@@ -150,7 +150,7 @@ class TPUMLAAttention(MLAAttention):
         mesh = vllm_model_wrapper_context.mesh
 
         # Get attention metadata
-        attn_metadata, _, _ = get_attention_context(self.layer_name)
+        attn_metadata, _, _, _ = get_attention_context(self.layer_name)
 
         q = jax_view(q)
         kv_c_normed = jax_view(kv_c_normed)
@@ -296,19 +296,13 @@ def _jax_mla_func(
         mesh,
         num_heads,
         qk_nope_head_dim,
-        query_tnh=None,
-        keyvalue_skh=None,
-        attn_o_tnh=None,
+        query_tnh_sharding=None,
+        keyvalue_skh_sharding=None,
+        attn_o_tnh_sharding=None,
         q_scale=q_scale,
         k_scale=k_scale,
         v_scale=v_scale,
         sm_scale=scale,
     )
-
-    # Convert the shape back to vLLM's convention
-    # assert outputs.shape[0] == q_len
-    # assert outputs.shape[1] == num_heads
-    # assert outputs.shape[2] == head_size
-    # outputs = outputs.reshape(q_len, num_heads * head_size)
 
     return new_kv_cache, outputs

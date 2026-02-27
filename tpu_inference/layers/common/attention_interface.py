@@ -434,9 +434,9 @@ def mla_attention(
         mesh: Mesh,
         num_attention_heads: int,
         qk_nope_head_dim: int,
-        query_tnh: Sharding | None = None,
-        keyvalue_skh: Sharding | None = None,
-        attn_o_tnh: Sharding | None = None,
+        query_tnh_sharding: Sharding | None = None,
+        keyvalue_skh_sharding: Sharding | None = None,
+        attn_o_tnh_sharding: Sharding | None = None,
         q_scale: float | None = None,
         k_scale: float | None = None,
         v_scale: float | None = None,
@@ -455,27 +455,32 @@ def mla_attention(
         mesh: Mesh
         num_attention_heads: number of attention heads
         qk_nope_head_dim: head dim for QK without rope
-        query_tnh: sharding to use for q/q_rope for the shard map (MLA kernel)
-        keyvalue_skh: sharding to use for k/k_rope for the shard map (MLA kernel)
-        attn_o_tnh: sharding to use for the attention output for the shard map (MLA kernel)
+        query_tnh_sharding: sharding to use for q/q_rope for the shard map (MLA kernel)
+        keyvalue_skh_sharding: sharding to use for k/k_rope for the shard map (MLA kernel)
+        attn_o_tnh_sharding: sharding to use for the attention output for the shard map (MLA kernel)
         q_scale: scale to apply to q (if quantized)
         k_scale: scale to apply to k (if quantized)
         v_scale: scale to apply to v (if quantized)
         sm_scale: softmax scale
     """
     in_specs = (
-        query_tnh or P(ShardingAxisName.MLP_TENSOR, None, None),  # q
-        query_tnh or P(ShardingAxisName.MLP_TENSOR, None, None),  # q_rope
-        keyvalue_skh or P(ShardingAxisName.MLP_TENSOR, None),  # k
-        keyvalue_skh or P(ShardingAxisName.MLP_TENSOR, None),  # k_rope
+        query_tnh_sharding or P(ShardingAxisName.MLP_TENSOR, None, None),  # q
+        query_tnh_sharding
+        or P(ShardingAxisName.MLP_TENSOR, None, None),  # q_rope
+        keyvalue_skh_sharding or P(ShardingAxisName.MLP_TENSOR, None),  # k
+        keyvalue_skh_sharding
+        or P(ShardingAxisName.MLP_TENSOR, None),  # k_rope
         P(ShardingAxisName.MLP_TENSOR),  # kv_cache
         P(ShardingAxisName.ATTN_DATA),  # md.seq_lens
         P(ShardingAxisName.ATTN_DATA),  # md.page_indices_flat
         P(ShardingAxisName.ATTN_DATA),  # md.query_start_loc
         P(ShardingAxisName.ATTN_DATA),  # md.distribution
     )
-    out_specs = (attn_o_tnh or P(ShardingAxisName.MLP_TENSOR, None, None),
-                 P(ShardingAxisName.MLP_TENSOR))
+    out_specs = (
+        attn_o_tnh_sharding
+        or P(ShardingAxisName.MLP_TENSOR, None, None),  # attn output
+        P(ShardingAxisName.MLP_TENSOR)  # kv cache
+    )
 
     def _mla_ragged_paged_attention(q, q_rope, k, k_rope, cache, *args):
         max_num_tokens = q.shape[0]
