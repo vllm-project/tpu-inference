@@ -320,6 +320,12 @@ def update_readme():
             elif section_key == "quantization":
                 new_table = generate_html_quantization_table(headers, all_data)
             else:
+                if section_key == "model_support":
+                    for row in all_data:
+                        if row and row[0]:
+                            raw_model_name = row[0].strip("'` ")
+                            if raw_model_name and not row[0].startswith("["):
+                                row[0] = f"[{row[0]}](https://huggingface.co/{raw_model_name})"
                 new_table = generate_markdown_table(headers, all_data)
         
         # Special handling for microbenchmarks to append footer
