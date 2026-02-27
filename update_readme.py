@@ -81,17 +81,26 @@ def generate_html_feature_table(headers, data):
     html.append("  </thead>")
     html.append("  <tbody>")
     
-    def _format_cell(text):
-        text = str(text)
-        # First, ensure spaces are non-breaking
-        text = text.replace(" ", "&nbsp;")
+    def _format_cell(status_string, hw_prefix=None):
+        """Formats the cell with a tooltip containing the full status and optional hardware prefix."""
+        status_string = str(status_string).strip()
         
-        # Then systematically strip out the words
-        words_to_remove = ["&nbsp;Passing", "&nbsp;Failed", "&nbsp;Failing", "&nbsp;Experimental", "&nbsp;Planned", "&nbsp;Untested", "&nbsp;Unplanned"]
-        for word in words_to_remove:
-            text = text.replace(word, "")
+        # Extract the pure status word for the tooltip (e.g., "Passing" from "✅ Passing")
+        parts = status_string.split(" ", 1)
+        icon = parts[0] if parts else ""
+        text_status = parts[1] if len(parts) > 1 else ""
+        
+        # Build the visual display text (just icon, or icon + prefix)
+        display_text = icon
+        if hw_prefix:
+            display_text = f"{icon}&nbsp;{hw_prefix}"
             
-        return text
+        # The tooltip should be descriptive
+        tooltip = status_string
+        if hw_prefix:
+            tooltip = f"{hw_prefix} {status_string}"
+            
+        return f'<span title="{tooltip}">{display_text}</span>'
 
     def _merge_hw_status(status_v6, status_v7):
         """Merges v6 and v7 statuses. If identical, returns one. If different, stacks them."""
@@ -100,15 +109,7 @@ def generate_html_feature_table(headers, data):
         if s6 == s7:
             return _format_cell(s6)
         
-        # Insert hardware prefixes right after the emoji
-        def _inject_hw(status_string, hw_prefix):
-            parts = status_string.split(" ", 1)
-            if len(parts) == 2:
-                # E.g., "✅ Passing" -> "✅ v6e" (text stripped later)
-                return f"{parts[0]} {hw_prefix} {parts[1]}"
-            return f"{status_string} {hw_prefix}"
-
-        return _format_cell(_inject_hw(s6, "v6e")) + "<br>" + _format_cell(_inject_hw(s7, "v7x"))
+        return _format_cell(s6, "v6e") + "<br>" + _format_cell(s7, "v7x")
 
     for row in data:
         html.append("    <tr>")
