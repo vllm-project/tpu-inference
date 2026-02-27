@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-02-27 09:15 AM UTC*
+*Last Updated: 2026-02-27 09:18 AM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -365,15 +365,6 @@ Below is the live status of our supported models, features, and kernels. Click o
   </thead>
   <tbody>
     <tr>
-      <td>*&nbsp;For&nbsp;attention<br>kernels,<br>W[x]A[y]&nbsp;denotes<br>KV&nbsp;cache&nbsp;as&nbsp;W,&nbsp;A<br>as&nbsp;compute,&nbsp;and<br>x,&nbsp;y&nbsp;as&nbsp;bit<br>precision</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-    </tr>
-    <tr>
       <td>all&#8209;gather&#8209;matmul</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -440,8 +431,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 </table>
 
 > **Note:**
-> *   *Tested on TPU v7 (Nightly 20260226)*
-> *   *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*
+> *   *Tested on TPU v7 (Nightly 20260227)*
 <!-- END: microbenchmarks -->
 
 </details>
