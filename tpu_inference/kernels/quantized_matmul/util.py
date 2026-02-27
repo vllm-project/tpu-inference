@@ -275,14 +275,6 @@ def validate_inputs(
 ):
     """Verify inputs invoking the kernel."""
 
-    # if x.dtype != x_q_dtype:
-    #     # If the input is quantized, then it should be the same subdtype as w_q
-    #     if jnp.issubdtype(x_q_dtype, jnp.integer) != jnp.issubdtype(
-    #             w_q.dtype, jnp.integer):
-    #         raise ValueError(
-    #             f"{x_q_dtype=} and {w_q.dtype=} must be the same int or float type."
-    #         )
-
     # Verify input shapes.
     if x.shape[1] != w_q.shape[1]:
         raise ValueError(f'{x.shape[1]=} must be equal to {w_q.shape[1]=}')

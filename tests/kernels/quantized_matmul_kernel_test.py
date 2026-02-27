@@ -271,9 +271,18 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
         )
 
     @parameterized.parameters(
+        (jnp.bfloat16, 512, 512, 1024),
+        (jnp.bfloat16, 512, 512, 512),
+        (jnp.bfloat16, 512, 1024, 512),
+        (jnp.bfloat16, 512, 1024, 1024),
+        (jnp.bfloat16, 512, 1024, 2048),
+        (jnp.float32, 512, 512, 1024),
+        (jnp.float32, 512, 512, 512),
+        (jnp.float32, 512, 1024, 512),
+        (jnp.float32, 512, 1024, 1024),
         (jnp.float32, 512, 1024, 2048),
     )
-    def test_quantized_matmul_blockwise_w4a8(
+    def test_quantized_matmul_blockwise_int4_fp8(
         self,
         dtype: jnp.dtype,
         bs: int,
