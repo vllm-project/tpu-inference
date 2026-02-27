@@ -83,8 +83,14 @@ def generate_html_feature_table(headers, data):
     
     def _format_cell(text):
         text = str(text)
-        for status in ["❓ Untested", "✅ Passing", "❌ Failed", "❌ Failing", "🧪 Experimental", "📝 Planned", "⛔️ Unplanned"]:
-            text = text.replace(status, status.replace(" ", "&nbsp;"))
+        # First, ensure spaces are non-breaking
+        text = text.replace(" ", "&nbsp;")
+        
+        # Then systematically strip out the words
+        words_to_remove = ["&nbsp;Passing", "&nbsp;Failed", "&nbsp;Failing", "&nbsp;Experimental", "&nbsp;Planned", "&nbsp;Untested", "&nbsp;Unplanned"]
+        for word in words_to_remove:
+            text = text.replace(word, "")
+            
         return text
 
     def _merge_hw_status(status_v6, status_v7):
@@ -96,11 +102,11 @@ def generate_html_feature_table(headers, data):
         
         # Insert hardware prefixes right after the emoji
         def _inject_hw(status_string, hw_prefix):
-            parts = status_string.split("&nbsp;", 1)
+            parts = status_string.split(" ", 1)
             if len(parts) == 2:
-                # E.g., "✅&nbsp;Passing" -> "✅&nbsp;v6e&nbsp;Passing"
-                return f"{parts[0]}&nbsp;{hw_prefix}&nbsp;{parts[1]}"
-            return f"{hw_prefix}&nbsp;{status_string}"
+                # E.g., "✅ Passing" -> "✅ v6e" (text stripped later)
+                return f"{parts[0]} {hw_prefix} {parts[1]}"
+            return f"{status_string} {hw_prefix}"
 
         return _format_cell(_inject_hw(s6, "v6e")) + "<br>" + _format_cell(_inject_hw(s7, "v7x"))
 
