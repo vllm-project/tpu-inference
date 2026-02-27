@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-02-27 09:29 AM UTC*
+*Last Updated: 2026-02-27 09:33 AM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -366,8 +366,8 @@ Below is the live status of our supported models, features, and kernels. Click o
   </thead>
   <tbody>
     <tr>
-      <td rowspan="2"><b>MoE</b></td>
-      <td>fused&nbsp;moe</td>
+      <td rowspan="2"><b>Moe</b></td>
+      <td>Fused&nbsp;MoE</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -386,7 +386,7 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td rowspan="5"><b>Attention</b></td>
-      <td>mla*</td>
+      <td>MLA</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -395,7 +395,7 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
-      <td>generic&nbsp;ragged<br>paged&nbsp;attention<br>v3*</td>
+      <td>Generic&nbsp;ragged<br>paged&nbsp;attention<br>v3</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -404,7 +404,7 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
-      <td>generic&nbsp;ragged<br>paged&nbsp;attention<br>v3*</td>
+      <td>Generic&nbsp;ragged<br>paged&nbsp;attention<br>v3</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -413,7 +413,7 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
-      <td>ragged&nbsp;paged<br>attention&nbsp;v3<br>head_dim&nbsp;64*</td>
+      <td>Ragged&nbsp;paged<br>attention&nbsp;v3<br>head_dim&nbsp;64</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -422,7 +422,7 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
-      <td>generic&nbsp;ragged<br>paged&nbsp;attention<br>v3*</td>
+      <td>Generic&nbsp;ragged<br>paged&nbsp;attention<br>v3</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>

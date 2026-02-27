@@ -249,9 +249,21 @@ def generate_html_microbenchmark_table(headers, data):
     
     # Establish categorized groupings
     categories = {
-        "MoE": ["fused moe", "gmm"],
+        "Moe": ["fused moe", "gmm"],
         "Dense": ["all-gather matmul"],
         "Attention": ["mla", "ragged paged attention", "generic ragged paged attention", "ragged paged attention v3 head_dim 64", "generic ragged paged attention v3"]
+    }
+    
+    # Exact display names requested by user
+    display_names = {
+        "fused moe": "Fused MoE",
+        "gmm": "gmm",
+        "all-gather matmul": "All-gather matmul",
+        "mla": "MLA",
+        "ragged paged attention": "Ragged paged attention",
+        "generic ragged paged attention": "Generic ragged paged attention",
+        "ragged paged attention v3 head_dim 64": "Ragged paged attention v3 head_dim 64",
+        "generic ragged paged attention v3": "Generic ragged paged attention v3"
     }
     
     # Map each raw kernel to its cleaned data row
@@ -284,8 +296,13 @@ def generate_html_microbenchmark_table(headers, data):
                 html.append(f"      <td rowspan=\"{rowspan}\"><b>{cat_name}</b></td>")
                 
             padded_row = row + [""] * (25 - len(row))
-            # we use format_kernel_name to restore formatting like * styling
-            html.append(f"      <td>{format_kernel_name(padded_row[0])}</td>")
+            
+            # Use exact requested display name or default to formatting
+            cleaned_k_name = str(k_name).replace("*", "")
+            display_str = display_names.get(cleaned_k_name, cleaned_k_name)
+            
+            # we use format_kernel_name to restore formatting like hyphenation and non-breaking spaces
+            html.append(f"      <td>{format_kernel_name(display_str)}</td>")
             
             # Merge v6e and v7x into stacked columns
             for i in range(6):
