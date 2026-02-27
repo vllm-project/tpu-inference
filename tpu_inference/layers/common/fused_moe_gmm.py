@@ -276,17 +276,14 @@ def expert_parallel_gmm(
     )
 
 
-@functools.partial(
-    jax.jit,
-    static_argnames=(
-        "topk",
-        "renormalize",
-        "mesh",
-        "use_ep",
-        "activation",
-        "scoring_fn",
-    ),
-)
+@jax.jit(static_argnames=(
+    "topk",
+    "renormalize",
+    "mesh",
+    "use_ep",
+    "activation",
+    "scoring_fn",
+))
 def fused_moe_func(
     hidden_states: jax.Array,
     w1: jax.Array,

@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
 from typing import TYPE_CHECKING, List
 
 import jax
@@ -343,7 +342,7 @@ class KVCacheManager:
         self.initialize_kv_cache(kv_cache_config)
 
     @staticmethod
-    @functools.partial(jax.jit)
+    @jax.jit
     def _jitted_gather_kv_cache(kv_caches: List[jax.Array],
                                 block_ids: jax.Array) -> List[jax.Array]:
         """
@@ -358,10 +357,7 @@ class KVCacheManager:
         return jax.tree.map(gather_and_reshape, kv_caches)
 
     @staticmethod
-    @functools.partial(
-        jax.jit,
-        static_argnames=("len_block"),
-    )
+    @jax.jit(static_argnames=("len_block"))
     def _jitted_gather_continuous_kv_cache(kv_caches: List[jax.Array],
                                            start_block,
                                            len_block) -> List[jax.Array]:
@@ -381,8 +377,7 @@ class KVCacheManager:
         return jax.tree.map(gather_and_reshape, kv_caches)
 
     @staticmethod
-    @functools.partial(
-        jax.jit,
+    @jax.jit(
         static_argnames=("block_size"),
         donate_argnames=(
             "kv_caches",
@@ -410,8 +405,7 @@ class KVCacheManager:
         return jax.tree.map(_update_layer, kv_caches, kv_cache_slices)
 
     @staticmethod
-    @functools.partial(
-        jax.jit,
+    @jax.jit(
         static_argnames=("block_size"),
         donate_argnames=(
             "kv_caches",

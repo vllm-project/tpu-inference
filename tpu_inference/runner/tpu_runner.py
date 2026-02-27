@@ -157,7 +157,7 @@ class ExecuteModelState:
     padded_num_reqs: Optional[int] = None
 
 
-@functools.partial(jax.jit, donate_argnums=(0, 1, 2))
+@jax.jit(donate_argnums=(0, 1, 2))
 def _substitute_placeholder_token(
         input_ids: jax.Array, token_in_tpu_cur_input_indices: jax.Array,
         token_in_tpu_pre_next_tokens_indices: jax.Array,
@@ -1072,7 +1072,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
         return model_runner_output
 
-    @functools.partial(jax.jit, static_argnums=(0, ))
+    @jax.jit(static_argnums=(0, ))
     def _select_from_array_fn(self, array, indices_to_select):
 
         def select_local_fn(local_array, local_indices):
@@ -1089,7 +1089,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         return ret
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnames=("max_logprobs", ))
+    @jax.jit(static_argnames=("max_logprobs", ))
     def _compute_and_gather_logprobs(logits, next_tokens, max_logprobs):
         logprobs = compute_logprobs(logits)
         return gather_logprobs(logprobs, next_tokens, max_logprobs)
