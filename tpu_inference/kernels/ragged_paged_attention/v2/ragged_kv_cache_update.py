@@ -229,8 +229,7 @@ def _get_num_slices_per_kv_cache_update_block(page_size_bytes: int,
     return min(num_slices_per_block, 64)
 
 
-@functools.partial(
-    jax.jit,
+@jax.jit(
     static_argnames=[
         "page_size", "num_slices_per_block", "mesh", "kv_cache_pspec"
     ],

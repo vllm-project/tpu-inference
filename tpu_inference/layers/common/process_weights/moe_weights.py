@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import functools
 from dataclasses import dataclass, fields
 
 import jax
@@ -396,13 +395,12 @@ def shard_moe_weights(
     return weights
 
 
-@functools.partial(jax.jit,
-                   static_argnames=(
-                       "moe_backend",
-                       "mesh",
-                       "activation",
-                       "weight_block_size",
-                   ))
+@jax.jit(static_argnames=(
+    "moe_backend",
+    "mesh",
+    "activation",
+    "weight_block_size",
+))
 def process_fp8_moe_weights(
     weights: FusedMoEWeights,
     moe_backend: MoEBackend,
