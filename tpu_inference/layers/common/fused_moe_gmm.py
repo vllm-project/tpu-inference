@@ -62,6 +62,16 @@ def _swigluoai(x1: jax.Array,
 
 
 def gmm_wrapper(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset):
+    if lhs is not None:
+        print("gxd lhs shape " + str(lhs.shape), " dtype " + str(lhs.dtype))
+    if rhs is not None:
+        print("gxd rhs shape " + str(rhs.shape), " dtype " + str(rhs.dtype))
+    if rhs_scale is not None:
+        print("gxd rhs_scale shape " + str(rhs_scale.shape) + " dtype " + str(rhs_scale.dtype))
+    if rhs_bias is not None:
+        print("gxd rhs_bias shape " + str(rhs_bias.shape), " dtype " + str(rhs_bias.dtype))
+
+
     if is_supported_by_gmm_v2(lhs, rhs, rhs_scale):
         print("gxd debug: use gmm_v2")
         gmm_res = gmm_v2(

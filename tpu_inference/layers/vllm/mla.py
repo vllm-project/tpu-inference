@@ -322,5 +322,5 @@ def _jax_mla_func(
     # assert outputs.shape[1] == num_heads
     # assert outputs.shape[2] == head_size
     # outputs = outputs.reshape(q_len, num_heads * head_size)
-
+    print("gxd jax mla")
     return new_kv_cache, outputs

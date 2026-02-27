@@ -72,10 +72,14 @@ class ShardingAxisName2D:
 try:
     _use_2d_tp_sharding = envs.USE_2D_TP
     _use_base_sharding = envs.NEW_MODEL_DESIGN
+    print("gxd _use_base_sharding", _use_base_sharding)
     if _use_2d_tp_sharding or _use_base_sharding:
         ShardingAxisName = ShardingAxisNameBase
+        print("gxd Using ShardingAxisNameBase for sharding axis names.")
     else:
         ShardingAxisName = ShardingAxisName2D
+        print("gxd Using ShardingAxisName2D for sharding axis names.")
+
 except Exception:
     ShardingAxisName = ShardingAxisName2D
 
@@ -143,7 +147,7 @@ class ShardingConfigManager:
         device_indexes = sharding_strategy.get("device_indexes", None)
 
         enable_dp_attention = sharding_strategy.get("enable_dp_attention",
-                                                    False)
+                                                    True)
         if pc_tensor_parallelism != ss_tensor_parallelsim and ss_tensor_parallelsim > 1:
             # The user has explicitly set the tensor parallelism in the sharding config.
             tensor_parallelism = ss_tensor_parallelsim

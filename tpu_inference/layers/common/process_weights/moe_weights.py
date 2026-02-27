@@ -319,6 +319,7 @@ def shard_moe_weights(
     match moe_backend:
         case MoEBackend.FUSED_MOE | MoEBackend.GMM_EP:
             ep_sharding = NamedSharding(mesh, P(ShardingAxisName.EXPERT))
+            print("gxd shard moe for FUSED_MOE or GMM_EP with sharding:", ep_sharding)
             weight_shardings = FusedMoEWeights(
                 w13_weight=ep_sharding,
                 w13_weight_scale=ep_sharding,
@@ -387,6 +388,7 @@ def shard_moe_weights(
         if (weight := getattr(weights, key, None)) is not None:
             layout = getattr(weight_layouts, key)
             sharding = getattr(weight_shardings, key)
+            print(f"gxd shard moe for {key}:", sharding)
             weight = general_device_put(weight, sharding, layout)
             setattr(weights, key, weight)
     return weights

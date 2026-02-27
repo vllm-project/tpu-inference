@@ -16,8 +16,8 @@ if TYPE_CHECKING:
     DECODE_SLICES: str = ""
     SKIP_JAX_PRECOMPILE: bool = False
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
-    MODEL_IMPL_TYPE: str = "auto"
-    NEW_MODEL_DESIGN: bool = False
+    MODEL_IMPL_TYPE: str = "vllm"
+    NEW_MODEL_DESIGN: bool = True
     PHASED_PROFILING_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
     USE_MOE_EP_KERNEL: bool = False
@@ -132,14 +132,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("VLLM_XLA_CHECK_RECOMPILATION", default=False),
     # Model implementation type (e.g., "flax_nnx")
     "MODEL_IMPL_TYPE":
-    env_with_choices("MODEL_IMPL_TYPE", "auto",
+    env_with_choices("MODEL_IMPL_TYPE", "vllm",
                      ["auto", "vllm", "flax_nnx", "jetpack"]),
     # Enable 2D tensor parallelism, shard attention heads across multiple axes
     "USE_2D_TP":
     env_bool("USE_2D_TP", default=False),
     # Enable new experimental model design
     "NEW_MODEL_DESIGN":
-    env_bool("NEW_MODEL_DESIGN", default=False),
+    env_bool("NEW_MODEL_DESIGN", default=True),
     # Directory to store phased profiling output
     "PHASED_PROFILING_DIR":
     lambda: os.getenv("PHASED_PROFILING_DIR", ""),

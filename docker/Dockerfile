@@ -14,7 +14,7 @@
 
 ARG BASE_IMAGE="python:3.12-slim-bookworm"
 # The latest main will be used if arg unspecified
-ARG VLLM_COMMIT_HASH=""
+ARG VLLM_COMMIT_HASH="3eff45d793daa976a21d0df5954cf6cc6723335f"
 
 FROM $BASE_IMAGE
 
@@ -38,15 +38,20 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+RUN apt-get update && apt-get install -y vim
+
 # Build vLLM
 WORKDIR /workspace/vllm
-ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_COMMIT_HASH
+# ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
+# ARG VLLM_COMMIT_HASH
 
-RUN git clone $VLLM_REPO . && \
-    if [ -n "$VLLM_COMMIT_HASH" ]; then \
-        git checkout $VLLM_COMMIT_HASH; \
-    fi
+# RUN git clone $VLLM_REPO . && \
+#     if [ -n "$VLLM_COMMIT_HASH" ]; then \
+#         git checkout $VLLM_COMMIT_HASH; \
+#     fi
+
+COPY vllm/ ./
+
 
 RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements/tpu.txt --retries 3
 RUN --mount=type=cache,target=/root/.cache/pip VLLM_TARGET_DEVICE="tpu" pip install -e .
@@ -63,20 +68,20 @@ RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install \
 # Install tpu_inference
 WORKDIR /workspace/tpu_inference
 # Install requirements first and cache so we don't need to re-install on code change.
-COPY requirements.txt .
+COPY tpu-inference/requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt --retries 3
-COPY requirements_benchmarking.txt .
+COPY tpu-inference/requirements_benchmarking.txt .
 # These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh)
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements_benchmarking.txt --retries 3
 # Install test requirements
-COPY requirements_test.txt .
+COPY tpu-inference/requirements_test.txt .
 RUN  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then \
         pip install -r requirements_test.txt --retries 3; \
     fi
-COPY . .
+COPY tpu-inference/ ./
 RUN --mount=type=cache,target=/root/.cache/pip pip install -e .
 
-COPY docker/entrypoint.sh /entrypoint.sh
+COPY tpu-inference/docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]

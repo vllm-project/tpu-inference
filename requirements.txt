@@ -5,13 +5,13 @@ pytest-mock
 absl-py
 numpy
 google-cloud-storage
-jax[tpu]==0.8.3
-jaxlib==0.8.3
-libtpu==0.0.32
+jax[tpu]==0.8.1 
+jaxlib==0.8.1   
+libtpu==0.0.30
 jaxtyping
 flax==0.12.4
 torchax==0.0.11
-qwix==0.1.2
+qwix==0.1.1
 torchvision==0.24.0
 pathwaysutils
 parameterized
