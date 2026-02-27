@@ -114,16 +114,17 @@ def moe_gmm_local(
 
     assert parallelism in ["tp", "ep"]
 
-    # GMM1 computes x @ (W_up | W_gate) tegether and then split out to apply activation
-    # to the gate result
+    # GMM1 computes x @ (W_up | W_gate) tegether and then split out to apply
+    # activation to the gate result
     gmm1_res_gate_up = gmm_wrapper(x, w1, w1_scale, w1_bias, group_sizes,
                                    group_offset, False)
     gmm1_res_gate, gmm1_res_up = jnp.split(gmm1_res_gate_up, 2, -1)
     gmm1_res = apply_act_fn(activation, gmm1_res_gate, gmm1_res_up)
 
-    # When the parallelism is TP since w2_bias is not sharded, we should only apply bias
-    # once, not applying to every shard. So we set w2_bias to 0 to all shards other than
-    # shard 0. For EP, it is not needed since bias is sharded on leading expert axis.
+    # When the parallelism is TP since w2_bias is not sharded, we should only
+    # apply bias once, not applying to every shard. So we set w2_bias to 0 to
+    # all shards other than shard 0. For EP, it is not needed since bias is
+    # sharded on leading expert axis.
     if parallelism == "tp" and w2_bias is not None:
         shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR).sum()
         w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
