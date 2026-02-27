@@ -235,18 +235,13 @@ def generate_html_microbenchmark_table(headers, data):
     html.append("<table>")
     html.append("  <thead>")
     html.append("    <tr>")
-    html.append("      <th rowspan=\"2\" width=\"300\">test</th>")
-    html.append("      <th colspan=\"6\">v6e</th>")
-    html.append("      <th colspan=\"6\">V7X</th>")
-    html.append("    </tr>")
-    html.append("    <tr>")
-    for _ in range(2):
-        html.append("      <th>W16A16</th>")
-        html.append("      <th>W8A16</th>")
-        html.append("      <th>W8 A8</th>")
-        html.append("      <th>W4A4</th>")
-        html.append("      <th>W4A8</th>")
-        html.append("      <th>W4A16</th>")
+    html.append("      <th width=\"300\">test</th>")
+    html.append("      <th>W16A16</th>")
+    html.append("      <th>W8A16</th>")
+    html.append("      <th>W8 A8</th>")
+    html.append("      <th>W4A4</th>")
+    html.append("      <th>W4A8</th>")
+    html.append("      <th>W4A16</th>")
     html.append("    </tr>")
     html.append("  </thead>")
     html.append("  <tbody>")
@@ -256,22 +251,13 @@ def generate_html_microbenchmark_table(headers, data):
         padded_row = row + [""] * (25 - len(row))
         html.append(f"      <td>{format_kernel_name(padded_row[0])}</td>") # Kernel
         
-        # v6e metrics
-        html.append(f"      <td>{merge_metrics(padded_row[1], padded_row[2])}</td>")
-        html.append(f"      <td>{merge_metrics(padded_row[3], padded_row[4])}</td>")
-        html.append(f"      <td>{merge_metrics(padded_row[5], padded_row[6])}</td>")
-        html.append(f"      <td>{merge_metrics(padded_row[7], padded_row[8])}</td>")
-        html.append(f"      <td>{merge_metrics(padded_row[9], padded_row[10])}</td>")
-        html.append(f"      <td>{merge_metrics(padded_row[11], padded_row[12])}</td>")
-        
-        # v7x metrics
-        html.append(f"      <td>{merge_metrics(padded_row[13], padded_row[14])}</td>")
-        html.append(f"      <td>{merge_metrics(padded_row[15], padded_row[16])}</td>")
-        html.append(f"      <td>{merge_metrics(padded_row[17], padded_row[18])}</td>")
-        html.append(f"      <td>{merge_metrics(padded_row[19], padded_row[20])}</td>")
-        html.append(f"      <td>{merge_metrics(padded_row[21], padded_row[22])}</td>")
-        html.append(f"      <td>{merge_metrics(padded_row[23], padded_row[24])}</td>")
-        
+        # Merge v6e and v7x into stacked columns
+        for i in range(6):
+            v6_status = merge_metrics(padded_row[(i*2) + 1], padded_row[(i*2) + 2])
+            v7_status = merge_metrics(padded_row[(i*2) + 13], padded_row[(i*2) + 14])
+            merged_hw = _merge_hw_status(v6_status, v7_status)
+            html.append(f"      <td>{merged_hw}</td>")
+
         html.append("    </tr>")
         
     html.append("  </tbody>")
