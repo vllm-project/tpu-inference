@@ -96,10 +96,10 @@ def generate_html_feature_table(headers, data):
         
         # Insert hardware prefixes right after the emoji
         def _inject_hw(status_string, hw_prefix):
-            parts = status_string.split(" ", 1)
+            parts = status_string.split("&nbsp;", 1)
             if len(parts) == 2:
-                # E.g., "✅ Passing" -> "✅ v6e&nbsp;Passing"
-                return f"{parts[0]} {hw_prefix}&nbsp;{parts[1]}"
+                # E.g., "✅&nbsp;Passing" -> "✅&nbsp;v6e&nbsp;Passing"
+                return f"{parts[0]}&nbsp;{hw_prefix}&nbsp;{parts[1]}"
             return f"{hw_prefix}&nbsp;{status_string}"
 
         return _format_cell(_inject_hw(s6, "v6e")) + "<br>" + _format_cell(_inject_hw(s7, "v7x"))
