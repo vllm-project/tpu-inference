@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-02-27 07:54 AM UTC*
+*Last Updated: 2026-02-27 08:09 AM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -134,14 +134,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <table>
   <thead>
     <tr>
-      <th rowspan="2">Test / Feature</th>
-      <th colspan="3">v6e</th>
-      <th colspan="3">v7x</th>
-    </tr>
-    <tr>
-      <th>flax</th>
-      <th>pytorch</th>
-      <th>default</th>
+      <th>Test / Feature</th>
       <th>flax</th>
       <th>pytorch</th>
       <th>default</th>
@@ -149,154 +142,103 @@ Below is the live status of our supported models, features, and kernels. Click o
   </thead>
   <tbody>
     <tr>
-      <td>async scheduler</td>
+      <td><strong>async scheduler</strong></td>
+      <td>v6e&nbsp;✅&nbsp;Passing<br>v7x&nbsp;❌&nbsp;Failed</td>
       <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>❌&nbsp;Failed</td>
-      <td>✅&nbsp;Passing</td>
-      <td>❌&nbsp;Failed</td>
+      <td>v6e&nbsp;✅&nbsp;Passing<br>v7x&nbsp;❌&nbsp;Failed</td>
     </tr>
     <tr>
-      <td>Chunked Prefill</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
+      <td><strong>Chunked Prefill</strong></td>
       <td>✅&nbsp;Passing</td>
       <td>✅&nbsp;Passing</td>
       <td>✅&nbsp;Passing</td>
     </tr>
     <tr>
-      <td>DCN-based P/D disaggregation</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-    </tr>
-    <tr>
-      <td>hybrid kv cache</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-    </tr>
-    <tr>
-      <td>KV cache host offloading</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-    </tr>
-    <tr>
-      <td>LoRA_Torch</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
+      <td><strong>DCN-based P/D disaggregation</strong></td>
       <td>✅&nbsp;Passing</td>
       <td>✅&nbsp;Passing</td>
       <td>✅&nbsp;Passing</td>
     </tr>
     <tr>
-      <td>multi-host</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-    </tr>
-    <tr>
-      <td>Multimodal Inputs</td>
-      <td>❌&nbsp;Failed</td>
-      <td>❌&nbsp;Failed</td>
-      <td>❌&nbsp;Failed</td>
-      <td>❌&nbsp;Failed</td>
-      <td>❌&nbsp;Failed</td>
-      <td>❌&nbsp;Failed</td>
-    </tr>
-    <tr>
-      <td>Out-of-tree model support</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-    </tr>
-    <tr>
-      <td>Prefix Caching</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-    </tr>
-    <tr>
-      <td>runai_model_streamer_loader</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❌&nbsp;Failed</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❌&nbsp;Failed</td>
-      <td>❓&nbsp;Untested</td>
-    </tr>
-    <tr>
-      <td>sampling_params</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❌&nbsp;Failed</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❌&nbsp;Failed</td>
-      <td>❓&nbsp;Untested</td>
-    </tr>
-    <tr>
-      <td>Single Program Multi Data</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-    </tr>
-    <tr>
-      <td>Single-Host-P-D-disaggregation</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
+      <td><strong>hybrid kv cache</strong></td>
       <td>❓&nbsp;Untested</td>
       <td>❓&nbsp;Untested</td>
       <td>❓&nbsp;Untested</td>
     </tr>
     <tr>
-      <td>Speculative Decoding: Eagle3</td>
-      <td>✅&nbsp;Passing</td>
-      <td>❌&nbsp;Failed</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>❌&nbsp;Failed</td>
-      <td>✅&nbsp;Passing</td>
+      <td><strong>KV cache host offloading</strong></td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
     </tr>
     <tr>
-      <td>Speculative Decoding: Ngram</td>
-      <td>✅&nbsp;Passing</td>
-      <td>❌&nbsp;Failed</td>
-      <td>✅&nbsp;Passing</td>
+      <td><strong>LoRA_Torch</strong></td>
       <td>✅&nbsp;Passing</td>
       <td>✅&nbsp;Passing</td>
       <td>✅&nbsp;Passing</td>
     </tr>
     <tr>
-      <td>structured_decoding</td>
+      <td><strong>multi-host</strong></td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+    </tr>
+    <tr>
+      <td><strong>Multimodal Inputs</strong></td>
+      <td>❌&nbsp;Failed</td>
+      <td>❌&nbsp;Failed</td>
+      <td>❌&nbsp;Failed</td>
+    </tr>
+    <tr>
+      <td><strong>Out-of-tree model support</strong></td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+    </tr>
+    <tr>
+      <td><strong>Prefix Caching</strong></td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+    </tr>
+    <tr>
+      <td><strong>runai_model_streamer_loader</strong></td>
       <td>❓&nbsp;Untested</td>
       <td>❌&nbsp;Failed</td>
       <td>❓&nbsp;Untested</td>
+    </tr>
+    <tr>
+      <td><strong>sampling_params</strong></td>
+      <td>❓&nbsp;Untested</td>
+      <td>❌&nbsp;Failed</td>
+      <td>❓&nbsp;Untested</td>
+    </tr>
+    <tr>
+      <td><strong>Single Program Multi Data</strong></td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+    </tr>
+    <tr>
+      <td><strong>Single-Host-P-D-disaggregation</strong></td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+      <td>❓&nbsp;Untested</td>
+    </tr>
+    <tr>
+      <td><strong>Speculative Decoding: Eagle3</strong></td>
+      <td>✅&nbsp;Passing</td>
+      <td>❌&nbsp;Failed</td>
+      <td>✅&nbsp;Passing</td>
+    </tr>
+    <tr>
+      <td><strong>Speculative Decoding: Ngram</strong></td>
+      <td>✅&nbsp;Passing</td>
+      <td>v6e&nbsp;❌&nbsp;Failed<br>v7x&nbsp;✅&nbsp;Passing</td>
+      <td>✅&nbsp;Passing</td>
+    </tr>
+    <tr>
+      <td><strong>structured_decoding</strong></td>
       <td>❓&nbsp;Untested</td>
       <td>❌&nbsp;Failed</td>
       <td>❓&nbsp;Untested</td>
