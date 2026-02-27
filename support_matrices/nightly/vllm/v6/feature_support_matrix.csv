@@ -10,7 +10,7 @@ Feature,CorrectnessTest,PerformanceTest
 "Single-Host-P-D-disaggregation",✅,N/A
 "Speculative Decoding: Eagle3",❌,N/A
 "Speculative Decoding: Ngram",❌,N/A
-"async scheduler",✅,✅
+"async scheduler",❌,N/A
 "hybrid kv cache",✅,N/A
 "multi-host",N/A,N/A
 "runai_model_streamer_loader",❌,N/A
