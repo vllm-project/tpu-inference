@@ -321,7 +321,7 @@ def round_up_to_multiple_of_128_within_limit(x: int, limit: int) -> int:
 def get_default_gmm_block_sizes(m: int, k: int, n: int,
                                 g: int) -> tuple[int, int, int]:
     """
-    Heuristic-based defaults for GMM tiling. 
+    Heuristic-based defaults for GMM tiling.
 
     Args:
         m (int): The total number of tokens.

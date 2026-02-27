@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import copy
-import functools
 import time
 from collections.abc import Sequence
 from contextlib import nullcontext
@@ -46,7 +45,6 @@ from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.common.utils import cpu_mesh_context
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     shard_model_to_tpu
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
@@ -174,9 +172,9 @@ class VllmModelWrapper:
         # By default load weights to the CPU device first. If we are running
         # under Pathways, this would cause weights to be loaded on a CPU-only
         # node, so we'll need to remove this context.
-        jax_context = cpu_mesh_context(
-        ) if not vllm_envs.VLLM_TPU_USING_PATHWAYS else nullcontext()
-
+        jax_context = jax.default_device(
+            jax.devices("cpu")
+            [0]) if not vllm_envs.VLLM_TPU_USING_PATHWAYS else nullcontext()
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
         with load_context, jax_context:
@@ -210,8 +208,7 @@ class VllmModelWrapper:
 
     def jit_step_func(self):
 
-        @functools.partial(
-            jax.jit,
+        @jax.jit(
             donate_argnames=("kv_caches", ),
             out_shardings=(
                 None,  # kv_caches - keep original sharding
@@ -225,8 +222,11 @@ class VllmModelWrapper:
                 "xla_tpu_reduce_scatter_collective_matmul_mode":
                 "post_spmd_conservative"
             },
-            static_argnames=("layer_name_to_kvcache_index", "is_first_rank",
-                             "is_last_rank"),
+            static_argnames=(
+                "layer_name_to_kvcache_index",
+                "is_first_rank",
+                "is_last_rank",
+            ),
         )
         def step_fun(
             params_and_buffers,  # This has been wrapped into torchax TorchValue
@@ -283,13 +283,10 @@ class VllmModelWrapper:
 
     def jit_compute_logits_func(self):
 
-        @functools.partial(
-            jax.jit,
-            out_shardings=(NamedSharding(
-                self.mesh,
-                PartitionSpec(ShardingAxisName.MLP_DATA,
-                              ShardingAxisName.MLP_TENSOR))),
-        )
+        @jax.jit(out_shardings=(NamedSharding(
+            self.mesh,
+            PartitionSpec(ShardingAxisName.MLP_DATA,
+                          ShardingAxisName.MLP_TENSOR))))
         def compute_logits_func(
             params_and_buffers: Any,
             hidden_states: jax.Array,

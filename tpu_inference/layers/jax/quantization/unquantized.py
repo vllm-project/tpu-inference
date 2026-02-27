@@ -30,6 +30,7 @@ from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
+from tpu_inference.models.jax.utils.weight_utils import shard_put
 
 
 class UnquantizedLinearMethod(QuantizeMethodBase,
@@ -87,8 +88,8 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             # stack to create a 4d array
             w13_val = jnp.stack([w_gate, w_up], axis=1)
 
-            layer.kernel_gating_upproj_E2DF = nnx.Param(w13_val,
-                                                        sharding=e2df_sharding)
+            layer.kernel_gating_upproj_E2DF = nnx.Param(
+                shard_put(w13_val, shardings=e2df_sharding))
 
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
@@ -108,18 +109,19 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             }
 
         elif layer.moe_backend in [MoEBackend.GMM_EP, MoEBackend.GMM_TP]:
-            expected_count = layer.num_local_experts
-            if layer.kernel_gating_EDF._cnt_moe_weights_loaded != expected_count or layer.kernel_up_proj_EDF._cnt_moe_weights_loaded != expected_count:
+            if any(
+                    any(w is None for w in param._weights_to_load) for param in
+                [layer.kernel_gating_EDF, layer.kernel_up_proj_EDF]):
                 return
             w_gate = layer.kernel_gating_EDF.value
             w_up = layer.kernel_up_proj_EDF.value
 
             # Fuse the weights into w13: [Gate, Up]
-            w13_val = jnp.concatenate([w_gate, w_up], axis=-1)
+            w13_val = jnp.concatenate([w_gate, w_up], axis=1)
 
             # TODO (jacobplatin): we probably want to make the sharding configurable
             layer.kernel_gating_upproj_EDF = nnx.Param(
-                w13_val, sharding=layer.edf_sharding)
+                shard_put(w13_val, shardings=layer.edf_sharding))
 
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
@@ -139,6 +141,8 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
 
             w13_weight = layer.kernel_gating_upproj_E2DF.value if layer.moe_backend == MoEBackend.FUSED_MOE else layer.kernel_gating_upproj_EDF.value
             w2_weight = layer.kernel_down_proj_EFD.value
+            w13_weight = jnp.swapaxes(w13_weight, 1, 2)
+            w2_weight = jnp.swapaxes(w2_weight, 1, 2)
             # TODO (jacobplatin/bzgoogle): we should support bias
             weights = FusedMoEWeights(
                 w13_weight=w13_weight,

@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
-
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
@@ -28,10 +26,7 @@ from tpu_inference.layers.jax.sample.sampling_metadata import \
 _SAMPLING_EPS = 1e-5
 
 
-@functools.partial(
-    jax.jit,
-    static_argnames=["mesh"],
-)
+@jax.jit(static_argnames=["mesh"])
 def sample(
     rng: jax.Array,
     mesh: Mesh,
