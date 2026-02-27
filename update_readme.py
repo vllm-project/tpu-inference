@@ -236,7 +236,7 @@ def generate_html_microbenchmark_table(headers, data):
       <th width="300" style="text-align:left">test</th>
       <th>W16A16</th>
       <th>W8A16</th>
-      <th>W8 A8</th>
+      <th>W8A8</th>
       <th>W4A4</th>
       <th>W4A8</th>
       <th>W4A16</th>
