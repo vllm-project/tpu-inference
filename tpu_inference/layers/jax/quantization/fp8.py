@@ -556,15 +556,20 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 shard_put(weights.w13_weight, shardings=layer.edf_sharding))
             layer.kernel_down_proj_EFD = nnx.Param(
                 shard_put(weights.w2_weight, shardings=layer.efd_sharding))
-            # NOTE: we aren't sharding the weight scales
+            
+            # gmm expects shape [num_groups, num_blocks, 1, n]
+            # TODO: Make sure it works for gmm_v2 as well.
+            edf_scale_sharding = (layer.edf_sharding[0],) + (None,) * (weights.w13_weight_scale.ndim - 2) + (layer.edf_sharding[-1],)
+            efd_scale_sharding = (layer.efd_sharding[0],) + (None,) * (weights.w2_weight_scale.ndim - 2) + (self.efd_sharding[-1],)
+
             setattr(
                 layer, f"kernel_gating_upproj_EDF_{self.weight_scale_name}",
                 nnx.Param(
-                    shard_put(weights.w13_weight_scale, shardings=(None, ))))
+                    shard_put(weights.w13_weight_scale, shardings=edf_scale_sharding)))
             setattr(
                 layer, f"kernel_down_proj_EFD_{self.weight_scale_name}",
                 nnx.Param(
-                    shard_put(weights.w2_weight_scale, shardings=(None, ))))
+                    shard_put(weights.w2_weight_scale, shardings=efd_scale_sharding)))
 
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
