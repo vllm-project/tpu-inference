@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-02-27 09:52 AM UTC*
+*Last Updated: 2026-02-27 06:50 PM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -355,7 +355,7 @@ Below is the live status of our supported models, features, and kernels. Click o
   <thead>
     <tr>
       <th width="150" style="text-align:left">Category</th>
-      <th width="300" style="text-align:left">test</th>
+      <th width="300" style="text-align:left">Test</th>
       <th>W16A16</th>
       <th>W8A16</th>
       <th>W8A8</th>
