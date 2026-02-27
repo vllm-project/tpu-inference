@@ -50,13 +50,11 @@ class MockVllmConfig:
 @patch("tpu_inference.executors.ray_distributed_executor.envs")
 @patch("tpu_inference.executors.ray_distributed_executor.ray")
 @patch("tpu_inference.executors.ray_distributed_executor.current_platform")
+@patch("vllm.platforms.current_platform")
 @patch("tpu_inference.executors.ray_distributed_executor.get_ip",
        return_value="127.0.0.1")
 @patch("tpu_inference.executors.ray_distributed_executor.get_open_port",
        return_value=12345)
-@patch(
-    "tpu_inference.executors.ray_distributed_executor.available_resources_per_node"
-)
 @patch("tpu_inference.executors.ray_distributed_executor._wait_until_pg_ready")
 class TestTpuRayDistributedExecutor(unittest.TestCase):
 
@@ -73,9 +71,9 @@ class TestTpuRayDistributedExecutor(unittest.TestCase):
         self.vllm_config.kv_transfer_config = None
 
     def test_init_executor_basic_flow(self, mock_wait_until_pg_ready,
-                                      mock_avail_resources, mock_get_port,
-                                      mock_get_ip, mock_platform, mock_ray,
-                                      mock_envs):
+                                      mock_get_port, mock_get_ip,
+                                      mock_vllm_platform, mock_platform,
+                                      mock_ray, mock_envs):
         # --- Setup mocks ---
         mock_envs.VLLM_USE_RAY_COMPILED_DAG = True
         mock_envs.VLLM_USE_RAY_SPMD_WORKER = True
@@ -85,11 +83,19 @@ class TestTpuRayDistributedExecutor(unittest.TestCase):
         mock_platform.device_name = "tpu"
         mock_platform.device_control_env_var = "TPU_VISIBLE_CHIPS"
         mock_platform.additional_env_vars = []
+        mock_vllm_platform.ray_device_key = "TPU"
+        mock_vllm_platform.device_name = "tpu"
+        mock_vllm_platform.device_control_env_var = "TPU_VISIBLE_CHIPS"
+        mock_vllm_platform.additional_env_vars = []
 
         mock_ray.is_initialized.return_value = False
-        mock_ray.nodes.return_value = [{"Resources": {"TPU": 4}}]
+        mock_ray.nodes.return_value = [{
+            "NodeID": "node_1",
+            "Resources": {
+                "TPU": 4
+            }
+        }]
         mock_ray.get_runtime_context.return_value.get_node_id.return_value = "node_1"
-        mock_avail_resources.return_value = {"node_1": {"TPU": 4}}
 
         mock_wait_until_pg_ready.return_value = None
 
@@ -125,24 +131,29 @@ class TestTpuRayDistributedExecutor(unittest.TestCase):
         self.assertEqual(len(executor.workers), 4)
 
     def test_initialize_ray_cluster_no_tpu_on_driver_raises_error(
-            self, mock_wait_until_pg_ready, mock_avail_resources,
-            mock_get_port, mock_get_ip, mock_platform, mock_ray, mock_envs):
+            self, mock_wait_until_pg_ready, mock_get_port, mock_get_ip,
+            mock_vllm_platform, mock_platform, mock_ray, mock_envs):
         # --- Setup Mocks ---
         mock_platform.ray_device_key = "TPU"
         mock_platform.device_name = "tpu"
+        mock_vllm_platform.ray_device_key = "TPU"
+        mock_vllm_platform.device_name = "tpu"
 
         mock_ray.is_initialized.return_value = False
-        mock_ray.nodes.return_value = [{"Resources": {"TPU": 4}}]
-        mock_ray.get_runtime_context.return_value.get_node_id.return_value = "driver_node"
-        # Simulate no TPUs on the driver node
-        mock_avail_resources.return_value = {
-            "driver_node": {
+        # ray.nodes() is now used to get resources
+        # Simulate driver node without TPU and worker node with TPU
+        mock_ray.nodes.return_value = [{
+            "NodeID": "driver_node",
+            "Resources": {
                 "CPU": 8
-            },
-            "worker_node": {
+            }
+        }, {
+            "NodeID": "worker_node",
+            "Resources": {
                 "TPU": 4
             }
-        }
+        }]
+        mock_ray.get_runtime_context.return_value.get_node_id.return_value = "driver_node"
 
         executor = self.RayDistributedExecutor(self.vllm_config)
         executor.vllm_config = self.vllm_config
@@ -154,14 +165,15 @@ class TestTpuRayDistributedExecutor(unittest.TestCase):
             executor._initialize_ray_cluster()
 
     def test_init_workers_ray_sorts_correctly(self, mock_wait_until_pg_ready,
-                                              mock_avail_resources,
                                               mock_get_port, mock_get_ip,
+                                              mock_vllm_platform,
                                               mock_platform, mock_ray,
                                               mock_envs):
         # --- Setup Mocks ---
         mock_envs.VLLM_RAY_BUNDLE_INDICES = ""
         mock_platform.ray_device_key = "TPU"
         mock_get_ip.return_value = "10.0.0.1"  # Driver IP
+        mock_vllm_platform.ray_device_key = "TPU"
 
         mock_pg = MagicMock()
         mock_pg.bundle_specs = [{"TPU": 1}] * 4
@@ -197,3 +209,146 @@ class TestTpuRayDistributedExecutor(unittest.TestCase):
         self.assertEqual(executor.workers, [
             mock_workers[2], mock_workers[0], mock_workers[1], mock_workers[3]
         ])
+
+    def test_initialize_ray_cluster_reuses_existing_placement_group(
+            self, mock_wait_until_pg_ready, mock_get_port, mock_get_ip,
+            mock_vllm_platform, mock_platform, mock_ray, mock_envs):
+        """Test that existing placement group is reused."""
+        # --- Setup Mocks ---
+        mock_platform.ray_device_key = "TPU"
+        mock_platform.device_name = "tpu"
+        mock_vllm_platform.ray_device_key = "TPU"
+        mock_vllm_platform.device_name = "tpu"
+
+        # Create a mock placement group (e.g., from ray.serve.llm)
+        existing_pg = MagicMock()
+        existing_pg.bundle_specs = [{"TPU": 4}] * 4
+
+        executor = self.RayDistributedExecutor(self.vllm_config)
+        executor.vllm_config = self.vllm_config
+        executor.parallel_config = self.vllm_config.parallel_config
+        # Set existing placement group (simulating ray.serve.llm)
+        executor.parallel_config.placement_group = existing_pg
+
+        # --- Call method under test ---
+        executor._initialize_ray_cluster()
+
+        # --- Assertions ---
+        # Should NOT create a new placement group
+        mock_ray.util.placement_group.assert_not_called()
+        mock_wait_until_pg_ready.assert_not_called()
+        # Should keep the existing placement group
+        self.assertEqual(executor.parallel_config.placement_group, existing_pg)
+
+    def test_initialize_ray_cluster_filters_non_tpu_nodes(
+            self, mock_wait_until_pg_ready, mock_get_port, mock_get_ip,
+            mock_vllm_platform, mock_platform, mock_ray, mock_envs):
+        """Test that non-TPU nodes are filtered from placement group."""
+        # --- Setup Mocks ---
+        mock_platform.ray_device_key = "TPU"
+        mock_platform.device_name = "tpu"
+        mock_vllm_platform.ray_device_key = "TPU"
+        mock_vllm_platform.device_name = "tpu"
+
+        mock_ray.is_initialized.return_value = True
+        # Simulate cluster with head node (no TPU) and 4 TPU worker nodes
+        mock_ray.nodes.return_value = [
+            {
+                "NodeID": "head_node",
+                "Resources": {
+                    "CPU": 8
+                }
+            },  # No TPU
+            {
+                "NodeID": "tpu_node_1",
+                "Resources": {
+                    "TPU": 4,
+                    "CPU": 160
+                }
+            },
+            {
+                "NodeID": "tpu_node_2",
+                "Resources": {
+                    "TPU": 4,
+                    "CPU": 160
+                }
+            },
+            {
+                "NodeID": "tpu_node_3",
+                "Resources": {
+                    "TPU": 4,
+                    "CPU": 160
+                }
+            },
+            {
+                "NodeID": "tpu_node_4",
+                "Resources": {
+                    "TPU": 4,
+                    "CPU": 160
+                }
+            },
+        ]
+        # Current node is a TPU node
+        mock_ray.get_runtime_context.return_value.get_node_id.return_value = "tpu_node_1"
+        mock_get_ip.return_value = "10.0.0.1"
+
+        mock_placement_group = MagicMock()
+        mock_ray.util.placement_group.return_value = mock_placement_group
+
+        executor = self.RayDistributedExecutor(self.vllm_config)
+        executor.vllm_config = self.vllm_config
+        executor.parallel_config = self.vllm_config.parallel_config
+        executor.parallel_config.placement_group = None
+
+        # --- Call method under test ---
+        executor._initialize_ray_cluster()
+
+        # --- Assertions ---
+        # Placement group should be created with 4 bundles (only TPU nodes)
+        call_args = mock_ray.util.placement_group.call_args
+        placement_group_specs = call_args[0][0]
+        # Should have 4 bundles (one per TPU node), not 5
+        self.assertEqual(len(placement_group_specs), 4)
+        # Each bundle should have TPU resources
+        for spec in placement_group_specs:
+            self.assertIn("TPU", spec)
+
+    def test_initialize_ray_cluster_uses_ray_nodes_for_resource_check(
+            self, mock_wait_until_pg_ready, mock_get_port, mock_get_ip,
+            mock_vllm_platform, mock_platform, mock_ray, mock_envs):
+        """Test that ray.nodes() is used for TPU availability check."""
+        # --- Setup Mocks ---
+        mock_platform.ray_device_key = "TPU"
+        mock_platform.device_name = "tpu"
+        mock_vllm_platform.ray_device_key = "TPU"
+        mock_vllm_platform.device_name = "tpu"
+
+        mock_ray.is_initialized.return_value = True
+        # Simulate node with TPU resources
+        mock_ray.nodes.return_value = [
+            {
+                "NodeID": "tpu_node_1",
+                "Resources": {
+                    "TPU": 4,
+                    "CPU": 160
+                }
+            },
+        ]
+        mock_ray.get_runtime_context.return_value.get_node_id.return_value = "tpu_node_1"
+        mock_get_ip.return_value = "10.0.0.1"
+
+        mock_placement_group = MagicMock()
+        mock_ray.util.placement_group.return_value = mock_placement_group
+
+        executor = self.RayDistributedExecutor(self.vllm_config)
+        executor.vllm_config = self.vllm_config
+        executor.parallel_config = self.vllm_config.parallel_config
+        executor.parallel_config.placement_group = None
+
+        # --- Call method under test ---
+        # Should not raise error since ray.nodes() returns TPU resources
+        executor._initialize_ray_cluster()
+
+        # --- Assertions ---
+        mock_ray.util.placement_group.assert_called_once()
+        self.assertIsNotNone(executor.parallel_config.placement_group)
