@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-02-27 08:09 AM UTC*
+*Last Updated: 2026-02-27 08:16 AM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -143,9 +143,9 @@ Below is the live status of our supported models, features, and kernels. Click o
   <tbody>
     <tr>
       <td><strong>async scheduler</strong></td>
-      <td>v6e&nbsp;✅&nbsp;Passing<br>v7x&nbsp;❌&nbsp;Failed</td>
+      <td>✅&nbsp;v6e&nbsp;Passing<br>❌&nbsp;v7x&nbsp;Failed</td>
       <td>✅&nbsp;Passing</td>
-      <td>v6e&nbsp;✅&nbsp;Passing<br>v7x&nbsp;❌&nbsp;Failed</td>
+      <td>✅&nbsp;v6e&nbsp;Passing<br>❌&nbsp;v7x&nbsp;Failed</td>
     </tr>
     <tr>
       <td><strong>Chunked Prefill</strong></td>
@@ -234,7 +234,7 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td><strong>Speculative Decoding: Ngram</strong></td>
       <td>✅&nbsp;Passing</td>
-      <td>v6e&nbsp;❌&nbsp;Failed<br>v7x&nbsp;✅&nbsp;Passing</td>
+      <td>❌&nbsp;v6e&nbsp;Failed<br>✅&nbsp;v7x&nbsp;Passing</td>
       <td>✅&nbsp;Passing</td>
     </tr>
     <tr>
