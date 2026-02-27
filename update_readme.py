@@ -82,6 +82,38 @@ def generate_markdown_table(headers, data):
         data_lines += "| " + " | ".join(formatted_row) + " |\n"
     return header_line + separator_line + data_lines
 
+def _format_cell(status_string, hw_prefix=None):
+    """Formats the cell with a tooltip containing the full status and optional hardware prefix."""
+    status_string = str(status_string).strip()
+    
+    # Extract the pure status word for the tooltip (e.g., "Passing" from "✅&nbsp;Passing")
+    # We must split on "&nbsp;" because merge_metrics uses non-breaking spaces
+    clean_string = status_string.replace("&nbsp;", " ")
+    parts = clean_string.split(" ", 1)
+    icon = parts[0] if parts else ""
+    text_status = parts[1] if len(parts) > 1 else ""
+    
+    # Build the visual display text (just icon, or icon + prefix)
+    display_text = icon
+    if hw_prefix:
+        display_text = f"{icon}&nbsp;{hw_prefix}"
+        
+    # The tooltip should be descriptive
+    tooltip = status_string
+    if hw_prefix:
+        tooltip = f"{hw_prefix} {status_string}"
+        
+    return f'<span title="{tooltip}">{display_text}</span>'
+
+def _merge_hw_status(status_v6, status_v7):
+    """Merges v6 and v7 statuses. If identical, returns one. If different, stacks them."""
+    s6 = status_v6.strip()
+    s7 = status_v7.strip()
+    if s6 == s7:
+        return _format_cell(s6)
+    
+    return _format_cell(s6, "v6e") + "<br>" + _format_cell(s7, "v7x")
+
 def generate_html_feature_table(headers, data):
     """Generates an HTML table specifically for the core feature matrix, merging v6e and v7x."""
     if not headers: return ""
@@ -97,38 +129,6 @@ def generate_html_feature_table(headers, data):
     html.append("    </tr>")
     html.append("  </thead>")
     html.append("  <tbody>")
-    
-    def _format_cell(status_string, hw_prefix=None):
-        """Formats the cell with a tooltip containing the full status and optional hardware prefix."""
-        status_string = str(status_string).strip()
-        
-        # Extract the pure status word for the tooltip (e.g., "Passing" from "✅&nbsp;Passing")
-        # We must split on "&nbsp;" because merge_metrics uses non-breaking spaces
-        clean_string = status_string.replace("&nbsp;", " ")
-        parts = clean_string.split(" ", 1)
-        icon = parts[0] if parts else ""
-        text_status = parts[1] if len(parts) > 1 else ""
-        
-        # Build the visual display text (just icon, or icon + prefix)
-        display_text = icon
-        if hw_prefix:
-            display_text = f"{icon}&nbsp;{hw_prefix}"
-            
-        # The tooltip should be descriptive
-        tooltip = status_string
-        if hw_prefix:
-            tooltip = f"{hw_prefix} {status_string}"
-            
-        return f'<span title="{tooltip}">{display_text}</span>'
-
-    def _merge_hw_status(status_v6, status_v7):
-        """Merges v6 and v7 statuses. If identical, returns one. If different, stacks them."""
-        s6 = status_v6.strip()
-        s7 = status_v7.strip()
-        if s6 == s7:
-            return _format_cell(s6)
-        
-        return _format_cell(s6, "v6e") + "<br>" + _format_cell(s7, "v7x")
 
     for row in data:
         html.append("    <tr>")
@@ -155,34 +155,28 @@ def generate_html_quantization_table(headers, data):
     html.append("<table>")
     html.append("  <thead>")
     html.append("    <tr>")
-    html.append("      <th rowspan=\"2\">Format</th>")
-    html.append("      <th rowspan=\"2\">Method</th>")
-    html.append("      <th rowspan=\"2\">Recommended<br>TPU Generations</th>")
-    html.append("      <th colspan=\"2\">v6e</th>")
-    html.append("      <th colspan=\"2\">v7x</th>")
-    html.append("    </tr>")
-    html.append("    <tr>")
-    html.append("      <th>flax</th>")
-    html.append("      <th>pytorch</th>")
+    html.append("      <th>Format</th>")
+    html.append("      <th>Method</th>")
+    html.append("      <th>Recommended<br>TPU Generations</th>")
     html.append("      <th>flax</th>")
     html.append("      <th>pytorch</th>")
     html.append("    </tr>")
     html.append("  </thead>")
     html.append("  <tbody>")
     
-    def _format_cell(text):
-        text = str(text)
-        for status in ["❓ Untested", "✅ Passing", "❌ Failed", "❌ Failing", "🧪 Experimental", "📝 Planned", "⛔️ Unplanned"]:
-            text = text.replace(status, status.replace(" ", "&nbsp;"))
-        return text
-
     for row in data:
         html.append("    <tr>")
         # Ensure we have 9 columns worth of data, then drop default columns (indices 5 and 8)
         padded_row = row + [""] * (9 - len(row))
-        indices_to_keep = [0, 1, 2, 3, 4, 6, 7]
-        for idx in indices_to_keep:
-            html.append(f"      <td>{_format_cell(padded_row[idx])}</td>")
+        html.append(f"      <td>{padded_row[0]}</td>")
+        html.append(f"      <td>{padded_row[1]}</td>")
+        html.append(f"      <td>{padded_row[2]}</td>")
+        
+        merged_flax = _merge_hw_status(padded_row[3], padded_row[6])
+        merged_pytorch = _merge_hw_status(padded_row[4], padded_row[7])
+        
+        html.append(f"      <td>{merged_flax}</td>")
+        html.append(f"      <td>{merged_pytorch}</td>")
         html.append("    </tr>")
         
     html.append("  </tbody>")

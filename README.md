@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-02-27 08:56 AM UTC*
+*Last Updated: 2026-02-27 09:04 AM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -275,15 +275,9 @@ Below is the live status of our supported models, features, and kernels. Click o
 <table>
   <thead>
     <tr>
-      <th rowspan="2">Format</th>
-      <th rowspan="2">Method</th>
-      <th rowspan="2">Recommended<br>TPU Generations</th>
-      <th colspan="2">v6e</th>
-      <th colspan="2">v7x</th>
-    </tr>
-    <tr>
-      <th>flax</th>
-      <th>pytorch</th>
+      <th>Format</th>
+      <th>Method</th>
+      <th>Recommended<br>TPU Generations</th>
       <th>flax</th>
       <th>pytorch</th>
     </tr>
@@ -293,55 +287,43 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>AWQ INT4</td>
       <td></td>
       <td>v5, v6</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
+      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓ Untested">❓</span></td>
     </tr>
     <tr>
       <td>FP4 W4A16</td>
       <td>mxfp4</td>
       <td>v7</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
+      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓ Untested">❓</span></td>
     </tr>
     <tr>
       <td>FP8 W8A8</td>
       <td>compressed-tensor</td>
       <td>v7</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
+      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓ Untested">❓</span></td>
     </tr>
     <tr>
       <td>FP8 W8A16</td>
       <td>compressed-tensor</td>
       <td>v7</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
+      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓ Untested">❓</span></td>
     </tr>
     <tr>
       <td>INT4 W4A16</td>
       <td>awq</td>
       <td>v5, v6</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
+      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓ Untested">❓</span></td>
     </tr>
     <tr>
       <td>INT8 W8A8</td>
       <td>compressed-tensor</td>
       <td>v5, v6</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
+      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓ Untested">❓</span></td>
     </tr>
   </tbody>
 </table>
