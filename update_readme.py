@@ -48,18 +48,19 @@ def generate_markdown_table(headers, data):
         
     def _format_markdown_cell(text):
         if not text: return ""
-        text_str = str(text)
+        text_str = _nbsp(str(text))
         
         # Look for known status strings to format as tooltips
         for status in ["❓ Untested", "✅ Passing", "❌ Failed", "❌ Failing", "🧪 Experimental", "📝 Planned", "⛔️ Unplanned"]:
-            if status in text_str:
+            nbsp_status = _nbsp(status)
+            if nbsp_status in text_str:
                 parts = status.split(" ", 1)
                 icon = parts[0] if parts else ""
-                tooltip = status.replace(" ", "&nbsp;")
+                tooltip = nbsp_status
                 wrapped = f'<span title="{tooltip}">{icon}</span>'
-                text_str = text_str.replace(status, wrapped)
+                text_str = text_str.replace(nbsp_status, wrapped)
                 
-        return _nbsp(text_str)
+        return text_str
 
     header_line = "| " + " | ".join([_nbsp(h) for h in headers]) + " |\n"
     separator_line = "| " + " | ".join(["---"] * len(headers)) + " |\n"
