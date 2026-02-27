@@ -415,7 +415,7 @@ def process_fp8_moe_weights(
     w2_weight = weights.w2_weight
     w2_weight_scale = weights.w2_weight_scale
 
-    if desired_quant_dtype_from_env := envs.REQUANTIZE_WEIGHT_DTYPE:
+    if desired_quant_dtype_from_env := envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
         desired_quant_dtype = to_jax_dtype(desired_quant_dtype_from_env)
     else:
         desired_quant_dtype = w13_weight.dtype

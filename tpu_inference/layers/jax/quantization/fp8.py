@@ -32,6 +32,7 @@ from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_fp8_moe_weights)
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.linear import JaxEinsum
@@ -40,12 +41,10 @@ from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.layers.jax.quantization.unquantized import (
     UnquantizedFusedMoEMethod, UnquantizedLinearMethod)
-from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
     jax_array_from_reshaped_torch, load_nnx_param_from_reshaped_torch,
     shard_put)
 
-logger = init_logger(__name__)
 
 # TODO (jacobplatin): remove once we support all backends
 FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS = [
@@ -565,15 +564,18 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 shard_put(weights.w13_weight, shardings=layer.edf_sharding))
             layer.kernel_down_proj_EFD = nnx.Param(
                 shard_put(weights.w2_weight, shardings=layer.efd_sharding))
-            # NOTE: we aren't sharding the weight scales
+            
+            edf_scale_sharding = (ShardingAxisName.ATTN_DATA_EXPERT,) + (None,) * (weights.w13_weight_scale.ndim - 2) + (ShardingAxisName.MOE_TENSOR,)
+            efd_scale_sharding = (ShardingAxisName.ATTN_DATA_EXPERT,) + (None,) * (weights.w2_weight_scale.ndim - 2) + (ShardingAxisName.MOE_TENSOR,)
+
             setattr(
                 layer, f"kernel_gating_upproj_EDF_{self.weight_scale_name}",
                 nnx.Param(
-                    shard_put(weights.w13_weight_scale, shardings=(None, ))))
+                    shard_put(weights.w13_weight_scale, shardings=edf_scale_sharding)))
             setattr(
                 layer, f"kernel_down_proj_EFD_{self.weight_scale_name}",
                 nnx.Param(
-                    shard_put(weights.w2_weight_scale, shardings=(None, ))))
+                    shard_put(weights.w2_weight_scale, shardings=efd_scale_sharding)))
         else:
             raise NotImplementedError(
                 f"Unsupported moe backend: {layer.moe_backend}! Currently supported: {FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS}"
