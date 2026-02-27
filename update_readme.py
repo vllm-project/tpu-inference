@@ -262,6 +262,8 @@ def generate_html_microbenchmark_table(headers, data):
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
+  </tbody>
+  <tbody>
     <tr>
       <td rowspan="1"><b>Dense</b></td>
       <td>All&#8209;gather&nbsp;matmul</td>
@@ -272,6 +274,8 @@ def generate_html_microbenchmark_table(headers, data):
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
+  </tbody>
+  <tbody>
     <tr>
       <td rowspan="2"><b>Attention</b></td>
       <td>MLA</td>
