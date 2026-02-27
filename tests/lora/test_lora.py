@@ -37,6 +37,7 @@ def setup_vllm(num_loras: int, tp: int = 1) -> vllm.LLM:
                     max_num_batched_tokens=64,
                     max_num_seqs=8,
                     tensor_parallel_size=tp,
+                    async_scheduling=0,
                     enable_lora=True,
                     max_loras=num_loras,
                     async_scheduling=0,

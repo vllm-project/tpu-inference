@@ -602,9 +602,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called "
                                "after execute_model() returns None.")
-        with jax.set_mesh(self.mesh):
-            output = self._execute_model(scheduler_output,
-                                         intermediate_tensors)
+        output = self._execute_model(scheduler_output, intermediate_tensors)
         return output
 
     def sample_tokens(
@@ -785,7 +783,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # TODO: make _get_input_ids_embeds within this context
         # NOTE: right now, mm model will use embeddings as the input,
         # but text-only model will use input_ids
-        with self.maybe_forbid_compile:
+        with jax.set_mesh(self.mesh), self.maybe_forbid_compile:
 
             with set_forward_context(
                     None,
