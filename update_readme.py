@@ -278,8 +278,8 @@ def generate_html_microbenchmark_table(headers, data):
         # Find which of these configured kernels actually exist in the CSV data
         found_kernels = []
         for k in kernels:
-            # check direct match and prefix match just in case
-            matched = [name for name in row_map.keys() if k in name]
+            # check direct match
+            matched = [name for name in row_map.keys() if k == name]
             if matched:
                 found_kernels.append((matched[0], row_map[matched[0]]))
 
