@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-02-27 08:44 AM UTC*
+*Last Updated: 2026-02-27 08:49 AM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -104,20 +104,20 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: model_support -->
 | Model | Type | Unit&nbsp;Test | Correctness&nbsp;Test | Benchmark |
 | --- | --- | --- | --- | --- |
-| [`meta-llama/Llama-4-Maverick-17B-128E-Instruct`](https://huggingface.co/meta-llama/Llama-4-Maverick-17B-128E-Instruct) | Multimodal | ❓&nbsp;Untested | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| [`Qwen/Qwen2.5-VL-7B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) | Multimodal | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| [`Qwen/Qwen3-Omni-30B-A3B-Instruct`](https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct) | Multimodal | ❓&nbsp;Untested | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| [`moonshotai/Kimi-K2-Thinking`](https://huggingface.co/moonshotai/Kimi-K2-Thinking) | Text | ❓&nbsp;Untested | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| [`Qwen/Qwen3-Coder-480B-A35B-Instruct`](https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct) | Text | ❓&nbsp;Untested | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| [`meta-llama/Llama-3.3-70B-Instruct`](https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct) | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| [`Qwen/Qwen3-4B`](https://huggingface.co/Qwen/Qwen3-4B) | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| [`google/gemma-3-27b-it`](https://huggingface.co/google/gemma-3-27b-it) | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| [`Qwen/Qwen3-32B`](https://huggingface.co/Qwen/Qwen3-32B) | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| [`deepseek-ai/DeepSeek-V3.1`](https://huggingface.co/deepseek-ai/DeepSeek-V3.1) | Text | ❓&nbsp;Untested | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| [`meta-llama/Llama-Guard-4-12B`](https://huggingface.co/meta-llama/Llama-Guard-4-12B) | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| [`openai/gpt-oss-120b`](https://huggingface.co/openai/gpt-oss-120b) | Text | ❓&nbsp;Untested | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| [`meta-llama/Llama-3.1-8B-Instruct`](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| [`Qwen/Qwen3-30B-A3B`](https://huggingface.co/Qwen/Qwen3-30B-A3B) | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
+| [`meta-llama/Llama-4-Maverick-17B-128E-Instruct`](https://huggingface.co/meta-llama/Llama-4-Maverick-17B-128E-Instruct) | Multimodal | <span&nbsp;title="❓&nbsp;Untested">❓</span> | <span&nbsp;title="❓&nbsp;Untested">❓</span> | <span&nbsp;title="❓&nbsp;Untested">❓</span> |
+| [`Qwen/Qwen2.5-VL-7B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) | Multimodal | <span&nbsp;title="✅&nbsp;Passing">✅</span> | <span&nbsp;title="✅&nbsp;Passing">✅</span> | <span&nbsp;title="✅&nbsp;Passing">✅</span> |
+| [`Qwen/Qwen3-Omni-30B-A3B-Instruct`](https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct) | Multimodal | <span&nbsp;title="❓&nbsp;Untested">❓</span> | <span&nbsp;title="❓&nbsp;Untested">❓</span> | <span&nbsp;title="❓&nbsp;Untested">❓</span> |
+| [`moonshotai/Kimi-K2-Thinking`](https://huggingface.co/moonshotai/Kimi-K2-Thinking) | Text | <span&nbsp;title="❓&nbsp;Untested">❓</span> | <span&nbsp;title="❓&nbsp;Untested">❓</span> | <span&nbsp;title="❓&nbsp;Untested">❓</span> |
+| [`Qwen/Qwen3-Coder-480B-A35B-Instruct`](https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct) | Text | <span&nbsp;title="❓&nbsp;Untested">❓</span> | <span&nbsp;title="❓&nbsp;Untested">❓</span> | <span&nbsp;title="❓&nbsp;Untested">❓</span> |
+| [`meta-llama/Llama-3.3-70B-Instruct`](https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct) | Text | <span&nbsp;title="✅&nbsp;Passing">✅</span> | <span&nbsp;title="✅&nbsp;Passing">✅</span> | <span&nbsp;title="✅&nbsp;Passing">✅</span> |
+| [`Qwen/Qwen3-4B`](https://huggingface.co/Qwen/Qwen3-4B) | Text | <span&nbsp;title="✅&nbsp;Passing">✅</span> | <span&nbsp;title="✅&nbsp;Passing">✅</span> | <span&nbsp;title="✅&nbsp;Passing">✅</span> |
+| [`google/gemma-3-27b-it`](https://huggingface.co/google/gemma-3-27b-it) | Text | <span&nbsp;title="✅&nbsp;Passing">✅</span> | <span&nbsp;title="✅&nbsp;Passing">✅</span> | <span&nbsp;title="✅&nbsp;Passing">✅</span> |
+| [`Qwen/Qwen3-32B`](https://huggingface.co/Qwen/Qwen3-32B) | Text | <span&nbsp;title="✅&nbsp;Passing">✅</span> | <span&nbsp;title="✅&nbsp;Passing">✅</span> | <span&nbsp;title="✅&nbsp;Passing">✅</span> |
+| [`deepseek-ai/DeepSeek-V3.1`](https://huggingface.co/deepseek-ai/DeepSeek-V3.1) | Text | <span&nbsp;title="❓&nbsp;Untested">❓</span> | <span&nbsp;title="❓&nbsp;Untested">❓</span> | <span&nbsp;title="❓&nbsp;Untested">❓</span> |
+| [`meta-llama/Llama-Guard-4-12B`](https://huggingface.co/meta-llama/Llama-Guard-4-12B) | Text | <span&nbsp;title="✅&nbsp;Passing">✅</span> | <span&nbsp;title="✅&nbsp;Passing">✅</span> | <span&nbsp;title="✅&nbsp;Passing">✅</span> |
+| [`openai/gpt-oss-120b`](https://huggingface.co/openai/gpt-oss-120b) | Text | <span&nbsp;title="❓&nbsp;Untested">❓</span> | <span&nbsp;title="❓&nbsp;Untested">❓</span> | <span&nbsp;title="❓&nbsp;Untested">❓</span> |
+| [`meta-llama/Llama-3.1-8B-Instruct`](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) | Text | <span&nbsp;title="✅&nbsp;Passing">✅</span> | <span&nbsp;title="✅&nbsp;Passing">✅</span> | <span&nbsp;title="✅&nbsp;Passing">✅</span> |
+| [`Qwen/Qwen3-30B-A3B`](https://huggingface.co/Qwen/Qwen3-30B-A3B) | Text | <span&nbsp;title="✅&nbsp;Passing">✅</span> | <span&nbsp;title="✅&nbsp;Passing">✅</span> | <span&nbsp;title="✅&nbsp;Passing">✅</span> |
 
 <!-- END: model_support -->
 
@@ -256,12 +256,12 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: parallelism -->
 | Feature | CorrectnessTest | PerformanceTest |
 | --- | --- | --- |
-| CP | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| DP | ✅&nbsp;Passing | ❓&nbsp;Untested |
-| EP | ✅&nbsp;Passing | ❓&nbsp;Untested |
-| PP | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| SP | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| TP | ✅&nbsp;Passing | ❓&nbsp;Untested |
+| CP | <span&nbsp;title="❓&nbsp;Untested">❓</span> | <span&nbsp;title="❓&nbsp;Untested">❓</span> |
+| DP | <span&nbsp;title="✅&nbsp;Passing">✅</span> | <span&nbsp;title="❓&nbsp;Untested">❓</span> |
+| EP | <span&nbsp;title="✅&nbsp;Passing">✅</span> | <span&nbsp;title="❓&nbsp;Untested">❓</span> |
+| PP | <span&nbsp;title="✅&nbsp;Passing">✅</span> | <span&nbsp;title="✅&nbsp;Passing">✅</span> |
+| SP | <span&nbsp;title="❓&nbsp;Untested">❓</span> | <span&nbsp;title="❓&nbsp;Untested">❓</span> |
+| TP | <span&nbsp;title="✅&nbsp;Passing">✅</span> | <span&nbsp;title="❓&nbsp;Untested">❓</span> |
 
 <!-- END: parallelism -->
 

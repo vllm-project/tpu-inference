@@ -45,6 +45,21 @@ def generate_markdown_table(headers, data):
     def _nbsp(text):
         if not text: return text
         return text.replace(" ", "&nbsp;")
+        
+    def _format_markdown_cell(text):
+        if not text: return ""
+        text_str = str(text)
+        
+        # Look for known status strings to format as tooltips
+        for status in ["❓ Untested", "✅ Passing", "❌ Failed", "❌ Failing", "🧪 Experimental", "📝 Planned", "⛔️ Unplanned"]:
+            if status in text_str:
+                parts = status.split(" ", 1)
+                icon = parts[0] if parts else ""
+                tooltip = status.replace(" ", "&nbsp;")
+                wrapped = f'<span title="{tooltip}">{icon}</span>'
+                text_str = text_str.replace(status, wrapped)
+                
+        return _nbsp(text_str)
 
     header_line = "| " + " | ".join([_nbsp(h) for h in headers]) + " |\n"
     separator_line = "| " + " | ".join(["---"] * len(headers)) + " |\n"
@@ -57,10 +72,11 @@ def generate_markdown_table(headers, data):
         formatted_row = []
         is_sp_row = (row and row[0].strip() == "SP")
         for c in row:
+            formatted_cell = _format_markdown_cell(c)
             if is_sp_row and "Experimental" in c:
-                formatted_row.append(_nbsp("🧪 Experimental") + " ([vote to prioritize](https://github.com/vllm-project/tpu-inference/issues/1749))")
+                formatted_row.append(formatted_cell + " ([vote to prioritize](https://github.com/vllm-project/tpu-inference/issues/1749))")
             else:
-                formatted_row.append(_nbsp(c))
+                formatted_row.append(formatted_cell)
                 
         data_lines += "| " + " | ".join(formatted_row) + " |\n"
     return header_line + separator_line + data_lines
