@@ -418,8 +418,10 @@ TUNED_BLOCK_SIZES_RAW = {
     (7, 16, 4096, 7168, 'float8_e4m3fn', 'float8_e4m3fn'): (16, 4096, 1792),
     (7, 16, 5120, 12800, 'float8_e4m3fn', 'float4_e2m1fn'): (16, 1024, 12800,
                                                              2),
-    # Not actually tuned below.
-    (7, 16, 5120, 5120, 'float8_e4m3fn', 'int4'): (16, 1024, 1024, 2),
+    # Not actually tuned for the line below.
+    (7, 16, 5120, 5120, 'float8_e4m3fn', 'int4'): (16, 5120, 1024, 2),
+    (7, 16, 5120, 4096, 'float8_e4m3fn', 'int4'): (16, 5120, 4096, 2),
+    (7, 16, 5120, 25600, 'float8_e4m3fn', 'int4'): (16, 5120, 25600, 2),
     (7, 16, 5120, 12800, 'float8_e4m3fn', 'float8_e4m3fn'): (16, 5120, 512, 4),
     (7, 16, 5120, 25600, 'float8_e4m3fn', 'float8_e4m3fn'): (16, 640, 25600),
     (7, 16, 5120, 4096, 'float8_e4m3fn', 'float4_e2m1fn'): (16, 1024, 4096, 2),
