@@ -66,21 +66,14 @@ def generate_markdown_table(headers, data):
     return header_line + separator_line + data_lines
 
 def generate_html_feature_table(headers, data):
-    """Generates an HTML table specifically for the core feature matrix."""
+    """Generates an HTML table specifically for the core feature matrix, merging v6e and v7x."""
     if not headers: return ""
     
     html = []
     html.append("<table>")
     html.append("  <thead>")
     html.append("    <tr>")
-    html.append("      <th rowspan=\"2\">Test / Feature</th>")
-    html.append("      <th colspan=\"3\">v6e</th>")
-    html.append("      <th colspan=\"3\">v7x</th>")
-    html.append("    </tr>")
-    html.append("    <tr>")
-    html.append("      <th>flax</th>")
-    html.append("      <th>pytorch</th>")
-    html.append("      <th>default</th>")
+    html.append("      <th>Test / Feature</th>")
     html.append("      <th>flax</th>")
     html.append("      <th>pytorch</th>")
     html.append("      <th>default</th>")
@@ -88,15 +81,40 @@ def generate_html_feature_table(headers, data):
     html.append("  </thead>")
     html.append("  <tbody>")
     
+    def _format_cell(text):
+        text = str(text)
+        for status in ["❓ Untested", "✅ Passing", "❌ Failed", "❌ Failing", "🧪 Experimental", "📝 Planned", "⛔️ Unplanned"]:
+            text = text.replace(status, status.replace(" ", "&nbsp;"))
+        return text
+
+    def _merge_hw_status(status_v6, status_v7):
+        """Merges v6 and v7 statuses. If identical, returns one. If different, stacks them."""
+        s6 = status_v6.strip()
+        s7 = status_v7.strip()
+        if s6 == s7:
+            return _format_cell(s6)
+        
+        # Insert hardware prefixes right after the emoji
+        def _inject_hw(status_string, hw_prefix):
+            parts = status_string.split(" ", 1)
+            if len(parts) == 2:
+                # E.g., "✅ Passing" -> "✅ v6e&nbsp;Passing"
+                return f"{parts[0]} {hw_prefix}&nbsp;{parts[1]}"
+            return f"{hw_prefix}&nbsp;{status_string}"
+
+        return _format_cell(_inject_hw(s6, "v6e")) + "<br>" + _format_cell(_inject_hw(s7, "v7x"))
+
     for row in data:
         html.append("    <tr>")
-        html.append(f"      <td>{row[0]}</td>")     # Feature name
-        html.append(f"      <td>{row[1]}</td>")     # v6e flax
-        html.append(f"      <td>{row[2]}</td>")     # v6e pytorch
-        html.append(f"      <td>{row[3]}</td>")     # v6e default
-        html.append(f"      <td>{row[4]}</td>")     # v7x flax
-        html.append(f"      <td>{row[5]}</td>")     # v7x pytorch
-        html.append(f"      <td>{row[6]}</td>")     # v7x default
+        html.append(f"      <td><strong>{row[0]}</strong></td>")  # Feature name, bolded for style
+        
+        merged_flax = _merge_hw_status(row[1], row[4])
+        merged_pytorch = _merge_hw_status(row[2], row[5])
+        merged_default = _merge_hw_status(row[3], row[6])
+        
+        html.append(f"      <td>{merged_flax}</td>")
+        html.append(f"      <td>{merged_pytorch}</td>")
+        html.append(f"      <td>{merged_default}</td>")
         html.append("    </tr>")
         
     html.append("  </tbody>")
