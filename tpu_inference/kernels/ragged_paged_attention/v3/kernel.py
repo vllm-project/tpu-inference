@@ -182,7 +182,7 @@ def get_smem_estimate_bytes(max_num_seqs, pages_per_seq):
         128 * 32 +
         # bo_ids_ref: i32[4]
         128 * 32 +
-        # bkv_update_ids_ref: i32[6]
+        # bkv_update_ids_ref: i32[4]
         128 * 32)
     return cdiv(total_bits, 8)
 
@@ -242,9 +242,9 @@ def _ragged_paged_attention_kernel(
     cu_q_lens_ref,  # [max_num_seqs + 1]
     # TODO(jevinjiang): merge these into one so we can save SMEM.
     distribution_ref,  # [3] (decode_end, prefill_end, mixed_end)
-    sem_ids_ref,  # [3] (bq_sem_idx, bkv_sem_idx, bo_sem_idx)
+    sem_ids_ref,  # [4] (bq_sem_idx, bkv_sem_idx, bo_sem_idx, kv_update_sem_idx)
     bo_ids_ref,  # [4] (bo_sem_0_seq_idx, bo_sem_1_seq_idx, bo_sem_0_bo_idx, bo_sem_1_bo_idx)
-    bkv_update_ids_ref,  # [6] (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz)
+    bkv_update_ids_ref,  # [4] (sem_0_seq_idx, sem_1_seq_idx, sem_0_bq_idx, sem_1_bq_idx)
     # Input
     q_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
     kv_hbm_ref,  # [max_num_tokens, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
@@ -717,6 +717,25 @@ def _ragged_paged_attention_kernel(
         lax.fori_loop(0, pages_to_write, _write_kv_cache_per_page,
                         (total_sz, 0, kv_cache_start_idx))
 
+    def start_read_kv_update(seq_idx, bq_idx, sem_idx):
+        read_kv_update(seq_idx, bq_idx, sem_idx, wait=False)
+
+    def wait_read_kv_update(seq_idx, bq_idx, sem_idx):
+        read_kv_update(seq_idx, bq_idx, sem_idx, wait=True)
+
+    def start_write_kv_update(seq_idx, bq_idx, sem_idx):
+        bkv_update_ids_ref[sem_idx] = seq_idx
+        bkv_update_ids_ref[sem_idx + 2] = bq_idx
+        write_kv_update(seq_idx, bq_idx, sem_idx, wait=False)
+
+    def wait_write_kv_update(sem_idx):
+        old_seq_idx = bkv_update_ids_ref[sem_idx]
+        old_bq_idx = bkv_update_ids_ref[sem_idx + 2]
+
+        @pl.when(jnp.logical_and(0 <= old_seq_idx, old_seq_idx <= seq_idx))
+        def _():
+            write_kv_update(old_seq_idx, old_bq_idx, sem_idx, wait=True)
+
     def load_bq(bq_sem_idx, kv_head_idx, *, actual_bq_sz=bq_sz):
         q_ref = (bq_x2_ref.bitcast(
             jnp.uint32).at[bq_sem_idx, kv_head_idx].reshape(
@@ -865,9 +884,9 @@ def _ragged_paged_attention_kernel(
                 sem_ids_ref[0] = next_bq_sem_idx
                 start_fetch_bq(next_seq_idx, next_bq_idx, next_bq_sem_idx)
 
-            @pl.when(bq_idx == 0)
-            def read_initial_kv_update():
-                read_kv_update(seq_idx, bq_idx, bq_idx % 2, wait=False)
+            kv_update_sem_idx = sem_ids_ref[3]
+            next_kv_update_sem_idx = lax.select(kv_update_sem_idx == 0, 1, 0)
+            sem_ids_ref[3] = next_kv_update_sem_idx
 
             def compute_with_bkv(bkv_idx, _):
                 # Create bitmask for KV.
@@ -975,17 +994,14 @@ def _ragged_paged_attention_kernel(
             lax.fori_loop(0, num_bkv, compute_with_bkv, None, unroll=False)
 
 
-            read_kv_update(seq_idx, bq_idx, bq_idx % 2, wait=True)
+            wait_read_kv_update(seq_idx, bq_idx, kv_update_sem_idx)
 
-            @pl.when(bq_idx > 0)
-            def wait_prev_write():
-                write_kv_update(seq_idx, bq_idx - 1, (bq_idx - 1) % 2, wait=True)
+            start_write_kv_update(seq_idx, bq_idx, kv_update_sem_idx)
 
-            write_kv_update(seq_idx, bq_idx, bq_idx % 2, wait=False)
-
-            @pl.when(bq_idx < num_bq - 1)
-            def read_next_kv_update():
-                read_kv_update(seq_idx, bq_idx + 1, (bq_idx + 1) % 2, wait=False)
+            @pl.when(next_seq_idx < num_seqs)
+            def prefetch_next_kv_update():
+                wait_write_kv_update(next_kv_update_sem_idx)
+                start_read_kv_update(next_seq_idx, next_bq_idx, next_kv_update_sem_idx)
 
             # Load acc and calculate final output.
             acc = acc_ref[...]
@@ -1010,15 +1026,12 @@ def _ragged_paged_attention_kernel(
 
         lax.fori_loop(0, num_bq, compute_with_bq, None, unroll=False)
 
-        @pl.when(num_bq > 0)
-        def wait_last_kv_write():
-            write_kv_update(seq_idx, num_bq - 1, (num_bq - 1) % 2, wait=True)
-
     ### ------- Kernel start ------- ###
 
     @pl.when(seq_idx == 0)
     def prologue():
         start_fetch_bq(0, 0, 0)
+        start_read_kv_update(0, 0, 0)
 
         # Initialize bkv_x2_ref to zeros to avoid NaN issues from accessing
         # uninitialized memory. Bitcast into int32 to avoid tiling issues.
@@ -1047,6 +1060,7 @@ def _ragged_paged_attention_kernel(
     def epilogue():
         for i in range(2):
             wait_send_bo(i)
+            wait_write_kv_update(i)
 
     ### ------- Kernel end ------- ###
 
@@ -1590,11 +1604,12 @@ def ragged_paged_attention(
         cu_q_lens,
         distribution,
         # (bq_sem_idx, bkv_sem_idx, bo_sem_idx)
-        jnp.zeros((3, ), jnp.int32),
+        # (bq_sem_idx, bkv_sem_idx, bo_sem_idx, kv_update_sem_idx)
+        jnp.zeros((4, ), jnp.int32),
         # (bo_sem_0_seq_idx, bo_sem_1_seq_idx, bo_sem_0_bo_idx, bo_sem_1_bo_idx)
         jnp.full((4, ), -1, jnp.int32),
-        # (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz)
-        jnp.full((6, ), -1, jnp.int32),
+        # (kv_sem_0_seq_idx, kv_sem_1_seq_idx, kv_sem_0_bq_idx, kv_sem_1_bq_idx)
+        jnp.full((4, ), -1, jnp.int32),
     )
 
     scope_name = get_kernel_scope_name(bq_sz, bkv_p, page_size, sliding_window)
