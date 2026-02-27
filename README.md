@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-02-27 08:18 AM UTC*
+*Last Updated: 2026-02-27 08:24 AM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -143,105 +143,105 @@ Below is the live status of our supported models, features, and kernels. Click o
   <tbody>
     <tr>
       <td><strong>async scheduler</strong></td>
-      <td>✅&nbsp;v6e&nbsp;Passing<br>❌&nbsp;v7x&nbsp;Failed</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;v6e&nbsp;Passing<br>❌&nbsp;v7x&nbsp;Failed</td>
+      <td>✅&nbsp;v6e<br>❌&nbsp;v7x</td>
+      <td>✅</td>
+      <td>✅&nbsp;v6e<br>❌&nbsp;v7x</td>
     </tr>
     <tr>
       <td><strong>Chunked Prefill</strong></td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
+      <td>✅</td>
+      <td>✅</td>
+      <td>✅</td>
     </tr>
     <tr>
       <td><strong>DCN-based P/D disaggregation</strong></td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
+      <td>✅</td>
+      <td>✅</td>
+      <td>✅</td>
     </tr>
     <tr>
       <td><strong>hybrid kv cache</strong></td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
+      <td>❓</td>
+      <td>❓</td>
+      <td>❓</td>
     </tr>
     <tr>
       <td><strong>KV cache host offloading</strong></td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
+      <td>❓</td>
+      <td>❓</td>
+      <td>❓</td>
     </tr>
     <tr>
       <td><strong>LoRA_Torch</strong></td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
+      <td>✅</td>
+      <td>✅</td>
+      <td>✅</td>
     </tr>
     <tr>
       <td><strong>multi-host</strong></td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
+      <td>❓</td>
+      <td>❓</td>
+      <td>❓</td>
     </tr>
     <tr>
       <td><strong>Multimodal Inputs</strong></td>
-      <td>❌&nbsp;Failed</td>
-      <td>❌&nbsp;Failed</td>
-      <td>❌&nbsp;Failed</td>
+      <td>❌</td>
+      <td>❌</td>
+      <td>❌</td>
     </tr>
     <tr>
       <td><strong>Out-of-tree model support</strong></td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
+      <td>✅</td>
+      <td>✅</td>
+      <td>✅</td>
     </tr>
     <tr>
       <td><strong>Prefix Caching</strong></td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
+      <td>✅</td>
+      <td>✅</td>
+      <td>✅</td>
     </tr>
     <tr>
       <td><strong>runai_model_streamer_loader</strong></td>
-      <td>❓&nbsp;Untested</td>
-      <td>❌&nbsp;Failed</td>
-      <td>❓&nbsp;Untested</td>
+      <td>❓</td>
+      <td>❌</td>
+      <td>❓</td>
     </tr>
     <tr>
       <td><strong>sampling_params</strong></td>
-      <td>❓&nbsp;Untested</td>
-      <td>❌&nbsp;Failed</td>
-      <td>❓&nbsp;Untested</td>
+      <td>❓</td>
+      <td>❌</td>
+      <td>❓</td>
     </tr>
     <tr>
       <td><strong>Single Program Multi Data</strong></td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
+      <td>✅</td>
+      <td>✅</td>
+      <td>✅</td>
     </tr>
     <tr>
       <td><strong>Single-Host-P-D-disaggregation</strong></td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
-      <td>❓&nbsp;Untested</td>
+      <td>❓</td>
+      <td>❓</td>
+      <td>❓</td>
     </tr>
     <tr>
       <td><strong>Speculative Decoding: Eagle3</strong></td>
-      <td>✅&nbsp;Passing</td>
-      <td>❌&nbsp;Failed</td>
-      <td>✅&nbsp;Passing</td>
+      <td>✅</td>
+      <td>❌</td>
+      <td>✅</td>
     </tr>
     <tr>
       <td><strong>Speculative Decoding: Ngram</strong></td>
-      <td>✅&nbsp;Passing</td>
-      <td>❌&nbsp;v6e&nbsp;Failed<br>✅&nbsp;v7x&nbsp;Passing</td>
-      <td>✅&nbsp;Passing</td>
+      <td>✅</td>
+      <td>❌&nbsp;v6e<br>✅&nbsp;v7x</td>
+      <td>✅</td>
     </tr>
     <tr>
       <td><strong>structured_decoding</strong></td>
-      <td>❓&nbsp;Untested</td>
-      <td>❌&nbsp;Failed</td>
-      <td>❓&nbsp;Untested</td>
+      <td>❓</td>
+      <td>❌</td>
+      <td>❓</td>
     </tr>
   </tbody>
 </table>
