@@ -88,8 +88,8 @@ Below is the live status of our supported models, features, and kernels. Click o
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
 
 > - ✅ **Passing:** Tested and works as expected. Ready for use.
-> - 🧪 **Experimental:** Works, but unoptimized or pending community validation.
 > - ❌ **Failing:** Known to be broken or not functional. Help is wanted to fix this!
+> - 🧪 **Experimental:** Works, but unoptimized or pending community validation.
 > - 📝 **Planned:** Not yet implemented, but on the official roadmap.
 > - ⛔️ **Unplanned:** There is no benefit to adding this.
 > - ❓ **Untested:** The functionality exists but has not been recently or thoroughly verified.
