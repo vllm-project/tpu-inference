@@ -157,7 +157,7 @@ def generate_html_quantization_table(headers, data):
     html.append("    <tr>")
     html.append("      <th>Format</th>")
     html.append("      <th>Method</th>")
-    html.append("      <th>Recommended<br>TPU Generations</th>")
+    html.append("      <th>Supported<br>Hardware Acceleration</th>")
     html.append("      <th>flax</th>")
     html.append("      <th>torchax</th>")
     html.append("    </tr>")
