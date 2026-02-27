@@ -128,7 +128,7 @@ def generate_html_quantization_table(headers, data):
     
     def _format_cell(text):
         text = str(text)
-        for status in ["❓ Untested", "✅ Passing", "❌ Failed", "❌ Failing", "⚠️ Beta", "🧪 Experimental", "📝 Planned", "⚪ N/A"]:
+        for status in ["❓ Untested", "✅ Passing", "❌ Failed", "❌ Failing", "🧪 Experimental", "📝 Planned", "⛔️ Unplanned"]:
             text = text.replace(status, status.replace(" ", "&nbsp;"))
         return text
 

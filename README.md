@@ -82,18 +82,17 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-02-27 07:48 AM UTC*
+*Last Updated: 2026-02-27 07:54 AM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
 
 > - ✅ **Passing:** Tested and works as expected. Ready for use.
-> - ⚠️ **Beta:** Works, but may be unstable or have known issues. Use with caution.
 > - 🧪 **Experimental:** Works, but unoptimized or pending community validation.
 > - ❌ **Failing:** Known to be broken or not functional. Help is wanted to fix this!
 > - 📝 **Planned:** Not yet implemented, but on the official roadmap.
+> - ⛔️ **Unplanned:** There is no benefit to adding this.
 > - ❓ **Untested:** The functionality exists but has not been recently or thoroughly verified.
-> - ⚪️ **N/A:** Not applicable for this feature.
 
 </details>
 
