@@ -100,7 +100,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <br>
 
 <details open markdown="1">
-<summary><b> ✅ Model Support </b></summary>
+<summary><b> ✅ Tested Models </b></summary>
 
 <!-- START: model_support -->
 | Model | Type | Unit&nbsp;Test | Correctness&nbsp;Test | Benchmark |
