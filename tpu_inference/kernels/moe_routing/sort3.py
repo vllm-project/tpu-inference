@@ -1,6 +1,5 @@
-import dataclasses
 import functools
-from typing import Callable, Optional, Tuple
+from typing import Optional, Tuple
 import jax
 from jax import lax
 from jax.experimental import pallas as pl
@@ -62,17 +61,13 @@ def inner_kernel(
   )
 
 
-def kernel(
+def gather_kernel(
     # Prefetch
-    topk_indices_ref: jax.Array,
+    sorted_token_indices_ref: jax.Array,
     # In
     x_ref: jax.Array,
     # Out
     x_sorted_ref: jax.Array,
-    group_sizes_ref: jax.Array,
-    topk_argsort_revert_indices_ref: jax.Array,
-    # Scratch
-    group_offset_ref: jax.Array,
     *,
     tile_out: int,
     tile_in: int,
@@ -81,36 +76,13 @@ def kernel(
 ):
   hidden_size = x_sorted_ref.shape[-1]
   num_out_tokens = num_tokens * topk
-  num_experts = group_sizes_ref.shape[0]
-
-  for i in range(num_experts):
-    group_sizes_ref[i] = 0
-
-  for t in range(num_tokens):
-    for k in range(topk):
-      expert_idx = topk_indices_ref[t * topk + k]
-      group_size = group_sizes_ref[expert_idx]
-      group_sizes_ref[expert_idx] = group_size + 1
-
-  curr_offset = 0
-  for e in range(num_experts):
-    group_offset_ref[e] = curr_offset
-    curr_offset = curr_offset + group_sizes_ref[e]
-
-  for t in range(num_tokens):
-    for k in range(topk):
-      expert_idx = topk_indices_ref[t * topk + k]
-      group_offset = group_offset_ref[expert_idx]
-      topk_argsort_revert_indices_ref[group_offset] = t
-      group_offset_ref[expert_idx] = group_offset + 1
-
   num_out_tiles = num_out_tokens // tile_out
   num_in_tiles = num_tokens // tile_in
 
   pltpu.emit_pipeline(
       functools.partial(
           inner_kernel,
-          topk_argsort_revert_indices_ref=topk_argsort_revert_indices_ref,
+          topk_argsort_revert_indices_ref=sorted_token_indices_ref,
       ),
       grid=(num_out_tiles, num_in_tiles),
       in_specs=[
@@ -141,8 +113,14 @@ def sort_tokens(
   out_shape = (num_tokens * topk, hidden_size)
 
   orig_dtype = x.dtype
-  # x = x.astype(jnp.float32)
   x = x.reshape(num_tokens, 2, hidden_size // 2)
+
+  # Compute indices in JAX (vectorized on tensor units).
+  topk_indices_flat = topk_indices.flatten()
+  topk_argsort_indices = jnp.argsort(topk_indices_flat)
+  topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
+  sorted_token_indices = jnp.arange(num_tokens, dtype=jnp.int32).repeat(topk)[topk_argsort_indices]
+  group_sizes = jnp.bincount(topk_indices_flat, length=num_experts).astype(jnp.int32)
 
   if tile_out is None or tile_in is None:
     if num_tokens == 64:
@@ -159,25 +137,15 @@ def sort_tokens(
       tile_in = default_tile_in
 
   scope_name = f"sort_tokens-m_{num_tokens}-k_{hidden_size}-tile_out{tile_out}-tile_in{tile_in}"
-  return pl.pallas_call(
-      functools.partial(kernel, tile_out=tile_out, tile_in=tile_in, num_tokens=num_tokens, topk=topk),
-      out_shape=[
-          jax.ShapeDtypeStruct(out_shape, orig_dtype),
-          jax.ShapeDtypeStruct((num_experts,), jnp.int32), # group_sizes
-          jax.ShapeDtypeStruct((topk_indices.size,), jnp.int32), # topk_argsort_revert_indices
-      ],
+  x_sorted = pl.pallas_call(
+      functools.partial(gather_kernel, tile_out=tile_out, tile_in=tile_in, num_tokens=num_tokens, topk=topk),
+      out_shape=jax.ShapeDtypeStruct(out_shape, orig_dtype),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=1,
           in_specs=[pl.BlockSpec(memory_space=pltpu.HBM)],
-          out_specs=[
-              pl.BlockSpec(memory_space=pltpu.HBM),
-              pl.BlockSpec(memory_space=pltpu.SMEM),
-              pl.BlockSpec(memory_space=pltpu.SMEM),
-          ],
-          scratch_shapes=[
-              pltpu.SMEM((num_experts,), jnp.int32),
-          ],
+          out_specs=pl.BlockSpec(memory_space=pltpu.HBM),
       ),
       compiler_params=pltpu.CompilerParams(vmem_limit_bytes=vmem_limit_bytes),
       name=scope_name,
-  )(topk_indices.flatten(), x)
+  )(sorted_token_indices, x)
+  return x_sorted, group_sizes, topk_argsort_revert_indices
