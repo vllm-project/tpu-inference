@@ -20,7 +20,6 @@ ANY_FAILED=false
 MODEL_LIST_KEY="model-list"
 FEATURE_LIST_KEY="feature-list"
 DEFAULT_FEATURES_FILE=".buildkite/features/default_features.txt"
-LOCAL_TPU_VERSION="${BUILDKITE_TAG:-nightly_$(date +%Y%m%d)}"
 
 # Note: This script assumes the metadata keys contain newline-separated lists.
 mapfile -t model_list < <(buildkite-agent meta-data get "${MODEL_LIST_KEY}" --default "")
@@ -28,7 +27,7 @@ mapfile -t metadata_feature_list < <(buildkite-agent meta-data get "${FEATURE_LI
 MODEL_STAGES=("Type" "UnitTest" "Accuracy/Correctness" "Benchmark")
 FEATURE_STAGES=("CorrectnessTest" "PerformanceTest")
 FEATURE_STAGES_QUANTIZATION=("QuantizationMethods" "RecommendedTPUGenerations" "CorrectnessTest" "PerformanceTest")
-FEATURE_STAGES_MICROBENCHMARKS=("CorrectnessTest" "PerformanceTest" "TPU Versions")
+FEATURE_STAGES_MICROBENCHMARKS=("CorrectnessTest" "PerformanceTest")
 
 declare -A TPU_GENERATIONS=(
     ["INT8 W8A8"]="\"v5, v6\""
@@ -143,16 +142,14 @@ process_features() {
         local stages_to_use=("${FEATURE_STAGES[@]}")
         local header="Feature,CorrectnessTest,PerformanceTest"
         local is_quantization_matrix=false
-        local is_kernel_microbenchmarks=false
 
         if [ "$category" == "quantization support matrix" ]; then
             is_quantization_matrix=true
             stages_to_use=("${FEATURE_STAGES_QUANTIZATION[@]}")
             header="Quantization dtype,Quantization methods,Recommended TPU Generations,CorrectnessTest,PerformanceTest"
         elif [ "$category" == "kernel support matrix microbenchmarks" ]; then
-            is_kernel_microbenchmarks=true
             stages_to_use=("${FEATURE_STAGES_MICROBENCHMARKS[@]}")
-            header="kernels,CorrectnessTest,PerformanceTest,TPU Versions"
+            header="kernels,CorrectnessTest,PerformanceTest"
         fi
 
         if [ ! -f "$category_csv" ]; then
@@ -171,9 +168,6 @@ process_features() {
             elif [ "$is_quantization_matrix" = true ] && [ "$stage" == "QuantizationMethods" ]; then
                 # If it's the quantization matrix, hardcode the quantization methods
                 result="${QUANTIZATION_METHODS["$feature"]:-N/A}"
-            elif [ "$is_kernel_microbenchmarks" = true ] && [ "$stage" == "TPU Versions" ]; then
-                # If it's kernel microbenchmarks matrix, hardcode the tpu version
-                result="${LOCAL_TPU_VERSION}"
             elif [[ "$mode" == "DEFAULT" ]]; then
                 result="✅"
             else
@@ -183,7 +177,7 @@ process_features() {
             row="$row,$result"
 
             # Check for failure (exclude the hardcoded TPU generation column and Quantization Methods column)
-            if [ "$stage" != "TPU Versions" ] && [ "$stage" != "QuantizationMethods" ] && [ "$stage" != "RecommendedTPUGenerations" ] && [ "${result}" != "✅" ] && [ "${result}" != "N/A" ] && [ "${result}" != "unverified" ]; then
+            if [ "$stage" != "QuantizationMethods" ] && [ "$stage" != "RecommendedTPUGenerations" ] && [ "${result}" != "✅" ] && [ "${result}" != "N/A" ] && [ "${result}" != "unverified" ]; then
                 ANY_FAILED=true
             fi
 
@@ -203,35 +197,21 @@ process_kernel_matrix_to_pivot() {
     fi
 
     # Define Headers for Display
+    local header="Kernel,W16 A16 (Correctness),W16 A16 (Performance),W8 A8 (Correctness),W8 A8 (Performance),W8 A16 (Correctness),W8 A16 (Performance),W4 A4 (Correctness),W4 A4 (Performance),W4 A8 (Correctness),W4 A8 (Performance),W4 A16 (Correctness),W4 A16 (Performance)"
+    echo "$header" > "$output_file"
+
+    # Define the quantization order to match the header
     local quant_cols_list="w16a16 w8a8 w8a16 w4a4 w4a8 w4a16"
-    local AWK_QUANT_COLS
-    AWK_QUANT_COLS=$(IFS=" "; echo "${quant_cols_list[*]}")
-
-    # Line 1: ,w16a16,,,w8a8,,,w8a16,,,w4a4,,,w4a8,,,w4a16,,
-    local header_line1=","
-    for quant_type in $quant_cols_list; do
-        header_line1="${header_line1}${quant_type},,,"
-    done
-    # Remove the trailing comma from the last group
-    header_line1="${header_line1%,}"
-
-    # Line 2: kernels,correctness,performance,tpu versions,correctness,performance,tpu versions,...
-    local header_line2="kernels"
-    for _ in $quant_cols_list; do
-        header_line2="${header_line2},correctness,performance,tpu versions"
-    done
-
-    # Write the two-line header structure to the output file
-    echo "$header_line1" > "$output_file"
-    echo "$header_line2" >> "$output_file"
 
     # Awk Script for Pivoting (Data Rows)
-   awk -v AWK_QUANT_COLS="$AWK_QUANT_COLS" '
-        BEGIN { FS=","; OFS="," }
+    awk -v AWK_QUANT_COLS="$quant_cols_list" '
+        BEGIN { 
+            FS=","; OFS=",";
+            split(AWK_QUANT_COLS, q_order, " ");
+        }
+        
         NR > 1 {
-            # Kernel parsing logic remains the same
             gsub(/"/, "", $1);
-
             if (match($1, /-(w[0-9]+a[0-9]+)$/)) {
                 quant_type = substr($1, RSTART + 1, RLENGTH - 1);
                 base_kernel_key = substr($1, 1, RSTART - 1);
@@ -240,7 +220,8 @@ process_kernel_matrix_to_pivot() {
                  quant_type = "w16a16";
             }
 
-            matrix[base_kernel_key][quant_type] = $2 OFS $3 OFS $4;
+            # Store original Correctness ($2) and Performance ($3)
+            matrix[base_kernel_key][quant_type] = $2 OFS $3;
 
             if (! (base_kernel_key in kernels)) {
                 kernels[base_kernel_key] = 1;
@@ -248,31 +229,24 @@ process_kernel_matrix_to_pivot() {
             }
         }
         END {
-            split(AWK_QUANT_COLS, quant_cols, " ");
-            default_val = "N/A" OFS "N/A" OFS "N/A";
-
-            # Iterate through all unique base kernels found in the input (ordered by kernel_list)
             for (i=0; i<num_kernels; i++) {
-                local_original_key = kernel_list[i];
-                kernel_for_output = local_original_key;
-
-                # Apply desired renames/modifications to the output name
-                if (kernel_for_output == "generic ragged paged attention v3") {
-                    kernel_for_output = "generic ragged paged attention v3*";
-                } else if (kernel_for_output == "mla") {
-                    kernel_for_output = "mla*";
-                } else if (kernel_for_output == "attention_kernels") {
-                    kernel_for_output = "* For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision";
-                } else if (kernel_for_output == "ragged paged attention v3 head_dim 64") {
-                    kernel_for_output = "ragged paged attention v3 head_dim 64*";
+                k = kernel_list[i];
+                out_name = k;
+                if (out_name == "generic ragged paged attention v3") {
+                    out_name = "\"generic ragged paged<br>attention v3*\"";
+                } else if (out_name == "mla") {
+                    out_name = "\"mla*\"";
+                } else if (out_name == "ragged paged attention v3 head_dim 64") {
+                    out_name = "\"ragged paged attention v3<br>head_dim 64*\"";
+                } else {
+                    out_name = "\"" out_name "\"";
                 }
 
-                row = "\"" kernel_for_output "\"";
-
-                # Append data for all columns
-                for (j in quant_cols) {
-                    quant = quant_cols[j];
-                    data = (matrix[local_original_key][quant] == "") ? default_val : matrix[local_original_key][quant];
+                row = out_name;
+                for (j=1; j<=6; j++) {
+                    q = q_order[j];
+                    # Use original N/A,N/A if data is missing
+                    data = (matrix[k][q] == "") ? "N/A,N/A" : matrix[k][q];
                     row = row OFS data;
                 }
                 print row >> "'"$output_file"'";

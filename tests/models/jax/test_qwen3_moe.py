@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import unittest
-
 import jax
 import pytest
 from jax import numpy as jnp
@@ -30,8 +28,6 @@ from tpu_inference.models.jax.qwen3_moe import Qwen3MoeForCausalLM
 
 class TestQwen3MoeForCausalLM:
 
-    @unittest.skip(
-        "TODO: skip to unblock jax/flax merging bug created for this")
     @pytest.mark.parametrize("model_name", [
         "Qwen/Qwen3-30B-A3B-Instruct-2507",
         "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
