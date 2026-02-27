@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-02-27 08:36 AM UTC*
+*Last Updated: 2026-02-27 08:44 AM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -143,105 +143,105 @@ Below is the live status of our supported models, features, and kernels. Click o
   <tbody>
     <tr>
       <td><strong>async scheduler</strong></td>
-      <td><span title="v6e ✅&nbsp;Passing">✅&nbsp;Passing&nbsp;v6e</span><br><span title="v7x ❌&nbsp;Failed">❌&nbsp;Failed&nbsp;v7x</span></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
-      <td><span title="v6e ✅&nbsp;Passing">✅&nbsp;Passing&nbsp;v6e</span><br><span title="v7x ❌&nbsp;Failed">❌&nbsp;Failed&nbsp;v7x</span></td>
+      <td><span title="v6e ✅&nbsp;Passing">✅&nbsp;v6e</span><br><span title="v7x ❌&nbsp;Failed">❌&nbsp;v7x</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="v6e ✅&nbsp;Passing">✅&nbsp;v6e</span><br><span title="v7x ❌&nbsp;Failed">❌&nbsp;v7x</span></td>
     </tr>
     <tr>
       <td><strong>Chunked Prefill</strong></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
       <td><strong>DCN-based P/D disaggregation</strong></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
       <td><strong>hybrid kv cache</strong></td>
-      <td><span title="❓&nbsp;Untested">❓&nbsp;Untested</span></td>
-      <td><span title="❓&nbsp;Untested">❓&nbsp;Untested</span></td>
-      <td><span title="❓&nbsp;Untested">❓&nbsp;Untested</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td><strong>KV cache host offloading</strong></td>
-      <td><span title="❓&nbsp;Untested">❓&nbsp;Untested</span></td>
-      <td><span title="❓&nbsp;Untested">❓&nbsp;Untested</span></td>
-      <td><span title="❓&nbsp;Untested">❓&nbsp;Untested</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td><strong>LoRA_Torch</strong></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
       <td><strong>multi-host</strong></td>
-      <td><span title="❓&nbsp;Untested">❓&nbsp;Untested</span></td>
-      <td><span title="❓&nbsp;Untested">❓&nbsp;Untested</span></td>
-      <td><span title="❓&nbsp;Untested">❓&nbsp;Untested</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td><strong>Multimodal Inputs</strong></td>
-      <td><span title="❌&nbsp;Failed">❌&nbsp;Failed</span></td>
-      <td><span title="❌&nbsp;Failed">❌&nbsp;Failed</span></td>
-      <td><span title="❌&nbsp;Failed">❌&nbsp;Failed</span></td>
+      <td><span title="❌&nbsp;Failed">❌</span></td>
+      <td><span title="❌&nbsp;Failed">❌</span></td>
+      <td><span title="❌&nbsp;Failed">❌</span></td>
     </tr>
     <tr>
       <td><strong>Out-of-tree model support</strong></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
       <td><strong>Prefix Caching</strong></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
       <td><strong>runai_model_streamer_loader</strong></td>
-      <td><span title="❓&nbsp;Untested">❓&nbsp;Untested</span></td>
-      <td><span title="❌&nbsp;Failed">❌&nbsp;Failed</span></td>
-      <td><span title="❓&nbsp;Untested">❓&nbsp;Untested</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❌&nbsp;Failed">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td><strong>sampling_params</strong></td>
-      <td><span title="❓&nbsp;Untested">❓&nbsp;Untested</span></td>
-      <td><span title="❌&nbsp;Failed">❌&nbsp;Failed</span></td>
-      <td><span title="❓&nbsp;Untested">❓&nbsp;Untested</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❌&nbsp;Failed">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td><strong>Single Program Multi Data</strong></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
       <td><strong>Single-Host-P-D-disaggregation</strong></td>
-      <td><span title="❓&nbsp;Untested">❓&nbsp;Untested</span></td>
-      <td><span title="❓&nbsp;Untested">❓&nbsp;Untested</span></td>
-      <td><span title="❓&nbsp;Untested">❓&nbsp;Untested</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td><strong>Speculative Decoding: Eagle3</strong></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
-      <td><span title="❌&nbsp;Failed">❌&nbsp;Failed</span></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="❌&nbsp;Failed">❌</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
       <td><strong>Speculative Decoding: Ngram</strong></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
-      <td><span title="v6e ❌&nbsp;Failed">❌&nbsp;Failed&nbsp;v6e</span><br><span title="v7x ✅&nbsp;Passing">✅&nbsp;Passing&nbsp;v7x</span></td>
-      <td><span title="✅&nbsp;Passing">✅&nbsp;Passing</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="v6e ❌&nbsp;Failed">❌&nbsp;v6e</span><br><span title="v7x ✅&nbsp;Passing">✅&nbsp;v7x</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
       <td><strong>structured_decoding</strong></td>
-      <td><span title="❓&nbsp;Untested">❓&nbsp;Untested</span></td>
-      <td><span title="❌&nbsp;Failed">❌&nbsp;Failed</span></td>
-      <td><span title="❓&nbsp;Untested">❓&nbsp;Untested</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❌&nbsp;Failed">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
   </tbody>
 </table>
