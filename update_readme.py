@@ -235,7 +235,8 @@ def generate_html_microbenchmark_table(headers, data):
     html.append("<table>")
     html.append("  <thead>")
     html.append("    <tr>")
-    html.append("      <th width=\"300\">test</th>")
+    html.append("      <th width=\"150\" style=\"text-align:left\">Category</th>")
+    html.append("      <th width=\"300\" style=\"text-align:left\">test</th>")
     html.append("      <th>W16A16</th>")
     html.append("      <th>W8A16</th>")
     html.append("      <th>W8 A8</th>")
@@ -246,19 +247,54 @@ def generate_html_microbenchmark_table(headers, data):
     html.append("  </thead>")
     html.append("  <tbody>")
     
+    # Establish categorized groupings
+    categories = {
+        "MoE": ["fused moe", "gmm"],
+        "Dense": ["all-gather matmul"],
+        "Attention": ["mla", "ragged paged attention", "generic ragged paged attention", "ragged paged attention v3 head_dim 64", "generic ragged paged attention v3"]
+    }
+    
+    # Map each raw kernel to its cleaned data row
+    row_map = {}
     for row in data:
-        html.append("    <tr>")
-        padded_row = row + [""] * (25 - len(row))
-        html.append(f"      <td>{format_kernel_name(padded_row[0])}</td>") # Kernel
-        
-        # Merge v6e and v7x into stacked columns
-        for i in range(6):
-            v6_status = merge_metrics(padded_row[(i*2) + 1], padded_row[(i*2) + 2])
-            v7_status = merge_metrics(padded_row[(i*2) + 13], padded_row[(i*2) + 14])
-            merged_hw = _merge_hw_status(v6_status, v7_status)
-            html.append(f"      <td>{merged_hw}</td>")
+        if not row: continue
+        raw_kernel = str(row[0]).strip()
+        cleaned_name = raw_kernel.replace("*", "")
+        row_map[cleaned_name] = row
 
-        html.append("    </tr>")
+    for cat_name, kernels in categories.items():
+        # Find which of these configured kernels actually exist in the CSV data
+        found_kernels = []
+        for k in kernels:
+            # check direct match and prefix match just in case
+            matched = [name for name in row_map.keys() if k in name]
+            if matched:
+                found_kernels.append((matched[0], row_map[matched[0]]))
+
+        if not found_kernels:
+            continue
+            
+        rowspan = len(found_kernels)
+        
+        for idx, (k_name, row) in enumerate(found_kernels):
+            html.append("    <tr>")
+            
+            # Print the category block spanning the rows if it's the first child
+            if idx == 0:
+                html.append(f"      <td rowspan=\"{rowspan}\"><b>{cat_name}</b></td>")
+                
+            padded_row = row + [""] * (25 - len(row))
+            # we use format_kernel_name to restore formatting like * styling
+            html.append(f"      <td>{format_kernel_name(padded_row[0])}</td>")
+            
+            # Merge v6e and v7x into stacked columns
+            for i in range(6):
+                v6_status = merge_metrics(padded_row[(i*2) + 1], padded_row[(i*2) + 2])
+                v7_status = merge_metrics(padded_row[(i*2) + 13], padded_row[(i*2) + 14])
+                merged_hw = _merge_hw_status(v6_status, v7_status)
+                html.append(f"      <td>{merged_hw}</td>")
+
+            html.append("    </tr>")
         
     html.append("  </tbody>")
     html.append("</table>")
