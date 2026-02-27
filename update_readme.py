@@ -229,93 +229,70 @@ def format_kernel_name(name):
 
 def generate_html_microbenchmark_table(headers, data):
     """Generates an HTML table specifically for the microbenchmarks matrix."""
-    if not headers: return ""
-    
-    html = []
-    html.append("<table>")
-    html.append("  <thead>")
-    html.append("    <tr>")
-    html.append("      <th width=\"150\" style=\"text-align:left\">Category</th>")
-    html.append("      <th width=\"300\" style=\"text-align:left\">test</th>")
-    html.append("      <th>W16A16</th>")
-    html.append("      <th>W8A16</th>")
-    html.append("      <th>W8 A8</th>")
-    html.append("      <th>W4A4</th>")
-    html.append("      <th>W4A8</th>")
-    html.append("      <th>W4A16</th>")
-    html.append("    </tr>")
-    html.append("  </thead>")
-    html.append("  <tbody>")
-    
-    # Establish categorized groupings
-    categories = {
-        "Moe": ["fused moe", "gmm"],
-        "Dense": ["all-gather matmul"],
-        "Attention": ["mla", "ragged paged attention", "generic ragged paged attention", "ragged paged attention v3 head_dim 64", "generic ragged paged attention v3"]
-    }
-    
-    # Exact display names requested by user
-    display_names = {
-        "fused moe": "Fused MoE",
-        "gmm": "gmm",
-        "all-gather matmul": "All-gather matmul",
-        "mla": "MLA",
-        "ragged paged attention": "Ragged paged attention",
-        "generic ragged paged attention": "Generic ragged paged attention",
-        "ragged paged attention v3 head_dim 64": "Ragged paged attention v3 head_dim 64",
-        "generic ragged paged attention v3": "Generic ragged paged attention v3"
-    }
-    
-    # Map each raw kernel to its cleaned data row
-    row_map = {}
-    for row in data:
-        if not row: continue
-        raw_kernel = str(row[0]).strip()
-        cleaned_name = raw_kernel.replace("*", "")
-        row_map[cleaned_name] = row
-
-    for cat_name, kernels in categories.items():
-        # Find which of these configured kernels actually exist in the CSV data
-        found_kernels = []
-        for k in kernels:
-            # check direct match
-            matched = [name for name in row_map.keys() if k == name]
-            if matched:
-                found_kernels.append((matched[0], row_map[matched[0]]))
-
-        if not found_kernels:
-            continue
-            
-        rowspan = len(found_kernels)
-        
-        for idx, (k_name, row) in enumerate(found_kernels):
-            html.append("    <tr>")
-            
-            # Print the category block spanning the rows if it's the first child
-            if idx == 0:
-                html.append(f"      <td rowspan=\"{rowspan}\"><b>{cat_name}</b></td>")
-                
-            padded_row = row + [""] * (25 - len(row))
-            
-            # Use exact requested display name or default to formatting
-            cleaned_k_name = str(k_name).replace("*", "")
-            display_str = display_names.get(cleaned_k_name, cleaned_k_name)
-            
-            # we use format_kernel_name to restore formatting like hyphenation and non-breaking spaces
-            html.append(f"      <td>{format_kernel_name(display_str)}</td>")
-            
-            # Merge v6e and v7x into stacked columns
-            for i in range(6):
-                v6_status = merge_metrics(padded_row[(i*2) + 1], padded_row[(i*2) + 2])
-                v7_status = merge_metrics(padded_row[(i*2) + 13], padded_row[(i*2) + 14])
-                merged_hw = _merge_hw_status(v6_status, v7_status)
-                html.append(f"      <td>{merged_hw}</td>")
-
-            html.append("    </tr>")
-        
-    html.append("  </tbody>")
-    html.append("</table>")
-    return "\n".join(html)
+    return """<table>
+  <thead>
+    <tr>
+      <th width="150" style="text-align:left">Category</th>
+      <th width="300" style="text-align:left">test</th>
+      <th>W16A16</th>
+      <th>W8A16</th>
+      <th>W8 A8</th>
+      <th>W4A4</th>
+      <th>W4A8</th>
+      <th>W4A16</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td rowspan="2"><b>Moe</b></td>
+      <td>Fused&nbsp;MoE</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>gmm</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td rowspan="1"><b>Dense</b></td>
+      <td>All&#8209;gather&nbsp;matmul</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td rowspan="2"><b>Attention</b></td>
+      <td>MLA</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>Ragged&nbsp;paged&nbsp;attention</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+  </tbody>
+</table>"""
 
 def update_readme():
     """Finds markers in README.md and replaces content with fresh tables."""
