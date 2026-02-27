@@ -399,7 +399,7 @@ def update_readme():
                 
             footer = (
                 "\n\n> **Note:**\n"
-                f"> *   *Tested on TPU v7 (Nightly {date_str})*"
+                "> *   *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*"
             )
             new_table += footer
 
