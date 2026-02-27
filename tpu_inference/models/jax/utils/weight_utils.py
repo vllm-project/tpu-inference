@@ -30,13 +30,15 @@ import torchax
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from jax.sharding import SingleDeviceSharding
+from jax.sharding import SingleDeviceSharding, get_mesh
 from safetensors import safe_open
 from torchax.ops.mappings import t2j
 from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from tpu_inference import envs, utils
+from tpu_inference.layers.common.utils import (cpu_mesh_context,
+                                               general_device_put)
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.logger import init_logger
@@ -217,17 +219,23 @@ def shard_put(x: jax.Array,
     # Single device sharding requires this special handling
     # to avoid the recursive jit error.
     if mesh is None:
-        if isinstance(shardings, tuple):
-            return jax.device_put(x, P(*shardings))
-        return jax.device_put(x, shardings)
+        mesh = get_mesh()
+
+    x_mesh = None
+    if isinstance(x.sharding, NamedSharding):
+        x_mesh = x.sharding.mesh
 
     if math.prod(mesh.axis_sizes) == 1:
-        return jax.device_put(x, mesh.devices.flatten()[0])
+        return general_device_put(x,
+                                  mesh.devices.flatten()[0],
+                                  source_mesh=x_mesh)
 
     if isinstance(shardings, tuple):
-        return jax.device_put(x, NamedSharding(mesh, P(*shardings)))
+        return general_device_put(x,
+                                  NamedSharding(mesh, P(*shardings)),
+                                  source_mesh=x_mesh)
     else:
-        return jax.device_put(x, shardings)
+        return general_device_put(x, shardings, source_mesh=x_mesh)
 
 
 def get_default_maps(model_config, mesh: Mesh,
@@ -740,7 +748,8 @@ def jax_array_from_reshaped_torch(
     if permute_dims is not None:
         torch_weight = torch_weight.permute(*permute_dims)
 
-    return t2j(torch_weight, use_dlpack=False)
+    with cpu_mesh_context():
+        return t2j(torch_weight, use_dlpack=False)
 
 
 def load_nnx_param_from_reshaped_torch(
@@ -769,12 +778,12 @@ def load_nnx_param_from_reshaped_torch(
     assert tuple(jax_weight.shape) == jax_param.value.shape, \
         f"Shape mismatch when loading weight '{param_name}': torch {jax_weight.shape} vs jax {jax_param.value.shape}"
 
-    spec = jax_param.sharding
-    if isinstance(jax_param.sharding, NamedSharding):
-        spec = jax_param.sharding.spec
-    elif isinstance(jax_param.sharding, SingleDeviceSharding):
+    spec = jax_param.get_metadata().get('sharding', ())
+    if isinstance(spec, NamedSharding):
+        spec = spec.spec
+    elif isinstance(spec, SingleDeviceSharding):
         spec = ()
-    mesh = getattr(jax_param, 'mesh', None)
+    mesh = jax_param.get_metadata().get('mesh', None)
 
     try:
         jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
