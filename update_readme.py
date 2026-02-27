@@ -90,13 +90,10 @@ def generate_html_feature_table(headers, data):
         icon = parts[0] if parts else ""
         text_status = parts[1] if len(parts) > 1 else ""
         
-        # Build the visual display text (icon + text, or icon + text + prefix)
-        display_text = status_string.replace(" ", "&nbsp;")
+        # Build the visual display text (just icon, or icon + prefix)
+        display_text = icon
         if hw_prefix:
-            if text_status:
-                display_text = f"{icon}&nbsp;{text_status}&nbsp;{hw_prefix}"
-            else:
-                display_text = f"{icon}&nbsp;{hw_prefix}"
+            display_text = f"{icon}&nbsp;{hw_prefix}"
             
         # The tooltip should be descriptive
         tooltip = status_string
