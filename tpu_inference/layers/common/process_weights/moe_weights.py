@@ -398,6 +398,8 @@ def shard_moe_weights(
                        "mesh",
                        "activation",
                        "weight_block_size",
+                       "requant_dtype",
+                       "requant_block_size",
                    ))
 def process_fp8_moe_weights(
     weights: FusedMoEWeights,
@@ -405,6 +407,8 @@ def process_fp8_moe_weights(
     mesh: Mesh,
     activation: str,
     weight_block_size: tuple[int, ...] | None = None,
+    requant_dtype: jnp.dtype = jnp.float8_e4m3fn,
+    requant_block_size: int | None = None,
 ) -> FusedMoEWeights:
     w13_weight = weights.w13_weight
     w13_weight_scale = weights.w13_weight_scale
@@ -432,8 +436,8 @@ def process_fp8_moe_weights(
             w2_weight_scale=None,
             w2_bias=None,
         ),
-        jnp.float8_e4m3fn,
-        None,
+        requant_dtype,
+        requant_block_size,
     )
     return process_moe_weights(
         weights,
