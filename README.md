@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-02-27 08:53 AM UTC*
+*Last Updated: 2026-02-27 08:56 AM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -353,7 +353,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <details markdown="1">
 <summary>Hardware Acceleration & Dtype Support</summary>
 
-| TPU Generations | Natively Supported FP4/FP8 |
+| TPU Generations | Natively Supported Hardware Acceleration |
 | :--- | :--- |
 | v5 | int8, int4, bf16 |
 | v6 | int8, int4, bf16 |
