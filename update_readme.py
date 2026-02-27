@@ -75,7 +75,7 @@ def generate_html_feature_table(headers, data):
     html.append("    <tr>")
     html.append("      <th>Test / Feature</th>")
     html.append("      <th>flax</th>")
-    html.append("      <th>pytorch</th>")
+    html.append("      <th>torchax</th>")
     html.append("      <th>default</th>")
     html.append("    </tr>")
     html.append("  </thead>")
