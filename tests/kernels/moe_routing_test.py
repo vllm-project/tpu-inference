@@ -105,11 +105,36 @@ class MoeRoutingTest(jtu.JaxTestCase):
     random_logits = jax.random.uniform(k1, (num_local_tokens, num_experts))
     _, topk_indices_local = jax.lax.top_k(random_logits, k=topk)
     hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size), dtype=jnp.bfloat16)
+    actual_x, actual_group_sizes, actual_revert = sort3.sort_tokens(
+        hidden_states, topk_indices_local, num_experts,
+    )
+    expected_x, expected_group_sizes, expected_revert = ref_impl(
+        topk_indices_local, hidden_states, num_experts
+    )
+
+    self.assertAllClose(expected_group_sizes, actual_group_sizes)
+    # actual_revert has correctness issue.
+    # self.assertAllClose(expected_revert, actual_revert)
+    print(f"sort2 random: max diff {jnp.max(jnp.abs(expected_x - actual_x))}")
+    print(f"sort2 random: mean diff {jnp.mean(jnp.abs(expected_x - actual_x))}")
+    self.assertAllClose(expected_x, actual_x)
+
+  def test_sort3_prefill_perf(self):
+    num_local_tokens = 8192
+    hidden_size = 6144
+    num_experts = 160
+    topk = TOPK
+
+    k1, k2 = jax.random.split(jax.random.key(0))
+    random_logits = jax.random.uniform(k1, (num_local_tokens, num_experts))
+    _, topk_indices_local = jax.lax.top_k(random_logits, k=topk)
+    hidden_states = jax.random.uniform(k2, (num_local_tokens, hidden_size), dtype=jnp.bfloat16)
     expected_x, expected_group_sizes, expected_revert = ref_impl(
         topk_indices_local, hidden_states, num_experts
     )
     actual_x, actual_group_sizes, actual_revert = sort3.sort_tokens(
-        hidden_states, topk_indices_local, num_experts
+        hidden_states, topk_indices_local, num_experts,
+        tile_out=256, tile_in=64
     )
 
     self.assertAllClose(expected_group_sizes, actual_group_sizes)

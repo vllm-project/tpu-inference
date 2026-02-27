@@ -1,6 +1,6 @@
 import dataclasses
 import functools
-from typing import Callable, Tuple
+from typing import Callable, Optional, Tuple
 import jax
 from jax import lax
 from jax.experimental import pallas as pl
@@ -128,9 +128,10 @@ def kernel(
   )(x_ref, x_sorted_ref)
 
 
-@jax.jit(static_argnames=["num_experts"])
+@jax.jit(static_argnames=["num_experts", "tile_out", "tile_in"])
 def sort_tokens(
-    x: jax.Array, topk_indices: jax.Array, num_experts: int
+    x: jax.Array, topk_indices: jax.Array, num_experts: int,
+    tile_out: Optional[int] = None, tile_in: Optional[int] = None,
 ) -> Tuple[jax.Array, jax.Array, jax.Array]:
   vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.8)
   num_tokens, hidden_size = x.shape
@@ -141,11 +142,19 @@ def sort_tokens(
   x = x.astype(jnp.float32)
   x = x.reshape(num_tokens, 1, hidden_size)
 
-  if num_tokens == 64:
-    tile_out = 256
-    tile_in = 64
-  else:
-    tile_out = tile_in = 2048
+  if tile_out is None or tile_in is None:
+    if num_tokens == 64:
+      default_tile_out = 256
+      default_tile_in = 64
+    elif num_tokens == 8192:
+      default_tile_out = 16
+      default_tile_in = 8192
+    else:
+      default_tile_out = default_tile_in = 2048
+    if tile_out is None:
+      tile_out = default_tile_out
+    if tile_in is None:
+      tile_in = default_tile_in
 
   scope_name = f"sort_tokens-m_{num_tokens}-k_{hidden_size}-topk_{topk}"
   return pl.pallas_call(
