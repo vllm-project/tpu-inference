@@ -46,7 +46,7 @@ _MODEL_REGISTRY = {}
 # List of architectures that are preferred to use  "vllm" implementation over
 # "flax_nnx" implementation due to various factors such as performance.
 _VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset(
-    {"GptOssForCausalLM"})
+    {"GptOssForCausalLM", "Qwen3MoeForCausalLM"})
 
 
 class UnsupportedArchitectureError(ValueError):
@@ -160,7 +160,7 @@ def _get_nnx_model(
                                              use_qwix_on_abstract_model=True)
             return jit_model
 
-        @nnx.jit
+        @jax.jit
         def create_sharded_model():
             model = model_class(vllm_config, rng, mesh)
             state = nnx.state(model)
@@ -203,7 +203,8 @@ def _get_nnx_model(
                 rng,
                 mesh,
                 apply_to_abstract_model=True)
-        model = nnx.eval_shape(abstract_model_fn)
+        with jax.set_mesh(mesh):
+            model = nnx.eval_shape(abstract_model_fn)
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
@@ -273,8 +274,7 @@ def get_flax_model(
     # https://flax.readthedocs.io/en/latest/guides/performance.html
     graphdef, state = nnx.split(jit_model)
 
-    @functools.partial(
-        jax.jit,
+    @jax.jit(
         out_shardings=(
             kv_cache_sharding,
             hidden_states_sharding,
@@ -293,10 +293,7 @@ def get_flax_model(
         mesh,
         PartitionSpec(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR))
 
-    @functools.partial(
-        jax.jit,
-        out_shardings=(logits_sharding),
-    )
+    @jax.jit(out_shardings=(logits_sharding))
     def run_compute_logits(graphdef, state, *args):
         model = nnx.merge(graphdef, state)
         hidden_state, *_ = args
@@ -310,19 +307,13 @@ def get_flax_model(
 
     embed_sharding = NamedSharding(mesh, PartitionSpec(None))
     # This function will calculates the embeddings of input texts and then merge with the image embeddings
-    @functools.partial(
-        jax.jit,
-        out_shardings=(embed_sharding),
-    )
+    @jax.jit(out_shardings=(embed_sharding))
     def run_embed_input_ids(graphdef, state, *args, **kwargs):
         model = nnx.merge(graphdef, state)
         return model.embed_input_ids(*args, **kwargs)
 
     # For models that want to work with EAGLE-3 speculative decoding
-    @functools.partial(
-        jax.jit,
-        out_shardings=(logits_sharding),
-    )
+    @jax.jit(out_shardings=(logits_sharding))
     def combine_hidden_states(graphdef, state, hidden_states):
         model = nnx.merge(graphdef, state)
         return model.combine_hidden_states(hidden_states)

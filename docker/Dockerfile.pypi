@@ -16,7 +16,6 @@ ARG VLLM_COMMIT_HASH=""
 
 FROM $BASE_IMAGE
 
-ARG IS_FOR_V7X="false"
 ARG IS_TEST="false"
 
 # Update pip
@@ -47,6 +46,7 @@ RUN  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then
         pip install -r requirements_test.txt --retries 3; \
     fi
 
+COPY . .
 # Build tpu_inference
 RUN python3 -m pip install build
 RUN python3 -m build

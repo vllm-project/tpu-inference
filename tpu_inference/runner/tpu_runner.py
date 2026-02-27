@@ -157,7 +157,7 @@ class ExecuteModelState:
     padded_num_reqs: Optional[int] = None
 
 
-@functools.partial(jax.jit, donate_argnums=(0, 1, 2))
+@jax.jit(donate_argnums=(0, 1, 2))
 def _substitute_placeholder_token(
         input_ids: jax.Array, token_in_tpu_cur_input_indices: jax.Array,
         token_in_tpu_pre_next_tokens_indices: jax.Array,
@@ -555,14 +555,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.rng_params_for_sampling = nnx.Rngs(
             jax.random.key(self.model_config.seed)).params()
-        self.is_multimodal_model = (
-            self.model_config.is_multimodal_model
-            and self.embed_multimodal_fn is not None and hasattr(
-                self.model_config.hf_config, "architectures"
-            )  #TODO: Remove Llama Guard 4 specific condition once the LG4 Vision portion is implemented
-            and len(self.model_config.hf_config.architectures) >= 1
-            and self.model_config.hf_config.architectures[0]
-            != "Llama4ForConditionalGeneration")
+        self.is_multimodal_model = (self.model_config.is_multimodal_model
+                                    and self.embed_multimodal_fn is not None
+                                    and hasattr(self.model_config.hf_config,
+                                                "architectures"))
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
@@ -587,6 +583,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
         if has_kv_transfer_group():
             get_kv_transfer_group().register_runner(self)
+
+    def delete_kv_cache(self) -> None:
+        self.kv_cache_manager.delete_kv_cache()
+
+    def reinitialize_kv_cache(self) -> None:
+        self.kv_cache_manager.reinitialize_kv_cache()
 
     def capture_model(self) -> None:
         self.compilation_manager.capture_model()
@@ -761,14 +763,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padded_num_reqs,
         ) = self._prepare_inputs(scheduler_output)
 
-        is_llama_guard_4 = (
-            hasattr(
-                self.model_config.hf_config, "architectures"
-            )  #TODO: Remove Llama Guard 4 specific condition once the LG4 Vision portion is implemented
-            and len(self.model_config.hf_config.architectures) >= 1
-            and self.model_config.hf_config.architectures[0]
-            == "Llama4ForConditionalGeneration")
-
         # multi-modal support
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
@@ -776,13 +770,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.mm_manager.execute_mm_encoder(scheduler_output)
             mm_embeds = self.mm_manager.gather_mm_embeddings(
                 scheduler_output, input_ids.shape[0])
-        #TODO: Remove the follow elif statement once Llama Guard 4 Vision portion has been implemented
-        elif is_llama_guard_4 and any(
-                self.mm_manager.runner.requests[req_id].mm_features
-                for req_id in self.mm_manager.runner.input_batch.req_ids):
-            raise NotImplementedError(
-                "Llama Guard 4 (JAX) currently supports only text inputs. "
-                "Multimodal processing not yet implemented.")
         else:
             mm_embeds = []
 
@@ -1085,7 +1072,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
         return model_runner_output
 
-    @functools.partial(jax.jit, static_argnums=(0, ))
+    @jax.jit(static_argnums=(0, ))
     def _select_from_array_fn(self, array, indices_to_select):
 
         def select_local_fn(local_array, local_indices):
@@ -1102,7 +1089,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         return ret
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnames=("max_logprobs", ))
+    @jax.jit(static_argnames=("max_logprobs", ))
     def _compute_and_gather_logprobs(logits, next_tokens, max_logprobs):
         logprobs = compute_logprobs(logits)
         return gather_logprobs(logprobs, next_tokens, max_logprobs)

@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Quantized matmul kernel with blockwise quantization support."""
 
-import functools
-
 import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
@@ -19,14 +17,11 @@ quantize_tensor = util.quantize_tensor
 MXU_SIZE = 256
 
 
-@functools.partial(
-    jax.jit,
-    static_argnames=[
-        "block_size",
-        "x_q_dtype",
-        "tuned_value",
-    ],
-)
+@jax.jit(static_argnames=[
+    "block_size",
+    "x_q_dtype",
+    "tuned_value",
+])
 def quantized_matmul_kernel(
     x: jax.Array,  # [bs, n_in]
     w_q: jax.Array,  # [n_out, n_in]
@@ -109,7 +104,12 @@ def quantized_matmul_kernel(
 
     # TODO(amandaliang): Make this configurable.
     acc_dtype = jnp.bfloat16
-    if quantize_activation and jnp.issubdtype(w_q.dtype, jnp.integer) and jnp.issubdtype(x_q_dtype, jnp.integer):
+    if (
+            quantize_activation
+            and jnp.issubdtype(w_q.dtype, jnp.integer)
+            # Mixed precision matmuls like int4xfp8 accumulate as float.
+            and jnp.issubdtype(x_q_dtype, jnp.integer)
+        ):
         acc_dtype = jnp.int32
 
     vmem_limit_bytes = util.get_vmem_limit(

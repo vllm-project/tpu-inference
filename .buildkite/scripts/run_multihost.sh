@@ -63,8 +63,8 @@ if [[ -z "${WORKER_IPS:-}" ]]; then
         ACCELERATOR_TYPE=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(acceleratorType)" 2>/dev/null || echo "")
         echo "   -> Detected Accelerator Type: $ACCELERATOR_TYPE"
         if [[ "$ACCELERATOR_TYPE" == *"tpu7"* ]]; then
-          export IS_FOR_V7X=true
-          echo "   -> Setting IS_FOR_V7X=true"
+          export TPU_VERSION="tpu7x"
+          echo "   -> Setting TPU_VERSION=tpu7x"
         fi
       fi
     else
@@ -86,8 +86,8 @@ fi
 HEAD_INTERNAL_IP="${HEAD_INTERNAL_IP:-$(hostname -I | awk '{print $1}')}"
 
 # Enforce TPUv7 requirement
-if [[ "${IS_FOR_V7X:-false}" != "true" ]]; then
-  echo "❌ This script is strictly for TPUv7 (IS_FOR_V7X=true). Exiting."
+if [[ "${TPU_VERSION:-tpu6e}" != "tpu7x" ]]; then
+  echo "❌ This script is strictly for TPUv7 (TPU_VERSION=tpu7x). Exiting."
   exit 0
 fi
 
@@ -119,7 +119,7 @@ cleanup() {
 
   echo "✅ Cleanup complete."
 }
-# trap cleanup EXIT
+trap cleanup EXIT
 
 wait_for_server() {
   local port=$1
@@ -181,6 +181,10 @@ IMAGE_NAME="${GCR_REPO}/vllm-tpu"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 TOP_DIR=$(dirname "$(dirname "$SCRIPT_DIR")")
 
+# Prune Head Node BEFORE building the new image to ensure we have disk space
+echo "--- Pruning Docker on Head Node to clear disk space..."
+docker system prune -a --volumes -f || true
+
 # Source the environment setup script
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/setup_docker_env.sh"
@@ -188,8 +192,6 @@ source "$SCRIPT_DIR/setup_docker_env.sh"
 setup_environment "${IMAGE_NAME}" "true"
 
 DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
-
-# RunAI streamer setup 
 
 # Clean up potential leftovers from previous runs
 echo "--- Cleaning up previous cluster state..."
@@ -209,14 +211,20 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   -e MODEL_IMPL_TYPE=vllm \
   -e VLLM_DISABLE_SHARED_EXPERTS_STREAM=1 &
 
-sleep 5
+sleep 60
 
 # 2. Distribute run_cluster.sh to workers and start them
 IFS=',' read -r -a WORKER_IPS_ARRAY <<< "${WORKER_IPS}"
 for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
     echo "--- Distributing and starting Ray Worker on ${worker_ip}"
+
+    # Prune Worker Node BEFORE it tries to pull the new giant image
+    echo "   -> Pruning Docker on worker to free disk space..."
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f" || true
+    
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "mkdir -p ~/tpu-inference/scripts/multihost" || true
-    scp "${SSH_OPTS[@]}" "${TOP_DIR}/scripts/multihost/run_cluster.sh" "${SSH_USER}@${worker_ip}:~/tpu-inference/scripts/multihost/run_cluster.sh"
+    # shellcheck disable=SC2002
+    cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "cat > ~/tpu-inference/scripts/multihost/run_cluster.sh"
     
     REMOTE_CMD="bash ~/tpu-inference/scripts/multihost/run_cluster.sh \
       '${DOCKER_IMAGE}' \
@@ -237,7 +245,7 @@ done
 
 echo "--- Waiting for all worker nodes to connect"
 # Wait a few seconds for all worker nodes to connect
-sleep 60
+sleep 120
 
 # 3. Start vLLM server on the head node
 echo "--- Starting vLLM server on head node"
