@@ -159,7 +159,7 @@ def generate_html_quantization_table(headers, data):
     html.append("      <th>Method</th>")
     html.append("      <th>Recommended<br>TPU Generations</th>")
     html.append("      <th>flax</th>")
-    html.append("      <th>pytorch</th>")
+    html.append("      <th>torchax</th>")
     html.append("    </tr>")
     html.append("  </thead>")
     html.append("  <tbody>")
