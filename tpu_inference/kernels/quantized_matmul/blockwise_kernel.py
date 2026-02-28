@@ -104,7 +104,9 @@ def quantized_matmul_kernel(
 
     # TODO(amandaliang): Make this configurable.
     acc_dtype = jnp.bfloat16
-    if quantize_activation and jnp.issubdtype(w_q.dtype, jnp.integer):
+    if (quantize_activation and jnp.issubdtype(w_q.dtype, jnp.integer)
+            # Mixed precision matmuls like int4xfp8 accumulate as float.
+            and jnp.issubdtype(x_q_dtype, jnp.integer)):
         acc_dtype = jnp.int32
 
     vmem_limit_bytes = util.get_vmem_limit(
