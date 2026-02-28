@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Tuple
+from typing import Tuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -29,7 +29,10 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.mla import (MLAModules,
                                             MultiHeadLatentAttentionWrapper)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl,
+                                       AttentionType, MLAAttentionImpl)
+from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
+                                                 register_backend)
 
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import mla_attention
@@ -37,6 +40,117 @@ from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
+
+
+class PallasMLAttentionBackendImpl(AttentionImpl):
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
+        kv_cache_dtype: str,
+        logits_soft_cap: float | None,
+        attn_type: str,
+        kv_sharing_target_layer_name: str | None,
+        # MLA Specific Arguments
+        **mla_args,
+    ) -> None:
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            **mla_args,
+        )
+
+    def forward(self, q, kv_c_normed, k_pe, kv_cache, attn_metadata, **kwargs):
+        # Get the KV cache
+        vllm_model_wrapper_context = get_vllm_model_wrapper_context()
+        kv_cache_index = vllm_model_wrapper_context.layer_name_to_kvcache_index[
+            self.layer_name]
+        kv_cache = vllm_model_wrapper_context.kv_caches[kv_cache_index]
+        mesh = vllm_model_wrapper_context.mesh
+
+        # Get attention metadata
+        attn_metadata, _, _, _ = get_attention_context(self.layer_name)
+
+        q = jax_view(q)
+        kv_c_normed = jax_view(kv_c_normed)
+        k_pe = jax_view(k_pe)
+
+        # Prepare inputs
+        q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=2)
+
+        # (B, N, P) x (N, P, L) -> (B, N, L)
+        # torch nn param
+        q_nope = jnp.einsum("bnp,npl->bnl", q_nope, jax_view(self.W_UK_T))
+
+        q_scale = k_scale = v_scale = None
+        if self.kv_cache_quantized_dtype:
+            q_scale = self._q_scale_float
+            k_scale = self._k_scale_float
+            v_scale = self._v_scale_float
+
+            kv_c_normed, _ = quantize_kv(self.kv_cache_quantized_dtype,
+                                         kv_c_normed,
+                                         value=None,
+                                         k_scale=k_scale)
+            k_pe, _ = quantize_kv(self.kv_cache_quantized_dtype,
+                                  k_pe,
+                                  value=None,
+                                  k_scale=k_scale)
+
+        new_kv_cache, outputs = _jax_mla_func(
+            kv_cache,
+            q_nope,
+            q_pe,
+            kv_c_normed,
+            k_pe,
+            attn_metadata,
+            mesh,
+            self.scale,
+            self.qk_nope_head_dim,
+            self.num_heads,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
+        )
+
+        # Update KV cache
+        vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
+
+        outputs = outputs.reshape(-1, self.num_heads, self.kv_lora_rank)
+        outputs = jnp.einsum("bnl,nlv->bnv", outputs, jax_view(self.W_UV))
+        outputs = outputs.reshape(-1, self.num_heads * self.v_head_dim)
+
+        # Return output as Torch tensor
+        return torch_view(outputs)
+
+
+@register_backend(AttentionBackendEnum.FLASHMLA)
+class PallasMLAttentionBackend(AttentionBackend):
+
+    @property
+    def accept_output_buffer(self) -> bool:
+        return True
+
+    @staticmethod
+    def get_name() -> str:
+        return "FLASHMLA"
+
+    @staticmethod
+    def get_impl_cls() -> type["PallasMLAttentionBackend"]:
+        return PallasMLAttentionBackendImpl
 
 
 class TPUMLAAttention(MLAAttention):
@@ -102,19 +216,43 @@ class TPUMLAAttention(MLAAttention):
         self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
         self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
 
-        # For compatibility reasons.
-        self.kv_sharing_target_layer_name = None
-        self.attn_type = AttentionType.DECODER
-        self.sliding_window = None
-
         self.kv_cache = [
             torch.tensor([]) for _ in range(get_current_vllm_config(
             ).parallel_config.pipeline_parallel_size)
         ]
 
-        # Misc.
         self.is_aiter_triton_fp4_bmm_enabled = False
         self.is_aiter_triton_fp8_bmm_enabled = False
+
+        # For compatibility reasons.
+        self.kv_sharing_target_layer_name = None
+        self.attn_type = AttentionType.DECODER
+        self.sliding_window = None
+
+        impl_cls = cast(type[MLAAttentionImpl],
+                        self.attn_backend.get_impl_cls())
+        self.impl = impl_cls(
+            num_heads=self.num_heads,
+            head_size=self.head_size,
+            scale=self.scale,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype=self.kv_cache_dtype,
+            logits_soft_cap=None,
+            attn_type=self.attn_type,
+            kv_sharing_target_layer_name=None,
+            # MLA Args
+            q_lora_rank=self.q_lora_rank,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
+            v_head_dim=self.v_head_dim,
+            kv_b_proj=kv_b_proj,
+            indexer=indexer,
+            **extra_impl_args,
+        )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         with torchax.default_env():
@@ -131,77 +269,14 @@ class TPUMLAAttention(MLAAttention):
             for key in kv_b_proj_params.keys():
                 delattr(self.kv_b_proj, key)
 
-    def forward(
-        self,
-        q: torch.Tensor,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        output_shape: torch.Size | None = None,
-    ) -> torch.Tensor:
+    def forward(self, q: torch.Tensor, kv_c_normed: torch.Tensor,
+                k_pe: torch.Tensor, **kwargs) -> torch.Tensor:
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe,
                                                 self.layer_name)
 
-        # Get the KV cache
-        vllm_model_wrapper_context = get_vllm_model_wrapper_context()
-        kv_cache_index = vllm_model_wrapper_context.layer_name_to_kvcache_index[
-            self.layer_name]
-        kv_cache = vllm_model_wrapper_context.kv_caches[kv_cache_index]
-        mesh = vllm_model_wrapper_context.mesh
-
-        # Get attention metadata
-        attn_metadata, _, _, _ = get_attention_context(self.layer_name)
-
-        q = jax_view(q)
-        kv_c_normed = jax_view(kv_c_normed)
-        k_pe = jax_view(k_pe)
-
-        # Prepare inputs
-        q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=2)
-
-        # (B, N, P) x (N, P, L) -> (B, N, L)
-        q_nope = jnp.einsum("bnp,npl->bnl", q_nope, jax_view(self.W_UK_T))
-
-        q_scale = k_scale = v_scale = None
-        if self.kv_cache_quantized_dtype:
-            q_scale = self._q_scale_float
-            k_scale = self._k_scale_float
-            v_scale = self._v_scale_float
-
-            kv_c_normed, _ = quantize_kv(self.kv_cache_quantized_dtype,
-                                         kv_c_normed,
-                                         value=None,
-                                         k_scale=k_scale)
-            k_pe, _ = quantize_kv(self.kv_cache_quantized_dtype,
-                                  k_pe,
-                                  value=None,
-                                  k_scale=k_scale)
-
-        new_kv_cache, outputs = _jax_mla_func(
-            kv_cache,
-            q_nope,
-            q_pe,
-            kv_c_normed,
-            k_pe,
-            attn_metadata,
-            mesh,
-            self.scale,
-            self.qk_nope_head_dim,
-            self.num_heads,
-            q_scale=q_scale,
-            k_scale=k_scale,
-            v_scale=v_scale,
-        )
-
-        # Update KV cache
-        vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
-
-        outputs = outputs.reshape(-1, self.num_heads, self.kv_lora_rank)
-        outputs = jnp.einsum("bnl,nlv->bnv", outputs, jax_view(self.W_UV))
-        outputs = outputs.reshape(-1, self.num_heads * self.v_head_dim)
-
-        # Return output as Torch tensor
-        return torch_view(outputs)
+        self.impl.forward(q, kv_c_normed, k_pe, self.kv_cache, self.layer_name,
+                          **kwargs)
 
 
 class TPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
