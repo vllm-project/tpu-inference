@@ -247,6 +247,7 @@ class GmmTest(jtu.JaxTestCase):
         out_size=[512, 1024],
         num_groups=[16, 32],
         weight_dtype=[jnp.int8, jnp.float8_e4m3fn],
+        block_size=[512, 1024],
         group_offset=[0, 2, 3],
     )
     def test_gmm_activation_weight_quantized(
@@ -256,13 +257,14 @@ class GmmTest(jtu.JaxTestCase):
         out_size,
         num_groups,
         weight_dtype,
+        block_size,
         group_offset,
     ):
         if weight_dtype == jnp.float4_e2m1fn and not jtu.is_device_tpu_at_least(
                 version=7):
             self.skipTest("Expect TPUv7+")
-        # TODO(kyuyeunk, wenxindong): Add subchannel quantization on gmm_v2.
-        block_size = in_size
+        if block_size > in_size:
+            self.skipTest("block_size must be <= in_size")
         num_local_groups = num_groups - group_offset
         key = jax.random.key(0)
 
