@@ -397,6 +397,13 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
             w13_qzeros = jnp.swapaxes(awq_u32_unpack_u4(w13_qzeros), 1, 2)
             w2_qzeros = jnp.swapaxes(awq_u32_unpack_u4(w2_qzeros), 1, 2)
 
+            # NOTE(catswe): convert qweight from uint4 to int4 and
+            # let qzeros absorb the difference for performance benefit
+            w13_qweight = (w13_qweight.astype(jnp.int8) - 8).astype(jnp.int4)
+            w2_qweight = (w2_qweight.astype(jnp.int8) - 8).astype(jnp.int4)
+            w13_qzeros = w13_qzeros.astype(jnp.int8) - 8
+            w2_qzeros = w2_qzeros.astype(jnp.int8) - 8
+
             w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
             w13_reorder_size = get_mesh_shape_product(
                 self.mesh, ShardingAxisName.MLP_TENSOR)

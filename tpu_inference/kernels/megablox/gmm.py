@@ -507,10 +507,9 @@ def gmm(
                                               quant_block_size, ...]
 
                 if rhs_zero_point is not None:
-                    # TODO(catswe): direct cast from uint4 (awq)
-                    # once support is added in pallas
+                    # NOTE(catswe): cast to bf16 for awq
                     loaded_rhs_block = loaded_rhs_block.astype(
-                        jnp.int8).astype(jnp.bfloat16) - rhs_zero_point[b_i]
+                        jnp.bfloat16) - rhs_zero_point[b_i]
 
                 partial_result = jnp.dot(
                     loaded_lhs_block,
