@@ -322,9 +322,9 @@ def fused_moe_func(
         activation: activation function to perform on the output of w1.
         scoring_fn: scoring function to apply on gating_output.
 
-    Returns:
-        Output of moe operation [num_tokens, hidden_size]
-    """
+  Returns:
+      Output of moe operation [num_tokens, hidden_size]
+  """
     num_tokens, hidden_size = hidden_states.shape
     global_num_experts, padded_hidden_size, _ = w1.shape
     dtype = hidden_states.dtype
