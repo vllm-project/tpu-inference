@@ -909,11 +909,11 @@ class CompilationManager:
                                                                                    num_reqs]
             dummy_grammar_bitmask = self.runner.grammar_bitmask_cpu[:num_reqs]
 
-            (dummy_logits, dummy_require_struct_decoding,
+            (dummy_require_struct_decoding,
              dummy_grammar_bitmask, arange) = device_array(
                  self.runner.mesh,
-                 (dummy_logits, dummy_require_struct_decoding,
-                  dummy_grammar_bitmask, self.runner.structured_decode_arange))
+                 (dummy_require_struct_decoding, dummy_grammar_bitmask,
+                  self.runner.structured_decode_arange))
 
             self._run_compilation(
                 "structured_decode",
