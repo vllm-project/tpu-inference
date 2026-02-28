@@ -2,9 +2,9 @@ Feature,CorrectnessTest,PerformanceTest
 "Chunked Prefill",✅,✅
 "DCN-based P/D disaggregation",✅,✅
 "KV cache host offloading",unverified,unverified
-"LoRA_Torch",✅,✅
+"LoRA_Torch",❌,N/A
 "Multimodal Inputs",❌,N/A
-"Out-of-tree model support",✅,✅
+"Out-of-tree model support",❌,N/A
 "Prefix Caching",✅,✅
 "Single Program Multi Data",✅,✅
 "Single-Host-P-D-disaggregation",✅,N/A
