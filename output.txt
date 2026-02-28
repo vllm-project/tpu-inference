@@ -1,0 +1,667 @@
+INFO 03-03 00:23:45 [__init__.py:59] TPU info: node_name=wenxindong-v7x-8 | tpu_type=tpu7x-8 | worker_id=0 | num_chips=8 | num_cores_per_chip=2
+WARNING:absl:Tensorflow library not found, tensorflow.io.gfile operations will use native shim calls. GCS paths (i.e. 'gs://...') cannot be accessed.
+INFO 03-03 00:23:47 [importing.py:44] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+INFO 03-03 00:23:47 [importing.py:68] Triton not installed or not compatible; certain GPU-related functions will not be available.
+WARNING 03-03 00:23:48 [interface.py:226] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+(APIServer pid=2632578) INFO 03-03 00:23:49 [utils.py:293] 
+(APIServer pid=2632578) INFO 03-03 00:23:49 [utils.py:293]        █     █     █▄   ▄█
+(APIServer pid=2632578) INFO 03-03 00:23:49 [utils.py:293]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.14.0rc1.dev524+gca81811bf.d20260113
+(APIServer pid=2632578) INFO 03-03 00:23:49 [utils.py:293]   █▄█▀ █     █     █     █  model   Qwen/Qwen3-235B-A22B-Instruct-2507
+(APIServer pid=2632578) INFO 03-03 00:23:49 [utils.py:293]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+(APIServer pid=2632578) INFO 03-03 00:23:49 [utils.py:293] 
+(APIServer pid=2632578) INFO 03-03 00:23:49 [utils.py:229] non-default args: {'model_tag': 'Qwen/Qwen3-235B-A22B-Instruct-2507', 'model': 'Qwen/Qwen3-235B-A22B-Instruct-2507', 'max_model_len': 5120, 'download_dir': '/mnt/disks/persist', 'tensor_parallel_size': 8, 'enable_expert_parallel': True, 'enable_prefix_caching': False, 'max_num_batched_tokens': 4096, 'max_num_seqs': 128}
+(APIServer pid=2632578) INFO 03-03 00:23:49 [model.py:532] Resolved architecture: Qwen3MoeForCausalLM
+(APIServer pid=2632578) INFO 03-03 00:23:49 [model.py:1557] Using max model len 5120
+(APIServer pid=2632578) INFO 03-03 00:23:49 [scheduler.py:231] Chunked prefill is enabled with max_num_batched_tokens=4096.
+(APIServer pid=2632578) INFO 03-03 00:23:49 [vllm.py:747] Asynchronous scheduling is enabled.
+(APIServer pid=2632578) INFO 03-03 00:23:49 [tpu_platform.py:139] Initialized sharding configuration: ShardingConfigManager(total_devices=8, sharding_strategy=ShardingStrategy(tensor_parallelism=8, expert_parallelism=1, sequence_parallelism=1, data_parallelism=1, attention_data_parallelism=1, attention_data_expert_parallelism=1), device_indexes=None)
+(APIServer pid=2632578) WARNING 03-03 00:23:49 [__init__.py:80] The quantization method 'awq' already exists and will be overwritten by the quantization config <class 'tpu_inference.layers.vllm.quantization.awq.VllmAWQConfig'>.
+(APIServer pid=2632578) WARNING 03-03 00:23:49 [__init__.py:80] The quantization method 'compressed-tensors' already exists and will be overwritten by the quantization config <class 'tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors.VllmCompressedTensorsConfig'>.
+(APIServer pid=2632578) WARNING 03-03 00:23:49 [__init__.py:80] The quantization method 'fp8' already exists and will be overwritten by the quantization config <class 'tpu_inference.layers.vllm.quantization.fp8.VllmFp8Config'>.
+(APIServer pid=2632578) WARNING 03-03 00:23:49 [__init__.py:80] The quantization method 'mxfp4' already exists and will be overwritten by the quantization config <class 'tpu_inference.layers.vllm.quantization.mxfp4.VllmMxfp4Config'>.
+(APIServer pid=2632578) INFO 03-03 00:23:49 [__init__.py:108] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
+(APIServer pid=2632578) WARNING 03-03 00:23:49 [__init__.py:97] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
+(APIServer pid=2632578) INFO 03-03 00:23:49 [__init__.py:108] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
+(APIServer pid=2632578) INFO 03-03 00:23:49 [tpu_platform.py:180] Using KV cache block size: 256
+(APIServer pid=2632578) INFO 03-03 00:23:49 [tpu_platform.py:191] Force using UniProcExecutor for JAX on single host without pipeline parallelism.
+(APIServer pid=2632578) WARNING 03-03 00:23:50 [input_processor.py:80] The signature of Platform.validate_request has changed from `(cls, prompt, params, processed_inputs) -> None` to `(cls, processed_inputs, params) -> None`. The old signature will no longer be supported starting from v0.18.
+(APIServer pid=2632578) WARNING 03-03 00:23:50 [tpu_platform.py:229] Pin memory is not supported on TPU.
+INFO 03-03 00:23:52 [__init__.py:59] TPU info: node_name=wenxindong-v7x-8 | tpu_type=tpu7x-8 | worker_id=0 | num_chips=8 | num_cores_per_chip=2
+WARNING:absl:Tensorflow library not found, tensorflow.io.gfile operations will use native shim calls. GCS paths (i.e. 'gs://...') cannot be accessed.
+INFO 03-03 00:23:54 [importing.py:44] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+INFO 03-03 00:23:54 [importing.py:68] Triton not installed or not compatible; certain GPU-related functions will not be available.
+WARNING 03-03 00:23:54 [interface.py:226] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:23:55 [core.py:101] Initializing a V1 LLM engine (v0.14.0rc1.dev524+gca81811bf.d20260113) with config: model='Qwen/Qwen3-235B-A22B-Instruct-2507', speculative_config=None, tokenizer='Qwen/Qwen3-235B-A22B-Instruct-2507', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=5120, download_dir='/mnt/disks/persist', load_format=auto, tensor_parallel_size=8, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=True, quantization=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=None, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=Qwen/Qwen3-235B-A22B-Instruct-2507, enable_prefix_caching=False, enable_chunked_prefill=True, pooler_config=None, compilation_config={'level': None, 'mode': <CompilationMode.DYNAMO_TRACE_ONCE: 2>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'openxla', 'custom_ops': ['all'], 'splitting_ops': [], 'compile_mm_encoder': False, 'compile_sizes': None, 'compile_ranges_split_points': [4096], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': None, 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}
+(EngineCore_DP0 pid=2632781) WARNING 03-03 00:23:56 [tpu_platform.py:229] Pin memory is not supported on TPU.
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:24:00 [parallel_state.py:1394] world_size=1 rank=0 local_rank=0 distributed_init_method=file:///tmp/tmpfzd_k7_6 backend=gloo
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:24:00 [parallel_state.py:1716] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank 0, EPLB rank N/A
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:24:00 [tpu_runner.py:302] Init mesh | mesh=Mesh('data': 1, 'model': 8, axis_types=(Auto, Auto))
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:24:00 [utils.py:314] Phased-based profiler enabled. Traces will be saved to: gs://wenxindong-vm/trace/qwen235b/v78
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:24:00 [utils.py:94] Prepared token paddings: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:24:00 [utils.py:60] Prepared request paddings: [8, 16, 32, 64, 128]
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:24:00 [compilation_manager.py:52] Enabling JAX compile cache.
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:24:00 [tpu_worker.py:279] Init worker | rank=0 | is_first_rank=True | is_last_rank=True | topology_order_id=0 | is_driver_worker=True | hbm=[(0.0, 94.75), (0.0, 94.75), (0.0, 94.75), (0.0, 94.75), (0.0, 94.75), (0.0, 94.75), (0.0, 94.75), (0.0, 94.75)]GiB |self.devices=[TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), TpuDevice(id=1, process_index=0, coords=(0,0,0), core_on_chip=1), TpuDevice(id=2, process_index=0, coords=(1,0,0), core_on_chip=0), TpuDevice(id=3, process_index=0, coords=(1,0,0), core_on_chip=1), TpuDevice(id=4, process_index=0, coords=(0,1,0), core_on_chip=0), TpuDevice(id=5, process_index=0, coords=(0,1,0), core_on_chip=1), TpuDevice(id=6, process_index=0, coords=(1,1,0), core_on_chip=0), TpuDevice(id=7, process_index=0, coords=(1,1,0), core_on_chip=1)] | total devices=[TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), TpuDevice(id=1, process_index=0, coords=(0,0,0), core_on_chip=1), TpuDevice(id=2, process_index=0, coords=(1,0,0), core_on_chip=0), TpuDevice(id=3, process_index=0, coords=(1,0,0), core_on_chip=1), TpuDevice(id=4, process_index=0, coords=(0,1,0), core_on_chip=0), TpuDevice(id=5, process_index=0, coords=(0,1,0), core_on_chip=1), TpuDevice(id=6, process_index=0, coords=(1,1,0), core_on_chip=0), TpuDevice(id=7, process_index=0, coords=(1,1,0), core_on_chip=1)] | local_devices=[TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), TpuDevice(id=1, process_index=0, coords=(0,0,0), core_on_chip=1), TpuDevice(id=2, process_index=0, coords=(1,0,0), core_on_chip=0), TpuDevice(id=3, process_index=0, coords=(1,0,0), core_on_chip=1), TpuDevice(id=4, process_index=0, coords=(0,1,0), core_on_chip=0), TpuDevice(id=5, process_index=0, coords=(0,1,0), core_on_chip=1), TpuDevice(id=6, process_index=0, coords=(1,1,0), core_on_chip=0), TpuDevice(id=7, process_index=0, coords=(1,1,0), core_on_chip=1)]
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:24:00 [model_loader.py:377] Loading model with MODEL_IMPL_TYPE=vllm
+(EngineCore_DP0 pid=2632781) WARNING 03-03 00:24:00 [__init__.py:80] The quantization method 'awq' already exists and will be overwritten by the quantization config <class 'tpu_inference.layers.vllm.quantization.awq.VllmAWQConfig'>.
+(EngineCore_DP0 pid=2632781) WARNING 03-03 00:24:00 [__init__.py:80] The quantization method 'compressed-tensors' already exists and will be overwritten by the quantization config <class 'tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors.VllmCompressedTensorsConfig'>.
+(EngineCore_DP0 pid=2632781) WARNING 03-03 00:24:00 [__init__.py:80] The quantization method 'fp8' already exists and will be overwritten by the quantization config <class 'tpu_inference.layers.vllm.quantization.fp8.VllmFp8Config'>.
+(EngineCore_DP0 pid=2632781) WARNING 03-03 00:24:00 [__init__.py:80] The quantization method 'mxfp4' already exists and will be overwritten by the quantization config <class 'tpu_inference.layers.vllm.quantization.mxfp4.VllmMxfp4Config'>.
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:24:00 [__init__.py:108] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
+(EngineCore_DP0 pid=2632781) WARNING 03-03 00:24:00 [__init__.py:97] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:24:00 [__init__.py:108] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:24:01 [tpu_platform.py:73] Cannot use None backend on TPU. Setting to FLASH_ATTN.
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:24:01 [tpu_platform.py:76] Using FLASH_ATTN backend.
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:24:01 [unquantized.py:186] Using TPU backend for Unquantized MoE
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:24:01 [moe.py:52] [MoE]: Using GMM EP kernel
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:   0% Completed | 0/118 [00:00<?, ?it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:   1% Completed | 1/118 [00:00<00:45,  2.59it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:   2% Completed | 2/118 [00:01<01:08,  1.69it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:   3% Completed | 3/118 [00:01<01:16,  1.51it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:   3% Completed | 4/118 [00:02<01:27,  1.30it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:   4% Completed | 5/118 [00:03<01:20,  1.40it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:   5% Completed | 6/118 [00:04<01:19,  1.41it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:   6% Completed | 7/118 [00:04<01:17,  1.44it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:   7% Completed | 8/118 [00:05<01:16,  1.44it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:   8% Completed | 9/118 [00:07<01:45,  1.03it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:   8% Completed | 10/118 [00:08<02:05,  1.16s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:   9% Completed | 11/118 [00:10<02:20,  1.32s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  10% Completed | 12/118 [00:11<02:29,  1.41s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  11% Completed | 13/118 [00:13<02:48,  1.61s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  12% Completed | 14/118 [00:15<02:46,  1.61s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  13% Completed | 15/118 [00:16<02:33,  1.49s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  14% Completed | 16/118 [00:18<02:29,  1.46s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  14% Completed | 17/118 [00:20<03:01,  1.80s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  15% Completed | 18/118 [00:23<03:23,  2.04s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  16% Completed | 19/118 [00:26<03:39,  2.22s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  17% Completed | 20/118 [00:28<03:49,  2.34s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  18% Completed | 21/118 [00:31<03:53,  2.40s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  19% Completed | 22/118 [00:33<03:49,  2.39s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  19% Completed | 23/118 [00:36<03:50,  2.43s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  20% Completed | 24/118 [00:38<03:54,  2.49s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  21% Completed | 25/118 [00:41<03:56,  2.54s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  22% Completed | 26/118 [00:44<03:56,  2.57s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  23% Completed | 27/118 [00:46<03:54,  2.58s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  24% Completed | 28/118 [00:49<03:55,  2.62s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  25% Completed | 29/118 [00:51<03:52,  2.62s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  25% Completed | 30/118 [00:54<03:53,  2.66s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  26% Completed | 31/118 [00:57<03:50,  2.65s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  27% Completed | 32/118 [01:00<03:49,  2.67s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  28% Completed | 33/118 [01:02<03:48,  2.69s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  29% Completed | 34/118 [01:05<03:41,  2.63s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  30% Completed | 35/118 [01:07<03:36,  2.61s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  31% Completed | 36/118 [01:10<03:34,  2.61s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  31% Completed | 37/118 [01:13<03:33,  2.64s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  32% Completed | 38/118 [01:15<03:23,  2.55s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  33% Completed | 39/118 [01:17<03:19,  2.52s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  34% Completed | 40/118 [01:20<03:12,  2.47s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  35% Completed | 41/118 [01:22<03:05,  2.41s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  36% Completed | 42/118 [01:24<03:00,  2.38s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  36% Completed | 43/118 [01:27<02:58,  2.38s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  37% Completed | 44/118 [01:29<02:57,  2.39s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  38% Completed | 45/118 [01:32<02:59,  2.46s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  39% Completed | 46/118 [01:34<02:56,  2.45s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  40% Completed | 47/118 [01:36<02:48,  2.37s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  41% Completed | 48/118 [01:38<02:34,  2.21s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  42% Completed | 49/118 [01:41<02:38,  2.29s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  42% Completed | 50/118 [01:43<02:38,  2.33s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  43% Completed | 51/118 [01:45<02:33,  2.29s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  44% Completed | 52/118 [01:48<02:31,  2.30s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  45% Completed | 53/118 [01:50<02:30,  2.31s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  46% Completed | 54/118 [01:53<02:32,  2.39s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  47% Completed | 55/118 [01:55<02:28,  2.36s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  47% Completed | 56/118 [01:57<02:18,  2.23s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  48% Completed | 57/118 [01:58<01:52,  1.84s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  49% Completed | 58/118 [01:59<01:45,  1.77s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  50% Completed | 59/118 [02:01<01:41,  1.71s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  51% Completed | 60/118 [02:03<01:38,  1.70s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  52% Completed | 61/118 [02:04<01:34,  1.66s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  53% Completed | 62/118 [02:06<01:37,  1.75s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  53% Completed | 63/118 [02:08<01:42,  1.86s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  54% Completed | 64/118 [02:10<01:44,  1.94s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  55% Completed | 65/118 [02:12<01:44,  1.98s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  56% Completed | 66/118 [02:15<01:48,  2.09s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  57% Completed | 67/118 [02:16<01:34,  1.86s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  58% Completed | 68/118 [02:18<01:26,  1.74s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  58% Completed | 69/118 [02:18<01:08,  1.40s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  59% Completed | 70/118 [02:19<00:59,  1.25s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  60% Completed | 71/118 [02:20<00:48,  1.03s/it]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  61% Completed | 72/118 [02:20<00:40,  1.13it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  62% Completed | 73/118 [02:20<00:31,  1.41it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  63% Completed | 74/118 [02:21<00:26,  1.68it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  64% Completed | 75/118 [02:21<00:22,  1.94it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  64% Completed | 76/118 [02:21<00:19,  2.20it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  65% Completed | 77/118 [02:22<00:17,  2.41it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  66% Completed | 78/118 [02:22<00:15,  2.60it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  67% Completed | 79/118 [02:22<00:14,  2.78it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  68% Completed | 80/118 [02:23<00:12,  2.93it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  69% Completed | 81/118 [02:23<00:12,  3.04it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  69% Completed | 82/118 [02:23<00:12,  2.86it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  70% Completed | 83/118 [02:24<00:11,  2.96it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  71% Completed | 84/118 [02:24<00:11,  3.05it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  72% Completed | 85/118 [02:24<00:10,  3.14it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  73% Completed | 86/118 [02:25<00:10,  3.19it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  74% Completed | 87/118 [02:25<00:09,  3.22it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  75% Completed | 88/118 [02:25<00:09,  3.26it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  75% Completed | 89/118 [02:25<00:08,  3.30it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  76% Completed | 90/118 [02:26<00:08,  3.30it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  77% Completed | 91/118 [02:26<00:08,  3.25it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  78% Completed | 92/118 [02:26<00:07,  3.28it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  79% Completed | 93/118 [02:27<00:07,  3.31it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  80% Completed | 94/118 [02:27<00:07,  3.36it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  81% Completed | 95/118 [02:27<00:06,  3.38it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  81% Completed | 96/118 [02:28<00:06,  3.36it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  82% Completed | 97/118 [02:28<00:06,  3.40it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  83% Completed | 98/118 [02:28<00:05,  3.44it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  84% Completed | 99/118 [02:28<00:05,  3.41it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  85% Completed | 100/118 [02:29<00:05,  3.38it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  86% Completed | 101/118 [02:29<00:04,  3.45it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  86% Completed | 102/118 [02:29<00:04,  3.42it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  87% Completed | 103/118 [02:30<00:04,  3.39it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  88% Completed | 104/118 [02:30<00:04,  3.42it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  89% Completed | 105/118 [02:30<00:03,  3.39it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  90% Completed | 106/118 [02:30<00:03,  3.44it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  91% Completed | 107/118 [02:31<00:03,  3.46it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  92% Completed | 108/118 [02:31<00:02,  3.37it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  92% Completed | 109/118 [02:31<00:02,  3.34it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  93% Completed | 110/118 [02:32<00:02,  3.35it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  94% Completed | 111/118 [02:32<00:02,  3.35it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  95% Completed | 112/118 [02:32<00:01,  3.35it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  96% Completed | 113/118 [02:33<00:01,  3.36it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  97% Completed | 114/118 [02:33<00:01,  3.36it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  97% Completed | 115/118 [02:33<00:00,  3.39it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  98% Completed | 116/118 [02:33<00:00,  3.37it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards:  99% Completed | 117/118 [02:34<00:00,  3.29it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards: 100% Completed | 118/118 [02:34<00:00,  3.58it/s]
+(EngineCore_DP0 pid=2632781) Loading safetensors checkpoint shards: 100% Completed | 118/118 [02:34<00:00,  1.31s/it]
+(EngineCore_DP0 pid=2632781) 
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:26:36 [default_loader.py:293] Loading weights took 154.56 seconds
+(EngineCore_DP0 pid=2632781) WARNING:root:Duplicate op registration for aten.__and__
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:02 [vllm_model_wrapper.py:209] Total time to load model weights from storage to TPU: 301.52 seconds.
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:02 [tpu_runner.py:563] Init model | hbm=[(54.88, 94.75), (54.88, 94.75), (54.88, 94.75), (54.88, 94.75), (54.88, 94.75), (54.88, 94.75), (54.88, 94.75), (54.88, 94.75)]GiB
+(EngineCore_DP0 pid=2632781) WARNING 03-03 00:29:02 [kv_cache_manager.py:165] Compilation num_layers = 94
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:02 [tpu_worker.py:313] Memory statistics | total_hbm_limit_gb=757.97GiB | total_hbm_limit_cap_gb=682.17GiB | total_hbm_used_gb=439.05GiB | total_hbm_avail_gb=243.12GiB
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:02 [kv_cache_utils.py:1314] GPU KV cache size: 677,888 tokens
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:02 [kv_cache_utils.py:1319] Maximum concurrency for 5,120 tokens per request: 132.40x
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:02 [compilation_manager.py:509] Compiling sampling with different input shapes.
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:03 [compilation_manager.py:75] Precompile worker0 sample --> {'num_reqs': 8, 'do_sampling': True}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:03 [compilation_manager.py:80] Compilation finished in 0.12 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:03 [compilation_manager.py:75] Precompile worker0 sample --> {'num_reqs': 8, 'do_sampling': True}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:03 [compilation_manager.py:80] Compilation finished in 0.09 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:03 [compilation_manager.py:75] Precompile worker0 sample --> {'num_reqs': 8, 'do_sampling': False}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:03 [compilation_manager.py:80] Compilation finished in 0.11 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:03 [compilation_manager.py:75] Precompile worker0 sample --> {'num_reqs': 8, 'do_sampling': False}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:03 [compilation_manager.py:80] Compilation finished in 0.11 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:03 [compilation_manager.py:75] Precompile worker0 sample --> {'num_reqs': 16, 'do_sampling': True}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:04 [compilation_manager.py:80] Compilation finished in 0.95 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:04 [compilation_manager.py:75] Precompile worker0 sample --> {'num_reqs': 16, 'do_sampling': True}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:05 [compilation_manager.py:80] Compilation finished in 0.91 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:05 [compilation_manager.py:75] Precompile worker0 sample --> {'num_reqs': 16, 'do_sampling': False}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:05 [compilation_manager.py:80] Compilation finished in 0.16 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:05 [compilation_manager.py:75] Precompile worker0 sample --> {'num_reqs': 16, 'do_sampling': False}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:06 [compilation_manager.py:80] Compilation finished in 0.17 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:06 [compilation_manager.py:75] Precompile worker0 sample --> {'num_reqs': 32, 'do_sampling': True}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:06 [compilation_manager.py:80] Compilation finished in 0.12 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:06 [compilation_manager.py:75] Precompile worker0 sample --> {'num_reqs': 32, 'do_sampling': True}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:06 [compilation_manager.py:80] Compilation finished in 0.10 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:06 [compilation_manager.py:75] Precompile worker0 sample --> {'num_reqs': 32, 'do_sampling': False}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:06 [compilation_manager.py:80] Compilation finished in 0.24 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:06 [compilation_manager.py:75] Precompile worker0 sample --> {'num_reqs': 32, 'do_sampling': False}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:07 [compilation_manager.py:80] Compilation finished in 0.24 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:07 [compilation_manager.py:75] Precompile worker0 sample --> {'num_reqs': 64, 'do_sampling': True}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:07 [compilation_manager.py:80] Compilation finished in 0.12 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:07 [compilation_manager.py:75] Precompile worker0 sample --> {'num_reqs': 64, 'do_sampling': True}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:07 [compilation_manager.py:80] Compilation finished in 0.10 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:07 [compilation_manager.py:75] Precompile worker0 sample --> {'num_reqs': 64, 'do_sampling': False}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:08 [compilation_manager.py:80] Compilation finished in 0.39 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:08 [compilation_manager.py:75] Precompile worker0 sample --> {'num_reqs': 64, 'do_sampling': False}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:08 [compilation_manager.py:80] Compilation finished in 0.38 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:08 [compilation_manager.py:75] Precompile worker0 sample --> {'num_reqs': 128, 'do_sampling': True}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:09 [compilation_manager.py:80] Compilation finished in 0.94 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:09 [compilation_manager.py:75] Precompile worker0 sample --> {'num_reqs': 128, 'do_sampling': True}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:10 [compilation_manager.py:80] Compilation finished in 0.97 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:10 [compilation_manager.py:75] Precompile worker0 sample --> {'num_reqs': 128, 'do_sampling': False}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:11 [compilation_manager.py:80] Compilation finished in 0.29 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:11 [compilation_manager.py:75] Precompile worker0 sample --> {'num_reqs': 128, 'do_sampling': False}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:11 [compilation_manager.py:80] Compilation finished in 0.28 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:11 [compilation_manager.py:582] Compiling gather_logprobs with different input shapes.
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:11 [compilation_manager.py:75] Precompile worker0 gather_logprobs --> {'num_reqs': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:11 [compilation_manager.py:80] Compilation finished in 0.32 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:11 [compilation_manager.py:75] Precompile worker0 gather_logprobs --> {'num_reqs': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:12 [compilation_manager.py:80] Compilation finished in 0.35 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:12 [compilation_manager.py:75] Precompile worker0 gather_logprobs --> {'num_reqs': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:12 [compilation_manager.py:80] Compilation finished in 0.50 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:12 [compilation_manager.py:75] Precompile worker0 gather_logprobs --> {'num_reqs': 64}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:13 [compilation_manager.py:80] Compilation finished in 0.67 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:13 [compilation_manager.py:75] Precompile worker0 gather_logprobs --> {'num_reqs': 128}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:14 [compilation_manager.py:80] Compilation finished in 0.53 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:22 [kv_cache_manager.py:284] Init kv-cache | num_layers=94 | shape=(num_blocks, (256, 8, 2, 128)) | num_blocks=[np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648), np.int64(2648)] | sharding=NamedSharding(mesh=Mesh('data': 1, 'model': 8, axis_types=(Auto, Auto)), spec=PartitionSpec('data', None, 'model'), memory_kind=device) | dtype=bfloat16 | hbm=[(85.29, 94.75), (85.29, 94.75), (85.29, 94.75), (85.29, 94.75), (85.29, 94.75), (85.29, 94.75), (85.29, 94.75), (85.29, 94.75)]Gb
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:22 [compilation_manager.py:85] Precompile all the subgraphs with possible input shapes.
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:22 [compilation_manager.py:75] Precompile worker0 backbone --> {'num_tokens': 16}
+(EngineCore_DP0 pid=2632781) /mnt/disks/persist/vllm_conda/lib/python3.12/site-packages/torchax/tensor.py:167: UserWarning: Explicitly requested dtype int64 requested in astype is not available, and will be truncated to dtype int32. To enable more dtypes, set the jax_enable_x64 configuration option or the JAX_ENABLE_X64 shell environment variable. See https://github.com/jax-ml/jax#current-gotchas for more.
+(EngineCore_DP0 pid=2632781)   res = jax_function(self._elem, *args, **kwargs)
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:22 [tuned_block_sizes.py:4389] RPA v3 kernel tuned block sizes for ('TPU v7', 256, 'q_bfloat16_kv_bfloat16', 'q_head-8_kv_head-1_head-128', 'max_model_len-8192-sw-None'): bkv_p=16, bq=16
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:29 [compilation_manager.py:80] Compilation finished in 6.74 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:29 [compilation_manager.py:75] Precompile worker0 backbone --> {'num_tokens': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:29 [tuned_block_sizes.py:4389] RPA v3 kernel tuned block sizes for ('TPU v7', 256, 'q_bfloat16_kv_bfloat16', 'q_head-8_kv_head-1_head-128', 'max_model_len-8192-sw-None'): bkv_p=16, bq=32
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:36 [compilation_manager.py:80] Compilation finished in 6.65 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:36 [compilation_manager.py:75] Precompile worker0 backbone --> {'num_tokens': 64}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:42 [compilation_manager.py:80] Compilation finished in 6.38 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:42 [compilation_manager.py:75] Precompile worker0 backbone --> {'num_tokens': 128}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:49 [compilation_manager.py:80] Compilation finished in 6.61 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:49 [compilation_manager.py:75] Precompile worker0 backbone --> {'num_tokens': 256}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:56 [compilation_manager.py:80] Compilation finished in 6.81 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:29:56 [compilation_manager.py:75] Precompile worker0 backbone --> {'num_tokens': 512}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:02 [compilation_manager.py:80] Compilation finished in 6.43 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:02 [compilation_manager.py:75] Precompile worker0 backbone --> {'num_tokens': 1024}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:09 [compilation_manager.py:80] Compilation finished in 7.13 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:09 [compilation_manager.py:75] Precompile worker0 backbone --> {'num_tokens': 2048}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:17 [compilation_manager.py:80] Compilation finished in 7.25 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:17 [compilation_manager.py:75] Precompile worker0 backbone --> {'num_tokens': 4096}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:24 [compilation_manager.py:80] Compilation finished in 7.09 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:24 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 16, 'num_reqs': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:24 [compilation_manager.py:80] Compilation finished in 0.13 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:24 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 16, 'num_reqs': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:24 [compilation_manager.py:80] Compilation finished in 0.13 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:24 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 16, 'num_reqs': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:24 [compilation_manager.py:80] Compilation finished in 0.12 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:24 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 16, 'num_reqs': 64}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:24 [compilation_manager.py:80] Compilation finished in 0.12 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:24 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 16, 'num_reqs': 128}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:25 [compilation_manager.py:80] Compilation finished in 0.13 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:25 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 32, 'num_reqs': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:25 [compilation_manager.py:80] Compilation finished in 0.13 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:25 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 32, 'num_reqs': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:25 [compilation_manager.py:80] Compilation finished in 0.13 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:25 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 32, 'num_reqs': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:25 [compilation_manager.py:80] Compilation finished in 0.13 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:25 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 32, 'num_reqs': 64}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:25 [compilation_manager.py:80] Compilation finished in 0.13 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:25 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 32, 'num_reqs': 128}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:25 [compilation_manager.py:80] Compilation finished in 0.13 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:25 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 64, 'num_reqs': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:25 [compilation_manager.py:80] Compilation finished in 0.15 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:25 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 64, 'num_reqs': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:25 [compilation_manager.py:80] Compilation finished in 0.14 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:25 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 64, 'num_reqs': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:26 [compilation_manager.py:80] Compilation finished in 0.14 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:26 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 64, 'num_reqs': 64}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:26 [compilation_manager.py:80] Compilation finished in 0.14 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:26 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 64, 'num_reqs': 128}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:26 [compilation_manager.py:80] Compilation finished in 0.14 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:26 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 128, 'num_reqs': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:26 [compilation_manager.py:80] Compilation finished in 0.16 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:26 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 128, 'num_reqs': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:26 [compilation_manager.py:80] Compilation finished in 0.17 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:26 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 128, 'num_reqs': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:26 [compilation_manager.py:80] Compilation finished in 0.16 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:26 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 128, 'num_reqs': 64}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:27 [compilation_manager.py:80] Compilation finished in 0.16 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:27 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 128, 'num_reqs': 128}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:27 [compilation_manager.py:80] Compilation finished in 0.15 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:27 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 256, 'num_reqs': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:27 [compilation_manager.py:80] Compilation finished in 0.16 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:27 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 256, 'num_reqs': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:27 [compilation_manager.py:80] Compilation finished in 0.18 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:27 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 256, 'num_reqs': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:27 [compilation_manager.py:80] Compilation finished in 0.21 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:27 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 256, 'num_reqs': 64}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:27 [compilation_manager.py:80] Compilation finished in 0.16 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:27 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 256, 'num_reqs': 128}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:28 [compilation_manager.py:80] Compilation finished in 0.16 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:28 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 512, 'num_reqs': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:28 [compilation_manager.py:80] Compilation finished in 0.17 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:28 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 512, 'num_reqs': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:28 [compilation_manager.py:80] Compilation finished in 0.18 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:28 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 512, 'num_reqs': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:28 [compilation_manager.py:80] Compilation finished in 0.21 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:28 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 512, 'num_reqs': 64}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:28 [compilation_manager.py:80] Compilation finished in 0.28 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:28 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 512, 'num_reqs': 128}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:29 [compilation_manager.py:80] Compilation finished in 0.16 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:29 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 1024, 'num_reqs': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:29 [compilation_manager.py:80] Compilation finished in 0.17 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:29 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 1024, 'num_reqs': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:29 [compilation_manager.py:80] Compilation finished in 0.18 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:29 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 1024, 'num_reqs': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:29 [compilation_manager.py:80] Compilation finished in 0.20 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:29 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 1024, 'num_reqs': 64}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:29 [compilation_manager.py:80] Compilation finished in 0.28 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:29 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 1024, 'num_reqs': 128}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:30 [compilation_manager.py:80] Compilation finished in 0.17 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:30 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 2048, 'num_reqs': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:30 [compilation_manager.py:80] Compilation finished in 0.25 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:30 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 2048, 'num_reqs': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:30 [compilation_manager.py:80] Compilation finished in 0.27 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:30 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 2048, 'num_reqs': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:30 [compilation_manager.py:80] Compilation finished in 0.28 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:30 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 2048, 'num_reqs': 64}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:31 [compilation_manager.py:80] Compilation finished in 0.36 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:31 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 2048, 'num_reqs': 128}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:31 [compilation_manager.py:80] Compilation finished in 0.24 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:31 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 4096, 'num_reqs': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:31 [compilation_manager.py:80] Compilation finished in 0.25 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:31 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 4096, 'num_reqs': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:32 [compilation_manager.py:80] Compilation finished in 0.26 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:32 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 4096, 'num_reqs': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:32 [compilation_manager.py:80] Compilation finished in 0.29 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:32 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 4096, 'num_reqs': 64}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:32 [compilation_manager.py:80] Compilation finished in 0.36 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:32 [compilation_manager.py:75] Precompile _substitute_placeholder_token_fn --> {'num_tokens': 4096, 'num_reqs': 128}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:32 [compilation_manager.py:80] Compilation finished in 0.25 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:32 [compilation_manager.py:430] Compiling select_from_array with different input shapes.
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:32 [compilation_manager.py:409] Compiling select_from_array for worker0 select all logits.
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:33 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 16, 'index_size': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:33 [compilation_manager.py:80] Compilation finished in 0.10 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:33 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 16, 'index_size': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:33 [compilation_manager.py:80] Compilation finished in 0.11 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:33 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 32, 'index_size': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:33 [compilation_manager.py:80] Compilation finished in 0.10 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:33 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 32, 'index_size': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:33 [compilation_manager.py:80] Compilation finished in 0.12 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:33 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 32, 'index_size': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:33 [compilation_manager.py:80] Compilation finished in 0.15 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:33 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 64, 'index_size': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:33 [compilation_manager.py:80] Compilation finished in 0.10 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:33 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 64, 'index_size': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:34 [compilation_manager.py:80] Compilation finished in 0.12 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:34 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 64, 'index_size': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:34 [compilation_manager.py:80] Compilation finished in 0.15 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:34 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 64, 'index_size': 64}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:34 [compilation_manager.py:80] Compilation finished in 0.23 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:34 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 128, 'index_size': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:34 [compilation_manager.py:80] Compilation finished in 0.12 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:34 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 128, 'index_size': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:34 [compilation_manager.py:80] Compilation finished in 0.14 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:34 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 128, 'index_size': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:34 [compilation_manager.py:80] Compilation finished in 0.17 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:34 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 128, 'index_size': 64}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:35 [compilation_manager.py:80] Compilation finished in 0.24 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:35 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 128, 'index_size': 128}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:35 [compilation_manager.py:80] Compilation finished in 0.39 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:35 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 256, 'index_size': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:35 [compilation_manager.py:80] Compilation finished in 0.15 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:35 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 256, 'index_size': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:35 [compilation_manager.py:80] Compilation finished in 0.17 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:35 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 256, 'index_size': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:36 [compilation_manager.py:80] Compilation finished in 0.21 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:36 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 256, 'index_size': 64}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:36 [compilation_manager.py:80] Compilation finished in 0.28 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:36 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 256, 'index_size': 128}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:36 [compilation_manager.py:80] Compilation finished in 0.42 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:36 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 512, 'index_size': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:37 [compilation_manager.py:80] Compilation finished in 0.22 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:37 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 512, 'index_size': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:37 [compilation_manager.py:80] Compilation finished in 0.25 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:37 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 512, 'index_size': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:37 [compilation_manager.py:80] Compilation finished in 0.28 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:37 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 512, 'index_size': 64}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:38 [compilation_manager.py:80] Compilation finished in 0.34 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:38 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 512, 'index_size': 128}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:38 [compilation_manager.py:80] Compilation finished in 0.48 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:38 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 1024, 'index_size': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:38 [compilation_manager.py:80] Compilation finished in 0.36 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:38 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 1024, 'index_size': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:39 [compilation_manager.py:80] Compilation finished in 0.40 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:39 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 1024, 'index_size': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:39 [compilation_manager.py:80] Compilation finished in 0.41 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:39 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 1024, 'index_size': 64}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:40 [compilation_manager.py:80] Compilation finished in 0.47 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:40 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 1024, 'index_size': 128}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:40 [compilation_manager.py:80] Compilation finished in 0.61 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:40 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 2048, 'index_size': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:40 [compilation_manager.py:80] Compilation finished in 0.08 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:40 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 2048, 'index_size': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:41 [compilation_manager.py:80] Compilation finished in 0.09 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:41 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 2048, 'index_size': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:41 [compilation_manager.py:80] Compilation finished in 0.11 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:41 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 2048, 'index_size': 64}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:41 [compilation_manager.py:80] Compilation finished in 0.14 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:41 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 2048, 'index_size': 128}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:41 [compilation_manager.py:80] Compilation finished in 0.20 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:41 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 4096, 'index_size': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:41 [compilation_manager.py:80] Compilation finished in 0.08 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:41 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 4096, 'index_size': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:41 [compilation_manager.py:80] Compilation finished in 0.09 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:41 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 4096, 'index_size': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:41 [compilation_manager.py:80] Compilation finished in 0.11 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:41 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 4096, 'index_size': 64}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:42 [compilation_manager.py:80] Compilation finished in 0.14 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:42 [compilation_manager.py:75] Precompile select_from_array [worker0 select all logits] --> {'array_size': 4096, 'index_size': 128}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:42 [compilation_manager.py:80] Compilation finished in 0.21 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:42 [compilation_manager.py:478] Compiling compute_logits with different input shapes.
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:42 [compilation_manager.py:75] Precompile worker0 compute_logits --> {'num_reqs': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:42 [compilation_manager.py:80] Compilation finished in 0.26 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:42 [compilation_manager.py:75] Precompile worker0 compute_logits --> {'num_reqs': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:42 [compilation_manager.py:80] Compilation finished in 0.27 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:42 [compilation_manager.py:75] Precompile worker0 compute_logits --> {'num_reqs': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:43 [compilation_manager.py:80] Compilation finished in 0.30 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:43 [compilation_manager.py:75] Precompile worker0 compute_logits --> {'num_reqs': 64}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:43 [compilation_manager.py:80] Compilation finished in 0.35 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:43 [compilation_manager.py:75] Precompile worker0 compute_logits --> {'num_reqs': 128}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:43 [compilation_manager.py:80] Compilation finished in 0.27 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:43 [compilation_manager.py:902] Compiling structured_decoding with different input shapes.
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:43 [compilation_manager.py:75] Precompile structured_decode --> {'num_reqs': 8}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:43 [compilation_manager.py:80] Compilation finished in 0.03 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:43 [compilation_manager.py:75] Precompile structured_decode --> {'num_reqs': 16}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:43 [compilation_manager.py:80] Compilation finished in 0.03 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:44 [compilation_manager.py:75] Precompile structured_decode --> {'num_reqs': 32}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:44 [compilation_manager.py:80] Compilation finished in 0.03 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:44 [compilation_manager.py:75] Precompile structured_decode --> {'num_reqs': 64}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:44 [compilation_manager.py:80] Compilation finished in 0.03 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:44 [compilation_manager.py:75] Precompile structured_decode --> {'num_reqs': 128}
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:44 [compilation_manager.py:80] Compilation finished in 0.03 [secs].
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:44 [core.py:282] init engine (profile, create kv cache, warmup model) took 101.42 seconds
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:45 [vllm.py:747] Asynchronous scheduling is enabled.
+(EngineCore_DP0 pid=2632781) WARNING 03-03 00:30:45 [vllm.py:792] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:45 [tpu_platform.py:139] Initialized sharding configuration: ShardingConfigManager(total_devices=8, sharding_strategy=ShardingStrategy(tensor_parallelism=8, expert_parallelism=1, sequence_parallelism=1, data_parallelism=1, attention_data_parallelism=1, attention_data_expert_parallelism=1), device_indexes=None)
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:30:45 [tpu_platform.py:191] Force using UniProcExecutor for JAX on single host without pipeline parallelism.
+(APIServer pid=2632578) INFO 03-03 00:30:45 [api_server.py:495] Supported tasks: ['generate']
+(APIServer pid=2632578) WARNING 03-03 00:30:45 [model.py:1358] Default vLLM sampling parameters have been overridden by the model's `generation_config.json`: `{'temperature': 0.7, 'top_k': 20, 'top_p': 0.8}`. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
+(APIServer pid=2632578) INFO 03-03 00:30:45 [serving.py:185] Warming up chat template processing...
+(APIServer pid=2632578) INFO 03-03 00:30:46 [hf.py:318] Detected the chat template content format to be 'string'. You can set `--chat-template-content-format` to override this.
+(APIServer pid=2632578) INFO 03-03 00:30:46 [serving.py:210] Chat template warmup completed in 706.2ms
+(APIServer pid=2632578) INFO 03-03 00:30:46 [api_server.py:500] Starting vLLM API server 0 on http://0.0.0.0:8000
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:38] Available routes are:
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /openapi.json, Methods: HEAD, GET
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /docs, Methods: HEAD, GET
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /docs/oauth2-redirect, Methods: HEAD, GET
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /redoc, Methods: HEAD, GET
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /tokenize, Methods: POST
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /detokenize, Methods: POST
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /load, Methods: GET
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /version, Methods: GET
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /health, Methods: GET
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /metrics, Methods: GET
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /v1/models, Methods: GET
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /ping, Methods: GET
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /ping, Methods: POST
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /invocations, Methods: POST
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /v1/chat/completions, Methods: POST
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /v1/chat/completions/render, Methods: POST
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /v1/responses, Methods: POST
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /v1/responses/{response_id}, Methods: GET
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /v1/responses/{response_id}/cancel, Methods: POST
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /v1/completions, Methods: POST
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /v1/completions/render, Methods: POST
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /v1/messages, Methods: POST
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /inference/v1/generate, Methods: POST
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /scale_elastic_ep, Methods: POST
+(APIServer pid=2632578) INFO 03-03 00:30:46 [launcher.py:47] Route: /is_scaling_elastic_ep, Methods: POST
+(APIServer pid=2632578) INFO:     Started server process [2632578]
+(APIServer pid=2632578) INFO:     Waiting for application startup.
+(APIServer pid=2632578) INFO:     Application startup complete.
+(APIServer pid=2632578) INFO:     127.0.0.1:47088 - "GET /metrics HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47088 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47090 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47092 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47100 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47108 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47116 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47122 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47132 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47136 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47150 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47158 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47164 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47178 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47188 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47200 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47212 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47214 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47222 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47234 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47240 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47242 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47250 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47256 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47262 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47266 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47270 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47286 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47300 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47308 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47322 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47324 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47330 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47344 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47354 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47356 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47364 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47380 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47390 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47392 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47406 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47416 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47424 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47436 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47448 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47450 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47454 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47464 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47470 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47472 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47482 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47486 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47498 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47512 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47516 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47528 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47540 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47556 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47568 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47576 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47590 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47600 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47614 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47622 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47630 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47634 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47650 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47664 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47674 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47686 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47698 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47714 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47716 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47728 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47734 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47742 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47744 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47754 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47756 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47770 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47778 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47780 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47792 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47798 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47812 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47820 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47836 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47844 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47858 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47864 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47876 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47884 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47894 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47908 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47924 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47938 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47950 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47952 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47954 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47958 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47970 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:47986 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48000 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48002 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48006 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48020 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48036 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48042 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48054 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48070 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48080 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48096 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48098 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48112 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48114 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48124 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48134 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48140 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48142 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48158 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48166 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48182 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48194 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48208 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48210 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48216 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48228 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48230 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO:     127.0.0.1:48246 - "POST /v1/completions HTTP/1.1" 200 OK
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:31:00 [utils.py:358] Starting profiling for prefill_heavy phase
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:31:00 [utils.py:359] Batch composition stats: {'total_num_scheduled_tokens': 4096, 'num_prefill_tokens': 4095, 'num_decode_tokens': 1, 'padded_total_num_scheduled_tokens': 4096, 'num_reqs': 9}
+(APIServer pid=2632578) INFO 03-03 00:31:06 [loggers.py:259] Engine 000: Avg prompt throughput: 5682.7 tokens/s, Avg generation throughput: 83.8 tokens/s, Running: 120 reqs, Waiting: 8 reqs, GPU KV cache usage: 13.2%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:31:16 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 120 reqs, Waiting: 8 reqs, GPU KV cache usage: 13.2%, Prefix cache hit rate: 0.0%
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:31:30 [utils.py:397] Profiling for prefill_heavy phase finished
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:31:30 [utils.py:358] Starting profiling for decode_heavy phase
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:31:30 [utils.py:359] Batch composition stats: {'total_num_scheduled_tokens': 128, 'num_prefill_tokens': 0, 'num_decode_tokens': 128, 'padded_total_num_scheduled_tokens': 128, 'num_reqs': 128}
+(APIServer pid=2632578) INFO 03-03 00:31:36 [loggers.py:259] Engine 000: Avg prompt throughput: 870.3 tokens/s, Avg generation throughput: 216.6 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 14.5%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:31:46 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 14.5%, Prefix cache hit rate: 0.0%
+(EngineCore_DP0 pid=2632781) INFO 03-03 00:31:51 [utils.py:397] Profiling for decode_heavy phase finished
+(APIServer pid=2632578) INFO 03-03 00:31:56 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 1100.5 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 14.5%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:32:06 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2162.2 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 19.3%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:32:16 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2174.6 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 19.3%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:32:26 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2174.8 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 24.2%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:32:36 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2150.1 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 29.0%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:32:46 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2162.3 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 29.0%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:32:56 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2162.3 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 33.8%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:33:06 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2150.2 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 38.7%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:33:16 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2135.0 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 38.7%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:33:26 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2123.9 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 43.5%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:33:36 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2124.1 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 45.6%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:33:46 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2110.9 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 48.4%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:33:56 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2124.6 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 53.2%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:34:06 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2121.1 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 53.2%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:34:16 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2111.0 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 58.0%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:34:26 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2099.2 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 62.9%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:34:36 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2099.0 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 62.9%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:34:46 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2096.2 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 67.7%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:34:56 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2085.5 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 72.5%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:35:06 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2086.4 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 72.5%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:35:16 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2085.6 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 77.4%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:35:26 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2057.7 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 82.2%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:35:36 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 1714.7 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 82.2%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:35:46 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 1728.0 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 87.0%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:35:56 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 1727.3 tokens/s, Running: 128 reqs, Waiting: 0 reqs, GPU KV cache usage: 87.0%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO:     127.0.0.1:47088 - "GET /metrics HTTP/1.1" 200 OK
+(APIServer pid=2632578) INFO 03-03 00:36:06 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 1235.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+(APIServer pid=2632578) INFO 03-03 00:36:16 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
