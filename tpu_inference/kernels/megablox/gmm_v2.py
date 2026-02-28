@@ -62,6 +62,10 @@ class Dimensions:
     size_group: int
     size_lhs_group: int
     size_lhs_sublane: int
+    quant_block_size: int = 0
+    num_quant_blocks: int = 0
+    rhs_packing: int = 1
+    rhs_dtype: jnp.dtype | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -114,9 +118,13 @@ class IndexMaps:
         return (group_id, 0, n_id)
 
     def rhs_scale_index_map(self, n_id: jax.Array, gm_id: jax.Array,
-                            _: jax.Array):
+                            k_id: jax.Array):
         group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
-        return (group_id, 0, 0, n_id)
+        num_quant_blocks_per_tile_k = pl.cdiv(self.cfgs.tiles.tile_k,
+                                              self.cfgs.dims.quant_block_size)
+        b_i = (k_id * self.cfgs.tiles.tile_k) // self.cfgs.dims.quant_block_size
+        b_tile_i = b_i // num_quant_blocks_per_tile_k
+        return (group_id, b_tile_i, 0, n_id)
 
     def out_index_map(self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array):
         is_last_gm = gm_id == (pl.num_programs(1) - 1)
@@ -147,7 +155,7 @@ def generate_block_specs(
     )
 
     rhs_weight_spec = pl.BlockSpec(
-        (None, cfgs.tiles.tile_k, cfgs.tiles.tile_n),
+        (None, cfgs.tiles.tile_k // cfgs.dims.rhs_packing, cfgs.tiles.tile_n),
         index_map.rhs_weight_index_map,
         pipeline_mode=pl.Buffered(buffer_count=3),
     )
@@ -158,8 +166,10 @@ def generate_block_specs(
             index_map.rhs_bias_index_map,
         )
     if cfgs.rhs_cfgs.has_scale:
+        num_quant_blocks_per_tile_k = pl.cdiv(cfgs.tiles.tile_k,
+                                              cfgs.dims.quant_block_size)
         rhs_scale_block_spec = pl.BlockSpec(
-            (None, None, 1, cfgs.tiles.tile_n),
+            (None, num_quant_blocks_per_tile_k, 1, cfgs.tiles.tile_n),
             index_map.rhs_scale_index_map,
         )
 
@@ -258,6 +268,7 @@ def inner_kernel(
 
                 acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size),
                                   dtype=acc_ref.dtype)
+                rhs_qbs = cfgs.dims.quant_block_size
                 for start_k in range(0, cfgs.tiles.tile_k, q_block_size):
                     end_k = min(cfgs.tiles.tile_k, start_k + q_block_size)
 
@@ -286,7 +297,18 @@ def inner_kernel(
                         preferred_element_type=preferred_element_type,
                     ).astype(acc_ref.dtype)
 
-                    acc_n += block_acc * block_scale.astype(acc_ref.dtype)
+                    block_acc = block_acc * block_scale.astype(acc_ref.dtype)
+
+                    # Apply rhs subchannel scale per quant block.
+                    if tiled_rhs_ref.scale is not None:
+                        b_i = start_k // rhs_qbs
+                        rhs_scale_block = tiled_rhs_ref.scale[
+                            ..., b_i:b_i + 1, :, :].reshape(
+                                1, cfgs.tiles.tile_n)
+                        block_acc *= rhs_scale_block[:, start_n:end_n].astype(
+                            acc_ref.dtype)
+
+                    acc_n += block_acc
 
                 acc_list.append(acc_n)
             acc = jnp.concatenate(acc_list, axis=1)
@@ -295,8 +317,6 @@ def inner_kernel(
             acc += acc_ref[...]
 
         if is_last_k_step:
-            if cfgs.rhs_cfgs.has_scale:
-                acc *= tiled_rhs_ref.scale[...].astype(acc.dtype)
             if cfgs.rhs_cfgs.has_bias:
                 acc += tiled_rhs_ref.bias[...].astype(acc.dtype)
 
@@ -675,6 +695,17 @@ def calculate_tiling(
     tile_n_limit = pltpu.get_tpu_info().mxu_column_size * 2
     tile_n_limit = min(tile_n_limit, dims.size_n)
 
+    def _is_tile_k_valid(tk: int) -> bool:
+        """Check all tile_k constraints."""
+        if tk % num_lanes != 0:
+            return False
+        if tk % dims.rhs_packing != 0:
+            return False
+        if (tk % dims.quant_block_size != 0
+                and dims.quant_block_size % tk != 0):
+            return False
+        return True
+
     # Initialize tile_k and tile_n to their maximum valid values.
     num_k_tiles = num_n_tiles = 1
     num_lanes = pltpu.get_tpu_info().num_lanes
@@ -730,11 +761,11 @@ def validate_inputs(
     if rhs_bias is not None:
         assert rhs_bias.shape == (size_group, 1, size_n)
     if rhs_scale is not None:
-        # TODO(kyuyeunk, wenxindong): Add support for subchannel quantization.
-        if rhs_scale.shape[1] != 1:
-            raise NotImplementedError(
-                "Only per-channel quantization is supported.")
-        assert rhs_scale.shape == (size_group, 1, 1, size_n)
+        num_quant_blocks = rhs_scale.shape[1]
+        assert rhs_scale.shape == (size_group, num_quant_blocks, 1, size_n)
+    else:
+        num_quant_blocks = 1
+    quant_block_size = size_k // num_quant_blocks
 
     assert group_offset.shape == (1, )
 
@@ -748,6 +779,10 @@ def validate_inputs(
         size_group=size_group,
         size_lhs_group=size_lhs_group,
         size_lhs_sublane=size_lhs_sublane,
+        quant_block_size=quant_block_size,
+        num_quant_blocks=num_quant_blocks,
+        rhs_packing=rhs_packing,
+        rhs_dtype=rhs.dtype,
     )
 
 
@@ -767,9 +802,11 @@ def get_cost_estimate(
     rhs_bytes = (dims.size_group * dims.size_k * dims.size_n *
                  jax.dtypes.itemsize_bits(rhs.weight)) // 8
     if rhs.scale is not None:
-        rhs_bytes += dims.size_n * jnp.dtype(jnp.float32).itemsize
+        rhs_bytes += (dims.size_group * dims.num_quant_blocks * dims.size_n *
+                      jnp.dtype(jnp.float32).itemsize)
     if rhs.bias is not None:
-        rhs_bytes += dims.size_n * jnp.dtype(jnp.float32).itemsize
+        rhs_bytes += dims.size_group * dims.size_n * jnp.dtype(
+            jnp.float32).itemsize
 
     out_bytes = dims.size_m * dims.size_n * jnp.dtype(out_dtype).itemsize
 
@@ -848,6 +885,22 @@ def make_gmm_configs(
         quant_block_size=512,
     )
 
+    # Validate that rhs quant block size >= lhs quant block size and is
+    # divisible by it. This ensures the lhs quantization loop (which steps by
+    # lhs_quant_block_size) correctly maps to rhs scale blocks.
+    if (lhs_cfgs.quant_dtype is not None and rhs_cfgs.has_scale
+            and rhs_cfgs.quant_block_size is not None):
+        lhs_qbs = lhs_cfgs.quant_block_size
+        rhs_qbs = rhs_cfgs.quant_block_size
+        if rhs_qbs < lhs_qbs:
+            raise ValueError(
+                f"rhs quant_block_size={rhs_qbs} must be >= lhs"
+                f" quant_block_size={lhs_qbs}.")
+        if rhs_qbs % lhs_qbs != 0:
+            raise ValueError(
+                f"rhs quant_block_size={rhs_qbs} must be divisible by lhs"
+                f" quant_block_size={lhs_qbs}.")
+
     if out_dtype is None:
         out_dtype = lhs.dtype
 
@@ -901,7 +954,7 @@ def gmm_v2(
     lhs: jax.Array,  # [size_m, size_k]
     rhs: jax.Array,  # [size_group, size_k, size_n]
     group_sizes: jax.Array,  # int32[size_lhs_group]
-    rhs_scale: jax.Array | None = None,  # [size_group, 1, 1, out_size]
+    rhs_scale: jax.Array | None = None,  # [size_group, num_blocks, 1, out_size]
     rhs_bias: jax.Array | None = None,  # [size_group, 1, out_size]
     group_offset: jax.Array | None = None,  # int32[1]
     *,
@@ -923,7 +976,7 @@ def gmm_v2(
         lhs: lhs with shape [size_m, size_k].
         rhs: rhs with shape [size_group, size_k, size_n].
         group_sizes: The group sizes of lhs rows of shape [size_lhs_group,].
-        rhs_scale: The rhs scale of shape [size_group, 1, 1, out_size].
+        rhs_scale: The rhs scale of shape [size_group, num_blocks, 1, out_size].
         rhs_bias: The rhs bias of shape [size_group, 1, out_size].
         group_offset: Optional. The group offset of shape [1,].
         tile_info: The tile sizes or tile function to use.
