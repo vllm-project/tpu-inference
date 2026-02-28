@@ -784,7 +784,6 @@ def calculate_tiling(
             f"Could not find valid tile sizes for {dims=} and"
             f" {rhs_vmem_target=}. Last tried tiles: {tile_m=} {tile_k=} {tile_n=}"
         )
-    print(f"Chosen tile sizes: tile_m={tile_m}, tile_k={tile_k}, tile_n={tile_n}")
     return TileSizes(tile_m=tile_m, tile_k=tile_k, tile_n=tile_n)
 
 
