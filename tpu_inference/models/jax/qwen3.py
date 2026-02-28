@@ -21,7 +21,7 @@ from jax.sharding import Mesh
 from transformers import Qwen3Config
 from vllm.config import VllmConfig
 
-from tpu_inference import utils
+from tpu_inference import envs, utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -75,11 +75,24 @@ class Qwen3Attention(JaxModule):
 
         self.mesh = mesh
 
+        # NOTE: LAYOUT_Q_PROJ_AS_NDH is by default False
+        if envs.LAYOUT_Q_PROJ_AS_NDH:
+            rhs_str = "NDH"
+            q_proj_sharding = ("model", None, None)
+            kernel_shape = (self.num_heads, self.hidden_size, self.head_dim)
+        else:
+            rhs_str = "DNH"
+            q_proj_sharding = (None, "model", None)
+            kernel_shape = (self.hidden_size, self.num_heads, self.head_dim)
+
+        logger.info_once(
+            f"Running with attention Q-Projection laid out as {rhs_str}")
+
         self.q_proj = JaxEinsum(
-            "TD,DNH->TNH",
-            (self.hidden_size, self.num_heads, self.head_dim),
+            f"TD,{rhs_str}->TNH",
+            kernel_shape,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
+            kernel_init=nnx.with_partitioning(init_fn, q_proj_sharding),
             rngs=rng,
             quant_config=quant_config,
             prefix=prefix + ".q_proj",

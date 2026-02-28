@@ -117,7 +117,7 @@ def sharded_paged_attention(
 
 
 # TODO(xiangxu): merge this with sharded_paged_attention
-@functools.partial(jax.jit, static_argnums=[0])
+@jax.jit(static_argnames=["paged_attention_kernel"])
 def paged_attention_with_guarded_smem(
     paged_attention_kernel: Callable,
     q: jax.Array,
@@ -224,8 +224,7 @@ def update_cache(
     return cache
 
 
-@functools.partial(
-    jax.jit, static_argnames=["window_size", "attn_logits_soft_cap", "is_mqa"])
+@jax.jit(static_argnames=["window_size", "attn_logits_soft_cap", "is_mqa"])
 def apply_splash(q, k, v, window_size, attn_logits_soft_cap,
                  is_mqa) -> jax.Array:
     # q: (batch_size, num_heads, seq_len, head_dim)

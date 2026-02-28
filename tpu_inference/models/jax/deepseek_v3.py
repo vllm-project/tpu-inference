@@ -1866,7 +1866,7 @@ class DeepSeekV3(JaxModule):
             if hasattr(layer, 'self_attn') and hasattr(layer.self_attn,
                                                        'rope'):
                 if hasattr(layer.self_attn.rope, 'initialize_cache'):
-                    layer.self_attn.rope.initialize_cache(self.mesh)
+                    layer.self_attn.rope.initialize_cache()
 
     def __call__(
         self,

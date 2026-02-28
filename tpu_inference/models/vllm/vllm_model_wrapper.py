@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import copy
-import functools
 import time
 from collections.abc import Sequence
 from contextlib import nullcontext
@@ -209,8 +208,7 @@ class VllmModelWrapper:
 
     def jit_step_func(self):
 
-        @functools.partial(
-            jax.jit,
+        @jax.jit(
             donate_argnames=("kv_caches", ),
             out_shardings=(
                 None,  # kv_caches - keep original sharding
@@ -224,8 +222,11 @@ class VllmModelWrapper:
                 "xla_tpu_reduce_scatter_collective_matmul_mode":
                 "post_spmd_conservative"
             },
-            static_argnames=("layer_name_to_kvcache_index", "is_first_rank",
-                             "is_last_rank"),
+            static_argnames=(
+                "layer_name_to_kvcache_index",
+                "is_first_rank",
+                "is_last_rank",
+            ),
         )
         def step_fun(
             params_and_buffers,  # This has been wrapped into torchax TorchValue
@@ -282,13 +283,10 @@ class VllmModelWrapper:
 
     def jit_compute_logits_func(self):
 
-        @functools.partial(
-            jax.jit,
-            out_shardings=(NamedSharding(
-                self.mesh,
-                PartitionSpec(ShardingAxisName.MLP_DATA,
-                              ShardingAxisName.MLP_TENSOR))),
-        )
+        @jax.jit(out_shardings=(NamedSharding(
+            self.mesh,
+            PartitionSpec(ShardingAxisName.MLP_DATA,
+                          ShardingAxisName.MLP_TENSOR))))
         def compute_logits_func(
             params_and_buffers: Any,
             hidden_states: jax.Array,
