@@ -157,7 +157,7 @@ class ExecuteModelState:
     padded_num_reqs: Optional[int] = None
 
 
-@functools.partial(jax.jit, donate_argnums=(0, 1, 2))
+@jax.jit(donate_argnums=(0, 1, 2))
 def _substitute_placeholder_token(
         input_ids: jax.Array, token_in_tpu_cur_input_indices: jax.Array,
         token_in_tpu_pre_next_tokens_indices: jax.Array,
@@ -486,7 +486,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Used to initialize positions / context_lens / seq_lens
         # Keep in int64 to avoid overflow with long context
         self.arange_cpu = np.arange(self.max_num_tokens, dtype=np.int64)
-        min_num_reqs = max(MIN_NUM_SEQS, self.dp_size)
+        min_num_reqs = max(MIN_NUM_SEQS, next_power_of_2(self.dp_size))
         self.num_reqs_paddings = runner_utils.get_req_paddings(
             min_req_size=min_num_reqs, max_req_size=self.max_num_reqs)
         self.num_reqs_paddings_per_dp = [
@@ -602,7 +602,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called "
                                "after execute_model() returns None.")
-        with jax.set_mesh(self.mesh):
+        reqs = self.input_batch.num_reqs
+        toks = scheduler_output.total_num_scheduled_tokens
+        with jax.set_mesh(self.mesh), jax.profiler.TraceAnnotation(
+                f"execute_model: {reqs} reqs, {toks} toks"):
             output = self._execute_model(scheduler_output,
                                          intermediate_tensors)
         return output
@@ -1072,7 +1075,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
         return model_runner_output
 
-    @functools.partial(jax.jit, static_argnums=(0, ))
+    @jax.jit(static_argnums=(0, ))
     def _select_from_array_fn(self, array, indices_to_select):
 
         def select_local_fn(local_array, local_indices):
@@ -1089,7 +1092,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         return ret
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnames=("max_logprobs", ))
+    @jax.jit(static_argnames=("max_logprobs", ))
     def _compute_and_gather_logprobs(logits, next_tokens, max_logprobs):
         logprobs = compute_logprobs(logits)
         return gather_logprobs(logprobs, next_tokens, max_logprobs)

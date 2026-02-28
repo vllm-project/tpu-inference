@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import functools
 from dataclasses import dataclass, fields
 
 import jax
@@ -20,15 +19,19 @@ from jax.experimental.layout import Layout, with_layout_constraint
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.tensor import Tensor
 
+import tpu_inference.envs as envs
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization import (dequantize_tensor,
                                                       quantize_tensor)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import (
     general_device_put, reorder_concatenated_tensor_for_sharding)
-from tpu_inference.utils import align_to, get_mesh_shape_product
+from tpu_inference.logger import init_logger
+from tpu_inference.utils import align_to, get_mesh_shape_product, to_jax_dtype
 
 P = PartitionSpec
+
+logger = init_logger(__name__)
 
 
 @jax.tree_util.register_dataclass
@@ -464,13 +467,12 @@ def shard_moe_weights(
     return weights
 
 
-@functools.partial(jax.jit,
-                   static_argnames=(
-                       "moe_backend",
-                       "mesh",
-                       "activation",
-                       "weight_block_size",
-                   ))
+@jax.jit(static_argnames=(
+    "moe_backend",
+    "mesh",
+    "activation",
+    "weight_block_size",
+))
 def process_fp8_moe_weights(
     weights: FusedMoEWeights,
     moe_backend: MoEBackend,
@@ -482,6 +484,24 @@ def process_fp8_moe_weights(
     w13_weight_scale = weights.w13_weight_scale
     w2_weight = weights.w2_weight
     w2_weight_scale = weights.w2_weight_scale
+
+    if desired_quant_dtype_from_env := envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
+        desired_quant_dtype = to_jax_dtype(desired_quant_dtype_from_env)
+    else:
+        desired_quant_dtype = w13_weight.dtype
+        if w13_weight.dtype != w2_weight.dtype:
+            raise ValueError(
+                f"Expected w13_weight and w2_weight to have the same dtype, but got {w13_weight.dtype} and {w2_weight.dtype}"
+            )
+    requant_block_size = None
+    if requant_block_size_from_env := envs.MOE_REQUANTIZE_BLOCK_SIZE:
+        requant_block_size = (int(requant_block_size_from_env)
+                              if requant_block_size_from_env else None)
+
+    moe_logging_str = f"[MoE requantization]: re-quantizing MoE weights to {desired_quant_dtype}"
+    if requant_block_size is not None:
+        moe_logging_str += f" with block size {requant_block_size}"
+    logger.info(moe_logging_str)
 
     # Dequantize fp8 2d block quantized weights into fp32.
     w13_weight = dequantize_tensor(w13_weight,
@@ -508,8 +528,8 @@ def process_fp8_moe_weights(
             w2_weight_zero_point=None,
             w2_bias=None,
         ),
-        jnp.float8_e4m3fn,
-        None,
+        desired_quant_dtype,
+        requant_block_size,
     )
     return process_moe_weights(
         weights,

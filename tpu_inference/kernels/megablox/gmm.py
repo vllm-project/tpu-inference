@@ -321,14 +321,11 @@ def _zero_uninitialized_memory(
 LutFn = Callable[[int, int, int], Optional[tuple[int, int, int]]]
 
 
-@functools.partial(
-    jax.jit,
-    static_argnames=[
-        "preferred_element_type",
-        "tiling",
-        "interpret",
-    ],
-)
+@jax.jit(static_argnames=[
+    "preferred_element_type",
+    "tiling",
+    "interpret",
+])
 def gmm(
     lhs: jnp.ndarray,
     rhs: jnp.ndarray,

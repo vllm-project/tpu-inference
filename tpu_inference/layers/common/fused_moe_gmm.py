@@ -62,7 +62,7 @@ def _swigluoai(x1: jax.Array,
 
 
 def gmm_wrapper(lhs, rhs, rhs_scale, rhs_zero_point, rhs_bias, group_sizes,
-                group_offset):
+                group_offset, last_gmm):
     if is_supported_by_gmm_v2(lhs, rhs, rhs_scale, rhs_zero_point):
         gmm_res = gmm_v2(
             lhs=lhs,
@@ -71,6 +71,9 @@ def gmm_wrapper(lhs, rhs, rhs_scale, rhs_zero_point, rhs_bias, group_sizes,
             rhs_bias=rhs_bias,
             group_sizes=group_sizes,
             group_offset=group_offset[0],
+            # If it's last gmm, we need to zero out unvisited rows because it would
+            # cause numeric error during final reduce if the rows are unitialized.
+            zero_initialize=last_gmm,
         )
     else:
         gmm_res = gmm(
@@ -108,7 +111,7 @@ def moe_gmm_local(
     parallelism: Literal["tp", "ep"],
 ) -> jax.Array:
     """ Main MoE logic on a local shard can run in TP or EP mode.
-    
+
     Set parallelism for "tp" or "ep"
     """
 
@@ -117,7 +120,7 @@ def moe_gmm_local(
     # GMM1 computes x @ (W_up | W_gate) tegether and then split out to apply activation
     # to the gate result
     gmm1_res_gate_up = gmm_wrapper(x, w1, w1_scale, w1_zero_point, w1_bias,
-                                   group_sizes, group_offset)
+                                   group_sizes, group_offset, False)
     gmm1_res_gate, gmm1_res_up = jnp.split(gmm1_res_gate_up, 2, -1)
     gmm1_res = apply_act_fn(activation, gmm1_res_gate, gmm1_res_up)
 
@@ -129,7 +132,7 @@ def moe_gmm_local(
         w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
 
     gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_zero_point, w2_bias,
-                           group_sizes, group_offset)
+                           group_sizes, group_offset, True)
 
     # First run local reduction on topk experts owned by the rank for all tokens
     token_topk_hidden = gmm2_res[topk_argsort_revert_indices].reshape(
@@ -302,17 +305,14 @@ def expert_parallel_gmm(
     )
 
 
-@functools.partial(
-    jax.jit,
-    static_argnames=(
-        "topk",
-        "renormalize",
-        "mesh",
-        "use_ep",
-        "activation",
-        "scoring_fn",
-    ),
-)
+@jax.jit(static_argnames=(
+    "topk",
+    "renormalize",
+    "mesh",
+    "use_ep",
+    "activation",
+    "scoring_fn",
+))
 def fused_moe_func(
     hidden_states: jax.Array,
     w1: jax.Array,
@@ -383,7 +383,8 @@ def fused_moe_func(
                                    dtype=jnp.int32).repeat(topk)
         token_indices_sorted = token_indices[topk_argsort_indices]
         x = hidden_states_local[token_indices_sorted]
-        # Below one_hot is equivalent to jnp.bincount(topk_indices_flat, length=global_num_experts) but is more performant.
+        # Below one_hot is equivalent to jnp.bincount(topk_indices_flat,
+        # length=global_num_experts) but is more performant.
         group_sizes_local = jax.nn.one_hot(topk_indices_flat,
                                            global_num_experts,
                                            dtype=jnp.int32).sum(axis=0)
