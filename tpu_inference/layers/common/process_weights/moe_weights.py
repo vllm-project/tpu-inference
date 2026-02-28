@@ -207,13 +207,11 @@ def process_moe_weights(
         w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
         w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
     if w13_weight_zero_point is not None:
-        # cast to bfloat16 instead of float32
-        w13_weight_zero_point = w13_weight_zero_point.astype(jnp.bfloat16)
+        w13_weight_zero_point = w13_weight_zero_point.astype(jnp.float32)
         w13_weight_zero_point = jnp.swapaxes(w13_weight_zero_point, 1, 2)
         w13_weight_zero_point = jnp.expand_dims(w13_weight_zero_point, 2)
     if w2_weight_zero_point is not None:
-        # cast to bfloat16 instead of float32
-        w2_weight_zero_point = w2_weight_zero_point.astype(jnp.bfloat16)
+        w2_weight_zero_point = w2_weight_zero_point.astype(jnp.float32)
         w2_weight_zero_point = jnp.swapaxes(w2_weight_zero_point, 1, 2)
         w2_weight_zero_point = jnp.expand_dims(w2_weight_zero_point, 2)
     if w13_bias is not None:

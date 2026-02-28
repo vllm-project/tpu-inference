@@ -503,16 +503,14 @@ def gmm(
                                               quant_block_size:(b_i + 1) *
                                               quant_block_size, ...]
 
-                if rhs_zero_point is not None:
-                    # NOTE(catswe): cast to bf16 for awq
-                    loaded_rhs_block = loaded_rhs_block.astype(
-                        jnp.bfloat16) - rhs_zero_point[b_i]
-
                 partial_result = jnp.dot(
                     loaded_lhs_block,
                     loaded_rhs_block,
                     preferred_element_type=jnp.float32,
                 )
+                if rhs_zero_point is not None:
+                    partial_result -= loaded_lhs_block.astype(jnp.float32).sum(
+                        axis=-1, keepdims=True) * rhs_zero_point[b_i]
                 if rhs_scale is not None:
                     partial_result *= jnp.broadcast_to(rhs_scale[b_i],
                                                        partial_result.shape)
