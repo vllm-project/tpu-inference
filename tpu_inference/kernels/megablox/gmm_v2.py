@@ -641,9 +641,12 @@ def kernel_main(
         rhs_weight = rhs_ref.weight
         assert isinstance(rhs_weight, jax.Array)
         rhs_weight = rhs_weight.bitcast(jnp.uint8)
-        rhs_weight = rhs_weight.reshape(cfgs.dims.size_group,
-                                        cfgs.dims.size_k // cfgs.dims.rhs_packing,
-                                        cfgs.dims.size_n)
+        assert rhs_weight.shape == (cfgs.dims.size_group,
+                                    cfgs.dims.size_k // cfgs.dims.rhs_packing,
+                                    cfgs.dims.size_n), (
+            f"Expected shape {(cfgs.dims.size_group, cfgs.dims.size_k // cfgs.dims.rhs_packing, cfgs.dims.size_n)}, "
+            f"got {rhs_weight.shape}"
+        )
         rhs_ref = dataclasses.replace(rhs_ref, weight=rhs_weight)
 
     # Fill metadata buffer and return number of group & m interations.
@@ -714,14 +717,8 @@ def calculate_tiling(
     # Calculate vmem limit for a single rhs buffer when using triple buffers.
     num_rhs_buffers = 3
     rhs_vmem_target = vmem_limit_bytes // num_rhs_buffers
-
-    # After packing, rhs is stored as [G, K // rhs_packing, N] with a larger
-    # element type (e.g. fp4 -> uint8). The effective per-element byte size
-    # after packing is rhs_bits * rhs_packing // 8.
-    rhs_packed_element_bytes = rhs_bits * dims.rhs_packing // 8
-    rhs_base_size_bytes = rhs_size_bytes = (
-        (dims.size_k // dims.rhs_packing) * dims.size_n *
-        rhs_packed_element_bytes)
+    rhs_base_size_bytes = rhs_size_bytes = (dims.size_k * dims.size_n *
+                                            rhs_bits // 8)
 
     num_lanes = pltpu.get_tpu_info().num_lanes
 
@@ -787,7 +784,7 @@ def calculate_tiling(
             f"Could not find valid tile sizes for {dims=} and"
             f" {rhs_vmem_target=}. Last tried tiles: {tile_m=} {tile_k=} {tile_n=}"
         )
-
+    print(f"Chosen tile sizes: tile_m={tile_m}, tile_k={tile_k}, tile_n={tile_n}")
     return TileSizes(tile_m=tile_m, tile_k=tile_k, tile_n=tile_n)
 
 
@@ -829,9 +826,11 @@ def validate_inputs(
     packing = 32 // bitwidth
     size_lhs_sublane = pltpu.get_tpu_info().num_sublanes * packing
 
-    # TODO(wenxindong): Currently we must first upcast fp4 rhs to fp8
-    # to avoid a compiler bug in scoped memory allocation. We should remove this
-    # limitation once we upgrade to use libtpu >0.0.36.
+    # TODO(wenxindong): Work around a compiler bug in scoped memory allocation
+    # for fp4. When rhs is fp4, we pack two fp4
+    # elements into one uint8 element along the K axis (rhs_packing=2) in
+    # kernel_main via bitcast. The inner kernel then unpacks back to fp4 using
+    # pltpu.bitcast. Remove this once we upgrade to libtpu >0.0.36.
     if jax.dtypes.itemsize_bits(rhs.dtype) == 4:
         rhs_packing = 2
     else:
