@@ -32,11 +32,9 @@ from torchax.ops.mappings import j2t_dtype
 from vllm.config import VllmConfig
 
 from tpu_inference import utils
-from tpu_inference.kernels.mla.v1.kernel import mla_ragged_paged_attention
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
-from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
-    get_tuned_block_sizes
+from tpu_inference.layers.common.attention_interface import mla_attention
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization import (quantize_kv,
                                                       u8_unpack_e2m1)
@@ -566,60 +564,22 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
                                        value=None,
                                        k_scale=k_scale)
 
-        in_specs = (
-            self.query_tnh,  # q
-            self.query_tnh,  # q_rope
-            self.keyvalue_skh,  # k
-            self.keyvalue_skh,  # k_rope
-            P(ShardingAxisName.MLP_TENSOR),  # kv_cache
-            P(ShardingAxisName.ATTN_DATA),  # md.seq_lens: Replicated
-            P(ShardingAxisName.ATTN_DATA),  # page_indices_flat: Replicated
-            P(ShardingAxisName.ATTN_DATA),  # query_start_loc: Replicated
-            P(ShardingAxisName.ATTN_DATA),  # distribution: Replicated
-        )
-        out_specs = (self.attn_o_tnh, P(ShardingAxisName.MLP_TENSOR))
-
-        def _mla_ragged_paged_attention(q, q_rope, k, k_rope, cache, *args):
-            max_num_tokens = q.shape[0]
-            max_num_seqs = md.seq_lens.shape[0]
-            pages_per_seq = md.block_tables.shape[0] // max_num_seqs
-
-            bkv_p, bq_sz = get_tuned_block_sizes(q.dtype, cache.dtype,
-                                                 self.num_attention_heads, 1,
-                                                 self.qk_nope_head_dim,
-                                                 cache.shape[1],
-                                                 max_num_tokens, pages_per_seq)
-            num_kv_pages_per_block = min(min(pages_per_seq, bkv_p), 4)
-            num_queries_per_block = min(min(max_num_tokens, bq_sz), 4)
-
-            out, new_cache = mla_ragged_paged_attention(
-                q,
-                q_rope,
-                k,
-                k_rope,
-                cache,
-                *args,
-                sm_scale=self.scale,
-                num_kv_pages_per_block=num_kv_pages_per_block,
-                num_queries_per_block=num_queries_per_block,
-                q_scale=q_scale,
-                k_scale=k_scale,
-                v_scale=k_scale)
-
-            return new_cache, out
-
-        kv_cache, output_TNA = jax.jit(
-            jax.shard_map(_mla_ragged_paged_attention,
-                          mesh=self.mesh,
-                          in_specs=in_specs,
-                          out_specs=out_specs,
-                          check_vma=False))(q_TNA, q_rope_TNH, k_SA, k_rope_SH,
-                                            kv_cache, md.seq_lens,
-                                            md.block_tables,
-                                            md.query_start_loc,
-                                            md.request_distribution)
-
-        return kv_cache, output_TNA
+        return mla_attention(q_TNA,
+                             q_rope_TNH,
+                             k_SA,
+                             k_rope_SH,
+                             kv_cache,
+                             md,
+                             self.mesh,
+                             self.num_attention_heads,
+                             self.qk_nope_head_dim,
+                             query_tnh_sharding=self.query_tnh,
+                             keyvalue_skh_sharding=self.keyvalue_skh,
+                             attn_o_tnh_sharding=self.attn_o_tnh,
+                             q_scale=q_scale,
+                             k_scale=k_scale,
+                             v_scale=k_scale,
+                             sm_scale=self.scale)
 
     def process_output(self, outputs_TNA: jax.Array) -> jax.Array:
         """
