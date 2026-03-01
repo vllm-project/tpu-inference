@@ -136,13 +136,6 @@ class TestQwen3ForCausalLM:
             mock_vllm_config.additional_config["quanntization"] = dict(
                 qwix=dict(rules=qwix_rules))
 
-        init_pp_distributed_environment(
-            ip="",
-            rank=0,
-            world_size=1,
-            device=jax.devices()[0],
-            need_pp=False,
-        )
         # Test model init
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
