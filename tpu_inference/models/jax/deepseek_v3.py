@@ -356,7 +356,11 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
 
         kv_SA = kv_SA[..., :self.kv_lora_rank]
         kv_SA = self.kv_a_layernorm(kv_SA)
-        kv_SA = lax.with_sharding_constraint(kv_SA, self.keyvalue_skh)
+        # Ensure the sharding spec rank (2) matches the tensor rank (2)
+        kv_SA_sharding = self.keyvalue_skh
+        if len(kv_SA_sharding) > 2:
+            kv_SA_sharding = P(kv_SA_sharding[0], kv_SA_sharding[1])
+        kv_SA = lax.with_sharding_constraint(kv_SA, kv_SA_sharding)
 
         kv_SL = self.kv_b_proj(kv_SA)
         kv_nope_SNH = kv_SL.reshape(kv_SA.shape[0], self.N,
@@ -427,15 +431,16 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
             self.query_tnh,  # q
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # v
-            P(None, None, ShardingAxisName.ATTN_HEAD),  # kv_cache
-            P(),  # md.seq_lens: Replicated
-            P(),  # page_indices_flat: Replicated
-            P(),  # query_start_loc: Replicated
-            P(),  # distribution: Replicated
+            # Use the same sharding axis as keyvalue_skh to ensure head alignment
+            P(None, None, ShardingAxisName.MLP_TENSOR),  # kv_cache
+            P(ShardingAxisName.ATTN_DATA),  # md.seq_lens
+            P(ShardingAxisName.ATTN_DATA),  # page_indices_flat
+            P(ShardingAxisName.ATTN_DATA),  # query_start_loc
+            P(ShardingAxisName.ATTN_DATA),  # distribution
         )
 
         out_specs = (self.attn_o_tnh, P(None, None,
-                                        ShardingAxisName.ATTN_HEAD))
+                                        ShardingAxisName.MLP_TENSOR))
 
         output_TNH, kv_cache = jax.jit(
             jax.shard_map(_ragged_paged_attention,
@@ -527,7 +532,11 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
 
         kv_SA = kv_SA[..., :self.kv_lora_rank]
         kv_SA = self.kv_a_layernorm(kv_SA)
-        kv_SA = lax.with_sharding_constraint(kv_SA, self.keyvalue_skh)
+        # Ensure the sharding spec rank (2) matches the tensor rank (2)
+        kv_SA_sharding = self.keyvalue_skh
+        if len(kv_SA_sharding) > 2:
+            kv_SA_sharding = P(kv_SA_sharding[0], kv_SA_sharding[1])
+        kv_SA = lax.with_sharding_constraint(kv_SA, kv_SA_sharding)
 
         return (kv_SA, k_rope_SH)
 
@@ -572,10 +581,10 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # k_rope
             P(ShardingAxisName.MLP_TENSOR),  # kv_cache
-            P(ShardingAxisName.ATTN_DATA),  # md.seq_lens: Replicated
-            P(ShardingAxisName.ATTN_DATA),  # page_indices_flat: Replicated
-            P(ShardingAxisName.ATTN_DATA),  # query_start_loc: Replicated
-            P(ShardingAxisName.ATTN_DATA),  # distribution: Replicated
+            P(ShardingAxisName.ATTN_DATA),  # md.seq_lens
+            P(ShardingAxisName.ATTN_DATA),  # page_indices_flat
+            P(ShardingAxisName.ATTN_DATA),  # query_start_loc
+            P(ShardingAxisName.ATTN_DATA),  # distribution
         )
         out_specs = (self.attn_o_tnh, P(ShardingAxisName.MLP_TENSOR))
 
