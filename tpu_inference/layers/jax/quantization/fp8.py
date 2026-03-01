@@ -72,11 +72,11 @@ def load_fp8_weight(jax_param: nnx.Param, torch_weight: torch.Tensor,
 
     if jax_weight.dtype != jnp.float8_e4m3fn:
         logger.warning(
-            f"Loading {param_name}: casting from {jax_weight.dtype} to {jax_param.value.dtype}"
+            f"Loading {param_name}: casting from {jax_weight.dtype} to {jax_param[...].dtype}"
         )
-        jax_weight = jax_weight.astype(jax_param.value.dtype)
+        jax_weight = jax_weight.astype(jax_param[...].dtype)
 
-    jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
+    jax_param[...] = shard_put(jax_weight, spec, mesh=mesh)
 
 
 class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
@@ -139,14 +139,14 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
                                           sharding=scale_sharding)
 
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
-        bias = layer.bias.value if layer.bias is not None else None
+        bias = layer.bias[...] if layer.bias is not None else None
 
         if self.batch_features:
             # Batched case: use dot_general with batch dims.
             out = sharded_quantized_batched_matmul(
                 x,
-                layer.weight.value,
-                layer.weight_scale.value,
+                layer.weight[...],
+                layer.weight_scale[...],
                 einsum_str=self.einsum_str,
                 weight_sharding=self.weight_sharding,
                 mesh=self.linear_config.mesh)
@@ -155,8 +155,8 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
             return out
 
         out = self._apply_fused(x,
-                                layer.weight.value,
-                                layer.weight_scale.value,
+                                layer.weight[...],
+                                layer.weight_scale[...],
                                 bias=bias)
         out = out.reshape(out.shape[:-1] + self.output_shape)
         return out
@@ -295,13 +295,9 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             bias_p_spec=self.linear_config.bias_sharding,
         )
         if self.linear_config.fuse_matmuls:
-            layer.weight = nnx.Param(
-                shard_put(weights.weight, self.linear_config.weight_sharding))
-            layer.weight_scale_inv = nnx.Param(
-                shard_put(weights.weight_scale, P(None, )))
-            layer.bias = nnx.Param(
-                shard_put(weights.bias, self.linear_config.bias_sharding)
-            ) if bias is not None else None
+            layer.weight = nnx.Param(weights.weight)
+            layer.weight_scale_inv = nnx.Param(weights.weight_scale)
+            layer.bias = nnx.Param(weights.bias) if bias is not None else None
         else:
             raise NotImplementedError(
                 "Fp8 block-wise linear method only supports fuse_matmuls.")
@@ -441,10 +437,10 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                         param, nnx.Param
                     ), f"Expected nnx.Param for {param_name}, got {type(param)}"
                     init_fn = param.init_fn
-                    E, K, N = param.value.shape
+                    E, K, N = param[...].shape
                     value = init_fn(rngs.params(), (E, K, N),
                                     jnp.float8_e4m3fn)
-                    param.value = value
+                    param[...] = value
 
                     scale_value = jnp.zeros((E, (K + block_k - 1) // block_k,
                                              (N + block_n - 1) // block_n),
@@ -580,14 +576,17 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
             # of shape TE -- we don't return the indices
             router_logits = layer.router(x_TD)
 
-            w13_weight = layer.kernel_gating_upproj_E2DF.value if layer.moe_backend == MoEBackend.FUSED_MOE else layer.kernel_gating_upproj_EDF.value
-            w2_weight = layer.kernel_down_proj_EFD.value
+            if layer.moe_backend == MoEBackend.FUSED_MOE:
+                w13_weight = layer.kernel_gating_upproj_E2DF[...]
+            else:
+                w13_weight = layer.kernel_gating_upproj_EDF[...]
+            w2_weight = layer.kernel_down_proj_EFD[...]
             w13_weight_scale = getattr(
                 layer,
-                f"kernel_gating_upproj_EDF_{self.weight_scale_name}").value
+                f"kernel_gating_upproj_EDF_{self.weight_scale_name}")[...]
 
             w2_weight_scale = getattr(
-                layer, f"kernel_down_proj_EFD_{self.weight_scale_name}").value
+                layer, f"kernel_down_proj_EFD_{self.weight_scale_name}")[...]
 
             # TODO (jacobplatin/bzgoogle): we should support bias
             weights = FusedMoEWeights(
