@@ -21,6 +21,7 @@ import jax
 from tpu_inference.layers.common.quantization.configs import \
     QuantLinearConfig as CommonQuantLinearConfig
 from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 
 
