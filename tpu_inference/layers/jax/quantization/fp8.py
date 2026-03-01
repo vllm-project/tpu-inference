@@ -440,7 +440,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                     E, K, N = param[...].shape
                     value = init_fn(rngs.params(), (E, K, N),
                                     jnp.float8_e4m3fn)
-                    param[...] = value
+                    param.value = value
 
                     scale_value = jnp.zeros((E, (K + block_k - 1) // block_k,
                                              (N + block_n - 1) // block_n),
