@@ -76,7 +76,7 @@ def load_fp8_weight(jax_param: nnx.Param, torch_weight: torch.Tensor,
         )
         jax_weight = jax_weight.astype(jax_param[...].dtype)
 
-    jax_param[...] = shard_put(jax_weight, spec, mesh=mesh)
+    jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
 
 
 class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
