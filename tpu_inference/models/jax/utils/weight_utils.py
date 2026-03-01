@@ -33,13 +33,15 @@ from jax.sharding import PartitionSpec as P
 from jax.sharding import SingleDeviceSharding, get_mesh
 from safetensors import safe_open
 from torchax.ops.mappings import t2j
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
+from vllm.model_executor.model_loader import register_model_loader
+from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from tpu_inference import envs, utils
 from tpu_inference.layers.common.utils import (cpu_mesh_context,
                                                general_device_put)
-from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax import JaxModule, JaxModuleList
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
@@ -870,3 +872,47 @@ class LoadableWithIterator:
             skip_prefixes=(["lm_head"]
                            if not hasattr(self, 'lm_head') else None))
         return loader.load_weights(weights)
+
+
+@register_model_loader("jax_dummy")
+class JaxDummyModelLoader(DummyModelLoader):
+    """A dummy weights loader for flax_nnx models.
+
+    The upstream DummyModelLoader relies on many torch-specific APIs, this
+    implementation overrides the load_weights method to support flax_nnx models.
+    """
+
+    def load_weights(self, model: JaxModule,
+                     model_config: ModelConfig) -> None:
+        params = nnx.state(model, nnx.Param)
+        graph_def, params = nnx.flatten(params)
+        for path, param in params:
+            assert isinstance(
+                param,
+                nnx.Param), f"Expected nnx.Param, got {type(param)} {param=}"
+            param.value = jax.random.uniform(
+                jax.random.PRNGKey(0),
+                param.value.shape,
+                dtype=param.value.dtype,
+                # upstream claims this range works well
+                # https://github.com/vllm-project/vllm/blob/7291d1b288558d48508e1a17c37b0aa170332264/vllm/model_executor/model_loader/weight_utils.py#L1088
+                minval=-1e-3,
+                maxval=1e-3)
+        params = nnx.unflatten(graph_def, params)
+        nnx.update(model, params)
+
+        self._process_weights_after_loading(model)
+
+    def _process_weights_after_loading(
+            self, module: JaxModule | JaxModuleList) -> None:
+        """Recursively call process_weights_after_loading if any."""
+        if (quant_method := getattr(module, 'quant_method', None)) is not None:
+            assert isinstance(quant_method, QuantizeMethodBase)
+            quant_method.process_weights_after_loading(module)
+            return
+        if isinstance(module, JaxModuleList):
+            for sub_module in module:
+                self._process_weights_after_loading(sub_module)
+        else:
+            for name, sub_module in module.named_children():
+                self._process_weights_after_loading(sub_module)

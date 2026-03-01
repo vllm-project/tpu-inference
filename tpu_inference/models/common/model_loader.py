@@ -134,7 +134,8 @@ def _get_nnx_model(
                                             apply_to_abstract_model=False)
         return model
 
-    if vllm_config.load_config.load_format == "dummy":
+    if vllm_config.load_config.load_format == "dummy" and not issubclass(
+            model_class, LoadableWithIterator):
         # Create a sharded model with random inited weights.
         # TODO: currently Qwen2ForCausalLM is using legacy model implementation
         # will merge the random init logic when all model are migrated to new model implementation
@@ -162,7 +163,7 @@ def _get_nnx_model(
 
         @jax.jit
         def create_sharded_model():
-            model = model_class(vllm_config, rng, mesh)
+            model = create_abstract_model()
             state = nnx.state(model)
             pspecs = nnx.get_partition_spec(state)
             sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
@@ -209,6 +210,8 @@ def _get_nnx_model(
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
         with jax.set_mesh(mesh):
+            if vllm_config.load_config.load_format == "dummy":
+                vllm_config.load_config.load_format = "jax_dummy"
             loader = get_model_loader(vllm_config.load_config)
             if isinstance(model, LoadableWithIterator):
                 assert isinstance(model, JaxModule)
