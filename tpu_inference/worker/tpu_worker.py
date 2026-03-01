@@ -14,12 +14,12 @@ from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
-from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.v1 import utils as vllm_utils
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.worker.worker_base import WorkerBase
 
 from tpu_inference import envs, utils
 from tpu_inference.distributed import jax_parallel_state
@@ -85,7 +85,7 @@ class PPConfig:
                 self.default_tpu_chips_per_process_bounds = f"1,{chips_per_stage},1"
 
 
-class TPUWorker:
+class TPUWorker(WorkerBase):
 
     def __init__(
         self,
@@ -98,14 +98,14 @@ class TPUWorker:
         ip: str = "localhost",
         prev_worker_ip: str = "localhost",
     ):
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.parallel_config = vllm_config.parallel_config
-        self.cache_config = vllm_config.cache_config
-        self.local_rank = local_rank
-        self.rank = rank
-        self.distributed_init_method = distributed_init_method
-        self.is_driver_worker = is_driver_worker
+        super().__init__(
+            vllm_config,
+            local_rank,
+            rank,
+            distributed_init_method,
+            is_driver_worker=is_driver_worker,
+        )
+
         self.devices = devices if devices is not None else []
         self.device_ranks = set(device.id for device in self.devices
                                 if isinstance(device, jaxlib._jax.Device))
@@ -374,13 +374,6 @@ class TPUWorker:
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         return self.model_runner.take_draft_token_ids()
 
-    def add_lora(
-        self,
-        lora_request: LoRARequest,
-    ) -> bool:
-        raise NotImplementedError(
-            "LoRA is not supported by the JAX worker yet.")
-
     def profile(self,
                 is_start: bool = True,
                 profile_prefix: str | None = None):
@@ -397,14 +390,12 @@ class TPUWorker:
     def load_model(self) -> None:
         self.model_runner.load_model()
 
-    def compile_or_warm_up_model(self) -> None:
+    def compile_or_warm_up_model(self) -> float:
         self.model_runner.capture_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         self.model_runner._init_random()
-
-    def reset_mm_cache(self) -> None:
-        pass
+        return self.compilation_config.compilation_time
 
     def get_model(self):
         return self.model_runner.get_model()
@@ -446,10 +437,6 @@ class TPUWorker:
         port = get_kv_transfer_port()
         return (int(self.topology_order_id), ip, int(port))
 
-    def check_health(self) -> None:
-        # worker will always be healthy as long as it's running.
-        return
-
     def sync_weights(
         self,
         updated_weights: jaxtyping.PyTree,
@@ -469,9 +456,6 @@ class TPUWorker:
 
     def reinitialize_kv_cache(self) -> None:
         self.model_runner.reinitialize_kv_cache()
-
-    def shutdown(self) -> None:
-        return
 
     # Ray executor do not need handshake metadata
     # as we pass the kv_parameters through proxy server
