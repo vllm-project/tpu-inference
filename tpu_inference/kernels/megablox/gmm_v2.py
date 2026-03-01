@@ -79,6 +79,11 @@ class GmmConfigs:
 TileFn = Callable[[jnp.dtype, jnp.dtype, Dimensions, int], TileSizes]
 
 
+def _align_to(x: int, alignment: int) -> int:
+    """Rounds x up to the nearest multiple of alignment."""
+    return ((x + alignment - 1) // alignment) * alignment
+
+
 class IndexMaps:
     """Index maps for GMM kernel."""
 
@@ -727,8 +732,8 @@ def validate_inputs(
     rhs_bias: jax.Array | None,
     group_sizes: jax.Array,
     group_offset: jax.Array,
-):
-    """Validates the inputs for the GMM kernel."""
+) -> Dimensions:
+    """Validates inputs and returns dimensions padded to TPU hardware alignment."""
 
     size_m = lhs.shape[0]
     size_group, size_k, size_n = rhs.shape
@@ -748,20 +753,20 @@ def validate_inputs(
 
     assert group_offset.shape == (1, )
 
-    # TODO(kyuyeunk): Add support for implicit padding along lane dimensions.
-    num_lanes = pltpu.get_tpu_info().num_lanes
-    if size_k % num_lanes != 0 or size_n % num_lanes != 0:
-        raise NotImplementedError(
-            "Implicit padding along lane dimensions is not supported.")
-
     bitwidth = jax.dtypes.itemsize_bits(lhs.dtype)
     packing = 32 // bitwidth
     size_lhs_sublane = pltpu.get_tpu_info().num_sublanes * packing
+    num_lanes = pltpu.get_tpu_info().num_lanes
+
+    # Pad dimensions to align with TPU hardware boundaries.
+    padded_m = _align_to(size_m, size_lhs_sublane)
+    padded_k = _align_to(size_k, num_lanes)
+    padded_n = _align_to(size_n, num_lanes)
 
     return Dimensions(
-        size_m=size_m,
-        size_k=size_k,
-        size_n=size_n,
+        size_m=padded_m,
+        size_k=padded_k,
+        size_n=padded_n,
         size_group=size_group,
         size_lhs_group=size_lhs_group,
         size_lhs_sublane=size_lhs_sublane,
@@ -985,6 +990,8 @@ def gmm_v2(
     if vmem_limit_bytes is None:
         vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9)
 
+    orig_m, orig_k, orig_n = lhs.shape[0], lhs.shape[1], rhs.shape[2]
+
     cfgs = make_gmm_configs(
         lhs,
         rhs,
@@ -1011,8 +1018,21 @@ def gmm_v2(
         rhs_bias = rhs_bias.astype(jnp.float32)
         rhs_bias_spec = pl.BlockSpec(memory_space=pltpu.HBM)
 
+    # Pad inputs to match padded dimensions when needed.
+    m_pad = dims.size_m - orig_m
+    k_pad = dims.size_k - orig_k
+    n_pad = dims.size_n - orig_n
+    if m_pad > 0 or k_pad > 0:
+        lhs = jnp.pad(lhs, ((0, m_pad), (0, k_pad)))
+    if k_pad > 0 or n_pad > 0:
+        rhs = jnp.pad(rhs, ((0, 0), (0, k_pad), (0, n_pad)))
+    if rhs_scale is not None and n_pad > 0:
+        rhs_scale = jnp.pad(rhs_scale, ((0, 0), (0, 0), (0, 0), (0, n_pad)))
+    if rhs_bias is not None and n_pad > 0:
+        rhs_bias = jnp.pad(rhs_bias, ((0, 0), (0, 0), (0, n_pad)))
+
     # Initialize scratch shapes.
-    max_num_gm = dims.size_group + dims.size_m // tiles.tile_m - 1
+    max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
 
     scratch_shapes = [
         # partial_out_ref
@@ -1055,7 +1075,7 @@ def gmm_v2(
     out_init = jax.ShapeDtypeStruct((dims.size_m, dims.size_n), cfgs.out_dtype)
     rhs_weights = WeightsRef(weight=rhs, scale=rhs_scale, bias=rhs_bias)
 
-    return pl.pallas_call(
+    result = pl.pallas_call(
         functools.partial(kernel_main, cfgs=cfgs),
         out_shape=out_init,
         grid_spec=pltpu.PrefetchScalarGridSpec(
@@ -1081,6 +1101,12 @@ def gmm_v2(
         metadata=get_metadata(cfgs),
     )(group_sizes, group_offset, lhs, rhs_weights)
 
+    # Slice output back to original dimensions if padding was applied.
+    if m_pad > 0 or n_pad > 0:
+        result = result[:orig_m, :orig_n]
+
+    return result
+
 
 def is_supported_by_gmm_v2(lhs: jax.Array, rhs: jax.Array,
                            rhs_scale: jax.Array | None) -> bool:
@@ -1088,14 +1114,6 @@ def is_supported_by_gmm_v2(lhs: jax.Array, rhs: jax.Array,
 
     if rhs_scale is not None and rhs_scale.shape[1] != 1:
         # gmm_v2 does not support subchannel quantization.
-        return False
-    # gmm_v2 does not support implicit padding along lane dimension.
-    num_lanes = pltpu.get_tpu_info().num_lanes
-    if lhs.shape[-1] % num_lanes != 0 or rhs.shape[-1] % num_lanes != 0:
-        return False
-    # gmm_v2 does not support when lhs is not multiple of sublane size.
-    lhs_bytes = lhs.dtype.itemsize
-    if lhs.shape[0] % (pltpu.get_tpu_info().num_sublanes * lhs_bytes) != 0:
         return False
     # Handle weird edge cases where inputs are already quantized.
     if lhs.dtype not in [jnp.bfloat16, jnp.float32]:
