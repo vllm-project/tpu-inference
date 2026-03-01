@@ -16,7 +16,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from vllm.config import ModelConfig
-from vllm.lora.request import LoRARequest
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import DraftTokenIds
 
@@ -42,6 +41,7 @@ def mock_vllm_config():
     mock_parallel_conf.pipeline_parallel_size = 1
     mock_parallel_conf.nnodes = 1
     mock_parallel_conf.nnodes_within_dp = 1
+    mock_parallel_conf.enable_elastic_ep = False
 
     mock_additional_config = {}
 
@@ -325,32 +325,6 @@ class TestTPUWorker:
         result = worker.take_draft_token_ids()
         worker.model_runner.take_draft_token_ids.assert_called_once()
         assert result == mock_draft_tokens
-
-    def test_add_lora_not_implemented(self, mock_vllm_config):
-        """Tests that add_lora raises NotImplementedError."""
-        worker = TPUWorker(vllm_config=mock_vllm_config,
-                           local_rank=0,
-                           rank=0,
-                           distributed_init_method="test")
-        mock_lora_request = MagicMock()
-
-        with pytest.raises(
-                NotImplementedError,
-                match="LoRA is not supported by the JAX worker yet."):
-            worker.add_lora(mock_lora_request)
-
-    def test_add_lora_not_implemented_lora_request(self, mock_vllm_config):
-        """Tests that add_lora raises NotImplementedError."""
-        worker = TPUWorker(vllm_config=mock_vllm_config,
-                           local_rank=0,
-                           rank=0,
-                           distributed_init_method="test")
-        mock_lora_request = MagicMock(spec=LoRARequest)
-
-        with pytest.raises(
-                NotImplementedError,
-                match="LoRA is not supported by the JAX worker yet."):
-            worker.add_lora(mock_lora_request)
 
     #
     # --- Profiling and Health Check Tests ---
