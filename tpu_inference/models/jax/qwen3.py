@@ -97,15 +97,16 @@ class Qwen3Attention(JaxModule):
             quant_config=quant_config,
             prefix=prefix + ".q_proj",
         )
-        self.q_norm = JaxRmsNorm(
-            self.head_dim,
-            epsilon=self.rms_norm_eps,
-            dtype=dtype,
-            scale_init=nnx.with_partitioning(init_fn, (None, )),
-            rngs=rng,
-            quant_config=quant_config,
-            prefix=prefix + ".q_norm",
-        )
+        self.q_norm = JaxRmsNorm(self.head_dim,
+                                 epsilon=self.rms_norm_eps,
+                                 dtype=dtype,
+                                 scale_init=nnx.with_partitioning(
+                                     init_fn, (None, )),
+                                 rngs=rng,
+                                 quant_config=quant_config,
+                                 prefix=prefix + ".q_norm",
+                                 promote_dtype_for_stats=False)
+
         self.k_proj = JaxEinsum(
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
@@ -115,15 +116,15 @@ class Qwen3Attention(JaxModule):
             quant_config=quant_config,
             prefix=prefix + ".k_proj",
         )
-        self.k_norm = JaxRmsNorm(
-            self.head_dim,
-            epsilon=self.rms_norm_eps,
-            dtype=dtype,
-            scale_init=nnx.with_partitioning(init_fn, (None, )),
-            rngs=rng,
-            quant_config=quant_config,
-            prefix=prefix + ".k_norm",
-        )
+        self.k_norm = JaxRmsNorm(self.head_dim,
+                                 epsilon=self.rms_norm_eps,
+                                 dtype=dtype,
+                                 scale_init=nnx.with_partitioning(
+                                     init_fn, (None, )),
+                                 rngs=rng,
+                                 quant_config=quant_config,
+                                 prefix=prefix + ".k_norm",
+                                 promote_dtype_for_stats=False)
         self.v_proj = JaxEinsum(
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
@@ -212,15 +213,15 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
 
-        self.input_layernorm = JaxRmsNorm(
-            hidden_size,
-            epsilon=rms_norm_eps,
-            dtype=dtype,
-            scale_init=nnx.with_partitioning(init_fn, (None, )),
-            rngs=rng,
-            quant_config=quant_config,
-            prefix=prefix + ".input_layernorm",
-        )
+        self.input_layernorm = JaxRmsNorm(hidden_size,
+                                          epsilon=rms_norm_eps,
+                                          dtype=dtype,
+                                          scale_init=nnx.with_partitioning(
+                                              init_fn, (None, )),
+                                          rngs=rng,
+                                          quant_config=quant_config,
+                                          prefix=prefix + ".input_layernorm",
+                                          promote_dtype_for_stats=False)
         self.self_attn = Qwen3Attention(config=config,
                                         dtype=dtype,
                                         rng=rng,
@@ -236,7 +237,7 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
             rngs=rng,
             quant_config=quant_config,
             prefix=prefix + ".post_attention_layernorm",
-        )
+            promote_dtype_for_stats=False)
         self.mlp = Qwen3MLP(
             config=config,
             dtype=dtype,
@@ -290,15 +291,15 @@ class Qwen3Model(Qwen2Model):
                 prefix=f"{prefix}.layers.{layer_index}",
             ))
         if self.is_last_rank:
-            self.norm = JaxRmsNorm(
-                hidden_size,
-                epsilon=rms_norm_eps,
-                dtype=dtype,
-                scale_init=nnx.with_partitioning(init_fn, (None, )),
-                rngs=rng,
-                quant_config=vllm_config.quant_config,
-                prefix=prefix + ".norm",
-            )
+            self.norm = JaxRmsNorm(hidden_size,
+                                   epsilon=rms_norm_eps,
+                                   dtype=dtype,
+                                   scale_init=nnx.with_partitioning(
+                                       init_fn, (None, )),
+                                   rngs=rng,
+                                   quant_config=vllm_config.quant_config,
+                                   prefix=prefix + ".norm",
+                                   promote_dtype_for_stats=False)
         else:
             self.norm = PPMissingLayer()
 
