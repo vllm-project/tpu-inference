@@ -12,10 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from abc import ABC, abstractmethod
 from typing import Optional
 
+import jax
+
+from tpu_inference.layers.common.quantization.configs import \
+    QuantLinearConfig as CommonQuantLinearConfig
 from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 
 
@@ -91,3 +97,82 @@ class QuantizationConfig(ABC):
             is_skipped = match_func(prefix, ignored_layers)
 
         return is_skipped
+
+
+def _to_partition_spec(sharding) -> jax.sharding.PartitionSpec:
+    """Convert a sharding value to a PartitionSpec.
+
+    Handles NamedSharding (extracts .spec), raw tuples/lists from
+    nnx.with_partitioning, and passthrough for existing PartitionSpec.
+    """
+    if isinstance(sharding, jax.sharding.NamedSharding):
+        return sharding.spec
+    if isinstance(sharding, jax.sharding.PartitionSpec):
+        return sharding
+    if isinstance(sharding, (tuple, list)):
+        return jax.sharding.PartitionSpec(*sharding)
+    return jax.sharding.PartitionSpec()
+
+
+class QuantLinearConfig(CommonQuantLinearConfig):
+    """Quantization config for jax linear layers."""
+
+    def __init__(self, layer: JaxEinsum, *, enable_sp: bool):
+        # Update config attributes by parsing einsum string and weight sharding.
+        # Parse the einsum string to classify axes:
+        #   - contracting: in both operands but NOT in output (summed over)
+        #   - batch: in both operands AND in output (paired/indexed)
+        #   - free: in only one operand and in output
+        einsum_str = layer.einsum_str
+        weight = layer.weight
+
+        lhs, output_axis = einsum_str.replace(" ", "").split("->")
+        x_axis, w_axis = lhs.split(",")
+
+        shared_axes = set(x_axis) & set(w_axis)
+        batch_axes = shared_axes & set(output_axis)
+        contracting_axes = shared_axes - batch_axes
+
+        self.in_features = tuple(weight.shape[i] for i, c in enumerate(w_axis)
+                                 if c in contracting_axes)
+
+        # Extract and fuse sharding per axis category.
+        sharding = _to_partition_spec(getattr(weight, "sharding", ()))
+        sharding = sharding + (None, ) * (len(weight.shape) - len(sharding))
+
+        in_sharding = set(s for i, s in enumerate(sharding)
+                          if w_axis[i] in contracting_axes and s is not None)
+        out_sharding = set(
+            s for i, s in enumerate(sharding)
+            if w_axis[i] not in (contracting_axes
+                                 | batch_axes) and s is not None)
+        batch_sharding_set = set(s for i, s in enumerate(sharding)
+                                 if w_axis[i] in batch_axes and s is not None)
+
+        assert len(in_sharding) <= 1 and len(out_sharding) <= 1, \
+            f"Cannot fuse sharding {getattr(weight, 'sharding', ())=} into 2D weight sharding for {einsum_str}"
+
+        self.out_features = tuple(
+            weight.shape[i] for i, c in enumerate(w_axis)
+            if c not in contracting_axes and c not in batch_axes)
+        self.batch_features = tuple(weight.shape[i]
+                                    for i, c in enumerate(w_axis)
+                                    if c in batch_axes)
+
+        self.out_features_sharding = (next(iter(out_sharding), None), )
+        self.in_features_sharding = (next(iter(in_sharding), None), )
+        self.batch_sharding = tuple(batch_sharding_set)
+
+        output_sizes = [math.prod(self.out_features)]
+        super().__init__(enable_sp=enable_sp, output_sizes=output_sizes)
+
+        # Update weight_sharding and bias_sharding for 2D matmul compatibility
+        if self.batch_features:
+            self.weight_sharding = _to_partition_spec(
+                weight.get_metadata().get("sharding", ()))
+        else:
+            self.weight_sharding = jax.sharding.PartitionSpec(
+                *(self.out_features_sharding + self.in_features_sharding))
+
+        self.bias_sharding = jax.sharding.PartitionSpec(
+            *self.out_features_sharding)
