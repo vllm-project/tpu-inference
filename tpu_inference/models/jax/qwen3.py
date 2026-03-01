@@ -172,6 +172,7 @@ class Qwen3Attention(JaxModule):
 
         # v: (T, K, H)
         v = self.v_proj(x)
+        v = v.astype(k.dtype)
         # o: (T, N, H)
         q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
