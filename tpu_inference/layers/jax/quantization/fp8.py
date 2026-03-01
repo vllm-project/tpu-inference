@@ -76,7 +76,7 @@ def load_fp8_weight(jax_param: nnx.Param, torch_weight: torch.Tensor,
         )
         jax_weight = jax_weight.astype(jax_param[...].dtype)
 
-    jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
+    jax_param[...] = shard_put(jax_weight, spec, mesh=mesh)
 
 
 class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
@@ -440,7 +440,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                     E, K, N = param[...].shape
                     value = init_fn(rngs.params(), (E, K, N),
                                     jnp.float8_e4m3fn)
-                    param.value = value
+                    param[...] = value
 
                     scale_value = jnp.zeros((E, (K + block_k - 1) // block_k,
                                              (N + block_n - 1) // block_n),
