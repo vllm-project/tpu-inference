@@ -43,8 +43,8 @@ from tpu_inference.layers.jax.quantization.unquantized import (
     UnquantizedFusedMoEMethod, UnquantizedLinearMethod)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
-    cpu_mesh, cpu_mesh_context, jax_array_from_reshaped_torch,
-    load_nnx_param_from_reshaped_torch, shard_put)
+    jax_array_from_reshaped_torch, load_nnx_param_from_reshaped_torch,
+    shard_put)
 
 logger = init_logger(__name__)
 
@@ -286,6 +286,14 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             # Batched case: weight stays in FP8. No blockwise processing
             # needed — the batched matmul uses dot_general with FP8 natively.
             return True
+
+        if not layer.weight.get_metadata(
+                "_is_loaded",
+                False) or not layer.weight_scale_inv.get_metadata(
+                    "_is_loaded", False):
+            # Weight and scale could spread across multiple files,
+            # so we only process once both of them are loaded.
+            return False
 
         # Do the re-quant process on CPU to avoid OOM on device.
         with cpu_mesh_context():
@@ -553,6 +561,10 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                     weight_block_size=weight_block_size,
                 )
 
+            del layer.kernel_gating_EDF
+            del layer.kernel_up_proj_EDF
+            delattr(layer, gating_scale_name)
+            delattr(layer, up_scale_name)
             # TODO (jacobplatin): we probably want to make the sharding configurable
             layer.kernel_gating_upproj_EDF = nnx.Param(
                 shard_put(weights.w13_weight, shardings=layer.edf_sharding))
@@ -567,11 +579,6 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 layer, f"kernel_down_proj_EFD_{self.weight_scale_name}",
                 nnx.Param(
                     shard_put(weights.w2_weight_scale, shardings=(None, ))))
-
-            del layer.kernel_gating_EDF
-            del layer.kernel_up_proj_EDF
-            delattr(layer, gating_scale_name)
-            delattr(layer, up_scale_name)
         else:
             raise NotImplementedError(
                 f"Unsupported moe backend: {layer.moe_backend}! Currently supported: {FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS}"
