@@ -788,6 +788,7 @@ def load_nnx_param_from_reshaped_torch(
 
     try:
         jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
+        jax_param.set_metadata('_is_loaded', True)
     except Exception as e:
         raise RuntimeError(
             f"Failed to load weight '{param_name}' with shape {jax_weight.shape} into param with shape {jax_param.value.shape}"
