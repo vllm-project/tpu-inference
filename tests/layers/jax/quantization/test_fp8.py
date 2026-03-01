@@ -68,18 +68,23 @@ def quantize_to_fp8_block_3d(weight: jax.Array,
     return w_q, scale_blocks
 
 
-def sharding_to_tuple(sharding):
+def sharding_to_tuple(sharding, ndim=2):
     if sharding is None:
         return None
     if isinstance(sharding, tuple):
-        return sharding
-    if isinstance(sharding, jax.sharding.NamedSharding):
-        return tuple(s for s in sharding.spec)
-    if isinstance(sharding, jax.sharding.PartitionSpec):
-        return tuple(s for s in sharding)
-    if isinstance(sharding, jax.sharding.SingleDeviceSharding):
-        return ()
-    raise ValueError(f"Unsupported sharding type: {type(sharding)}")
+        res = sharding
+    elif isinstance(sharding, jax.sharding.NamedSharding):
+        res = tuple(s for s in sharding.spec)
+    elif isinstance(sharding, jax.sharding.PartitionSpec):
+        res = tuple(s for s in sharding)
+    elif isinstance(sharding, jax.sharding.SingleDeviceSharding):
+        res = ()
+    else:
+        raise ValueError(f"Unsupported sharding type: {type(sharding)}")
+
+    if len(res) < ndim:
+        res = res + (None,) * (ndim - len(res))
+    return res
 
 
 @pytest.fixture(scope="module")
