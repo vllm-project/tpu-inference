@@ -30,6 +30,7 @@ logger = init_logger(__name__)
 init_fn = nnx.initializers.uniform()
 
 DEFAULT_BLOCK_K_MAJOR = 128
+VISION_GRID_SIZE = 48
 
 
 class _Qwen3VLConfigAdapter:
@@ -48,7 +49,9 @@ class _Qwen3VLConfigAdapter:
             except AttributeError:
                 pass
         raise AttributeError(
-            f"'{type(self._config).__name__}' object has no attribute '{name}'"
+            f"Attribute '{name}' not found in either"
+            f" '{type(self._config).__name__}' or"
+            f" '{type(self._text_config).__name__}'"
         )
 
 
@@ -754,7 +757,7 @@ class Qwen3VLVisionPatchEmbed(nnx.Module):
             out_features=hidden_size,
             kernel_size=kernel_size,
             strides=kernel_size,
-            use_bias=True,
+            use_bias=True, # Unlike 2.5VL, uses bias for the convolution.
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(
                 init_fn, (None, None, None, None, "model")
@@ -779,7 +782,6 @@ class Qwen3VLVisionPatchEmbed(nnx.Module):
         x = x.reshape(
             L, C, self.temporal_patch_size, self.patch_size, self.patch_size
         )
-        # L, T, H, W, C
         x = jnp.transpose(x, (0, 2, 3, 4, 1))
         x = self.proj(x)
         # After conv, shape is (L, 1, 1, 1, hidden_size)
@@ -1003,8 +1005,8 @@ class Qwen3VLVisionPatchMerger(nnx.Module):
 
     def __init__(
         self,
-        d_model: int, # in
-        context_dim: int, # out
+        d_model: int,
+        context_dim: int,
         spatial_merge_size: int,
         dtype: jnp.dtype,
         rngs: nnx.Rngs,
@@ -1058,7 +1060,7 @@ class Qwen3VLVisionPatchMerger(nnx.Module):
             x = x.reshape(-1, self.hidden_size)
 
         x = self.linear_fc1(x)
-        x = nnx.gelu(x) # make this configurable?
+        x = nnx.gelu(x)
         x = self.linear_fc2(x)
         return x
 
@@ -1102,7 +1104,7 @@ class Qwen3VLVisionTransformer(nnx.Module):
 
         # Learned PE, 48 x 48 H W
         num_position_embeddings = getattr(
-            vision_config, "num_position_embeddings", 2304
+            vision_config, "num_position_embeddings", VISION_GRID_SIZE * VISION_GRID_SIZE
         )
         self.pos_embed = nnx.Embed(
             num_embeddings=num_position_embeddings,
