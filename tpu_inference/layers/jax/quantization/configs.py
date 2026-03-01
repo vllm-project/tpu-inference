@@ -21,7 +21,6 @@ import jax
 from tpu_inference.layers.common.quantization.configs import \
     QuantLinearConfig as CommonQuantLinearConfig
 from tpu_inference.layers.jax import JaxModule
-from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 
 
@@ -117,7 +116,10 @@ def _to_partition_spec(sharding) -> jax.sharding.PartitionSpec:
 class QuantLinearConfig(CommonQuantLinearConfig):
     """Quantization config for jax linear layers."""
 
-    def __init__(self, layer: JaxEinsum, *, enable_sp: bool):
+    def __init__(self, layer, *, enable_sp: bool):
+        # Avoid circular import.
+        from tpu_inference.layers.jax.linear import JaxEinsum
+        assert isinstance(layer, JaxEinsum)
         # Update config attributes by parsing einsum string and weight sharding.
         # Parse the einsum string to classify axes:
         #   - contracting: in both operands but NOT in output (summed over)
