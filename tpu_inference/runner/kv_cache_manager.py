@@ -151,11 +151,16 @@ class KVCacheManager:
                                 block_size, num_kv_heads, head_size)
         else:
             # Else propagate attention modules from compilation config.
-            attn = get_layers_from_vllm_config(self.runner.vllm_config,
-                                               Attention)
-            mla = get_layers_from_vllm_config(self.runner.vllm_config,
-                                              MLAAttention)
-            layers = attn | mla
+            layers = {}
+            attention_types = [Attention, MLAAttention]
+
+            for attn_cls in attention_types:
+                # Get the layers for the current class
+                new_layers = get_layers_from_vllm_config(
+                    self.runner.vllm_config, attn_cls)
+
+                # Add them to the main dictionary (equivalent to your | operator)
+                layers.update(new_layers)
 
             logger.warning(f"Compilation num_layers = {len(layers.items())}")
             for layer_name, attn_module in layers.items():
@@ -288,8 +293,8 @@ class KVCacheManager:
     def delete_kv_cache(self) -> None:
         """Delete KV cache JAX arrays to free HBM.
         This explicitly deletes all KV cache JAX arrays, clearing the HBM
-        they occupy. 
-        
+        they occupy.
+
         1. Avoid serving stale KV cache values from a previous model version
            (since prefix cache keys remain constant but values become invalid
            after weight updates).

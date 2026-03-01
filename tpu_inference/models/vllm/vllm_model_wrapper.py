@@ -47,7 +47,7 @@ from tpu_inference.distributed.jax_parallel_state import \
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.mla_attention import \
-    TPUMultiHeadLatentAttentionWrapper
+    VllmTPUMultiHeadLatentAttentionWrapper
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     shard_model_to_tpu
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
@@ -114,7 +114,7 @@ class VllmModelWrapper:
         self._apply_pp_patch()
 
         MultiHeadLatentAttentionWrapper.register_oot(
-            TPUMultiHeadLatentAttentionWrapper)
+            VllmTPUMultiHeadLatentAttentionWrapper)
 
     def _apply_pp_patch(self):
         # patch `get_pp_group` in vLLM to jax's get_pp_group.

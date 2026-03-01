@@ -25,8 +25,8 @@ from torchax.interop import torch_view
 from vllm.v1.attention.backend import AttentionType
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.vllm.attention import (PallasAttentionBackend,
-                                                 PallasAttentionBackendImpl)
+from tpu_inference.layers.vllm.backends.flash_attn import (
+    PallasAttentionBackend, PallasAttentionBackendImpl)
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     set_vllm_model_wrapper_context
 from tpu_inference.runner.kv_cache import get_kv_cache_shape_with_mesh

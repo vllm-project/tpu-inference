@@ -19,27 +19,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
-import torchax
 from jax.sharding import Mesh
-from torchax.interop import torch_view
-from vllm.config import CacheConfig, VllmConfig
-from vllm.forward_context import set_forward_context
+from vllm.v1.attention.backend import AttentionType
 
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.vllm.mla_attention import TPUMLAAttention
-from tpu_inference.models.vllm.vllm_model_wrapper_context import \
-    set_vllm_model_wrapper_context
-
-TOTAL_TOKENS = 10
-NUM_SEQS = 2
-MAX_NUM_SEQS = 4
-NUM_HEADS = 4
-KV_LORA_RANK = 64
-QK_NOPE_HEAD_DIM = 32
-QK_ROPE_HEAD_DIM = 16
-V_HEAD_DIM = 32
-SCALE = 0.1
-PREFIX = "model.layers.0.attn"
+from tpu_inference.layers.vllm.mla_attention import (
+    TPUMLAAttention, VllmTPUMultiHeadLatentAttentionWrapper)
+from tpu_inference.models.vllm.vllm_model_wrapper_context import (
+    get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 
 
 @pytest.fixture
@@ -51,243 +37,268 @@ def mesh():
     return Mesh(devices.reshape((-1, 1, 1)), ("data", "attn_dp", "model"))
 
 
-@pytest.fixture
-def mock_vllm_config():
-    """Mocks the global vLLM config required by TPUMLAAttention."""
-    # Patch the function in the module where it is used (mla_attention.py),
-    # because it was imported using 'from ... import ...'
-    with patch(
-            "tpu_inference.layers.vllm.mla_attention.get_current_vllm_config"
-    ) as mock_get_cfg:
-        mock_config = MagicMock(spec=VllmConfig)
-        mock_config.compilation_config.static_forward_context = {}
-        mock_config.parallel_config.pipeline_parallel_size = 1
-        mock_config.parallel_config.data_parallel_size = 1
-        mock_get_cfg.return_value = mock_config
-        yield mock_config
-
-
-def create_mla_inputs(
-    mesh: Mesh,
-    num_heads: int = NUM_HEADS,
-    qk_nope_dim: int = QK_NOPE_HEAD_DIM,
-    qk_rope_dim: int = QK_ROPE_HEAD_DIM,
-    kv_lora_rank: int = KV_LORA_RANK,
-    dtype: jnp.dtype = jnp.bfloat16,
-):
-    key = jax.random.key(0)
-
-    # Inputs to forward
-    # q: (batch, num_heads, qk_nope + qk_rope)
-    q = jax.random.uniform(
-        key, (TOTAL_TOKENS, num_heads, qk_nope_dim + qk_rope_dim), dtype=dtype)
-    # kv_c_normed: (batch, 1, kv_lora_rank) - usually expanded in VLLM before calling forward
-    kv_c_normed = jax.random.uniform(key, (TOTAL_TOKENS, 1, kv_lora_rank),
-                                     dtype=dtype)
-    # k_pe: (batch, 1, qk_rope_dim)
-    k_pe = jax.random.uniform(key, (TOTAL_TOKENS, 1, qk_rope_dim), dtype=dtype)
-
-    # Convert to torch
-    q = torch_view(q)
-    kv_c_normed = torch_view(kv_c_normed)
-    k_pe = torch_view(k_pe)
-
-    # Dummy KV Cache (Shape depends on backend implementation, creating generic placeholder)
-    # Assuming standard KV cache structure for tests
-    kv_cache = jax.random.normal(key, (1, 100, 1024), dtype=dtype)
-
-    # Metadata
-    positions = jnp.ones((TOTAL_TOKENS, ), dtype=jnp.int32)
-    block_tables = jnp.zeros((MAX_NUM_SEQS * 8), dtype=jnp.int32).reshape(-1)
-    seq_lens = jnp.array([5, 5, 0, 0], dtype=jnp.int32)
-    query_start_loc = jnp.array([0, 5, 10, 10, 10], dtype=jnp.int32)
-    request_distribution = jnp.array([0, 0, NUM_SEQS], dtype=jnp.int32)
-
-    metadata = AttentionMetadata(
-        input_positions=positions,
-        block_tables=block_tables,
-        seq_lens=seq_lens,
-        query_start_loc=query_start_loc,
-        request_distribution=request_distribution,
-    )
-
-    return q, kv_c_normed, k_pe, kv_cache, metadata
-
-
 class TestTPUMLAAttention:
 
-    def test_init_valid_params(self, mock_vllm_config):
-        mock_kv_b_proj = MagicMock()
+    @patch(
+        "vllm.model_executor.layers.attention.mla_attention.MLAAttention.__init__",
+        autospec=True)
+    def test_init_auto_dtype(self, mock_super_init):
+        # Emulate how vLLM initializes the cache type
+        def side_effect(self, *args, **kwargs):
+            self.kv_cache_dtype = "auto"
 
+        mock_super_init.side_effect = side_effect
+
+        kv_b_proj = MagicMock()
         attn = TPUMLAAttention(
-            num_heads=NUM_HEADS,
-            scale=SCALE,
-            qk_nope_head_dim=QK_NOPE_HEAD_DIM,
-            qk_rope_head_dim=QK_ROPE_HEAD_DIM,
-            v_head_dim=V_HEAD_DIM,
+            num_heads=8,
+            scale=1.0,
+            qk_nope_head_dim=64,
+            qk_rope_head_dim=32,
+            v_head_dim=64,
             q_lora_rank=None,
-            kv_lora_rank=KV_LORA_RANK,
-            kv_b_proj=mock_kv_b_proj,
-            prefix=PREFIX,
+            kv_lora_rank=32,
+            kv_b_proj=kv_b_proj,
+            prefix="test",
         )
 
-        assert attn.num_heads == NUM_HEADS
-        assert attn.qk_nope_head_dim == QK_NOPE_HEAD_DIM
-        assert attn.qk_rope_head_dim == QK_ROPE_HEAD_DIM
-        assert attn.v_head_dim == V_HEAD_DIM
-        assert attn.kv_lora_rank == KV_LORA_RANK
-        assert attn.layer_name == PREFIX
-        assert attn.num_kv_heads == 1
-        # Check registration in config
-        assert mock_vllm_config.compilation_config.static_forward_context[
-            PREFIX] == attn
-
-    def test_init_duplicate_prefix_raises_error(self, mock_vllm_config):
-        # Pre-populate context to trigger error
-        mock_vllm_config.compilation_config.static_forward_context[
-            PREFIX] = "existing"
-        mock_kv_b_proj = MagicMock()
-
-        with pytest.raises(ValueError, match="Duplicate layer name"):
-            TPUMLAAttention(
-                num_heads=NUM_HEADS,
-                scale=SCALE,
-                qk_nope_head_dim=QK_NOPE_HEAD_DIM,
-                qk_rope_head_dim=QK_ROPE_HEAD_DIM,
-                v_head_dim=V_HEAD_DIM,
-                q_lora_rank=None,
-                kv_lora_rank=KV_LORA_RANK,
-                kv_b_proj=mock_kv_b_proj,
-                prefix=PREFIX,
-            )
-
-    def test_process_weights_after_loading(self, mock_vllm_config):
-        mock_kv_b_proj = MagicMock()
-        mock_kv_b_proj.quant_method = None
-        out_features = NUM_HEADS * (QK_NOPE_HEAD_DIM + V_HEAD_DIM)
-        in_features = KV_LORA_RANK
-
-        # Create a real parameter so .shape, .to(), and .T work correctly during the assertion
-        mock_kv_b_proj.weight = torch.nn.Parameter(
-            torch.randn(out_features, in_features))
-        mock_kv_b_proj.named_parameters.return_value = {
-            "weight": mock_kv_b_proj.weight
-        }.items()
-
-        attn = TPUMLAAttention(
-            num_heads=NUM_HEADS,
-            scale=SCALE,
-            qk_nope_head_dim=QK_NOPE_HEAD_DIM,
-            qk_rope_head_dim=QK_ROPE_HEAD_DIM,
-            v_head_dim=V_HEAD_DIM,
-            q_lora_rank=None,
-            kv_lora_rank=KV_LORA_RANK,
-            kv_b_proj=mock_kv_b_proj,
-            prefix=PREFIX,
-        )
-
-        with torchax.default_env():
-            attn.process_weights_after_loading(torch.float32)
-
-        # Check that kv_b_proj attributes were deleted
-        assert not hasattr(attn.kv_b_proj, "weight")
-        # Check that weights are frozen
-        assert not attn.W_UK_T.requires_grad
-        assert not attn.W_UV.requires_grad
-
-    @patch("vllm.config.get_current_vllm_config")
-    @patch("tpu_inference.layers.vllm.mla_attention.get_attention_context")
-    def test_forward(self, mock_get_attn_context, mock_get_current_vllm_config,
-                     mesh, mock_vllm_config):
-        out_features = NUM_HEADS * (QK_NOPE_HEAD_DIM + V_HEAD_DIM)
-        in_features = KV_LORA_RANK
-
-        mock_kv_b_proj = MagicMock()
-        mock_kv_b_proj.quant_method = None
-        mock_kv_b_proj.weight = torch.nn.Parameter(
-            torch.randn(out_features, in_features))
-        mock_kv_b_proj.named_parameters.return_value = {
-            "weight": mock_kv_b_proj.weight
-        }.items()
-
-        with torchax.default_env():
-            attn = TPUMLAAttention(
-                num_heads=NUM_HEADS,
-                scale=SCALE,
-                qk_nope_head_dim=QK_NOPE_HEAD_DIM,
-                qk_rope_head_dim=QK_ROPE_HEAD_DIM,
-                v_head_dim=V_HEAD_DIM,
-                q_lora_rank=None,
-                kv_lora_rank=KV_LORA_RANK,
-                kv_b_proj=mock_kv_b_proj,
-                prefix=PREFIX,
-            )
-
-            attn.process_weights_after_loading(torch.float32)
-
-            # Inputs
-            q, kv_c_normed, k_pe, kv_cache, metadata = create_mla_inputs(mesh)
-
-            mock_get_attn_context.return_value = (metadata, None, None, None)
-            mock_get_current_vllm_config.return_value = mock_vllm_config
-
-        with torchax.default_env(), set_vllm_model_wrapper_context(
-                kv_caches=[kv_cache],
-                mesh=mesh,
-                layer_name_to_kvcache_index={PREFIX: 0}), set_forward_context(
-                    attn_metadata=metadata, vllm_config=mock_vllm_config):
-
-            output = attn.forward(q, kv_c_normed, k_pe)
-
-        # Verify output shape
-        # Output should be (TOTAL_TOKENS, NUM_HEADS * V_HEAD_DIM) after W_UV projection
-        expected_shape = (TOTAL_TOKENS, NUM_HEADS * V_HEAD_DIM)
-        assert output.shape == expected_shape
-        assert isinstance(output, torch.Tensor)
+        # Validate that the fallback attributes are set correctly
+        assert attn.kv_sharing_target_layer_name is None
+        assert attn.attn_type == AttentionType.DECODER
+        assert attn.sliding_window is None
+        assert attn.kv_cache_quantized_dtype is None
 
     @patch(
-        "vllm.model_executor.layers.attention.attention.get_attention_context")
-    def test_forward_with_quantization(self, mock_get_attn_context, mesh,
-                                       mock_vllm_config):
-        mock_kv_b_proj = MagicMock()
-        cache_config = MagicMock(spec=CacheConfig)
-        cache_config.cache_dtype = "fp8"
-        cache_config.calculate_kv_scales = False
+        "vllm.model_executor.layers.attention.mla_attention.MLAAttention.__init__",
+        autospec=True)
+    def test_init_fp8_dtype(self, mock_super_init):
 
+        def side_effect(self, *args, **kwargs):
+            self.kv_cache_dtype = "fp8"
+
+        mock_super_init.side_effect = side_effect
+
+        kv_b_proj = MagicMock()
         attn = TPUMLAAttention(
-            num_heads=NUM_HEADS,
-            scale=SCALE,
-            qk_nope_head_dim=QK_NOPE_HEAD_DIM,
-            qk_rope_head_dim=QK_ROPE_HEAD_DIM,
-            v_head_dim=V_HEAD_DIM,
+            num_heads=8,
+            scale=1.0,
+            qk_nope_head_dim=64,
+            qk_rope_head_dim=32,
+            v_head_dim=64,
             q_lora_rank=None,
-            kv_lora_rank=KV_LORA_RANK,
-            kv_b_proj=mock_kv_b_proj,
-            cache_config=cache_config,
-            prefix=PREFIX,
+            kv_lora_rank=32,
+            kv_b_proj=kv_b_proj,
+            prefix="test",
         )
 
-        # Setup weights
-        target_proj_dim = 64
-        attn.W_UK_T = torch.nn.Parameter(
-            torch.randn(NUM_HEADS, QK_NOPE_HEAD_DIM, target_proj_dim))
-        attn.W_UV = torch.nn.Parameter(
-            torch.randn(NUM_HEADS, KV_LORA_RANK, V_HEAD_DIM))
-        attn._q_scale_float = 1.0
-        attn._k_scale_float = 1.0
-        attn._v_scale_float = 1.0
+        assert attn.kv_cache_quantized_dtype == jnp.float8_e4m3fn
 
-        q, kv_c_normed, k_pe, kv_cache, metadata = create_mla_inputs(
-            mesh, dtype=jnp.float32)
+    @patch(
+        "vllm.model_executor.layers.attention.mla_attention.MLAAttention.__init__",
+        autospec=True)
+    def test_process_weights_after_loading(self, mock_super_init):
 
-        # mock_get_attn_context.return_value = (metadata, None, None, None)
+        def side_effect(self, *args, **kwargs):
+            self.kv_cache_dtype = "auto"
 
-        with torchax.default_env(), set_vllm_model_wrapper_context(
+        mock_super_init.side_effect = side_effect
+
+        # Mock a linear layer (to simulate column parallel linear)
+        kv_b_proj = torch.nn.Linear(10, 10)
+        attn = TPUMLAAttention(
+            num_heads=8,
+            scale=1.0,
+            qk_nope_head_dim=64,
+            qk_rope_head_dim=32,
+            v_head_dim=64,
+            q_lora_rank=None,
+            kv_lora_rank=32,
+            kv_b_proj=kv_b_proj,
+            prefix="test",
+        )
+
+        attn.W_UK_T = torch.rand(10, 10)
+        attn.W_UV = torch.rand(10, 10)
+        attn.kv_b_proj = MagicMock()
+
+        with patch(
+                "vllm.model_executor.layers.attention.mla_attention.MLAAttention.process_weights_after_loading"
+        ) as mock_super_process:
+            attn.process_weights_after_loading(torch.float32)
+
+            mock_super_process.assert_called_once_with(torch.float32)
+
+            # W_UK_T and W_UV should now be un-grad Parameters
+            assert isinstance(attn.W_UK_T, torch.nn.Parameter)
+            assert not attn.W_UK_T.requires_grad
+            assert isinstance(attn.W_UV, torch.nn.Parameter)
+            assert not attn.W_UV.requires_grad
+
+    @patch("tpu_inference.layers.vllm.mla_attention.get_attention_context")
+    @patch(
+        "vllm.model_executor.layers.attention.mla_attention.MLAAttention.__init__",
+        autospec=True)
+    def test_forward(self, mock_super_init, mock_get_attention_context, mesh):
+
+        def side_effect(self, *args, **kwargs):
+            self.kv_cache_dtype = "auto"
+
+        mock_super_init.side_effect = side_effect
+
+        attn = TPUMLAAttention(
+            num_heads=8,
+            scale=1.0,
+            qk_nope_head_dim=64,
+            qk_rope_head_dim=32,
+            v_head_dim=64,
+            q_lora_rank=None,
+            kv_lora_rank=32,
+            kv_b_proj=MagicMock(),
+            prefix="test_layer",
+        )
+
+        attn.calculate_kv_scales = False
+        attn.layer_name = "test_layer"
+        attn.impl = MagicMock()
+
+        mock_outputs = jnp.zeros((1, 10))
+        mock_new_kv_cache = jnp.zeros((10, 10))
+        attn.impl.forward.return_value = (mock_outputs, mock_new_kv_cache)
+
+        mock_attn_metadata = MagicMock()
+        mock_get_attention_context.return_value = (mock_attn_metadata, None,
+                                                   None, None)
+
+        q = torch.rand(1, 10)
+        kv_c_normed = torch.rand(1, 10)
+        k_pe = torch.rand(1, 10)
+
+        kv_cache = jnp.zeros((10, 10))
+
+        with set_vllm_model_wrapper_context(
                 kv_caches=[kv_cache],
                 mesh=mesh,
-                layer_name_to_kvcache_index={PREFIX: 0}), set_forward_context(
-                    attn_metadata=metadata, vllm_config=mock_vllm_config):
+                layer_name_to_kvcache_index={"test_layer": 0}):
+            outputs = attn.forward(q, kv_c_normed, k_pe)
 
-            output = attn.forward(q, kv_c_normed, k_pe)
+            mock_get_attention_context.assert_called_once_with("test_layer")
+            attn.impl.forward.assert_called_once_with(q, kv_c_normed, k_pe,
+                                                      kv_cache,
+                                                      mock_attn_metadata, mesh,
+                                                      attn)
 
-        assert output.shape == (TOTAL_TOKENS, NUM_HEADS * V_HEAD_DIM)
+            assert isinstance(outputs, torch.Tensor)
+            context = get_vllm_model_wrapper_context()
+            assert context.kv_caches[0] is mock_new_kv_cache
+
+    @patch("torch.ops.vllm.maybe_calc_kv_scales", create=True)
+    @patch("tpu_inference.layers.vllm.mla_attention.get_attention_context")
+    @patch(
+        "vllm.model_executor.layers.attention.mla_attention.MLAAttention.__init__",
+        autospec=True)
+    def test_forward_calculates_kv_scales(self, mock_super_init,
+                                          mock_get_attention_context,
+                                          mock_maybe_calc_kv_scales, mesh):
+
+        def side_effect(self, *args, **kwargs):
+            self.kv_cache_dtype = "auto"
+
+        mock_super_init.side_effect = side_effect
+
+        attn = TPUMLAAttention(
+            num_heads=8,
+            scale=1.0,
+            qk_nope_head_dim=64,
+            qk_rope_head_dim=32,
+            v_head_dim=64,
+            q_lora_rank=None,
+            kv_lora_rank=32,
+            kv_b_proj=MagicMock(),
+            prefix="test_layer",
+        )
+
+        attn.calculate_kv_scales = True
+        attn.layer_name = "test_layer"
+        attn.impl = MagicMock()
+        attn.impl.forward.return_value = (jnp.zeros(1), jnp.zeros(1))
+        mock_get_attention_context.return_value = (MagicMock(), None, None,
+                                                   None)
+
+        q = torch.rand(1, 10)
+        kv_c_normed = torch.rand(1, 10)
+        k_pe = torch.rand(1, 10)
+
+        with set_vllm_model_wrapper_context(
+                kv_caches=[jnp.zeros(1)],
+                mesh=mesh,
+                layer_name_to_kvcache_index={"test_layer": 0}):
+            attn.forward(q, kv_c_normed, k_pe)
+
+            mock_maybe_calc_kv_scales.assert_called_once_with(
+                q, kv_c_normed, k_pe, "test_layer")
+
+
+class TestVllmTPUMultiHeadLatentAttentionWrapper:
+
+    @patch("tpu_inference.layers.vllm.mla_attention.TPUMLAAttention",
+           autospec=True)
+    def test_init(self, mock_tpu_mla_attn):
+        mla_modules = MagicMock()
+        mla_modules.fused_qkv_a_proj = "fused_qkv_a_proj"
+        mla_modules.kv_a_proj_with_mqa = "kv_a_proj_with_mqa"
+        mla_modules.q_a_layernorm = "q_a_layernorm"
+        mla_modules.q_b_proj = "q_b_proj"
+        mla_modules.q_proj = "q_proj"
+        mla_modules.kv_a_layernorm = "kv_a_layernorm"
+        mla_modules.kv_b_proj = MagicMock()
+        mla_modules.rotary_emb = "rotary_emb"
+        mla_modules.o_proj = "o_proj"
+        mla_modules.indexer = None
+        mla_modules.indexer_rotary_emb = "indexer_rotary_emb"
+        mla_modules.is_sparse = False
+
+        wrapper = VllmTPUMultiHeadLatentAttentionWrapper(
+            hidden_size=128,
+            num_heads=8,
+            scale=1.0,
+            qk_nope_head_dim=64,
+            qk_rope_head_dim=32,
+            v_head_dim=64,
+            q_lora_rank=None,
+            kv_lora_rank=32,
+            mla_modules=mla_modules,
+            cache_config=None,
+            quant_config=None,
+            prefix="test_wrapper",
+        )
+
+        assert wrapper.hidden_size == 128
+        assert wrapper.qk_head_dim == 96
+        assert wrapper.fused_qkv_a_proj == "fused_qkv_a_proj"
+        assert wrapper.kv_a_proj_with_mqa == "kv_a_proj_with_mqa"
+        assert wrapper.q_a_layernorm == "q_a_layernorm"
+        assert wrapper.q_b_proj == "q_b_proj"
+        assert wrapper.q_proj == "q_proj"
+        assert wrapper.kv_a_layernorm == "kv_a_layernorm"
+        assert wrapper.kv_b_proj == mla_modules.kv_b_proj
+        assert wrapper.rotary_emb == "rotary_emb"
+        assert wrapper.o_proj == "o_proj"
+        assert wrapper.indexer is None
+        assert wrapper.is_sparse is False
+
+        mock_tpu_mla_attn.assert_called_once_with(
+            num_heads=8,
+            scale=1.0,
+            qk_nope_head_dim=64,
+            qk_rope_head_dim=32,
+            v_head_dim=64,
+            q_lora_rank=None,
+            kv_lora_rank=32,
+            cache_config=None,
+            quant_config=None,
+            prefix="test_wrapper.attn",
+            kv_b_proj=mla_modules.kv_b_proj,
+            use_sparse=False,
+            indexer=None,
+        )
+        assert wrapper.mla_attn == mock_tpu_mla_attn.return_value
