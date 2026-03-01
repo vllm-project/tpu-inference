@@ -715,9 +715,42 @@ class DPScheduler(SchedulerInterface):
 
         combined_engine_outputs = defaultdict(list)
         rank_scheduler_stats: List[Optional[SchedulerStats]] = []
+
+        # # Gather per-rank results in parallel using threads to reduce
+        # # serial waits on the queues. Exceptions from threads are
+        # # captured and re-raised in the main thread.
+        # import threading
+
+        # results: List[Any] = [None] * self.dp_size
+        # exceptions: List[Optional[BaseException]] = [None] * self.dp_size
+
+        # def _fetch(rank_idx: int) -> None:
+        #     try:
+        #         results[rank_idx] = self._get_result_from_queue(
+        #             rank_idx, SchedulerCommand.UPDATE_FROM_OUTPUT)
+        #     except BaseException as e:
+        #         exceptions[rank_idx] = e
+
+        # threads: List[threading.Thread] = []
+        # for rank in range(self.dp_size):
+        #     t = threading.Thread(target=_fetch, args=(rank,))
+        #     t.start()
+        #     threads.append(t)
+
+        # for t in threads:
+        #     t.join()
+
+        # # If any thread raised, propagate the first exception.
+        # for exc in exceptions:
+        #     if exc is not None:
+        #         raise exc
+
+        # Process the collected per-rank outputs in original order.
         for rank in range(self.dp_size):
+            # rank_engine_outputs = results[rank]
             rank_engine_outputs = self._get_result_from_queue(
-                rank, SchedulerCommand.UPDATE_FROM_OUTPUT)
+            rank, SchedulerCommand.UPDATE_FROM_OUTPUT)
+
             rank_stats = None
             for client_idx, engine_output in rank_engine_outputs.items():
                 combined_engine_outputs[client_idx].append(engine_output)

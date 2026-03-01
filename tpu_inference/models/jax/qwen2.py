@@ -61,7 +61,7 @@ class Qwen2MLP(JaxModule):
             hidden_size,
             intermediate_size,
             use_bias=False,
-            dtype=dtype,
+            param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
             quant_config=quant_config,
@@ -71,7 +71,7 @@ class Qwen2MLP(JaxModule):
             hidden_size,
             intermediate_size,
             use_bias=False,
-            dtype=dtype,
+            param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
             quant_config=quant_config,
@@ -81,7 +81,7 @@ class Qwen2MLP(JaxModule):
             intermediate_size,
             hidden_size,
             use_bias=False,
-            dtype=dtype,
+            param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
             quant_config=quant_config,
@@ -116,12 +116,25 @@ class Qwen2Attention(JaxModule):
         self.head_dim_original = getattr(config, "head_dim",
                                          self.hidden_size // self.num_heads)
         self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
+        original_num_heads = self.num_heads
+        original_num_kv_heads = self.num_kv_heads
 
         sharding_size = mesh.shape["model"]
         self.num_heads = utils.get_padded_num_heads(self.num_heads,
                                                     sharding_size)
         self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,
                                                        sharding_size)
+        logger.info(
+            "[Qwen2Attention] prefix=%s | mesh.shape=%s | "
+            "sharding_size(mesh['model'])=%d | "
+            "num_heads: %d -> %d | num_kv_heads: %d -> %d | "
+            "head_dim: %d -> %d (padded) | hidden_size=%d",
+            prefix, dict(mesh.shape), sharding_size,
+            original_num_heads, self.num_heads,
+            original_num_kv_heads, self.num_kv_heads,
+            self.head_dim_original, self.head_dim,
+            self.hidden_size,
+        )
 
         self.mesh = mesh
 
@@ -129,7 +142,7 @@ class Qwen2Attention(JaxModule):
             "TD,DNH->TNH",
             (self.hidden_size, self.num_heads, self.head_dim),
             bias_shape=(self.num_heads, self.head_dim),
-            dtype=dtype,
+            param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             bias_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
@@ -140,7 +153,7 @@ class Qwen2Attention(JaxModule):
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
             bias_shape=(self.num_kv_heads, self.head_dim),
-            dtype=dtype,
+            param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             bias_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
@@ -151,7 +164,7 @@ class Qwen2Attention(JaxModule):
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
             bias_shape=(self.num_kv_heads, self.head_dim),
-            dtype=dtype,
+            param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             bias_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
@@ -161,13 +174,27 @@ class Qwen2Attention(JaxModule):
         self.o_proj = JaxEinsum(
             "TNH,NHD->TD",
             (self.num_heads, self.head_dim, self.hidden_size),
-            dtype=dtype,
+            param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
             rngs=rng,
             quant_config=quant_config,
             prefix=prefix + ".o_proj",
         )
-
+        logger.info(
+            "[Qwen2Attention] %s weight shapes | "
+            "q_proj.w: (%d, %d, %d) | q_proj.bias: (%d, %d) | "
+            "k_proj.w: (%d, %d, %d) | k_proj.bias: (%d, %d) | "
+            "v_proj.w: (%d, %d, %d) | v_proj.bias: (%d, %d) | "
+            "o_proj.w: (%d, %d, %d)",
+            prefix,
+            self.hidden_size, self.num_heads, self.head_dim,
+            self.num_heads, self.head_dim,
+            self.hidden_size, self.num_kv_heads, self.head_dim,
+            self.num_kv_heads, self.head_dim,
+            self.hidden_size, self.num_kv_heads, self.head_dim,
+            self.num_kv_heads, self.head_dim,
+            self.num_heads, self.head_dim, self.hidden_size,
+        )
         self._q_scale = 1.0
         self._k_scale = 1.0
         self._v_scale = 1.0
@@ -237,7 +264,7 @@ class Qwen2DecoderLayer(JaxModule):
         self.input_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
-            dtype=dtype,
+            param_dtype=dtype,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
@@ -253,7 +280,7 @@ class Qwen2DecoderLayer(JaxModule):
         self.post_attention_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
-            dtype=dtype,
+            param_dtype=dtype,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
@@ -310,7 +337,7 @@ class Qwen2Model(JaxModule):
             self.embed_tokens = JaxEmbed(
                 num_embeddings=vocab_size,
                 features=hidden_size,
-                dtype=dtype,
+                param_dtype=dtype,
                 embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
                 rngs=rng,
                 quant_config=vllm_config.quant_config,
@@ -336,7 +363,7 @@ class Qwen2Model(JaxModule):
             self.norm = JaxRmsNorm(
                 hidden_size,
                 epsilon=rms_norm_eps,
-                dtype=dtype,
+                param_dtype=dtype,
                 scale_init=nnx.with_partitioning(init_fn, (None, )),
                 rngs=rng,
                 quant_config=vllm_config.quant_config,
@@ -392,7 +419,7 @@ class Qwen2ForCausalLM(JaxModule, LoadableWithIterator):
             self.lm_head = JaxEinsum(
                 einsum_str="TD,DV->TV",
                 kernel_shape=(hidden_size, vocab_size),
-                dtype=model_config.dtype,
+                param_dtype=model_config.dtype,
                 rngs=rng,
                 quant_config=vllm_config.quant_config,
                 prefix="lm_head",
