@@ -23,6 +23,21 @@ from jax.experimental.layout import Layout, with_layout_constraint
 from jax.sharding import PartitionSpec
 
 
+def _get_local_positions(positions: jax.Array, x_TNH: jax.Array) -> jax.Array:
+    """Handles global positions with local x_TNH (e.g. Qwix or DPA)."""
+    if positions.shape[0] > x_TNH.shape[0]:
+        factor = positions.shape[0] // x_TNH.shape[0]
+        # Try common DP axis names to find the local shard
+        for axis_name in ['data', 'attn_dp', 'attn_dp_expert']:
+            try:
+                if jax.lax.axis_size(axis_name) == factor:
+                    return positions.reshape(factor,
+                                             -1)[jax.lax.axis_index(axis_name)]
+            except (ValueError, NameError, RuntimeError):
+                continue
+    return positions
+
+
 @dataclass(kw_only=True)
 class RotaryEmbedding(nnx.Module):
     """
@@ -61,6 +76,7 @@ class RotaryEmbedding(nnx.Module):
     def apply_rope(self, positions: jax.Array, x_TNH: jax.Array):
         assert x_TNH.ndim == 3
         assert self.sin_cos_cache is not None, "RoPE cache not initialized."
+        positions = _get_local_positions(positions, x_TNH)
         cos_sin_TH = self.sin_cos_cache[positions]
         # cos, sin: (T, H/2)
         cos_TH, sin_TH = jnp.split(cos_sin_TH, 2, axis=-1)
@@ -141,6 +157,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
     def apply_rope(self, positions: jax.Array, x_TNH: jax.Array):
         assert x_TNH.ndim == 3
         assert self.sin_cos_cache is not None, "RoPE cache not initialized."
+        positions = _get_local_positions(positions, x_TNH)
         cos_sin_padded = self.sin_cos_cache[positions]
         cos_sin_TH = cos_sin_padded[:, :self.rotary_dim]
         # cos, sin: (T, H/2)
