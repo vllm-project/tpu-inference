@@ -72,14 +72,17 @@ def sharding_to_tuple(sharding):
     if sharding is None:
         return None
     if isinstance(sharding, tuple):
-        return sharding
-    if isinstance(sharding, jax.sharding.NamedSharding):
-        return tuple(s for s in sharding.spec)
-    if isinstance(sharding, jax.sharding.PartitionSpec):
-        return tuple(s for s in sharding)
-    if isinstance(sharding, jax.sharding.SingleDeviceSharding):
-        return ()
-    raise ValueError(f"Unsupported sharding type: {type(sharding)}")
+        res = sharding
+    elif isinstance(sharding, jax.sharding.NamedSharding):
+        res = tuple(s for s in sharding.spec)
+    elif isinstance(sharding, jax.sharding.PartitionSpec):
+        res = tuple(s for s in sharding)
+    elif isinstance(sharding, jax.sharding.SingleDeviceSharding):
+        res = ()
+    else:
+        raise ValueError(f"Unsupported sharding type: {type(sharding)}")
+
+    return res
 
 
 @pytest.fixture(scope="module")
