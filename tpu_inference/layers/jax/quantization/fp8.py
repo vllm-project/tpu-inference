@@ -93,13 +93,12 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
         self.batch_sharding = linear_config.batch_sharding
         out_features = math.prod(self.output_shape)
         in_features = math.prod(linear_config.in_features)
+        self.weight_sharding = linear_config.weight_sharding
         if self.batch_features:
             # Batched case: keep original weight sharding for the full
             # 3D weight (matches kernel_shape).
-            self.weight_sharding = linear_config.weight_sharding
             self.kernel_shape = layer.kernel_shape
         else:
-            self.weight_sharding = linear_config.weight_sharding
             self.kernel_shape = (out_features, in_features)
 
         self.in_features = in_features
@@ -176,15 +175,13 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         self.in_features = math.prod(linear_config.in_features)
         self.batch_features = linear_config.batch_features
         self.batch_sharding = linear_config.batch_sharding
+        self.weight_sharding = linear_config.weight_sharding
+        self.bias_sharding = linear_config.bias_sharding
         if self.batch_features:
             # Batched case: keep original weight sharding for the full
             # 3D weight (matches kernel_shape).
-            self.weight_sharding = linear_config.weight_sharding
-            self.bias_sharding = linear_config.bias_sharding
             self.kernel_shape = layer.kernel_shape
         else:
-            self.weight_sharding = linear_config.weight_sharding
-            self.bias_sharding = linear_config.bias_sharding
             self.kernel_shape = (math.prod(self.out_features),
                                  self.in_features)
 
