@@ -11,3 +11,5 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import tpu_inference.layers.vllm.backends.flash_attn  # noqa:F401
+import tpu_inference.layers.vllm.backends.flash_attn_mla  # noqa:F401

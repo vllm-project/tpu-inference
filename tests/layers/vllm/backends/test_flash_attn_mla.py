@@ -18,7 +18,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import torch
 import torchax
 from jax.sharding import Mesh
 from torchax.interop import torch_view
@@ -32,7 +31,7 @@ from tpu_inference.runner.kv_cache import get_kv_cache_shape_with_mesh
 # ---- Test Configuration & Constants ----
 
 # Total number of tokens across all sequences in the batch
-TOTAL_TOKENS = 10
+TOTAL_TOKENS = 4
 # Number of sequences in the batch
 NUM_SEQS = 2
 # Padded maximum number of sequences
@@ -41,9 +40,9 @@ MAX_NUM_SEQS = 4
 NUM_HEADS = 8
 # MLA Specific Configurations
 Q_LORA_RANK = 64
-KV_LORA_RANK = 32
-QK_NOPE_HEAD_DIM = 64
-QK_ROPE_HEAD_DIM = 32
+KV_LORA_RANK = 512
+QK_NOPE_HEAD_DIM = 128
+QK_ROPE_HEAD_DIM = 64
 V_HEAD_DIM = 64
 
 # Total number of blocks in the KV cache
@@ -74,7 +73,7 @@ def create_mla_inputs(
 
     q = jax.random.uniform(key, (total_tokens, num_heads, qk_head_dim),
                            dtype=q_dtype)
-    kv_c_normed = jax.random.uniform(key, (total_tokens, 1, kv_lora_rank),
+    kv_c_normed = jax.random.uniform(key, (total_tokens, kv_lora_rank),
                                      dtype=q_dtype)
     k_pe = jax.random.uniform(key, (total_tokens, 1, qk_rope_head_dim),
                               dtype=q_dtype)
@@ -86,8 +85,13 @@ def create_mla_inputs(
     # For MLA, KV cache relies heavily on specific dimensions.
     # We use a mocked cache mapping using 1 KV Head as parameterized
     head_size = kv_lora_rank + qk_rope_head_dim
-    kv_cache_shape = get_kv_cache_shape_with_mesh(mesh, num_blocks, block_size,
-                                                  1, head_size, kv_dtype)
+    kv_cache_shape = get_kv_cache_shape_with_mesh(mesh,
+                                                  num_blocks,
+                                                  block_size,
+                                                  1,
+                                                  head_size,
+                                                  kv_dtype,
+                                                  use_mla=True)
     kv_cache = jax.random.normal(key, kv_cache_shape, dtype=kv_dtype)
 
     positions = jnp.ones((total_tokens, ), dtype=jnp.int32)
@@ -120,7 +124,7 @@ def mesh():
 class TestPallasMLAttentionBackend:
 
     def test_get_name(self):
-        assert PallasMLAttentionBackend.get_name() == "FLASHMLA"
+        assert PallasMLAttentionBackend.get_name() == "FLASH_ATTN_MLA"
 
     def test_get_impl_cls(self):
         assert PallasMLAttentionBackend.get_impl_cls(
@@ -215,13 +219,20 @@ class TestPallasMLAttentionBackendImpl:
         )
 
         layer = MagicMock()
-        layer.W_UK_T = torch.rand((NUM_HEADS, QK_NOPE_HEAD_DIM, KV_LORA_RANK))
-        layer.W_UV = torch.rand((NUM_HEADS, KV_LORA_RANK, V_HEAD_DIM))
         layer.kv_cache_quantized_dtype = None
 
         q, kv_c_normed, k_pe, kv_cache, metadata = create_mla_inputs(mesh)
 
         with torchax.default_env():
+            key = jax.random.key(0)
+            layer.W_UK_T = torchax.tensor.Tensor(jax.random.normal(
+                key, (NUM_HEADS, QK_NOPE_HEAD_DIM, KV_LORA_RANK),
+                dtype=jnp.bfloat16),
+                                                 env=torchax.default_env())
+            layer.W_UV = torchax.tensor.Tensor(
+                jax.random.normal(key, (NUM_HEADS, KV_LORA_RANK, V_HEAD_DIM),
+                                  dtype=jnp.bfloat16),
+                env=torchax.default_env())
             outputs, new_kv_cache = impl.forward(q, kv_c_normed, k_pe,
                                                  kv_cache, metadata, mesh,
                                                  layer)
@@ -250,8 +261,6 @@ class TestPallasMLAttentionBackendImpl:
         )
 
         layer = MagicMock()
-        layer.W_UK_T = torch.rand((NUM_HEADS, QK_NOPE_HEAD_DIM, KV_LORA_RANK))
-        layer.W_UV = torch.rand((NUM_HEADS, KV_LORA_RANK, V_HEAD_DIM))
         layer.kv_cache_quantized_dtype = jnp.float8_e4m3fn
         layer._q_scale_float = None
         layer._k_scale_float = 1.0
@@ -261,6 +270,16 @@ class TestPallasMLAttentionBackendImpl:
             mesh, kv_dtype=jnp.float8_e4m3fn)
 
         with torchax.default_env():
+            key = jax.random.key(0)
+            layer.W_UK_T = torchax.tensor.Tensor(jax.random.normal(
+                key, (NUM_HEADS, QK_NOPE_HEAD_DIM, KV_LORA_RANK),
+                dtype=jnp.bfloat16),
+                                                 env=torchax.default_env())
+            layer.W_UV = torchax.tensor.Tensor(
+                jax.random.normal(key, (NUM_HEADS, KV_LORA_RANK, V_HEAD_DIM),
+                                  dtype=jnp.bfloat16),
+                env=torchax.default_env())
+
             outputs, new_kv_cache = impl.forward(q, kv_c_normed, k_pe,
                                                  kv_cache, metadata, mesh,
                                                  layer)
@@ -289,8 +308,6 @@ class TestPallasMLAttentionBackendImpl:
         )
 
         layer = MagicMock()
-        layer.W_UK_T = torch.rand((NUM_HEADS, QK_NOPE_HEAD_DIM, KV_LORA_RANK))
-        layer.W_UV = torch.rand((NUM_HEADS, KV_LORA_RANK, V_HEAD_DIM))
         layer.kv_cache_quantized_dtype = jnp.float8_e4m3fn
         layer._q_scale_float = 1.0
         layer._k_scale_float = 1.0
@@ -300,6 +317,15 @@ class TestPallasMLAttentionBackendImpl:
             mesh, kv_dtype=jnp.float8_e4m3fn)
 
         with torchax.default_env():
+            key = jax.random.key(0)
+            layer.W_UK_T = torchax.tensor.Tensor(jax.random.normal(
+                key, (NUM_HEADS, QK_NOPE_HEAD_DIM, KV_LORA_RANK),
+                dtype=jnp.bfloat16),
+                                                 env=torchax.default_env())
+            layer.W_UV = torchax.tensor.Tensor(
+                jax.random.normal(key, (NUM_HEADS, KV_LORA_RANK, V_HEAD_DIM),
+                                  dtype=jnp.bfloat16),
+                env=torchax.default_env())
             outputs, new_kv_cache = impl.forward(q, kv_c_normed, k_pe,
                                                  kv_cache, metadata, mesh,
                                                  layer)

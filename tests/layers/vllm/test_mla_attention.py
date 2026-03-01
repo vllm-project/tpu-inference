@@ -23,7 +23,7 @@ from jax.sharding import Mesh
 from vllm.v1.attention.backend import AttentionType
 
 from tpu_inference.layers.vllm.mla_attention import (
-    TPUMLAAttention, VllmTPUMultiHeadLatentAttentionWrapper)
+    VllmTPUMLAAttention, VllmTPUMultiHeadLatentAttentionWrapper)
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 
@@ -37,7 +37,7 @@ def mesh():
     return Mesh(devices.reshape((-1, 1, 1)), ("data", "attn_dp", "model"))
 
 
-class TestTPUMLAAttention:
+class TestVllmTPUMLAAttention:
 
     @patch(
         "vllm.model_executor.layers.attention.mla_attention.MLAAttention.__init__",
@@ -50,7 +50,7 @@ class TestTPUMLAAttention:
         mock_super_init.side_effect = side_effect
 
         kv_b_proj = MagicMock()
-        attn = TPUMLAAttention(
+        attn = VllmTPUMLAAttention(
             num_heads=8,
             scale=1.0,
             qk_nope_head_dim=64,
@@ -79,7 +79,7 @@ class TestTPUMLAAttention:
         mock_super_init.side_effect = side_effect
 
         kv_b_proj = MagicMock()
-        attn = TPUMLAAttention(
+        attn = VllmTPUMLAAttention(
             num_heads=8,
             scale=1.0,
             qk_nope_head_dim=64,
@@ -105,7 +105,7 @@ class TestTPUMLAAttention:
 
         # Mock a linear layer (to simulate column parallel linear)
         kv_b_proj = torch.nn.Linear(10, 10)
-        attn = TPUMLAAttention(
+        attn = VllmTPUMLAAttention(
             num_heads=8,
             scale=1.0,
             qk_nope_head_dim=64,
@@ -145,7 +145,7 @@ class TestTPUMLAAttention:
 
         mock_super_init.side_effect = side_effect
 
-        attn = TPUMLAAttention(
+        attn = VllmTPUMLAAttention(
             num_heads=8,
             scale=1.0,
             qk_nope_head_dim=64,
@@ -205,7 +205,7 @@ class TestTPUMLAAttention:
 
         mock_super_init.side_effect = side_effect
 
-        attn = TPUMLAAttention(
+        attn = VllmTPUMLAAttention(
             num_heads=8,
             scale=1.0,
             qk_nope_head_dim=64,
@@ -240,7 +240,7 @@ class TestTPUMLAAttention:
 
 class TestVllmTPUMultiHeadLatentAttentionWrapper:
 
-    @patch("tpu_inference.layers.vllm.mla_attention.TPUMLAAttention",
+    @patch("tpu_inference.layers.vllm.mla_attention.VllmTPUMLAAttention",
            autospec=True)
     def test_init(self, mock_tpu_mla_attn):
         mla_modules = MagicMock()

@@ -30,7 +30,7 @@ from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
 
 
-class TPUMLAAttention(MLAAttention):
+class VllmTPUMLAAttention(MLAAttention):
 
     def __init__(
         self,
@@ -154,7 +154,7 @@ class VllmTPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             self.topk_tokens = self.indexer.topk_tokens
             self.topk_indices_buffer = mla_modules.topk_indices_buffer
 
-        self.mla_attn = TPUMLAAttention(
+        self.mla_attn = VllmTPUMLAAttention(
             num_heads=self.num_heads,
             scale=scale,
             qk_nope_head_dim=self.qk_nope_head_dim,
