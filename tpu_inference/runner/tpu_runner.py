@@ -1794,9 +1794,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def get_intermediate_tensor_spec(self, num_tokens: int):
         jax_dtype = to_jax_dtype(self.dtype)
+        
+        # In DP mode, num_tokens is the local token count. We need to
+        # calculate padding based on the global token count.
+        if self.dp_size > 1:
+            num_tokens = num_tokens * self.dp_size
+
         num_padded_tokens = runner_utils.get_padded_token_len(
             self.num_tokens_paddings, num_tokens)
-        sharding = NamedSharding(self.mesh, PartitionSpec())
+
+        if self.dp_size > 1:
+            sharding = NamedSharding(
+                self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+        else:
+            sharding = NamedSharding(self.mesh, PartitionSpec())
+
         hidden_size = self.model_config.get_hidden_size()
         spec = jax.ShapeDtypeStruct(shape=(num_padded_tokens, hidden_size),
                                     dtype=jax_dtype,
