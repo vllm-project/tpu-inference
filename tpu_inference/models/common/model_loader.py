@@ -48,6 +48,11 @@ _MODEL_REGISTRY = {}
 _VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset(
     {"GptOssForCausalLM", "Qwen3MoeForCausalLM"})
 
+# List of architectures that don't have pipeline parallelism support in jax yet.
+_PP_DISABLED_MODELS = frozenset[str] = frozenset({
+                        "DeepseekV3ForCausalLM", "Eagle3LlamaForCausalLM",
+                        "GptOssForCausalLM"})
+
 
 class UnsupportedArchitectureError(ValueError):
     """Raised when a model architecture is not supported in the registry."""
@@ -382,10 +387,12 @@ def get_model(
     match impl:
         case "flax_nnx":
             with jax.set_mesh(mesh):
-                if vllm_config.parallel_config.pipeline_parallel_size > 1:
+                arch = getattr(vllm_config.model_config.hf_config,
+                               "architectures", [None])[0]
+                if vllm_config.parallel_config.pipeline_parallel_size > 1 and arch in _PP_DISABLED_MODELS:
                     logger.warning(
-                        "PP is not fully supported on Jax flax_nnx models yet, fallback to vllm models."
-                    )
+                        "PP is not fully supported on Jax flax_nnx %s models yet, fallback to vllm models.",
+                        arch)
                     return get_vllm_model(vllm_config, rng, mesh)
                 try:
                     # Try to load the flax model first
