@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from vllm.config import VllmConfig
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -90,8 +91,8 @@ class TestDPScheduler:
                 assert len(scheduler.processes) == 2
                 assert len(scheduler.input_queues) == 2
                 # output_queues is a dict with (rank, command) tuple keys
-                # 2 ranks × 15 commands (SchedulerCommand enum)
-                assert len(scheduler.output_queues) == 30
+                # 2 ranks × 17 commands (SchedulerCommand enum)
+                assert len(scheduler.output_queues) == 34
                 assert scheduler.log_stats is True
                 assert len(scheduler.per_rank_kv_cache_configs) == 2
 
@@ -256,8 +257,8 @@ class TestDPScheduler:
                 scheduler.output_queues = {
                     (0, "get_token_count"): mock_queue_get_token_0,
                     (1, "get_token_count"): mock_queue_get_token_1,
-                    (0, "get_computed_blocks"): mock_queue_computed_0,
-                    (1, "get_computed_blocks"): mock_queue_computed_1,
+                    (0, "probe_computed_blocks"): mock_queue_computed_0,
+                    (1, "probe_computed_blocks"): mock_queue_computed_1,
                 }
 
                 rank = scheduler._find_best_rank_for_request(mock_request)
@@ -298,8 +299,8 @@ class TestDPScheduler:
                 scheduler.output_queues = {
                     (0, "get_token_count"): mock_queue_get_token_0,
                     (1, "get_token_count"): mock_queue_get_token_1,
-                    (0, "get_computed_blocks"): mock_queue_computed_0,
-                    (1, "get_computed_blocks"): mock_queue_computed_1,
+                    (0, "probe_computed_blocks"): mock_queue_computed_0,
+                    (1, "probe_computed_blocks"): mock_queue_computed_1,
                 }
 
                 rank = scheduler._find_best_rank_for_request(mock_request)
@@ -659,13 +660,53 @@ class TestDPScheduler:
 
                 result = scheduler.reset_prefix_cache()
 
-                # Verify commands were sent
+                # Verify commands were sent with default args
                 scheduler.input_queues[0].put.assert_called_with(
-                    (SchedulerCommand.RESET_PREFIX_CACHE, None))
+                    (SchedulerCommand.RESET_PREFIX_CACHE, (False, False)))
                 scheduler.input_queues[1].put.assert_called_with(
-                    (SchedulerCommand.RESET_PREFIX_CACHE, None))
+                    (SchedulerCommand.RESET_PREFIX_CACHE, (False, False)))
 
                 assert result is True
+
+    def test_reset_prefix_cache_with_args(self, mock_vllm_config,
+                                          mock_kv_cache_config,
+                                          mock_structured_output_manager):
+        """Test reset_prefix_cache forwards reset_running_requests and reset_connector args."""
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
+            with patch('multiprocessing.get_context'):
+                scheduler = DPScheduler(
+                    vllm_config=mock_vllm_config,
+                    kv_cache_config=mock_kv_cache_config,
+                    structured_output_manager=mock_structured_output_manager,
+                    block_size=16,
+                )
+
+                scheduler.input_queues = [MagicMock(), MagicMock()]
+
+                # Create proper mocks for queue.get() calls
+                mock_queue_0 = MagicMock()
+                mock_queue_0.get.return_value = True
+                mock_queue_1 = MagicMock()
+                mock_queue_1.get.return_value = False
+
+                scheduler.output_queues = {
+                    (0, "reset_prefix_cache"): mock_queue_0,
+                    (1, "reset_prefix_cache"): mock_queue_1,
+                }
+
+                result = scheduler.reset_prefix_cache(
+                    reset_running_requests=True, reset_connector=True)
+
+                # Verify commands were sent with provided args
+                scheduler.input_queues[0].put.assert_called_with(
+                    (SchedulerCommand.RESET_PREFIX_CACHE, (True, True)))
+                scheduler.input_queues[1].put.assert_called_with(
+                    (SchedulerCommand.RESET_PREFIX_CACHE, (True, True)))
+
+                # One rank returned False, so overall result should be False
+                assert result is False
 
     def test_reset_encoder_cache(self, mock_vllm_config, mock_kv_cache_config,
                                  mock_structured_output_manager):
@@ -701,6 +742,69 @@ class TestDPScheduler:
                     (SchedulerCommand.RESET_ENCODER_CACHE, None))
                 scheduler.input_queues[1].put.assert_called_with(
                     (SchedulerCommand.RESET_ENCODER_CACHE, None))
+
+    def test_pause_state_default(self, mock_vllm_config, mock_kv_cache_config,
+                                 mock_structured_output_manager):
+        """Test pause_state queries worker and defaults to UNPAUSED."""
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
+            with patch('multiprocessing.get_context'):
+                scheduler = DPScheduler(
+                    vllm_config=mock_vllm_config,
+                    kv_cache_config=mock_kv_cache_config,
+                    structured_output_manager=mock_structured_output_manager,
+                    block_size=16,
+                )
+
+                scheduler.input_queues = [MagicMock(), MagicMock()]
+
+                mock_queue_0 = MagicMock()
+                mock_queue_0.get.return_value = PauseState.UNPAUSED
+
+                scheduler.output_queues = {
+                    (0, "get_pause_state"): mock_queue_0,
+                }
+
+                assert scheduler.pause_state == PauseState.UNPAUSED
+
+                # Verify GET_PAUSE_STATE was sent only to rank 0
+                scheduler.input_queues[0].put.assert_called_with(
+                    (SchedulerCommand.GET_PAUSE_STATE, None))
+
+    def test_set_pause_state(self, mock_vllm_config, mock_kv_cache_config,
+                             mock_structured_output_manager):
+        """Test set_pause_state sends command to all workers."""
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
+            with patch('multiprocessing.get_context'):
+                scheduler = DPScheduler(
+                    vllm_config=mock_vllm_config,
+                    kv_cache_config=mock_kv_cache_config,
+                    structured_output_manager=mock_structured_output_manager,
+                    block_size=16,
+                )
+
+                scheduler.input_queues = [MagicMock(), MagicMock()]
+
+                mock_queue_0 = MagicMock()
+                mock_queue_0.get.return_value = None
+                mock_queue_1 = MagicMock()
+                mock_queue_1.get.return_value = None
+
+                scheduler.output_queues = {
+                    (0, "set_pause_state"): mock_queue_0,
+                    (1, "set_pause_state"): mock_queue_1,
+                }
+
+                scheduler.set_pause_state(PauseState.PAUSED_NEW)
+
+                # Verify SET_PAUSE_STATE was sent to all ranks
+                scheduler.input_queues[0].put.assert_called_with(
+                    (SchedulerCommand.SET_PAUSE_STATE, PauseState.PAUSED_NEW))
+                scheduler.input_queues[1].put.assert_called_with(
+                    (SchedulerCommand.SET_PAUSE_STATE, PauseState.PAUSED_NEW))
 
     def test_make_stats_aggregates_from_workers(
             self, mock_vllm_config, mock_kv_cache_config,

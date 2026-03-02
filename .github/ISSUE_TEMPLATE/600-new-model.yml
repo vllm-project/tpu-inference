@@ -36,8 +36,7 @@ body:
     label: The closest model TPU Inference already supports.
     description: >
       Here are the lists of models already supported by TPU Inference:
-      * Text-Only Models: https://github.com/vllm-project/tpu-inference/blob/main/support_matrices/text_only_model_support_matrix.csv
-      * Multimodal Models: https://github.com/vllm-project/tpu-inference/blob/main/support_matrices/multimodal_model_support_matrix.csv
+      * Models: https://github.com/vllm-project/tpu-inference/blob/main/support_matrices/model_support_matrix.csv
       Which model is the most similar to the model you want to add support for?
 - type: textarea
   attributes:

@@ -200,8 +200,7 @@ def _prev_power_of_2(n: int) -> int:
 def _get_page_size_bytes(block_size: int, num_combined_kv_heads: int,
                          head_size: int, kv_cache_dtype) -> int:
     """Returns the size in bytes of one page of the KV cache."""
-    kv_cache_dtype_bit_size = (dtypes.bit_width(kv_cache_dtype) if hasattr(
-        dtypes, "bit_width") else dtypes.itemsize_bits(kv_cache_dtype))
+    kv_cache_dtype_bit_size = dtypes.itemsize_bits(kv_cache_dtype)
     padded_head_size = _ceil_div(
         head_size, TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
 
@@ -230,8 +229,7 @@ def _get_num_slices_per_kv_cache_update_block(page_size_bytes: int,
     return min(num_slices_per_block, 64)
 
 
-@functools.partial(
-    jax.jit,
+@jax.jit(
     static_argnames=[
         "page_size", "num_slices_per_block", "mesh", "kv_cache_pspec"
     ],

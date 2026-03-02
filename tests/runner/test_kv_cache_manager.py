@@ -507,3 +507,103 @@ class TestKVCacheManager:
             spec = kv_cache_spec[f"layer.{i}"]
             assert isinstance(spec, MLAAttentionSpec)
             assert spec.num_kv_heads == 1
+
+    def test_delete_kv_cache(self):
+        """Test that delete_kv_cache deletes JAX arrays and clears state."""
+        # First, initialize KV cache using the same setup as
+        # test_initialize_kv_cache.
+        block_size = self.runner.vllm_config.cache_config.block_size
+        num_kv_heads = 8
+        head_size = 128
+        num_blocks = 100
+        full_attn_spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+        )
+        kv_cache_groups = [
+            KVCacheGroupSpec(layer_names=[f'layer.{i}' for i in range(10)],
+                             kv_cache_spec=full_attn_spec),
+        ]
+        page_size_bytes = full_attn_spec.page_size_bytes
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=num_blocks * page_size_bytes,
+                shared_by=[f'layer.{i}'],
+            ) for i in range(10)
+        ]
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        self.runner.initialize_kv_cache(kv_cache_config)
+        assert len(self.runner.kv_caches) == 10
+        assert len(self.runner.layer_name_to_kvcache_index) == 10
+
+        # Now reset.
+        self.runner.delete_kv_cache()
+
+        assert len(self.runner.kv_caches) == 0
+        assert len(self.runner.layer_name_to_kvcache_index) == 0
+
+    def test_reinitialize_kv_cache(self):
+        """Test that reinitialize_kv_cache reallocates fresh KV cache."""
+        block_size = self.runner.vllm_config.cache_config.block_size
+        num_kv_heads = 8
+        head_size = 128
+        num_blocks = 100
+        kv_packing = 2  # bf16
+        full_attn_spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+        )
+        kv_cache_groups = [
+            KVCacheGroupSpec(layer_names=[f'layer.{i}' for i in range(10)],
+                             kv_cache_spec=full_attn_spec),
+        ]
+        page_size_bytes = full_attn_spec.page_size_bytes
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=num_blocks * page_size_bytes,
+                shared_by=[f'layer.{i}'],
+            ) for i in range(10)
+        ]
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        self.runner.initialize_kv_cache(kv_cache_config)
+        assert len(self.runner.kv_caches) == 10
+
+        # Reset and then reinitialize.
+        self.runner.delete_kv_cache()
+        assert len(self.runner.kv_caches) == 0
+
+        self.runner.reinitialize_kv_cache()
+        assert len(self.runner.kv_caches) == 10
+        for i in range(10):
+            assert self.runner.kv_caches[i].shape == (num_blocks, block_size,
+                                                      num_kv_heads * 2 //
+                                                      kv_packing, kv_packing,
+                                                      head_size)
+            assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == i
+
+    def test_reinitialize_kv_cache_without_init_raises(self):
+        """Test that reinitialize raises if initialize was never called."""
+        # kv_cache_config is not set on a fresh runner.
+        with pytest.raises(RuntimeError, match="Cannot reinitialize KV cache"):
+            self.runner.reinitialize_kv_cache()
+
+    def test_delete_kv_cache_no_op_when_empty(self):
+        """Test that delete_kv_cache is safe to call when no KV cache exists."""
+        assert len(self.runner.kv_caches) == 0
+        # Should not raise.
+        self.runner.delete_kv_cache()
+        assert len(self.runner.kv_caches) == 0

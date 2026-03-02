@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import functools
 from typing import Optional, Tuple
 
 import jax
@@ -216,8 +215,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         return torch_view(outputs)
 
 
-@functools.partial(
-    jax.jit,
+@jax.jit(
     static_argnames=(
         "mesh",
         "scale",
@@ -251,16 +249,11 @@ def _jax_attn_func(
     del scale  # Unused for now, as the attention function applies a default scale.
 
     # Get shapes from vllm
-    q_len, q_compute_dim = q.shape
-    k_len, k_compute_dim = k.shape
-    assert k.shape == v.shape
-    assert q_compute_dim == head_size * num_heads
-    assert k_compute_dim == head_size * num_kv_heads
+    q_len = q.shape[0]
+    k_len = k.shape[0]
 
-    # Convert the shapes from vLLM's convetion to what the attention function expects
-    # bs, num_heads, q_len, head_size
+    # Convert the shapes from vLLM's convention to what the attention function expects
     q = q.reshape(q_len, num_heads, head_size)
-    # bs, num_kv_heads, k_len, head_size
     k = k.reshape(k_len, num_kv_heads, head_size)
     v = v.reshape(k_len, num_kv_heads, head_size)
 
@@ -282,6 +275,6 @@ def _jax_attn_func(
     assert outputs.shape[0] == q_len
     assert outputs.shape[1] == num_heads
     assert outputs.shape[2] == head_size
-    outputs = outputs.reshape(q_len, q_compute_dim)
+    outputs = outputs.reshape(q_len, num_heads * head_size)
 
     return new_kv_cache, outputs

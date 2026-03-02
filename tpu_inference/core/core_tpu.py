@@ -577,6 +577,16 @@ class DisaggEngineCore(vLLMEngineCore):
                                       self._decode_engines):
             engine.scheduler.reset_prefix_cache()
 
+    def delete_kv_cache(self) -> None:
+        for engine in itertools.chain(self._prefill_engines,
+                                      self._decode_engines):
+            engine.collective_rpc("delete_kv_cache")
+
+    def reinitialize_kv_cache(self) -> None:
+        for engine in itertools.chain(self._prefill_engines,
+                                      self._decode_engines):
+            engine.collective_rpc("reinitialize_kv_cache")
+
 
 class DisaggEngineCoreProc(vLLMEngineCoreProc):
     """The vLLM-facing adapter that handles process management and I/O."""
@@ -784,3 +794,15 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
 
     def shutdown(self):
         self._orchestrator.shutdown()
+
+    def delete_kv_cache(self) -> None:
+        """Delete KV cache on all workers."""
+        for engine in itertools.chain(self._prefill_engines,
+                                      self._decode_engines):
+            engine.collective_rpc("delete_kv_cache")
+
+    def reinitialize_kv_cache(self) -> None:
+        """Reallocate KV cache on all workers."""
+        for engine in itertools.chain(self._prefill_engines,
+                                      self._decode_engines):
+            engine.collective_rpc("reinitialize_kv_cache")

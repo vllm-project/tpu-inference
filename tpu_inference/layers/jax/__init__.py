@@ -63,7 +63,7 @@ class JaxModule(nnx.Module):
                 yield name, JaxModuleList(value)
 
 
-class JaxModuleList(list):
+class JaxModuleList(nnx.List):
     """A list container for JaxModule objects."""
 
     def __init__(self, modules: Iterable[JaxModule]):

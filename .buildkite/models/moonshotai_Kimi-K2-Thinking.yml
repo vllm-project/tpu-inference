@@ -19,8 +19,6 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2-Thinking_UnitTest"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
-    env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
     soft_fail: true
     commands:
       - |
@@ -44,8 +42,6 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-K2-Thinking_UnitTest"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
-    env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
     soft_fail: true
     commands:
       - |
@@ -69,8 +65,6 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-K2-Thinking_Accuracy"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
-    env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
     soft_fail: true
     commands:
       - |

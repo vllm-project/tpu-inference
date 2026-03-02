@@ -40,3 +40,11 @@ def pytest_addoption(parser):
         default=None,
         help=
         "Path to the dataset file used for accuracy evaluation (CSV or PKL).")
+    parser.addoption("--image-dir",
+                     action="store",
+                     default=None,
+                     help="Path to the directory containing test images.")
+    parser.addoption("--num-test-cases",
+                     type=int,
+                     default=None,
+                     help="Number of test cases to run from the dataset.")

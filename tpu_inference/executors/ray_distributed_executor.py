@@ -31,6 +31,7 @@ from vllm.v1.executor.ray_executor import RayWorkerMetaData
 from vllm.v1.executor.ray_utils import RayWorkerWrapper as RayWorkerWrapperV1
 from vllm.v1.executor.ray_utils import _wait_until_pg_ready
 
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
@@ -385,13 +386,12 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         if self.parallel_config.pipeline_parallel_size > 1:
             self.collective_rpc("initialize_pp_transfer_connect")
         self.collective_rpc("load_model")
-
         if self.use_ray_spmd_worker:
             for pp_rank in range(self.parallel_config.pipeline_parallel_size):
                 self.pp_tp_workers.append([])
                 num_tp_workers = int(
-                    self.parallel_config.tensor_parallel_size //
-                    num_tpu_per_worker)
+                    len(self.workers) //
+                    self.parallel_config.pipeline_parallel_size)
                 for tp_rank in range(num_tp_workers):
                     # PP=2, TP=4, num_tpu_per_worker=2
                     # pp_tp_workers = [[0, 1], [2, 3]]
@@ -413,7 +413,11 @@ class RayWorkerWrapper(RayWorkerWrapperV1):
     The implementation is similar to vllm/v1/executor/ray_utils.py
     
     _is_intermediate_tensors: check whether the output is JaxIntermediateTensors.
+    _is_last_rank: check whether this Ray worker is the last PP stage.
     """
 
     def _is_intermediate_tensors(self, output) -> bool:
         return isinstance(output, JaxIntermediateTensors)
+
+    def _is_last_rank(self) -> bool:
+        return get_pp_group().is_last_rank

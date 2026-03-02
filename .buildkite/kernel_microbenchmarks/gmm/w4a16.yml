@@ -20,8 +20,6 @@ steps:
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
-    env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
         buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_gmm-w4a16_CorrectnessTest" "unverified"
@@ -45,8 +43,6 @@ steps:
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
-    env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
     commands:
       - |
         buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_gmm-w4a16_PerformanceTest" "unverified"

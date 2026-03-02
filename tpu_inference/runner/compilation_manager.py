@@ -31,7 +31,7 @@ from tpu_inference.layers.jax.sample.sampling_metadata import \
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
-from tpu_inference.utils import device_array
+from tpu_inference.utils import device_array, to_jax_dtype
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -58,7 +58,7 @@ class CompilationManager:
                              dtype: Any,
                              sharding: Optional[NamedSharding] = None) -> Any:
         """Helper to create dummy tensors for precompilation."""
-        tensor = jnp.ones(shape, dtype=dtype)
+        tensor = jnp.ones(shape, dtype=to_jax_dtype(dtype))
         if sharding:
             return device_array(self.runner.mesh, tensor, sharding=sharding)
         return device_array(self.runner.mesh, tensor)
@@ -74,9 +74,8 @@ class CompilationManager:
                          **kwargs) -> None:
         logger.info(f"Precompile {name} --> {kwargs}")
         start = time.perf_counter()
-        with jax.set_mesh(self.runner.mesh):
-            result = fn(*args)
-            jax.tree.map(lambda r: r.block_until_ready(), result)
+        result = fn(*args)
+        jax.tree.map(lambda r: r.block_until_ready(), result)
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
 
@@ -84,8 +83,10 @@ class CompilationManager:
         if envs.SKIP_JAX_PRECOMPILE or self.runner.model_config.enforce_eager:
             return
         logger.info("Precompile all the subgraphs with possible input shapes.")
+        compilation_start_time = time.perf_counter()
 
-        with self.runner.maybe_setup_dummy_loras(self.runner.lora_config):
+        with self.runner.maybe_setup_dummy_loras(
+                self.runner.lora_config), jax.set_mesh(self.runner.mesh):
             self._precompile_backbone_text_only()
             if self.runner.is_multimodal_model:
                 self.runner.precompile_vision_encoder_fn(
@@ -111,6 +112,9 @@ class CompilationManager:
             self._precompile_structured_decoding()
             if self.runner.speculative_config:
                 self._precompile_speculative_decoding()
+
+        elapsed = time.perf_counter() - compilation_start_time
+        self.runner.vllm_config.compilation_config.compilation_time += elapsed
 
     def _precompile_input_embeddings_merger(self) -> None:
         for num_tokens in self.runner.num_tokens_paddings:

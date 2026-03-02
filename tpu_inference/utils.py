@@ -26,17 +26,21 @@ GBYTES = 1024 * 1024 * 1024
 TPU_HEAD_SIZE_ALIGNMENT = 128
 TPU_SECOND_LAST_MINOR = 8
 
-# Map vllm dtype string that doesn't exactly match jax dtype string name.
-_VLLM_DTYPE_STR_TO_JAX_DTYPE = {
+# Map a dtype string (possibly from vLLM) to the corresponding JAX dtype
+_DTYPE_STR_ALIAS_TO_JAX_DTYPE = {
     "fp8": jnp.float8_e4m3fn.dtype,
     "fp8_e4m3": jnp.float8_e4m3fn.dtype,
     "fp8_e5m2": jnp.float8_e5m2.dtype,
+    # NOTE: vLLM doesn't have this str dtype yet
+    "fp4": jnp.float4_e2m1fn.dtype,
 }
 
 
 def to_jax_dtype(dtype: str | jnp.dtype | torch.dtype) -> jnp.dtype:
-    if isinstance(dtype, str):
-        if dict_dtype := _VLLM_DTYPE_STR_TO_JAX_DTYPE.get(dtype, None):
+    if isinstance(dtype, (str, type)):
+        if isinstance(dtype, str) and (dict_dtype :=
+                                       _DTYPE_STR_ALIAS_TO_JAX_DTYPE.get(
+                                           dtype, None)):
             return dict_dtype
         return jnp.dtype(dtype)
     elif isinstance(dtype, torch.dtype):
@@ -199,8 +203,7 @@ def get_padded_num_heads(num_heads: int, sharding_size: int) -> int:
 
 
 def get_dtype_packing(dtype):
-    bits = (dtypes.bit_width(dtype)
-            if hasattr(dtypes, "bit_width") else dtypes.itemsize_bits(dtype))
+    bits = dtypes.itemsize_bits(dtype)
     return 32 // bits
 
 
@@ -262,7 +265,17 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
                 logger.info("Use customized mesh: %s", mesh)
                 return mesh
 
-    return jax.make_mesh(axis_shapes, axis_names, devices=devices)
+    # Try to create a physically optimized mesh. Fall back to a logical layout
+    # for non-power-of-two device counts (e.g., DP=6) to bypass strict
+    # hardware topology constraints that would otherwise cause an AssertionError.
+    try:
+        return jax.make_mesh(axis_shapes, axis_names, devices=devices)
+    except (AssertionError, ValueError, RuntimeError) as e:
+        logger.warning(
+            "jax.make_mesh failed due to topology constraints. Falling back to manual mesh: %s",
+            e)
+        ordered_devices = np.array(devices).reshape(axis_shapes)
+        return mesh_lib.Mesh(ordered_devices, axis_names)
 
 
 def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:

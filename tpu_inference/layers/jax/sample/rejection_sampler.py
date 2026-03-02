@@ -18,7 +18,6 @@ This implementation follows the same algorithm as the GPU version but is
 designed for JAX/TPU compatibility. It currently only supports greedy sampling.
 """
 
-import functools
 from typing import Optional
 
 import jax
@@ -85,7 +84,7 @@ class RejectionSampler:
             key=key,
         )
 
-    @functools.partial(jax.jit, static_argnums=(0, ))
+    @jax.jit(static_argnums=(0, ))
     def forward(
         self,
         # [num_tokens] - flattened format

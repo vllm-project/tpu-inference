@@ -320,14 +320,11 @@ def _zero_uninitialized_memory(
 LutFn = Callable[[int, int, int], Optional[tuple[int, int, int]]]
 
 
-@functools.partial(
-    jax.jit,
-    static_argnames=[
-        "preferred_element_type",
-        "tiling",
-        "interpret",
-    ],
-)
+@jax.jit(static_argnames=[
+    "preferred_element_type",
+    "tiling",
+    "interpret",
+])
 def gmm(
     lhs: jnp.ndarray,
     rhs: jnp.ndarray,
@@ -627,7 +624,8 @@ def gmm(
         )),
         interpret=interpret,
         cost_estimate=cost_estimate,
-        name=f"gmm-m_{m}-k_{k}-n_{n}-tm_{tm}-tk_{tk}-tn_{tn}",
+        name=
+        f"gmm-g_{num_current_groups}-m_{m}-k_{k}-n_{n}-tm_{tm}-tk_{tk}-tn_{tn}",
     )
 
     out = call_gmm(

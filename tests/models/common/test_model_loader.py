@@ -99,6 +99,15 @@ def mock_get_pp_group():
         yield
 
 
+@pytest.fixture(autouse=True)
+def mock_register_oot():
+    """Prevents Duplicate layer name errors from register_oot."""
+    with patch(
+            "vllm.model_executor.layers.mla.MultiHeadLatentAttentionWrapper.register_oot"
+    ):
+        yield
+
+
 # ==============================================================================
 # >> Test Cases
 # ==============================================================================

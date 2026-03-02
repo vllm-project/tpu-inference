@@ -37,18 +37,30 @@ logger = init_logger(__name__)
 
 
 class MoEBackend(Enum):
-    # This is using the Fused MoE kernel found in tpu-inference/tpu_inference/kernels/fused_moe/v1/kernel.py
+    # FUSED_MOE is using the Fused MoE kernel found in tpu-inference/tpu_inference/kernels/fused_moe/v1/kernel.py
     # and is production ready.
+    # NOTE: for FusedMOE on the JAX/Flax path, we expect the MoE quant method (e.g. UnquantizedFusedMoEMethod) to
+    # create a new `kernel_gating_upproj_E2DF` param that replaces `kernel_gating_EDF` and `kernel_up_proj_EDF`
+    # and thus runs the forward pass on the fused weight.  `kernel_down_proj_EFD` is unchanged.
     FUSED_MOE = "fused_moe"
-    # This is using the GMM kernel found in tpu-inference/tpu_inference/layers/common/fused_moe_gmm.py
+
+    # GMM_EP is using the GMM kernel found in tpu-inference/tpu_inference/layers/common/fused_moe_gmm.py
     # and is `expert_sharded_gmm` the GMM calls.  Production ready.
+    # NOTE: for GMM_EP JAX/Flax path, we expect the MoE quant method (e.g. UnquantizedFusedMoEMethod) to
+    # create a new `kernel_gating_upproj_EDF` param that replaces `kernel_gating_EDF` and `kernel_up_proj_EDF`
+    # and thus runs the forward pass on the fused weight.  `kernel_down_proj_EFD` is unchanged.
     GMM_EP = "gmm_ep"
+
     # Same as GMM_EP but uses `tensor_sharded_gmm_*` for the GMM calls and is production ready
     GMM_TP = "gmm_tp"
-    # Uses a simple dense matmul for the MoE backend and is intended for testing
-    # Only used in the JAX path for now
+
+    # DENSE_MAT uses a simple dense matmul for the MoE backend,  is intended for testing, and is
+    # only used in the JAX path for now
+    # NOTE: for DENSE_MAT in the JAX/Flax path, there are no changes for weights for the unfused backends (DENSE_MAT and MEGABLOX_GMM).
+    # That is, `kernel_gating_EDF`, `kernel_up_proj_EDF`, and `kernel_down_proj_EFD` are unchanged.
     DENSE_MAT = "dense_mat"
-    MEGABLX_GMM = "megablox_gmm"  # only used in the JAX path for now
+    # Also only used in the JAX path for now
+    MEGABLX_GMM = "megablox_gmm"
 
     @classmethod
     def fused_moe_backends(cls):

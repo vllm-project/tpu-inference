@@ -16,12 +16,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from vllm.config import ModelConfig
-from vllm.lora.request import LoRARequest
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import DraftTokenIds
 
 # The class we are testing
-from tpu_inference.worker.tpu_worker import TPUWorker
+from tpu_inference.worker.tpu_worker import PPConfig, TPUWorker
 
 
 @pytest.fixture
@@ -42,6 +41,7 @@ def mock_vllm_config():
     mock_parallel_conf.pipeline_parallel_size = 1
     mock_parallel_conf.nnodes = 1
     mock_parallel_conf.nnodes_within_dp = 1
+    mock_parallel_conf.enable_elastic_ep = False
 
     mock_additional_config = {}
 
@@ -66,6 +66,65 @@ def mock_get_pp_group():
                                       rank_in_group=0,
                                       world_size=1)):
         yield
+
+
+class TestPPConfig:
+    """Test suite for the PPConfig class."""
+
+    def test_pp_config_no_pp(self, mock_vllm_config):
+        """Tests PPConfig initialization when pipeline parallelism is disabled."""
+        pp_config = PPConfig(vllm_config=mock_vllm_config,
+                             rank=0,
+                             ip="127.0.0.1",
+                             prev_worker_ip="127.0.0.1",
+                             pp_world_size=1)
+        assert pp_config.default_tpu_process_bounds == "1,1,1"
+        assert pp_config.default_tpu_chips_per_process_bounds == "1,1,1"
+        assert pp_config.default_tpu_visible_chips == "0"
+
+    @patch('tpu_inference.tpu_info.get_num_cores_per_chip')
+    def test_pp_config_with_pp(self, mock_get_cores, mock_vllm_config):
+        """Tests PPConfig initialization when pipeline parallelism is enabled."""
+        mock_get_cores.return_value = 2
+        mock_vllm_config.sharding_config.total_devices = 4
+
+        # Rank 0 in a PP=2 setup, each stage needs 4 cores / 2 cores per chip = 2 chips
+        pp_config = PPConfig(vllm_config=mock_vllm_config,
+                             rank=0,
+                             ip="127.0.0.1",
+                             prev_worker_ip="127.0.0.1",
+                             pp_world_size=2)
+
+        assert pp_config.default_tpu_process_bounds == "1,1,1"
+        assert pp_config.default_tpu_chips_per_process_bounds == "1,2,1"
+        assert pp_config.default_tpu_visible_chips == "0,1"
+
+        # Rank 1 in the same setup
+        pp_config_rank1 = PPConfig(vllm_config=mock_vllm_config,
+                                   rank=1,
+                                   ip="127.0.0.2",
+                                   prev_worker_ip="127.0.0.1",
+                                   pp_world_size=2)
+        assert pp_config_rank1.default_tpu_chips_per_process_bounds == "1,2,1"
+        assert pp_config_rank1.default_tpu_visible_chips == "2,3"
+
+    @patch('tpu_inference.tpu_info.get_num_cores_per_chip')
+    def test_pp_config_single_core_per_chip(self, mock_get_cores,
+                                            mock_vllm_config):
+        """Tests PPConfig with 1 core per chip (e.g., v5litepod, v6e)."""
+        mock_get_cores.return_value = 1
+        mock_vllm_config.sharding_config.total_devices = 1
+
+        pp_config = PPConfig(vllm_config=mock_vllm_config,
+                             rank=2,
+                             ip="127.0.0.3",
+                             prev_worker_ip="127.0.0.2",
+                             pp_world_size=4)
+
+        # Rank 2, 1 core per stage, 1 core per chip -> 1 chip per stage.
+        # Stage 0: chip 0, Stage 1: chip 1, Stage 2: chip 2
+        assert pp_config.default_tpu_chips_per_process_bounds == "1,1,1"
+        assert pp_config.default_tpu_visible_chips == "2"
 
 
 class TestTPUWorker:
@@ -266,32 +325,6 @@ class TestTPUWorker:
         result = worker.take_draft_token_ids()
         worker.model_runner.take_draft_token_ids.assert_called_once()
         assert result == mock_draft_tokens
-
-    def test_add_lora_not_implemented(self, mock_vllm_config):
-        """Tests that add_lora raises NotImplementedError."""
-        worker = TPUWorker(vllm_config=mock_vllm_config,
-                           local_rank=0,
-                           rank=0,
-                           distributed_init_method="test")
-        mock_lora_request = MagicMock()
-
-        with pytest.raises(
-                NotImplementedError,
-                match="LoRA is not supported by the JAX worker yet."):
-            worker.add_lora(mock_lora_request)
-
-    def test_add_lora_not_implemented_lora_request(self, mock_vllm_config):
-        """Tests that add_lora raises NotImplementedError."""
-        worker = TPUWorker(vllm_config=mock_vllm_config,
-                           local_rank=0,
-                           rank=0,
-                           distributed_init_method="test")
-        mock_lora_request = MagicMock(spec=LoRARequest)
-
-        with pytest.raises(
-                NotImplementedError,
-                match="LoRA is not supported by the JAX worker yet."):
-            worker.add_lora(mock_lora_request)
 
     #
     # --- Profiling and Health Check Tests ---

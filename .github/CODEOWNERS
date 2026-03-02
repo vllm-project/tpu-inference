@@ -22,17 +22,17 @@
 /tpu_inference/distributed/ @mrjunwan-lang @sixiang-google
 
 # Kernel Implementations (Performance-critical)
-/tpu_inference/kernels/ @kyuyeunk @yaochengji @bythew3i
+/tpu_inference/kernels/ @kyuyeunk @bythew3i
 
 # JAX Model Layers - Attention
 /tpu_inference/layers/jax/ @bzgoogle @jrplatin @gpolovets1
-/tpu_inference/layers/vllm/ @kyuyeunk @hfan @vanbasten23
+/tpu_inference/layers/vllm/ @kyuyeunk @vanbasten23
 
 # JAX Model Implementations
-/tpu_inference/models/jax/qwen2_5_vl.py @hfan @kwang3939
+/tpu_inference/models/jax/qwen2_5_vl.py @kwang3939
 /tpu_inference/models/jax/gpt_oss.py @bzgoogle
 /tpu_inference/models/jax/deepseek_v3.py @bzgoogle @gpolovets1 @jrplatin
-/tpu_inference/models/vllm/ @kyuyeunk @hfan @vanbasten23
+/tpu_inference/models/vllm/ @kyuyeunk @vanbasten23
 
 # Runner and Execution
 /tpu_inference/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google  @mrjunwan-lang
