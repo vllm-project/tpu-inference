@@ -20,7 +20,7 @@ import jax
 from flax import nnx
 from jax import numpy as jnp
 from jax.experimental.layout import Layout, with_layout_constraint
-from jax.sharding import NamedSharding, PartitionSpec
+from jax.sharding import PartitionSpec
 
 
 @dataclass(kw_only=True)
@@ -88,7 +88,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
     mscale_value: float = 1
     mscale_all_dim: float = 0
 
-    def initialize_cache(self, mesh: jax.sharding.Mesh):
+    def initialize_cache(self):
         """Computes and caches the sin/cos embeddings."""
         # The second condition is for the Qwix case, where we need to call `initialize_cache` on
         # the abstract model.  Thus, when we go to call `initialize_cache` on the concrete model,
@@ -100,9 +100,9 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         mscale_val = _yarn_get_mscale(
             self.scaling_factor, self.mscale_value) / _yarn_get_mscale(
                 self.scaling_factor, self.mscale_all_dim)
-        replicated_sharding = NamedSharding(mesh, PartitionSpec())
-        self.mscale = jax.device_put(mscale_val, replicated_sharding)
-        self.sin_cos_cache = self._compute_sin_cos()
+        replicated_sharding = PartitionSpec()
+        self.mscale = nnx.data(jax.device_put(mscale_val, replicated_sharding))
+        self.sin_cos_cache = nnx.data(self._compute_sin_cos())
 
     def _compute_inv_freq(self):
         fractions = jnp.arange(0, self.rotary_dim, 2,
@@ -121,7 +121,6 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
             1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
         return inv_freq
 
-    @jax.jit
     def _compute_sin_cos(self):
         inv_freq_H = self._compute_inv_freq()
         t = jnp.arange(self.original_max_position_embeddings *
