@@ -67,12 +67,12 @@ rm -rf artifacts
 #
 # Create running config
 #
+BM_JOB_STATUS=$EXIT_SUCCESS
 echo "Creating running config..."
-.buildkite/benchmark/scripts/agent/create_config.sh "$RECORD_ID"
-if [ $? -ne 0 ]; then
+.buildkite/benchmark/scripts/agent/create_config.sh "$RECORD_ID" || {
   echo "Error creating running config."
-  exit 1
-fi
+  BM_JOB_STATUS=$EXIT_FAILURE
+}
 
 #
 # This makes GCS_BUCKET and other vars available to the whole script.
@@ -84,22 +84,21 @@ if [ -f "$ENV_FILE" ]; then
   set +a
 else
   echo "Error: Config file $ENV_FILE not found after create_config.sh"
-  exit 1
+  BM_JOB_STATUS=$EXIT_FAILURE
 fi
 
 #
 # Run job in docker
 #
-BM_JOB_STATUS=$EXIT_SUCCESS
-echo "Running job in docker..."
-.buildkite/benchmark/scripts/agent/docker_run_bm.sh "artifacts/${RECORD_ID}.env" || {
-  echo "Error running benchmark job in docker."
-  BM_JOB_STATUS=$EXIT_FAILURE
-}
-# if [ $? -ne 0 ]; then
-#   echo "Error running job in docker."
-#   exit 1
-# fi
+if (( BM_JOB_STATUS == EXIT_SUCCESS )); then
+  echo "Running job in docker..."
+  .buildkite/benchmark/scripts/agent/docker_run_bm.sh "artifacts/${RECORD_ID}.env" || {
+    echo "Error running benchmark job in docker."
+    BM_JOB_STATUS=$EXIT_FAILURE
+  }
+else
+  echo "Skipping benchmark job because BM_JOB_STATUS is non-zero ($BM_JOB_STATUS)."
+fi
 
 echo "Benchmark script completed."
 
