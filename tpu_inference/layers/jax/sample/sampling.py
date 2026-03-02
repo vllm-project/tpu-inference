@@ -48,12 +48,12 @@ def sample(
         return greedy_sampled
 
     logits = logits.astype(jnp.float32)
-    
+
     # Temperature scaling
     temperatures = tpu_sampling_metadata.temperature.astype(logits.dtype)
     temperatures = jnp.expand_dims(temperatures, axis=-1)
     logits /= temperatures
-    
+
     # Only apply top-k masking if k > 0 for each token
     top_k = tpu_sampling_metadata.top_k
     should_apply_topk = jnp.expand_dims(top_k > 0, axis=-1)
