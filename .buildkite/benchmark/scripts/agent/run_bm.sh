@@ -15,21 +15,11 @@
 
 set -euo pipefail
 
-# Strip quotes from environment variables (important when passed via docker --env-file)
-# which doesn't strip quotes like bash 'source' does.
-for var in MODEL DATASET NUM_PROMPTS INPUT_LEN OUTPUT_LEN EXPECTED_ETEL TENSOR_PARALLEL_SIZE MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS MAX_MODEL_LEN PREFIX_LEN ADDITIONAL_CONFIG EXTRA_ARGS; do
-  if [ -n "${!var:-}" ]; then
-    val="${!var}"
-    val="${val#\'}"
-    val="${val%\'}"
-    val="${val#\"}"
-    val="${val%\"}"
-    export "$var"="$val"
-  fi
-done
-
 # Datasets using lm-evaluation-harness `lm_eval`.
 LM_EVAL_DATASETS=("math500" "mmlu" "mlperf")
+
+# Datasets that use the internal python performance benchmark script `python benchmark_serving.py`.
+BM_INFRA_DATASETS=("custom-token" "bench-custom-token" "bench-custom-mm")
 
 # All other datasets will use the standard `vllm bench serve` command.
 
@@ -41,6 +31,7 @@ pip install evaluate==0.4.5 || true
 pip install rouge-score==0.1.2 || true
 # Install lm_eval with dependencies, version is same as https://github.com/vllm-project/vllm/blob/main/.buildkite/scripts/hardware_ci/run-tpu-v1-test.sh#L64
 pip install "lm-eval[api,math]>=0.4.9.2" || true
+
 
 VLLM_LOG="$WORKSPACE/vllm_log.txt"
 BM_LOG="$WORKSPACE/bm_log.txt"
@@ -106,51 +97,29 @@ echo "lanching vllm..."
 echo "logging to $VLLM_LOG"
 echo
 
-if [[ -z "${EXTRA_ARGS:-}" ]]; then
-  # If it is unset or empty, we initialize it as an empty string.
-  # This makes the append operation (+=) safe to use later.
-  EXTRA_ARGS=""
-fi
-
+EXTRA_ARGS=""
 if [[ "$MODEL" == "google/gemma-3-27b-it" ]]; then
   echo "google/gemma-3-27b-it"
-  EXTRA_ARGS+="--limit-mm-per-prompt {\"image\":0}"
+  EXTRA_ARGS="--limit-mm-per-prompt {\"image\":0}"
 elif [[ "$MODEL" == "Qwen/Qwen2.5-VL-7B-Instruct" || "$MODEL" == "Qwen/Qwen2.5-VL-32B-Instruct" ]]; then
   echo "$MODEL"
-  EXTRA_ARGS+="--limit-mm-per-prompt {\"image\":1} --mm-processor-kwargs {\"max_pixels\":1024000}"
-elif [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
-  echo "deepseek-ai/DeepSeek-R1"
-  EXTRA_ARGS+=" --hf-config=deepseek-ai/DeepSeek-R1 --hf_overrides '{\"architectures\": [\"DeepseekV3ForCausalLM\"]}' --gpu-memory-utilization 0.91"
+  EXTRA_ARGS="--limit-mm-per-prompt {\"image\":1} --mm-processor-kwargs {\"max_pixels\":1024000}"
 fi
 
-if [[ -n "${ADDITIONAL_CONFIG:-}" ]]; then
-  printf -v quoted_config "%q" "$ADDITIONAL_CONFIG"
-  echo "Adding --additional_config=${quoted_config} to EXTRA_ARGS for running vllm serve ..."
-  EXTRA_ARGS+=" --additional_config=${quoted_config}"
+# If FORCE_EAGER is set to true (case-insensitive), append flag
+if [[ "${FORCE_EAGER:-,,}" == "true" ]]; then
+  EXTRA_ARGS+=" --enforce-eager"
 fi
 
-echo "Printing the vllm serve command used to start the server:"
-echo "VLLM_USE_V1=1 VLLM_TORCH_PROFILER_DIR=\"$PROFILE_FOLDER\" vllm serve $MODEL \
- --seed 42 \
- --disable-log-requests \
- --max-num-seqs $MAX_NUM_SEQS \
- --max-num-batched-tokens $MAX_NUM_BATCHED_TOKENS \
- --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
- --no-enable-prefix-caching \
- --download_dir $DOWNLOAD_DIR \
- --max-model-len $MAX_MODEL_LEN $EXTRA_ARGS \
- --async-scheduling > \"$VLLM_LOG\" 2>&1 &"
-
-eval "VLLM_USE_V1=1 VLLM_TORCH_PROFILER_DIR=\"$PROFILE_FOLDER\" vllm serve $MODEL \
- --seed 42 \
- --disable-log-requests \
- --max-num-seqs $MAX_NUM_SEQS \
- --max-num-batched-tokens $MAX_NUM_BATCHED_TOKENS \
- --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
- --no-enable-prefix-caching \
- --download_dir $DOWNLOAD_DIR \
- --max-model-len $MAX_MODEL_LEN $EXTRA_ARGS \
- --async-scheduling > \"$VLLM_LOG\" 2>&1 &"
+VLLM_USE_V1=1 VLLM_TORCH_PROFILER_DIR="$PROFILE_FOLDER" vllm serve $MODEL \
+  --seed 42 \
+  --disable-log-requests \
+  --max-num-seqs $MAX_NUM_SEQS \
+  --max-num-batched-tokens $MAX_NUM_BATCHED_TOKENS \
+  --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
+  --no-enable-prefix-caching \
+  --download_dir $DOWNLOAD_DIR \
+  --max-model-len $MAX_MODEL_LEN $EXTRA_ARGS> "$VLLM_LOG" 2>&1 &
 
 
 echo "wait for 20 minutes.."
@@ -188,8 +157,9 @@ run_benchmark(){
   local command_to_run
   local ARGS=()
 
-  if [[ "$MODEL" == "BCCard/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic" ]]; then
-    command_to_run=("python3" "benchmarks/benchmark_serving.py")
+  # Determine benchmark command to use
+  if contains_element "$DATASET" "${BM_INFRA_DATASETS[@]}"; then
+    command_to_run=("python" "benchmarks/benchmark_serving.py")
   else
     command_to_run=("vllm" "bench" "serve")
   fi
@@ -228,8 +198,8 @@ run_benchmark(){
       local dataset_path="$WORKSPACE/dataset/${MODEL##*/}/inlen${INPUT_LEN}_outlen${OUTPUT_LEN}_prefixlen${PREFIX_LEN}.jsonl"
       echo "dataset_path: $dataset_path"
       # The original script set dataset-name to 'custom' for this case
-      ARGS[7]="custom" # This replaces the --dataset-name value in the array
-      ARGS+=(--dataset-path "$dataset_path" --custom-output-len "$OUTPUT_LEN" --skip-chat-template)
+      ARGS[6]="custom" # This replaces the --dataset-name value in the array
+      ARGS+=(--dataset-path "$dataset_path" --custom-output-len "$OUTPUT_LEN")
       ;;
     bench-custom-mm)
       DATA_DIR="$WORKSPACE/dataset/${MODEL##*/}"
