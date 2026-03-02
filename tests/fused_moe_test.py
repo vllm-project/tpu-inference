@@ -477,7 +477,7 @@ class MoEKernelTest(jtu.JaxTestCase):
             rtol=1e1,
             num_cores=2,
             capture_xprof=False,
-            run_baseline=False,
+            run_baseline=True,
         )
 
 if __name__ == "__main__":
