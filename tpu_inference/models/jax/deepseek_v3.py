@@ -17,7 +17,7 @@ import os
 from abc import abstractmethod
 from dataclasses import InitVar, dataclass
 from itertools import islice
-from typing import Any, Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -117,8 +117,7 @@ class DeepseekV3BaseAttention(JaxModule):
     num_attention_heads: int
     num_key_value_heads: int
     head_dim: int
-    rope_theta: float
-    rope_scaling: dict[str, Any]
+    rope: DeepseekScalingRotaryEmbedding
     dtype: jnp.dtype
     kv_cache_dtype: str
     mesh: Mesh
@@ -164,25 +163,13 @@ class DeepseekV3BaseAttention(JaxModule):
         self.D = self.hidden_size
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
-        if self.rope_scaling["factor"] <= 1.0:
+        if self.rope.scaling_factor <= 1.0:
             yarn_mscale = 1.0
         else:
             yarn_mscale = 0.1 * self.rope_mscale_all_dim * math.log(
-                self.rope_scaling["factor"]) + 1.0
-        self.scale = self.qk_head_dim**-0.5 * yarn_mscale**2
+                self.rope.scaling_factor) + 1.0
 
-        self.rope = DeepseekScalingRotaryEmbedding(
-            rotary_dim=self.qk_rope_head_dim,
-            rope_theta=self.rope_theta,
-            original_max_position_embeddings=self.
-            rope_scaling["original_max_position_embeddings"],
-            scaling_factor=self.rope_scaling["factor"],
-            dtype=self.dtype,
-            beta_fast=self.rope_scaling["beta_fast"],
-            beta_slow=self.rope_scaling["beta_slow"],
-            mscale_value=self.rope_scaling["mscale"],
-            mscale_all_dim=self.rope_scaling["mscale_all_dim"],
-        )
+        self.scale = self.qk_head_dim**-0.5 * yarn_mscale**2
 
         weight_init = _weight_init(self.random_init)
 
@@ -1125,6 +1112,19 @@ class DeepSeekV3(JaxModule):
         else:
             self.embed_tokens = PPMissingLayer()
 
+        self.rope_emb = DeepseekScalingRotaryEmbedding(
+            rotary_dim=qk_rope_head_dim,
+            rope_theta=rope_theta,
+            original_max_position_embeddings=rope_scaling[
+                "original_max_position_embeddings"],
+            scaling_factor=rope_scaling["factor"],
+            dtype=dtype,
+            beta_fast=rope_scaling["beta_fast"],
+            beta_slow=rope_scaling["beta_slow"],
+            mscale_value=rope_scaling["mscale"],
+            mscale_all_dim=rope_scaling["mscale_all_dim"],
+        )
+
         def _create_deepseek_attention(
                 i: int) -> Union[DeepseekV3MLA, DeepseekV3Attention]:
             if self.use_mla_kernel:
@@ -1158,8 +1158,6 @@ class DeepSeekV3(JaxModule):
                 assert num_attention_heads == num_key_value_heads, "Expected same number of of attention heads and key value heads for MHA."
 
             kwargs = dict(
-                rope_theta=rope_theta,
-                rope_scaling=rope_scaling,
                 q_lora_rank=q_lora_rank,
                 kv_lora_rank=kv_lora_rank,
                 qk_nope_head_dim=qk_nope_head_dim,
@@ -1172,6 +1170,8 @@ class DeepSeekV3(JaxModule):
                 num_key_value_heads=1
                 if self.use_mla_kernel else num_key_value_heads,
                 head_dim=v_head_dim,  # MLA uses v_head_dim as head_dim
+                rope=self.rope_emb,
+                rope_mscale_all_dim=rope_scaling["mscale_all_dim"],
                 dtype=dtype,
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
@@ -1278,12 +1278,8 @@ class DeepSeekV3(JaxModule):
         return self.__call__(*args, **kwargs)
 
     def initialize_cache(self):
-        # Initialize RoPE caches after weights are loaded and before JIT compilation.
-        for layer in self.layers:
-            if hasattr(layer, 'self_attn') and hasattr(layer.self_attn,
-                                                       'rope'):
-                if hasattr(layer.self_attn.rope, 'initialize_cache'):
-                    layer.self_attn.rope.initialize_cache()
+        # Initialize RoPE cache once after weights are loaded.
+        self.rope_emb.initialize_cache()
 
     def __call__(
         self,
