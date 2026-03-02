@@ -37,6 +37,7 @@ def _validate_args(
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
     rhs_scale: jnp.ndarray | None = None,
+    rhs_zero_point: jnp.ndarray | None = None,
     rhs_bias: jnp.ndarray | None = None,
 ):
     """Validates the arguments for the gmm function."""
@@ -331,6 +332,7 @@ def gmm(
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
     rhs_scale: jnp.ndarray | None = None,
+    rhs_zero_point: jnp.ndarray | None = None,
     rhs_bias: jnp.ndarray | None = None,
     tiling: tuple[int, int, int] | LutFn | None = None,
     group_offset: jnp.ndarray | None = None,
@@ -345,6 +347,7 @@ def gmm(
     group_sizes: A 1d, jnp.ndarray with shape [num_groups] and jnp.int32 dtype.
     preferred_element_type: jnp.dtype, the element type for the output matrix.
     rhs_scale: A 4d, jnp.ndarray with shape [num_groups, num_blocks, 1, n].
+    rhs_zero_point: A 4d, jnp.ndarray with shape [num_groups, num_blocks, 1, n].
     rhs_bias: A 3d, jnp.ndarray with shape [num_groups, 1, n].
     tiling: 3-tuple of ints. The m, k and n-dimension tile sizes.
     group_offset: The group in group sizes to start computing from. This is
@@ -378,6 +381,7 @@ def gmm(
         rhs=rhs,
         group_sizes=group_sizes,
         rhs_scale=rhs_scale,
+        rhs_zero_point=rhs_zero_point,
         rhs_bias=rhs_bias,
     )
 
@@ -438,6 +442,7 @@ def gmm(
         lhs,
         rhs,
         rhs_scale,
+        rhs_zero_point,
         rhs_bias,
         existing_out,
         out,
@@ -491,13 +496,21 @@ def gmm(
 
             acc = acc_scratch[...]
             for b_i in range(num_quant_blocks_per_tk):
+                loaded_lhs_block = loaded_lhs[..., b_i *
+                                              quant_block_size:(b_i + 1) *
+                                              quant_block_size]
+                loaded_rhs_block = loaded_rhs[b_i *
+                                              quant_block_size:(b_i + 1) *
+                                              quant_block_size, ...]
+
                 partial_result = jnp.dot(
-                    loaded_lhs[..., b_i * quant_block_size:(b_i + 1) *
-                               quant_block_size],
-                    loaded_rhs[b_i * quant_block_size:(b_i + 1) *
-                               quant_block_size, ...],
+                    loaded_lhs_block,
+                    loaded_rhs_block,
                     preferred_element_type=jnp.float32,
                 )
+                if rhs_zero_point is not None:
+                    partial_result -= loaded_lhs_block.astype(jnp.float32).sum(
+                        axis=-1, keepdims=True) * rhs_zero_point[b_i]
                 if rhs_scale is not None:
                     partial_result *= jnp.broadcast_to(rhs_scale[b_i],
                                                        partial_result.shape)
@@ -550,6 +563,13 @@ def gmm(
         b_tile_i = b_i // num_quant_blocks_per_tk
         return group_ids[grid_id] - group_offset[0], b_tile_i, 0, n_i
 
+    def rhs_zero_point_transform_indices(n_i, grid_id, k_i, group_metadata,
+                                         group_offset):
+        group_ids = group_metadata.group_ids
+        b_i = (k_i * tk) // quant_block_size
+        b_tile_i = b_i // num_quant_blocks_per_tk
+        return group_ids[grid_id] - group_offset[0], b_tile_i, 0, n_i
+
     def rhs_bias_transform_indices(n_i, grid_id, k_i, group_metadata,
                                    group_offset):
         group_ids = group_metadata.group_ids
@@ -568,7 +588,17 @@ def gmm(
         input_output_aliases = {}
     else:
         in_out_block_spec = out_block_spec
-        input_output_aliases = {7: 0}
+        num_existing_out_leaves = len(
+            jax.tree_util.tree_leaves((
+                group_metadata,
+                group_offset,
+                lhs,
+                rhs,
+                rhs_scale,
+                rhs_zero_point,
+                rhs_bias,
+            )))
+        input_output_aliases = {num_existing_out_leaves: 0}
 
     lhs_block_spec = pl.BlockSpec((tm, tk), lhs_transform_indices)
     rhs_block_spec = pl.BlockSpec((None, tk, tn), rhs_transform_indices)
@@ -580,6 +610,13 @@ def gmm(
             (None, num_quant_blocks_per_tk, 1, tn),
             rhs_scale_transform_indices)
 
+    if rhs_zero_point is None:
+        rhs_zero_point_block_spec = None
+    else:
+        rhs_zero_point_block_spec = pl.BlockSpec(
+            (None, num_quant_blocks_per_tk, 1, tn),
+            rhs_zero_point_transform_indices)
+
     if rhs_bias is None:
         rhs_bias_block_spec = None
     else:
@@ -590,6 +627,8 @@ def gmm(
     rhs_bytes = (k * n) * rhs.itemsize  # We don't read all of rhs
     if rhs_scale is not None:
         rhs_bytes += (num_quant_blocks * n) * rhs_scale.itemsize
+    if rhs_zero_point is not None:
+        rhs_bytes += (num_quant_blocks * n) * rhs_zero_point.itemsize
     if rhs_bias is not None:
         rhs_bytes += n * rhs_bias.itemsize
     out_bytes = (m * n) * jnp.dtype(preferred_element_type).itemsize
@@ -609,6 +648,7 @@ def gmm(
                 lhs_block_spec,
                 rhs_block_spec,
                 rhs_scale_block_spec,
+                rhs_zero_point_block_spec,
                 rhs_bias_block_spec,
                 in_out_block_spec,
             ],
@@ -634,6 +674,7 @@ def gmm(
         lhs,
         rhs,
         rhs_scale,
+        rhs_zero_point,
         rhs_bias,
         existing_out,
     )
