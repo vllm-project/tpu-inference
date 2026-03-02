@@ -183,7 +183,9 @@ class TestFp8BlockwiseJaxLinear:
         mesh = jax.sharding.Mesh(np.array(devices).reshape(-1, 1), ('in', 'out'))
         with jax.set_mesh(mesh):
             # Process weights in mesh context
-            layer.quant_method.process_weights_after_loading(layer)
+            layer.weight.set_metadata("_is_loaded", True)
+            layer.weight_scale_inv.set_metadata("_is_loaded", True)
+            assert layer.quant_method.process_weights_after_loading(layer)
 
             # Prepare input
             x = jax.random.normal(rngs.params(), (batch_size, in_features))
@@ -227,7 +229,9 @@ class TestFp8BlockwiseJaxLinear:
         mesh = jax.sharding.Mesh(np.array(devices).reshape(-1, 1), ('in', 'out'))
         with jax.set_mesh(mesh):
             # Process weights in mesh context
-            layer.quant_method.process_weights_after_loading(layer)
+            layer.weight.set_metadata("_is_loaded", True)
+            layer.weight_scale_inv.set_metadata("_is_loaded", True)
+            assert layer.quant_method.process_weights_after_loading(layer)
 
             # Prepare input (B, D)
             x = jax.random.normal(rngs.params(), (batch_size, kernel_shape[0]))
@@ -271,7 +275,7 @@ class TestFp8BlockwiseJaxLinear:
         devices = jax.devices()
         mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
         with jax.set_mesh(mesh):
-            layer.quant_method.process_weights_after_loading(layer)
+            assert layer.quant_method.process_weights_after_loading(layer)
 
             x = jax.random.normal(rngs.params(), (batch_size, N, H))
             output = layer(x)
@@ -301,7 +305,7 @@ class TestFp8BlockwiseJaxLinear:
         devices = jax.devices()
         mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
         with jax.set_mesh(mesh):
-            layer.quant_method.process_weights_after_loading(layer)
+            assert layer.quant_method.process_weights_after_loading(layer)
 
             x = jax.random.normal(rngs.params(), (batch_size, N, A))
             output = layer(x)
@@ -622,7 +626,7 @@ class TestFp8FusedMoE:
         # End mimic loading weights from checkpoint.
 
         with jax.set_mesh(mesh):
-            layer.quant_method.process_weights_after_loading(layer)
+            assert layer.quant_method.process_weights_after_loading(layer)
 
         # Patch the router since we don't want to use the
         # real router
