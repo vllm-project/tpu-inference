@@ -156,7 +156,7 @@ if [[ " ${DATASETS[*]} " == *" $DATASET "* ]]; then
   echo docker cp .buildkite/benchmark/scripts/agent/benchmark_serving.py "$CONTAINER_NAME:/workspace/vllm/benchmarks/benchmark_serving.py"
   docker cp .buildkite/benchmark/scripts/agent/benchmark_serving.py "$CONTAINER_NAME:/workspace/vllm/benchmarks/benchmark_serving.py"
 
-  echo docker cp s.buildkite/benchmark/cripts/agent/benchmark_dataset.py "$CONTAINER_NAME:/workspace/vllm/benchmarks/benchmark_dataset.py"
+  echo docker cp s.buildkite/benchmark/scripts/agent/benchmark_dataset.py "$CONTAINER_NAME:/workspace/vllm/benchmarks/benchmark_dataset.py"
   docker cp .buildkite/benchmark/scripts/agent/benchmark_dataset.py "$CONTAINER_NAME:/workspace/vllm/benchmarks/benchmark_dataset.py"
 fi
 
@@ -175,10 +175,6 @@ if [[ "$DATASET" == "math500" || "$DATASET" == "mmlu" || "$DATASET" == "mlperf" 
   echo "Copying lm_eval directory to container..."
   docker cp .buildkite/benchmark/lm_eval "$CONTAINER_NAME:/workspace/"
 fi
-
-# echo "Copying bench_serving directory to container..."
-# docker exec "$CONTAINER_NAME" mkdir -p /workspace/vllm/scripts/agent/bench_serving
-# docker cp .buildkite/benchmark/scripts/agent/bench_serving/. "$CONTAINER_NAME:/workspace/vllm/scripts/agent/bench_serving/"
 
 echo "copy script run_bm.sh to container..."
 docker cp .buildkite/benchmark/scripts/agent/run_bm.sh "$CONTAINER_NAME:/workspace/vllm/run_bm.sh"
