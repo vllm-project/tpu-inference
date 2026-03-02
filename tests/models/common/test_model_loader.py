@@ -379,7 +379,9 @@ class TestGetModel:
         mock_get_flax.return_value = "flax_model_sentinel"
         mock_get_vllm.return_value = "vllm_model_sentinel"
         vllm_config.parallel_config.pipeline_parallel_size = 2
-        vllm_config.model_config.hf_config.architectures = ["GptOssForCausalLM"]
+        vllm_config.model_config.hf_config.architectures = [
+            "GptOssForCausalLM"
+        ]
         result = model_loader.get_model(vllm_config, rng, mesh)
 
         mock_get_flax.assert_not_called()
