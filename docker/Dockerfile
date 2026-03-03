@@ -35,6 +35,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     bc \
     ca-certificates \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Build vLLM

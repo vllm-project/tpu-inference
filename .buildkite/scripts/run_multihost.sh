@@ -63,8 +63,8 @@ if [[ -z "${WORKER_IPS:-}" ]]; then
         ACCELERATOR_TYPE=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(acceleratorType)" 2>/dev/null || echo "")
         echo "   -> Detected Accelerator Type: $ACCELERATOR_TYPE"
         if [[ "$ACCELERATOR_TYPE" == *"tpu7"* ]]; then
-          export IS_FOR_V7X=true
-          echo "   -> Setting IS_FOR_V7X=true"
+          export TPU_VERSION="tpu7x"
+          echo "   -> Setting TPU_VERSION=tpu7x"
         fi
       fi
     else
@@ -86,8 +86,8 @@ fi
 HEAD_INTERNAL_IP="${HEAD_INTERNAL_IP:-$(hostname -I | awk '{print $1}')}"
 
 # Enforce TPUv7 requirement
-if [[ "${IS_FOR_V7X:-false}" != "true" ]]; then
-  echo "❌ This script is strictly for TPUv7 (IS_FOR_V7X=true). Exiting."
+if [[ "${TPU_VERSION:-tpu6e}" != "tpu7x" ]]; then
+  echo "❌ This script is strictly for TPUv7 (TPU_VERSION=tpu7x). Exiting."
   exit 0
 fi
 

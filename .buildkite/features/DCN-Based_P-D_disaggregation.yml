@@ -19,7 +19,7 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_CorrectnessTest"
     soft_fail: true
     env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       MODEL: "Qwen/Qwen3-0.6B"
       INPUT_LEN: 100
       OUTPUT_LEN: 20
@@ -49,7 +49,7 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_PerformanceTest"
     soft_fail: true
     env:
-      IS_FOR_V7X: "${IS_FOR_V7X}"
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       MODEL: "Qwen/Qwen3-0.6B"
       INPUT_LEN: 1024
       OUTPUT_LEN: 1024

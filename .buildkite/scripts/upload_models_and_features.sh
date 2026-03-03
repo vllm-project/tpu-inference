@@ -116,6 +116,7 @@ if [[ "${#pipeline_v6e_fragments[@]}" -gt 0 ]]; then
   echo "--- Uploading TPU v6e Pipeline Group"
   buildkite-agent meta-data set "run_v6_matrix" "true"
   {
+    echo "priority: ${JOB_PRIORITY:-1}"
     echo "steps:"
     echo "  - group: \"TPU v6e nightly Tests (${MODEL_IMPL_TYPE:-auto})\""
     echo "    key: \"v6e-group\""
@@ -132,10 +133,10 @@ if [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
   # Export v7x specific variables (overwrites previous exports)
   export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
   export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
-  export IS_FOR_V7X="true"
   export TPU_VERSION="tpu7x"
   buildkite-agent meta-data set "run_v7_matrix" "true"
   {
+    echo "priority: ${JOB_PRIORITY:-1}"
     echo "steps:"
     echo "  - group: \"TPU v7x nightly Tests (${MODEL_IMPL_TYPE:-auto})\""
     echo "    key: \"v7x-group\""

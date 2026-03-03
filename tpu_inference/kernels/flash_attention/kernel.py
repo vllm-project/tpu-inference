@@ -72,16 +72,13 @@ class BlockSizes:
         )
 
 
-@functools.partial(
-    jax.jit,
-    static_argnames=[
-        "causal",
-        "sm_scale",
-        "block_sizes",
-        "vmem_limit_bytes",
-        "debug",
-    ],
-)
+@jax.jit(static_argnames=[
+    "causal",
+    "sm_scale",
+    "block_sizes",
+    "vmem_limit_bytes",
+    "debug",
+])
 def flash_attention(
     q,  # [batch_size, num_heads, q_seq_len, d_model]
     k,  # [batch_size, num_heads, kv_seq_len, d_model]
@@ -712,8 +709,7 @@ def mha_reference_no_custom_vjp(
     return out
 
 
-@functools.partial(jax.jit,
-                   static_argnames=["causal", "mask_value", "sm_scale"])
+@jax.jit(static_argnames=["causal", "mask_value", "sm_scale"])
 @jax.default_matmul_precision("bfloat16")
 def mha_reference(
     q,
