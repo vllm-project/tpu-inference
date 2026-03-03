@@ -1,5 +1,4 @@
-#/mnt/pd/tpu-inference/tpu_inference/kernels/mla/v1/kernel_hbm_best_best.py# 
-#Copyright 2025 Google LLC
+/mnt/pd/tpu-inference/tpu_inference/kernels/mla/v1/kernel_hbm_best_best.py# Copyright 2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,35 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""TPU-Friendly and Data-Movement-Friendly MLA Ragged Paged Attention kernel.
-FUSED MLA + KV Cache Update (RMW) with Prefetching and Triple Buffering.
-
-[ADDED: Triple-Buffer DMA Pipeline]
-Upgrades the KV-block fetch pipeline from double-buffering (N+1 look-ahead) to
-triple-buffering (N+2 look-ahead) to eliminate the Vector-unit 'Wait' segments
-visible in XProf when the DMA fence for block N+1 is on the critical path of
-iteration N.
-
-Ordering strategy per iteration N
-----------------------------------
-  Old (double-buffer):
-    1. start_fetch_bkv(N+1)          <- scalar: issue N+1 DMA
-    2. wait_fetch_bkv(N)             <- scalar: fence for N  ← stalls if N DMA
-    3. load_bkv / flash_attention(N) <- vector: heavy matmul   not done yet
-    [N was issued 1 iteration ago; fence may still stall]
-
-  New (triple-buffer, this file):
-    1. start_fetch_bkv(N+2)          <- scalar: issue N+2 DMA first
-    2. wait_fetch_bkv(N)             <- scalar: fence for N  ← near-zero stall
-    3. load_bkv / flash_attention(N) <- vector: heavy matmul
-    [N was issued 2 iterations ago; fence completes with minimal stall]
-
-XProf evidence:
-  sems (4,2) bkv fence stalls visible between scalar DMA issue and vector unit
-  start. Triple-buffering allows the scalar unit to issue the N+2 command BEFORE
-  the vector unit begins the N matmul, so both DMA engines are busy while VPU
-  computes, eliminating idle 'Wait' segments.
-"""
+"""TPU-Friendly and Data-Movement-Friendly MLA Ragged Paged Attention kernel. FUSED MLA + KV Cache Update (RMW) with Prefetching and Double Buffering."""
 
 import functools
 import jax
@@ -109,12 +80,12 @@ def _mla_ragged_paged_attention_kernel(
     o_hbm_ref,  # [max_num_tokens, num_q_heads_per_q_packing, q_packing, lkv_dim] # Memory: HBM
     updated_cache_kv_hbm_ref,  # [total_num_pages, page_size_per_kv_packing, kv_packing, align_to(lkv_dim + r_dim, 128)] # Memory: HBM
     # Scratch
-    bkvc_x3_ref,  # [3, bkv_sz_per_kv_packing, kv_packing, lkv_dim] # Memory: VMEM (triple-buf)
-    bkpe_x3_ref,  # [3, bkv_sz_per_kv_packing, kv_packing, r_dim] # Memory: VMEM (triple-buf)
+    bkvc_x2_ref,  # [2, bkv_sz_per_kv_packing, kv_packing, lkv_dim] # Memory: VMEM
+    bkpe_x2_ref,  # [2, bkv_sz_per_kv_packing, kv_packing, r_dim] # Memory: VMEM
     bq_nope_x2_ref,  # [2, bq_sz, num_q_heads_per_q_packing, q_packing, lkv_dim] # Memory: VMEM
     bq_rope_x2_ref,  # [2, bq_sz, num_q_heads_per_q_packing, q_packing, r_dim] # Memory: VMEM
     bo_x2_ref,  # [2, bq_sz, num_q_heads_per_q_packing, q_packing, lkv_dim] # Memory: VMEM
-    sems,  # [4, 3] # Memory: SMEM (Semaphores; row 0 uses 3 slots for triple-buf KV)
+    sems,  # [4, 2] # Memory: SMEM (Semaphores)
     l_ref,  # [bq_sz * num_q_heads, 128] # Memory: VMEM
     m_ref,  # [bq_sz * num_q_heads, 128] # Memory: VMEM
     acc_ref,  # [bq_sz * num_q_heads, lkv_dim] # Memory: VMEM
@@ -405,10 +376,9 @@ def _mla_ragged_paged_attention_kernel(
         head_acc_ref[...] = o_curr
 
     def _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, *, wait=False):
-        # [ADDED: triple-buf] bkv_sem_idx cycles 0→1→2→0 (mod 3)
         sem = sems.at[0, bkv_sem_idx]
-        bkvc_vmem_ref = bkvc_x3_ref.at[bkv_sem_idx]
-        bkvpe_vmem_ref = bkpe_x3_ref.at[bkv_sem_idx]
+        bkvc_vmem_ref = bkvc_x2_ref.at[bkv_sem_idx]
+        bkvpe_vmem_ref = bkpe_x2_ref.at[bkv_sem_idx]
         reshaped_cache_hbm_ref = cache_kv_hbm_ref.reshape(
             total_num_pages * page_size_per_kv_packing,
             *cache_kv_hbm_ref.shape[2:],
@@ -544,12 +514,12 @@ def _mla_ragged_paged_attention_kernel(
         return q_nope_vec, q_rope_vec
 
     def load_bkv(bkv_sem_idx, *, bkvc_mask, bkpe_mask):
-        bkvc_ref = (bkvc_x3_ref.bitcast(jnp.uint32).at[bkv_sem_idx].reshape(
+        bkvc_ref = (bkvc_x2_ref.bitcast(jnp.uint32).at[bkv_sem_idx].reshape(
             bkv_sz_per_kv_packing, lkv_dim))
         bkvc_vec = pltpu.bitcast(bkvc_ref[...], kv_dtype)
         bkvc_vec = lax.select(bkvc_mask, bkvc_vec, jnp.zeros_like(bkvc_vec))
 
-        bkpe_ref = (bkpe_x3_ref.bitcast(jnp.uint32).at[bkv_sem_idx].reshape(
+        bkpe_ref = (bkpe_x2_ref.bitcast(jnp.uint32).at[bkv_sem_idx].reshape(
             bkv_sz_per_kv_packing, r_dim))
         bkpe_vec = pltpu.bitcast(bkpe_ref[...], kv_dtype)
         bkpe_vec = lax.select(bkpe_mask, bkpe_vec, jnp.zeros_like(bkpe_vec))
@@ -585,7 +555,6 @@ def _mla_ragged_paged_attention_kernel(
             return next_seq_idx, next_bq_idx, next_bq_sem_idx
 
         def get_next_bkv_ids(seq_idx, bq_idx, bkv_idx, bkv_sem_idx):
-            # [ADDED: triple-buf] sem rotates 0→1→2→0
             next_bkv_idx = bkv_idx + 1
             is_last_bkv = next_bkv_idx == num_bkv
             next_bkv_idx = lax.select(is_last_bkv, 0, next_bkv_idx)
@@ -593,20 +562,8 @@ def _mla_ragged_paged_attention_kernel(
             is_last_bq = next_bq_idx == num_bq
             next_bq_idx = lax.select(is_last_bq, 0, next_bq_idx)
             next_seq_idx = lax.select(is_last_bq, seq_idx + 1, seq_idx)
-            # Rotate through 3 slots: (sem_idx + 1) % 3
-            next_bkv_sem_idx = lax.select(
-                bkv_sem_idx == 2, 0,
-                lax.select(bkv_sem_idx == 1, 2, 1),
-            )
+            next_bkv_sem_idx = lax.select(bkv_sem_idx == 0, 1, 0)
             return next_seq_idx, next_bq_idx, next_bkv_idx, next_bkv_sem_idx
-
-        def get_next2_bkv_ids(seq_idx, bq_idx, bkv_idx, bkv_sem_idx):
-            """Return IDs for block N+2 (two steps ahead). [ADDED: triple-buf]"""
-            n1_seq, n1_bq, n1_bkv, n1_sem = get_next_bkv_ids(
-                seq_idx, bq_idx, bkv_idx, bkv_sem_idx)
-            n2_seq, n2_bq, n2_bkv, n2_sem = get_next_bkv_ids(
-                n1_seq, n1_bq, n1_bkv, n1_sem)
-            return n2_seq, n2_bq, n2_bkv, n2_sem
 
         def compute_with_bq(bq_idx, _):
             bq_sem_idx = sem_ids_ref[0]
@@ -629,49 +586,21 @@ def _mla_ragged_paged_attention_kernel(
                              < actual_bkv_sz)
 
                 bkv_sem_idx = sem_ids_ref[1]
-                (next_seq_idx, _, next_bkv_idx,
-                 next_bkv_sem_idx) = get_next_bkv_ids(
-                     seq_idx, bq_idx, bkv_idx, bkv_sem_idx)
-                (next2_seq_idx, _, next2_bkv_idx,
-                 next2_bkv_sem_idx) = get_next2_bkv_ids(
-                     seq_idx, bq_idx, bkv_idx, bkv_sem_idx)
+                next_seq_idx, _, next_bkv_idx, next_bkv_sem_idx = get_next_bkv_ids(
+                    seq_idx, bq_idx, bkv_idx, bkv_sem_idx)
 
-                # ── [ADDED: triple-buf] Step 1: Scalar issues N+2 DMA ──────
-                # Two independent guards keep the sem tracking and the prefetch
-                # decoupled so we handle the "N+1 exists but N+2 does not" case.
-                #
-                # Guard A: Advance sem_ids to N+1's slot whenever N+1 exists.
-                # The next iteration must read sem_ids_ref[1] == N+1's slot so
-                # it can wait on (and then load from) the correct VMEM buffer.
                 @pl.when(next_seq_idx < num_seqs)
-                def advance_sem_tracking():
-                    sem_ids_ref[1] = next_bkv_sem_idx  # N+1's slot, not N+2!
+                def prefetch_next_bkv():
+                    sem_ids_ref[1] = next_bkv_sem_idx
+                    start_fetch_bkv(next_seq_idx, next_bkv_idx,
+                                    next_bkv_sem_idx)
 
-                # Guard B: Issue the N+2 prefetch only when N+2 actually exists.
-                # This DMA is issued BEFORE the fence for N (below), so the DMA
-                # engine is already pulling N+2 from HBM while the scalar unit
-                # resolves N's fence — eliminating the Vector-unit 'Wait' seen
-                # in XProf.
-                @pl.when(next2_seq_idx < num_seqs)
-                def prefetch_n2():
-                    start_fetch_bkv(next2_seq_idx, next2_bkv_idx,
-                                    next2_bkv_sem_idx)
-
-                # ── Step 2: Fence for block N (delayed as late as possible) ──
-                # Block N's DMA was issued two iterations ago, so the fence
-                # completes with near-zero stall compared to double buffering
-                # (where it was issued only one iteration ago).
                 @pl.when(bkv_idx == 0)
                 def wait_cur_bq():
                     wait_fetch_bq(seq_idx, bq_idx, bq_sem_idx)
 
                 wait_fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx)
 
-                # ── Step 3: Vector heavy matmul ──────────────────────────────
-                # By the time we reach here:
-                #   • Block N data is in VMEM (fence resolved above)
-                #   • Block N+2 DMA is in-flight (issued in Step 1)
-                # So the Vector unit never idles waiting for a DMA fence.
                 if debug_mode:
                     return
 
@@ -719,14 +648,8 @@ def _mla_ragged_paged_attention_kernel(
     
     @pl.when(seq_idx == 0)
     def start_prefetch():
-        # [ADDED: triple-buf] Pre-fill two slots so the pipeline has N and N+1
-        # both in-flight before compute_with_bkv iteration 0 starts.
-        # Slot 0 → block 0 (N=0), Slot 1 → block 1 (N=1).
-        # In the first iteration of compute_with_bkv we will issue slot 2 (N=2)
-        # before waiting for slot 1 (N=1), giving true triple-buffer overlap.
         start_fetch_bq(0, 0, 0)
-        start_fetch_bkv(0, 0, 0)   # slot 0 → block 0
-        start_fetch_bkv(0, 1, 1)   # slot 1 → block 1  [ADDED: triple-buf]
+        start_fetch_bkv(0, 0, 0)
 
     @pl.when(seq_idx < decode_end)
     def process_decode():
@@ -876,9 +799,8 @@ def mla_ragged_paged_attention(
         pl.BlockSpec(memory_space=pltpu.HBM), # updated_cache_kv
     ]
 
-    # [ADDED: triple-buf] Upgraded from 2→3 slots to enable N+2 look-ahead.
-    bkvc_triple_buf = pltpu.VMEM((3, bkv_sz_per_kv_packing, kv_packing, lkv_dim), cache_kv.dtype)
-    bkpe_triple_buf = pltpu.VMEM((3, bkv_sz_per_kv_packing, kv_packing, r_dim), cache_kv.dtype)
+    bkvc_double_buf = pltpu.VMEM((2, bkv_sz_per_kv_packing, kv_packing, lkv_dim), cache_kv.dtype)
+    bkpe_double_buf = pltpu.VMEM((2, bkv_sz_per_kv_packing, kv_packing, r_dim), cache_kv.dtype)
     bq_nope_double_buf = pltpu.VMEM((2, bq_sz, num_q_heads_per_q_packing, q_packing, lkv_dim), ql_nope.dtype)
     bq_rope_double_buf = pltpu.VMEM((2, bq_sz, num_q_heads_per_q_packing, q_packing, r_dim), q_pe.dtype)
     bo_double_buf = bq_nope_double_buf
@@ -894,12 +816,12 @@ def mla_ragged_paged_attention(
     new_k_pe_scratch = pltpu.VMEM((8, kv_packing, r_dim), new_k_pe_prepared.dtype)
 
     scratch_shapes = [
-        bkvc_triple_buf,
-        bkpe_triple_buf,
+        bkvc_double_buf,
+        bkpe_double_buf,
         bq_nope_double_buf,
         bq_rope_double_buf,
         bo_double_buf,
-        pltpu.SemaphoreType.DMA((4, 3)),  # [ADDED: triple-buf] 3rd bkv slot
+        pltpu.SemaphoreType.DMA((4, 2)),
         l_scratch,
         m_scratch,
         acc_scratch,

@@ -1,5 +1,3 @@
-#/mnt/pd/tpu-inference/tpu_inference/kernels/mla/v1/kernel_hbm_best_best.py# 
-#Copyright 2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,35 +10,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""TPU-Friendly and Data-Movement-Friendly MLA Ragged Paged Attention kernel.
-FUSED MLA + KV Cache Update (RMW) with Prefetching and Triple Buffering.
-
-[ADDED: Triple-Buffer DMA Pipeline]
-Upgrades the KV-block fetch pipeline from double-buffering (N+1 look-ahead) to
-triple-buffering (N+2 look-ahead) to eliminate the Vector-unit 'Wait' segments
-visible in XProf when the DMA fence for block N+1 is on the critical path of
-iteration N.
-
-Ordering strategy per iteration N
-----------------------------------
-  Old (double-buffer):
-    1. start_fetch_bkv(N+1)          <- scalar: issue N+1 DMA
-    2. wait_fetch_bkv(N)             <- scalar: fence for N  ← stalls if N DMA
-    3. load_bkv / flash_attention(N) <- vector: heavy matmul   not done yet
-    [N was issued 1 iteration ago; fence may still stall]
-
-  New (triple-buffer, this file):
-    1. start_fetch_bkv(N+2)          <- scalar: issue N+2 DMA first
-    2. wait_fetch_bkv(N)             <- scalar: fence for N  ← near-zero stall
-    3. load_bkv / flash_attention(N) <- vector: heavy matmul
-    [N was issued 2 iterations ago; fence completes with minimal stall]
-
-XProf evidence:
-  sems (4,2) bkv fence stalls visible between scalar DMA issue and vector unit
-  start. Triple-buffering allows the scalar unit to issue the N+2 command BEFORE
-  the vector unit begins the N matmul, so both DMA engines are busy while VPU
-  computes, eliminating idle 'Wait' segments.
-"""
+"""TPU-Friendly and Data-Movement-Friendly MLA Ragged Paged Attention kernel. FUSED MLA + KV Cache Update (RMW) with Prefetching and Double Buffering."""
 
 import functools
 import jax
@@ -109,17 +79,17 @@ def _mla_ragged_paged_attention_kernel(
     o_hbm_ref,  # [max_num_tokens, num_q_heads_per_q_packing, q_packing, lkv_dim] # Memory: HBM
     updated_cache_kv_hbm_ref,  # [total_num_pages, page_size_per_kv_packing, kv_packing, align_to(lkv_dim + r_dim, 128)] # Memory: HBM
     # Scratch
-    bkvc_x3_ref,  # [3, bkv_sz_per_kv_packing, kv_packing, lkv_dim] # Memory: VMEM (triple-buf)
-    bkpe_x3_ref,  # [3, bkv_sz_per_kv_packing, kv_packing, r_dim] # Memory: VMEM (triple-buf)
+    bkvc_x2_ref,  # [2, bkv_sz_per_kv_packing, kv_packing, lkv_dim] # Memory: VMEM
+    bkpe_x2_ref,  # [2, bkv_sz_per_kv_packing, kv_packing, r_dim] # Memory: VMEM
     bq_nope_x2_ref,  # [2, bq_sz, num_q_heads_per_q_packing, q_packing, lkv_dim] # Memory: VMEM
     bq_rope_x2_ref,  # [2, bq_sz, num_q_heads_per_q_packing, q_packing, r_dim] # Memory: VMEM
     bo_x2_ref,  # [2, bq_sz, num_q_heads_per_q_packing, q_packing, lkv_dim] # Memory: VMEM
-    sems,  # [4, 3] # Memory: SMEM (Semaphores; row 0 uses 3 slots for triple-buf KV)
+    sems,  # [4, 2] # Memory: SMEM (Semaphores)
     l_ref,  # [bq_sz * num_q_heads, 128] # Memory: VMEM
     m_ref,  # [bq_sz * num_q_heads, 128] # Memory: VMEM
     acc_ref,  # [bq_sz * num_q_heads, lkv_dim] # Memory: VMEM
     # Update Scratch
-    existing_cache_scratch_ref,  # [kv_packing, kv_dim] # Memory: VMEM
+    existing_cache_scratch_ref,  # [2, kv_packing, kv_dim] # Memory: VMEM (double-buffered)
     new_kv_c_scratch_ref,        # [scratch_size_kv] # Memory: VMEM
     new_k_pe_scratch_ref,        # [scratch_size_pe] # Memory: VMEM
     *,
@@ -229,7 +199,26 @@ def _mla_ragged_paged_attention_kernel(
         first_col       = first_token_idx % kv_packing  # its col within its cache row
         num_cache_rows  = cdiv(first_col + q_len, kv_packing)
 
-        def cache_row_body(r_iter, _):
+        def cache_row_body(r_iter, carry):
+            prev_slot, prev_page_idx, prev_cache_row = carry
+
+            curr_slot = r_iter % 2
+
+            # --- Deferred Write Pipeline: drain the PREVIOUS row's write ---
+            # The write DMA started at the end of iteration r-1 is independent
+            # of the three read DMAs we are about to issue for iteration r.
+            # Draining it here (rather than immediately after start()) lets both
+            # the write and the three reads proceed concurrently, hiding 31 out
+            # of 32 write latencies for a 32-row prefill.
+            @pl.when(r_iter > 0)
+            def _drain_prev_write():
+                cp_prev = pltpu.make_async_copy(
+                    existing_cache_scratch_ref.at[prev_slot],
+                    updated_cache_kv_hbm_ref.at[prev_page_idx, prev_cache_row],
+                    dma_sem,
+                )
+                cp_prev.wait()
+
             # j_row_start: first j (0-indexed token offset) for the r_iter-th cache
             # row.  For r_iter=0 with first_col>0 this is negative; those leading
             # slots contain old cache data and are skipped via the valid mask below.
@@ -242,9 +231,14 @@ def _mla_ragged_paged_attention_kernel(
             page_idx   = page_indices_ref[seq_idx * pages_per_seq + page_num]
             cache_row  = (anchor_seq % page_size) // kv_packing
 
-            # --- Step 1: Load new-KV data (one DMA for the 8-row aligned window) ---
-            # kv_packing consecutive tokens span at most 2 packed new-KV rows, so
-            # an 8-row aligned window always covers every token in this cache row.
+            # --- Steps 1+2: Issue all three read DMAs concurrently into curr_slot ---
+            # cp1 (new_kv_c), cp2 (new_k_pe), and cp_read (existing cache row)
+            # all read from independent HBM addresses into independent VMEM
+            # scratch locations.  Issuing them together lets the DMA engine
+            # service all three in parallel, reducing per-row DMA latency from
+            # 2 serial waits (cp1/cp2, then cp_read) down to 1 parallel wait.
+            # curr_slot alternates 0/1 so the read into curr_slot never races
+            # with the in-flight write draining from prev_slot.
             first_new_idx   = q_start + j_start
             aligned_new_row = (first_new_idx // kv_packing) & ~7
 
@@ -258,20 +252,19 @@ def _mla_ragged_paged_attention_kernel(
                 new_k_pe_scratch_ref.at[pl.ds(0, 8)],
                 dma_sem,
             )
-            cp1.start(); cp2.start()
-            cp1.wait(); cp2.wait()
-
-            # --- Step 2: DMA_Read the existing cache row ONCE ---
+            # Define cp_read BEFORE any start() so all three can be issued
+            # together in the next line.
             cp_read = pltpu.make_async_copy(
                 updated_cache_kv_hbm_ref.at[page_idx, cache_row],
-                existing_cache_scratch_ref.at[0],
+                existing_cache_scratch_ref.at[curr_slot],
                 dma_sem,
             )
-            cp_read.start(); cp_read.wait()
+            cp1.start(); cp2.start(); cp_read.start()
+            cp1.wait(); cp2.wait(); cp_read.wait()
 
-            cache_line = existing_cache_scratch_ref[0]   # [kv_packing, total_dim]
-            updated_c  = cache_line[:, :lkv_dim]         # [kv_packing, lkv_dim]
-            updated_pe = cache_line[:, lkv_dim:]          # [kv_packing, r_dim]
+            cache_line = existing_cache_scratch_ref[curr_slot]  # [kv_packing, total_dim]
+            updated_c  = cache_line[:, :lkv_dim]                # [kv_packing, lkv_dim]
+            updated_pe = cache_line[:, lkv_dim:]                 # [kv_packing, r_dim]
 
             # --- Step 3: Update the cache line (VPU only, select-based) ---
             # Unrolled over the compile-time constant kv_packing.  Each iteration
@@ -310,17 +303,37 @@ def _mla_ragged_paged_attention_kernel(
                 updated_pe = jnp.where(apply, new_pe_val[None, :], updated_pe)
 
             updated_line = jnp.concatenate([updated_c, updated_pe], axis=1)
-            existing_cache_scratch_ref.at[0].set(updated_line)
+            existing_cache_scratch_ref.at[curr_slot].set(updated_line)
 
-            # --- Step 4: DMA_Write the updated cache row ONCE ---
+            # --- Step 4: Start write from curr_slot but do NOT wait ---
+            # The wait is deferred to the start of the next iteration (or the
+            # post-loop drain below), allowing it to overlap with the next row's
+            # three read DMAs.
             cp_write = pltpu.make_async_copy(
-                existing_cache_scratch_ref.at[0],
+                existing_cache_scratch_ref.at[curr_slot],
                 updated_cache_kv_hbm_ref.at[page_idx, cache_row],
                 dma_sem,
             )
-            cp_write.start(); cp_write.wait()
+            cp_write.start()
 
-        lax.fori_loop(0, num_cache_rows, cache_row_body, None)
+            return (curr_slot, page_idx, cache_row)
+
+        final_carry = lax.fori_loop(
+            0, num_cache_rows, cache_row_body,
+            (jnp.int32(0), jnp.int32(0), jnp.int32(0)),
+        )
+
+        # Drain the final row's write (the loop never gets an r_iter+1 to do it).
+        final_slot, final_page_idx, final_cache_row = final_carry
+
+        @pl.when(num_cache_rows > 0)
+        def _drain_last_write():
+            cp_last = pltpu.make_async_copy(
+                existing_cache_scratch_ref.at[final_slot],
+                updated_cache_kv_hbm_ref.at[final_page_idx, final_cache_row],
+                dma_sem,
+            )
+            cp_last.wait()
 
     # Standard MLA Logic (Flash Attention)
     
@@ -405,10 +418,9 @@ def _mla_ragged_paged_attention_kernel(
         head_acc_ref[...] = o_curr
 
     def _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, *, wait=False):
-        # [ADDED: triple-buf] bkv_sem_idx cycles 0→1→2→0 (mod 3)
         sem = sems.at[0, bkv_sem_idx]
-        bkvc_vmem_ref = bkvc_x3_ref.at[bkv_sem_idx]
-        bkvpe_vmem_ref = bkpe_x3_ref.at[bkv_sem_idx]
+        bkvc_vmem_ref = bkvc_x2_ref.at[bkv_sem_idx]
+        bkvpe_vmem_ref = bkpe_x2_ref.at[bkv_sem_idx]
         reshaped_cache_hbm_ref = cache_kv_hbm_ref.reshape(
             total_num_pages * page_size_per_kv_packing,
             *cache_kv_hbm_ref.shape[2:],
@@ -544,12 +556,12 @@ def _mla_ragged_paged_attention_kernel(
         return q_nope_vec, q_rope_vec
 
     def load_bkv(bkv_sem_idx, *, bkvc_mask, bkpe_mask):
-        bkvc_ref = (bkvc_x3_ref.bitcast(jnp.uint32).at[bkv_sem_idx].reshape(
+        bkvc_ref = (bkvc_x2_ref.bitcast(jnp.uint32).at[bkv_sem_idx].reshape(
             bkv_sz_per_kv_packing, lkv_dim))
         bkvc_vec = pltpu.bitcast(bkvc_ref[...], kv_dtype)
         bkvc_vec = lax.select(bkvc_mask, bkvc_vec, jnp.zeros_like(bkvc_vec))
 
-        bkpe_ref = (bkpe_x3_ref.bitcast(jnp.uint32).at[bkv_sem_idx].reshape(
+        bkpe_ref = (bkpe_x2_ref.bitcast(jnp.uint32).at[bkv_sem_idx].reshape(
             bkv_sz_per_kv_packing, r_dim))
         bkpe_vec = pltpu.bitcast(bkpe_ref[...], kv_dtype)
         bkpe_vec = lax.select(bkpe_mask, bkpe_vec, jnp.zeros_like(bkpe_vec))
@@ -585,7 +597,6 @@ def _mla_ragged_paged_attention_kernel(
             return next_seq_idx, next_bq_idx, next_bq_sem_idx
 
         def get_next_bkv_ids(seq_idx, bq_idx, bkv_idx, bkv_sem_idx):
-            # [ADDED: triple-buf] sem rotates 0→1→2→0
             next_bkv_idx = bkv_idx + 1
             is_last_bkv = next_bkv_idx == num_bkv
             next_bkv_idx = lax.select(is_last_bkv, 0, next_bkv_idx)
@@ -593,20 +604,8 @@ def _mla_ragged_paged_attention_kernel(
             is_last_bq = next_bq_idx == num_bq
             next_bq_idx = lax.select(is_last_bq, 0, next_bq_idx)
             next_seq_idx = lax.select(is_last_bq, seq_idx + 1, seq_idx)
-            # Rotate through 3 slots: (sem_idx + 1) % 3
-            next_bkv_sem_idx = lax.select(
-                bkv_sem_idx == 2, 0,
-                lax.select(bkv_sem_idx == 1, 2, 1),
-            )
+            next_bkv_sem_idx = lax.select(bkv_sem_idx == 0, 1, 0)
             return next_seq_idx, next_bq_idx, next_bkv_idx, next_bkv_sem_idx
-
-        def get_next2_bkv_ids(seq_idx, bq_idx, bkv_idx, bkv_sem_idx):
-            """Return IDs for block N+2 (two steps ahead). [ADDED: triple-buf]"""
-            n1_seq, n1_bq, n1_bkv, n1_sem = get_next_bkv_ids(
-                seq_idx, bq_idx, bkv_idx, bkv_sem_idx)
-            n2_seq, n2_bq, n2_bkv, n2_sem = get_next_bkv_ids(
-                n1_seq, n1_bq, n1_bkv, n1_sem)
-            return n2_seq, n2_bq, n2_bkv, n2_sem
 
         def compute_with_bq(bq_idx, _):
             bq_sem_idx = sem_ids_ref[0]
@@ -629,49 +628,21 @@ def _mla_ragged_paged_attention_kernel(
                              < actual_bkv_sz)
 
                 bkv_sem_idx = sem_ids_ref[1]
-                (next_seq_idx, _, next_bkv_idx,
-                 next_bkv_sem_idx) = get_next_bkv_ids(
-                     seq_idx, bq_idx, bkv_idx, bkv_sem_idx)
-                (next2_seq_idx, _, next2_bkv_idx,
-                 next2_bkv_sem_idx) = get_next2_bkv_ids(
-                     seq_idx, bq_idx, bkv_idx, bkv_sem_idx)
+                next_seq_idx, _, next_bkv_idx, next_bkv_sem_idx = get_next_bkv_ids(
+                    seq_idx, bq_idx, bkv_idx, bkv_sem_idx)
 
-                # ── [ADDED: triple-buf] Step 1: Scalar issues N+2 DMA ──────
-                # Two independent guards keep the sem tracking and the prefetch
-                # decoupled so we handle the "N+1 exists but N+2 does not" case.
-                #
-                # Guard A: Advance sem_ids to N+1's slot whenever N+1 exists.
-                # The next iteration must read sem_ids_ref[1] == N+1's slot so
-                # it can wait on (and then load from) the correct VMEM buffer.
                 @pl.when(next_seq_idx < num_seqs)
-                def advance_sem_tracking():
-                    sem_ids_ref[1] = next_bkv_sem_idx  # N+1's slot, not N+2!
+                def prefetch_next_bkv():
+                    sem_ids_ref[1] = next_bkv_sem_idx
+                    start_fetch_bkv(next_seq_idx, next_bkv_idx,
+                                    next_bkv_sem_idx)
 
-                # Guard B: Issue the N+2 prefetch only when N+2 actually exists.
-                # This DMA is issued BEFORE the fence for N (below), so the DMA
-                # engine is already pulling N+2 from HBM while the scalar unit
-                # resolves N's fence — eliminating the Vector-unit 'Wait' seen
-                # in XProf.
-                @pl.when(next2_seq_idx < num_seqs)
-                def prefetch_n2():
-                    start_fetch_bkv(next2_seq_idx, next2_bkv_idx,
-                                    next2_bkv_sem_idx)
-
-                # ── Step 2: Fence for block N (delayed as late as possible) ──
-                # Block N's DMA was issued two iterations ago, so the fence
-                # completes with near-zero stall compared to double buffering
-                # (where it was issued only one iteration ago).
                 @pl.when(bkv_idx == 0)
                 def wait_cur_bq():
                     wait_fetch_bq(seq_idx, bq_idx, bq_sem_idx)
 
                 wait_fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx)
 
-                # ── Step 3: Vector heavy matmul ──────────────────────────────
-                # By the time we reach here:
-                #   • Block N data is in VMEM (fence resolved above)
-                #   • Block N+2 DMA is in-flight (issued in Step 1)
-                # So the Vector unit never idles waiting for a DMA fence.
                 if debug_mode:
                     return
 
@@ -719,14 +690,8 @@ def _mla_ragged_paged_attention_kernel(
     
     @pl.when(seq_idx == 0)
     def start_prefetch():
-        # [ADDED: triple-buf] Pre-fill two slots so the pipeline has N and N+1
-        # both in-flight before compute_with_bkv iteration 0 starts.
-        # Slot 0 → block 0 (N=0), Slot 1 → block 1 (N=1).
-        # In the first iteration of compute_with_bkv we will issue slot 2 (N=2)
-        # before waiting for slot 1 (N=1), giving true triple-buffer overlap.
         start_fetch_bq(0, 0, 0)
-        start_fetch_bkv(0, 0, 0)   # slot 0 → block 0
-        start_fetch_bkv(0, 1, 1)   # slot 1 → block 1  [ADDED: triple-buf]
+        start_fetch_bkv(0, 0, 0)
 
     @pl.when(seq_idx < decode_end)
     def process_decode():
@@ -876,9 +841,8 @@ def mla_ragged_paged_attention(
         pl.BlockSpec(memory_space=pltpu.HBM), # updated_cache_kv
     ]
 
-    # [ADDED: triple-buf] Upgraded from 2→3 slots to enable N+2 look-ahead.
-    bkvc_triple_buf = pltpu.VMEM((3, bkv_sz_per_kv_packing, kv_packing, lkv_dim), cache_kv.dtype)
-    bkpe_triple_buf = pltpu.VMEM((3, bkv_sz_per_kv_packing, kv_packing, r_dim), cache_kv.dtype)
+    bkvc_double_buf = pltpu.VMEM((2, bkv_sz_per_kv_packing, kv_packing, lkv_dim), cache_kv.dtype)
+    bkpe_double_buf = pltpu.VMEM((2, bkv_sz_per_kv_packing, kv_packing, r_dim), cache_kv.dtype)
     bq_nope_double_buf = pltpu.VMEM((2, bq_sz, num_q_heads_per_q_packing, q_packing, lkv_dim), ql_nope.dtype)
     bq_rope_double_buf = pltpu.VMEM((2, bq_sz, num_q_heads_per_q_packing, q_packing, r_dim), q_pe.dtype)
     bo_double_buf = bq_nope_double_buf
@@ -886,20 +850,20 @@ def mla_ragged_paged_attention(
     m_scratch = l_scratch
     acc_scratch = pltpu.VMEM((bq_sz * num_q_heads_per_q_packing * q_packing, lkv_dim), jnp.float32)
     
-    # Scratch for RMW update
+    # Scratch for RMW update — double-buffered to overlap write of slot A with reads into slot B
     kv_dim = lkv_dim + r_dim
-    existing_cache_scratch = pltpu.VMEM((1, kv_packing, kv_dim), cache_kv.dtype)
+    existing_cache_scratch = pltpu.VMEM((2, kv_packing, kv_dim), cache_kv.dtype)
     # Scratch for loading new KVs: [8, kv_packing, dim]
     new_kv_c_scratch = pltpu.VMEM((8, kv_packing, lkv_dim), new_kv_c_prepared.dtype)
     new_k_pe_scratch = pltpu.VMEM((8, kv_packing, r_dim), new_k_pe_prepared.dtype)
 
     scratch_shapes = [
-        bkvc_triple_buf,
-        bkpe_triple_buf,
+        bkvc_double_buf,
+        bkpe_double_buf,
         bq_nope_double_buf,
         bq_rope_double_buf,
         bo_double_buf,
-        pltpu.SemaphoreType.DMA((4, 3)),  # [ADDED: triple-buf] 3rd bkv slot
+        pltpu.SemaphoreType.DMA((4, 2)),
         l_scratch,
         m_scratch,
         acc_scratch,

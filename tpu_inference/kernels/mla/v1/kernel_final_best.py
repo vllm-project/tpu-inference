@@ -1,5 +1,4 @@
-#/mnt/pd/tpu-inference/tpu_inference/kernels/mla/v1/kernel_hbm_best_best.py# 
-#Copyright 2025 Google LLC
+# Copyright 2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,35 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""TPU-Friendly and Data-Movement-Friendly MLA Ragged Paged Attention kernel.
-FUSED MLA + KV Cache Update (RMW) with Prefetching and Triple Buffering.
-
-[ADDED: Triple-Buffer DMA Pipeline]
-Upgrades the KV-block fetch pipeline from double-buffering (N+1 look-ahead) to
-triple-buffering (N+2 look-ahead) to eliminate the Vector-unit 'Wait' segments
-visible in XProf when the DMA fence for block N+1 is on the critical path of
-iteration N.
-
-Ordering strategy per iteration N
-----------------------------------
-  Old (double-buffer):
-    1. start_fetch_bkv(N+1)          <- scalar: issue N+1 DMA
-    2. wait_fetch_bkv(N)             <- scalar: fence for N  ← stalls if N DMA
-    3. load_bkv / flash_attention(N) <- vector: heavy matmul   not done yet
-    [N was issued 1 iteration ago; fence may still stall]
-
-  New (triple-buffer, this file):
-    1. start_fetch_bkv(N+2)          <- scalar: issue N+2 DMA first
-    2. wait_fetch_bkv(N)             <- scalar: fence for N  ← near-zero stall
-    3. load_bkv / flash_attention(N) <- vector: heavy matmul
-    [N was issued 2 iterations ago; fence completes with minimal stall]
-
-XProf evidence:
-  sems (4,2) bkv fence stalls visible between scalar DMA issue and vector unit
-  start. Triple-buffering allows the scalar unit to issue the N+2 command BEFORE
-  the vector unit begins the N matmul, so both DMA engines are busy while VPU
-  computes, eliminating idle 'Wait' segments.
-"""
+"""TPU-Friendly and Data-Movement-Friendly MLA Ragged Paged Attention kernel. FUSED MLA + KV Cache Update (RMW) with Prefetching and Double Buffering."""
 
 import functools
 import jax
@@ -109,12 +80,12 @@ def _mla_ragged_paged_attention_kernel(
     o_hbm_ref,  # [max_num_tokens, num_q_heads_per_q_packing, q_packing, lkv_dim] # Memory: HBM
     updated_cache_kv_hbm_ref,  # [total_num_pages, page_size_per_kv_packing, kv_packing, align_to(lkv_dim + r_dim, 128)] # Memory: HBM
     # Scratch
-    bkvc_x3_ref,  # [3, bkv_sz_per_kv_packing, kv_packing, lkv_dim] # Memory: VMEM (triple-buf)
-    bkpe_x3_ref,  # [3, bkv_sz_per_kv_packing, kv_packing, r_dim] # Memory: VMEM (triple-buf)
+    bkvc_x2_ref,  # [2, bkv_sz_per_kv_packing, kv_packing, lkv_dim] # Memory: VMEM
+    bkpe_x2_ref,  # [2, bkv_sz_per_kv_packing, kv_packing, r_dim] # Memory: VMEM
     bq_nope_x2_ref,  # [2, bq_sz, num_q_heads_per_q_packing, q_packing, lkv_dim] # Memory: VMEM
     bq_rope_x2_ref,  # [2, bq_sz, num_q_heads_per_q_packing, q_packing, r_dim] # Memory: VMEM
     bo_x2_ref,  # [2, bq_sz, num_q_heads_per_q_packing, q_packing, lkv_dim] # Memory: VMEM
-    sems,  # [4, 3] # Memory: SMEM (Semaphores; row 0 uses 3 slots for triple-buf KV)
+    sems,  # [4, 2] # Memory: SMEM (Semaphores)
     l_ref,  # [bq_sz * num_q_heads, 128] # Memory: VMEM
     m_ref,  # [bq_sz * num_q_heads, 128] # Memory: VMEM
     acc_ref,  # [bq_sz * num_q_heads, lkv_dim] # Memory: VMEM
@@ -181,146 +152,112 @@ def _mla_ragged_paged_attention_kernel(
             cp.start()
         return cp
 
-    # Fused Update Logic (RMW) — HBM-Bandwidth-Optimised
+    # Fused Update Logic (RMW)
     def update_kv_cache_block():
-        # Helper for dynamic selection (unchanged).
+        # Helper for dynamic selection
         def select_tree(index, candidates):
             n = len(candidates)
             if n == 1:
                 return candidates[0]
             mid = n // 2
-            return lax.select(index < mid,
-                              select_tree(index, candidates[:mid]),
+            return lax.select(index < mid, 
+                              select_tree(index, candidates[:mid]), 
                               select_tree(index - mid, candidates[mid:]))
 
-        # HBM BANDWIDTH FIX: Process one cache row per iteration instead of one
-        # token per iteration.
-        #
-        # Root cause: with kv_packing=4 (float8), up to kv_packing consecutive
-        # new tokens all map to the same 128-byte packed cache row.  The old
-        # per-token loop issued a DMA_Read + DMA_Write for every individual token,
-        # so a q_len=4 prefill touching one cache row generated 4 reads and 4
-        # writes of the *same* row — kv_packing× redundant HBM traffic plus
-        # serialised DMA latency.  XProf shows this as a dense burst of tiny
-        # DMA_Read/DMA_Write events at kernel start with idle Vector units.
-        #
-        # Fix: the outer loop iterates over unique cache rows
-        # (ceil((first_col + q_len) / kv_packing) iterations).  Each iteration:
-        #   1. Issues one DMA for the new-KV aligned window (same as before).
-        #   2. DMA_Reads  the target cache row ONCE.
-        #   3. Scatters all valid slot updates with a VPU-only unrolled loop
-        #      (kv_packing iterations, fully unrolled by XLA — no dynamic gather).
-        #   4. DMA_Writes the updated cache row ONCE.
-        #
-        # HBM round-trip reduction: up to kv_packing× for q_len >= kv_packing.
-        # Decode (q_len=1): iteration count is identical to before (1 cache row),
-        # so there is zero regression in that regime.
-        #
-        # Correctness property: cache slot s always equals cache col s.
-        # Proof: col = (first_token_idx + j_row_start + s) % kv_packing
-        #             = (first_token_idx - first_col + s)  % kv_packing
-        #               [r_iter * kv_packing cancels mod kv_packing]
-        #             = ((first_token_idx // kv_packing) * kv_packing + s) % kv_packing
-        #             = s.   QED.
-        # This means we can update slot s directly without a col→slot indirection.
-
-        dma_sem         = sems.at[3, 0]
-        first_token_idx = kv_len - q_len          # sequence pos of first new token
-        first_col       = first_token_idx % kv_packing  # its col within its cache row
-        num_cache_rows  = cdiv(first_col + q_len, kv_packing)
-
-        def cache_row_body(r_iter, _):
-            # j_row_start: first j (0-indexed token offset) for the r_iter-th cache
-            # row.  For r_iter=0 with first_col>0 this is negative; those leading
-            # slots contain old cache data and are skipped via the valid mask below.
-            j_row_start = r_iter * kv_packing - first_col
-
-            # Anchor on the first *valid* token in this row to locate it in HBM.
-            j_start    = jnp.maximum(j_row_start, 0)
-            anchor_seq = first_token_idx + j_start
-            page_num   = anchor_seq // page_size
-            page_idx   = page_indices_ref[seq_idx * pages_per_seq + page_num]
-            cache_row  = (anchor_seq % page_size) // kv_packing
-
-            # --- Step 1: Load new-KV data (one DMA for the 8-row aligned window) ---
-            # kv_packing consecutive tokens span at most 2 packed new-KV rows, so
-            # an 8-row aligned window always covers every token in this cache row.
-            first_new_idx   = q_start + j_start
-            aligned_new_row = (first_new_idx // kv_packing) & ~7
-
+        # Update the KV cache with new tokens for the current sequence.
+        # This function implements the 32-bit RMW pattern.
+        
+        def token_loop_body(j, _):
+            token_idx_in_seq = kv_len - q_len + j
+            page_num_in_seq = token_idx_in_seq // page_size
+            page_indices_start = seq_idx * pages_per_seq
+            page_idx = page_indices_ref[page_indices_start + page_num_in_seq]
+            
+            row = (token_idx_in_seq % page_size) // kv_packing
+            col = (token_idx_in_seq % page_size) % kv_packing
+            
+            # Prepare new data from new_kv_c/new_k_pe inputs
+            idx = q_start + j
+            row_new = idx // kv_packing
+            col_new = idx % kv_packing
+            
+            # Align read to 8 to satisfy tiling constraints
+            aligned_row_new = row_new & ~7
+            
+            # 1. Load new KV values
+            dma_sem = sems.at[3, 0] # Use spare semaphore
+            
+            # Transfer: HBM -> VMEM (Scratch)
             cp1 = pltpu.make_async_copy(
-                new_kv_c_hbm_ref.at[pl.ds(aligned_new_row, 8)],
+                new_kv_c_hbm_ref.at[pl.ds(aligned_row_new, 8)],
                 new_kv_c_scratch_ref.at[pl.ds(0, 8)],
-                dma_sem,
+                dma_sem
             )
             cp2 = pltpu.make_async_copy(
-                new_k_pe_hbm_ref.at[pl.ds(aligned_new_row, 8)],
+                new_k_pe_hbm_ref.at[pl.ds(aligned_row_new, 8)],
                 new_k_pe_scratch_ref.at[pl.ds(0, 8)],
-                dma_sem,
+                dma_sem
             )
-            cp1.start(); cp2.start()
-            cp1.wait(); cp2.wait()
-
-            # --- Step 2: DMA_Read the existing cache row ONCE ---
+            cp1.start()
+            cp2.start()
+            cp1.wait()
+            cp2.wait()
+            
+            # Extract the specific token's KV
+            # Load: VMEM -> Registers
+            row_offset = row_new % 8
+            full_c = new_kv_c_scratch_ref.at[row_offset][...] # [kv_packing, lkv_dim]
+            
+            c_candidates = [full_c[i] for i in range(kv_packing)]
+            new_val_c = select_tree(col_new, c_candidates)
+            
+            full_pe = new_k_pe_scratch_ref.at[row_offset][...] # [kv_packing, r_dim]
+            pe_candidates = [full_pe[i] for i in range(kv_packing)]
+            new_val_pe = select_tree(col_new, pe_candidates)
+            
+            # 2. Read-Modify-Write into Cache
+            
+            # Load existing cache line
+            # Transfer: HBM -> VMEM
             cp_read = pltpu.make_async_copy(
-                updated_cache_kv_hbm_ref.at[page_idx, cache_row],
+                updated_cache_kv_hbm_ref.at[page_idx, row],
                 existing_cache_scratch_ref.at[0],
-                dma_sem,
+                dma_sem
             )
-            cp_read.start(); cp_read.wait()
-
-            cache_line = existing_cache_scratch_ref[0]   # [kv_packing, total_dim]
-            updated_c  = cache_line[:, :lkv_dim]         # [kv_packing, lkv_dim]
-            updated_pe = cache_line[:, lkv_dim:]          # [kv_packing, r_dim]
-
-            # --- Step 3: Update the cache line (VPU only, select-based) ---
-            # Unrolled over the compile-time constant kv_packing.  Each iteration
-            # handles one (slot, token) pair.
-            #
-            # Implementation note: .at[s].set() inside a lax.fori_loop lowers to
-            # XLA scatter, which is not supported by the Pallas TPU backend.
-            # Instead we use jnp.where with a per-slot boolean mask (slot_iota==s),
-            # which lowers to XLA select — fully supported on TPU.
-            slot_iota = lax.broadcasted_iota(jnp.int32, (kv_packing, 1), 0)
-            for s in range(kv_packing):
-                j_s   = j_row_start + s        # dynamic j value for this slot
-                valid = jnp.logical_and(j_s >= 0, j_s < q_len)
-
-                # For invalid slots (leading/trailing partial row), fall back to
-                # first_new_idx so the scratch access is always in-bounds.  The
-                # extracted value is discarded by jnp.where when valid=False.
-                new_idx = jnp.where(valid, q_start + j_s, first_new_idx)
-                row_off = jnp.clip(new_idx // kv_packing - aligned_new_row, 0, 7)
-                col_s   = new_idx % kv_packing
-
-                scratch_c_row  = new_kv_c_scratch_ref.at[row_off][...]  # [kv_packing, lkv_dim]
-                scratch_pe_row = new_k_pe_scratch_ref.at[row_off][...]  # [kv_packing, r_dim]
-
-                c_candidates  = [scratch_c_row[i]  for i in range(kv_packing)]
-                pe_candidates = [scratch_pe_row[i] for i in range(kv_packing)]
-                new_c_val  = select_tree(col_s, c_candidates)   # [lkv_dim]
-                new_pe_val = select_tree(col_s, pe_candidates)  # [r_dim]
-
-                # slot_mask is True only for row s (shape [kv_packing, 1]).
-                # Combining with the per-token valid flag gives a mask that is
-                # True at exactly one position — the slot we want to update.
-                slot_mask = (slot_iota == s)                       # [kv_packing, 1]
-                apply     = jnp.logical_and(valid, slot_mask)      # [kv_packing, 1]
-                updated_c  = jnp.where(apply, new_c_val[None, :],  updated_c)
-                updated_pe = jnp.where(apply, new_pe_val[None, :], updated_pe)
-
+            cp_read.start()
+            cp_read.wait()
+            
+            # Modify in VMEM
+            cache_line = existing_cache_scratch_ref[0] # [kv_packing, total_dim]
+            
+            # Construct updated line
+            idx_range = lax.broadcasted_iota(jnp.int32, (kv_packing, 1), 0)
+            mask = idx_range == col
+            
+            # Update part 1: lkv_dim
+            current_c = cache_line[:, :lkv_dim]
+            updated_c = jnp.where(mask, new_val_c[None, :], current_c)
+            
+            # Update part 2: r_dim
+            current_pe = cache_line[:, lkv_dim:]
+            updated_pe = jnp.where(mask, new_val_pe[None, :], current_pe)
+            
+            # Combine
             updated_line = jnp.concatenate([updated_c, updated_pe], axis=1)
+            
             existing_cache_scratch_ref.at[0].set(updated_line)
-
-            # --- Step 4: DMA_Write the updated cache row ONCE ---
+            
+            # Write back
+            # Transfer: VMEM -> HBM
             cp_write = pltpu.make_async_copy(
                 existing_cache_scratch_ref.at[0],
-                updated_cache_kv_hbm_ref.at[page_idx, cache_row],
-                dma_sem,
+                updated_cache_kv_hbm_ref.at[page_idx, row],
+                dma_sem
             )
-            cp_write.start(); cp_write.wait()
-
-        lax.fori_loop(0, num_cache_rows, cache_row_body, None)
+            cp_write.start()
+            cp_write.wait()
+            
+        lax.fori_loop(0, q_len, token_loop_body, None)
 
     # Standard MLA Logic (Flash Attention)
     
@@ -405,10 +342,9 @@ def _mla_ragged_paged_attention_kernel(
         head_acc_ref[...] = o_curr
 
     def _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, *, wait=False):
-        # [ADDED: triple-buf] bkv_sem_idx cycles 0→1→2→0 (mod 3)
         sem = sems.at[0, bkv_sem_idx]
-        bkvc_vmem_ref = bkvc_x3_ref.at[bkv_sem_idx]
-        bkvpe_vmem_ref = bkpe_x3_ref.at[bkv_sem_idx]
+        bkvc_vmem_ref = bkvc_x2_ref.at[bkv_sem_idx]
+        bkvpe_vmem_ref = bkpe_x2_ref.at[bkv_sem_idx]
         reshaped_cache_hbm_ref = cache_kv_hbm_ref.reshape(
             total_num_pages * page_size_per_kv_packing,
             *cache_kv_hbm_ref.shape[2:],
@@ -544,12 +480,12 @@ def _mla_ragged_paged_attention_kernel(
         return q_nope_vec, q_rope_vec
 
     def load_bkv(bkv_sem_idx, *, bkvc_mask, bkpe_mask):
-        bkvc_ref = (bkvc_x3_ref.bitcast(jnp.uint32).at[bkv_sem_idx].reshape(
+        bkvc_ref = (bkvc_x2_ref.bitcast(jnp.uint32).at[bkv_sem_idx].reshape(
             bkv_sz_per_kv_packing, lkv_dim))
         bkvc_vec = pltpu.bitcast(bkvc_ref[...], kv_dtype)
         bkvc_vec = lax.select(bkvc_mask, bkvc_vec, jnp.zeros_like(bkvc_vec))
 
-        bkpe_ref = (bkpe_x3_ref.bitcast(jnp.uint32).at[bkv_sem_idx].reshape(
+        bkpe_ref = (bkpe_x2_ref.bitcast(jnp.uint32).at[bkv_sem_idx].reshape(
             bkv_sz_per_kv_packing, r_dim))
         bkpe_vec = pltpu.bitcast(bkpe_ref[...], kv_dtype)
         bkpe_vec = lax.select(bkpe_mask, bkpe_vec, jnp.zeros_like(bkpe_vec))
@@ -585,7 +521,6 @@ def _mla_ragged_paged_attention_kernel(
             return next_seq_idx, next_bq_idx, next_bq_sem_idx
 
         def get_next_bkv_ids(seq_idx, bq_idx, bkv_idx, bkv_sem_idx):
-            # [ADDED: triple-buf] sem rotates 0→1→2→0
             next_bkv_idx = bkv_idx + 1
             is_last_bkv = next_bkv_idx == num_bkv
             next_bkv_idx = lax.select(is_last_bkv, 0, next_bkv_idx)
@@ -593,20 +528,8 @@ def _mla_ragged_paged_attention_kernel(
             is_last_bq = next_bq_idx == num_bq
             next_bq_idx = lax.select(is_last_bq, 0, next_bq_idx)
             next_seq_idx = lax.select(is_last_bq, seq_idx + 1, seq_idx)
-            # Rotate through 3 slots: (sem_idx + 1) % 3
-            next_bkv_sem_idx = lax.select(
-                bkv_sem_idx == 2, 0,
-                lax.select(bkv_sem_idx == 1, 2, 1),
-            )
+            next_bkv_sem_idx = lax.select(bkv_sem_idx == 0, 1, 0)
             return next_seq_idx, next_bq_idx, next_bkv_idx, next_bkv_sem_idx
-
-        def get_next2_bkv_ids(seq_idx, bq_idx, bkv_idx, bkv_sem_idx):
-            """Return IDs for block N+2 (two steps ahead). [ADDED: triple-buf]"""
-            n1_seq, n1_bq, n1_bkv, n1_sem = get_next_bkv_ids(
-                seq_idx, bq_idx, bkv_idx, bkv_sem_idx)
-            n2_seq, n2_bq, n2_bkv, n2_sem = get_next_bkv_ids(
-                n1_seq, n1_bq, n1_bkv, n1_sem)
-            return n2_seq, n2_bq, n2_bkv, n2_sem
 
         def compute_with_bq(bq_idx, _):
             bq_sem_idx = sem_ids_ref[0]
@@ -629,49 +552,21 @@ def _mla_ragged_paged_attention_kernel(
                              < actual_bkv_sz)
 
                 bkv_sem_idx = sem_ids_ref[1]
-                (next_seq_idx, _, next_bkv_idx,
-                 next_bkv_sem_idx) = get_next_bkv_ids(
-                     seq_idx, bq_idx, bkv_idx, bkv_sem_idx)
-                (next2_seq_idx, _, next2_bkv_idx,
-                 next2_bkv_sem_idx) = get_next2_bkv_ids(
-                     seq_idx, bq_idx, bkv_idx, bkv_sem_idx)
+                next_seq_idx, _, next_bkv_idx, next_bkv_sem_idx = get_next_bkv_ids(
+                    seq_idx, bq_idx, bkv_idx, bkv_sem_idx)
 
-                # ── [ADDED: triple-buf] Step 1: Scalar issues N+2 DMA ──────
-                # Two independent guards keep the sem tracking and the prefetch
-                # decoupled so we handle the "N+1 exists but N+2 does not" case.
-                #
-                # Guard A: Advance sem_ids to N+1's slot whenever N+1 exists.
-                # The next iteration must read sem_ids_ref[1] == N+1's slot so
-                # it can wait on (and then load from) the correct VMEM buffer.
                 @pl.when(next_seq_idx < num_seqs)
-                def advance_sem_tracking():
-                    sem_ids_ref[1] = next_bkv_sem_idx  # N+1's slot, not N+2!
+                def prefetch_next_bkv():
+                    sem_ids_ref[1] = next_bkv_sem_idx
+                    start_fetch_bkv(next_seq_idx, next_bkv_idx,
+                                    next_bkv_sem_idx)
 
-                # Guard B: Issue the N+2 prefetch only when N+2 actually exists.
-                # This DMA is issued BEFORE the fence for N (below), so the DMA
-                # engine is already pulling N+2 from HBM while the scalar unit
-                # resolves N's fence — eliminating the Vector-unit 'Wait' seen
-                # in XProf.
-                @pl.when(next2_seq_idx < num_seqs)
-                def prefetch_n2():
-                    start_fetch_bkv(next2_seq_idx, next2_bkv_idx,
-                                    next2_bkv_sem_idx)
-
-                # ── Step 2: Fence for block N (delayed as late as possible) ──
-                # Block N's DMA was issued two iterations ago, so the fence
-                # completes with near-zero stall compared to double buffering
-                # (where it was issued only one iteration ago).
                 @pl.when(bkv_idx == 0)
                 def wait_cur_bq():
                     wait_fetch_bq(seq_idx, bq_idx, bq_sem_idx)
 
                 wait_fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx)
 
-                # ── Step 3: Vector heavy matmul ──────────────────────────────
-                # By the time we reach here:
-                #   • Block N data is in VMEM (fence resolved above)
-                #   • Block N+2 DMA is in-flight (issued in Step 1)
-                # So the Vector unit never idles waiting for a DMA fence.
                 if debug_mode:
                     return
 
@@ -719,14 +614,8 @@ def _mla_ragged_paged_attention_kernel(
     
     @pl.when(seq_idx == 0)
     def start_prefetch():
-        # [ADDED: triple-buf] Pre-fill two slots so the pipeline has N and N+1
-        # both in-flight before compute_with_bkv iteration 0 starts.
-        # Slot 0 → block 0 (N=0), Slot 1 → block 1 (N=1).
-        # In the first iteration of compute_with_bkv we will issue slot 2 (N=2)
-        # before waiting for slot 1 (N=1), giving true triple-buffer overlap.
         start_fetch_bq(0, 0, 0)
-        start_fetch_bkv(0, 0, 0)   # slot 0 → block 0
-        start_fetch_bkv(0, 1, 1)   # slot 1 → block 1  [ADDED: triple-buf]
+        start_fetch_bkv(0, 0, 0)
 
     @pl.when(seq_idx < decode_end)
     def process_decode():
@@ -876,9 +765,8 @@ def mla_ragged_paged_attention(
         pl.BlockSpec(memory_space=pltpu.HBM), # updated_cache_kv
     ]
 
-    # [ADDED: triple-buf] Upgraded from 2→3 slots to enable N+2 look-ahead.
-    bkvc_triple_buf = pltpu.VMEM((3, bkv_sz_per_kv_packing, kv_packing, lkv_dim), cache_kv.dtype)
-    bkpe_triple_buf = pltpu.VMEM((3, bkv_sz_per_kv_packing, kv_packing, r_dim), cache_kv.dtype)
+    bkvc_double_buf = pltpu.VMEM((2, bkv_sz_per_kv_packing, kv_packing, lkv_dim), cache_kv.dtype)
+    bkpe_double_buf = pltpu.VMEM((2, bkv_sz_per_kv_packing, kv_packing, r_dim), cache_kv.dtype)
     bq_nope_double_buf = pltpu.VMEM((2, bq_sz, num_q_heads_per_q_packing, q_packing, lkv_dim), ql_nope.dtype)
     bq_rope_double_buf = pltpu.VMEM((2, bq_sz, num_q_heads_per_q_packing, q_packing, r_dim), q_pe.dtype)
     bo_double_buf = bq_nope_double_buf
@@ -894,12 +782,12 @@ def mla_ragged_paged_attention(
     new_k_pe_scratch = pltpu.VMEM((8, kv_packing, r_dim), new_k_pe_prepared.dtype)
 
     scratch_shapes = [
-        bkvc_triple_buf,
-        bkpe_triple_buf,
+        bkvc_double_buf,
+        bkpe_double_buf,
         bq_nope_double_buf,
         bq_rope_double_buf,
         bo_double_buf,
-        pltpu.SemaphoreType.DMA((4, 3)),  # [ADDED: triple-buf] 3rd bkv slot
+        pltpu.SemaphoreType.DMA((4, 2)),
         l_scratch,
         m_scratch,
         acc_scratch,
