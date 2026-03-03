@@ -228,6 +228,7 @@ class DeepseekV3BaseAttention(JaxModule):
                                         epsilon=self.rms_norm_eps,
                                         scale_init=nnx.with_partitioning(
                                             init_fn, (None, )),
+                                        param_dtype=self.dtype,
                                         dtype=self.dtype,
                                         quant_config=self.quant_config,
                                         prefix=self.prefix + ".q_a_layernorm",
