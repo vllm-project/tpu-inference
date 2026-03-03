@@ -303,6 +303,8 @@ def fused_moe_func(
     use_ep: bool,
     activation: str,
     scoring_fn: str,
+    topk_weights: jax.Array | None = None,
+    topk_indices: jax.Array | None = None,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -321,6 +323,8 @@ def fused_moe_func(
         use_ep: use expert parallelism.
         activation: activation function to perform on the output of w1.
         scoring_fn: scoring function to apply on gating_output.
+        topk_weights: pre-calculated expert weights.
+        topk_indices: pre-calculated expert indices.
 
     Returns:
         Output of moe operation [num_tokens, hidden_size]
@@ -333,15 +337,20 @@ def fused_moe_func(
         "The kernel requires num_tokens * topk to be a multiple of "
         f"16 but got {num_tokens}*{topk}={num_tokens*topk}")
 
-    assert gating_output.shape == (num_tokens, global_num_experts)
+    if topk_weights is None or topk_indices is None:
+        assert gating_output is not None
+        assert gating_output.shape == (num_tokens, global_num_experts)
 
-    topk_weights = apply_scoring_fn(scoring_fn, gating_output)
-    # All-gather topk weights for attention dp
-    topk_weights = jax.lax.with_sharding_constraint(
-        topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
-    topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
+        topk_weights = apply_scoring_fn(scoring_fn, gating_output)
+        # All-gather topk weights for attention dp
+        topk_weights = jax.lax.with_sharding_constraint(
+            topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
+        topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
+        if renormalize:
+            topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
+    else:
+        jax.debug.print("KERNEL DEBUG: Using pre-calculated topk_weights and indices")
+    
     topk_weights = topk_weights.astype(dtype)
 
     def _process_tokens_locally(hidden_states_local, topk_indices_local):

@@ -1077,22 +1077,26 @@ class DeepSeekV3Router(JaxEinsum):
 
         scores_TE = super().__call__(x_TD)
 
-        if self.moe_backend in MoEBackend.fused_moe_backends():
-            return scores_TE
-        else:
-            if self.scoring_func == "sigmoid":
-                scores_TE = nnx.sigmoid(scores_TE)
-            elif self.scoring_func == "softmax":
-                scores_TE = jax.nn.softmax(scores_TE, axis=-1)
+        # Apply scoring function (Sigmoid/Softmax)
+        if self.scoring_func == "sigmoid":
+            scores_TE = nnx.sigmoid(scores_TE)
+        elif self.scoring_func == "softmax":
+            scores_TE = jax.nn.softmax(scores_TE, axis=-1)
 
-        original_scores_TE = scores_TE
+        # Always perform Grouped Top-K selection in Python to ensure accuracy
         topk_indices_TX = self.get_topk_indices(scores_TE)
-        weights_TX = jnp.take_along_axis(original_scores_TE,
+        weights_TX = jnp.take_along_axis(scores_TE,
                                          topk_indices_TX,
                                          axis=-1)
 
         if self.norm_topk_prob:
             weights_TX /= jnp.sum(weights_TX, axis=-1)[..., None] + 1e-20
+
+        # One-time debug log per layer execution
+        jax.debug.callback(
+            lambda s, w, i: logger.warning(f"ROUTER DEBUG: func={s} weight_sum_mean={jnp.mean(jnp.sum(w, axis=-1))} first_indices={i[0, :4]}"),
+            self.scoring_func, weights_TX, topk_indices_TX
+        )
 
         return weights_TX, topk_indices_TX
 
