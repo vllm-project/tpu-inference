@@ -646,9 +646,9 @@ class DeepseekV3MLP(JaxModule):
     hidden_act: str
     hidden_size: int
     intermediate_size: int
-    df_sharding: Sharding = ()
-    fd_sharding: Sharding = ()
-    activation_ffw_td: Sharding = ()
+    df_sharding: P = P()
+    fd_sharding: P = P()
+    activation_ffw_td: P = P()
     random_init: bool = False
     quant_config: Optional[QuantizationConfig] = None
 
@@ -757,7 +757,7 @@ class DeepseekV2Moe(JaxModule):
             norm_topk_prob=True,
             rngs=rng,
             routed_scaling_factor=routed_scaling_factor,
-            dtype=self.dtype,
+            dtype=dtype,
             moe_backend=moe_backend,
             activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
             ed_sharding=P(None, None),
@@ -771,9 +771,9 @@ class DeepseekV2Moe(JaxModule):
             hidden_size=hidden_size,
             intermediate_size=num_shared_experts * moe_intermediate_size,
             rngs=rng,
-            activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-            df_sharding=(None, ShardingAxisName.MLP_TENSOR),
-            fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
+            activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
+            df_sharding=P(None, ShardingAxisName.MLP_TENSOR),
+            fd_sharding=P(ShardingAxisName.MLP_TENSOR, None),
             quant_config=quant_config)
 
         # routed experts
