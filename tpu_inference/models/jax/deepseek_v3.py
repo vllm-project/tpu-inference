@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import math
+import os
 from abc import abstractmethod
 from dataclasses import InitVar, dataclass
 from itertools import islice
@@ -1331,15 +1332,16 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
         self.model.initialize_cache()
 
         # Display model arch
-        logger.info("Model architecture and parameter dtypes:")
-        num_layers_to_display = 5
-        should_skip_layer_display = False
-        for name, param in self.named_parameters():
-            if f"layers.{num_layers_to_display}." in name:
-                should_skip_layer_display = True
-            if should_skip_layer_display and "layers." in name:
-                continue
-            v: jax.Array = param.value
-            logger.info(f"{name} : {v.dtype}{v.shape} on {v.device}")
+        if os.environ.get("VLLM_LOGGING_LEVEL", "").upper() == "DEBUG":
+            logger.debug("Model architecture and parameter dtypes:")
+            num_layers_to_display = 5
+            should_skip_layer_display = False
+            for name, param in self.named_parameters():
+                if f"layers.{num_layers_to_display}." in name:
+                    should_skip_layer_display = True
+                if should_skip_layer_display and "layers." in name:
+                    continue
+                v: jax.Array = param.value
+                logger.debug(f"{name} : {v.dtype}{v.shape} on {v.device}")
 
         return loaded
