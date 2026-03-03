@@ -349,7 +349,10 @@ def fused_moe_func(
         if renormalize:
             topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
     else:
-        jax.debug.print("KERNEL DEBUG: Using pre-calculated topk_weights and indices")
+        topk_weights = jax.lax.with_sharding_constraint(
+            topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
+        topk_indices = jax.lax.with_sharding_constraint(
+            topk_indices, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
     
     topk_weights = topk_weights.astype(dtype)
 

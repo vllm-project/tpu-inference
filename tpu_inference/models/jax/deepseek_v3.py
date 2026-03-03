@@ -527,7 +527,7 @@ class MLAEinsum(JaxEinsum):
                 self.weight,
                 self.weight_scale_inv,
                 (0, 1),
-                block_size=self.quant_config.weight_block_size,
+                block_size=None,
             ).T
             A, N, qk_nope_head_dim, v_head_dim = self.mla_layer.kv_lora_rank, self.mla_layer.N, self.mla_layer.qk_nope_head_dim, self.mla_layer.v_head_dim
             if dequantized_weight.shape != (A, N *
@@ -1075,30 +1075,28 @@ class DeepSeekV3Router(JaxEinsum):
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = lax.with_sharding_constraint(x_TD, self.activation_ffw_td)
 
-        scores_TE = super().__call__(x_TD)
+        # 1. Get raw logits in float32 for precision
+        logits_TE = super().__call__(x_TD).astype(jnp.float32)
 
-        # Apply scoring function (Sigmoid/Softmax)
+        # 2. Expert Selection: Use biased logits (Aux-Loss-Free bias)
+        topk_indices_TX = self.get_topk_indices(logits_TE)
+
+        # 3. Expert Weighting: Use unbiased probabilities
         if self.scoring_func == "sigmoid":
-            scores_TE = nnx.sigmoid(scores_TE)
+            probs_TE = jax.nn.sigmoid(logits_TE)
         elif self.scoring_func == "softmax":
-            scores_TE = jax.nn.softmax(scores_TE, axis=-1)
+            probs_TE = jax.nn.softmax(logits_TE, axis=-1)
+        else:
+            probs_TE = logits_TE
 
-        # Always perform Grouped Top-K selection in Python to ensure accuracy
-        topk_indices_TX = self.get_topk_indices(scores_TE)
-        weights_TX = jnp.take_along_axis(scores_TE,
+        weights_TX = jnp.take_along_axis(probs_TE,
                                          topk_indices_TX,
                                          axis=-1)
 
         if self.norm_topk_prob:
             weights_TX /= jnp.sum(weights_TX, axis=-1)[..., None] + 1e-20
 
-        # One-time debug log per layer execution
-        jax.debug.callback(
-            lambda s, w, i: logger.warning(f"ROUTER DEBUG: func={s} weight_sum_mean={jnp.mean(jnp.sum(w, axis=-1))} first_indices={i[0, :4]}"),
-            self.scoring_func, weights_TX, topk_indices_TX
-        )
-
-        return weights_TX, topk_indices_TX
+        return weights_TX.astype(self.dtype), topk_indices_TX
 
 
 @dataclass

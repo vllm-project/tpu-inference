@@ -535,8 +535,8 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                     moe_backend=layer.moe_backend,
                     mesh=layer.mesh,
                     activation=layer.activation,
-                    # Convert to tuple so jax jit can hash it
-                    weight_block_size=weight_block_size,
+                    # Source block size should be inferred from scale shape
+                    weight_block_size=None,
                 )
 
             del layer.kernel_gating_EDF

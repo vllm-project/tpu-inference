@@ -124,7 +124,6 @@ def moe_apply(
                 topk_weights = None
                 topk_indices = None
                 if isinstance(gating_output, tuple):
-                    jax.debug.print("MOE_APPLY DEBUG: Unpacking tuple gating_output")
                     topk_weights, topk_indices = gating_output
                     gating_output = None # Not used if pre-calculated
 
