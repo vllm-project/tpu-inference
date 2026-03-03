@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-02-27 06:50 PM UTC*
+*Last Updated: 2026-03-03 10:28 PM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -272,61 +272,14 @@ Below is the live status of our supported models, features, and kernels. Click o
 <summary>Quantization Methods</summary>
 
 <!-- START: quantization -->
-<table>
-  <thead>
-    <tr>
-      <th>Format</th>
-      <th>Method</th>
-      <th>Supported<br>Hardware Acceleration</th>
-      <th>flax</th>
-      <th>torchax</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td>AWQ INT4</td>
-      <td></td>
-      <td>v5, v6</td>
-      <td><span title="❓ Untested">❓</span></td>
-      <td><span title="❓ Untested">❓</span></td>
-    </tr>
-    <tr>
-      <td>FP4 W4A16</td>
-      <td>mxfp4</td>
-      <td>v7</td>
-      <td><span title="❓ Untested">❓</span></td>
-      <td><span title="❓ Untested">❓</span></td>
-    </tr>
-    <tr>
-      <td>FP8 W8A8</td>
-      <td>compressed-tensor</td>
-      <td>v7</td>
-      <td><span title="❓ Untested">❓</span></td>
-      <td><span title="❓ Untested">❓</span></td>
-    </tr>
-    <tr>
-      <td>FP8 W8A16</td>
-      <td>compressed-tensor</td>
-      <td>v7</td>
-      <td><span title="❓ Untested">❓</span></td>
-      <td><span title="❓ Untested">❓</span></td>
-    </tr>
-    <tr>
-      <td>INT4 W4A16</td>
-      <td>awq</td>
-      <td>v5, v6</td>
-      <td><span title="❓ Untested">❓</span></td>
-      <td><span title="❓ Untested">❓</span></td>
-    </tr>
-    <tr>
-      <td>INT8 W8A8</td>
-      <td>compressed-tensor</td>
-      <td>v5, v6</td>
-      <td><span title="❓ Untested">❓</span></td>
-      <td><span title="❓ Untested">❓</span></td>
-    </tr>
-  </tbody>
-</table>
+| Weight | Activation | Method |
+| --- | --- | --- |
+| Int4 | bf16 | awq |
+| fp4 | bf16 | mxfp4 |
+| fp8 | bf16&nbsp;or&nbsp;fp8 | fp8 |
+| fp8 | bf16&nbsp;or&nbsp;fp8 | compressed-tensors |
+| int8 | bf16&nbsp;or&nbsp;int8 | compressed-tensors |
+
 <!-- END: quantization -->
 
 </details>
