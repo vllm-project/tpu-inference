@@ -757,7 +757,7 @@ class DeepseekV2Moe(JaxModule):
             norm_topk_prob=True,
             rngs=rng,
             routed_scaling_factor=routed_scaling_factor,
-            dtype=dtype,
+            dtype=self.dtype,
             moe_backend=moe_backend,
             activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
             ed_sharding=P(None, None),
