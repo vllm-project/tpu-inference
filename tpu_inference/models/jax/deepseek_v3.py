@@ -21,7 +21,6 @@ from typing import Any, Iterable, List, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
-import torch
 from flax import nnx
 from flax.typing import Sharding
 from jax import lax
@@ -67,20 +66,12 @@ def _weight_init(random_init: bool):
     return sharded_initializer if random_init else nnx.initializers.uniform()
 
 
-# A map from JAX dtype to the corresponding PyTorch integer dtype for raw memory viewing.
-DTYPE_VIEW_MAP = {
-    jnp.dtype(jnp.float8_e4m3fn): torch.uint8,
-    jnp.dtype(jnp.bfloat16): torch.uint16,
-    jnp.dtype(jnp.float32): torch.uint32,
-}
-
 modeling_flax_utils = FlaxUtils()
 
 # TODO: read these configs from HF config.
 num_local_experts: int = 256
 vocab_size: int = 129280
 hidden_size: int = 7168
-# NOTE: this dtype may be implicitly overriden if using to Qwix to load in the quantized weights
 dtype: jnp.dtype = jnp.bfloat16
 num_attention_heads: int = 128
 num_key_value_heads: int = 128
@@ -236,6 +227,7 @@ class DeepseekV3BaseAttention(JaxModule):
                                         epsilon=self.rms_norm_eps,
                                         scale_init=nnx.with_partitioning(
                                             init_fn, (None, )),
+                                        param_dtype=self.dtype,
                                         dtype=self.dtype,
                                         quant_config=self.quant_config,
                                         prefix=self.prefix + ".q_a_layernorm",
@@ -245,6 +237,7 @@ class DeepseekV3BaseAttention(JaxModule):
             self.kv_lora_rank,
             epsilon=self.rms_norm_eps,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
+            param_dtype=self.dtype,
             dtype=self.dtype,
             quant_config=self.quant_config,
             prefix=self.prefix + ".kv_a_layernorm",
@@ -719,7 +712,7 @@ class SharedFusedMoe(JaxMoE):
     Corresponds to vLLM's SharedFusedMoe.
     Handles the routed and shared experts + the relevant forward pass.
 
-    Reference here: https://github.com/vllm-project/vllm/blob/2b465570e6dd327e8422ef9c87e9b2b1454ceaed/vllm/model_executor/models/deepseek_v2.py#L223
+    Reference here: https://github.com/vllm-project/vllm/blob/168ee03e1cbba2b962adbc704b16762b266be184/vllm/model_executor/layers/fused_moe/shared_fused_moe.py#L14
     """
     shared_experts: Optional[DeepseekV3MLP] = None
 
@@ -738,6 +731,10 @@ class SharedFusedMoe(JaxMoE):
 
 
 class DeepseekV2Moe(JaxModule):
+    """Jax implementation of Deepseek MoE layer
+    
+    vllm ref. https://github.com/vllm-project/vllm/blob/168ee03e1cbba2b962adbc704b16762b266be184/vllm/model_executor/models/deepseek_v2.py#L225
+    """
 
     def __init__(self,
                  *,
@@ -836,13 +833,12 @@ class DeepseekV3DecoderLayer(JaxModule):
             self_attn: Union[DeepseekV3Attention, DeepseekV3MLA],
 
             # MLP can be either the Dense MLP (for first k layers) or SharedFusedMoe
-            # TODO: rename to mlp? custom_module seems needlessly confusing
-            custom_module: nnx.Module | SharedFusedMoe | DeepseekV3MLP,
+            mlp: nnx.Module | SharedFusedMoe | DeepseekV3MLP,
             prefix: str = ""):
         self.input_layernorm = input_layernorm
         self.post_attention_layernorm = post_attention_layernorm
         self.self_attn = self_attn
-        self.mlp = custom_module
+        self.mlp = mlp
 
     def __call__(
         self, x_TD: jax.Array, *, kv_cache: List[jax.Array],
@@ -1152,8 +1148,6 @@ class DeepSeekV3(JaxModule):
                     quant_config=quant_config)
             else:
                 # MoE Layer
-                # moe_dtype = jnp.float8_e4m3fn if self.weight_loader.is_native_fp8_model else vllm_config.model_config.hf_config.quantization_config.get(
-                #     "tpu_settings", {}).get("mlp_dtype", jnp.float4_e2m1fn)
                 mlp_layer = DeepseekV2Moe(
                     mesh=self.mesh,
                     num_expert_parallelism=self.num_expert_parallelism,
@@ -1166,7 +1160,7 @@ class DeepSeekV3(JaxModule):
                 input_layernorm=input_layernorm,
                 post_attention_layernorm=post_attention_layernorm,
                 self_attn=_create_deepseek_attention(layer_index),
-                custom_module=mlp_layer,
+                mlp=mlp_layer,
                 prefix=f"{prefix}.layers.{layer_index}")
 
         # hf_config.num_hidden_layers is 61, which ignores the last MTP layer.
