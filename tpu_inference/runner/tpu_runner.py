@@ -241,7 +241,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.devices = devices
         self.dtype = self.model_config.dtype
-        self.maybe_forbid_compile = runner_utils.ForbidCompile(
+        self.maybe_forbid_compile = jax.no_tracing(
         ) if envs.VLLM_XLA_CHECK_RECOMPILATION else nullcontext()
         self.dp_size = self.vllm_config.sharding_config.total_dp_size
         self.rank = rank

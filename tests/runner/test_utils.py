@@ -8,15 +8,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jax._src.interpreters import pxla
 from jax._src.pallas.utils import next_power_of_2
 
 from tpu_inference.runner.utils import (
-    PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR, ForbidCompile, InferencePhase,
-    LatencyTracker, PhasedBasedProfiler,
-    determine_phase_from_batch_composition_stats, get_batch_composition_stats,
-    get_padded_num_reqs_with_upper_limit, get_padded_token_len,
-    get_req_paddings, get_token_paddings)
+    PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR, InferencePhase, LatencyTracker,
+    PhasedBasedProfiler, determine_phase_from_batch_composition_stats,
+    get_batch_composition_stats, get_padded_num_reqs_with_upper_limit,
+    get_padded_token_len, get_req_paddings, get_token_paddings)
 
 
 def test_min_token_size_alignment():
@@ -182,72 +180,6 @@ def jnp_array_input_same_shape():
 @pytest.fixture
 def jnp_array_input_new():
     return jnp.ones((3, 3))
-
-
-def test_forbid_compile_raises_error_on_first_call(jitted_function,
-                                                   jnp_array_input):
-    """Test that ForbidCompile raises an error when a compilation occurs."""
-    with pytest.raises(RuntimeError, match="JAX compilation occurred"):
-        with ForbidCompile():
-            jitted_function(jnp_array_input)
-
-
-def test_forbid_compile_succeeds_on_cached_call(jitted_function,
-                                                jnp_array_input):
-    """Test that ForbidCompile does not raise an error on a cached call."""
-    # Warm up the cache
-    jitted_function(jnp_array_input)
-    with ForbidCompile():
-        jitted_function(jnp_array_input)
-
-
-def test_forbid_compile_restores_original_function():
-    """Test that ForbidCompile restores the original JAX function after exit."""
-    original_func = pxla._cached_lowering_to_hlo
-    with ForbidCompile():
-        pass
-    assert pxla._cached_lowering_to_hlo is original_func
-
-
-def test_forbid_compile_with_exception():
-    """Test that ForbidCompile restores the original function even if an exception occurs."""
-    original_func = pxla._cached_lowering_to_hlo
-    with pytest.raises(ValueError, match="Test exception"):
-        with ForbidCompile():
-            raise ValueError("Test exception")
-    assert pxla._cached_lowering_to_hlo is original_func
-
-
-def test_forbid_compile_raises_on_new_shape(jitted_function, jnp_array_input,
-                                            jnp_array_input_same_shape,
-                                            jnp_array_input_new):
-    """
-    Tests that ForbidCompile raises a RuntimeError when a jitted function
-    is called with an input shape that triggers a new compilation.
-    """
-    # Clear cache for a clean test state.
-    pxla._cached_lowering_to_hlo.cache_clear()
-
-    # Warm up the JIT cache with the SCALAR input.
-    # This causes the first compilation and cache miss.
-    jitted_function(jnp_array_input)
-    misses_after_warmup = pxla._cached_lowering_to_hlo.cache_info().misses
-    assert misses_after_warmup == 1
-
-    # This call uses the same shape/dtype, so it should be a cache HIT.
-    # No RuntimeError expected.
-    with ForbidCompile():
-        jitted_function(jnp_array_input_same_shape)
-    assert pxla._cached_lowering_to_hlo.cache_info(
-    ).misses == misses_after_warmup  # No new misses
-
-    # Now, call with a VECTOR input. This has a different shape,
-    # forcing a NEW compilation (cache MISS).
-    # This *should* raise a RuntimeError within the ForbidCompile context.
-    expected_error_message = "JAX compilation occurred but was forbidden in this context."
-    with pytest.raises(RuntimeError, match=expected_error_message):
-        with ForbidCompile(message=expected_error_message):
-            jitted_function(jnp_array_input_new)
 
 
 class MockInputBatch:
