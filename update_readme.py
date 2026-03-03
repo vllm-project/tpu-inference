@@ -147,6 +147,44 @@ def generate_html_feature_table(headers, data):
     html.append("</table>")
     return "\n".join(html)
 
+def generate_html_quantization_table(headers, data):
+    """Generates an HTML table specifically for the quantization methods matrix."""
+    if not headers: return ""
+    
+    html = []
+    html.append("<table>")
+    html.append("  <thead>")
+    html.append("    <tr>")
+    html.append("      <th>Weight</th>")
+    html.append("      <th>Activation</th>")
+    html.append("      <th>Method</th>")
+    html.append("      <th>Supported<br>Hardware Acceleration</th>")
+    html.append("      <th>flax</th>")
+    html.append("      <th>torchax</th>")
+    html.append("    </tr>")
+    html.append("  </thead>")
+    html.append("  <tbody>")
+    
+    for row in data:
+        html.append("    <tr>")
+        # Ensure we have 10 columns worth of data, then drop default columns (indices 6 and 9)
+        padded_row = row + [""] * (10 - len(row))
+        html.append(f"      <td>{padded_row[0]}</td>")
+        html.append(f"      <td>{padded_row[1]}</td>")
+        html.append(f"      <td>{padded_row[2]}</td>")
+        html.append(f"      <td>{padded_row[3]}</td>")
+        
+        merged_flax = _merge_hw_status(padded_row[4], padded_row[7])
+        merged_pytorch = _merge_hw_status(padded_row[5], padded_row[8])
+        
+        html.append(f"      <td>{merged_flax}</td>")
+        html.append(f"      <td>{merged_pytorch}</td>")
+        html.append("    </tr>")
+        
+    html.append("  </tbody>")
+    html.append("</table>")
+    return "\n".join(html)
+
 
 
 def merge_metrics(c, p):
@@ -341,6 +379,8 @@ def update_readme():
             
             if section_key == "core_features":
                 new_table = generate_html_feature_table(headers, all_data)
+            elif section_key == "quantization":
+                new_table = generate_html_quantization_table(headers, all_data)
             else:
                 if section_key == "model_support":
                     for row in all_data:
