@@ -20,6 +20,7 @@ from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
+from tpu_inference.kernels.gather.gather2 import ragged_gather
 from tpu_inference.kernels.megablox.gmm import gmm
 from tpu_inference.kernels.megablox.gmm_v2 import (gmm_v2,
                                                    is_supported_by_gmm_v2)
@@ -129,10 +130,8 @@ def _selective_gather_ep(hidden_states, token_indices_sorted, group_sizes,
     ep_token_start = jnp.where(ep_expert_start > 0,
                                cumsum_gs[ep_expert_start - 1], 0)
     ep_token_end = cumsum_gs[ep_expert_start + num_experts_per_shard - 1]
-    positions = jnp.arange(num_total)
-    is_local = (positions >= ep_token_start) & (positions < ep_token_end)
-    safe_indices = jnp.where(is_local, token_indices_sorted, 0)
-    return hidden_states[safe_indices]
+    return ragged_gather(hidden_states, token_indices_sorted, ep_token_start,
+                         ep_token_end)
 
 
 def moe_gmm_local(

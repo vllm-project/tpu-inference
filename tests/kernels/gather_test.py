@@ -12,6 +12,7 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 from tpu_inference.kernels.gather.gather import gather
+from tpu_inference.kernels.gather.gather2 import ragged_gather
 
 jax.config.parse_flags_with_absl()
 
@@ -52,6 +53,59 @@ class MoeRoutingTest(jtu.JaxTestCase):
     expected = gather_direct(indices, a)
     actual = gather(a, indices)
     self.assertAllClose(actual, expected)
+
+
+@jtu.with_config(jax_numpy_dtype_promotion="standard")
+class RaggedGatherTest(jtu.JaxTestCase):
+
+  def _run_ragged_gather_test(self, batch_size, value_dim, num_indices,
+                              ep_token_start, ep_token_end):
+    """Helper: runs ragged_gather and checks in-range output matches reference."""
+    a = jnp.arange(batch_size * value_dim).reshape(
+        batch_size, value_dim).astype(jnp.bfloat16)
+    indices = jax.random.randint(
+        jax.random.key(0), (num_indices,), 0, batch_size, jnp.int32)
+
+    actual = ragged_gather(a, indices, ep_token_start, ep_token_end)
+    expected = a[indices]
+
+    # Verify the in-range portion matches
+    actual_slice = actual[ep_token_start:ep_token_end]
+    expected_slice = expected[ep_token_start:ep_token_end]
+    self.assertAllClose(actual_slice, expected_slice)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="range_in_middle",
+           ep_token_start=1024, ep_token_end=4096),
+      dict(testcase_name="range_at_start",
+           ep_token_start=0, ep_token_end=2048),
+      dict(testcase_name="range_at_end",
+           ep_token_start=63488, ep_token_end=65536),
+      dict(testcase_name="full_range",
+           ep_token_start=0, ep_token_end=65536),
+      dict(testcase_name="non_aligned_boundaries",
+           ep_token_start=20, ep_token_end=50),
+  )
+  def test_ragged_gather(self, ep_token_start, ep_token_end):
+    self._run_ragged_gather_test(8192, 6144, 65536, ep_token_start,
+                                 ep_token_end)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="range_in_middle",
+           ep_token_start=512, ep_token_end=1024),
+      dict(testcase_name="range_at_start",
+           ep_token_start=0, ep_token_end=512),
+      dict(testcase_name="range_at_end",
+           ep_token_start=1536, ep_token_end=2048),
+      dict(testcase_name="full_range",
+           ep_token_start=0, ep_token_end=2048),
+      dict(testcase_name="non_aligned_boundaries",
+           ep_token_start=20, ep_token_end=50),
+  )
+  def test_ragged_gather_small(self, ep_token_start, ep_token_end):
+    self._run_ragged_gather_test(512, 128, 2048, ep_token_start,
+                                 ep_token_end)
+
 
 if __name__ == "__main__":
   absltest.main(testLoader=jtu.JaxTestLoader())
