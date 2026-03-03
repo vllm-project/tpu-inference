@@ -126,7 +126,7 @@ wait_for_server() {
   local container_name=$2
   local service_name=$3
   local log_path=$4
-  local timeout=${5:-3600} # Default 1 hour
+  local timeout=${5:-7200} # Default 2 hours
 
   echo "Waiting for $service_name on port $port to become healthy (Timeout: ${timeout}s)..."
 
@@ -209,7 +209,10 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   -e JAX_PLATFORMS='' \
   -e TPU_BACKEND_TYPE=jax \
   -e MODEL_IMPL_TYPE=vllm \
-  -e VLLM_DISABLE_SHARED_EXPERTS_STREAM=1 &
+  -e VLLM_DISABLE_SHARED_EXPERTS_STREAM="${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}" \
+  -e NEW_MODEL_DESIGN="${NEW_MODEL_DESIGN:-0}" \
+  -e MOE_REQUANTIZE_BLOCK_SIZE="${MOE_REQUANTIZE_BLOCK_SIZE:-}" \
+  -e MOE_REQUANTIZE_WEIGHT_DTYPE="${MOE_REQUANTIZE_WEIGHT_DTYPE:-}" &
 
 sleep 60
 
@@ -226,17 +229,16 @@ for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
     # shellcheck disable=SC2002
     cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "cat > ~/tpu-inference/scripts/multihost/run_cluster.sh"
     
-    REMOTE_CMD="bash ~/tpu-inference/scripts/multihost/run_cluster.sh \
-      '${DOCKER_IMAGE}' \
-      '${HEAD_INTERNAL_IP}' \
-      --worker \
-      '${HOST_HF_HOME}' \
+    REMOTE_CMD="bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_INTERNAL_IP}' --worker '${HOST_HF_HOME}' \
       -e HF_TOKEN='${HF_TOKEN:-}' \
       -e TPU_MULTIHOST_BACKEND=ray \
       -e JAX_PLATFORMS='' \
       -e TPU_BACKEND_TYPE=jax \
       -e MODEL_IMPL_TYPE=vllm \
-      -e VLLM_DISABLE_SHARED_EXPERTS_STREAM=1"
+      -e VLLM_DISABLE_SHARED_EXPERTS_STREAM='${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}' \
+      -e NEW_MODEL_DESIGN='${NEW_MODEL_DESIGN:-0}' \
+      -e MOE_REQUANTIZE_BLOCK_SIZE='${MOE_REQUANTIZE_BLOCK_SIZE:-}' \
+      -e MOE_REQUANTIZE_WEIGHT_DTYPE='${MOE_REQUANTIZE_WEIGHT_DTYPE:-}'"
 
     # shellcheck disable=SC2029
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "$REMOTE_CMD" &

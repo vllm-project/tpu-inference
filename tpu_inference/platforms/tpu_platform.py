@@ -56,6 +56,8 @@ class TpuPlatform(Platform):
         "NEW_MODEL_DESIGN",
         "MODEL_IMPL_TYPE",
         "VLLM_DISABLE_SHARED_EXPERTS_STREAM",
+        "MOE_REQUANTIZE_BLOCK_SIZE",
+        "MOE_REQUANTIZE_WEIGHT_DTYPE",
     ]
 
     @classmethod
