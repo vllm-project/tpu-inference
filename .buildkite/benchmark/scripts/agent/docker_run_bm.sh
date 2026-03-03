@@ -78,13 +78,13 @@ if [ -z "$HF_TOKEN" ]; then
 fi
 
 # Make sure mounted disk or dir exists
-if [ ! -d "$DOWNLOAD_DIR" ]; then
-    echo "Error: Folder $DOWNLOAD_DIR does not exist. This is useually a mounted drive. If no mounted drive, just create a folder."
+if [ ! -d "$LOCAL_HF_HOME" ]; then
+    echo "Error: Folder $LOCAL_HF_HOME does not exist. This is useually a mounted drive. If no mounted drive, just create a folder."
     exit 1
 fi
 
-if ! mountpoint -q "$DOWNLOAD_DIR"; then
-    echo "Error: $DOWNLOAD_DIR exists but is not a mounted directory."
+if ! mountpoint -q "$LOCAL_HF_HOME"; then
+    echo "Error: $LOCAL_HF_HOME exists but is not a mounted directory."
     exit 1
 fi
 
@@ -109,9 +109,10 @@ fi
 echo "starting docker...$CONTAINER_NAME"
 echo
 docker run \
- -v $DOWNLOAD_DIR:$DOWNLOAD_DIR \
+ -v $LOCAL_HF_HOME:$DOCKER_HF_HOME \
  --env-file $ENV_FILE \
  -e HF_TOKEN="$HF_TOKEN" \
+ -e HF_HOME="$DOCKER_HF_HOME" \
  -e TARGET_COMMIT=$TARGET_COMMIT \
  -e MODEL=$MODEL \
  -e DATASET=$DATASET \

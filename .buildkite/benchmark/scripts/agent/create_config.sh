@@ -71,6 +71,7 @@ done
 cat <<EOF >> "${ENV_FILE}"
 TEST_NAME=static
 CONTAINER_NAME=vllm-tpu
-DOWNLOAD_DIR=/mnt/disks/persist
+LOCAL_HF_HOME="/mnt/disks/persist/models"
+DOCKER_HF_HOME="/tmp/hf_home"
 EOF
 
