@@ -833,6 +833,9 @@ class SharedFusedMoe(JaxMoE):
         # Compute Routed Experts
         final_hidden_states = super().__call__(x_TD)
 
+        # Apply scaling factor
+        final_hidden_states *= self.routed_scaling_factor
+
         # (Maybe) Compute Shared Experts
         if self.shared_experts is not None:
             shared_output = self.shared_experts(x_TD)
@@ -854,6 +857,7 @@ class DeepseekV2Moe(JaxModule):
                  num_expert_parallelism,
                  moe_backend,
                  quant_config,
+                 scoring_func,
                  rng,
                  prefix: str = ""):
 
@@ -868,9 +872,10 @@ class DeepseekV2Moe(JaxModule):
             routed_scaling_factor=routed_scaling_factor,
             dtype=dtype,
             moe_backend=moe_backend,
-            activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
-            ed_sharding=P(None, None),
-            e_sharding=P(None, ),
+            activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
+            ed_sharding=(None, None),
+            e_sharding=(None, ),
+            scoring_func=scoring_func,
             quant_config=quant_config)
 
         # shared experts
@@ -927,6 +932,7 @@ class DeepseekV2Moe(JaxModule):
             prefix=f"{prefix}.experts",
             router=self.gate,
             shared_experts=self.shared_experts,
+            scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor)
 
     def __call__(self, x_TD: jax.Array):
@@ -999,6 +1005,7 @@ class DeepSeekV3Router(JaxEinsum):
             random_init: bool = False,
             quant_config: Optional[QuantizationConfig] = None,
             router_bias_dtype: jnp.dtype = jnp.float32,
+            scoring_func: str = "softmax",
             moe_backend: MoEBackend = MoEBackend.DENSE_MAT):
         self.hidden_size = hidden_size
         self.num_experts = num_experts
@@ -1014,6 +1021,7 @@ class DeepSeekV3Router(JaxEinsum):
         self.random_init = random_init
         self.quant_config = quant_config
         self.router_bias_dtype = router_bias_dtype
+        self.scoring_func = scoring_func
         self.moe_backend = moe_backend
         """Generates the router kernel (weights and bias) for routing."""
         D = self.hidden_size
@@ -1081,10 +1089,14 @@ class DeepSeekV3Router(JaxEinsum):
         x_TD = lax.with_sharding_constraint(x_TD, self.activation_ffw_td)
 
         scores_TE = super().__call__(x_TD)
-        scores_TE = nnx.sigmoid(scores_TE)
 
         if self.moe_backend in MoEBackend.fused_moe_backends():
             return scores_TE
+        else:
+            if self.scoring_func == "sigmoid":
+                scores_TE = nnx.sigmoid(scores_TE)
+            elif self.scoring_func == "softmax":
+                scores_TE = jax.nn.softmax(scores_TE, axis=-1)
 
         original_scores_TE = scores_TE
         topk_indices_TX = self.get_topk_indices(scores_TE)
@@ -1094,8 +1106,6 @@ class DeepSeekV3Router(JaxEinsum):
 
         if self.norm_topk_prob:
             weights_TX /= jnp.sum(weights_TX, axis=-1)[..., None] + 1e-20
-
-        weights_TX *= self.routed_scaling_factor
 
         return weights_TX, topk_indices_TX
 
@@ -1135,6 +1145,7 @@ class DeepSeekV3(JaxModule):
         self.is_last_rank = get_pp_group().is_last_rank
         hf_config = vllm_config.model_config.hf_config
         dtype = vllm_config.model_config.dtype
+        scoring_func = getattr(hf_config, "scoring_func", "sigmoid")
 
         if self.is_first_rank:
             self.embed_tokens = JaxEmbed(
@@ -1270,6 +1281,7 @@ class DeepSeekV3(JaxModule):
                     num_expert_parallelism=self.num_expert_parallelism,
                     moe_backend=self.moe_backend,
                     quant_config=quant_config,
+                    scoring_func=scoring_func,
                     rng=rng,
                     prefix=f"{prefix}.layers.{layer_index}.mlp")
 
