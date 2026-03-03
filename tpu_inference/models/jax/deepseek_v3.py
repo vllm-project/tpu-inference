@@ -72,7 +72,6 @@ modeling_flax_utils = FlaxUtils()
 num_local_experts: int = 256
 vocab_size: int = 129280
 hidden_size: int = 7168
-dtype: jnp.dtype = jnp.bfloat16
 num_attention_heads: int = 128
 num_key_value_heads: int = 128
 ffw_intermediate_size: int = 18432
@@ -739,6 +738,7 @@ class DeepseekV2Moe(JaxModule):
     def __init__(self,
                  *,
                  mesh,
+                 dtype,
                  num_expert_parallelism,
                  moe_backend,
                  quant_config,
@@ -754,7 +754,7 @@ class DeepseekV2Moe(JaxModule):
             norm_topk_prob=True,
             rngs=rng,
             routed_scaling_factor=routed_scaling_factor,
-            dtype=dtype,
+            dtype=self.dtype,
             moe_backend=moe_backend,
             activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
             ed_sharding=P(None, None),
@@ -1022,6 +1022,7 @@ class DeepSeekV3(JaxModule):
         self.is_first_rank = get_pp_group().is_first_rank
         self.is_last_rank = get_pp_group().is_last_rank
         hf_config = vllm_config.model_config.hf_config
+        dtype = vllm_config.model_config.dtype
 
         if self.is_first_rank:
             self.embed_tokens = JaxEmbed(
@@ -1150,6 +1151,7 @@ class DeepSeekV3(JaxModule):
                 # MoE Layer
                 mlp_layer = DeepseekV2Moe(
                     mesh=self.mesh,
+                    dtype=dtype,
                     num_expert_parallelism=self.num_expert_parallelism,
                     moe_backend=self.moe_backend,
                     quant_config=quant_config,
