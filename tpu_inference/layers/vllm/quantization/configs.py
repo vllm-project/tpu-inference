@@ -53,6 +53,7 @@ class VllmQuantLinearConfig(QuantLinearConfig):
         self.n_shards = get_mesh_shape_product(self.mesh,
                                                self.weight_sharding[0])
 
+        # .....
         if isinstance(layer, RowParallelLinear):
             self.weight_sharding = P(None, ShardingAxisName.ATTN_HEAD)
             if self.enable_sp:

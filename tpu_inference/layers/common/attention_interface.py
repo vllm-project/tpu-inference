@@ -464,13 +464,13 @@ def mla_attention(
         sm_scale: softmax scale
     """
     in_specs = (
-        query_tnh_sharding or P(ShardingAxisName.MLP_TENSOR, None, None),  # q
+        query_tnh_sharding or P(ShardingAxisName.ATTN_DATA, None, None),  # q
         query_tnh_sharding
-        or P(ShardingAxisName.MLP_TENSOR, None, None),  # q_rope
-        keyvalue_skh_sharding or P(ShardingAxisName.MLP_TENSOR, None),  # k
+        or P(ShardingAxisName.ATTN_DATA, None, None),  # q_rope
+        keyvalue_skh_sharding or P(ShardingAxisName.ATTN_DATA, None),  # k
         keyvalue_skh_sharding
-        or P(ShardingAxisName.MLP_TENSOR, None),  # k_rope
-        P(ShardingAxisName.MLP_TENSOR),  # kv_cache
+        or P(ShardingAxisName.ATTN_DATA, None),  # k_rope
+        P(ShardingAxisName.ATTN_DATA),  # kv_cache
         P(ShardingAxisName.ATTN_DATA),  # md.seq_lens
         P(ShardingAxisName.ATTN_DATA),  # md.page_indices_flat
         P(ShardingAxisName.ATTN_DATA),  # md.query_start_loc
@@ -478,12 +478,14 @@ def mla_attention(
     )
     out_specs = (
         attn_o_tnh_sharding
-        or P(ShardingAxisName.MLP_TENSOR, None, None),  # attn output
-        P(ShardingAxisName.MLP_TENSOR)  # kv cache
+        or P(ShardingAxisName.ATTN_DATA, None, None),  # attn output
+        P(ShardingAxisName.ATTN_DATA)  # kv cache
     )
 
     def _mla_ragged_paged_attention(q, q_rope, k, k_rope, cache, *args):
         max_num_tokens = q.shape[0]
+        print("gxd _mla_ragged_paged_attention max_num_tokens:", max_num_tokens)
+        print("gxd _mla_ragged_paged_attention q.shape:", q.shape)
         max_num_seqs = md.seq_lens.shape[0]
         pages_per_seq = md.block_tables.shape[0] // max_num_seqs
 
@@ -507,7 +509,8 @@ def mla_attention(
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale)
-
+        
+        print("gxd _mla_ragged_paged_attention out.shape:", out.shape)
         return new_cache, out
 
     kv_cache, output_TNA = jax.jit(

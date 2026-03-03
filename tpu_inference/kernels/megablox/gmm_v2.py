@@ -1088,16 +1088,20 @@ def is_supported_by_gmm_v2(lhs: jax.Array, rhs: jax.Array,
 
     if rhs_scale is not None and rhs_scale.shape[1] != 1:
         # gmm_v2 does not support subchannel quantization.
+        print("gxd # gmm_v2 does not support subchannel quantization.") # --> hit this part
         return False
     # gmm_v2 does not support implicit padding along lane dimension.
     num_lanes = pltpu.get_tpu_info().num_lanes
     if lhs.shape[-1] % num_lanes != 0 or rhs.shape[-1] % num_lanes != 0:
+        print("gxd # gmm_v2 does not support implicit padding along lane dimension")
         return False
     # gmm_v2 does not support when lhs is not multiple of sublane size.
     lhs_bytes = lhs.dtype.itemsize
     if lhs.shape[0] % (pltpu.get_tpu_info().num_sublanes * lhs_bytes) != 0:
+        print("gxd # gmm_v2 does not support when lhs is not multiple of sublane size.")
         return False
     # Handle weird edge cases where inputs are already quantized.
     if lhs.dtype not in [jnp.bfloat16, jnp.float32]:
+        print("gxd # lhs.dtype not in [jnp.bfloat16, jnp.float32]")
         return False
     return True

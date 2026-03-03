@@ -15,7 +15,7 @@ from typing import Tuple
 
 import jax.numpy as jnp
 import torch
-from jax.sharding import Mesh
+from jax.sharding import Mesh, PartitionSpec as P, NamedSharding
 from torchax.interop import jax_view
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.v1.attention.backend import (AttentionBackend, AttentionLayer,
@@ -26,6 +26,8 @@ from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
 from tpu_inference.layers.common.attention_interface import mla_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
+import jax
+from tpu_inference.layers.common.sharding import ShardingAxisName
 
 
 class PallasMLAttentionBackendImpl(MLAAttentionImpl):
@@ -123,7 +125,23 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
 
         # (B, N, P) x (N, P, L) -> (B, N, L)
         # torch nn param
-        q_nope = jnp.einsum("bnp,npl->bnl", q_nope, jax_view(layer.W_UK_T))
+        # q_nope = jnp.einsum("bnp,npl->bnl", q_nope, jax_view(layer.W_UK_T))
+
+        def _down_tmp(x, w_uk):
+            return jnp.einsum("bnp,npl->bnl", x, w_uk)
+        in_specs = (
+            P(ShardingAxisName.ATTN_DATA, None, None),  # x
+            P()  # w_uk
+        )
+        out_specs = P(ShardingAxisName.ATTN_DATA, None, None)
+
+        q_nope = jax.shard_map(_down_tmp,
+                      mesh=mesh,
+                      in_specs=in_specs,
+                      out_specs=out_specs,
+                      check_vma=False)(q_nope, jax_view(layer.W_UK_T))
+
+
 
         q_scale = k_scale = v_scale = None
         if layer.kv_cache_quantized_dtype:
@@ -160,9 +178,27 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             sm_scale=self.scale,
         )
 
-        outputs = outputs.reshape(-1, self.num_heads, self.kv_lora_rank)
-        outputs = jnp.einsum("bnl,nlv->bnv", outputs, jax_view(layer.W_UV))
-        outputs = outputs.reshape(-1, self.num_heads * self.v_head_dim)
+        def up_tmp(x, w_uv):
+            out = x
+            out = out.reshape(-1, self.num_heads, self.kv_lora_rank)
+            out = jnp.einsum("bnl,nlv->bnv", x, w_uv)
+            out = out.reshape(-1, self.num_heads * self.v_head_dim)
+            return out
+        in_specs = (
+            P(ShardingAxisName.ATTN_DATA, None, None),  # x
+            P()  # w_uv
+        )
+        out_specs = P(ShardingAxisName.ATTN_DATA,)
+
+        outputs = jax.shard_map(up_tmp,
+                      mesh=mesh,
+                      in_specs=in_specs,
+                      out_specs=out_specs,
+                      check_vma=False)(outputs, jax_view(layer.W_UV))
+
+        # outputs = outputs.reshape(-1, self.num_heads, self.kv_lora_rank)
+        # outputs = jnp.einsum("bnl,nlv->bnv", outputs, jax_view(layer.W_UV))
+        # outputs = outputs.reshape(-1, self.num_heads * self.v_head_dim)
 
         return outputs, new_kv_cache
 

@@ -121,6 +121,8 @@ def moe_apply(
                     **extra_backend_kwargs,
                 )[:, :actual_hidden_size]
             case MoEBackend.GMM_EP | MoEBackend.GMM_TP:
+                print("gxd fused_moe_func input shape: ", x.shape)
+                # x = jax.lax.with_sharding_constraint(x, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None)))
                 output = fused_moe_func(
                     hidden_states=x,
                     w1=weights.w13_weight,
@@ -137,6 +139,7 @@ def moe_apply(
                     activation=activation,
                     scoring_fn=layer.scoring_func,
                 )
+                print("gxd fused_moe_func output shape: ", output.shape)
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance
                 from tpu_inference.layers.jax.moe.dense_moe import \

@@ -64,6 +64,7 @@ def _swigluoai(x1: jax.Array,
 def gmm_wrapper(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset,
                 last_gmm):
     if is_supported_by_gmm_v2(lhs, rhs, rhs_scale):
+        print("gxd gmm_v2...")
         gmm_res = gmm_v2(
             lhs=lhs,
             rhs=rhs,
@@ -76,6 +77,7 @@ def gmm_wrapper(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset,
             zero_initialize=last_gmm,
         )
     else:
+        print("gxd gmm_v1...")
         gmm_res = gmm(
             lhs=lhs,
             rhs=rhs,
@@ -140,6 +142,7 @@ def moe_gmm_local(
 
     reduction_axis = (ShardingAxisName.MLP_TENSOR
                       if parallelism == "tp" else ShardingAxisName.EXPERT)
+    print("gxd gmm reduction_axis:", reduction_axis)
     # Then global reduction on all ranks for all tokens and all experts
     return jax.lax.psum(token_hidden, axis_name=reduction_axis)
 
@@ -241,7 +244,11 @@ def expert_parallel_gmm(
     w1_bias_spec = None if w1_bias is None else ep_p_spec
     w2_scale_spec = None if w2_scale is None else ep_p_spec
     w2_bias_spec = None if w2_bias is None else ep_p_spec
-
+    
+    print("gxd data_p_spec:", data_p_spec)
+    print("gxd ep_p_spec:", ep_p_spec)
+    print("gxd x shape:", x.shape)
+    print("gxd w1 shape:", w1.shape)
     return jax.shard_map(
         functools.partial(
             moe_gmm_local,
@@ -264,6 +271,7 @@ def expert_parallel_gmm(
             data_p_spec,
         ),
         out_specs=(data_p_spec),
+        # out_specs=(P(ShardingAxisName.ATTN_DATA)),
         check_vma=False,
     )(
         x,
@@ -328,6 +336,7 @@ def fused_moe_func(
     num_tokens, hidden_size = hidden_states.shape
     global_num_experts, padded_hidden_size, _ = w1.shape
     dtype = hidden_states.dtype
+    print("gxd fused_moe_func, hidden_states.dtype:", hidden_states.dtype)
 
     assert (num_tokens * topk) % 16 == 0, (
         "The kernel requires num_tokens * topk to be a multiple of "
@@ -374,6 +383,10 @@ def fused_moe_func(
             P(ShardingAxisName.MLP_DATA),
         ),
     )(hidden_states, topk_indices)
+
+    print("gxd fused_moe_func hidden_states", hidden_states.shape)
+    print("gxd fused_moe_func x", x.shape)
+    print("gxd psec: ", P(ShardingAxisName.MLP_DATA, None))
 
     x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
 

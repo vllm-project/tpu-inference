@@ -1261,6 +1261,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         assert num_reqs > 0
 
         dp_size = self.dp_size
+        #print("gxd debug: dp_size", dp_size)
+
         data_parallel_attn_sharding = NamedSharding(
             self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
 
@@ -1449,7 +1451,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         query_start_loc_cpu = query_start_loc
         logits_indices_cpu = logits_indices
         seq_lens_cpu = seq_lens
-
+        
+        # print("gxd prepare inputs dp sharding: data_parallel_attn_sharding", data_parallel_attn_sharding)
         (input_ids, positions, query_start_loc, seq_lens, logits_indices,
          request_distribution) = device_array(
              self.mesh,

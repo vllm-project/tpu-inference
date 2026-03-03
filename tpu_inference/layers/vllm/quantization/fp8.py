@@ -277,6 +277,7 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
             w2_weight_scale=jax_view(layer.w2_weight_scale_inv),
             w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
         )
+        # assert False, "gxd zzz"
         return vllm_moe_apply(layer=layer,
                               weights=weights,
                               quant_method_instance=self,

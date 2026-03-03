@@ -226,7 +226,13 @@ class VllmModelWrapper:
                 "xla_tpu_all_gather_collective_matmul_mode":
                 "post_spmd_conservative",
                 "xla_tpu_reduce_scatter_collective_matmul_mode":
-                "post_spmd_conservative"
+                "post_spmd_conservative",
+
+                # "xla_tpu_scoped_vmem_limit_kib": "65536",
+                # "xla_mosaic_use_strided_memcopy": "true",
+                # "xla_tpu_overlap_compute_collective_tc": "true",
+                # "xla_tpu_enable_async_collective_fusion_multiple_steps": "true",
+                # "xla_enable_async_all_gather": "true",
             },
             static_argnames=(
                 "layer_name_to_kvcache_index",

@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from tests.layers import jax
 import torch
 import torchax
 from torch.nn import Parameter
@@ -169,5 +170,28 @@ class VllmTPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             use_sparse=self.is_sparse,
             indexer=self.indexer,
         )
-
+        # assert False, "gxd...."
         self.prefix = prefix
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        vllm_model_wrapper_context = get_vllm_model_wrapper_context()
+        mesh = vllm_model_wrapper_context.mesh
+        import jax
+        from torchax.interop import jax_view
+        from jax.sharding import PartitionSpec, NamedSharding
+        from tpu_inference.layers.common.sharding import ShardingAxisName
+
+        def _appy_contraints(tensor: torch.Tensor) -> torch.Tensor:
+            return torch_view(jax.lax.with_sharding_constraint(
+                jax_view(tensor),
+                NamedSharding(mesh, PartitionSpec(ShardingAxisName.ATTN_DATA,))
+            ))
+        
+        ret = super().forward(_appy_contraints(positions), _appy_contraints(hidden_states), llama_4_scaling)
+
+        return _appy_contraints(ret)
