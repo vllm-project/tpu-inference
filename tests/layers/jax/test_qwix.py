@@ -16,6 +16,8 @@ from tpu_inference.models.common.model_loader import apply_qwix_quantization
 from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     DEFAULT_MAX_NUM_BLOCKS_PER_REQ, DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS,
     DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS)
+    DEFAULT_MAX_NUM_BLOCKS_PER_REQ, DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS,
+    DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS)
 
 mock_nnx = MagicMock()
 mock_jax = MagicMock()
