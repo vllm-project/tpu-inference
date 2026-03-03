@@ -1792,21 +1792,43 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             transpose_keys=transpose_keys,
             shard=shard)
 
-    def get_intermediate_tensor_spec(self, num_tokens: int):
+    def get_intermediate_tensor_spec(self, scheduler_output: "VllmSchedulerOutput"):
         jax_dtype = to_jax_dtype(self.dtype)
-        
-        # In DP mode, num_tokens is the local token count. We need to
-        # calculate padding based on the global token count.
-        if self.dp_size > 1:
-            num_tokens = num_tokens * self.dp_size
+        num_tokens = scheduler_output.total_num_scheduled_tokens
 
-        num_padded_tokens = runner_utils.get_padded_token_len(
-            self.num_tokens_paddings, num_tokens)
+        if self.dp_size > 1 and num_tokens > 0:
+            # We calculate the max tokens per DP rank directly from the
+            # scheduler_output. We cannot use _prepare_dp_input_metadata here
+            # because it relies on self.input_batch, which is not yet updated
+            # for Rank > 0 workers at this point in the pipeline.
+            num_scheduled_tokens_per_dp_rank = {
+                dp_rank: 0
+                for dp_rank in range(self.dp_size)
+            }
+            assigned_dp_rank = getattr(scheduler_output, "assigned_dp_rank",
+                                       None)
+            if assigned_dp_rank is not None:
+                for req_id, num_toks in scheduler_output.num_scheduled_tokens.items(
+                ):
+                    dp_rank = assigned_dp_rank.get(req_id)
+                    if dp_rank is not None:
+                        num_scheduled_tokens_per_dp_rank[dp_rank] += num_toks
 
-        if self.dp_size > 1:
+                max_tokens_across_dp = max(
+                    num_scheduled_tokens_per_dp_rank.values())
+            else:
+                max_tokens_across_dp = (num_tokens + self.dp_size -
+                                        1) // self.dp_size
+
+            # Match the padding logic in _prepare_dp_input_metadata
+            padded_per_dp = runner_utils.get_padded_token_len(
+                self.num_tokens_paddings_per_dp, max_tokens_across_dp)
+            num_padded_tokens = padded_per_dp * self.dp_size
             sharding = NamedSharding(
                 self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
         else:
+            num_padded_tokens = runner_utils.get_padded_token_len(
+                self.num_tokens_paddings, num_tokens)
             sharding = NamedSharding(self.mesh, PartitionSpec())
 
         hidden_size = self.model_config.get_hidden_size()
