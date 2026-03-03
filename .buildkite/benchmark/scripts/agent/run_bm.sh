@@ -118,7 +118,6 @@ VLLM_USE_V1=1 VLLM_TORCH_PROFILER_DIR="$PROFILE_FOLDER" vllm serve $MODEL \
   --max-num-batched-tokens $MAX_NUM_BATCHED_TOKENS \
   --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
   --no-enable-prefix-caching \
-  --download_dir $DOWNLOAD_DIR \
   --max-model-len $MAX_MODEL_LEN $EXTRA_ARGS> "$VLLM_LOG" 2>&1 &
 
 
