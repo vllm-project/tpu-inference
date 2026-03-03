@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-03-03 10:33 PM UTC*
+*Last Updated: 2026-03-03 10:50 PM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -289,40 +289,40 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>bf16</td>
       <td>awq</td>
       <td>v5, v6</td>
-      <td><span title="❓ Untested">❓</span></td>
-      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>fp4</td>
       <td>bf16</td>
       <td>mxfp4</td>
       <td>v7</td>
-      <td><span title="❓ Untested">❓</span></td>
-      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>fp8</td>
       <td>bf16 or fp8</td>
       <td>fp8</td>
       <td>v7</td>
-      <td><span title="❓ Untested">❓</span></td>
-      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>fp8</td>
       <td>bf16 or fp8</td>
       <td>compressed-tensors</td>
       <td>v7</td>
-      <td><span title="❓ Untested">❓</span></td>
-      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>int8</td>
       <td>bf16 or int8</td>
       <td>compressed-tensors</td>
       <td>v5, v6</td>
-      <td><span title="❓ Untested">❓</span></td>
-      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
   </tbody>
 </table>

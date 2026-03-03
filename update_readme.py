@@ -18,7 +18,15 @@ CSV_MAP = {
         "v7_default": "support_matrices/nightly/default/v7/feature_support_matrix.csv"
     },
     "parallelism": "support_matrices/parallelism_support_matrix.csv",
-    "quantization": "support_matrices/quantization_support_matrix.csv",
+    "quantization": {
+        "static": "support_matrices/quantization_support_matrix.csv",
+        "v6_flax": "support_matrices/nightly/flax_nnx/v6/quantization_support_matrix.csv",
+        "v6_pytorch": "support_matrices/nightly/vllm/v6/quantization_support_matrix.csv",
+        "v6_default": "support_matrices/nightly/default/v6/quantization_support_matrix.csv",
+        "v7_flax": "support_matrices/nightly/flax_nnx/v7/quantization_support_matrix.csv",
+        "v7_pytorch": "support_matrices/nightly/vllm/v7/quantization_support_matrix.csv",
+        "v7_default": "support_matrices/nightly/default/v7/quantization_support_matrix.csv"
+    },
     "kernel_support": "support_matrices/kernel_support_matrix.csv",
     "microbenchmarks": {
         "v6": "support_matrices/nightly/vllm/v6/kernel_support_matrix-microbenchmarks.csv",
@@ -369,6 +377,61 @@ def update_readme():
             headers = ["test"] # Dummy header, script handles rendering manually
             new_table = generate_html_microbenchmark_table(headers, all_data)
             
+        elif section_key == "quantization":
+            static_file = file_sources["static"]
+            headers, static_d = read_csv_data(static_file)
+            if not headers: continue
+            
+            nightly_data = {}
+            for k in ["v6_flax", "v6_pytorch", "v6_default", "v7_flax", "v7_pytorch", "v7_default"]:
+                _, d = read_csv_data(file_sources[k])
+                nightly_data[k] = d
+
+            def find_status(weight, method, nightly_rows):
+                if not nightly_rows: return "❓ Untested"
+                weight = weight.lower().replace(" ", "")
+                method = method.lower().replace(" ", "").rstrip('s')
+                
+                matched = []
+                for nr in nightly_rows:
+                    if not nr: continue
+                    nr_dtype = nr[0].lower().replace(" ", "")
+                    nr_method = nr[1].lower().replace(" ", "") if len(nr) > 1 else ""
+                    
+                    if weight in nr_dtype:
+                        if method in nr_method or method in nr_dtype:
+                            matched.append(nr)
+                            
+                if not matched: return "❓ Untested"
+                    
+                overall_corr, overall_perf = "✅", "✅"
+                for nr in matched:
+                    c = nr[3] if len(nr) > 3 else ""
+                    p = nr[4] if len(nr) > 4 else ""
+                    if "unverified" in c.lower() or "untested" in c.lower() or "❓" in c: overall_corr = "❓"
+                    elif "fail" in c.lower() or "❌" in c: overall_corr = "❌"
+                        
+                    if "unverified" in p.lower() or "untested" in p.lower() or "❓" in p: overall_perf = "❓"
+                    elif "fail" in p.lower() or "❌" in p: overall_perf = "❌"
+                        
+                return merge_metrics(overall_corr, overall_perf)
+                
+            for row in static_d:
+                if not row or len(row) < 4: continue
+                w = row[0]
+                m = row[2]
+                v6_f = find_status(w, m, nightly_data["v6_flax"])
+                v6_p = find_status(w, m, nightly_data["v6_pytorch"])
+                v6_d = find_status(w, m, nightly_data["v6_default"])
+                v7_f = find_status(w, m, nightly_data["v7_flax"])
+                v7_p = find_status(w, m, nightly_data["v7_pytorch"])
+                v7_d = find_status(w, m, nightly_data["v7_default"])
+                
+                new_row = row[:4] + [v6_f, v6_p, v6_d, v7_f, v7_p, v7_d]
+                all_data.append(new_row)
+                
+            new_table = generate_html_quantization_table(headers, all_data)
+            
         else:
             sources = file_sources if isinstance(file_sources, list) else [file_sources]
             for i, file_path in enumerate(sources):
@@ -379,8 +442,6 @@ def update_readme():
             
             if section_key == "core_features":
                 new_table = generate_html_feature_table(headers, all_data)
-            elif section_key == "quantization":
-                new_table = generate_html_quantization_table(headers, all_data)
             else:
                 if section_key == "model_support":
                     for row in all_data:
