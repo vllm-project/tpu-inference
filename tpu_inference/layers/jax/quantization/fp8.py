@@ -29,7 +29,7 @@ from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.linear_weights import \
     shard_linear_weights
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_fp8_moe_weights)
+    FusedMoEWeights, process_fp8_moe_weights, shard_fp8_moe_weights_to_tpu)
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
 from tpu_inference.layers.common.utils import cpu_mesh, cpu_mesh_context
 from tpu_inference.layers.jax import JaxModule
@@ -494,6 +494,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 # more than once. We only want to process the weights once all of them are loaded.
                 return False
 
+            # Concatenate expert weights on CPU (fast, memory-efficient).
             with cpu_mesh_context():
                 w_gate = jnp.concatenate(
                     layer.kernel_gating_EDF._weights_to_load, axis=0)
@@ -517,27 +518,31 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 w13_weight = jnp.concatenate([w_gate, w_up], axis=1)
                 w13_weight_scale = jnp.concatenate([s_gate, s_up], axis=1)
 
-                weight_block_size = None
-                if self.weight_block_size is not None:
-                    weight_block_size = tuple(self.weight_block_size)
+            weight_block_size = None
+            if self.weight_block_size is not None:
+                weight_block_size = tuple(self.weight_block_size)
 
-                # TODO (jacobplatin): we should support bias
-                input_weights = FusedMoEWeights(
-                    w13_weight=w13_weight,
-                    w13_weight_scale=w13_weight_scale,
-                    w13_bias=None,
-                    w2_weight=w2_weight,
-                    w2_weight_scale=w2_weight_scale,
-                    w2_bias=None)
+            # TODO (jacobplatin): we should support bias
+            input_weights = FusedMoEWeights(w13_weight=w13_weight,
+                                            w13_weight_scale=w13_weight_scale,
+                                            w13_bias=None,
+                                            w2_weight=w2_weight,
+                                            w2_weight_scale=w2_weight_scale,
+                                            w2_bias=None)
 
-                weights = process_fp8_moe_weights(
-                    input_weights,
-                    moe_backend=layer.moe_backend,
-                    mesh=layer.mesh,
-                    activation=layer.activation,
-                    # Convert to tuple so jax jit can hash it
-                    weight_block_size=weight_block_size,
-                )
+            # Shard FP8 weights to TPU before requantization so that
+            # process_fp8_moe_weights runs on TPU instead of CPU.
+            input_weights = shard_fp8_moe_weights_to_tpu(
+                input_weights, layer.mesh, source_mesh=cpu_mesh())
+
+            weights = process_fp8_moe_weights(
+                input_weights,
+                moe_backend=layer.moe_backend,
+                mesh=layer.mesh,
+                activation=layer.activation,
+                # Convert to tuple so jax jit can hash it
+                weight_block_size=weight_block_size,
+            )
 
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
