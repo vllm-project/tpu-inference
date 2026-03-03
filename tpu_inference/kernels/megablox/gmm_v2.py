@@ -74,6 +74,9 @@ class InputConfigs:
     quant_block_size: int | None
     has_bias: bool = False
     has_scale: bool = False
+    dtype: jnp.dtype | None = None
+    packing: int = 1
+    num_quant_blocks: int = 1
 
 
 @dataclasses.dataclass(frozen=True)
@@ -87,7 +90,8 @@ class GmmConfigs:
     zero_init: bool
 
 
-TileFn = Callable[[jnp.dtype, jnp.dtype, Dimensions, int], TileSizes]
+TileFn = Callable[[jnp.dtype, jnp.dtype, Dimensions, InputConfigs, int],
+                   TileSizes]
 
 
 class IndexMaps:
@@ -121,8 +125,9 @@ class IndexMaps:
                             k_id: jax.Array):
         group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
         num_quant_blocks_per_tile_k = pl.cdiv(self.cfgs.tiles.tile_k,
-                                              self.cfgs.dims.quant_block_size)
-        b_i = (k_id * self.cfgs.tiles.tile_k) // self.cfgs.dims.quant_block_size
+                                              self.cfgs.rhs_cfgs.quant_block_size)
+        b_i = (k_id *
+               self.cfgs.tiles.tile_k) // self.cfgs.rhs_cfgs.quant_block_size
         b_tile_i = b_i // num_quant_blocks_per_tile_k
         return (group_id, b_tile_i, 0, n_id)
 
@@ -155,7 +160,7 @@ def generate_block_specs(
     )
 
     rhs_weight_spec = pl.BlockSpec(
-        (None, cfgs.tiles.tile_k // cfgs.dims.rhs_packing, cfgs.tiles.tile_n),
+        (None, cfgs.tiles.tile_k // cfgs.rhs_cfgs.packing, cfgs.tiles.tile_n),
         index_map.rhs_weight_index_map,
         pipeline_mode=pl.Buffered(buffer_count=3),
     )
@@ -167,7 +172,7 @@ def generate_block_specs(
         )
     if cfgs.rhs_cfgs.has_scale:
         num_quant_blocks_per_tile_k = pl.cdiv(cfgs.tiles.tile_k,
-                                              cfgs.dims.quant_block_size)
+                                              cfgs.rhs_cfgs.quant_block_size)
         rhs_scale_block_spec = pl.BlockSpec(
             (None, num_quant_blocks_per_tile_k, 1, cfgs.tiles.tile_n),
             index_map.rhs_scale_index_map,
@@ -207,11 +212,11 @@ def inner_kernel(
 ):
     """Inner kernel invoked by emit_pipeline to perform matmul.
 
-    tiled_lhs_ref and tiled_out_ref points to rows [m_start:m_end] of lhs and out.
-    Additionally, m_start and m_end does not have to align with tile boundaries
-    [m_offset:m_offset+tile_m]. Therefore, rows [m_offset:m_start] and
-    [m_end:m_offset+tile_m] of tiled_lhs_ref and tiled_out_ref will contain
-    invalid data and needs to be masked out.
+  tiled_lhs_ref and tiled_out_ref points to rows [m_start:m_end] of lhs and out.
+  Additionally, m_start and m_end does not have to align with tile boundaries
+  [m_offset:m_offset+tile_m]. Therefore, rows [m_offset:m_start] and
+  [m_end:m_offset+tile_m] of tiled_lhs_ref and tiled_out_ref will contain
+  invalid data and needs to be masked out.
 
     Args:
         tiled_lhs_ref: Contains value lhs[m_start:m_end, k_start:k_end]
@@ -268,7 +273,7 @@ def inner_kernel(
 
                 acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size),
                                   dtype=acc_ref.dtype)
-                rhs_qbs = cfgs.dims.quant_block_size
+                rhs_qbs = cfgs.rhs_cfgs.quant_block_size
                 for start_k in range(0, cfgs.tiles.tile_k, q_block_size):
                     end_k = min(cfgs.tiles.tile_k, start_k + q_block_size)
 
@@ -303,8 +308,8 @@ def inner_kernel(
                     if tiled_rhs_ref.scale is not None:
                         b_i = start_k // rhs_qbs
                         rhs_scale_block = tiled_rhs_ref.scale[
-                            ..., b_i:b_i + 1, :, :].reshape(
-                                1, cfgs.tiles.tile_n)
+                            ...,
+                            b_i:b_i + 1, :, :].reshape(1, cfgs.tiles.tile_n)
                         block_acc *= rhs_scale_block[:, start_n:end_n].astype(
                             acc_ref.dtype)
 
@@ -414,10 +419,10 @@ def fill_metadata(
 ) -> jax.Array:
     """Fills the metadata for the given lhs group sizes and group offset.
 
-    Iterates over the lhs group sizes and if the group id is valid, determines
-    the number of gm tiles that are needed to process the current group. Then,
-    it fills starting and ending offset (gm_id_to_m_offset), and the group id
-    (gm_id_to_group_id) for each gm tile.
+  Iterates over the lhs group sizes and if the group id is valid, determines
+  the number of gm tiles that are needed to process the current group. Then,
+  it fills starting and ending offset (gm_id_to_m_offset), and the group id
+  (gm_id_to_group_id) for each gm tile.
 
     Args:
         lhs_group_sizes_ref: The group sizes of lhs.
@@ -426,9 +431,9 @@ def fill_metadata(
             for each gmm tile.
         cfgs: GmmConfigs.
 
-    Returns:
-        The number of gm tiles to process lhs with given group offset.
-    """
+  Returns:
+      The number of gm tiles to process lhs with given group offset.
+  """
 
     group_offset = group_offset_ref[0]
     max_num_group = group_offset + cfgs.dims.size_group
@@ -597,30 +602,30 @@ def kernel_main(
 ):
     """Entry point for GMM kernel.
 
-    Computes metadata to determine which rows of lhs needs processing and how
-    they will be tiled. And then, invoke inner kernel using metadata.
+  Computes metadata to determine which rows of lhs needs processing and how
+  they will be tiled. And then, invoke inner kernel using metadata.
 
-    Uses the following notation:
-    - g: rhs group dimension
-    - m: Batch dimension
-    - gm: Batch tiling dimension. Aligned to size_lhs_sublane and has tile size
-        of tile_m. Skips over empty groups and accounts for revisited tiles.
-    - k: in dimension
-    - n: out dimension
+  Uses the following notation:
+  - g: rhs group dimension
+  - m: Batch dimension
+  - gm: Batch tiling dimension. Aligned to size_lhs_sublane and has tile size
+    of tile_m. Skips over empty groups and accounts for revisited tiles.
+  - k: in dimension
+  - n: out dimension
 
-    Args:
-        lhs_group_sizes_ref: Reference to the group sizes of lhs.
-        group_offset_ref: Reference to the group offset.
-        lhs_ref: Reference to the lhs.
-        rhs_ref: Reference to the rhs.
-        out_ref: Reference to the out.
-        partial_out_ref: Reference to the partial output.
-        acc_ref: Reference to the accumulator.
-        metadata_ref: Reference to the metadata.
-        zero_ref: Scratch memory for storing zero values used in initialization.
-        semaphore_ref: Semaphore for zero initialization DMAs.
-        cfgs: GmmConfigs.
-    """
+  Args:
+    lhs_group_sizes_ref: Reference to the group sizes of lhs.
+    group_offset_ref: Reference to the group offset.
+    lhs_ref: Reference to the lhs.
+    rhs_ref: Reference to the rhs.
+    out_ref: Reference to the out.
+    partial_out_ref: Reference to the partial output.
+    acc_ref: Reference to the accumulator.
+    metadata_ref: Reference to the metadata.
+    zero_ref: Scratch memory for storing zero values used in initialization.
+    semaphore_ref: Semaphore for zero initialization DMAs.
+    cfgs: GmmConfigs.
+  """
 
     num_k = pl.cdiv(cfgs.dims.size_k, cfgs.tiles.tile_k)
     num_n = pl.cdiv(cfgs.dims.size_n, cfgs.tiles.tile_n)
@@ -668,6 +673,7 @@ def calculate_tiling(
     lhs_dtype: jnp.dtype,
     rhs_dtype: jnp.dtype,
     dims: Dimensions,
+    rhs_cfgs: InputConfigs,
     vmem_limit_bytes: int,
 ) -> TileSizes:
     """Calculate optimal tile sizes for GMM kernel."""
@@ -699,10 +705,9 @@ def calculate_tiling(
         """Check all tile_k constraints."""
         if tk % num_lanes != 0:
             return False
-        if tk % dims.rhs_packing != 0:
+        if tk % rhs_cfgs.packing != 0:
             return False
-        if (tk % dims.quant_block_size != 0
-                and dims.quant_block_size % tk != 0):
+        if tk % rhs_cfgs.quant_block_size != 0 and rhs_cfgs.quant_block_size % tk != 0:
             return False
         return True
 
@@ -760,11 +765,9 @@ def validate_inputs(
     if rhs_bias is not None:
         assert rhs_bias.shape == (size_group, 1, size_n)
     if rhs_scale is not None:
-        num_quant_blocks = rhs_scale.shape[1]
-        assert rhs_scale.shape == (size_group, num_quant_blocks, 1, size_n)
-    else:
-        num_quant_blocks = 1
-    quant_block_size = size_k // num_quant_blocks
+        assert rhs_scale.shape[0] == size_group
+        assert rhs_scale.shape[2] == 1
+        assert rhs_scale.shape[3] == size_n
 
     assert group_offset.shape == (1, )
 
@@ -790,6 +793,7 @@ def get_cost_estimate(
     rhs: WeightsRef,
     out_dtype: jnp.dtype,
     dims: Dimensions,
+    rhs_cfgs: InputConfigs,
 ):
     """Returns the cost estimate for the GMM kernel."""
     assert isinstance(rhs.weight, jax.Array)
@@ -801,8 +805,8 @@ def get_cost_estimate(
     rhs_bytes = (dims.size_group * dims.size_k * dims.size_n *
                  jax.dtypes.itemsize_bits(rhs.weight)) // 8
     if rhs.scale is not None:
-        rhs_bytes += (dims.size_group * dims.num_quant_blocks * dims.size_n *
-                      jnp.dtype(jnp.float32).itemsize)
+        rhs_bytes += (dims.size_group * rhs_cfgs.num_quant_blocks *
+                      dims.size_n * jnp.dtype(jnp.float32).itemsize)
     if rhs.bias is not None:
         rhs_bytes += dims.size_group * dims.size_n * jnp.dtype(
             jnp.float32).itemsize
@@ -853,13 +857,27 @@ def make_gmm_configs(
     else:
         has_scale = False
         rhs_quant_dtype = None
-        block_size = None
+        num_blocks = 1
+        block_size = dims.size_k
+
+    # TODO(wenxindong): Work around a compiler bug in scoped memory allocation
+    # for fp4. When rhs is fp4, we pack two fp4
+    # elements into one uint8 element along the K axis (packing=2) in
+    # kernel_main via bitcast. The inner kernel then unpacks back to fp4 using
+    # pltpu.bitcast. Remove this once we upgrade to libtpu >0.0.36.
+    if jax.dtypes.itemsize_bits(rhs.dtype) == 4:
+        rhs_packing = 2
+    else:
+        rhs_packing = 1
 
     rhs_cfgs = InputConfigs(
         quant_dtype=rhs_quant_dtype,
         quant_block_size=block_size,
         has_bias=rhs_bias is not None,
         has_scale=has_scale,
+        dtype=rhs.dtype,
+        packing=rhs_packing,
+        num_quant_blocks=num_blocks,
     )
 
     lhs_q_dtype = None
@@ -892,9 +910,8 @@ def make_gmm_configs(
         lhs_qbs = lhs_cfgs.quant_block_size
         rhs_qbs = rhs_cfgs.quant_block_size
         if rhs_qbs < lhs_qbs:
-            raise ValueError(
-                f"rhs quant_block_size={rhs_qbs} must be >= lhs"
-                f" quant_block_size={lhs_qbs}.")
+            raise ValueError(f"rhs quant_block_size={rhs_qbs} must be >= lhs"
+                             f" quant_block_size={lhs_qbs}.")
         if rhs_qbs % lhs_qbs != 0:
             raise ValueError(
                 f"rhs quant_block_size={rhs_qbs} must be divisible by lhs"
@@ -916,7 +933,8 @@ def make_gmm_configs(
         tiles = tile_info
     else:
         lhs_q_dtype = lhs_q_dtype if lhs_q_dtype is not None else lhs.dtype
-        tiles = tile_info(lhs_q_dtype, rhs.dtype, dims, vmem_limit_bytes)
+        tiles = tile_info(lhs_q_dtype, rhs.dtype, dims, rhs_cfgs,
+                          vmem_limit_bytes)
 
     return GmmConfigs(
         dims=dims,
@@ -953,7 +971,8 @@ def gmm_v2(
     lhs: jax.Array,  # [size_m, size_k]
     rhs: jax.Array,  # [size_group, size_k, size_n]
     group_sizes: jax.Array,  # int32[size_lhs_group]
-    rhs_scale: jax.Array | None = None,  # [size_group, num_blocks, 1, out_size]
+    rhs_scale: jax.Array
+    | None = None,  # [size_group, num_blocks, 1, out_size]
     rhs_bias: jax.Array | None = None,  # [size_group, 1, out_size]
     group_offset: jax.Array | None = None,  # int32[1]
     *,
@@ -971,24 +990,24 @@ def gmm_v2(
     Additionally, it adjusts dma size based on number of valid rows and utilize
     triple buffering on weights to better utilize memory.
 
-    Args:
-        lhs: lhs with shape [size_m, size_k].
-        rhs: rhs with shape [size_group, size_k, size_n].
-        group_sizes: The group sizes of lhs rows of shape [size_lhs_group,].
-        rhs_scale: The rhs scale of shape [size_group, num_blocks, 1, out_size].
-        rhs_bias: The rhs bias of shape [size_group, 1, out_size].
-        group_offset: Optional. The group offset of shape [1,].
-        tile_info: The tile sizes or tile function to use.
-        vmem_limit_bytes: Optional vmem limit in bytes.
-        precision: Unused. Exists for compatibility reasons.
-        preferred_element_type: Optional jnp.dtype for the output matrix.
-        acc_dtype: Optional jnp.dtype for the accumulator.
-        maybe_quantize_lhs: Quantize lhs if set to True and rhs is quantized.
-        zero_initialize: Whether to initialize unvisited output elements to zero.
+  Args:
+    lhs: lhs with shape [size_m, size_k].
+    rhs: rhs with shape [size_group, size_k, size_n].
+    group_sizes: The group sizes of lhs rows of shape [size_lhs_group,].
+    rhs_scale: The rhs scale of shape [size_group, 1, 1, out_size].
+    rhs_bias: The rhs bias of shape [size_group, 1, out_size].
+    group_offset: Optional. The group offset of shape [1,].
+    tile_info: The tile sizes or tile function to use.
+    vmem_limit_bytes: Optional vmem limit in bytes.
+    precision: Unused. Exists for compatibility reasons.
+    preferred_element_type: Optional jnp.dtype for the output matrix.
+    acc_dtype: Optional jnp.dtype for the accumulator.
+    maybe_quantize_lhs: Quantize lhs if set to True and rhs is quantized.
+    zero_initialize: Whether to initialize unvisited output elements to zero.
 
-    Returns:
-        Output of shape [size_m, size_n].
-    """
+  Returns:
+    Output of shape [size_m, size_n].
+  """
 
     del precision
 
@@ -1094,7 +1113,7 @@ def gmm_v2(
         ),
         name=get_scope_name(dims, tiles),
         cost_estimate=get_cost_estimate(lhs, rhs_weights, out_init.dtype,
-                                        dims),
+                                        dims, cfgs.rhs_cfgs),
         metadata=get_metadata(cfgs),
     )(group_sizes, group_offset, lhs, rhs_weights)[:, :dims.size_n]
 
