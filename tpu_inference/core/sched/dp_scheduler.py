@@ -267,6 +267,9 @@ def _scheduler_worker_process(
 class DPSchedulerOutput(SchedulerOutput):
     """Extended SchedulerOutput that includes DP rank assignments."""
     assigned_dp_rank: Optional[Dict[str, int]] = None
+    # The maximum number of tokens scheduled on any single DP rank in this step.
+    # This is used by the Runner to calculate the global padded batch size
+    # (padded_max * dp_size), ensuring consistent shapes across pipeline stages.
     max_num_scheduled_tokens_per_dp_rank: int = 0
 
     def __init__(self, *args, assigned_dp_rank=None,
@@ -515,6 +518,7 @@ class DPScheduler(SchedulerInterface):
         combined_spec_decode_tokens = {}
         combined_encoder_inputs = {}
         total_scheduled_tokens = 0
+        # Track the maximum token load on any single rank to determine global padding.
         max_scheduled_tokens_per_rank = 0
 
         for output in rank_outputs:

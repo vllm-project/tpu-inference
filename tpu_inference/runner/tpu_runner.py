@@ -1793,9 +1793,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             shard=shard)
 
     def _get_padded_total_tokens(self, scheduler_output: "VllmSchedulerOutput") -> int:
-        """Authoritative source for calculating the global padded batch size.
-        Works for all configurations (DP, non-DP, and empty steps).
-        """
         num_tokens = scheduler_output.total_num_scheduled_tokens
 
         # Determine the capacity per rank (max tokens assigned to any single device)
