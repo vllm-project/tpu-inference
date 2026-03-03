@@ -40,6 +40,7 @@ from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
+from tpu_inference.layers.jax.base import _init_fn as init_fn
 from tpu_inference.layers.jax.base import create_param, sharded_initializer
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.layers import FlaxUtils
@@ -60,7 +61,6 @@ from tpu_inference.models.jax.utils.weight_utils import (JaxAutoWeightsLoader,
 KVCache = Tuple[jax.Array, jax.Array]
 
 logger = init_logger(__name__)
-init_fn = nnx.initializers.uniform()
 
 
 def _weight_init(random_init: bool):
@@ -76,8 +76,8 @@ DTYPE_VIEW_MAP = {
 
 modeling_flax_utils = FlaxUtils()
 
+# TODO: read these configs from HF config.
 num_local_experts: int = 256
-
 vocab_size: int = 129280
 hidden_size: int = 7168
 # NOTE: this dtype may be implicitly overriden if using to Qwix to load in the quantized weights
@@ -110,12 +110,6 @@ kv_lora_rank = 512
 qk_nope_head_dim = 128
 qk_rope_head_dim = 64
 v_head_dim = 128
-# TODO (jacobplatin): this shouldn't be related to
-# the (DeepSeek) modelling code since it's really
-# MoE-specific, but because we do weight loading
-# here, we need to keep it for now.
-# TODO (jacobplatin): remove this in another PR
-edf_sharding = (None, ShardingAxisName.MODEL_1, ShardingAxisName.MODEL_2)
 expert_axis_name = ShardingAxisName.ATTN_DATA_EXPERT
 
 
@@ -657,9 +651,9 @@ class DeepseekV3MLP(JaxModule):
     hidden_act: str
     hidden_size: int
     intermediate_size: int
-    df_sharding: P = P()
-    fd_sharding: P = P()
-    activation_ffw_td: P = P()
+    df_sharding: Sharding = ()
+    fd_sharding: Sharding = ()
+    activation_ffw_td: Sharding = ()
     random_init: bool = False
     quant_config: Optional[QuantizationConfig] = None
 
@@ -777,9 +771,9 @@ class DeepseekV2Moe(JaxModule):
             hidden_size=hidden_size,
             intermediate_size=num_shared_experts * moe_intermediate_size,
             rngs=rng,
-            activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
-            df_sharding=P(None, ShardingAxisName.MLP_TENSOR),
-            fd_sharding=P(ShardingAxisName.MLP_TENSOR, None),
+            activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
+            df_sharding=(None, ShardingAxisName.MLP_TENSOR),
+            fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
             quant_config=quant_config)
 
         # routed experts
@@ -1060,8 +1054,8 @@ class DeepSeekV3(JaxModule):
                 attn_o_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR)
             rd_sharding = (ShardingAxisName.MLP_TENSOR, None)
             ap_sharding = (None, ShardingAxisName.MLP_TENSOR)
-            q_da_sharding = (ShardingAxisName.MLP_TENSOR, None)
-            kv_da_sharding = (ShardingAxisName.MLP_TENSOR, None)
+            q_da_sharding = (None, ShardingAxisName.MLP_TENSOR)
+            kv_da_sharding = (None, ShardingAxisName.MLP_TENSOR)
 
             if self.vllm_config.additional_config.get("replicate_attn_weights",
                                                       False):

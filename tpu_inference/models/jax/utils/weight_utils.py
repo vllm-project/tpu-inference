@@ -853,40 +853,14 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         # Post-process module after loading weights. Unlike vLLM post-process
         # weights after loading all weights, we do it per-module here to
         # avoid OOM.
-        self._process_weights_after_loading(base_prefix, module)
-
-        if module == self.module:
-            # For those modules without `load_weights` method, do the post-processing
-            # here.
-            self._process_weights_after_loading(base_prefix, module)
-
-    def _process_weights_after_loading(self, base_prefix: str,
-                                       module: JaxModule):
         if self._process_weights_after_loading_per_module[base_prefix]:
             return
         if (quant_method := getattr(module, 'quant_method', None)) is not None:
             assert isinstance(quant_method, QuantizeMethodBase)
             loaded = quant_method.process_weights_after_loading(module)
-            assert isinstance(
-                loaded, bool
-            ), f"{quant_method} should return a bool indicating whether the weights have been processed, but got {type(loaded)}"
+            assert isinstance(loaded, bool)
             self._process_weights_after_loading_per_module[
                 base_prefix] = loaded
-        else:
-            for name, child in module.named_children():
-                if isinstance(child, JaxModule):
-                    if base_prefix:
-                        new_prefix = f"{base_prefix}.{name}"
-                    else:
-                        new_prefix = name
-                    self._process_weights_after_loading(new_prefix, child)
-                else:
-                    for i, c in enumerate(child):
-                        if base_prefix:
-                            new_prefix = f"{base_prefix}.{name}.{i}"
-                        else:
-                            new_prefix = f"{name}.{i}"
-                        self._process_weights_after_loading(new_prefix, c)
 
 
 class LoadableWithIterator:
