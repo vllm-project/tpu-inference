@@ -26,18 +26,20 @@ GBYTES = 1024 * 1024 * 1024
 TPU_HEAD_SIZE_ALIGNMENT = 128
 TPU_SECOND_LAST_MINOR = 8
 
-# Map vllm dtype string that doesn't exactly match jax dtype string name.
-_VLLM_DTYPE_STR_TO_JAX_DTYPE = {
+# Map a dtype string (possibly from vLLM) to the corresponding JAX dtype
+_DTYPE_STR_ALIAS_TO_JAX_DTYPE = {
     "fp8": jnp.float8_e4m3fn.dtype,
     "fp8_e4m3": jnp.float8_e4m3fn.dtype,
     "fp8_e5m2": jnp.float8_e5m2.dtype,
+    # NOTE: vLLM doesn't have this str dtype yet
+    "fp4": jnp.float4_e2m1fn.dtype,
 }
 
 
 def to_jax_dtype(dtype: str | jnp.dtype | torch.dtype) -> jnp.dtype:
     if isinstance(dtype, (str, type)):
         if isinstance(dtype, str) and (dict_dtype :=
-                                       _VLLM_DTYPE_STR_TO_JAX_DTYPE.get(
+                                       _DTYPE_STR_ALIAS_TO_JAX_DTYPE.get(
                                            dtype, None)):
             return dict_dtype
         return jnp.dtype(dtype)

@@ -716,10 +716,7 @@ class Qwen2_5_VisionTransformer(nnx.Module):
                                           rotary_pos_emb, cu_seqlens,
                                           cu_window_seqlens)
 
-    @partial(
-        jax.jit,
-        static_argnames=("grid_thw", ),
-    )
+    @jax.jit(static_argnames=("grid_thw", ))
     def encode_jit(self, x, grid_thw):
         window_index, rotary_pos_emb, cu_seqlens, cu_window_seqlens = self.compute_aux_arrays(
             grid_thw)

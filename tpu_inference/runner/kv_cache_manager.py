@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
 from typing import TYPE_CHECKING, List
 
 import jax
@@ -23,6 +22,7 @@ from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import t2j_dtype
 from vllm.config import get_layers_from_vllm_config
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.mla import MLAAttention
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -151,8 +151,17 @@ class KVCacheManager:
                                 block_size, num_kv_heads, head_size)
         else:
             # Else propagate attention modules from compilation config.
-            layers = get_layers_from_vllm_config(self.runner.vllm_config,
-                                                 Attention)
+            layers = {}
+            attention_types = [Attention, MLAAttention]
+
+            for attn_cls in attention_types:
+                # Get the layers for the current class
+                new_layers = get_layers_from_vllm_config(
+                    self.runner.vllm_config, attn_cls)
+
+                # Add them to the main dictionary (equivalent to your | operator)
+                layers.update(new_layers)
+
             logger.warning(f"Compilation num_layers = {len(layers.items())}")
             for layer_name, attn_module in layers.items():
                 if (kv_tgt_layer :=
@@ -284,8 +293,8 @@ class KVCacheManager:
     def delete_kv_cache(self) -> None:
         """Delete KV cache JAX arrays to free HBM.
         This explicitly deletes all KV cache JAX arrays, clearing the HBM
-        they occupy. 
-        
+        they occupy.
+
         1. Avoid serving stale KV cache values from a previous model version
            (since prefix cache keys remain constant but values become invalid
            after weight updates).
@@ -343,7 +352,7 @@ class KVCacheManager:
         self.initialize_kv_cache(kv_cache_config)
 
     @staticmethod
-    @functools.partial(jax.jit)
+    @jax.jit
     def _jitted_gather_kv_cache(kv_caches: List[jax.Array],
                                 block_ids: jax.Array) -> List[jax.Array]:
         """
@@ -358,10 +367,7 @@ class KVCacheManager:
         return jax.tree.map(gather_and_reshape, kv_caches)
 
     @staticmethod
-    @functools.partial(
-        jax.jit,
-        static_argnames=("len_block"),
-    )
+    @jax.jit(static_argnames=("len_block"))
     def _jitted_gather_continuous_kv_cache(kv_caches: List[jax.Array],
                                            start_block,
                                            len_block) -> List[jax.Array]:
@@ -381,8 +387,7 @@ class KVCacheManager:
         return jax.tree.map(gather_and_reshape, kv_caches)
 
     @staticmethod
-    @functools.partial(
-        jax.jit,
+    @jax.jit(
         static_argnames=("block_size"),
         donate_argnames=(
             "kv_caches",
@@ -410,8 +415,7 @@ class KVCacheManager:
         return jax.tree.map(_update_layer, kv_caches, kv_cache_slices)
 
     @staticmethod
-    @functools.partial(
-        jax.jit,
+    @jax.jit(
         static_argnames=("block_size"),
         donate_argnames=(
             "kv_caches",

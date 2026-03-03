@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
 import math
 from typing import Optional, Sequence
 
@@ -75,8 +74,7 @@ class Fp8LinearMethod:
         return jnp.concatenate(outs, axis=-1)
 
 
-@functools.partial(jax.jit,
-                   static_argnames=('linear_config', 'weight_block_size'))
+@jax.jit(static_argnames=('linear_config', 'weight_block_size'))
 def process_blockwise_fp8_linear_weights(
     weight: jax.Array,
     weight_scale: jax.Array,

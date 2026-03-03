@@ -21,7 +21,7 @@ import pytest
 from jax.sharding import Mesh
 
 from tpu_inference.layers.common.attention_interface import (
-    attention, sharded_ragged_paged_attention)
+    attention, mla_attention, sharded_ragged_paged_attention)
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.runner.kv_cache import get_kv_cache_shape_with_mesh
@@ -304,3 +304,76 @@ def test_sharded_ragged_paged_attention_gqa_incompatible_raises_error(
             attention_sink=None,
             sm_scale=sm_scale,
         )
+
+
+def test_mla_attention(monkeypatch, mesh):
+    """
+    Tests the `mla_attention` function.
+
+    Verifies that:
+    1. It correctly calculates block sizes using `get_tuned_block_sizes`
+    2. It calls `mla_ragged_paged_attention` with the correct arguments
+    3. It returns the expected output and updated KV cache
+    """
+    qk_nope_dim = 32
+    qk_rope_dim = 16
+    q_lora_rank = 64
+    kv_lora_rank = 64
+
+    q_TNA = jnp.ones((TOTAL_TOKENS, NUM_HEADS, q_lora_rank))
+    q_rope_TNH = jnp.ones((TOTAL_TOKENS, NUM_HEADS, qk_rope_dim))
+    k_SA = jnp.ones((TOTAL_TOKENS, kv_lora_rank))
+    k_rope_SH = jnp.ones((TOTAL_TOKENS, qk_rope_dim))
+
+    # Arbitrary cache shape just for testing
+    kv_cache_shape = (1, NUM_BLOCKS, BLOCK_SIZE, kv_lora_rank)
+    kv_cache = jnp.zeros(kv_cache_shape)
+
+    metadata = AttentionMetadata(
+        input_positions=jnp.arange(TOTAL_TOKENS, dtype=jnp.int32),
+        block_tables=jnp.zeros((MAX_NUM_SEQS * MAX_BLOCKS_PER_SEQ, ),
+                               dtype=jnp.int32),
+        seq_lens=jnp.array([5, 5, 0, 0], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 5, 10, 10, 10], dtype=jnp.int32),
+        request_distribution=jnp.array([0, 0, NUM_SEQS], dtype=jnp.int32),
+    )
+
+    mock_tuned_block_sizes = MagicMock(return_value=(8, 8))
+    monkeypatch.setattr(
+        "tpu_inference.layers.common.attention_interface.get_tuned_block_sizes",
+        mock_tuned_block_sizes)
+
+    expected_output = jnp.full(q_TNA.shape, 0.5)
+    expected_new_cache = jnp.full(kv_cache_shape, 0.1)
+
+    mock_mla_kernel = MagicMock(return_value=(expected_output,
+                                              expected_new_cache))
+    monkeypatch.setattr(
+        "tpu_inference.layers.common.attention_interface.mla_ragged_paged_attention",
+        mock_mla_kernel)
+
+    final_kv_cache, output = mla_attention(
+        q_TNA=q_TNA,
+        q_rope_TNH=q_rope_TNH,
+        k_SA=k_SA,
+        k_rope_SH=k_rope_SH,
+        kv_cache=kv_cache,
+        md=metadata,
+        mesh=mesh,
+        num_attention_heads=NUM_HEADS,
+        qk_nope_head_dim=qk_nope_dim,
+        sm_scale=0.1,
+    )
+
+    # Verify mocked functions were called
+    mock_tuned_block_sizes.assert_called_once()
+    mock_mla_kernel.assert_called_once()
+
+    # Verify output correctness
+    assert jnp.array_equal(output, expected_output)
+    assert jnp.array_equal(final_kv_cache, expected_new_cache)
+
+    _, kernel_kwargs = mock_mla_kernel.call_args
+    assert kernel_kwargs["num_kv_pages_per_block"] == 4
+    assert kernel_kwargs["num_queries_per_block"] == 4
+    assert kernel_kwargs["sm_scale"] == 0.1

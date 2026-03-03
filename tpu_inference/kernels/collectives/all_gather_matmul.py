@@ -693,7 +693,7 @@ def all_gather_matmul(
                                     bytes_accessed=bytes_accessed,
                                     transcendentals=0)
 
-    @functools.partial(jax.jit, static_argnames=["bn", "bk", "rhs_transpose"])
+    @jax.jit(static_argnames=["bn", "bk", "rhs_transpose"])
     def _all_gather_matmul_call(x, y, bn, bk, rhs_transpose):
         return pl.pallas_call(
             functools.partial(

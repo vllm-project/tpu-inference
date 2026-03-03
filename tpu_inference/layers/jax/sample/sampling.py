@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
-
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
@@ -28,10 +26,7 @@ from tpu_inference.layers.jax.sample.sampling_metadata import \
 _SAMPLING_EPS = 1e-5
 
 
-@functools.partial(
-    jax.jit,
-    static_argnames=["mesh"],
-)
+@jax.jit(static_argnames=["mesh"])
 def sample(
     rng: jax.Array,
     mesh: Mesh,
@@ -48,6 +43,12 @@ def sample(
         return greedy_sampled
 
     logits = logits.astype(jnp.float32)
+
+    # Temperature scaling
+    temperatures = tpu_sampling_metadata.temperature.astype(logits.dtype)
+    temperatures = jnp.expand_dims(temperatures, axis=-1)
+    logits /= temperatures
+
     # Only apply top-k masking if k > 0 for each token
     top_k = tpu_sampling_metadata.top_k
     should_apply_topk = jnp.expand_dims(top_k > 0, axis=-1)
@@ -59,10 +60,6 @@ def sample(
     should_apply_topp = jnp.expand_dims(top_p < 1.0, axis=-1)
     topp_masked = topp_mask(logits, top_p, replace_val=-1e12)
     logits = jnp.where(should_apply_topp, topp_masked, logits)
-
-    temperatures = tpu_sampling_metadata.temperature.astype(logits.dtype)
-    temperatures = jnp.expand_dims(temperatures, axis=-1)
-    logits /= temperatures
 
     # (batch_size,)
     next_tokens = jax.random.categorical(rng, logits)
