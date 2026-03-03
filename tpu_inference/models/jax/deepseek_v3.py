@@ -41,6 +41,7 @@ from tpu_inference.layers.common.sharding import \
     ShardingAxisNameBase as ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
+from tpu_inference.layers.jax.base import _init_fn as init_fn
 from tpu_inference.layers.jax.base import create_param, sharded_initializer
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.layers import FlaxUtils
@@ -62,7 +63,6 @@ from tpu_inference.models.jax.utils.weight_utils import (JaxAutoWeightsLoader,
 KVCache = Tuple[jax.Array, jax.Array]
 
 logger = init_logger(__name__)
-init_fn = nnx.initializers.uniform()
 
 
 def _weight_init(random_init: bool):
@@ -645,9 +645,9 @@ class DeepseekV3MLP(JaxModule):
     hidden_act: str
     hidden_size: int
     intermediate_size: int
-    df_sharding: P = P()
-    fd_sharding: P = P()
-    activation_ffw_td: P = P()
+    df_sharding: Sharding = ()
+    fd_sharding: Sharding = ()
+    activation_ffw_td: Sharding = ()
     random_init: bool = False
     quant_config: Optional[QuantizationConfig] = None
 
@@ -770,9 +770,9 @@ class DeepseekV2Moe(JaxModule):
             hidden_size=hidden_size,
             intermediate_size=num_shared_experts * moe_intermediate_size,
             rngs=rng,
-            activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
-            df_sharding=P(None, ShardingAxisName.MLP_TENSOR),
-            fd_sharding=P(ShardingAxisName.MLP_TENSOR, None),
+            activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
+            df_sharding=(None, ShardingAxisName.MLP_TENSOR),
+            fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
             quant_config=quant_config)
 
         # routed experts
@@ -1057,8 +1057,8 @@ class DeepSeekV3(JaxModule):
                 attn_o_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR)
             rd_sharding = (ShardingAxisName.MLP_TENSOR, None)
             ap_sharding = (None, ShardingAxisName.MLP_TENSOR)
-            q_da_sharding = (ShardingAxisName.MLP_TENSOR, None)
-            kv_da_sharding = (ShardingAxisName.MLP_TENSOR, None)
+            q_da_sharding = (None, ShardingAxisName.MLP_TENSOR)
+            kv_da_sharding = (None, ShardingAxisName.MLP_TENSOR)
 
             if self.vllm_config.additional_config.get("replicate_attn_weights",
                                                       False):
