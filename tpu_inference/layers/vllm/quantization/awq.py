@@ -390,19 +390,26 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
             w2_qzeros: jax.Array,
             w2_bias: jax.Array | None,
         ) -> FusedMoEWeights:
-            w13_qweight = jnp.swapaxes(awq_u32_unpack_u4(w13_qweight), 1, 2)
-            w2_qweight = jnp.swapaxes(awq_u32_unpack_u4(w2_qweight), 1, 2)
+            w13_qweight = awq_u32_unpack_u4(w13_qweight).astype(jnp.int8)
+            w13_qzeros = awq_u32_unpack_u4(w13_qzeros).astype(jnp.int8)
+            w2_qweight = awq_u32_unpack_u4(w2_qweight).astype(jnp.int8)
+            w2_qzeros = awq_u32_unpack_u4(w2_qzeros).astype(jnp.int8)
+
+            w13_weight = (w13_qweight.reshape(w13_qweight.shape[0], -1,
+                                              self.quant_config.group_size,
+                                              w13_qweight.shape[-1]) -
+                          w13_qzeros[:, :, jnp.newaxis, :]).reshape(
+                              w13_qweight.shape)
+            w2_weight = (w2_qweight.reshape(w2_qweight.shape[0], -1,
+                                            self.quant_config.group_size,
+                                            w2_qweight.shape[-1]) -
+                         w2_qzeros[:, :, jnp.newaxis, :]).reshape(
+                             w2_qweight.shape)
+
+            w13_weight = jnp.swapaxes(w13_weight, 1, 2)
+            w2_weight = jnp.swapaxes(w2_weight, 1, 2)
             w13_scales = jnp.swapaxes(w13_scales, 1, 2)
             w2_scales = jnp.swapaxes(w2_scales, 1, 2)
-            w13_qzeros = jnp.swapaxes(awq_u32_unpack_u4(w13_qzeros), 1, 2)
-            w2_qzeros = jnp.swapaxes(awq_u32_unpack_u4(w2_qzeros), 1, 2)
-
-            # NOTE(catswe): convert qweight from uint4 to int4 and
-            # let qzeros absorb the difference for performance benefit
-            w13_qweight = (w13_qweight.astype(jnp.int8) - 8).astype(jnp.int4)
-            w2_qweight = (w2_qweight.astype(jnp.int8) - 8).astype(jnp.int4)
-            w13_qzeros = w13_qzeros.astype(jnp.int8) - 8
-            w2_qzeros = w2_qzeros.astype(jnp.int8) - 8
 
             w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
             w13_reorder_size = get_mesh_shape_product(
@@ -410,13 +417,11 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
 
             return process_moe_weights(
                 FusedMoEWeights(
-                    w13_weight=w13_qweight,
+                    w13_weight=w13_weight,
                     w13_weight_scale=w13_scales,
-                    w13_weight_zero_point=w13_qzeros,
                     w13_bias=w13_bias,
-                    w2_weight=w2_qweight,
+                    w2_weight=w2_weight,
                     w2_weight_scale=w2_scales,
-                    w2_weight_zero_point=w2_qzeros,
                     w2_bias=w2_bias,
                 ),
                 moe_backend=self.moe_backend,
@@ -446,11 +451,6 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         layer.w2_weight_scale = Parameter(weights.w2_weight_scale,
                                           requires_grad=False)
 
-        layer.w13_weight_zero_point = Parameter(weights.w13_weight_zero_point,
-                                                requires_grad=False)
-        layer.w2_weight_zero_point = Parameter(weights.w2_weight_zero_point,
-                                               requires_grad=False)
-
         if self.moe.has_bias:
             layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
             layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
@@ -464,11 +464,9 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         weights = FusedMoEWeights(
             w13_weight=jax_view(layer.w13_weight),
             w13_weight_scale=jax_view(layer.w13_weight_scale),
-            w13_weight_zero_point=jax_view(layer.w13_weight_zero_point),
             w13_bias=jax_view(layer.w13_bias) if self.moe.has_bias else None,
             w2_weight=jax_view(layer.w2_weight),
             w2_weight_scale=jax_view(layer.w2_weight_scale),
-            w2_weight_zero_point=jax_view(layer.w2_weight_zero_point),
             w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None)
 
         return vllm_moe_apply(layer=layer,
