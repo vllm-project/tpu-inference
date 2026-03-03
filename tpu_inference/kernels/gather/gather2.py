@@ -42,8 +42,13 @@ def gather(data, indices):
 
 
 @jax.jit
-def ragged_gather(data, indices, ep_token_start, ep_token_end):
-  """Gather with ragged range: only gathers for indices in [ep_token_start, ep_token_end).
+def ragged_gather(data, indices, ep_range):
+  """Gather with ragged range: only gathers for indices in [ep_range[0], ep_range[1]).
+
+  Args:
+    data: [batch_size, value_dim] source data.
+    indices: [num_indices] gather indices.
+    ep_range: i32[2] array where ep_range[0] = ep_token_start, ep_range[1] = ep_token_end.
 
   Skips DMA copies for tiles whose index range falls entirely outside
   [ep_token_start, ep_token_end), reducing HBM bandwidth by ~ep_size x.
@@ -59,20 +64,21 @@ def ragged_gather(data, indices, ep_token_start, ep_token_end):
       subcore_axis_name="subcore",
   )
 
-  # Precompute per-tile mask: 1 if tile overlaps [start, end), 0 otherwise
-  tile_starts = jnp.arange(num_tiles) * gather_window_size
-  tile_mask = ((tile_starts + gather_window_size) > ep_token_start) & (
-      tile_starts < ep_token_end)
-  tile_mask = tile_mask.astype(jnp.int32).reshape(1, num_tiles)
-
+  ep_start = ep_range[0].reshape(1, 1)
+  ep_end = ep_range[1].reshape(1, 1)
   indices = indices.reshape((1, num_indices))
 
   @pl.kernel(out_shape=jax.ShapeDtypeStruct((num_indices, value_dim),
                                              data.dtype),
              mesh=vector_mesh)
-  def kernel(x_hbm, i_hbm, mask_hbm, o_hbm):
-    def body(i_vmem, mask_vmem, o_vmem):
-      should_gather = mask_vmem[0, 0] > 0
+  def kernel(x_hbm, i_hbm, ep_start_hbm, ep_end_hbm, o_hbm):
+    def body(i_vmem, ep_start_vmem, ep_end_vmem, o_vmem):
+      tile_idx = pl.program_id(0)
+      tile_start = tile_idx * gather_window_size
+      token_start = ep_start_vmem[0, 0]
+      token_end = ep_end_vmem[0, 0]
+      should_gather = ((tile_start + gather_window_size) > token_start) & (
+          tile_start < token_end)
 
       @pl.when(should_gather)
       def _():
@@ -83,12 +89,13 @@ def ragged_gather(data, indices, ep_token_start, ep_token_end):
         grid=(num_tiles,),
         in_specs=[
             pl.BlockSpec((1, gather_window_size), index_map=lambda i: (0, i)),
-            pl.BlockSpec((1, 1), index_map=lambda i: (0, i)),
+            pl.BlockSpec((1, 1), index_map=lambda i: (0, 0)),
+            pl.BlockSpec((1, 1), index_map=lambda i: (0, 0)),
         ],
         out_specs=[pl.BlockSpec((gather_window_size, value_dim),
                                 index_map=lambda i: (i, 0))],
         core_axis_name='subcore',
         dimension_semantics=(pltpu.PARALLEL,),
-    )(i_hbm, mask_hbm, o_hbm)
+    )(i_hbm, ep_start_hbm, ep_end_hbm, o_hbm)
 
-  return kernel(data, indices, tile_mask)
+  return kernel(data, indices, ep_start, ep_end)

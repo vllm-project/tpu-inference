@@ -66,7 +66,8 @@ class RaggedGatherTest(jtu.JaxTestCase):
     indices = jax.random.randint(
         jax.random.key(0), (num_indices,), 0, batch_size, jnp.int32)
 
-    actual = ragged_gather(a, indices, ep_token_start, ep_token_end)
+    ep_range = jnp.array([ep_token_start, ep_token_end], dtype=jnp.int32)
+    actual = ragged_gather(a, indices, ep_range)
     expected = a[indices]
 
     # Verify the in-range portion matches

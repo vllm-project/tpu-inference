@@ -130,8 +130,8 @@ def _selective_gather_ep(hidden_states, token_indices_sorted, group_sizes,
     ep_token_start = jnp.where(ep_expert_start > 0,
                                cumsum_gs[ep_expert_start - 1], 0)
     ep_token_end = cumsum_gs[ep_expert_start + num_experts_per_shard - 1]
-    return ragged_gather(hidden_states, token_indices_sorted, ep_token_start,
-                         ep_token_end)
+    ep_range = jnp.array([ep_token_start, ep_token_end], dtype=jnp.int32)
+    return ragged_gather(hidden_states, token_indices_sorted, ep_range)
 
 
 def moe_gmm_local(
