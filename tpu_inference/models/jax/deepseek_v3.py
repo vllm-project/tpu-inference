@@ -36,7 +36,8 @@ from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
 from tpu_inference.layers.common.attention_interface import mla_attention
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization import quantize_kv
-from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import \
+    ShardingAxisNameBase as ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.base import _init_fn as init_fn
@@ -643,9 +644,9 @@ class DeepseekV3MLP(JaxModule):
     hidden_act: str
     hidden_size: int
     intermediate_size: int
-    df_sharding: Sharding = ()
-    fd_sharding: Sharding = ()
-    activation_ffw_td: Sharding = ()
+    df_sharding: P = P()
+    fd_sharding: P = P()
+    activation_ffw_td: P = P()
     random_init: bool = False
     quant_config: Optional[QuantizationConfig] = None
 
@@ -754,7 +755,7 @@ class DeepseekV2Moe(JaxModule):
             norm_topk_prob=True,
             rngs=rng,
             routed_scaling_factor=routed_scaling_factor,
-            dtype=self.dtype,
+            dtype=dtype,
             moe_backend=moe_backend,
             activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
             ed_sharding=P(None, None),
@@ -768,9 +769,9 @@ class DeepseekV2Moe(JaxModule):
             hidden_size=hidden_size,
             intermediate_size=num_shared_experts * moe_intermediate_size,
             rngs=rng,
-            activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-            df_sharding=(None, ShardingAxisName.MLP_TENSOR),
-            fd_sharding=(ShardingAxisName.MLP_TENSOR, None),
+            activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
+            df_sharding=P(None, ShardingAxisName.MLP_TENSOR),
+            fd_sharding=P(ShardingAxisName.MLP_TENSOR, None),
             quant_config=quant_config)
 
         # routed experts
@@ -1028,6 +1029,7 @@ class DeepSeekV3(JaxModule):
             self.embed_tokens = JaxEmbed(
                 num_embeddings=vocab_size,
                 features=hf_config.hidden_size,
+                param_dtype=dtype,
                 dtype=dtype,
                 embedding_init=nnx.with_partitioning(
                     init_fn, (ShardingAxisName.MLP_TENSOR, )),
@@ -1113,8 +1115,9 @@ class DeepSeekV3(JaxModule):
                 epsilon=rms_norm_eps,
                 scale_init=nnx.with_partitioning(init_fn, (None, )),
                 dtype=dtype,
-                quant_config=quant_config,
+                param_dtype=dtype,
                 rngs=rng,
+                quant_config=quant_config,
             )
 
             post_attention_layernorm = JaxRmsNorm(
@@ -1122,8 +1125,9 @@ class DeepSeekV3(JaxModule):
                 epsilon=rms_norm_eps,
                 scale_init=nnx.with_partitioning(init_fn, (None, )),
                 dtype=dtype,
-                quant_config=quant_config,
+                param_dtype=dtype,
                 rngs=rng,
+                quant_config=quant_config,
             )
 
             # Logic to determine if this layer is Dense or MoE
@@ -1255,6 +1259,7 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
             self.lm_head = JaxEinsum(
                 einsum_str="TD,DV->TV",
                 kernel_shape=(hidden_size, vocab_size),
+                param_dtype=model_config.dtype,
                 dtype=model_config.dtype,
                 rngs=rng,
                 kernel_init=nnx.with_partitioning(
