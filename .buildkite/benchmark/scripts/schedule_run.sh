@@ -170,6 +170,7 @@ while read -r line || [ -n "${line}" ]; do
 - label: "Publish: benchmark - RecordId: ${RECORD_ID}"
   depends_on: "build-vllm-tpu-image"
   env:
+    BUILDKITE_GIT_SUBMODULES: "true"
     GCP_PROJECT_ID: "cloud-tpu-inference-test"
     GCP_REGION: "southamerica-west1"
     GCS_BUCKET: "vllm-cb-storage2"
