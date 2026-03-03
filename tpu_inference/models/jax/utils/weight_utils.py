@@ -18,6 +18,7 @@ import glob
 import math
 import os
 import re
+from collections import defaultdict
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -787,6 +788,7 @@ def load_nnx_param_from_reshaped_torch(
 
     try:
         jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
+        jax_param.set_metadata('_is_loaded', True)
     except Exception as e:
         raise RuntimeError(
             f"Failed to load weight '{param_name}' with shape {jax_weight.shape} into param with shape {jax_param.value.shape}"
@@ -841,6 +843,9 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                                       param_name=name))
 
         super().__init__(model, **kwargs)
+        # Book mark those already done processing, skip if visited.
+        self._process_weights_after_loading_per_module = defaultdict(
+            lambda: False)
 
     def _load_module(self, base_prefix: str, module: JaxModule,
                      weights: Iterable) -> Iterable:
@@ -848,9 +853,14 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         # Post-process module after loading weights. Unlike vLLM post-process
         # weights after loading all weights, we do it per-module here to
         # avoid OOM.
+        if self._process_weights_after_loading_per_module[base_prefix]:
+            return
         if (quant_method := getattr(module, 'quant_method', None)) is not None:
             assert isinstance(quant_method, QuantizeMethodBase)
-            quant_method.process_weights_after_loading(module)
+            loaded = quant_method.process_weights_after_loading(module)
+            assert isinstance(loaded, bool)
+            self._process_weights_after_loading_per_module[
+                base_prefix] = loaded
 
 
 class LoadableWithIterator:
