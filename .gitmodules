@@ -1,0 +1,3 @@
+[submodule ".buildkite/benchmark/scripts/agent/bench_serving"]
+	path = .buildkite/benchmark/scripts/agent/bench_serving
+	url = https://github.com/kimbochen/bench_serving.git
