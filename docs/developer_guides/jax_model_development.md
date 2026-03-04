@@ -24,10 +24,8 @@ tpu_inference
 │   │    ├── glossary.md
 │   │    ├── attention
 │   │    │    ├── attention.py # Pre-implemented attention layer.
-│   │    │    └── deepseek_v3_attention.py
 │   │    └── moe
 │   │         ├── moe.py
-│   │         └── deepseek_v3_moe.py
 │   └── common # Functionalities shared between torchax and jax implementations.
 └── models
    ├── common
@@ -42,7 +40,7 @@ tpu_inference
 - Registration of new Jax model types should be performed in [`tpu_inference/models/common/model_loader.py`](https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/models/common/model_loader.py)
 - New Jax model definitions should be added to [`tpu_inference/models/jax`](https://github.com/vllm-project/tpu-inference/tree/main/tpu_inference/models/jax).
 - Commonly used layers (e.g. embedding, feed-forward) can be imported from [`tpu_inference/layers/jax`](https://github.com/vllm-project/tpu-inference/tree/main/tpu_inference/layers/jax).
-- Model-specific layer implementations should be added to `tpu_inference/layers/<layer_type>/<model_type>_<layer_type>.py` (e.g. [`attention/deepseek_v3_attention.py`](https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/jax/attention/deepseek_v3_attention.py), [`moe/deepseek_v3_moe.py`](https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/jax/moe/deepseek_v3_moe.py)).
+- Model-specific layer implementations should be added directly to the modeling file itself (e.g. for DeepSeek-V3: [`tpu_inference/models/jax/deepseek_v3.py`](https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/models/jax/deepseek_v3.py)).
 - Custom (Qwix) quantization configs (yaml files) should be stored in [`tpu_inference/models/jax/utils/quantization/configs`](https://github.com/vllm-project/tpu-inference/tree/main/tpu_inference/models/jax/utils/quantization/configs).
 
 # Model Implementation
@@ -60,6 +58,8 @@ class NewModel(nnx.Module):
   def __init__(self, vllm_config: VllmConfig, rng: nnx.Rngs,
                mesh: jax.sharding.Mesh)
 ```
+
+"# TODO (jacobplatin): we need to update this once the JAX-path refactor is fully done"
 
 The constructor should set the architecture configuration (e.g. num_layers, hidden_size) and initialize the model layers. Layers can be defined from scratch using flax NNX (e.g. [Llama3](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/llama3.py)) or can leverage tpu-inference to import or extend commonly used layer types (e.g. [Embedder](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/layers/jax/layers.py#L168), [RMSNorm](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/layers/jax/layers.py#L49), [MoE](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/layers/jax/moe/moe.py#L69), [Attention](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/layers/jax/attention/attention.py#L23), [DenseFFW](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/layers/jax/layers.py#L98C7-L98C15), [TransformerBlock](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/layers/jax/transformer_block.py#L15
 )).

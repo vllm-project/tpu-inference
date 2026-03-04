@@ -12,8 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import nullcontext
+
 import jax
 import jax.numpy as jnp
+from jax.experimental.layout import Format
+from jax.sharding import Mesh
+
+from tpu_inference import envs
+
+# Lazy initialized, since device might not be ready at import time.
+_cpu_mesh = None
 
 
 def reorder_concatenated_tensor_for_sharding(concatenated_tensor: jax.Array,
@@ -92,3 +101,59 @@ def slice_sharded_tensor_for_concatenation(sharded_tensor: jax.Array,
         start_offset = end_offset
 
     return split_tensors
+
+
+def general_device_put(tensor: jax.Array,
+                       sharding,
+                       *,
+                       layout=None,
+                       source_mesh=None) -> jax.Array:
+    """
+    Put a tensor onto devices with the given sharding.
+    This method handles both single-host and multi-host cases.
+
+    `source_mesh` specifies the mesh on which the input tensor is currently located.
+    """
+
+    def _put(t):
+        multihost_backend = envs.TPU_MULTIHOST_BACKEND
+        if multihost_backend != "ray":
+            return jax.device_put(t, sharding)
+
+        # NOTE: at here, num_global_devices != num_local_devices
+        # meaning we are in multi-host setup. Each host will run the same process
+        # and each process only need to handle the devices accessible to this host.
+        shape = t.shape
+        ctx = nullcontext() if source_mesh is None else jax.set_mesh(
+            source_mesh)
+        # `t[i]` needs to be operated in the same mesh as `t`, which is provided as
+        # `source_mesh`.
+        with ctx:
+            x_split = [
+                jax.device_put(t[i], device) for device, i in
+                sharding.addressable_devices_indices_map(shape).items()
+            ]
+        global_array = jax.make_array_from_single_device_arrays(shape,
+                                                                sharding,
+                                                                x_split,
+                                                                dtype=t.dtype)
+        if layout is not None:
+            dst_mesh = sharding.mesh
+            with jax.set_mesh(dst_mesh):
+                global_array = jax.device_put(global_array,
+                                              Format(layout, sharding))
+        return global_array
+
+    return jax.tree_util.tree_map(_put, tensor)
+
+
+def cpu_mesh() -> Mesh:
+    global _cpu_mesh
+    if _cpu_mesh is None:
+        _cpu_mesh = Mesh(jax.devices("cpu")[:1], ("cpu", ))
+    return _cpu_mesh
+
+
+def cpu_mesh_context():
+    """A context to enforce using CPU mesh, used for loading weights on CPU."""
+    return jax.set_mesh(cpu_mesh())

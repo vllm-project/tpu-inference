@@ -54,7 +54,6 @@ class TestTPUJaxRunner:
             parallel_config = ParallelConfig(
                 pipeline_parallel_size=1,
                 tensor_parallel_size=1,
-                worker_use_ray=False,
             )
             speculative_config = SpeculativeConfig(
                 model='ngram',
@@ -212,7 +211,6 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
             parallel_config = ParallelConfig(
                 pipeline_parallel_size=1,
                 tensor_parallel_size=1,
-                worker_use_ray=False,
             )
             vllm_config = VllmConfig(
                 model_config=model_config,
@@ -238,6 +236,7 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
         return (
             MagicMock(),  # TPUModelRunner.model_fn
             MagicMock(),  # TPUModelRunner.compute_logits_fn
+            MagicMock(),  # TPUModelRunner.pooler_fn
             MagicMock(),  # TPUModelRunner.combine_hidden_states_fn
             mock_multimodal_fns,  # TPUModelRunner.multimodal_fns
             MagicMock(),  # TPUModelRunner.state (model params)

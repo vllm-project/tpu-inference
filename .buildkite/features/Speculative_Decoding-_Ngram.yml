@@ -15,20 +15,23 @@
 # pipeline-name: Speculative Decoding: Ngram
 # pipeline-type: feature support matrix
 steps:
-  - label: "Correctness tests for Speculative Decoding: Ngram"
-    key: "Speculative_Decoding-_Ngram_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for Speculative Decoding: Ngram"
+    key: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Ngram_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_correctness_greedy \
           /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_correctness_random
-  - label: "Record correctness test result for Speculative Decoding: Ngram"
-    key: "record_Speculative_Decoding-_Ngram_CorrectnessTest"
-    depends_on: "Speculative_Decoding-_Ngram_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for Speculative Decoding: Ngram"
+    key: "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_Ngram_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Ngram_CorrectnessTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Speculative Decoding: Ngram"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "feature support matrix"
@@ -36,24 +39,27 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh Speculative_Decoding-_Ngram_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Ngram_CorrectnessTest
 
-  - label: "Performance tests for Speculative Decoding: Ngram"
-    key: "Speculative_Decoding-_Ngram_PerformanceTest"
-    depends_on: "record_Speculative_Decoding-_Ngram_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for Speculative Decoding: Ngram"
+    key: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Ngram_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_Ngram_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_performance_greedy \
           /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_performance_random
 
-  - label: "Record performance test result for Speculative Decoding: Ngram"
-    key: "record_Speculative_Decoding-_Ngram_PerformanceTest"
-    depends_on: "Speculative_Decoding-_Ngram_PerformanceTest"
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for Speculative Decoding: Ngram"
+    key: "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_Ngram_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Ngram_PerformanceTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Speculative Decoding: Ngram"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "feature support matrix"
@@ -61,4 +67,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh Speculative_Decoding-_Ngram_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Ngram_PerformanceTest

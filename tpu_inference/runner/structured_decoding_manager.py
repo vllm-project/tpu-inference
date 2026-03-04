@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
 from typing import TYPE_CHECKING, Tuple
 
 import jax
@@ -31,7 +30,7 @@ class StructuredDecodingManager:
     def __init__(self, runner: "TPUModelRunner"):
         self.runner = runner
 
-    @functools.partial(jax.jit, static_argnums=(0, ))
+    @jax.jit(static_argnums=(0, ))
     def structured_decode_fn(self, require_struct_decoding: jax.Array,
                              grammar_bitmask: jax.Array, logits: jax.Array,
                              arange: jax.Array) -> jax.Array:
@@ -41,7 +40,7 @@ class StructuredDecodingManager:
                 logits, grammar_bitmask, require_struct_decoding, arange),
             lambda: logits)
 
-    @functools.partial(jax.jit, static_argnums=(0, ))
+    @jax.jit(static_argnums=(0, ))
     def _apply_grammar_bitmask_kernel(self, logits: jax.Array,
                                       grammar_bitmask: jax.Array,
                                       require_struct_decoding: jax.Array,

@@ -111,13 +111,13 @@ class TestEagleLlama3ForCausalLM:
         hf_config = mock_vllm_config.speculative_config.draft_model_config.hf_config
         dtype = jnp.bfloat16
         rngs = nnx.Rngs(rng)
-
-        layer = Eagle3LlamaDecoderLayer(
-            hf_config,
-            dtype,
-            rngs,
-            mesh,
-            kv_cache_dtype=mock_vllm_config.cache_config.cache_dtype)
+        with jax.set_mesh(mesh):
+            layer = Eagle3LlamaDecoderLayer(
+                hf_config,
+                dtype,
+                rngs,
+                mesh,
+                kv_cache_dtype=mock_vllm_config.cache_config.cache_dtype)
 
         # Check if projection layers are overridden with correct input size
         original_hidden_size = hf_config.hidden_size
@@ -143,7 +143,8 @@ class TestEagleLlama3ForCausalLM:
 
         draft_model_config = mock_vllm_config.speculative_config.draft_model_config
         hf_config = draft_model_config.hf_config
-        model = EagleLlama3ForCausalLM(mock_vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = EagleLlama3ForCausalLM(mock_vllm_config, rng, mesh)
 
         input_ids, hidden_states, attention_metadata = mock_model_inputs
 
@@ -177,7 +178,8 @@ class TestEagleLlama3ForCausalLM:
                           mock_vllm_config: MockVllmConfig, rng: PRNGKey,
                           mesh: Mesh):
         """Tests that the load_weights function is called correctly."""
-        model = EagleLlama3ForCausalLM(mock_vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = EagleLlama3ForCausalLM(mock_vllm_config, rng, mesh)
         model.load_weights(rng)
 
         mock_load_hf_weights.assert_called_once()

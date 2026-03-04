@@ -15,19 +15,22 @@
 # pipeline-name: Speculative Decoding: Eagle3
 # pipeline-type: feature support matrix
 steps:
-  - label: "Correctness tests for Speculative Decoding: Eagle3"
-    key: "Speculative_Decoding-_Eagle3_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for Speculative Decoding: Eagle3"
+    key: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Eagle3_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_eagle3_correctness
-  - label: "Record correctness test result for Speculative Decoding: Eagle3"
-    key: "record_Speculative_Decoding-_Eagle3_CorrectnessTest"
-    depends_on: "Speculative_Decoding-_Eagle3_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for Speculative Decoding: Eagle3"
+    key: "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_Eagle3_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Eagle3_CorrectnessTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Speculative Decoding: Eagle3"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "feature support matrix"
@@ -35,23 +38,26 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh Speculative_Decoding-_Eagle3_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Eagle3_CorrectnessTest
 
-  - label: "Performance tests for Speculative Decoding: Eagle3"
-    key: "Speculative_Decoding-_Eagle3_PerformanceTest"
-    depends_on: "record_Speculative_Decoding-_Eagle3_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for Speculative Decoding: Eagle3"
+    key: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Eagle3_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_Eagle3_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_eagle3_performance
 
-  - label: "Record performance test result for Speculative Decoding: Eagle3"
-    key: "record_Speculative_Decoding-_Eagle3_PerformanceTest"
-    depends_on: "Speculative_Decoding-_Eagle3_PerformanceTest"
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for Speculative Decoding: Eagle3"
+    key: "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_Eagle3_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Eagle3_PerformanceTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Speculative Decoding: Eagle3"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "feature support matrix"
@@ -59,4 +65,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh Speculative_Decoding-_Eagle3_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Eagle3_PerformanceTest

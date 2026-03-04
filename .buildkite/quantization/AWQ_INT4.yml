@@ -15,18 +15,19 @@
 # pipeline-name: AWQ INT4
 # pipeline-type: quantization support matrix
 steps:
-  - label: "Correctness tests for AWQ INT4"
-    key: "AWQ_INT4_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for AWQ INT4"
+    key: "${TPU_VERSION:-tpu6e}_AWQ_INT4_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "AWQ_INT4_CorrectnessTest" "unverified"
-  - label: "Record correctness test result for AWQ INT4"
-    key: "record_AWQ_INT4_CorrectnessTest"
-    depends_on: "AWQ_INT4_CorrectnessTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_AWQ_INT4_CorrectnessTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for AWQ INT4"
+    key: "${TPU_VERSION:-tpu6e}_record_AWQ_INT4_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_AWQ_INT4_CorrectnessTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "AWQ INT4"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "quantization support matrix"
@@ -34,21 +35,22 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh AWQ_INT4_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_AWQ_INT4_CorrectnessTest
 
-  - label: "Performance tests for AWQ INT4"
-    key: "AWQ_INT4_PerformanceTest"
-    depends_on: "record_AWQ_INT4_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for AWQ INT4"
+    key: "${TPU_VERSION:-tpu6e}_AWQ_INT4_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_AWQ_INT4_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v6e_queue
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "AWQ_INT4_PerformanceTest" "unverified"
-  - label: "Record performance test result for AWQ INT4"
-    key: "record_AWQ_INT4_PerformanceTest"
-    depends_on: "AWQ_INT4_PerformanceTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_AWQ_INT4_PerformanceTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for AWQ INT4"
+    key: "${TPU_VERSION:-tpu6e}_record_AWQ_INT4_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_AWQ_INT4_PerformanceTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "AWQ INT4"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "quantization support matrix"
@@ -56,4 +58,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh AWQ_INT4_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_AWQ_INT4_PerformanceTest

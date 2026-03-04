@@ -35,17 +35,19 @@ class MockParamLlamaGuard4:
     dtype: jnp.dtype = jnp.bfloat16
     sharding_spec: Tuple[str | None, ...] | None = None
     value: Any = field(init=False)
-    sharding: Any = field(init=False)
+    out_sharding: Any = field(init=False)
 
     def __init__(self, shape=(32, 128)):
         self.shape = shape
         self.value = jnp.zeros(self.shape, dtype=self.dtype)
         # The sharding spec is accessed during weight loading
-        self.sharding = SimpleNamespace(spec=self.sharding_spec)
+        self.out_sharding = SimpleNamespace(spec=self.sharding_spec)
 
     # Allow the mock parameter's value to be updated
     def __setattr__(self, name, value):
-        if name in ['value', 'shape', 'dtype', 'sharding', 'sharding_spec']:
+        if name in [
+                'value', 'shape', 'dtype', 'out_sharding', 'sharding_spec'
+        ]:
             self.__dict__[name] = value
         else:
             super().__setattr__(name, value)
@@ -88,6 +90,19 @@ class MockVllmConfig:
         hf_config_mock = MagicMock()
         hf_config_mock.text_config = text_config_mock
 
+        vision_config_mock = MagicMock()
+        vision_config_mock.image_size = 336
+        vision_config_mock.patch_size = 14
+        vision_config_mock.hidden_size = 1408
+        vision_config_mock.num_attention_heads = 16
+        vision_config_mock.rope_theta = 10000.0
+        vision_config_mock.intermediate_size = 5632
+        vision_config_mock.projector_input_dim = 4096
+        vision_config_mock.projector_output_dim = 4096
+        vision_config_mock.projector_dropout = 0.0
+        hf_config_mock.vision_config = vision_config_mock
+        hf_config_mock.image_token_index = 200092
+
         self.model_config.hf_config = hf_config_mock
 
 
@@ -120,14 +135,25 @@ def mock_vllm_config_llama_guard_4() -> MockVllmConfig:
     return MockVllmConfig(model_name="meta-llama/Llama-Guard-4-12B")
 
 
+@pytest.fixture(autouse=True)
+def mock_get_pp_group():
+    with patch("tpu_inference.models.jax.llama_guard_4.get_pp_group",
+               return_value=MagicMock(is_first_rank=True,
+                                      is_last_rank=True,
+                                      rank_in_group=0,
+                                      world_size=1)):
+        yield
+
+
 class TestLlamaGuard4ForCausalLM:
     """Tests for the main LlamaGuard4ForCausalLM model class."""
 
     def test_init_llama_guard_4(self, mock_vllm_config_llama_guard_4, rng,
                                 mesh):
         """Tests correct initialization and parameter detection."""
-        model = LlamaGuard4ForCausalLM(mock_vllm_config_llama_guard_4, rng,
-                                       mesh)
+        with jax.set_mesh(mesh):
+            model = LlamaGuard4ForCausalLM(mock_vllm_config_llama_guard_4, rng,
+                                           mesh)
 
         # Check model name is correctly set in the config
         assert "llama-guard-4" in model.vllm_config.model_config.model.lower()
@@ -164,10 +190,12 @@ class TestLlamaGuard4ForCausalLM:
         """Tests that the weight loader is called correctly for checkpoint loading."""
         vllm_config = MockVllmConfig(model_name="llama-guard-4-test",
                                      random_weights=False)
-        model = LlamaGuard4ForCausalLM(vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = LlamaGuard4ForCausalLM(vllm_config, rng, mesh)
 
-        with patch.object(LlamaGuard4ForCausalLM,
-                          'WeightLoader') as mock_loader_cls:
+        with patch(
+                'tpu_inference.models.jax.llama_guard_4.LlamaGuard4WeightLoader'
+        ) as mock_loader_cls:
             mock_loader_instance = MagicMock()
             mock_loader_cls.return_value = mock_loader_instance
             model.load_weights(rng)
@@ -214,7 +242,8 @@ class TestLlamaGuard4WeightLoader:
         vllm_config = MockVllmConfig(model_name="llama-guard-4-small-test",
                                      random_weights=False)
 
-        model = LlamaGuard4ForCausalLM(vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = LlamaGuard4ForCausalLM(vllm_config, rng, mesh)
 
         hidden_size = 5120
         vocab_size = 202048

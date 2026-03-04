@@ -59,6 +59,29 @@ class TestJaxModule(unittest.TestCase):
         self.assertCountEqual(["inner.quantization_scale", "weight"],
                               [k for k, _ in module.named_parameters()])
 
+    def test_named_children_in_nested_module(self):
+        """Tests named_children method in nested modules."""
+
+        class Depth3Module(JaxModule):
+
+            def __init__(self):
+                super().__init__()
+                self.my_module_1 = MyModule()
+                self.my_module_2 = MyModule()
+                self.nested_module_a = NestedModule()
+                self.nested_module_b = NestedModule()
+                self.layers = nnx.List([MyModule() for _ in range(3)])
+
+        module = Depth3Module()
+
+        children = set(name for name, _ in module.named_children())
+        # Should only return immediate children modules, without "inner" etc.
+        self.assertCountEqual(
+            children, {
+                "my_module_1", "my_module_2", "nested_module_a",
+                "nested_module_b", "layers"
+            })
+
 
 if __name__ == "__main__":
     unittest.main()

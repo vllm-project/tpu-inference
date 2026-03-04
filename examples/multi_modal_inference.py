@@ -41,8 +41,10 @@ def run_qwen2_5_vl(questions: list[str], modality: str,
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_num_seqs=5,
         mm_processor_kwargs={
-            "min_pixels": 28 * 28,
-            "max_pixels": 1280 * 28 * 28,
+            "size": {
+                "longest_edge": 1003520,
+                "shortest_edge": 3136
+            },
             "fps": 1,
         },
         limit_mm_per_prompt={modality: 1},

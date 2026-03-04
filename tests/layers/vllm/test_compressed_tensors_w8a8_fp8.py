@@ -38,6 +38,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsLinearMethod
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 
+from tests.layers.common import utils as test_utils
 from tpu_inference.layers.common.quantization import (dequantize_tensor,
                                                       quantize_tensor)
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
@@ -47,8 +48,6 @@ from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compresse
     VllmCompressedTensorsW8A8Fp8
 from tpu_inference.layers.vllm.quantization.configs import \
     VllmQuantLinearConfig
-
-from . import utils as test_utils
 
 P = PartitionSpec
 MODELS = [

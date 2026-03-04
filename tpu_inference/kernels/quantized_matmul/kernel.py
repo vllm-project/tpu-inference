@@ -112,13 +112,10 @@ def matmul_kernel(
     unfold_args((quant, is_first_step, is_last_step), (), matmul_body)
 
 
-@functools.partial(
-    jax.jit,
-    static_argnames=[
-        "x_q_dtype",
-        "tuned_value",
-    ],
-)
+@jax.jit(static_argnames=[
+    "x_q_dtype",
+    "tuned_value",
+])
 def quantized_matmul_kernel(
     x: jax.Array,  # [bs, n_in]
     w_q: jax.Array,  # [n_out, n_in]

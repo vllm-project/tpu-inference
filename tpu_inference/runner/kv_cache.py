@@ -19,7 +19,6 @@ import jax.numpy as jnp
 import numpy as np
 from jax._src import dtypes
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from torchax.ops.mappings import t2j_dtype
 
 import tpu_inference.kernels.mla.v1.kernel as mla
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
@@ -27,6 +26,7 @@ import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
 from tpu_inference import utils
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
+from tpu_inference.utils import to_jax_dtype
 
 logger = init_logger(__name__)
 
@@ -129,9 +129,8 @@ def create_kv_caches(
 
 def get_attention_page_size_bytes(mesh, block_size, num_kv_heads, head_size,
                                   dtype, use_mla) -> int:
-    jax_dtype = t2j_dtype(dtype)
-    bits = (dtypes.bit_width(jax_dtype) if hasattr(dtypes, "bit_width") else
-            dtypes.itemsize_bits(jax_dtype))
+    jax_dtype = to_jax_dtype(dtype)
+    bits = dtypes.itemsize_bits(jax_dtype)
     kv_cache_shape = get_kv_cache_shape_with_mesh(
         mesh=mesh,
         total_num_pages=1,
