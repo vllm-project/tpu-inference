@@ -19,6 +19,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
+import torchax
 from jax.sharding import Mesh
 from vllm.v1.attention.backend import AttentionType
 
@@ -96,7 +97,7 @@ class TestVllmTPUMLAAttention:
     @patch(
         "vllm.model_executor.layers.attention.mla_attention.MLAAttention.__init__",
         autospec=True)
-    def test_process_weights_after_loading(self, mock_super_init):
+    def test_process_weights_after_loading(self, mock_super_init, mesh):
 
         def side_effect(self, *args, **kwargs):
             self.kv_cache_dtype = "auto"
@@ -117,14 +118,17 @@ class TestVllmTPUMLAAttention:
             prefix="test",
         )
 
-        attn.W_UK_T = torch.rand(10, 10)
-        attn.W_UV = torch.rand(10, 10)
+        attn.W_UK_T = torchax.tensor.Tensor(jnp.ones((10, 10)), env=torchax.default_env())
+        attn.W_UV = torchax.tensor.Tensor(jnp.ones((10, 10)), env=torchax.default_env())
         attn.kv_b_proj = MagicMock()
+        attn.kv_b_proj.quant_method.linear_config.mesh = mesh
+        attn.kv_b_proj.named_parameters.return_value = {}
 
         with patch(
-                "vllm.model_executor.layers.attention.mla_attention.MLAAttention.process_weights_after_loading"
+            "vllm.model_executor.layers.attention.mla_attention.MLAAttention.process_weights_after_loading"
         ) as mock_super_process:
-            attn.process_weights_after_loading(torch.float32)
+            with torchax.default_env():
+                attn.process_weights_after_loading(torch.float32)
 
             mock_super_process.assert_called_once_with(torch.float32)
 

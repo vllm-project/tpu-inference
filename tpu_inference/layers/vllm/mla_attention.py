@@ -11,23 +11,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import jax
 import torch
 import torchax
+from jax.sharding import PartitionSpec as P, NamedSharding
 from torch.nn import Parameter
-from torchax.interop import torch_view
+from torchax.interop import torch_view, jax_view
 from vllm.config import CacheConfig
-from vllm.model_executor.layers.attention.attention import \
-    get_attention_context
+from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.linear import ColumnParallelLinear
-from vllm.model_executor.layers.mla import (MLAModules,
-                                            MultiHeadLatentAttentionWrapper)
+from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.v1.attention.backend import AttentionType
 
 from tpu_inference import utils
-from tpu_inference.models.vllm.vllm_model_wrapper_context import \
-    get_vllm_model_wrapper_context
+from tpu_inference.models.vllm.vllm_model_wrapper_context import (
+    get_vllm_model_wrapper_context,
+)
 
 
 class VllmTPUMLAAttention(MLAAttention):
@@ -63,7 +64,8 @@ class VllmTPUMLAAttention(MLAAttention):
         self.kv_cache_quantized_dtype = None
         if self.kv_cache_dtype != "auto":
             self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
-                self.kv_cache_dtype)
+                self.kv_cache_dtype
+            )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         with torchax.default_env():
@@ -71,6 +73,18 @@ class VllmTPUMLAAttention(MLAAttention):
 
             # NOTE: vLLM dequantizes kv_b_proj weights which causes more memory
             # usage than expected.
+
+            # TODO(gxd3): consider quantize W_UK_T, W_UV back to fp8.
+            # Explicit replicate `W_UK_T`, `W_UV` to all TPU, given MLA layers
+            # are pure DP.
+            mesh = self.kv_b_proj.quant_method.linear_config.mesh
+            self.W_UK_T = torch_view(
+                jax.device_put(jax_view(self.W_UK_T), NamedSharding(mesh, P()))
+            )
+            self.W_UV = torch_view(
+                jax.device_put(jax_view(self.W_UV), NamedSharding(mesh, P()))
+            )
+
             self.W_UK_T = Parameter(self.W_UK_T, requires_grad=False)
             self.W_UV = Parameter(self.W_UV, requires_grad=False)
 
