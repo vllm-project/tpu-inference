@@ -123,11 +123,11 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 </details>
 
-<details markdown="1">
+<details open markdown="1">
 <summary><b> 🚀&nbsp; Advanced Capabilities </b></summary>
 <ul>
   <li>
-<details markdown="1">
+<details open markdown="1">
 <summary>Core Features</summary>
 
 <!-- START: core_features -->
@@ -250,7 +250,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 </details>
   </li>
   <li>
-<details markdown="1">
+<details open markdown="1">
 <summary>Parallelism Techniques</summary>
 
 <!-- START: parallelism -->
@@ -268,7 +268,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 </details>
   </li>
   <li>
-<details markdown="1">
+<details open markdown="1">
 <summary>Quantization Methods</summary>
 
 <!-- START: quantization -->
@@ -328,7 +328,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 </details>
   </li>
   <li>
-<details markdown="1">
+<details open markdown="1">
 <summary>Hardware Acceleration & Dtype Support</summary>
 
 | TPU Generations | Natively Supported Hardware Acceleration |
@@ -343,7 +343,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 </ul>
 </details>
 
-<details markdown="1">
+<details open markdown="1">
 <summary><b> 🔬 Microbenchmark Kernel Support </b></summary>
 
 <!-- START: microbenchmarks -->
