@@ -163,7 +163,7 @@ def generate_html_quantization_table(headers, data):
     html.append("<table>")
     html.append("  <thead>")
     html.append("    <tr>")
-    html.append("      <th>Weight</th>")
+    html.append("      <th>Checkpoint dtype</th>")
     html.append("      <th>Method</th>")
     html.append("      <th>Supported<br>Hardware Acceleration</th>")
     html.append("      <th>flax</th>")
