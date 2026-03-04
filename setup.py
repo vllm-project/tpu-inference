@@ -97,7 +97,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "tpu-tune=tpu_inference.tools.autotune.cli:main",
+            "tpu-tune=tpu_inference.tools.autotune.v1.cli:main",
         ],
         "vllm.general_plugins": [
             "tpu_quantization_configs = tpu_inference.layers.vllm.quantization:register_tpu_quantization_configs",
