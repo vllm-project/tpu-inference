@@ -59,8 +59,6 @@ class SchedulerCommand(Enum):
     GET_TOKEN_COUNT = "get_token_count"
     PROBE_COMPUTED_BLOCKS = "probe_computed_blocks"
     RESET_ENCODER_CACHE = "reset_encoder_cache"
-    SET_PAUSE_STATE = "set_pause_state"
-    GET_PAUSE_STATE = "get_pause_state"
     SHUTDOWN = "shutdown"
 
 
@@ -231,15 +229,6 @@ def _scheduler_worker_process(
                             kv_cache_mgr.coordinator.find_longest_cache_hit(
                                 request.block_hashes, max_cache_hit_length))
                         output_queues[command.value].put(num_cached_tokens)
-
-                case SchedulerCommand.SET_PAUSE_STATE:
-                    pause_state = data
-                    scheduler.set_pause_state(pause_state)
-                    output_queues[command.value].put(None)
-
-                case SchedulerCommand.GET_PAUSE_STATE:
-                    result = scheduler.pause_state
-                    output_queues[command.value].put(result)
 
                 case SchedulerCommand.SHUTDOWN:
                     logger.info(f"Rank {rank}: Shutting down")
