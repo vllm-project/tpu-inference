@@ -112,23 +112,35 @@ By default a model should inherit [LoadableWithIterator](https://github.com/vllm
 Each [quant_method](https://github.com/vllm-project/tpu-inference/blob/c2b3ff50f9a2a99026e67de26f122c1a46b3e366/tpu_inference/layers/jax/quantization/__init__.py#L69) can process the weight after loading. This is usually used to re-quantize the weight to be TPU-friendly block size.
 
 # Quantization Support
-Many large LLMs like DeepSeek-V3 employ quantization to reduce hardware requirements and improve performance. The tpu-inference codebase utilizes [Qwix](https://github.com/google/qwix) to load pre-quantized models and/or apply additional quantization settings to loaded model weights. In tpu-inference, there are no assumptions on how a pre-quantized checkpoint is generated (so you are free to use your choice of popular tools), as long as the results are saved in HuggingFace Safetensor format and the guidelines below are followed.
+Many large LLMs like DeepSeek-V3 employ quantization to reduce hardware requirements and improve performance. The tpu-inference codebase can load pre-quantized model checkpoint, and utilizes [Qwix](https://github.com/google/qwix) to apply additional quantization settings to unquantized model weights. In tpu-inference, there are no assumptions on how a pre-quantized checkpoint is generated (so you are free to use your choice of popular tools), as long as the results are saved in HuggingFace Safetensor format and proper quantization configuration is provided on HuggingFace.
 For more details on how to perform inference runs with Qwix on tpu-inference, please refer to the [general readme](https://github.com/vllm-project/tpu-inference/tree/31fa76a0187496ec161c634c98ac5eba144cb36c?tab=readme-ov-file#quantization).
 
 **Please note** that you may need to update the list of supported quantization types on TPU [here](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/platforms/tpu_jax.py#L48). vLLM will trigger a validation error if the `quant_method` listed in the [HuggingFace quantization_config](https://huggingface.co/deepseek-ai/DeepSeek-R1/blob/main/config.json#L40) is not one of the supported types.
 
-For the sake of demonstration, we will be referencing [deepseek_v3.py](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/deepseek_v3.py) for implementation details in this section.
+For the sake of demonstration, we will be referencing [deepseek_v3.py](https://github.com/vllm-project/tpu-inference/blob/c38e48fe2530d1c25143979d715e7578bcc242f3/tpu_inference/models/jax/deepseek_v3.py) for implementation details in this section.
 
-## Loading Pre-quantized Checkpoints and Applying Quantization Rules
-To correctly load a pre-quantized checkpoint, the following steps need to be run:
-- Define the quantization settings using a Qwix config, which can be exposed as a yaml file (e.g. [int8_default.yaml](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/utils/quantization/configs/int8_default.yaml)) or [set within the code](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/utils/quantization/quantization_utils.py#L37). Open source models' quantization settings are typically published in the respective HuggingFace quantization_config (e.g. [DeepSeek-R1](https://huggingface.co/deepseek-ai/DeepSeek-R1/blob/main/config.json#L37)).
-(For more information on the supported Qwix quantization options, please refer to the [Qwix documentation](https://github.com/google/qwix?tab=readme-ov-file#quantization-config)).
-- Set `use_abstract_model: True` in your Qwix config so that your NNX model graph is quantized before the weights are loaded in.
-- If the pre-quantized model contains dequantization scales, update the weight loading logic to [store them](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/deepseek_v3.py#L693) as well. If loading the model’s weights required [applying transformations](#weight-loading), ensure that [dequantization scales are also transformed accordingly](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/deepseek_v3.py#L602). The scale dimensions can be determined by the `weight_block_size` in the [HuggingFace config](https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/config.json#L41) and [set](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/deepseek_v3.py#L484) in the weight loading logic. The scale dimensions can also be cross-referenced against the [Safetensor files](https://huggingface.co/deepseek-ai/DeepSeek-R1/blob/main/model-00001-of-000163.safetensors).
+## Loading Pre-quantized Checkpoints
 
-Conversely, if the checkpoint is not pre-quantized then no custom model loading code is needed and one should set `use_abstract_model: False` in the Qwix config.
+Similar to vLLM, tpu-inference relies on "quantization_config" from `config.json` on HuggingFace to find out the proper [QuantizationConfig](https://github.com/vllm-project/tpu-inference/blob/c38e48fe2530d1c25143979d715e7578bcc242f3/tpu_inference/layers/jax/quantization/configs.py#L27), which is propagated to each module inside a model. Each module then utilize `QuantizationConfig` to update its topology (e.g. add parameters for scale) such that the parameters in the model can map to weights from HuggingFace.
 
-**Please be aware** that the Qwix quantization settings are the source of truth and will override the data types used for the loaded weights (even if pre-quantized weights were provided).
+After weights are loaded, we also through [process_weights_after_loading](https://github.com/vllm-project/tpu-inference/blob/c38e48fe2530d1c25143979d715e7578bcc242f3/tpu_inference/layers/jax/quantization/__init__.py#L69) re-quantize the weights for linear layers, to make quantization block layout more TPU-friendly.
+
+All above mechanism are natively implemented in tpu-inference, as an user, you don't need to do anything but
+
+```bash
+MODEL_IMPL_TYPE=flax_nnx vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
+```
+
+## Loading Unquantized Checkpoints with Online Qwix Quantization
+
+With an unquantized model checkpoint, we also provide an option to apply quantization while loading the checkpoint, through [Qwix](https://github.com/google/qwix).
+
+An user needs to proivde qwix configuration describing how they want to online quantize the model
+
+```bash
+MODEL_IMPL_TYPE=flax_nnx vllm serve Qwen/Qwen3-4B-Instruct-2507 \
+    --additional_config='{"quantization": { "qwix": { "rules": [{ "module_path": ".*", "weight_qtype": "float8_e4m3fn", "act_qtype": "float8_e4m3fn"}]}}}'
+```
 
 # Model Registration
 Once a new model type is implemented, it must be added to the model registry in [model_loader.py](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/common/model_loader.py#L29).
