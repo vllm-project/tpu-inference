@@ -164,7 +164,6 @@ def generate_html_quantization_table(headers, data):
     html.append("  <thead>")
     html.append("    <tr>")
     html.append("      <th>Weight</th>")
-    html.append("      <th>Activation</th>")
     html.append("      <th>Method</th>")
     html.append("      <th>Supported<br>Hardware Acceleration</th>")
     html.append("      <th>flax</th>")
@@ -175,15 +174,14 @@ def generate_html_quantization_table(headers, data):
     
     for row in data:
         html.append("    <tr>")
-        # Ensure we have 10 columns worth of data, then drop default columns (indices 6 and 9)
-        padded_row = row + [""] * (10 - len(row))
+        # Ensure we have 9 columns worth of data, then drop default columns (indices 5 and 8)
+        padded_row = row + [""] * (9 - len(row))
         html.append(f"      <td>{padded_row[0]}</td>")
         html.append(f"      <td>{padded_row[1]}</td>")
         html.append(f"      <td>{padded_row[2]}</td>")
-        html.append(f"      <td>{padded_row[3]}</td>")
         
-        merged_flax = _merge_hw_status(padded_row[4], padded_row[7])
-        merged_pytorch = _merge_hw_status(padded_row[5], padded_row[8])
+        merged_flax = _merge_hw_status(padded_row[3], padded_row[6])
+        merged_pytorch = _merge_hw_status(padded_row[4], padded_row[7])
         
         html.append(f"      <td>{merged_flax}</td>")
         html.append(f"      <td>{merged_pytorch}</td>")
@@ -417,9 +415,9 @@ def update_readme():
                 return merge_metrics(overall_corr, overall_perf)
                 
             for row in static_d:
-                if not row or len(row) < 4: continue
+                if not row or len(row) < 3: continue
                 w = row[0]
-                m = row[2]
+                m = row[1]
                 v6_f = find_status(w, m, nightly_data["v6_flax"])
                 v6_p = find_status(w, m, nightly_data["v6_pytorch"])
                 v6_d = find_status(w, m, nightly_data["v6_default"])
@@ -427,7 +425,7 @@ def update_readme():
                 v7_p = find_status(w, m, nightly_data["v7_pytorch"])
                 v7_d = find_status(w, m, nightly_data["v7_default"])
                 
-                new_row = row[:4] + [v6_f, v6_p, v6_d, v7_f, v7_p, v7_d]
+                new_row = row[:3] + [v6_f, v6_p, v6_d, v7_f, v7_p, v7_d]
                 all_data.append(new_row)
                 
             new_table = generate_html_quantization_table(headers, all_data)

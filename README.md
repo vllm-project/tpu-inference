@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-03-03 10:50 PM UTC*
+*Last Updated: 2026-03-04 01:08 AM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -276,7 +276,6 @@ Below is the live status of our supported models, features, and kernels. Click o
   <thead>
     <tr>
       <th>Weight</th>
-      <th>Activation</th>
       <th>Method</th>
       <th>Supported<br>Hardware Acceleration</th>
       <th>flax</th>
@@ -286,7 +285,6 @@ Below is the live status of our supported models, features, and kernels. Click o
   <tbody>
     <tr>
       <td>Int4</td>
-      <td>bf16</td>
       <td>awq</td>
       <td>v5, v6</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -294,7 +292,6 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>fp4</td>
-      <td>bf16</td>
       <td>mxfp4</td>
       <td>v7</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -302,7 +299,6 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>fp8</td>
-      <td>bf16 or fp8</td>
       <td>fp8</td>
       <td>v7</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -310,7 +306,6 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>fp8</td>
-      <td>bf16 or fp8</td>
       <td>compressed-tensors</td>
       <td>v7</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -318,7 +313,6 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>int8</td>
-      <td>bf16 or int8</td>
       <td>compressed-tensors</td>
       <td>v5, v6</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
