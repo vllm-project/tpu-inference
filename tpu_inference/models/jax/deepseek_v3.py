@@ -1055,7 +1055,7 @@ class DeepSeekV3Router(JaxEinsum):
                               axis=-1)
             mask_TE = jnp.repeat(mask_TG,
                                  scores_TE.shape[-1] // mask_TG.shape[-1], -1)
-            scores_TE = jnp.where(mask_TE, scores_TE, 0.0)
+            scores_TE = jnp.where(mask_TE, scores_TE, -jnp.inf)
 
         indices_TX = jax.lax.top_k(scores_TE, k=self.num_experts_per_tok)[1]
 
@@ -1073,15 +1073,11 @@ class DeepSeekV3Router(JaxEinsum):
                 - indices: Indices of selected experts, shape (sequence, num_experts_per_tok).
         """
         x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = lax.with_sharding_constraint(x_TD, self.activation_ffw_td)
+        x_TD = jax.lax.with_sharding_constraint(x_TD, P(*self.activation_ffw_td))
 
-        # 1. Get raw logits in float32 for precision
         logits_TE = super().__call__(x_TD).astype(jnp.float32)
 
-        # 2. Expert Selection: Use biased logits (Aux-Loss-Free bias)
-        topk_indices_TX = self.get_topk_indices(logits_TE)
-
-        # 3. Expert Weighting: Use unbiased probabilities
+        # Apply scoring function (Sigmoid/Softmax) to get probabilities
         if self.scoring_func == "sigmoid":
             probs_TE = jax.nn.sigmoid(logits_TE)
         elif self.scoring_func == "softmax":
@@ -1089,6 +1085,10 @@ class DeepSeekV3Router(JaxEinsum):
         else:
             probs_TE = logits_TE
 
+        # Will add Aux-Loss-Free bias the activation outputs during topk selection.
+        topk_indices_TX = self.get_topk_indices(probs_TE)
+
+        # The actual weights do not include the bias terms.
         weights_TX = jnp.take_along_axis(probs_TE,
                                          topk_indices_TX,
                                          axis=-1)
