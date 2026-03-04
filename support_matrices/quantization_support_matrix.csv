@@ -1,6 +1,6 @@
-Weight,Activation,Method,Recommended TPU Generations,v6e (flax),v6e (pytorch),v6e (default),v7x (flax),v7x (pytorch),v7x (default)
-Int4,bf16,awq,"v5, v6",❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested
-fp4,bf16,mxfp4,v7,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested
-fp8,bf16 or fp8,fp8,v7,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested
-fp8,bf16 or fp8,compressed-tensors,v7,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested
-int8,bf16 or int8,compressed-tensors,"v5, v6",❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested
+Weight,Method,Recommended TPU Generations,v6e (flax),v6e (pytorch),v6e (default),v7x (flax),v7x (pytorch),v7x (default)
+Int4,awq,"v5, v6",❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested
+fp4,mxfp4,v7,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested
+fp8,fp8,v7,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested
+fp8,compressed-tensors,v7,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested
+int8,compressed-tensors,"v5, v6",❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested
