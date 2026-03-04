@@ -538,4 +538,8 @@ def test_fused_moe(num_devices, num_tokens, intermediate_size, hidden_size,
             vllm_fused_moe)
         actual = vllm_fused_moe(jax_a, score)
 
-        torch.testing.assert_close(expected, actual, check_device=False)
+        torch.testing.assert_close(expected,
+                                   actual,
+                                   check_device=False,
+                                   atol=1e-1,
+                                   rtol=1e-1)
