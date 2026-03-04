@@ -44,7 +44,10 @@ def get_kv_cache_shape(
     )
 
 
-@jax.jit(donate_argnames=("cache_kv"))
+@functools.partial(
+    jax.jit,
+    donate_argnames=("cache_kv"),
+)
 def update_kv_cache(
         new_kv_c: jax.Array,  # [num_tokens, actual_lkv_dim]
         new_k_pe: jax.Array,  # [num_tokens, actual_r_dim]
@@ -1072,7 +1075,8 @@ def prepare_outputs(
     )[:, :actual_num_q_heads, :actual_head_dim]
 
 
-@jax.jit(
+@functools.partial(
+    jax.jit,
     static_argnames=(
         "sm_scale",
         "sliding_window",
