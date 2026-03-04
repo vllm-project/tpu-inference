@@ -31,6 +31,7 @@ from vllm.config import VllmConfig
 
 from tpu_inference import utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
+from tpu_inference.kernels.quantized_matmul.util import quantize_tensor
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
 from tpu_inference.layers.common.attention_interface import mla_attention
@@ -39,6 +40,7 @@ from tpu_inference.layers.common.quantization import (dequantize_tensor,
                                                       quantize_kv)
 from tpu_inference.layers.common.sharding import \
     ShardingAxisNameBase as ShardingAxisName
+from tpu_inference.layers.common.utils import cpu_mesh_context
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.base import _init_fn as init_fn
@@ -533,8 +535,7 @@ class MLAEinsum(JaxEinsum):
             return
         assert self.quant_config is not None
         # After loading, split the weights into k/v
-        with jax.set_mesh(
-                jax.make_mesh((1, ), ('x', ), devices=jax.devices('cpu'))):
+        with cpu_mesh_context():
             dequantized_weight = dequantize_tensor(
                 self.weight,
                 self.weight_scale_inv,
@@ -551,21 +552,46 @@ class MLAEinsum(JaxEinsum):
                 A, N, qk_nope_head_dim + v_head_dim)
             k_ANH, v_ANH = jnp.split(dequantized_weight, [qk_nope_head_dim],
                                      axis=-1)
+            k_ANH_weight, k_ANH_scale = quantize_tensor(k_ANH,
+                                                        self.weight.dtype,
+                                                        dim=-1)
+            v_ANH_weight, v_1NH_scale = quantize_tensor(v_ANH,
+                                                        self.weight.dtype,
+                                                        dim=0)
+            # As of writing, sharded_quantized_batched_matmul expects scale to be
+            # a different shape order than weight
+            k_N1A_scale = k_ANH_scale.transpose(1, 2, 0)
+            v_N1H_scale = v_1NH_scale.transpose(1, 0, 2)
         mla_layer = self.mla_layer
         setattr(
             mla_layer, "k_up_proj",
-            JaxEinsum(einsum_str="TNH,ANH->TNA",
-                      kernel_shape=(A, N, qk_nope_head_dim),
-                      rngs=nnx.Rngs(0)))
+            JaxEinsum(
+                einsum_str="TNH,ANH->TNA",
+                kernel_shape=(A, N, qk_nope_head_dim),
+                rngs=nnx.Rngs(0),
+                prefix=mla_layer.prefix + ".k_up_proj",
+                quant_config=self.quant_config,
+            ))
         setattr(
             mla_layer, "v_up_proj",
-            JaxEinsum(einsum_str="TNA,ANH->TNH",
-                      kernel_shape=(A, N, v_head_dim),
-                      rngs=nnx.Rngs(0)))
-        mla_layer.k_up_proj.weight.set_raw_value(
-            shard_put(k_ANH, self.mla_layer.anh_sharding))
-        mla_layer.v_up_proj.weight.set_raw_value(
-            shard_put(v_ANH, self.mla_layer.anh_sharding))
+            JaxEinsum(
+                einsum_str="TNA,ANH->TNH",
+                kernel_shape=(A, N, v_head_dim),
+                rngs=nnx.Rngs(0),
+                prefix=mla_layer.prefix + ".v_up_proj",
+                quant_config=self.quant_config,
+            ))
+        # Cannot apply anh_sharding to scales, otherwise it complains about shape mismatch.
+        mla_layer.k_up_proj.weight.value = shard_put(
+            k_ANH_weight, self.mla_layer.anh_sharding)
+        mla_layer.k_up_proj.weight_scale_inv.value = shard_put(k_N1A_scale, ())
+        mla_layer.v_up_proj.weight.value = shard_put(
+            v_ANH_weight, self.mla_layer.anh_sharding)
+        mla_layer.v_up_proj.weight_scale_inv.value = shard_put(v_N1H_scale, ())
+
+        delattr(self, 'weight')
+        delattr(self, 'weight_scale_inv')
+        delattr(self, 'quant_method')
 
 
 @dataclass(kw_only=True)
