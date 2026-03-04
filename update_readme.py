@@ -465,6 +465,12 @@ def update_readme():
                 "> *   *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*"
             )
             new_table += footer
+        elif section_key == "quantization":
+            footer = (
+                "\n\n> **Note:**\n"
+                "> *   *This table only tests checkpoint loading compatibility.*"
+            )
+            new_table += footer
 
         start_marker, end_marker = f"<!-- START: {section_key} -->", f"<!-- END: {section_key} -->"
         pattern = f"({re.escape(start_marker)})(.*?)({re.escape(end_marker)})"
