@@ -468,7 +468,7 @@ def update_readme():
         elif section_key == "quantization":
             footer = (
                 "\n\n> **Note:**\n"
-                "> *   *This table only tests checkpoint loading compatibility.*"
+                "> &bull;&nbsp;&nbsp;&nbsp;*This table only tests checkpoint loading compatibility.*"
             )
             new_table += footer
 
