@@ -177,8 +177,7 @@ class _DisaggOrchestrator:
         while self.live:
             with self.request_condition:
                 self.request_condition.wait_for(
-                        lambda: prefill_engine.scheduler.has_requests()
-                )
+                    lambda: prefill_engine.scheduler.has_requests())
 
             scheduler_output = prefill_engine.scheduler.schedule()
             with LatencyTracker(f"prefill-{idx}"):
