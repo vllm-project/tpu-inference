@@ -17,10 +17,10 @@ import os
 import tempfile
 from unittest.mock import MagicMock
 
-from tpu_inference.tools.autotune.utils import (apply_tp_scaling,
-                                                block_until_ready,
-                                                get_registry_file_name,
-                                                update_json_registry)
+from tpu_inference.tools.autotune.v1.utils import (apply_tp_scaling,
+                                                   block_until_ready,
+                                                   get_registry_file_name,
+                                                   update_json_registry)
 
 
 def test_get_registry_file_name():

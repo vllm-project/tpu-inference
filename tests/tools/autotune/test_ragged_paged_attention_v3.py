@@ -14,8 +14,8 @@
 
 from unittest.mock import patch
 
-from tpu_inference.tools.autotune.benchmarks import BenchmarkResult
-from tpu_inference.tools.autotune.ragged_paged_attention_v3 import (
+from tpu_inference.tools.autotune.v1.benchmarks import BenchmarkResult
+from tpu_inference.tools.autotune.v1.ragged_paged_attention_v3 import (
     RpaBlock, RpaKey, make_rpa_configs, tune_rpa)
 
 
@@ -64,11 +64,12 @@ def test_make_rpa_configs_filters_invalid_blocks():
     assert configs[0][1].num_kv_pages_per_block == 32
 
 
-@patch("tpu_inference.tools.autotune.utils.RunContext")  # Mock RunContext
+@patch("tpu_inference.tools.autotune.v1.utils.RunContext")  # Mock RunContext
 @patch(
-    "tpu_inference.tools.autotune.ragged_paged_attention_v3.benchmark_kernel")
-@patch("tpu_inference.tools.autotune.utils.update_json_registry")
-@patch("tpu_inference.tools.autotune.utils.get_registry_file_name")
+    "tpu_inference.tools.autotune.v1.ragged_paged_attention_v3.benchmark_kernel"
+)
+@patch("tpu_inference.tools.autotune.v1.utils.update_json_registry")
+@patch("tpu_inference.tools.autotune.v1.utils.get_registry_file_name")
 @patch("tpu_inference.utils.get_tpu_name_slug")
 def test_tune_rpa_flow(mock_slug, mock_registry_name, mock_update,
                        mock_benchmark, mock_run_context):
@@ -111,9 +112,10 @@ def test_tune_rpa_flow(mock_slug, mock_registry_name, mock_update,
         "max_model_len-128-sw-None"]["stats"]["latency_avg_ns"] == 5.0
 
 
-@patch("tpu_inference.tools.autotune.utils.RunContext")
+@patch("tpu_inference.tools.autotune.v1.utils.RunContext")
 @patch(
-    "tpu_inference.tools.autotune.ragged_paged_attention_v3.benchmark_kernel")
+    "tpu_inference.tools.autotune.v1.ragged_paged_attention_v3.benchmark_kernel"
+)
 def test_tune_rpa_tp_scaling(mock_benchmark, mock_run_context):
     # Set return value to prevent unpacking error
     mock_benchmark.return_value = BenchmarkResult(10.0, 0.0, 0.0, 0.0, [], {})

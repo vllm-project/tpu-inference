@@ -17,7 +17,7 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
-from tpu_inference.tools.autotune import cli
+from tpu_inference.tools.autotune.v1 import cli
 
 
 @pytest.fixture
@@ -27,7 +27,7 @@ def runner():
 
 def test_rpa_command(runner):
     with patch(
-            "tpu_inference.tools.autotune.ragged_paged_attention_v3.tune_rpa"
+            "tpu_inference.tools.autotune.v1.ragged_paged_attention_v3.tune_rpa"
     ) as mock_tune_rpa:
         result = runner.invoke(cli.rpa_v3, [
             "--page-size", "128", "--q-dtype", "bfloat16", "--kv-dtype",
@@ -42,7 +42,7 @@ def test_rpa_command(runner):
 
 
 def test_quantized_matmul_command(runner):
-    with patch("tpu_inference.tools.autotune.quantized_matmul.tune_matmul"
+    with patch("tpu_inference.tools.autotune.v1.quantized_matmul.tune_matmul"
                ) as mock_tune_matmul:
         result = runner.invoke(cli.quantized_matmul, [
             "--batch-sizes", "128", "--out-in-features", "1024/1024",

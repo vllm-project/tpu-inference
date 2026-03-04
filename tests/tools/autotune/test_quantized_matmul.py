@@ -14,10 +14,10 @@
 
 from unittest.mock import patch
 
-from tpu_inference.tools.autotune.benchmarks import BenchmarkResult
-from tpu_inference.tools.autotune.quantized_matmul import (factors_of_n,
-                                                           make_configs,
-                                                           tune_matmul)
+from tpu_inference.tools.autotune.v1.benchmarks import BenchmarkResult
+from tpu_inference.tools.autotune.v1.quantized_matmul import (factors_of_n,
+                                                              make_configs,
+                                                              tune_matmul)
 
 
 def test_factors_of_n():
@@ -47,12 +47,13 @@ def test_make_configs():
     assert value.batch_block_size == 128
 
 
-@patch("tpu_inference.tools.autotune.quantized_matmul.autotune_kernel")
-@patch("tpu_inference.tools.autotune.utils.update_json_registry")
-@patch("tpu_inference.tools.autotune.utils.get_registry_file_name")
+@patch("tpu_inference.tools.autotune.v1.quantized_matmul.autotune_kernel")
+@patch("tpu_inference.tools.autotune.v1.utils.update_json_registry")
+@patch("tpu_inference.tools.autotune.v1.utils.get_registry_file_name")
 @patch("tpu_inference.utils.get_tpu_name_slug")
 @patch(
-    "tpu_inference.kernels.quantized_matmul.tuned_block_sizes.get_tpu_version")
+    "tpu_inference.kernels.quantized_matmul.tuned_block_sizes.get_tpu_generation"
+)
 def test_tune_matmul_flow(mock_tpu_ver, mock_slug, mock_registry_name,
                           mock_update, mock_autotune):
     # mocks
@@ -96,9 +97,10 @@ def test_tune_matmul_flow(mock_tpu_ver, mock_slug, mock_registry_name,
     assert data[key]["stats"]["latency_avg_ns"] == 10.0
 
 
-@patch("tpu_inference.tools.autotune.quantized_matmul.autotune_kernel")
+@patch("tpu_inference.tools.autotune.v1.quantized_matmul.autotune_kernel")
 @patch(
-    "tpu_inference.kernels.quantized_matmul.tuned_block_sizes.get_tpu_version")
+    "tpu_inference.kernels.quantized_matmul.tuned_block_sizes.get_tpu_generation"
+)
 def test_tune_matmul_tp_scaling(mock_tpu_ver, mock_autotune):
     # Set return value
     mock_tpu_ver.return_value = 5
