@@ -186,7 +186,7 @@ def assert_weight_loading_memory_bounded():
         # Proportional threshold with absolute floor. PP-partitioned models
         # have fewer params but per-layer transients don't shrink
         # proportionally, so the floor prevents false failures.
-        max_peak_bytes = max(int(model_param_bytes * threshold_multiplier),
+        max_peak_delta = max(int(model_param_bytes * threshold_multiplier),
                              min_threshold_bytes)
 
         device = jax.local_devices()[0] if jax.local_devices() else None
@@ -221,13 +221,13 @@ def assert_weight_loading_memory_bounded():
             peak_observed / GBYTES,
             peak_delta / GBYTES,
             num_samples,
-            max_peak_bytes / GBYTES,
+            max_peak_delta / GBYTES,
         )
 
-        assert peak_delta <= max_peak_bytes, (
+        assert peak_delta <= max_peak_delta, (
             f"Peak device memory during {description} exceeded threshold: "
             f"peak_delta={peak_delta / GBYTES:.3f} GB > "
-            f"max={max_peak_bytes / GBYTES:.3f} GB "
+            f"max={max_peak_delta / GBYTES:.3f} GB "
             f"(before={bytes_before / GBYTES:.3f} GB, "
             f"after={bytes_after / GBYTES:.3f} GB, "
             f"peak={peak_observed / GBYTES:.3f} GB, "
