@@ -221,7 +221,8 @@ class TestQwen3ForCausalLM:
     @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
                                                        (3, 4)])
     def test_model_loading(self, model_name, pp_rank, pp_world_size, rng, mesh,
-                           mock_vllm_config):
+                           mock_vllm_config,
+                           assert_weight_loading_memory_bounded):
         """Tests loading weights from HF model"""
         kv_cache_type = "auto"
         mock_vllm_config = mock_vllm_config(model_name, kv_cache_type)
@@ -251,9 +252,14 @@ class TestQwen3ForCausalLM:
 
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
-            # load weights from HF model
+
+            # load weights from HF model, monitoring device memory
             loader = get_model_loader(mock_vllm_config.load_config)
-            loader.load_weights(model, model_config)
+            with assert_weight_loading_memory_bounded(
+                    model,
+                    description=f"load_weights({model_name})",
+            ):
+                loader.load_weights(model, model_config)
 
         layer_idx = model.model.start_layer
         jax_layer_0 = model.model.layers[layer_idx]
