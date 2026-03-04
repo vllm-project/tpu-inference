@@ -525,8 +525,9 @@ def tune_rpa(
         tpu_version = tpu_utils.get_tpu_name_slug()
         norm_name = utils.get_registry_file_name(tpu_version)
 
-        base_dir = os.path.dirname(os.path.dirname(
-            os.path.dirname(__file__)))  # tpu_inference/
+        base_dir = os.path.dirname(
+            os.path.dirname(os.path.dirname(
+                os.path.dirname(__file__))))  # tpu_inference/
         data_dir = os.path.join(
             base_dir, "kernels/tuned_data/ragged_paged_attention/v3")
         target_file = os.path.join(data_dir, f"{norm_name}.json")

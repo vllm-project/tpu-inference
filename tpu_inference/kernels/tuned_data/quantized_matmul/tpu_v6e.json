@@ -154,11 +154,30 @@
     1024,
     2048
   ],
-  "128,128,8192,int8,int8": [
-    128,
-    128,
-    4096
-  ],
+  "128,128,8192,int8,int8": {
+    "config": {
+      "batch_block_size": 128,
+      "in_block_size": 8192,
+      "out_block_size": 128
+    },
+    "metadata": {
+      "benchmarking_method": "amortized",
+      "num_repeats": 5,
+      "samples_ns": [
+        73190.0,
+        60800.0,
+        59615.0,
+        62280.0,
+        62295.0
+      ]
+    },
+    "stats": {
+      "compile_time_s": 0.17098649498075247,
+      "latency_avg_ns": 63636.0,
+      "latency_std_ns": 5457.271983326468,
+      "lower_time_s": 0.012706028996035457
+    }
+  },
   "128,1280,8192,int8,int8": [
     128,
     1280,
