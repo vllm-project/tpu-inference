@@ -15,15 +15,10 @@ It is helpful to familiarize with the code organization before beginning model d
 tpu_inference
 ├── layers
 │   ├── jax # Provide pre-implemented building blocks for tpu-inference models.
-│   │    ├── attention_interface.py # Core interfaces used for applying attention.
-│   │    ├── base.py
-│   │    ├── layers.py
-│   │    ├── transformer_block.py
-│   │    ├── sharding.py
-│   │    ├── rope.py
-│   │    ├── glossary.md
-│   │    ├── attention
-│   │    │    ├── attention.py # Pre-implemented attention layer.
+│   │    ├── __init__.py # Definition of JaxModule to provide pytorch-like APIs (e.g. named_parameters)
+│   │    ├── embed.py
+│   │    ├── linear.py
+│   │    ├── norm.py
 │   │    └── moe
 │   │         ├── moe.py
 │   └── common # Functionalities shared between torchax and jax implementations.
@@ -32,7 +27,6 @@ tpu_inference
    │   └── model_loader.py
    └── jax  # Contains model files for each type of model family.
        ├── deepseek_v3.py
-       ├── llama3.py
        ├── qwen3.py
        └── utils
 ```
@@ -49,32 +43,36 @@ Implementing a new model requires creating a dedicated model file (e.g. [deepsee
 - Forward pass implementation and logit computation.
 - Weight loading logic to import HuggingFace weights into the model definition.
 
+## Reusable building blocks
+
+With [#1485](https://github.com/vllm-project/tpu-inference/issues/1485), we provided several reusable building blocks that's similar to those in vLLM.
+The building blocks can be found under layers/jax/, e.g. JaxLinear / JaxEinsum / JaxMoe etc. With these building blocks, contributors can draft the model
+with similar model architecture as vLLM implementation.
+
 ## Defining the model architecture
 The model file is intended to contain all of the information needed for defining the Transformer-based architecture.
 Each model file contains a model class with the following constructor interface:
 
 ```python
-class NewModel(nnx.Module):
-  def __init__(self, vllm_config: VllmConfig, rng: nnx.Rngs,
-               mesh: jax.sharding.Mesh)
+class NewModel(JaxModule, LoadableWithIterator):
+  def __init__(self, vllm_config: VllmConfig, rng: nnx.Rngs, quant_config):
+    ...
 ```
 
-"# TODO (jacobplatin): we need to update this once the JAX-path refactor is fully done"
-
-The constructor should set the architecture configuration (e.g. num_layers, hidden_size) and initialize the model layers. Layers can be defined from scratch using flax NNX (e.g. [Llama3](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/llama3.py)) or can leverage tpu-inference to import or extend commonly used layer types (e.g. [Embedder](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/layers/jax/layers.py#L168), [RMSNorm](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/layers/jax/layers.py#L49), [MoE](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/layers/jax/moe/moe.py#L69), [Attention](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/layers/jax/attention/attention.py#L23), [DenseFFW](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/layers/jax/layers.py#L98C7-L98C15), [TransformerBlock](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/layers/jax/transformer_block.py#L15
-)).
+The constructor should set the architecture configuration (e.g. num_layers, hidden_size) and initialize the model layers. Layers can leverage tpu-inference to import or extend commonly used layer types (e.g. [JaxEmbed](https://github.com/vllm-project/tpu-inference/blob/c2b3ff50f9a2a99026e67de26f122c1a46b3e366/tpu_inference/layers/jax/embed.py#L25), [JaxRmsNorm](https://github.com/vllm-project/tpu-inference/blob/c2b3ff50f9a2a99026e67de26f122c1a46b3e366/tpu_inference/layers/jax/norm.py#L25), [JaxMoE](https://github.com/vllm-project/tpu-inference/blob/c2b3ff50f9a2a99026e67de26f122c1a46b3e366/tpu_inference/layers/jax/moe/moe.py#L129)). (Not recommended) The model can also be defined from scratch using flax NNX (e.g. [Llama3](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/llama3.py)).
 
 ## Implementing the forward pass
 The forward pass contains the logic for stitching together the layers that are defined in the model constructor and is expected to use the following interface:
 
 ```python
 def __call__(
-   self,
-   kv_caches: List[jax.Array],
-   input_ids: jax.Array,
-   attention_metadata: AttentionMetadata,
-   *args,
-) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array]]
+    self,
+    kv_caches: List[jax.Array],
+    input_ids: jax.Array,
+    attention_metadata: AttentionMetadata,
+    ...
+) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
+            List[jax.Array]]:
 ```
 
 The key assumption of this interface is that context is managed outside of the model (the exception being that the model is responsible for updating the KV cache tensors after self-attention), which is the case in vLLM.
@@ -82,21 +80,36 @@ The key assumption of this interface is that context is managed outside of the m
 The returned output is expected to contain the updated KV cache, final layer hidden states, and (optional) auxiliary final hidden state residuals (for speculative decoding).
 
 In addition to the forward pass logic, each model needs to implement a method to generate the logits using the following interface:
-`def compute_logits(self, hidden_states: jax.Array) -> jax.Array:`
+
+```
+def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
+```
 
 # Weight Loading
-Open source model weights are not universally standardized in their naming nor in their parameter shapes. Thus, it is necessary to implement per-model weight loading logic to correctly import open source weights into their corresponding model parameters.
-To do this, each model must implement a `load_weights` method with the following interface: `def load_weights(self, rng: PRNGKey)`
 
-Weight loading logic is typically composed of several categories of steps:
-- Loading HuggingFace weights into an iterator (see [model_weights_generator](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/utils/weight_utils.py#L73))
-- Defining a mapping between loaded weight names and implementation
- weight names.
-- Defining a mapping of tensor transformations to apply on the loaded parameters. (these transformations can include transposing or reshaping loaded tensors).
-- Performing model-specific loading logic (e.g. splitting a loaded weight tensor and loading into multiple parameters).
-- (optional) Support for loading pre-quantized models.
+With [#1623](https://github.com/vllm-project/tpu-inference/issues/1623) and [#1571](https://github.com/vllm-project/tpu-inference/issues/1571), new models are recommended to reuse weight loading mechanisms/utilities from vLLM repo.
 
-Please refer to [deepseek_v3.py](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/deepseek_v3.py#L354) or [llama4.py](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/llama4.py#L286) for some examples on how to implement weight loading.
+## Parameter level loading
+
+tpu-inference provides [default per-parameter weight loader](https://github.com/vllm-project/tpu-inference/blob/c2b3ff50f9a2a99026e67de26f122c1a46b3e366/tpu_inference/models/jax/utils/weight_utils.py#L840) if not specified otherwise. This is sufficient for most cases. However it's possible to provide specific weight loader by setting "weight_loader" attribute for the paramter. Typical usages are:
+- unpack the weight, e.g. unpack uint8 into fp4
+- reshape the weight before loading
+
+## Module level loading
+
+If a module has "load_weights" method like [JaxMoE](https://github.com/vllm-project/tpu-inference/blob/c2b3ff50f9a2a99026e67de26f122c1a46b3e366/tpu_inference/layers/jax/moe/moe.py#L247), the weight loading mechanism will use it and skip per-parameter loader.
+
+Typical usages are:
+- Fuse the weight, e.g. in MoE
+- Split the weight, e.g. in MLA
+
+## Model level loading
+
+By default a model should inherit [LoadableWithIterator](https://github.com/vllm-project/tpu-inference/blob/c2b3ff50f9a2a99026e67de26f122c1a46b3e366/tpu_inference/models/jax/utils/weight_utils.py#L866) which relies on `JaxAutoWeightsLoader` to load model. But a model definition can definitly override this method like [Deepseek](https://github.com/vllm-project/tpu-inference/blob/c2b3ff50f9a2a99026e67de26f122c1a46b3e366/tpu_inference/models/jax/deepseek_v3.py#L1309).
+
+## Process weights after loading
+
+Each [quant_method](https://github.com/vllm-project/tpu-inference/blob/c2b3ff50f9a2a99026e67de26f122c1a46b3e366/tpu_inference/layers/jax/quantization/__init__.py#L69) can process the weight after loading. This is usually used to re-quantize the weight to be TPU-friendly block size.
 
 # Quantization Support
 Many large LLMs like DeepSeek-V3 employ quantization to reduce hardware requirements and improve performance. The tpu-inference codebase utilizes [Qwix](https://github.com/google/qwix) to load pre-quantized models and/or apply additional quantization settings to loaded model weights. In tpu-inference, there are no assumptions on how a pre-quantized checkpoint is generated (so you are free to use your choice of popular tools), as long as the results are saved in HuggingFace Safetensor format and the guidelines below are followed.
