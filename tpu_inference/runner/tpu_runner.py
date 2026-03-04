@@ -788,61 +788,65 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # TODO: make _get_input_ids_embeds within this context
         # NOTE: right now, mm model will use embeddings as the input,
         # but text-only model will use input_ids
-        with self.maybe_forbid_compile:
+        try:
+            with self.maybe_forbid_compile:
 
-            with set_forward_context(
-                    None,
-                    self.vllm_config,
-            ), self.maybe_get_kv_connector_output(
-                    scheduler_output) as kv_connector_output:
-                # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
-                # but one of them would be `None`
-                (self.kv_caches, hidden_states,
-                 aux_hidden_states) = self.model_fn(
-                     self.state,
-                     self.kv_caches,
-                     input_ids,
-                     attn_metadata,
-                     inputs_embeds,
-                     input_positions,
-                     tuple(self.layer_name_to_kvcache_index.items()),
-                     lora_metadata,
-                     intermediate_tensors,
-                     self.is_first_rank,
-                     self.is_last_rank,
-                 )
-            if not self.is_last_rank:
-                assert isinstance(hidden_states, JaxIntermediateTensors)
-                hidden_states.kv_connector_output = kv_connector_output
-                return hidden_states
+                with set_forward_context(
+                        None,
+                        self.vllm_config,
+                ), self.maybe_get_kv_connector_output(
+                        scheduler_output) as kv_connector_output:
+                    # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
+                    # but one of them would be `None`
+                    (self.kv_caches, hidden_states,
+                     aux_hidden_states) = self.model_fn(
+                         self.state,
+                         self.kv_caches,
+                         input_ids,
+                         attn_metadata,
+                         inputs_embeds,
+                         input_positions,
+                         tuple(self.layer_name_to_kvcache_index.items()),
+                         lora_metadata,
+                         intermediate_tensors,
+                         self.is_first_rank,
+                         self.is_last_rank,
+                     )
+                if not self.is_last_rank:
+                    assert isinstance(hidden_states, JaxIntermediateTensors)
+                    hidden_states.kv_connector_output = kv_connector_output
+                    return hidden_states
 
-            if self.is_pooling_model:
-                seq_lens = self.seq_lens_cpu[:self.input_batch.num_reqs]
-                pooling_metadata = self.input_batch.get_pooling_metadata()
+                if self.is_pooling_model:
+                    seq_lens = self.seq_lens_cpu[:self.input_batch.num_reqs]
+                    pooling_metadata = self.input_batch.get_pooling_metadata()
 
-                pooler_fn: PoolerFunc = self.pooler_fn
-                pooler_output = pooler_fn(
+                    pooler_fn: PoolerFunc = self.pooler_fn
+                    pooler_output = pooler_fn(
+                        hidden_states,
+                        pooling_metadata,
+                        seq_lens,
+                    )
+
+                    return ModelRunnerOutput(
+                        req_ids=self.input_batch.req_ids,
+                        req_id_to_index=self.input_batch.req_id_to_index,
+                        sampled_token_ids=[],
+                        logprobs=None,
+                        prompt_logprobs_dict={},
+                        pooler_output=pooler_output,
+                    )
+
+                hidden_states = self._select_from_array_fn(
+                    hidden_states, logits_indices)
+                logits = self.compute_logits_fn(
+                    self.state,
                     hidden_states,
-                    pooling_metadata,
-                    seq_lens,
+                    lora_metadata,
                 )
-
-                return ModelRunnerOutput(
-                    req_ids=self.input_batch.req_ids,
-                    req_id_to_index=self.input_batch.req_id_to_index,
-                    sampled_token_ids=[],
-                    logprobs=None,
-                    prompt_logprobs_dict={},
-                    pooler_output=pooler_output,
-                )
-
-            hidden_states = self._select_from_array_fn(hidden_states,
-                                                       logits_indices)
-            logits = self.compute_logits_fn(
-                self.state,
-                hidden_states,
-                lora_metadata,
-            )
+        except RuntimeError as e:
+            print(f"kky {e=}")
+            raise e
 
         self.execute_model_state = ExecuteModelState(
             scheduler_output=scheduler_output,
