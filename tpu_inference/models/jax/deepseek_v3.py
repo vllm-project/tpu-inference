@@ -40,6 +40,7 @@ from tpu_inference.layers.common.quantization import (dequantize_tensor,
                                                       quantize_kv)
 from tpu_inference.layers.common.sharding import \
     ShardingAxisNameBase as ShardingAxisName
+from tpu_inference.layers.common.utils import cpu_mesh_context
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.base import _init_fn as init_fn
@@ -534,8 +535,7 @@ class MLAEinsum(JaxEinsum):
             return
         assert self.quant_config is not None
         # After loading, split the weights into k/v
-        with jax.set_mesh(
-                jax.make_mesh((1, ), ('x', ), devices=jax.devices('cpu'))):
+        with cpu_mesh_context():
             dequantized_weight = dequantize_tensor(
                 self.weight,
                 self.weight_scale_inv,
@@ -581,12 +581,17 @@ class MLAEinsum(JaxEinsum):
                 prefix=mla_layer.prefix + ".v_up_proj",
                 quant_config=self.quant_config,
             ))
+        # Cannot apply anh_sharding to scales, otherwise it complains about shape mismatch.
         mla_layer.k_up_proj.weight.value = shard_put(
             k_ANH_weight, self.mla_layer.anh_sharding)
         mla_layer.k_up_proj.weight_scale_inv.value = shard_put(k_N1A_scale, ())
         mla_layer.v_up_proj.weight.value = shard_put(
             v_ANH_weight, self.mla_layer.anh_sharding)
         mla_layer.v_up_proj.weight_scale_inv.value = shard_put(v_N1H_scale, ())
+
+        delattr(self, 'weight')
+        delattr(self, 'weight_scale_inv')
+        delattr(self, 'quant_method')
 
 
 @dataclass(kw_only=True)
