@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import dataclasses
 import logging
 import re
 import threading
 from contextlib import contextmanager
-from typing import Iterator, Optional
 from unittest.mock import MagicMock
 
 import jax
@@ -115,80 +113,6 @@ def count_model_param_bytes(model) -> int:
     return total
 
 
-@dataclasses.dataclass
-class MemoryProfile:
-    """Device memory profile captured over a code block.
-
-    Tracks both settled memory (before/after) and peak memory observed
-    by polling bytes_in_use from a background thread. The polled peak
-    is window-scoped (not cumulative), so it accurately captures transient
-    spikes during the block — which is what actually causes OOMs.
-    """
-    bytes_before: int
-    bytes_after: int
-    peak_bytes_observed: int  # max bytes_in_use seen by polling thread
-    num_samples: int  # number of polls taken
-    description: str
-
-    @property
-    def settled_delta(self) -> int:
-        """Net memory change after the block completes."""
-        return self.bytes_after - self.bytes_before
-
-    @property
-    def peak_delta(self) -> int:
-        """Peak memory reached during the block, relative to starting baseline.
-
-        This is the metric that matters for OOM risk: the highest point
-        observed relative to where we started. Window-scoped via polling,
-        so not affected by peaks from previous tests.
-        """
-        return self.peak_bytes_observed - self.bytes_before
-
-    def log(self, threshold_bytes: Optional[int] = None):
-        """Log the full memory profile. Called on every run, not just failures."""
-        threshold_str = (f", threshold={threshold_bytes / GBYTES:.3f} GB"
-                         if threshold_bytes is not None else "")
-        logger.info(
-            "Memory profile [%s]: "
-            "before=%.3f GB, after=%.3f GB, peak_observed=%.3f GB, "
-            "settled_delta=%.3f GB, peak_delta=%.3f GB, "
-            "samples=%d%s",
-            self.description,
-            self.bytes_before / GBYTES,
-            self.bytes_after / GBYTES,
-            self.peak_bytes_observed / GBYTES,
-            self.settled_delta / GBYTES,
-            self.peak_delta / GBYTES,
-            self.num_samples,
-            threshold_str,
-        )
-
-    def assert_peak_bounded(self, max_bytes: int):
-        """Assert peak memory delta stayed within threshold."""
-        self.log(threshold_bytes=max_bytes)
-        assert self.peak_delta <= max_bytes, (
-            f"Peak device memory during {self.description} exceeded threshold: "
-            f"peak_delta={self.peak_delta / GBYTES:.3f} GB > "
-            f"max={max_bytes / GBYTES:.3f} GB. "
-            f"before={self.bytes_before / GBYTES:.3f} GB, "
-            f"after={self.bytes_after / GBYTES:.3f} GB, "
-            f"peak_observed={self.peak_bytes_observed / GBYTES:.3f} GB "
-            f"({self.num_samples} samples). "
-            f"This may indicate an unexpected memory regression during "
-            f"weight loading or processing.")
-
-    def assert_settled_bounded(self, max_bytes: int):
-        """Assert settled (net) memory delta stayed within threshold."""
-        self.log(threshold_bytes=max_bytes)
-        assert self.settled_delta <= max_bytes, (
-            f"Settled device memory after {self.description} exceeded threshold: "
-            f"settled_delta={self.settled_delta / GBYTES:.3f} GB > "
-            f"max={max_bytes / GBYTES:.3f} GB. "
-            f"before={self.bytes_before / GBYTES:.3f} GB, "
-            f"after={self.bytes_after / GBYTES:.3f} GB.")
-
-
 class _MemoryPoller:
     """Background thread that polls device bytes_in_use and tracks the max.
 
@@ -230,134 +154,83 @@ class _MemoryPoller:
             self._stop.wait(timeout=self._poll_interval)
 
 
-def _get_bytes_in_use(device) -> Optional[int]:
-    """Read current bytes_in_use from a device's memory_stats()."""
+def _get_bytes_in_use(device):
+    """Read current bytes_in_use, or None if unavailable."""
     try:
         stats = device.memory_stats()
-        if not stats:
-            return None
-        return stats.get("bytes_in_use")
+        return stats.get("bytes_in_use") if stats else None
     except Exception:
         return None
-
-
-@contextmanager
-def device_memory_profile(
-    device=None,
-    description: str = "operation",
-    poll_interval_s: float = 0.001,
-) -> Iterator[MemoryProfile]:
-    """Profile device memory over a code block.
-
-    Spawns a background thread that polls bytes_in_use at ~1ms intervals
-    to capture the true peak within the block (not the cumulative
-    high-water mark from process start).
-
-    Yields a MemoryProfile that is populated after the block completes.
-    The caller can then inspect the profile or call assert methods on it.
-
-    When memory_stats() is unavailable (CPU-only environments), yields
-    a zeroed-out profile and logs a warning.
-
-    Usage::
-
-        with device_memory_profile(description="load_weights") as prof:
-            loader.load_weights(model, model_config)
-        print(prof.peak_delta)  # inspect without asserting
-        prof.assert_peak_bounded(max_bytes)  # or assert
-    """
-    if device is None:
-        local_devs = jax.local_devices()
-        if not local_devs:
-            logger.warning("No local devices; memory profiling skipped for %s",
-                           description)
-            yield MemoryProfile(0, 0, 0, 0, description)
-            return
-        device = local_devs[0]
-
-    bytes_before = _get_bytes_in_use(device)
-    if bytes_before is None:
-        logger.warning(
-            "memory_stats() unavailable on %s; memory profiling skipped for %s",
-            device, description)
-        yield MemoryProfile(0, 0, 0, 0, description)
-        return
-
-    profile = MemoryProfile(
-        bytes_before=bytes_before,
-        bytes_after=0,
-        peak_bytes_observed=bytes_before,
-        num_samples=0,
-        description=description,
-    )
-
-    poller = _MemoryPoller(device, poll_interval_s=poll_interval_s)
-    poller.start(initial_bytes=bytes_before)
-
-    yield profile
-
-    peak_observed, num_samples = poller.stop()
-
-    bytes_after = _get_bytes_in_use(device)
-    if bytes_after is None:
-        logger.warning("memory_stats() became unavailable during %s",
-                       description)
-        return
-
-    profile.bytes_after = bytes_after
-    # Take the max of the poller's peak and the final value, in case
-    # the final read catches a higher point than the last poll.
-    profile.peak_bytes_observed = max(peak_observed, bytes_after)
-    profile.num_samples = num_samples
-
-
-@contextmanager
-def device_memory_profile_bounded(
-    max_peak_bytes: int,
-    device=None,
-    description: str = "operation",
-) -> Iterator[MemoryProfile]:
-    """Profile device memory and assert peak delta is within threshold.
-
-    Convenience wrapper around device_memory_profile that automatically
-    calls assert_peak_bounded on exit.
-    """
-    with device_memory_profile(device=device, description=description) as prof:
-        yield prof
-    # Only assert if we got real measurements (non-zero means stats were available)
-    if prof.bytes_before > 0 or prof.bytes_after > 0:
-        prof.assert_peak_bounded(max_peak_bytes)
 
 
 @pytest.fixture
 def assert_weight_loading_memory_bounded():
     """Fixture that monitors device memory during weight loading.
 
+    Spawns a background poller to capture peak bytes_in_use (window-scoped,
+    not the cumulative high-water mark) and asserts peak delta stays within
+    max(model_params * multiplier, min_threshold).
+
     Usage in tests::
 
         with assert_weight_loading_memory_bounded(model, "load_weights(...)"):
             loader.load_weights(model, model_config)
-
-        # With explicit threshold:
-        with assert_weight_loading_memory_bounded(
-            model, "load_weights(...)", threshold_multiplier=0.5,
-        ):
-            loader.load_weights(model, model_config)
     """
 
-    def _factory(model,
+    @contextmanager
+    def _monitor(model,
                  description="operation",
                  threshold_multiplier=0.3,
                  min_threshold_bytes=2 * GBYTES):
         model_param_bytes = count_model_param_bytes(model)
-        # Use proportional threshold, but enforce an absolute floor.
-        # PP-partitioned models have fewer params but per-layer transients
-        # don't shrink proportionally, so the floor prevents false failures.
+        # Proportional threshold with absolute floor. PP-partitioned models
+        # have fewer params but per-layer transients don't shrink
+        # proportionally, so the floor prevents false failures.
         max_peak_bytes = max(int(model_param_bytes * threshold_multiplier),
                              min_threshold_bytes)
-        return device_memory_profile_bounded(
-            max_peak_bytes=max_peak_bytes,
-            description=description,
+
+        device = jax.local_devices()[0] if jax.local_devices() else None
+        if device is None:
+            logger.warning("No local devices; memory profiling skipped")
+            yield
+            return
+
+        bytes_before = _get_bytes_in_use(device)
+        if bytes_before is None:
+            logger.warning("memory_stats() unavailable; profiling skipped")
+            yield
+            return
+
+        poller = _MemoryPoller(device)
+        poller.start(initial_bytes=bytes_before)
+
+        yield
+
+        peak_observed, num_samples = poller.stop()
+        bytes_after = _get_bytes_in_use(device) or bytes_before
+        peak_observed = max(peak_observed, bytes_after)
+        peak_delta = peak_observed - bytes_before
+
+        logger.info(
+            "Memory profile [%s]: "
+            "before=%.3f GB, after=%.3f GB, peak_observed=%.3f GB, "
+            "peak_delta=%.3f GB, samples=%d, threshold=%.3f GB",
+            description,
+            bytes_before / GBYTES,
+            bytes_after / GBYTES,
+            peak_observed / GBYTES,
+            peak_delta / GBYTES,
+            num_samples,
+            max_peak_bytes / GBYTES,
         )
 
-    return _factory
+        assert peak_delta <= max_peak_bytes, (
+            f"Peak device memory during {description} exceeded threshold: "
+            f"peak_delta={peak_delta / GBYTES:.3f} GB > "
+            f"max={max_peak_bytes / GBYTES:.3f} GB "
+            f"(before={bytes_before / GBYTES:.3f} GB, "
+            f"after={bytes_after / GBYTES:.3f} GB, "
+            f"peak={peak_observed / GBYTES:.3f} GB, "
+            f"{num_samples} samples)")
+
+    return _monitor
