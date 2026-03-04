@@ -35,7 +35,8 @@ from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
 from tpu_inference.layers.common.attention_interface import mla_attention
 from tpu_inference.layers.common.moe import MoEBackend
-from tpu_inference.layers.common.quantization import quantize_kv
+from tpu_inference.layers.common.quantization import (dequantize_tensor,
+                                                      quantize_kv)
 from tpu_inference.layers.common.sharding import \
     ShardingAxisNameBase as ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
@@ -56,7 +57,8 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (JaxAutoWeightsLoader,
-                                                         LoadableWithIterator)
+                                                         LoadableWithIterator,
+                                                         shard_put)
 
 KVCache = Tuple[jax.Array, jax.Array]
 
@@ -148,7 +150,6 @@ class DeepseekV3BaseAttention(JaxModule):
     rngs: InitVar[nnx.Rngs]
 
     quant_config: Optional[QuantizationConfig] = None
-    prefix: str = ''
 
     # Scales for Q/KV quantization (per-tensor)
     _q_scale: float = 1
@@ -248,10 +249,16 @@ class DeepseekV3BaseAttention(JaxModule):
             self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
                 self.kv_cache_dtype)
 
-        self.setup_specific_layers(rngs)
-
-    def setup_specific_layers(self, *args) -> None:
-        pass
+        self.kv_b_proj = JaxEinsum(
+            einsum_str="SA,AL->SL",
+            kernel_shape=(self.kv_lora_rank,
+                          self.N * (self.qk_nope_head_dim + self.v_head_dim)),
+            rngs=rngs,
+            quant_config=self.quant_config,
+            param_dtype=self.dtype,
+            kernel_init=nnx.with_partitioning(init_fn, self.ap_sharding),
+            prefix=self.prefix + ".kv_b_proj",
+        )
 
     @abstractmethod
     def compute_q_projection(self, *args) -> jax.Array:
@@ -320,7 +327,9 @@ class DeepseekV3BaseAttention(JaxModule):
 class DeepseekV3Attention(DeepseekV3BaseAttention):
     """Standard Multi-Head Attention (MHA) for DeepSeek models."""
 
-    def setup_specific_layers(self, rngs: nnx.Rngs) -> None:
+    def __post_init__(self, rngs: nnx.Rngs):
+        super().__post_init__(rngs)
+
         weight_init = _weight_init(self.random_init)
         self.kv_b_proj = JaxEinsum(
             einsum_str="SA,AL->SL",
@@ -477,31 +486,107 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
         return kv_cache, output_TNH
 
 
+class MLAEinsum(JaxEinsum):
+    """Extending JaxEinsum to handle MLA.
+    
+    This class is used for MLA, where:
+    1) the weight is split into k/v parts after loading, and
+    2) modify the MLA layer to set k/v weights
+    """
+
+    def __init__(self,
+                 mla_layer,
+                 einsum_str: str,
+                 kernel_shape: tuple[int, ...],
+                 rngs,
+                 bias_shape: Optional[tuple[int, ...]] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "",
+                 **kwargs):
+        super().__init__(einsum_str,
+                         kernel_shape,
+                         rngs,
+                         bias_shape=bias_shape,
+                         quant_config=quant_config,
+                         prefix=prefix,
+                         **kwargs)
+        self.loaded = set()
+        self.mla_layer = mla_layer
+        self.quant_config = quant_config
+
+    def named_children(self):
+        # Override, otherwise "mla_layer" will be visited, causing infinite recursion.
+        yield from []
+
+    def load_weights(self, weights):
+        named_params = dict(self.named_parameters())
+        if len(self.loaded) >= 2:
+            raise ValueError(
+                f"Expect at most 2 params to load for kv_b_proj, already got {self.loaded}, still have {[name for name, _ in weights]} coming."
+            )
+        for name, weight in weights:
+            param = named_params[name]
+            weight_loader = getattr(param, "weight_loader")
+            weight_loader(param, weight)
+            self.loaded.add(name)
+        if len(self.loaded) != len(named_params):
+            return
+        assert self.quant_config is not None
+        # After loading, split the weights into k/v
+        with jax.set_mesh(
+                jax.make_mesh((1, ), ('x', ), devices=jax.devices('cpu'))):
+            dequantized_weight = dequantize_tensor(
+                self.weight,
+                self.weight_scale_inv,
+                (0, 1),
+                block_size=self.quant_config.weight_block_size,
+            ).T
+            A, N, qk_nope_head_dim, v_head_dim = self.mla_layer.kv_lora_rank, self.mla_layer.N, self.mla_layer.qk_nope_head_dim, self.mla_layer.v_head_dim
+            if dequantized_weight.shape != (A, N *
+                                            (qk_nope_head_dim + v_head_dim)):
+                raise ValueError(
+                    f"Unexpected weight shape after dequantization: {dequantized_weight.shape}, expected {(A, N * (qk_nope_head_dim + v_head_dim))=}"
+                )
+            dequantized_weight = dequantized_weight.reshape(
+                A, N, qk_nope_head_dim + v_head_dim)
+            k_ANH, v_ANH = jnp.split(dequantized_weight, [qk_nope_head_dim],
+                                     axis=-1)
+        mla_layer = self.mla_layer
+        setattr(
+            mla_layer, "k_up_proj",
+            JaxEinsum(einsum_str="TNH,ANH->TNA",
+                      kernel_shape=(A, N, qk_nope_head_dim),
+                      rngs=nnx.Rngs(0)))
+        setattr(
+            mla_layer, "v_up_proj",
+            JaxEinsum(einsum_str="TNA,ANH->TNH",
+                      kernel_shape=(A, N, v_head_dim),
+                      rngs=nnx.Rngs(0)))
+        mla_layer.k_up_proj.weight.set_raw_value(
+            shard_put(k_ANH, self.mla_layer.anh_sharding))
+        mla_layer.v_up_proj.weight.set_raw_value(
+            shard_put(v_ANH, self.mla_layer.anh_sharding))
+
+
 @dataclass(kw_only=True)
 class DeepseekV3MLA(DeepseekV3BaseAttention):
     """Multi-Head Latent Attention (MLA) for DeepSeek V3."""
     anh_sharding: Sharding = ()
 
-    def setup_specific_layers(self, rngs: nnx.Rngs) -> None:
-        weight_init = _weight_init(self.random_init)
-        self.k_up_proj = JaxEinsum(
-            einsum_str="TNH,ANH->TNA",
-            kernel_shape=(self.kv_lora_rank, self.N, self.qk_nope_head_dim),
-            rngs=rngs,
-            quant_config=self.quant_config,
-            param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(weight_init, self.anh_sharding),
-            prefix=self.prefix + ".k_up_proj",
-        )
+    def __post_init__(self, rngs: nnx.Rngs):
+        super().__post_init__(rngs)
 
-        self.v_up_proj = JaxEinsum(
-            einsum_str="TNA,ANH->TNH",
-            kernel_shape=(self.kv_lora_rank, self.N, self.v_head_dim),
+        weight_init = _weight_init(self.random_init)
+        self.kv_b_proj = MLAEinsum(
+            mla_layer=self,
+            einsum_str="SA,AL->SL",
+            kernel_shape=(self.kv_lora_rank,
+                          self.N * (self.qk_nope_head_dim + self.v_head_dim)),
             rngs=rngs,
             quant_config=self.quant_config,
             param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(weight_init, self.anh_sharding),
-            prefix=self.prefix + ".v_up_proj",
+            kernel_init=nnx.with_partitioning(weight_init, self.ap_sharding),
+            prefix=self.prefix + ".kv_b_proj",
         )
 
     def compute_q_projection(
