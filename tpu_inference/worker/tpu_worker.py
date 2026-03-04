@@ -316,8 +316,9 @@ class TPUWorker:
             intermediate_tensors = JaxIntermediateTensors(
                 intermediate_tensors_dict)
 
-        output = self.model_runner.execute_model(scheduler_output,
-                                                 intermediate_tensors)
+        with jax.profiler.TraceAnnotation("execute_model"):
+            output = self.model_runner.execute_model(scheduler_output,
+                                                     intermediate_tensors)
 
         if isinstance(output, JaxIntermediateTensors):
             assert self.parallel_config.pipeline_parallel_size > 1
@@ -350,16 +351,37 @@ class TPUWorker:
         raise NotImplementedError(
             "LoRA is not supported by the JAX worker yet.")
 
-    def profile(self, is_start: bool = True):
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None,
+                **kwargs):
+        if self.profile_dir is None:
+            return
         if is_start:
+            # Stop any existing profile before starting a new one
+            if getattr(self, '_profiling', False):
+                try:
+                    jax.profiler.stop_trace()
+                except Exception:
+                    pass
+                self._profiling = False
+            if profile_prefix is not None:
+                trace_dir = os.path.join(self.profile_dir, profile_prefix)
+                os.makedirs(trace_dir, exist_ok=True)
+            else:
+                trace_dir = self.profile_dir
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
-            options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
+            options.python_tracer_level = 0
             options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 1)
-            jax.profiler.start_trace(self.profile_dir,
+            jax.profiler.start_trace(trace_dir,
                                      profiler_options=options)
+            self._profiling = True
         else:
+            if not getattr(self, '_profiling', False):
+                logger.warning("Profiler was not started, nothing to stop.")
+                return
+            jax.effects_barrier()
             jax.profiler.stop_trace()
+            self._profiling = False
 
     def load_model(self) -> None:
         self.model_runner.load_model()
