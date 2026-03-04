@@ -1168,7 +1168,7 @@ class TestTPUJaxRunnerPadding:
              patch('tpu_inference.runner.tpu_runner.NamedSharding', return_value='mock_sharding'), \
              patch('tpu_inference.runner.tpu_runner.PartitionSpec', return_value='mock_spec'), \
              patch('jax.ShapeDtypeStruct', return_value=mock_spec_instance):
-            
+
             spec_dict = self.runner.get_intermediate_tensor_spec(mock_output)
 
             assert "hidden_states" in spec_dict

@@ -1792,7 +1792,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             transpose_keys=transpose_keys,
             shard=shard)
 
-    def _get_padded_total_tokens(self, scheduler_output: "VllmSchedulerOutput") -> int:
+    def _get_padded_total_tokens(
+            self, scheduler_output: "VllmSchedulerOutput") -> int:
         num_tokens = scheduler_output.total_num_scheduled_tokens
 
         # Determine the capacity per rank (max tokens assigned to any single device)
@@ -1806,7 +1807,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         return padded_per_rank * self.dp_size
 
-    def get_intermediate_tensor_spec(self, scheduler_output: "VllmSchedulerOutput"):
+    def get_intermediate_tensor_spec(self,
+                                     scheduler_output: "VllmSchedulerOutput"):
         jax_dtype = to_jax_dtype(self.dtype)
         num_padded_tokens = self._get_padded_total_tokens(scheduler_output)
 

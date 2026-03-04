@@ -960,7 +960,8 @@ class TestDPScheduler:
                 output_0.scheduled_spec_decode_tokens = {}
                 output_0.scheduled_encoder_inputs = {}
                 output_0.finished_req_ids = set()
-                output_0.scheduled_cached_reqs = MagicMock(spec=CachedRequestData)
+                output_0.scheduled_cached_reqs = MagicMock(
+                    spec=CachedRequestData)
                 output_0.scheduled_cached_reqs.req_ids = ["req1"]
                 output_0.scheduled_cached_reqs.resumed_req_ids = set()
                 output_0.scheduled_cached_reqs.new_token_ids = [[1, 2]]
@@ -977,7 +978,8 @@ class TestDPScheduler:
                 output_1.scheduled_spec_decode_tokens = {}
                 output_1.scheduled_encoder_inputs = {}
                 output_1.finished_req_ids = set()
-                output_1.scheduled_cached_reqs = MagicMock(spec=CachedRequestData)
+                output_1.scheduled_cached_reqs = MagicMock(
+                    spec=CachedRequestData)
                 output_1.scheduled_cached_reqs.req_ids = ["req2"]
                 output_1.scheduled_cached_reqs.resumed_req_ids = set()
                 output_1.scheduled_cached_reqs.new_token_ids = [[3, 4]]
