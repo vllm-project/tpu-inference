@@ -23,15 +23,15 @@ steps:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        # Skip this step, since it's identical to ${TPU_VERSION:-tpu6e}_meta-llama_Llama-Guard-4-12B_Text-Only_UnitTest"
-        UPSTREAM_STEP="${TPU_VERSION:-tpu6e}_meta-llama_Llama-Guard-4-12B_Text-Only_UnitTest"
-        OUTCOME=$$(buildkite-agent step get "outcome" --step "$$UPSTREAM_STEP")
+        # multimodal runs the same unit test as text-only for Llama-Guard-4-12B
+        mirroring_text_only_step="${TPU_VERSION:-tpu6e}_meta-llama_Llama-Guard-4-12B_Text-Only_UnitTest"
+        OUTCOME=$$(buildkite-agent step get "outcome" --step "$$mirroring_text_only_step")
 
         if [ "$$OUTCOME" = "passed" ]; then
-          echo "Success: Mirroring upstream pass."
+          echo "Success: Mirroring text-only result passed."
           exit 0
         else
-          echo "Failure: Upstream was $$OUTCOME, so this step fails too."
+          echo "Failure: Mirroring text-only result was $$OUTCOME, so this step fails too."
           exit 1
         fi
           
