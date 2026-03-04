@@ -107,6 +107,122 @@ class RaggedGatherTest(jtu.JaxTestCase):
     self._run_ragged_gather_test(512, 128, 2048, ep_token_start,
                                  ep_token_end)
 
+  def _run_ragged_gather_perf_test(self, ep_token_start, ep_token_end):
+    batch_size = 8192
+    value_dim = 6144
+    topk = 8
+    num_indices = batch_size * topk
+    k1, k2 = jax.random.split(jax.random.key(0))
+    data = jax.random.uniform(k1, (batch_size, value_dim), dtype=jnp.bfloat16)
+    indices = jax.random.randint(
+        k2,
+        (num_indices,),
+        0,
+        batch_size,
+        jnp.int32,
+    )
+    ep_range = jnp.array([ep_token_start, ep_token_end], dtype=jnp.int32)
+    gather.ragged_gather(
+        data, indices, ep_range, gather_window_size=16
+    ).block_until_ready()
+
+  def test_ragged_gather_perf(self):
+    batch_size = 8192
+    value_dim = 6144
+    topk = 8
+    num_indices = batch_size * topk
+    k1, k2 = jax.random.split(jax.random.key(0))
+    data = jax.random.uniform(k1, (batch_size, value_dim), dtype=jnp.bfloat16)
+    indices = jax.random.randint(
+        k2,
+        (num_indices,),
+        0,
+        batch_size,
+        jnp.int32,
+    )
+
+    @jax.jit
+    def gather_direct(indices, x):
+      return x[indices]
+
+    # Run once to warm up
+    gather_direct(indices, data).block_until_ready()
+
+    ep_token_start, ep_token_end = 1024, 1024+num_indices/16
+    self._run_ragged_gather_perf_test(ep_token_start, ep_token_end)
+
+    ep_token_start, ep_token_end = 1024, 1024+num_indices/8
+    self._run_ragged_gather_perf_test(ep_token_start, ep_token_end)
+
+    ep_token_start, ep_token_end = 1024, 1024+num_indices/4
+    self._run_ragged_gather_perf_test(ep_token_start, ep_token_end)
+
+    ep_token_start, ep_token_end = 1024, 1024+num_indices/2
+    self._run_ragged_gather_perf_test(ep_token_start, ep_token_end)
+
+    ep_token_start, ep_token_end = 0, num_indices
+    self._run_ragged_gather_perf_test(ep_token_start, ep_token_end)
+
+    # Run with xprof
+    xprof_sess = xprof_session.XprofSession()
+    xprof_sess.start_session()
+
+    gather_direct(indices, data).block_until_ready()
+
+    ep_token_start, ep_token_end = 1024, 1024+num_indices/16
+    self._run_ragged_gather_perf_test(ep_token_start, ep_token_end)
+
+    ep_token_start, ep_token_end = 1024, 1024+num_indices/8
+    self._run_ragged_gather_perf_test(ep_token_start, ep_token_end)
+
+    ep_token_start, ep_token_end = 1024, 1024+num_indices/4
+    self._run_ragged_gather_perf_test(ep_token_start, ep_token_end)
+
+    ep_token_start, ep_token_end = 1024, 1024+num_indices/2
+    self._run_ragged_gather_perf_test(ep_token_start, ep_token_end)
+
+    ep_token_start, ep_token_end = 0, num_indices
+    self._run_ragged_gather_perf_test(ep_token_start, ep_token_end)
+
+    session_id = xprof_sess.end_session_and_get_session_id()
+    print(f"xprof: http://xprof/?session_id={session_id}")
+
+
+  # $ blaze test -c opt //experimental/users/kyuyeunk/vllm/tests:gather_test_gf --test_filter=RaggedGatherTest.test_ragged_gather_single_perf --test_arg=--xla_xprof_register_llo_debug_info=true
+  # $ blaze test -c opt //experimental/users/kyuyeunk/vllm/tests:gather_test_gf --test_filter=RaggedGatherTest.test_ragged_gather_single_perf --test_arg=--xla_xprof_register_llo_debug_info=true --test_arg=--xla_tpu_emit_tracing_vwaits=true
+  # ref: https://source.corp.google.com/piper///depot/google3/experimental/users/kyuyeunk/debugging/benchmark/run_benchmark.sh;l=23-25;rcl=873173398
+  # https://source.corp.google.com/piper///depot/google3/experimental/users/yuyanpeng/ullm/test_tmp.py;l=1
+  def test_ragged_gather_single_perf(self):
+    batch_size = 8192
+    topk = 8
+    num_indices = batch_size * topk
+
+    @jax.jit
+    def gather_direct(indices, x):
+      return x[indices]
+
+    # Run once to warm up
+    ep_token_start, ep_token_end = 1024, 1024+num_indices/8
+    self._run_ragged_gather_perf_test(ep_token_start, ep_token_end)
+
+    kernel_name = "ragged_gather_b8192_v6144_n65536_w16"
+    xprof_sess = xprof_session.XprofSession()
+    xprof_sess.start_session(
+        device_name="",
+        enable_python_tracer=False,
+        host_trace_level=2,
+        host_cpu_profile=False,
+        trace_mode="TRACE_COMPUTE_AND_SYNC",
+        power_trace_level="POWER_TRACE_NORMAL",
+        enable_fw_throttle_event=True,
+        enable_fw_power_level_event=True,
+        enable_fw_thermal_event=True,
+    )
+    ep_token_start, ep_token_end = 1024, 1024+num_indices/8
+    self._run_ragged_gather_perf_test(ep_token_start, ep_token_end)
+    session_id = xprof_sess.end_session_and_get_session_id()
+    print(f"✅ [xprof] http://xprof/?session_id={session_id}")
+    print(f"✅ http://percale.corp.google.com/{session_id}/{kernel_name}")
 
 if __name__ == "__main__":
   absltest.main(testLoader=jtu.JaxTestLoader())

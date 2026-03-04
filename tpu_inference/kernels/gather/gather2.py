@@ -41,8 +41,8 @@ def gather(data, indices):
   return kernel(data, indices)
 
 
-@jax.jit
-def ragged_gather(data, indices, ep_range):
+@functools.partial(jax.jit, static_argnames=("gather_window_size",))
+def ragged_gather(data, indices, ep_range, gather_window_size=16):
   """Gather with ragged range: only gathers for indices in [ep_range[0], ep_range[1]).
 
   Args:
@@ -56,7 +56,7 @@ def ragged_gather(data, indices, ep_range):
   """
   num_indices = indices.shape[0]
   value_dim = data.shape[1]
-  gather_window_size = 16
+  batch_size = data.shape[0]
   num_tiles = num_indices // gather_window_size
 
   vector_mesh = plsc.VectorSubcoreMesh(
@@ -98,4 +98,6 @@ def ragged_gather(data, indices, ep_range):
         dimension_semantics=(pltpu.PARALLEL,),
     )(i_hbm, ep_start_hbm, ep_end_hbm, o_hbm)
 
-  return kernel(data, indices, ep_start, ep_end)
+  kernel_name = f"ragged_gather_b{batch_size}_v{value_dim}_n{num_indices}_w{gather_window_size}"
+  return jax.named_call(kernel, name=kernel_name)(
+      data, indices, ep_start, ep_end)
