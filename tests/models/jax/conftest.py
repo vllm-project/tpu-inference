@@ -15,6 +15,7 @@
 import dataclasses
 import logging
 import re
+import threading
 from contextlib import contextmanager
 from typing import Iterator, Optional
 from unittest.mock import MagicMock
@@ -118,15 +119,15 @@ def count_model_param_bytes(model) -> int:
 class MemoryProfile:
     """Device memory profile captured over a code block.
 
-    Tracks both settled memory (before/after) and peak memory via the
-    allocator's high-water mark (peak_bytes_in_use). The peak captures
-    transient spikes during the block that settle back down — which is
-    what actually causes OOMs.
+    Tracks both settled memory (before/after) and peak memory observed
+    by polling bytes_in_use from a background thread. The polled peak
+    is window-scoped (not cumulative), so it accurately captures transient
+    spikes during the block — which is what actually causes OOMs.
     """
     bytes_before: int
     bytes_after: int
-    peak_bytes_before: int
-    peak_bytes_after: int
+    peak_bytes_observed: int  # max bytes_in_use seen by polling thread
+    num_samples: int  # number of polls taken
     description: str
 
     @property
@@ -139,9 +140,10 @@ class MemoryProfile:
         """Peak memory reached during the block, relative to starting baseline.
 
         This is the metric that matters for OOM risk: the highest point
-        the allocator reached relative to where we started.
+        observed relative to where we started. Window-scoped via polling,
+        so not affected by peaks from previous tests.
         """
-        return self.peak_bytes_after - self.bytes_before
+        return self.peak_bytes_observed - self.bytes_before
 
     def log(self, threshold_bytes: Optional[int] = None):
         """Log the full memory profile. Called on every run, not just failures."""
@@ -149,14 +151,16 @@ class MemoryProfile:
                          if threshold_bytes is not None else "")
         logger.info(
             "Memory profile [%s]: "
-            "before=%.3f GB, after=%.3f GB, peak=%.3f GB, "
-            "settled_delta=%.3f GB, peak_delta=%.3f GB%s",
+            "before=%.3f GB, after=%.3f GB, peak_observed=%.3f GB, "
+            "settled_delta=%.3f GB, peak_delta=%.3f GB, "
+            "samples=%d%s",
             self.description,
             self.bytes_before / GBYTES,
             self.bytes_after / GBYTES,
-            self.peak_bytes_after / GBYTES,
+            self.peak_bytes_observed / GBYTES,
             self.settled_delta / GBYTES,
             self.peak_delta / GBYTES,
+            self.num_samples,
             threshold_str,
         )
 
@@ -169,7 +173,8 @@ class MemoryProfile:
             f"max={max_bytes / GBYTES:.3f} GB. "
             f"before={self.bytes_before / GBYTES:.3f} GB, "
             f"after={self.bytes_after / GBYTES:.3f} GB, "
-            f"peak={self.peak_bytes_after / GBYTES:.3f} GB. "
+            f"peak_observed={self.peak_bytes_observed / GBYTES:.3f} GB "
+            f"({self.num_samples} samples). "
             f"This may indicate weights or temporaries were placed on device "
             f"instead of being loaded on CPU first.")
 
@@ -184,19 +189,54 @@ class MemoryProfile:
             f"after={self.bytes_after / GBYTES:.3f} GB.")
 
 
-def _get_device_memory_stats(device) -> Optional[dict]:
-    """Read memory stats from a device.
+class _MemoryPoller:
+    """Background thread that polls device bytes_in_use and tracks the max.
 
-    Returns dict with 'bytes_in_use' and 'peak_bytes_in_use',
-    or None if unavailable.
+    Polling is ~1μs per call on TPU, so even at sub-millisecond intervals
+    the overhead is negligible relative to weight loading (seconds).
     """
+
+    def __init__(self, device, poll_interval_s: float = 0.001):
+        self._device = device
+        self._poll_interval = poll_interval_s
+        self._peak: int = 0
+        self._num_samples: int = 0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+
+    def start(self, initial_bytes: int):
+        self._peak = initial_bytes
+        self._num_samples = 0
+        self._stop.clear()
+        self._thread.start()
+
+    def stop(self) -> tuple[int, int]:
+        """Stop polling and return (peak_bytes_observed, num_samples)."""
+        self._stop.set()
+        self._thread.join(timeout=5.0)
+        return self._peak, self._num_samples
+
+    def _poll_loop(self):
+        while not self._stop.is_set():
+            try:
+                stats = self._device.memory_stats()
+                if stats and "bytes_in_use" in stats:
+                    current = stats["bytes_in_use"]
+                    if current > self._peak:
+                        self._peak = current
+                    self._num_samples += 1
+            except Exception:
+                pass
+            self._stop.wait(timeout=self._poll_interval)
+
+
+def _get_bytes_in_use(device) -> Optional[int]:
+    """Read current bytes_in_use from a device's memory_stats()."""
     try:
         stats = device.memory_stats()
         if not stats:
             return None
-        if "bytes_in_use" not in stats or "peak_bytes_in_use" not in stats:
-            return None
-        return stats
+        return stats.get("bytes_in_use")
     except Exception:
         return None
 
@@ -205,8 +245,13 @@ def _get_device_memory_stats(device) -> Optional[dict]:
 def device_memory_profile(
     device=None,
     description: str = "operation",
+    poll_interval_s: float = 0.001,
 ) -> Iterator[MemoryProfile]:
     """Profile device memory over a code block.
+
+    Spawns a background thread that polls bytes_in_use at ~1ms intervals
+    to capture the true peak within the block (not the cumulative
+    high-water mark from process start).
 
     Yields a MemoryProfile that is populated after the block completes.
     The caller can then inspect the profile or call assert methods on it.
@@ -230,8 +275,8 @@ def device_memory_profile(
             return
         device = local_devs[0]
 
-    before_stats = _get_device_memory_stats(device)
-    if before_stats is None:
+    bytes_before = _get_bytes_in_use(device)
+    if bytes_before is None:
         logger.warning(
             "memory_stats() unavailable on %s; memory profiling skipped for %s",
             device, description)
@@ -239,23 +284,31 @@ def device_memory_profile(
         return
 
     profile = MemoryProfile(
-        bytes_before=before_stats["bytes_in_use"],
+        bytes_before=bytes_before,
         bytes_after=0,
-        peak_bytes_before=before_stats["peak_bytes_in_use"],
-        peak_bytes_after=0,
+        peak_bytes_observed=bytes_before,
+        num_samples=0,
         description=description,
     )
 
+    poller = _MemoryPoller(device, poll_interval_s=poll_interval_s)
+    poller.start(initial_bytes=bytes_before)
+
     yield profile
 
-    after_stats = _get_device_memory_stats(device)
-    if after_stats is None:
+    peak_observed, num_samples = poller.stop()
+
+    bytes_after = _get_bytes_in_use(device)
+    if bytes_after is None:
         logger.warning("memory_stats() became unavailable during %s",
                        description)
         return
 
-    profile.bytes_after = after_stats["bytes_in_use"]
-    profile.peak_bytes_after = after_stats["peak_bytes_in_use"]
+    profile.bytes_after = bytes_after
+    # Take the max of the poller's peak and the final value, in case
+    # the final read catches a higher point than the last poll.
+    profile.peak_bytes_observed = max(peak_observed, bytes_after)
+    profile.num_samples = num_samples
 
 
 @contextmanager
@@ -285,14 +338,14 @@ def assert_weight_loading_memory_bounded():
         with assert_weight_loading_memory_bounded(model, "load_weights(...)"):
             loader.load_weights(model, model_config)
 
-        # With explicit threshold for models with known higher overhead:
+        # With explicit threshold:
         with assert_weight_loading_memory_bounded(
-            model, "load_weights(...)", threshold_multiplier=2.0,
+            model, "load_weights(...)", threshold_multiplier=0.5,
         ):
             loader.load_weights(model, model_config)
     """
 
-    def _factory(model, description="operation", threshold_multiplier=1.5):
+    def _factory(model, description="operation", threshold_multiplier=0.3):
         model_param_bytes = count_model_param_bytes(model)
         max_peak_bytes = int(model_param_bytes * threshold_multiplier)
         return device_memory_profile_bounded(
