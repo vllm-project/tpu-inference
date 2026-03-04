@@ -1647,6 +1647,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # TODO(pooyam): Some paddings are up to `num_reqs_paddings` (spec decoding, select hidden states, etc) and some other are to `max_num_reqs` (block table, seq_lens). We should stick to one of them maybe?
         query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1]
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs]
+        # seq_lens = np.full(self.max_num_reqs, 4096, dtype=np.int32)
         request_distribution = np.array(self.input_batch.request_distribution)
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -1691,6 +1692,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             return block_tables
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
+            # jnp.set_printoptions(threshold=jnp.inf)
+            # print("START")
+            # print("block_tables", block_tables)
+            # print("dist", request_distribution)
+            # print("seq_lens", seq_lens)
+            # print("query_start_loc", query_start_loc)
+            # print("END")
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
                 block_tables=block_tables,
