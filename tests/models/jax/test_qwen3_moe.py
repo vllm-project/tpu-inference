@@ -76,9 +76,8 @@ class TestQwen3MoeForCausalLM:
         # load weights from HF model, monitoring device memory
         with jax.set_mesh(mesh):
             loader = get_model_loader(vllm_config.load_config)
-            # Weight loading should happen on CPU; only final sharded
-            # weights land on TPU. 0.3x allows for transient overlap
-            # during shard_put (BF16 MoE observed ~0.18x, FP8 ~0x).
+            # Monitor device memory during weight loading to catch
+            # regressions.
             with assert_weight_loading_memory_bounded(
                     model,
                     description=f"load_weights({model_name})",

@@ -255,9 +255,8 @@ class TestQwen3ForCausalLM:
 
             # load weights from HF model, monitoring device memory
             loader = get_model_loader(mock_vllm_config.load_config)
-            # Weight loading should happen on CPU; only final sharded
-            # weights land on TPU. 0.3x allows for transient overlap
-            # during shard_put while old placeholders are freed.
+            # Monitor device memory during weight loading to catch
+            # regressions.
             with assert_weight_loading_memory_bounded(
                     model,
                     description=f"load_weights({model_name})",

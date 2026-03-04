@@ -175,8 +175,8 @@ class MemoryProfile:
             f"after={self.bytes_after / GBYTES:.3f} GB, "
             f"peak_observed={self.peak_bytes_observed / GBYTES:.3f} GB "
             f"({self.num_samples} samples). "
-            f"This may indicate weights or temporaries were placed on device "
-            f"instead of being loaded on CPU first.")
+            f"This may indicate an unexpected memory regression during "
+            f"weight loading or processing.")
 
     def assert_settled_bounded(self, max_bytes: int):
         """Assert settled (net) memory delta stayed within threshold."""
@@ -345,9 +345,16 @@ def assert_weight_loading_memory_bounded():
             loader.load_weights(model, model_config)
     """
 
-    def _factory(model, description="operation", threshold_multiplier=0.3):
+    def _factory(model,
+                 description="operation",
+                 threshold_multiplier=0.3,
+                 min_threshold_bytes=2 * GBYTES):
         model_param_bytes = count_model_param_bytes(model)
-        max_peak_bytes = int(model_param_bytes * threshold_multiplier)
+        # Use proportional threshold, but enforce an absolute floor.
+        # PP-partitioned models have fewer params but per-layer transients
+        # don't shrink proportionally, so the floor prevents false failures.
+        max_peak_bytes = max(int(model_param_bytes * threshold_multiplier),
+                             min_threshold_bytes)
         return device_memory_profile_bounded(
             max_peak_bytes=max_peak_bytes,
             description=description,
