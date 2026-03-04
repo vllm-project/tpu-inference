@@ -28,7 +28,7 @@ from tpu_inference.kernels.ragged_paged_attention.v3 import kernel, kernel_hd64
 from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
     get_lookup_keys
 from tpu_inference.kernels.ragged_paged_attention.v3.util import cdiv
-from tpu_inference.tools.autotune import benchmarks, utils
+from tpu_inference.tools.autotune.v1 import benchmarks, utils
 
 console = utils.console
 

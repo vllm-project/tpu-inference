@@ -17,10 +17,11 @@ import os
 
 import click
 
-from tpu_inference.tools.autotune import quantized_matmul as matmul_lib
-from tpu_inference.tools.autotune import ragged_paged_attention_v3 as rpa_lib
-from tpu_inference.tools.autotune import utils
-from tpu_inference.tools.autotune.utils import console, update_json_registry
+from tpu_inference.tools.autotune.v1 import quantized_matmul as matmul_lib
+from tpu_inference.tools.autotune.v1 import \
+    ragged_paged_attention_v3 as rpa_lib
+from tpu_inference.tools.autotune.v1 import utils
+from tpu_inference.tools.autotune.v1.utils import console, update_json_registry
 from tpu_inference.utils import get_tpu_name_slug
 
 

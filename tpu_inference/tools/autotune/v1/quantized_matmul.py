@@ -23,7 +23,7 @@ import jax.numpy as jnp
 
 from tpu_inference import utils as tpu_utils
 from tpu_inference.kernels.quantized_matmul import tuned_block_sizes, util
-from tpu_inference.tools.autotune import benchmarks, utils
+from tpu_inference.tools.autotune.v1 import benchmarks, utils
 
 console = utils.console
 

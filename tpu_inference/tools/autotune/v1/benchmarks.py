@@ -21,7 +21,7 @@ from typing import Any, Callable, Dict, List, Tuple
 
 import jax
 
-from tpu_inference.tools.autotune import utils
+from tpu_inference.tools.autotune.v1 import utils
 
 # Optional import for XProf
 try:
