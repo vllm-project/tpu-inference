@@ -6,7 +6,6 @@ On the server side, run one of the following commands:
     vLLM OpenAI API server
     vllm serve <your_model> \
         --swap-space 16 \
-        --disable-log-requests
 
 On the client side, run:
     python benchmarks/benchmark_serving.py \
