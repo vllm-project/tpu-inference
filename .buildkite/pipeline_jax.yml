@@ -411,6 +411,25 @@ steps:
                 "
             fi
 
+      - label: "${TPU_VERSION:-tpu6e} E2E test for MaxText Llama3.1-8B RL"
+        key: "${TPU_VERSION:-tpu6e}_test_27"
+        soft_fail: true
+        agents:
+          queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
+        env:
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+          BASE_IMAGE: "gcr.io/tpu-prod-env-multipod/maxtext_post_training_stable:latest"
+        commands:
+          - |
+            .buildkite/scripts/run_in_docker.sh bash -c 'ENABLE_PATHWAYS_PERSISTENCE=1 \
+            python3 -m maxtext.trainers.post_train.rl.train_rl maxtext/configs/post_train/rl.yml \
+            run_name=test chat_template_path=src/maxtext/examples/chat_templates/gsm8k_rl.json \
+            model_name=llama3.1-8b \
+            load_parameters_path=gs://maxtext-model-checkpoints/llama3.1_8b_instruct/2025-11-13/pathways/scanned/0/items \
+            tokenizer_path=meta-llama/Llama-3.1-8B-Instruct enable_single_controller=true \
+            checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
+            skip_jax_distributed_system=True dataset_name=gsm8k'
+
       # -----------------------------------------------------------------
       # NOTIFICATION STEP
       # -----------------------------------------------------------------
@@ -442,6 +461,7 @@ steps:
           - ${TPU_VERSION:-tpu6e}_test_24
           - ${TPU_VERSION:-tpu6e}_test_25
           - ${TPU_VERSION:-tpu6e}_test_26
+          - ${TPU_VERSION:-tpu6e}_test_27
         agents:
           queue: cpu
         commands:

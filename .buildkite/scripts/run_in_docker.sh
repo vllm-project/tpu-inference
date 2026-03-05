@@ -41,6 +41,7 @@ ENV_VARS=(
   -e MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
   -e MAX_NUM_SEQS="${MAX_NUM_SEQS:-}"
   -e MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
+  -e BASE_IMAGE="${BASE_IMAGE:-python:3.12-slim-bookworm}"
 )
 
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
@@ -52,7 +53,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 # Source the environment setup script
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/setup_docker_env.sh"
-setup_environment $IMAGE_NAME
+setup_environment "$IMAGE_NAME" "false" "${BASE_IMAGE}"
 
 TEST_SUITE_VARS=(
   -e BUILDKITE_ANALYTICS_TOKEN="${BUILDKITE_ANALYTICS_TOKEN:-}"
