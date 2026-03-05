@@ -14,7 +14,7 @@
 
 steps:
   - label: "Task (Priority 100)"
-    parallelism: 10
+    parallelism: 20
     priority: 100
     commands:
       - echo "Psriority 100 work...sleep 10s"
