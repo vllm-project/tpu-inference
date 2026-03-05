@@ -118,14 +118,16 @@ class TestVllmTPUMLAAttention:
             prefix="test",
         )
 
-        attn.W_UK_T = torchax.tensor.Tensor(jnp.ones((10, 10)), env=torchax.default_env())
-        attn.W_UV = torchax.tensor.Tensor(jnp.ones((10, 10)), env=torchax.default_env())
+        attn.W_UK_T = torchax.tensor.Tensor(jnp.ones((10, 10)),
+                                            env=torchax.default_env())
+        attn.W_UV = torchax.tensor.Tensor(jnp.ones((10, 10)),
+                                          env=torchax.default_env())
         attn.kv_b_proj = MagicMock()
         attn.kv_b_proj.quant_method.linear_config.mesh = mesh
         attn.kv_b_proj.named_parameters.return_value = {}
 
         with patch(
-            "vllm.model_executor.layers.attention.mla_attention.MLAAttention.process_weights_after_loading"
+                "vllm.model_executor.layers.attention.mla_attention.MLAAttention.process_weights_after_loading"
         ) as mock_super_process:
             with torchax.default_env():
                 attn.process_weights_after_loading(torch.float32)
