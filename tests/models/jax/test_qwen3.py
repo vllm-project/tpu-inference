@@ -216,6 +216,39 @@ class TestQwen3ForCausalLM:
         logits = model.compute_logits(hidden_states)
         assert logits.shape == (1, hf_config.vocab_size)
 
+    def test_expected_error_with_tight_threshold(
+            self, rng, mesh, mock_vllm_config,
+            assert_weight_loading_memory_bounded):
+        """Verifies assert_weight_loading_memory_bounded raises on an
+        unreasonably tight threshold, ensuring the guard itself works."""
+        model_name = "Qwen/Qwen3-0.6B"
+        kv_cache_type = "auto"
+        config = mock_vllm_config(model_name, kv_cache_type)
+        config.model_config.hf_config.num_hidden_layers = 4
+        config.load_config.load_format = "skip_layers_model_loader_for_test"
+        config.load_config.num_layers_to_load_for_test = 4
+
+        init_pp_distributed_environment(
+            ip="",
+            rank=0,
+            world_size=1,
+            device=jax.devices()[0],
+            need_pp=False,
+        )
+
+        with jax.set_mesh(mesh):
+            model = Qwen3ForCausalLM(config, rng, mesh)
+            loader = get_model_loader(config.load_config)
+
+            with pytest.raises(AssertionError, match="exceeded threshold"):
+                with assert_weight_loading_memory_bounded(
+                        model,
+                        description=f"load_weights({model_name})",
+                        threshold_multiplier=0.001,
+                        min_threshold_bytes=1,
+                ):
+                    loader.load_weights(model, config.model_config)
+
     @pytest.mark.parametrize("model_name",
                              ["Qwen/Qwen3-0.6B", "Qwen/Qwen3-0.6B-FP8"])
     @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),

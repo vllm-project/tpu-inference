@@ -21,7 +21,6 @@ from unittest.mock import MagicMock
 import jax
 import numpy as np
 import pytest
-from flax import nnx
 from flax.typing import PRNGKey
 from jax import numpy as jnp
 from jax.sharding import Mesh
@@ -104,12 +103,11 @@ class SkipLayersModelLoaderForTest(DefaultModelLoader):
 
 
 def count_model_param_bytes(model) -> int:
-    """Count total bytes of all parameters in a Flax nnx model."""
-    _, state = nnx.split(model)
+    """Count total bytes of all parameters in a model."""
     total = 0
-    for _, v in state.flat_state():
-        if hasattr(v, 'value') and hasattr(v.value, 'nbytes'):
-            total += v.value.nbytes
+    for _, param in model.named_parameters():
+        if hasattr(param, 'value') and hasattr(param.value, 'nbytes'):
+            total += param.value.nbytes
     return total
 
 
