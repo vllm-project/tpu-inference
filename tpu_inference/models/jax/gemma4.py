@@ -20,9 +20,8 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
+from transformers import Gemma4TextConfig
 from vllm.config import VllmConfig
-# from transformers import Gemma4TextConfig
-from vllm.vllm.transformers_utils.configs.gemma4 import Gemma4TextConfig
 
 from tpu_inference import utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
@@ -103,7 +102,7 @@ class Gemma4Attention(JaxModule):
         self.rms_norm_eps = config.rms_norm_eps
 
         # Assuming Gemma 4 also uses a custom scalar, not 1/sqrt(head_dim)
-        self.scaling = config.query_pre_attn_scalar**-0.5
+        self.scaling = config.query_pre_attn_scalar**-0.5  # may not be true, need to check with config
 
         # Same as Gemma3: use layer_idx to handle GLOBAL/LOCAL layer
         self.layer_type = "full_attention"
@@ -124,27 +123,25 @@ class Gemma4Attention(JaxModule):
             self.rope_scaling = rope_parameters.get(
                 "rope_scaling", getattr(config, "rope_scaling", None))
             if not self.is_sliding:  # GLOBAL layer
-                self.rope_fraction = getattr(config,
-                                             "global_partial_rotary_factor",
-                                             0.25)
+                self.rope_proportion = rope_parameters.get(
+                    "partial_rotary_factor",
+                    getattr(config, "global_partial_rotary_factor", 0.25))
             else:  # LOCAL layer
-                self.rope_fraction = rope_parameters.get(
+                self.rope_proportion = rope_parameters.get(
                     "partial_rotary_factor", 1.0)
-            # self.rope_type = rope_parameters.get("rope_type", "proportional" if not self.is_sliding else "default") # Not sure if this is needed?
         else:
             # Transformers v4 rope config.
             # Fallback for config backward compatibility
             self.rope_theta = config.rope_local_base_freq if self.is_sliding else config.rope_theta
             self.rope_scaling = getattr(config, "rope_scaling", None)
-            self.rope_fraction = getattr(
-                config, "global_partial_rotary_factor", 0.25
-            ) if not self.is_sliding else 1.0  # Assuming the config name is global_partial_rotary_factor
-            # self.rope_type = "proportional" if not self.is_sliding else "default"
+            self.rope_proportion = getattr(
+                config, "global_partial_rotary_factor",
+                0.25) if not self.is_sliding else 1.0
 
         # Gemma4: use different num_kv_heads and head_dim in GLOBAL/LOCAL layers
         if not self.is_sliding:
             # GLOBAL layers
-            self.num_kv_heads = config.global_num_key_value_heads  # Assuming 4 new config names for GLOBAL/LOCAL layers
+            self.num_kv_heads = config.num_global_key_value_heads
             self.head_dim_original = config.global_head_dim
         else:
             # LOCAL layers
@@ -276,18 +273,12 @@ class Gemma4Attention(JaxModule):
         q = self.q_proj(x)
         q = self.q_norm(q)
 
-        # partial rope for q(?)
-        if self.rope_fraction < 1.0:
-            rope_dim = int(self.head_dim_original * self.rope_fraction)
-            q_rope = q[..., :rope_dim]
-            q_pass = q[..., rope_dim:]
-
-            q_rope = apply_rope(q_rope, md.input_positions, rope_dim,
-                                self.rope_theta, self.rope_scaling)
-            q = jnp.concatenate([q_rope, q_pass], axis=-1)
-        else:
-            q = apply_rope(q, md.input_positions, self.head_dim_original,
-                           self.rope_theta, self.rope_scaling)
+        q = apply_rope(q,
+                       md.input_positions,
+                       self.head_dim_original,
+                       self.rope_theta,
+                       self.rope_scaling,
+                       rope_proportion=self.rope_proportion)
 
         # k: (T, K, H)
         # v: (T, K, H)
@@ -301,18 +292,12 @@ class Gemma4Attention(JaxModule):
             v = self.v_proj(x)
             v = self.v_norm(v)
 
-        # partial rope for k(?)
-        if self.rope_fraction < 1.0:
-            rope_dim = int(self.head_dim_original * self.rope_fraction)
-            k_rope = k[..., :rope_dim]
-            k_pass = k[..., rope_dim:]
-
-            k_rope = apply_rope(k_rope, md.input_positions, rope_dim,
-                                self.rope_theta, self.rope_scaling)
-            k = jnp.concatenate([k_rope, k_pass], axis=-1)
-        else:
-            k = apply_rope(k, md.input_positions, self.head_dim_original,
-                           self.rope_theta, self.rope_scaling)
+        k = apply_rope(k,
+                       md.input_positions,
+                       self.head_dim_original,
+                       self.rope_theta,
+                       self.rope_scaling,
+                       rope_proportion=self.rope_proportion)
 
         # o: (T, N, H)
         q_scale = k_scale = v_scale = None
