@@ -22,13 +22,13 @@ import jax.numpy as jnp
 def apply_rope(
     # (seq_len, num_heads, head_dim)
     inputs: jax.Array,
-    *,
     # (3, seq_len) for M-RoPE, otherwise (seq_len,)
     positions: jax.Array,
     head_dim: int,
     rope_theta: float = 10000,
     rope_scaling: Dict[str, Any] = None,
     rope_input_ordering: str = "split",
+    *,
     rope_proportion: float = 1.0,
 ) -> jax.Array:
     """
