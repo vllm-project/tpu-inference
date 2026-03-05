@@ -57,12 +57,6 @@ BUILDKITE_QUEUE_DEVICE_MAP=(
     ["v6e-8"]="tpu_v6e_8_queue"
 )
 
-# === Config ===
-# Make sure these environment variables are set or export here
-# export GCP_PROJECT_ID="your-project"
-# export GCP_INSTANCE_ID="your-instance"
-# export GCP_DATABASE_ID="your-database"
-
 # === Read CSV and skip header ===
 while read -r line || [ -n "${line}" ]; do
 

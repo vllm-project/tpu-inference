@@ -35,28 +35,47 @@ ENV_FILE_TMP="$ENV_FILE.tmp"
 # MAX_MODEL_LEN=2048
 # INPUT_LEN=1800
 # OUTPUT_LEN=128
-gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
-  --instance="$GCP_INSTANCE_ID" \
-  --project="$GCP_PROJECT_ID" \
-  --sql="SELECT RecordId, Model, RunType, CodeHash, MaxNumSeqs, MaxNumBatchedTokens, TensorParallelSize, MaxModelLen, Dataset, InputLen, OutputLen, NumPrompts, PrefixLen, ExpectedETEL, ExtraEnvs FROM RunRecord WHERE RecordId = '$RECORD_ID';" | \
-  gawk 'NR==1 {
-    for (i=1; i<=NF; i++) {
-      # Insert underscore before uppercase letters preceded by a lowercase letter
-      # Then convert to uppercase
-      header[i] = toupper(gensub(/([a-z0-9])([A-Z])/, "\\1_\\2", "g", $i))
-    }
-  }
-  NR==2 {
-    for (i=1; i<=NF; i++) {
-      if ($i != "" && $i != "None") {
-        print header[i] "=" $i
-      }
-    }
-  }' > "$ENV_FILE_TMP"
+
+# First, run the query ONCE and get the stable JSON output
+JSON_OUTPUT=$(gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
+    --instance="$GCP_INSTANCE_ID" \
+    --project="$GCP_PROJECT_ID" \
+    --format="json" \
+    --sql="SELECT RecordId, Model, RunType, CodeHash, MaxNumSeqs, MaxNumBatchedTokens, TensorParallelSize, MaxModelLen, Dataset, InputLen, OutputLen, NumPrompts, PrefixLen, ExpectedETEL, ExtraEnvs, AdditionalConfig, Device, ExtraArgs FROM RunRecord WHERE RecordId = '$RECORD_ID';")
+
+# Now, use this powerful jq script to parse the JSON and build the .env file.
+# This correctly zips headers with values and handles all special characters.
+echo "$JSON_OUTPUT" | jq -r '
+  # 1. Create an array of SNAKE_CASE header names
+  [ .metadata.rowType.fields[].name | gsub("(?<=[a-z0-9])(?=[A-Z])"; "_") | ascii_upcase ] as $headers |
+
+  # 2. Create an array of values from the first (and only) data row
+  [ .rows[0][] ] as $values |
+
+  # 3. Loop from 0 to the length of the header array
+  range($headers | length) as $i |
+
+  # 4. Get the key and the value for this index
+  $headers[$i] as $key |
+  $values[$i] as $val |
+
+  # 5. Filter out any null/empty values and print the formatted "KEY=Value" line
+  if ($val | type) != "null" and $val != "" then
+    "\($key)=\($val | @sh)"
+  else
+    empty
+  end
+' > "$ENV_FILE_TMP"
+
+echo "Temp Environment file: "
+cat $ENV_FILE_TMP
 
 # Process EXTRA_ENVS line
 EXTRA_ENVS_LINE=$(grep '^EXTRA_ENVS=' "$ENV_FILE_TMP")
 EXTRA_ENVS_VALUE="${EXTRA_ENVS_LINE#EXTRA_ENVS=}"
+
+# Strip leading/trailing single and double quotes from the value
+EXTRA_ENVS_VALUE=$(echo "$EXTRA_ENVS_VALUE" | sed -e "s/^'//" -e "s/'$//" -e 's/^"//' -e 's/"$//')
 
 # Remove the original EXTRA_ENVS line
 grep -v '^EXTRA_ENVS=' "$ENV_FILE_TMP" > "${ENV_FILE}"
@@ -74,4 +93,3 @@ CONTAINER_NAME=vllm-tpu
 LOCAL_HF_HOME="/mnt/disks/persist/models"
 DOCKER_HF_HOME="/tmp/hf_home"
 EOF
-

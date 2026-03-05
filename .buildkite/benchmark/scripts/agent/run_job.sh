@@ -39,6 +39,9 @@ if [ -z "$RECORD_ID" ] || [ "$RECORD_ID" == "null" ]; then
   continue
 fi
 
+echo "--- Verifying Submodule Commit"
+git submodule status
+
 # Query TryCount as JSON
 echo "Query $RECORD_ID..."
 TRY_COUNT_JSON=$(gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
