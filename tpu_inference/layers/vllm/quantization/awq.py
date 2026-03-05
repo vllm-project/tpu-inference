@@ -57,12 +57,6 @@ class VllmAWQConfig(AWQConfig, VllmQuantConfig):
     def get_name(cls):
         return AWQ
 
-    def get_supported_act_dtypes(self) -> list[torch.dtype]:
-        # NOTE: AWQ checkpoint was quantized with float16. But on TPUs, using
-        # bfloat16 is significantly preferred over float16. This might lead to
-        # some numeric output change.
-        return [torch.bfloat16]
-
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional[Union["LinearMethodBase", "QuantizeMethodBase"]]:
