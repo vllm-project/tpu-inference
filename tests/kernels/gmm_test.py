@@ -14,7 +14,6 @@
 
 import jax
 import jax.numpy as jnp
-import pytest
 from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 
@@ -220,7 +219,7 @@ class GmmTest(jtu.JaxTestCase):
             group_offset=group_offset,
         )
 
-        if is_supported_by_gmm_v2(lhs, rhs_q, rhs_scale):
+        if is_supported_by_gmm_v2(rhs_scale):
             actual = gmm_v2(
                 lhs,
                 rhs_q,
@@ -306,7 +305,6 @@ class GmmTest(jtu.JaxTestCase):
         has_bias=[True, False],
         group_offset=[0],
     )
-    @pytest.mark.skip(reason="padding not yet implemented")
     def test_gmm_implicit_padding(self, batch_size, in_size, out_size,
                                   num_groups, has_bias, group_offset):
         num_local_groups = num_groups - group_offset
@@ -352,7 +350,6 @@ class GmmTest(jtu.JaxTestCase):
         block_size=[512],
         group_offset=[0],
     )
-    @pytest.mark.skip(reason="padding not yet implemented")
     def test_gmm_weight_quantized_padding(
         self,
         batch_size,
