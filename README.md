@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-03-05 12:18 AM UTC*
+*Last Updated: 2026-03-05 12:25 AM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -143,9 +143,9 @@ Below is the live status of our supported models, features, and kernels. Click o
   <tbody>
     <tr>
       <td><strong>async scheduler</strong></td>
-      <td><span title="v6e ✅&nbsp;Passing">✅&nbsp;v6e</span><br><span title="v7x ❌&nbsp;Failed">❌&nbsp;v7x</span></td>
+      <td><span title="❌&nbsp;Failed">❌</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="v6e ✅&nbsp;Passing">✅&nbsp;v6e</span><br><span title="v7x ❌&nbsp;Failed">❌&nbsp;v7x</span></td>
+      <td><span title="❌&nbsp;Failed">❌</span></td>
     </tr>
     <tr>
       <td><strong>Chunked Prefill</strong></td>
@@ -203,7 +203,7 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td><strong>runai_model_streamer_loader</strong></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="v6e ❓&nbsp;Untested">❓&nbsp;v6e</span><br><span title="v7x ❌&nbsp;Failed">❌&nbsp;v7x</span></td>
       <td><span title="❌&nbsp;Failed">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
@@ -222,7 +222,7 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td><strong>Single-Host-P-D-disaggregation</strong></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❌&nbsp;Failed">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
@@ -396,7 +396,7 @@ Below is the live status of our supported models, features, and kernels. Click o
   <tbody>
     <tr>
       <td rowspan="3"><b>Attention</b></td>
-      <td>Generic ragged paged attention v3*</td>
+      <td>Generic&nbsp;Ragged<br>Paged<Br>Attention<br>V3*</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -414,7 +414,7 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
-      <td>Ragged paged attention v3 head_dim 64*</td>
+      <td>Ragged&nbsp;Paged<br>Attention<br>V3<Br>Head_Dim<br>64*</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
