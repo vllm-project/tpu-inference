@@ -13,11 +13,11 @@
 # limitations under the License.
 
 steps:
-  - label: "Task (Priority 0)"
+  - label: "Task (Priority 100)"
     parallelism: 10
-    priority: 0
+    priority: 100
     commands:
-      - echo "Psriority 0 work...sleep 30s"
-      - sleep 30
+      - echo "Psriority 100 work...sleep 10s"
+      - sleep 10
     agents:
       queue: "cpu"
