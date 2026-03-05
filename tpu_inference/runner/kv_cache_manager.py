@@ -120,7 +120,6 @@ class KVCacheManager:
             parallel_config = self.runner.parallel_config
             text_config = getattr(model_config, "hf_text_config",
                                   getattr(model_config, "hf_config", None))
-            # Pad num_kv_heads to multiple of TP size.
             base_num_kv_heads = model_config.get_total_num_kv_heads()
             base_head_size = model_config.get_head_size()
 
@@ -145,10 +144,11 @@ class KVCacheManager:
                     else:
                         num_kv_heads = base_num_kv_heads
                         head_size = base_head_size
+                    # Pad num_kv_heads to multiple of TP size.
                     num_kv_heads = common_utils.get_padded_num_heads(
                         num_kv_heads, model_cnt)
                     head_size = common_utils.get_padded_head_dim(head_size)
-                    # TODO(kwang3939): Re-enable sliding_window once mixed dims sliding_window with is supported.
+                    # TODO(kwang3939): Re-enable sliding_window once mixed dims with sliding_window is supported.
                     sliding_window = None
                     kv_cache_spec[f"layer.{i}"] = self._create_attention_spec(
                         block_size,
