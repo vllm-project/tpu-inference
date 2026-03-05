@@ -417,12 +417,12 @@ def get_default_block_sizes(
     )
     return {
         "bq_sz": 1,
-        "bkv_sz": 768,
-        "batch_size": 10
+        "bkv_sz": 4096,
+        "batch_size": 3
     }, {
         "bq_sz": 128,
-        "bkv_sz": 512,
-        "batch_size": 2,
+        "bkv_sz": 768,
+        "batch_size": 1,
     }
 
 
