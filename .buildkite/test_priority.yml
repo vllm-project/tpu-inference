@@ -13,10 +13,143 @@
 # limitations under the License.
 
 steps:
-  - label: "Task (Priority 0)"
-    parallelism: 20
+  - label: "Task 1 (Priority ${JOB_PRIORITY:-1})"
+    priority: ${JOB_PRIORITY:-1}
     commands:
-      - echo "Psriority 0 work...sleep 30s"
-      - sleep 30
+      - echo "Running Task 1... sleep 10s"
+      - sleep 10
+    agents:
+      queue: "cpu"
+
+  - label: "Task 2 (Priority ${JOB_PRIORITY:-1})"
+    priority: ${JOB_PRIORITY:-1}
+    commands:
+      - sleep 10
+    agents:
+      queue: "cpu"
+
+  - label: "Task 3 (Priority ${JOB_PRIORITY:-1})"
+    priority: ${JOB_PRIORITY:-1}
+    commands:
+      - sleep 10
+    agents:
+      queue: "cpu"
+
+  - label: "Task 4 (Priority ${JOB_PRIORITY:-1})"
+    priority: ${JOB_PRIORITY:-1}
+    commands:
+      - sleep 10
+    agents:
+      queue: "cpu"
+
+  - label: "Task 5 (Priority ${JOB_PRIORITY:-1})"
+    priority: ${JOB_PRIORITY:-1}
+    commands:
+      - sleep 10
+    agents:
+      queue: "cpu"
+
+  - label: "Task 6 (Priority ${JOB_PRIORITY:-1})"
+    priority: ${JOB_PRIORITY:-1}
+    commands:
+      - sleep 10
+    agents:
+      queue: "cpu"
+
+  - label: "Task 7 (Priority ${JOB_PRIORITY:-1})"
+    priority: ${JOB_PRIORITY:-1}
+    commands:
+      - sleep 10
+    agents:
+      queue: "cpu"
+
+  - label: "Task 8 (Priority ${JOB_PRIORITY:-1})"
+    priority: ${JOB_PRIORITY:-1}
+    commands:
+      - sleep 10
+    agents:
+      queue: "cpu"
+
+  - label: "Task 9 (Priority ${JOB_PRIORITY:-1})"
+    priority: ${JOB_PRIORITY:-1}
+    commands:
+      - sleep 10
+    agents:
+      queue: "cpu"
+
+  - label: "Task 10 (Priority ${JOB_PRIORITY:-1})"
+    priority: ${JOB_PRIORITY:-1}
+    commands:
+      - sleep 10
+    agents:
+      queue: "cpu"
+
+  - label: "Task 11 (Priority ${JOB_PRIORITY:-1})"
+    priority: ${JOB_PRIORITY:-1}
+    commands:
+      - sleep 10
+    agents:
+      queue: "cpu"
+
+  - label: "Task 12 (Priority ${JOB_PRIORITY:-1})"
+    priority: ${JOB_PRIORITY:-1}
+    commands:
+      - sleep 10
+    agents:
+      queue: "cpu"
+
+  - label: "Task 13 (Priority ${JOB_PRIORITY:-1})"
+    priority: ${JOB_PRIORITY:-1}
+    commands:
+      - sleep 10
+    agents:
+      queue: "cpu"
+
+  - label: "Task 14 (Priority ${JOB_PRIORITY:-1})"
+    priority: ${JOB_PRIORITY:-1}
+    commands:
+      - sleep 10
+    agents:
+      queue: "cpu"
+
+  - label: "Task 15 (Priority ${JOB_PRIORITY:-1})"
+    priority: ${JOB_PRIORITY:-1}
+    commands:
+      - sleep 10
+    agents:
+      queue: "cpu"
+
+  - label: "Task 16 (Priority ${JOB_PRIORITY:-1})"
+    priority: ${JOB_PRIORITY:-1}
+    commands:
+      - sleep 10
+    agents:
+      queue: "cpu"
+
+  - label: "Task 17 (Priority ${JOB_PRIORITY:-1})"
+    priority: ${JOB_PRIORITY:-1}
+    commands:
+      - sleep 10
+    agents:
+      queue: "cpu"
+
+  - label: "Task 18 (Priority ${JOB_PRIORITY:-1})"
+    priority: ${JOB_PRIORITY:-1}
+    commands:
+      - sleep 10
+    agents:
+      queue: "cpu"
+
+  - label: "Task 19 (Priority ${JOB_PRIORITY:-1})"
+    priority: ${JOB_PRIORITY:-1}
+    commands:
+      - sleep 10
+    agents:
+      queue: "cpu"
+
+  - label: "Task 20 (Priority ${JOB_PRIORITY:-1})"
+    priority: ${JOB_PRIORITY:-1}
+    commands:
+      - sleep 10
     agents:
       queue: "cpu"
