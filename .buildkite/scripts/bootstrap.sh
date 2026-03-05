@@ -99,7 +99,7 @@ echo "$FILES_CHANGED" | tr '\n' ',' | buildkite-agent meta-data set "changed_fil
 #     export JOB_PRIORITY=$PRIORITY_DEFAULT
 #     echo "Build type: General - Priority: $JOB_PRIORITY"
 # fi
-export JOB_PRIORITY=0
+export JOB_PRIORITY=-5
 buildkite-agent meta-data set "job_priority" "$JOB_PRIORITY"
 
 # Implemented dynamic job prioritization by injecting integers during upload
