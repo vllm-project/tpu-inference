@@ -164,6 +164,22 @@ def _get_nnx_model(
                                              use_qwix_on_abstract_model=True)
             return jit_model
 
+        if getattr(model_class, '_self_manages_sharding', False):
+            # The model class handles its own JIT-sharded initialization internally
+            # (e.g. via create_nnx_model with out_shardings). Wrapping it in an
+            # additional outer @jax.jit causes nested JIT inlining that multiplies
+            with mesh:
+                jit_model = model_class(vllm_config, rng, mesh)
+                jit_model = apply_qwix_quantization(
+                    vllm_config,
+                    jit_model,
+                    rng,
+                    mesh,
+                    apply_to_abstract_model=False)
+                if hasattr(jit_model, 'initialize_cache'):
+                    jit_model.initialize_cache()
+            return jit_model
+
         @jax.jit
         def create_sharded_model():
             model = model_class(vllm_config, rng, mesh)
