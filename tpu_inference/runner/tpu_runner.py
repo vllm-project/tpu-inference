@@ -1792,11 +1792,31 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             transpose_keys=transpose_keys,
             shard=shard)
 
-    def get_intermediate_tensor_spec(self, num_tokens: int):
+    def _get_padded_total_tokens(
+            self, scheduler_output: "VllmSchedulerOutput") -> int:
+        num_tokens = scheduler_output.total_num_scheduled_tokens
+
+        # Determine the capacity per rank (max tokens assigned to any single device)
+        max_tokens_per_rank = getattr(
+            scheduler_output, "max_num_scheduled_tokens_per_dp_rank",
+            (num_tokens + self.dp_size - 1) // self.dp_size)
+
+        # Map to the next local bucket and multiply by world size to get global shape
+        padded_per_rank = runner_utils.get_padded_token_len(
+            self.num_tokens_paddings_per_dp, max_tokens_per_rank)
+
+        return padded_per_rank * self.dp_size
+
+    def get_intermediate_tensor_spec(self,
+                                     scheduler_output: "VllmSchedulerOutput"):
         jax_dtype = to_jax_dtype(self.dtype)
-        num_padded_tokens = runner_utils.get_padded_token_len(
-            self.num_tokens_paddings, num_tokens)
-        sharding = NamedSharding(self.mesh, PartitionSpec())
+        num_padded_tokens = self._get_padded_total_tokens(scheduler_output)
+
+        if self.dp_size > 1:
+            sharding = NamedSharding(
+                self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+        else:
+            sharding = NamedSharding(self.mesh, PartitionSpec())
         hidden_size = self.model_config.get_hidden_size()
         spec = jax.ShapeDtypeStruct(shape=(num_padded_tokens, hidden_size),
                                     dtype=jax_dtype,
