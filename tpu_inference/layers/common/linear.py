@@ -21,6 +21,7 @@ from tpu_inference.kernels.quantized_matmul.blockwise_kernel import \
     quantized_matmul_kernel as blockwise_quantized_matmul_kernel
 from tpu_inference.kernels.quantized_matmul.util import (
     xla_quantized_batched_matmul, xla_quantized_matmul)
+from tpu_inference.layers.common.sharding import ShardingAxisName
 
 
 def _get_x_q_dtype(w_q_dtype: jnp.dtype) -> jnp.dtype:
@@ -66,7 +67,7 @@ def sharded_quantized_matmul(x: jax.Array,
     # NOTE (jacobplatin/kyuyeunk) there have been numeric issues (concerning) NaNs
     # with the kernel and thus we disable it for now.
     out_axis, in_axis = weight_spec
-    x_sharding = P(None, in_axis)
+    x_sharding = P(ShardingAxisName.ATTN_DATA, in_axis)
     enable_quantized_matmul_kernel = len(w_s.shape) == 3
     if enable_quantized_matmul_kernel:
         num_blocks, _, __ = w_s.shape
@@ -77,7 +78,7 @@ def sharded_quantized_matmul(x: jax.Array,
         )
     else:
         scale_sharding = P(out_axis, )
-    out_sharding = P(None, out_axis)
+    out_sharding = P(ShardingAxisName.ATTN_DATA, out_axis)
 
     x_q_dtype = _get_x_q_dtype(w_q.dtype)
     x = jax.lax.with_sharding_constraint(

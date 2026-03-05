@@ -25,11 +25,11 @@ from vllm.config import ModelConfig, VllmConfig
 
 from tests.layers.common import utils as test_utils
 from tpu_inference.layers.common.moe import MoEBackend
-from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   ShardingAxisNameBase)
 from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
 from tpu_inference.layers.jax.moe.moe import JaxMoE
+from tpu_inference.layers.jax.quantization.configs import QuantLinearConfig
 # yapf: disable
 from tpu_inference.layers.jax.quantization.fp8 import (
     Fp8Config, Fp8TensorwiseLinearMethod)
@@ -77,6 +77,8 @@ def sharding_to_tuple(sharding):
         return tuple(s for s in sharding.spec)
     if isinstance(sharding, jax.sharding.PartitionSpec):
         return tuple(s for s in sharding)
+    if isinstance(sharding, jax.sharding.SingleDeviceSharding):
+        return ()
     raise ValueError(f"Unsupported sharding type: {type(sharding)}")
 
 
@@ -101,8 +103,8 @@ def mesh():
 def rngs():
     return nnx.Rngs(42)
 
-class TestLinearOpAdaptInfo:
-    """Test QuantLinearConfig.get_adapt_info axis classification."""
+class TestQuantLinearConfig:
+    """Test QuantLinearConfig axis classification."""
 
     @pytest.mark.parametrize("einsum_str,weight_shape,weight_sharding", [
         ("ab,bc->ac", (32, 16), (None, 'out')),
@@ -116,40 +118,37 @@ class TestLinearOpAdaptInfo:
             layer = JaxEinsum(einsum_str, weight_shape, rngs, kernel_init=nnx.with_partitioning(nnx.initializers.uniform(), weight_sharding))
         else:
             layer = JaxEinsum(einsum_str, weight_shape, rngs)
-        info = QuantLinearConfig.get_adapt_info(einsum_str=layer.einsum_str,
-                                                weight=layer.weight)
-        assert info.in_features == (32, )  # b is contracting
-        assert info.out_features == (16, )  # c is free
-        assert info.batch_features == ()  # no batch dims
+
+        config = QuantLinearConfig(layer, enable_sp=False)
+        assert config.in_features == (32, )  # b is contracting
+        assert config.out_features == (16, )  # c is free
+        assert config.batch_features == ()  # no batch dims
         if kernel_init_with_sharding:
-            assert info.out_features_sharding == ("out", )
+            assert config.out_features_sharding == ("out", )
 
     def test_2d_weight_3d_output(self, rngs):
         """TD,DNH->TNH: D is contracting, N and H are output-only."""
         layer = JaxEinsum('TD,DNH->TNH', (128, 8, 16), rngs)
-        info = QuantLinearConfig.get_adapt_info(einsum_str=layer.einsum_str,
-                                                weight=layer.weight)
-        assert info.in_features == (128, )  # D is contracting
-        assert info.out_features == (8, 16)  # N, H are free
-        assert info.batch_features == ()  # no batch dims
+        config = QuantLinearConfig(layer, enable_sp=False)
+        assert config.in_features == (128, )  # D is contracting
+        assert config.out_features == (8, 16)  # N, H are free
+        assert config.batch_features == ()  # no batch dims
 
     def test_batched_einsum_tnh_anh_tna(self, rngs):
         """TNH,ANH->TNA: N is batch dim, H is contracting."""
         layer = JaxEinsum('TNH,ANH->TNA', (16, 4, 8), rngs)
-        info = QuantLinearConfig.get_adapt_info(einsum_str=layer.einsum_str,
-                                                weight=layer.weight)
-        assert info.in_features == (8, )  # H is contracting
-        assert info.out_features == (16, )  # A is free
-        assert info.batch_features == (4, )  # N is batch
+        config = QuantLinearConfig(layer, enable_sp=False)
+        assert config.in_features == (8, )  # H is contracting
+        assert config.out_features == (16, )  # A is free
+        assert config.batch_features == (4, )  # N is batch
 
     def test_batched_einsum_tna_anh_tnh(self, rngs):
         """TNA,ANH->TNH: N is batch dim, A is contracting."""
         layer = JaxEinsum('TNA,ANH->TNH', (16, 4, 8), rngs)
-        info = QuantLinearConfig.get_adapt_info(einsum_str=layer.einsum_str,
-                                                weight=layer.weight)
-        assert info.in_features == (16, )  # A is contracting
-        assert info.out_features == (8, )  # H is free
-        assert info.batch_features == (4, )  # N is batch
+        config = QuantLinearConfig(layer, enable_sp=False)
+        assert config.in_features == (16, )  # A is contracting
+        assert config.out_features == (8, )  # H is free
+        assert config.batch_features == (4, )  # N is batch
 
 
 class TestFp8BlockwiseJaxLinear:
@@ -158,9 +157,10 @@ class TestFp8BlockwiseJaxLinear:
                                                           (256, 128)])
     @pytest.mark.parametrize("use_bias", [True, False])
     @pytest.mark.parametrize("batch_size", [1, 4])
-    @pytest.mark.parametrize("weight_sharding", [(None,), ('in', None), (None, 'out'), ('in', 'out')])
+    @pytest.mark.parametrize("weight_sharding", [(None, None), ('in', None), (None, 'out'), ('in', 'out')])
+    @pytest.mark.parametrize("num_devices", [1, len(jax.devices())])
     def test_linear_forward_correctness(self, in_features, out_features,
-                                        use_bias, batch_size, weight_sharding, rngs):
+                                        use_bias, batch_size, weight_sharding, num_devices, rngs):
         hf_quant_config = {
             "quant_method": "fp8",
             "activation_scheme": "dynamic",
@@ -179,11 +179,13 @@ class TestFp8BlockwiseJaxLinear:
         )
 
         # Use a dummy mesh for testing
-        devices = jax.devices()
-        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
+        devices = jax.devices()[:num_devices]
+        mesh = jax.sharding.Mesh(np.array(devices).reshape(-1, 1, 1), ('in', 'out', 'data'))
         with jax.set_mesh(mesh):
             # Process weights in mesh context
-            layer.quant_method.process_weights_after_loading(layer)
+            layer.weight.set_metadata("_is_loaded", True)
+            layer.weight_scale_inv.set_metadata("_is_loaded", True)
+            assert layer.quant_method.process_weights_after_loading(layer)
 
             # Prepare input
             x = jax.random.normal(rngs.params(), (batch_size, in_features))
@@ -193,15 +195,17 @@ class TestFp8BlockwiseJaxLinear:
 
         assert output.shape == (batch_size, out_features)
         assert layer.weight.shape == (out_features, in_features)
-        assert sharding_to_tuple(layer.weight.sharding) in [(None, None), ('out', None), (None, 'in'), ('out', 'in')]
+        expected_weight_sharding = weight_sharding[::-1]
+        assert sharding_to_tuple(layer.weight.sharding) == expected_weight_sharding
         if use_bias:
             assert layer.bias.shape == (out_features, )
-            assert sharding_to_tuple(layer.bias.sharding) in [(None,), ('out',)]
+            expected_bias_sharding = ('out',) if 'out' in weight_sharding else (None,)
+            assert sharding_to_tuple(layer.bias.sharding) == expected_bias_sharding
 
     @pytest.mark.parametrize("kernel_shape", [(128, 8, 16), (256, 32, 32)])
     @pytest.mark.parametrize("use_bias", [True, False])
     @pytest.mark.parametrize("batch_size", [1, 4])
-    @pytest.mark.parametrize("weight_sharding", [(None,), ('in', None), (None, 'out'), ('in', None, 'out'), (None, None, 'out')])
+    @pytest.mark.parametrize("weight_sharding", [('in', None), (None, 'out'), ('in', None, 'out'), (None, None, 'out')])
     def test_einsum_forward_correctness(self, kernel_shape, use_bias,
                                         batch_size, weight_sharding, rngs):
         hf_quant_config = {
@@ -222,10 +226,12 @@ class TestFp8BlockwiseJaxLinear:
 
         # Use a dummy mesh for testing
         devices = jax.devices()
-        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
+        mesh = jax.sharding.Mesh(np.array(devices).reshape(-1, 1, 1), ('in', 'out', 'data'))
         with jax.set_mesh(mesh):
             # Process weights in mesh context
-            layer.quant_method.process_weights_after_loading(layer)
+            layer.weight.set_metadata("_is_loaded", True)
+            layer.weight_scale_inv.set_metadata("_is_loaded", True)
+            assert layer.quant_method.process_weights_after_loading(layer)
 
             # Prepare input (B, D)
             x = jax.random.normal(rngs.params(), (batch_size, kernel_shape[0]))
@@ -237,10 +243,14 @@ class TestFp8BlockwiseJaxLinear:
         expected_shape = (batch_size, ) + kernel_shape[1:]
         assert output.shape == expected_shape
         assert layer.weight.shape == (math.prod(kernel_shape[1:]), kernel_shape[0])
-        assert sharding_to_tuple(layer.weight.sharding) in [(None, None), ('out', None), (None, 'in'), ('out', 'in')]
+
+        expected_weight_sharding = ('out',) if 'out' in weight_sharding else (None,)
+        expected_weight_sharding += ('in',) if 'in' in weight_sharding else (None,)
+        assert sharding_to_tuple(layer.weight.sharding) == expected_weight_sharding
         if use_bias:
             assert layer.bias.shape == (math.prod(kernel_shape[1:]),)
-            assert sharding_to_tuple(layer.bias.sharding) in [(None,), ('out',)]
+            expected_bias_sharding = ('out',) if 'out' in weight_sharding else (None,)
+            assert sharding_to_tuple(layer.bias.sharding) == expected_bias_sharding
 
     @pytest.mark.parametrize("kernel_shape", [(16, 4, 8), (32, 8, 16)])
     @pytest.mark.parametrize("batch_size", [1, 4])
@@ -265,7 +275,7 @@ class TestFp8BlockwiseJaxLinear:
         devices = jax.devices()
         mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
         with jax.set_mesh(mesh):
-            layer.quant_method.process_weights_after_loading(layer)
+            assert layer.quant_method.process_weights_after_loading(layer)
 
             x = jax.random.normal(rngs.params(), (batch_size, N, H))
             output = layer(x)
@@ -295,7 +305,7 @@ class TestFp8BlockwiseJaxLinear:
         devices = jax.devices()
         mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
         with jax.set_mesh(mesh):
-            layer.quant_method.process_weights_after_loading(layer)
+            assert layer.quant_method.process_weights_after_loading(layer)
 
             x = jax.random.normal(rngs.params(), (batch_size, N, A))
             output = layer(x)
@@ -309,7 +319,7 @@ class TestFp8TensorwiseJaxLinear:
     def test_fp8_linear_method_create_weights(self, mesh, rngs):
         with jax.set_mesh(mesh):
             layer = JaxEinsum("ab,bc->ac", (32, 16), rngs, bias_shape=None)
-            config = QuantLinearConfig(enable_sp=False, output_sizes=[16])
+            config = QuantLinearConfig(layer, enable_sp=False)
             method = Fp8TensorwiseLinearMethod(layer, config)
             method.create_weights_jax(layer, rngs=rngs)
 
@@ -324,7 +334,7 @@ class TestFp8TensorwiseJaxLinear:
     def test_fp8_loader_prevents_upcast(self, mesh, rngs):
         with jax.set_mesh(mesh):
             layer = JaxEinsum("ab,bc->ac", (4, 2), rngs, bias_shape=None)
-            config = QuantLinearConfig(enable_sp=False, output_sizes=[2])
+            config = QuantLinearConfig(layer, enable_sp=False)
             method = Fp8TensorwiseLinearMethod(layer, config)
             method.create_weights_jax(layer, rngs=rngs)
 
@@ -592,41 +602,31 @@ class TestFp8FusedMoE:
         # Begin mimic loading weights from checkpoint.
         block_m, block_n = quant_config.weight_block_size
         w_gate_fp8, gate_scale = quantize_to_fp8_block_3d(
-            jnp.transpose(gate, (0, 2, 1)), block_m, block_n, jnp.float8_e4m3fn)
+            gate.to_device(jax.devices('cpu')[0]), block_m, block_n, jnp.float8_e4m3fn)
         w_up_fp8, up_scale = quantize_to_fp8_block_3d(
-            jnp.transpose(up, (0, 2, 1)), block_m, block_n, jnp.float8_e4m3fn)
+            up.to_device(jax.devices('cpu')[0]), block_m, block_n, jnp.float8_e4m3fn)
         w2_weight, w2_weight_scale = quantize_to_fp8_block_3d(
-            jnp.transpose(w2, (0, 2, 1)), block_m, block_n, jnp.float8_e4m3fn)
+            w2.to_device(jax.devices('cpu')[0]), block_m, block_n, jnp.float8_e4m3fn)
 
         scale_suffix = layer.quant_method.weight_scale_name
 
         getattr(
             layer,
-            f"kernel_gating_EDF_{scale_suffix}").value = gate_scale
+            f"kernel_gating_EDF_{scale_suffix}").set_metadata(_weights_to_load = jnp.vsplit(gate_scale, num_experts))
         getattr(
             layer,
-            f"kernel_up_proj_EDF_{scale_suffix}").value = up_scale
+            f"kernel_up_proj_EDF_{scale_suffix}").set_metadata(_weights_to_load = jnp.vsplit(up_scale, num_experts))
         getattr(layer,
-                f"kernel_down_proj_EFD_{scale_suffix}").value = w2_weight_scale
+                f"kernel_down_proj_EFD_{scale_suffix}").set_metadata(_weights_to_load = jnp.vsplit(w2_weight_scale, num_experts))
 
         # Overwrite the layer's parameters with our FP8 data
-        layer.kernel_gating_EDF.value = w_gate_fp8
-        layer.kernel_up_proj_EDF.value = w_up_fp8
-        layer.kernel_down_proj_EFD.value = w2_weight
-
-        for param in [
-            getattr(layer, f"kernel_gating_EDF_{scale_suffix}"),
-            getattr(layer, f"kernel_up_proj_EDF_{scale_suffix}"),
-            getattr(layer, f"kernel_down_proj_EFD_{scale_suffix}"),
-            layer.kernel_gating_EDF,
-            layer.kernel_up_proj_EDF,
-            layer.kernel_down_proj_EFD
-        ]:
-            param.set_metadata("_cnt_moe_weights_loaded", layer.num_local_experts)
+        layer.kernel_gating_EDF.set_metadata(_weights_to_load = jnp.vsplit(w_gate_fp8, num_experts))
+        layer.kernel_up_proj_EDF.set_metadata(_weights_to_load = jnp.vsplit(w_up_fp8, num_experts))
+        layer.kernel_down_proj_EFD.set_metadata(_weights_to_load = jnp.vsplit(w2_weight, num_experts))
         # End mimic loading weights from checkpoint.
 
         with jax.set_mesh(mesh):
-            layer.quant_method.process_weights_after_loading(layer)
+            assert layer.quant_method.process_weights_after_loading(layer)
 
         # Patch the router since we don't want to use the
         # real router

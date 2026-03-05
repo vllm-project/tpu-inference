@@ -99,6 +99,15 @@ def mock_get_pp_group():
         yield
 
 
+@pytest.fixture(autouse=True)
+def mock_register_oot():
+    """Prevents Duplicate layer name errors from register_oot."""
+    with patch(
+            "vllm.model_executor.layers.mla.MultiHeadLatentAttentionWrapper.register_oot"
+    ):
+        yield
+
+
 # ==============================================================================
 # >> Test Cases
 # ==============================================================================
@@ -363,18 +372,37 @@ class TestGetModel:
     @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "flax_nnx"}, clear=True)
     @patch("tpu_inference.models.common.model_loader.get_vllm_model")
     @patch("tpu_inference.models.common.model_loader.get_flax_model")
-    def test_get_model_flax_happy_path_withPP(self, mock_get_flax,
-                                              mock_get_vllm, vllm_config, rng,
-                                              mesh):
-        """Tests that 'flax_nnx' impl calls get_vllm_model when PP is enabled."""
+    def test_get_model_flax_fallback_to_vllm_with_pp_on_unsupported_models(
+            self, mock_get_flax, mock_get_vllm, vllm_config, rng, mesh):
+        """Tests that 'flax_nnx' impl calls get_vllm_model when PP is enabled on
+        unsupported models (e.g. GptOssForCausalLM)."""
         mock_get_flax.return_value = "flax_model_sentinel"
         mock_get_vllm.return_value = "vllm_model_sentinel"
         vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.model_config.hf_config.architectures = [
+            "GptOssForCausalLM"
+        ]
         result = model_loader.get_model(vllm_config, rng, mesh)
 
         mock_get_flax.assert_not_called()
         mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh)
         assert result == "vllm_model_sentinel"
+
+    @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "flax_nnx"}, clear=True)
+    @patch("tpu_inference.models.common.model_loader.get_vllm_model")
+    @patch("tpu_inference.models.common.model_loader.get_flax_model")
+    def test_get_model_flax_no_fallback_with_pp_on_supported_models(
+            self, mock_get_flax, mock_get_vllm, vllm_config, rng, mesh):
+        """Tests that 'flax_nnx' impl calls get_flax_model when PP is enabled on
+        supported models (e.g. Qwen3ForCausalLM)."""
+        mock_get_flax.return_value = "flax_model_sentinel"
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.model_config.hf_config.architectures = ["Qwen3ForCausalLM"]
+        result = model_loader.get_model(vllm_config, rng, mesh)
+
+        mock_get_flax.assert_called_once_with(vllm_config, rng, mesh, False)
+        mock_get_vllm.assert_not_called()
+        assert result == "flax_model_sentinel"
 
     @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "vllm"}, clear=True)
     @patch("tpu_inference.models.common.model_loader.get_vllm_model")

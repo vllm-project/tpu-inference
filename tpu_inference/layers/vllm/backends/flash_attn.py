@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import functools
 from typing import Optional, Tuple
 
 import jax
@@ -216,8 +215,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         return torch_view(outputs)
 
 
-@functools.partial(
-    jax.jit,
+@jax.jit(
     static_argnames=(
         "mesh",
         "scale",
