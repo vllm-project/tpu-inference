@@ -104,7 +104,6 @@ def flash_attention(
     m_curr = jnp.max(qk, axis=-1, keepdims=True)
     m_next = jnp.maximum(m_prev, m_curr)
     p = jnp.exp(qk - broadcast_minor(m_next, qk.shape))
-    p = jnp.where(mask, p, 0.0)
 
     pv = lax.dot(
         einshape.jax_einshape('bkts->(bk)ts', p),
