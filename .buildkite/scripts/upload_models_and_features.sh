@@ -22,9 +22,9 @@ FEATURE_LIST_KEY="feature-list"
 
 declare -a TARGET_FOLDERS=(
     "quantization"
-    "parallelism"
-    "models"
-    "features"
+    # "parallelism"
+    # "models"
+    # "features"
 )
 
 
