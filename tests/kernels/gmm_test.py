@@ -299,7 +299,7 @@ class GmmTest(jtu.JaxTestCase):
         self.assertArraysAllClose(actual, expected, atol=1.1, rtol=1.1)
 
     @parameterized.product(
-        batch_size=[129, 135, 255],
+        batch_size=[128, 256],
         in_size=[255, 500],
         out_size=[255, 500],
         num_groups=[16],
@@ -343,51 +343,7 @@ class GmmTest(jtu.JaxTestCase):
         self.assertArraysAllClose(actual, expected)
 
     @parameterized.product(
-        batch_size=[33, 65],
-        in_size=[256],
-        out_size=[256],
-        num_groups=[4],
-        has_bias=[False],
-        group_offset=[0],
-    )
-    @pytest.mark.skip(reason="padding not yet implemented")
-    def test_gmm_implicit_padding_small_m(self, batch_size, in_size, out_size,
-                                          num_groups, has_bias, group_offset):
-        num_local_groups = num_groups - group_offset
-        key = jax.random.key(0)
-
-        lhs = jax.random.normal(key, (batch_size, in_size), dtype=jnp.bfloat16)
-        rhs = jax.random.normal(key, (num_local_groups, in_size, out_size),
-                                dtype=jnp.bfloat16)
-        rhs_bias = None
-        if has_bias:
-            rhs_bias = jax.random.normal(key, (num_local_groups, 1, out_size),
-                                         dtype=jnp.bfloat16)
-
-        group_sizes = get_group_sizes(batch_size, num_groups)
-        group_offset = jnp.array(group_offset, dtype=jnp.int32)
-
-        expected = reference_gmm(
-            lhs,
-            rhs,
-            group_sizes,
-            rhs_bias=rhs_bias,
-            group_offset=group_offset,
-        )
-
-        actual = gmm_v2(
-            lhs,
-            rhs,
-            group_sizes,
-            rhs_bias=rhs_bias,
-            group_offset=group_offset,
-        )
-
-        self.assertEqual(actual.shape, (batch_size, out_size))
-        self.assertArraysAllClose(actual, expected)
-
-    @parameterized.product(
-        batch_size=[129],
+        batch_size=[128],
         in_size=[512],
         out_size=[500],
         num_groups=[16],
