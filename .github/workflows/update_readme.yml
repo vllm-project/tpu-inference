@@ -1,0 +1,36 @@
+name: Update README Tables
+
+on:
+  push:
+    branches:
+      - main  # Or your default branch, e.g., master
+      - vllm-tpu-community-contribution-UX-update
+    paths:
+      - 'support_matrices/**.csv' # Only run this action if a CSV file changes
+
+jobs:
+  update-readme:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Run README update script
+        run: python update_readme.py
+
+      - name: Run Combined Matrix Generation
+        run: python scripts/combine_matrices.py
+
+      - name: Commit and push if changed
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add README.md support_matrices/combined_model_support_matrix.csv
+          # Only commit if there are changes
+          git diff --staged --quiet || git commit -m "docs: auto-update support matrices in README and combined CSV"
+          git push
