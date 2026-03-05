@@ -611,3 +611,154 @@ def fused_moe_func2(
     )
     x_n = jnp.concatenate([x_1, x_2], axis=0)
     return x_n[:num_tokens, :hidden_size]
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=(
+        "topk",
+        "renormalize",
+        "mesh",
+        "use_ep",
+        "activation",
+        "scoring_fn",
+        "num_stages",
+    ),
+)
+def fused_moe_func3(
+    hidden_states: jax.Array,
+    w1: jax.Array,
+    w2: jax.Array,
+    w1_scale: jax.Array | None,
+    w2_scale: jax.Array | None,
+    w1_bias: jax.Array | None,
+    w2_bias: jax.Array | None,
+    gating_output: jax.Array,
+    topk: int,
+    renormalize: bool,
+    mesh: Mesh,
+    use_ep: bool,
+    activation: str,
+    scoring_fn: str,
+    num_stages: int = 2,
+) -> jax.Array:
+    """Route tokens in hidden_states into each experts based on routing.
+
+    This version splits the tokens into num_stages chunks along the first
+    dimension and processes each chunk sequentially to overlap computation
+    with communication.
+
+    Args:
+        hidden_states: [num_tokens, hidden_size]
+        w1: first moe weights [num_experts, intermediate_size * 2, hidden_size]
+        w2: second moe weights [num_experts, hidden_size, intermediate_size]
+        w1_scale: w1 scale [num_experts, num_blocks, 1, intermediate_size * 2]
+        w2_scale: w2 scale [num_experts, num_blocks, 1, hidden_size]
+        w1_bias: optional bias of w1 [num_experts, 1, intermediate_size * 2]
+        w2_bias: optional bias of w2 [num_experts, 1, hidden_size]
+        gating_output: routing information of tokens [num_tokens, num_experts]
+        topk: number of experts to choose per token.
+        renormalize: normalize gating_output.
+        mesh: mesh to perform moe.
+        use_ep: use expert parallelism.
+        activation: activation function to perform on the output of w1.
+        scoring_fn: scoring function to apply on gating_output.
+        num_stages: number of stages to split the tokens into for pipelining.
+
+    Returns:
+        Output of moe operation [num_tokens, hidden_size]
+    """
+    num_tokens, hidden_size = hidden_states.shape
+    global_num_experts, padded_hidden_size, _ = w1.shape
+    dtype = hidden_states.dtype
+
+    assert num_stages >= 1, f"num_stages must be >= 1 but got {num_stages}"
+    assert num_tokens % num_stages == 0, (
+        f"num_tokens ({num_tokens}) must be divisible by num_stages ({num_stages})"
+    )
+
+    chunk_size = num_tokens // num_stages
+
+    assert (chunk_size * topk) % 16 == 0, (
+        "The kernel requires chunk_size * topk to be a multiple of "
+        f"16 but got {chunk_size}*{topk}={chunk_size*topk}")
+
+    assert gating_output.shape == (num_tokens, global_num_experts)
+
+    topk_weights = apply_scoring_fn(scoring_fn, gating_output)
+    topk_weights = jax.lax.with_sharding_constraint(
+        topk_weights, NamedSharding(mesh, P(MLP_DATA, None)))
+    topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
+    topk_weights = topk_weights.astype(dtype)
+
+    def _process_tokens_locally(hidden_states_local, topk_indices_local):
+        num_tokens_local = hidden_states_local.shape[0]
+        topk_indices_flat = topk_indices_local.flatten()
+        topk_argsort_indices = jnp.argsort(topk_indices_flat)
+        topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
+        token_indices = jnp.arange(num_tokens_local,
+                                   dtype=jnp.int32).repeat(topk)
+        token_indices_sorted = token_indices[topk_argsort_indices]
+        group_sizes_local = jnp.bincount(topk_indices_flat,
+                                         length=global_num_experts)
+
+        x = hidden_states_local[token_indices_sorted]
+
+        return x, group_sizes_local, topk_argsort_revert_indices
+
+    # Reshape inputs to (num_stages, chunk_size, ...) for scan
+    hidden_states_stages = hidden_states.reshape(num_stages, chunk_size,
+                                                 hidden_size)
+    topk_indices_stages = topk_indices.reshape(num_stages, chunk_size, topk)
+    topk_weights_stages = topk_weights.reshape(num_stages, chunk_size, topk)
+
+    def scan_body(carry, stage_inputs):
+        hidden_states_chunk, topk_indices_chunk, topk_weights_chunk = stage_inputs
+
+        x_chunk, group_sizes_chunk, revert_indices_chunk = jax.shard_map(
+            _process_tokens_locally,
+            mesh=mesh,
+            in_specs=(
+                P(MLP_DATA, None),
+                P(MLP_DATA, None),
+            ),
+            out_specs=(
+                P(MLP_DATA, None),
+                P(MLP_DATA),
+                P(MLP_DATA),
+            ),
+        )(hidden_states_chunk, topk_indices_chunk)
+
+        x_chunk = jnp.pad(x_chunk,
+                          ((0, 0), (0, padded_hidden_size - hidden_size)))
+
+        x_chunk = expert_parallel_gmm(
+            x_chunk,
+            w1,
+            w1_scale,
+            w1_bias,
+            w2,
+            w2_scale,
+            w2_bias,
+            group_sizes_chunk,
+            revert_indices_chunk,
+            topk_weights_chunk,
+            activation=activation,
+            topk=topk,
+            mesh=mesh,
+        )
+
+        return carry, x_chunk
+
+    _, x_stages = jax.lax.scan(
+        scan_body,
+        init=None,
+        xs=(hidden_states_stages, topk_indices_stages, topk_weights_stages),
+        unroll=True,  # unroll=False for debugging
+    )
+
+    # x_stages shape: (num_stages, chunk_size, padded_hidden_size)
+    x_out = x_stages.reshape(num_tokens, -1)
+    return x_out[:num_tokens, :hidden_size]
