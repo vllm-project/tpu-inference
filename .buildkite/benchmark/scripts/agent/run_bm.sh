@@ -138,7 +138,6 @@ fi
 echo "Printing the vllm serve command used to start the server:"
 echo "$VLLM_ENVS vllm serve $MODEL \
  --seed 42 \
- --disable-log-requests \
  --max-num-seqs $MAX_NUM_SEQS \
  --max-num-batched-tokens $MAX_NUM_BATCHED_TOKENS \
  --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
@@ -148,7 +147,6 @@ echo "$VLLM_ENVS vllm serve $MODEL \
 
 eval "$VLLM_ENVS vllm serve $MODEL \
  --seed 42 \
- --disable-log-requests \
  --max-num-seqs $MAX_NUM_SEQS \
  --max-num-batched-tokens $MAX_NUM_BATCHED_TOKENS \
  --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
