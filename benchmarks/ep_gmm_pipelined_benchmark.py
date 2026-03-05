@@ -762,3 +762,107 @@ def fused_moe_func3(
     # x_stages shape: (num_stages, chunk_size, padded_hidden_size)
     x_out = x_stages.reshape(num_tokens, -1)
     return x_out[:num_tokens, :hidden_size]
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=(
+        "topk",
+        "renormalize",
+        "mesh",
+        "use_ep",
+        "activation",
+        "scoring_fn",
+        "num_stages",
+    ),
+)
+def fused_moe_func4(
+    hidden_states: jax.Array,
+    w1: jax.Array,
+    w2: jax.Array,
+    w1_scale: jax.Array | None,
+    w2_scale: jax.Array | None,
+    w1_bias: jax.Array | None,
+    w2_bias: jax.Array | None,
+    gating_output: jax.Array,
+    topk: int,
+    renormalize: bool,
+    mesh: Mesh,
+    use_ep: bool,
+    activation: str,
+    scoring_fn: str,
+    num_stages: int = 2,
+) -> jax.Array:
+    """Route tokens in hidden_states into each experts based on routing.
+
+    This version splits the tokens into num_stages chunks along the first
+    dimension and calls fused_moe_func for each chunk via jax.lax.scan
+    with unroll=True.
+
+    Args:
+        hidden_states: [num_tokens, hidden_size]
+        w1: first moe weights [num_experts, intermediate_size * 2, hidden_size]
+        w2: second moe weights [num_experts, hidden_size, intermediate_size]
+        w1_scale: w1 scale [num_experts, num_blocks, 1, intermediate_size * 2]
+        w2_scale: w2 scale [num_experts, num_blocks, 1, hidden_size]
+        w1_bias: optional bias of w1 [num_experts, 1, intermediate_size * 2]
+        w2_bias: optional bias of w2 [num_experts, 1, hidden_size]
+        gating_output: routing information of tokens [num_tokens, num_experts]
+        topk: number of experts to choose per token.
+        renormalize: normalize gating_output.
+        mesh: mesh to perform moe.
+        use_ep: use expert parallelism.
+        activation: activation function to perform on the output of w1.
+        scoring_fn: scoring function to apply on gating_output.
+        num_stages: number of stages to split the tokens into for pipelining.
+
+    Returns:
+        Output of moe operation [num_tokens, hidden_size]
+    """
+    num_tokens, hidden_size = hidden_states.shape
+    global_num_experts = gating_output.shape[1]
+
+    assert num_stages >= 1, f"num_stages must be >= 1 but got {num_stages}"
+    assert num_tokens % num_stages == 0, (
+        f"num_tokens ({num_tokens}) must be divisible by num_stages ({num_stages})"
+    )
+
+    chunk_size = num_tokens // num_stages
+
+    # Reshape inputs to (num_stages, chunk_size, ...) for scan
+    hidden_states_stages = hidden_states.reshape(num_stages, chunk_size,
+                                                 hidden_size)
+    gating_output_stages = gating_output.reshape(num_stages, chunk_size,
+                                                 global_num_experts)
+
+    def scan_body(carry, stage_inputs):
+        hidden_states_chunk, gating_output_chunk = stage_inputs
+
+        x_chunk = fused_moe_func(
+            hidden_states_chunk,
+            w1,
+            w2,
+            w1_scale,
+            w2_scale,
+            w1_bias,
+            w2_bias,
+            gating_output_chunk,
+            topk=topk,
+            renormalize=renormalize,
+            mesh=mesh,
+            use_ep=use_ep,
+            activation=activation,
+            scoring_fn=scoring_fn,
+        )
+
+        return carry, x_chunk
+
+    _, x_stages = jax.lax.scan(
+        scan_body,
+        init=None,
+        xs=(hidden_states_stages, gating_output_stages),
+        unroll=True,  # unroll=False for debugging
+    )
+
+    # x_stages shape: (num_stages, chunk_size, hidden_size)
+    return x_stages.reshape(num_tokens, hidden_size)
