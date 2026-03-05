@@ -24,6 +24,7 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.v1.attention.backend import AttentionType
+from tpu_inference.layers.common.sharding import ShardingAxisName
 
 from tpu_inference import utils
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
@@ -75,14 +76,13 @@ class VllmTPUMLAAttention(MLAAttention):
             # usage than expected.
 
             # TODO(gxd3): consider quantize W_UK_T, W_UV back to fp8.
-            # Explicit replicate `W_UK_T`, `W_UV` to all TPU, given MLA layers
-            # are pure DP.
+            # Device_put `W_UK_T`, `W_UV` to TPUs
             mesh = self.kv_b_proj.quant_method.linear_config.mesh
             self.W_UK_T = torch_view(
-                jax.device_put(jax_view(self.W_UK_T), NamedSharding(mesh, P()))
+                jax.device_put(jax_view(self.W_UK_T), NamedSharding(mesh, P(ShardingAxisName.ATTN_HEAD,)))
             )
             self.W_UV = torch_view(
-                jax.device_put(jax_view(self.W_UV), NamedSharding(mesh, P()))
+                jax.device_put(jax_view(self.W_UV), NamedSharding(mesh, P(ShardingAxisName.ATTN_HEAD,)))
             )
 
             self.W_UK_T = Parameter(self.W_UK_T, requires_grad=False)

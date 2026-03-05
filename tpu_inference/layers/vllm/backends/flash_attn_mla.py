@@ -121,22 +121,28 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
         # Prepare inputs
         q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=2)
 
-        # (B, N, P) x (N, P, L) -> (B, N, L)
-        # torch nn param
-        q_nope = jax.shard_map(
-            lambda x, w_uk: jnp.einsum("bnp,npl->bnl", x, w_uk),
-            mesh=mesh,
-            in_specs=(
-                P(
+
+        def sharded_fn(x, w, fn):
+            return jax.shard_map(
+                lambda sharded_x, sharded_w: fn(sharded_x, sharded_w),
+                mesh=mesh,
+                in_specs=(
+                    P(ShardingAxisName.ATTN_DATA,),
+                    P(ShardingAxisName.ATTN_HEAD,),
+                ),
+                out_specs=P(
                     ShardingAxisName.ATTN_DATA,
                 ),
-                P(),
-            ),
-            out_specs=P(
-                ShardingAxisName.ATTN_DATA,
-            ),
-            check_vma=False,
-        )(q_nope, jax_view(layer.W_UK_T))
+                check_vma=False,
+            )(x, w)
+
+        # (B, N, P) x (N, P, L) -> (B, N, L)
+        # torch nn param
+        q_nope = sharded_fn(
+            q_nope,
+            jax_view(layer.W_UK_T),
+            lambda x, w_uk: jnp.einsum("bnp,npl->bnl", x, w_uk),
+        )
 
         q_scale = k_scale = v_scale = None
         if layer.kv_cache_quantized_dtype:
@@ -173,22 +179,13 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             sm_scale=self.scale,
         )
 
-        outputs = jax.shard_map(
+        outputs = sharded_fn(
+            outputs,
+            jax_view(layer.W_UV),
             lambda x, w_uv: jnp.einsum(
                 "bnl,nlv->bnv", x.reshape(-1, self.num_heads, self.kv_lora_rank), w_uv
             ).reshape(-1, self.num_heads * self.v_head_dim),
-            mesh=mesh,
-            in_specs=(
-                P(
-                    ShardingAxisName.ATTN_DATA,
-                ),
-                P(),
-            ),
-            out_specs=P(
-                ShardingAxisName.ATTN_DATA,
-            ),
-            check_vma=False,
-        )(outputs, jax_view(layer.W_UV))
+        )
 
         return outputs, new_kv_cache
 
