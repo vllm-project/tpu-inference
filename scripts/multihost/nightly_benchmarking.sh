@@ -54,7 +54,7 @@ export CODE_HASH="a4047d4-cf732f1-"
 export CREATED_BY="bm-scheduler"
 
 # Define the commands utilizing the unified parameters
-SERVER_CMD="TPU_BACKEND_TYPE=jax MODEL_IMPL_TYPE=vllm VLLM_DISABLE_SHARED_EXPERTS_STREAM=1 vllm serve --seed 42 --model ${TARGET_MODEL_PATH} --max-model-len=${MAX_MODEL_LEN} --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} --max-num-seqs ${MAX_NUM_SEQS} --no-enable-prefix-caching --disable-log-requests --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} --kv_cache_dtype=\"fp8\" --no-async-scheduling --load-format=runai_streamer"
+SERVER_CMD="TPU_BACKEND_TYPE=jax MODEL_IMPL_TYPE=vllm VLLM_DISABLE_SHARED_EXPERTS_STREAM=1 vllm serve --seed 42 --model ${TARGET_MODEL_PATH} --max-model-len=${MAX_MODEL_LEN} --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} --max-num-seqs ${MAX_NUM_SEQS} --no-enable-prefix-caching --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} --kv_cache_dtype=\"fp8\" --no-async-scheduling --load-format=runai_streamer"
 BENCHMARK_CMD="vllm bench serve --model ${TARGET_MODEL_PATH} --tokenizer ${TARGET_TOKENIZER} --dataset-name ${DATASET_NAME} --random-input-len ${INPUT_LEN} --random-output-len ${OUTPUT_LEN} --num-prompts ${NUM_PROMPTS} --ignore-eos"
 
 
