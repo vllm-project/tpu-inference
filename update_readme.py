@@ -239,74 +239,63 @@ def format_kernel_name(name):
 
 def generate_html_microbenchmark_table(headers, data):
     """Generates an HTML table specifically for the microbenchmarks matrix."""
-    return """<table>
-  <thead>
-    <tr>
-      <th width="150" style="text-align:left">Category</th>
-      <th width="300" style="text-align:left">Test</th>
-      <th>W16A16</th>
-      <th>W8A16</th>
-      <th>W8A8</th>
-      <th>W4A4</th>
-      <th>W4A8</th>
-      <th>W4A16</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td rowspan="2"><b>Moe</b></td>
-      <td>Fused&nbsp;MoE</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-    </tr>
-    <tr>
-      <td>gmm</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-    </tr>
-  </tbody>
-  <tbody>
-    <tr>
-      <td rowspan="1"><b>Dense</b></td>
-      <td>All&#8209;gather&nbsp;matmul</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-    </tr>
-  </tbody>
-  <tbody>
-    <tr>
-      <td rowspan="2"><b>Attention</b></td>
-      <td>MLA</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-    </tr>
-    <tr>
-      <td>Ragged&nbsp;paged&nbsp;attention</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-    </tr>
-  </tbody>
-</table>"""
+    categories = {"Moe": [], "Dense": [], "Attention": []}
+    
+    for row in data:
+        k = row[0].lower()
+        if "moe" in k or "gmm" in k:
+            categories["Moe"].append(row)
+        elif "attention" in k or "mla" in k:
+            categories["Attention"].append(row)
+        else:
+            categories["Dense"].append(row)
+            
+    html = []
+    html.append("<table>")
+    html.append("  <thead>")
+    html.append("    <tr>")
+    html.append("      <th width=\"150\" style=\"text-align:left\">Category</th>")
+    html.append("      <th width=\"300\" style=\"text-align:left\">Test</th>")
+    html.append("      <th>W16A16</th>")
+    html.append("      <th>W8A8</th>")
+    html.append("      <th>W8A16</th>")
+    html.append("      <th>W4A4</th>")
+    html.append("      <th>W4A8</th>")
+    html.append("      <th>W4A16</th>")
+    html.append("    </tr>")
+    html.append("  </thead>")
+    
+    display_names = {
+        "all-gather-matmul": "All&#8209;gather&nbsp;matmul",
+        "fused moe": "Fused&nbsp;MoE",
+        "gmm": "gmm",
+        "mla*": "MLA",
+        "generic ragged paged attention v3*": "Generic ragged paged attention v3*",
+        "ragged paged attention v3 head_dim 64*": "Ragged paged attention v3 head_dim 64*"
+    }
+    
+    for cat_name in ["Moe", "Dense", "Attention"]:
+        rows = categories[cat_name]
+        if not rows: continue
+        
+        html.append("  <tbody>")
+        for idx, row in enumerate(rows):
+            html.append("    <tr>")
+            if idx == 0:
+                html.append(f"      <td rowspan=\"{len(rows)}\"><b>{cat_name}</b></td>")
+            
+            kernel_key = row[0].lower()
+            safe_name = display_names.get(kernel_key, format_kernel_name(row[0].title()))
+            html.append(f"      <td>{safe_name}</td>")
+            
+            for i in range(1, 7):
+                cell_data = row[i] if i < len(row) else '<span title="❓&nbsp;Untested">❓</span>'
+                html.append(f"      <td>{cell_data}</td>")
+            html.append("    </tr>")
+        html.append("  </tbody>")
+        
+    html.append("</table>")
+    return "\n".join(html)
 
 def update_readme():
     """Finds markers in README.md and replaces content with fresh tables."""
@@ -354,23 +343,30 @@ def update_readme():
             merged_data = {}
             if v6_d:
                 for row in v6_d:
-                    if not row: continue
+                    if not row or row[0].lower() == "kernels": continue
                     merged_data[row[0]] = {"v6": row[1:]}
                     
             if v7_d:
                 for row in v7_d:
-                    if not row: continue
+                    if not row or row[0].lower() == "kernels": continue
                     if row[0] not in merged_data:
                         merged_data[row[0]] = {}
                     merged_data[row[0]]["v7"] = row[1:]
                     
             for kernel in sorted(merged_data.keys()):
-                v6_metrics = merged_data[kernel].get("v6", [""] * 12)
-                v7_metrics = merged_data[kernel].get("v7", [""] * 12)
-                # Ensure they have exactly 12 columns
-                v6_metrics = v6_metrics + [""] * (12 - len(v6_metrics))
-                v7_metrics = v7_metrics + [""] * (12 - len(v7_metrics))
-                all_data.append([kernel] + v6_metrics[:12] + v7_metrics[:12])
+                v6_metrics = merged_data[kernel].get("v6", [""] * 18)
+                v7_metrics = merged_data[kernel].get("v7", [""] * 18)
+                # Ensure they have exactly 18 columns to cover 6 quantizations (3 columns each)
+                v6_metrics = v6_metrics + [""] * (18 - len(v6_metrics))
+                v7_metrics = v7_metrics + [""] * (18 - len(v7_metrics))
+                
+                merged_row = [kernel]
+                for i in [0, 3, 6, 9, 12, 15]: 
+                    stat_v6 = merge_metrics(v6_metrics[i], v6_metrics[i+1])
+                    stat_v7 = merge_metrics(v7_metrics[i], v7_metrics[i+1])
+                    merged_row.append(_merge_hw_status(stat_v6, stat_v7))
+                
+                all_data.append(merged_row)
                 
             headers = ["test"] # Dummy header, script handles rendering manually
             new_table = generate_html_microbenchmark_table(headers, all_data)

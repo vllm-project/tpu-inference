@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-03-04 01:50 AM UTC*
+*Last Updated: 2026-03-05 12:18 AM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -353,8 +353,8 @@ Below is the live status of our supported models, features, and kernels. Click o
       <th width="150" style="text-align:left">Category</th>
       <th width="300" style="text-align:left">Test</th>
       <th>W16A16</th>
-      <th>W8A16</th>
       <th>W8A8</th>
+      <th>W8A16</th>
       <th>W4A4</th>
       <th>W4A8</th>
       <th>W4A16</th>
@@ -395,7 +395,16 @@ Below is the live status of our supported models, features, and kernels. Click o
   </tbody>
   <tbody>
     <tr>
-      <td rowspan="2"><b>Attention</b></td>
+      <td rowspan="3"><b>Attention</b></td>
+      <td>Generic ragged paged attention v3*</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
       <td>MLA</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -405,7 +414,7 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
-      <td>Ragged&nbsp;paged&nbsp;attention</td>
+      <td>Ragged paged attention v3 head_dim 64*</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
