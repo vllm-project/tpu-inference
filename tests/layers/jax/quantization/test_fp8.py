@@ -180,7 +180,7 @@ class TestFp8BlockwiseJaxLinear:
 
         # Use a dummy mesh for testing
         devices = jax.devices()[:num_devices]
-        mesh = jax.sharding.Mesh(np.array(devices).reshape(-1, 1), ('in', 'out'))
+        mesh = jax.sharding.Mesh(np.array(devices).reshape(-1, 1, 1), ('in', 'out', 'data'))
         with jax.set_mesh(mesh):
             # Process weights in mesh context
             layer.weight.set_metadata("_is_loaded", True)
@@ -226,7 +226,7 @@ class TestFp8BlockwiseJaxLinear:
 
         # Use a dummy mesh for testing
         devices = jax.devices()
-        mesh = jax.sharding.Mesh(np.array(devices).reshape(-1, 1), ('in', 'out'))
+        mesh = jax.sharding.Mesh(np.array(devices).reshape(-1, 1, 1), ('in', 'out', 'data'))
         with jax.set_mesh(mesh):
             # Process weights in mesh context
             layer.weight.set_metadata("_is_loaded", True)
@@ -554,7 +554,7 @@ class TestFp8FusedMoE:
                 ed_sharding=(None, None),
                 e_sharding=(None, ))
 
-            layer = JaxMoE(dtype=jnp.float8_e4m3fn,
+            layer = JaxMoE(dtype=jnp.bfloat16,
                         num_local_experts=num_experts,
                         apply_expert_weight_before_computation=False,
                         expert_axis_name=expert_axis_name,

@@ -37,7 +37,6 @@ steps:
             --tensor-parallel-size 16 \
             --trust-remote-code \
             --max-model-len 1024 \
-            --disable-log-requests \
             --no-async-scheduling \
             --load-format=runai_streamer \
             --no-enable-prefix-caching" \
