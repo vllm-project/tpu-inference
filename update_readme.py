@@ -447,7 +447,7 @@ def update_readme():
                 date_str = dt.strftime("%Y%m%d")
             except Exception:
                 date_str = "Unknown"
-                
+
             footer = (
                 "\n\n> **Note:**\n"
                 "> *   *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*"
@@ -467,12 +467,15 @@ def update_readme():
 
     # Automatically update the Last Updated timestamp
     import datetime
-    current_time = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %I:%M %p UTC")
-    content = re.sub(r"\*Last Updated: .*\*?", f"*Last Updated: {current_time}*", content)
+    current_time = datetime.datetime.now(
+        datetime.timezone.utc).strftime("%Y-%m-%d %I:%M %p UTC")
+    content = re.sub(r"\*Last Updated: .*\*?",
+                     f"*Last Updated: {current_time}*", content)
 
     with open(README_PATH, "w", encoding="utf-8") as f:
         f.write(content)
     print("✅ README.md has been automatically updated.")
+
 
 if __name__ == "__main__":
     update_readme()
