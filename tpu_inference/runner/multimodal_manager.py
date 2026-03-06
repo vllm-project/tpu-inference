@@ -235,8 +235,10 @@ class MultiModalManager:
                 if deepstack_output is not None:
                     self.runner.deepstack_cache[mm_hash] = deepstack_output
 
-    def gather_mm_embeddings(self, scheduler_output: "VllmSchedulerOutput",
-                             target_pad_len: int) -> list[jax.Array]:
+    def gather_mm_embeddings(
+        self, scheduler_output: "VllmSchedulerOutput",
+        target_pad_len: int,
+    ) -> jax.Array | tuple[jax.Array, list[jax.Array]] | None:
         mm_embeds: list[jax.Array] = []
         deepstack_layers: list[list[jax.Array]] | None = None
         deepstack_dim = None

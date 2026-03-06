@@ -3,6 +3,7 @@
 
 from dataclasses import InitVar, dataclass
 
+from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.models.jax.qwen3_vl import (
     get_mrope_input_positions,
     apply_rotary_pos_emb_thd_padded,
@@ -10,7 +11,6 @@ from tpu_inference.models.jax.qwen3_vl import (
     Qwen3VLImagePixelInputs,
     Qwen3VLImageInputs,
     Qwen3VLVisionTransformer,
-    Qwen3VLTextRMSNorm,
     Qwen3VLTextRotaryEmbedding,
 )
 
@@ -219,7 +219,7 @@ class Qwen3VLMoeTextAttention(nnx.Module):
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rngs,
         )
-        self.q_norm = Qwen3VLTextRMSNorm(self.head_dim, eps=self.rms_norm_eps, dtype=dtype)
+        self.q_norm = JaxRmsNorm(self.head_dim, epsilon=self.rms_norm_eps, param_dtype=dtype, rngs=rngs)
 
         self.k_proj = nnx.Einsum(
             "TD,DKH->TKH",
@@ -228,7 +228,7 @@ class Qwen3VLMoeTextAttention(nnx.Module):
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rngs,
         )
-        self.k_norm = Qwen3VLTextRMSNorm(self.head_dim, eps=self.rms_norm_eps, dtype=dtype)
+        self.k_norm = JaxRmsNorm(self.head_dim, epsilon=self.rms_norm_eps, param_dtype=dtype, rngs=rngs)
 
         self.v_proj = nnx.Einsum(
             "TD,DKH->TKH",
@@ -382,11 +382,11 @@ class Qwen3VLMoeTextDecoderLayer(nnx.Module):
                 dtype=dtype,
             )
 
-        self.input_layernorm = Qwen3VLTextRMSNorm(
-            hidden_size, eps=rms_norm_eps, dtype=dtype
+        self.input_layernorm = JaxRmsNorm(
+            hidden_size, epsilon=rms_norm_eps, param_dtype=dtype, rngs=rngs
         )
-        self.post_attention_layernorm = Qwen3VLTextRMSNorm(
-            hidden_size, eps=rms_norm_eps, dtype=dtype
+        self.post_attention_layernorm = JaxRmsNorm(
+            hidden_size, epsilon=rms_norm_eps, param_dtype=dtype, rngs=rngs
         )
 
     def __call__(
@@ -454,10 +454,11 @@ class Qwen3VLMoeTextModel(nnx.Module):
             for layer_idx in range(num_hidden_layers)
         ]
 
-        self.norm = Qwen3VLTextRMSNorm(
+        self.norm = JaxRmsNorm(
             hidden_size,
-            eps=rms_norm_eps,
-            dtype=dtype,
+            epsilon=rms_norm_eps,
+            param_dtype=dtype,
+            rngs=rngs,
         )
 
         rope_scaling = getattr(config, "rope_scaling", None)

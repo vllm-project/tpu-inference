@@ -17,6 +17,7 @@ from tpu_inference.layers.common.attention_interface import (
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.logger import init_logger
+from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     merge_multimodal_embeddings,
 )
@@ -126,7 +127,9 @@ def generate_segment_ids_from_grid_thw(
         segment_ids: (total_tokens,) array with segment IDs per frame
     """
     segments = []
-    seg_id = 1 # start for 1 to make padding 0
+    # Start from 1 so that padding positions remain 0, which
+    # pad_segment_ids_for_attention uses to mask out padded tokens.
+    seg_id = 1
 
     for (t, h, w) in grid_thw:
         frame_size = h * w
@@ -194,7 +197,6 @@ def get_mrope_input_positions(
     video_grid_thw: Optional[List[Tuple[int, int, int]]],
     image_token_id: int,
     video_token_id: int,
-    vision_start_token_id: int,
     spatial_merge_size: int,
 ) -> Tuple[jax.Array, int]:
     """Compute MRoPE 3D position IDs for a single sequence.
@@ -209,7 +211,6 @@ def get_mrope_input_positions(
         video_grid_thw: List of (T, H, W) tuples for each video
         image_token_id: Token ID for image placeholders
         video_token_id: Token ID for video placeholders
-        vision_start_token_id: Token ID marking start of vision tokens
         spatial_merge_size: Spatial merge size from vision config
 
     Returns:
@@ -332,23 +333,6 @@ def apply_interleaved_mrope(
 
     return result
 
-
-class Qwen3VLTextRMSNorm(nnx.Module):
-    def __init__(
-        self,
-        hidden_size: int,
-        eps: float = 1e-6,
-        dtype: jnp.dtype = jnp.bfloat16,
-    ):
-        self.weight = nnx.Param(jnp.ones(hidden_size, dtype=dtype))
-        self.variance_epsilon = eps
-
-    def __call__(self, hidden_states: jax.Array) -> jax.Array:
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.astype(jnp.float32)
-        variance = jnp.mean(jnp.square(hidden_states), axis=-1, keepdims=True)
-        hidden_states = hidden_states * jax.lax.rsqrt(variance + self.variance_epsilon)
-        return self.weight.value * hidden_states.astype(input_dtype)
 
 
 def rotate_half(x: jax.Array) -> jax.Array:
@@ -517,7 +501,7 @@ class Qwen3VLTextAttention(nnx.Module):
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rngs,
         )
-        self.q_norm = Qwen3VLTextRMSNorm(self.head_dim, eps=self.rms_norm_eps, dtype=dtype)
+        self.q_norm = JaxRmsNorm(self.head_dim, epsilon=self.rms_norm_eps, param_dtype=dtype, rngs=rngs)
 
         self.k_proj = nnx.Einsum(
             "TD,DKH->TKH",
@@ -526,7 +510,7 @@ class Qwen3VLTextAttention(nnx.Module):
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rngs,
         )
-        self.k_norm = Qwen3VLTextRMSNorm(self.head_dim, eps=self.rms_norm_eps, dtype=dtype)
+        self.k_norm = JaxRmsNorm(self.head_dim, epsilon=self.rms_norm_eps, param_dtype=dtype, rngs=rngs)
 
         self.v_proj = nnx.Einsum(
             "TD,DKH->TKH",
@@ -659,12 +643,14 @@ class Qwen3VLTextDecoderLayer(nnx.Module):
             hidden_act=getattr(config, "hidden_act", "silu"),
             dtype=dtype,
         )
-        self.input_layernorm = Qwen3VLTextRMSNorm(hidden_size,
-                                                  eps=rms_norm_eps,
-                                                  dtype=dtype)
-        self.post_attention_layernorm = Qwen3VLTextRMSNorm(hidden_size,
-                                                           eps=rms_norm_eps,
-                                                           dtype=dtype)
+        self.input_layernorm = JaxRmsNorm(hidden_size,
+                                           epsilon=rms_norm_eps,
+                                           param_dtype=dtype,
+                                           rngs=rngs)
+        self.post_attention_layernorm = JaxRmsNorm(hidden_size,
+                                                    epsilon=rms_norm_eps,
+                                                    param_dtype=dtype,
+                                                    rngs=rngs)
 
     def __call__(
         self,
@@ -775,10 +761,13 @@ class Qwen3VLVisionPatchEmbed(nnx.Module):
             Embedded patches of shape (num_patches, hidden_size)
         """
         L, dim = x.shape
-        C = dim // (
-            self.temporal_patch_size * self.patch_size * self.patch_size
+        patch_volume = self.temporal_patch_size * self.patch_size * self.patch_size
+        assert dim % patch_volume == 0, (
+            f"Input dim {dim} is not divisible by patch volume {patch_volume}"
         )
-        # Reshape to (L, T, H, W, C) for Conv3D with channels_last
+        C = dim // patch_volume
+        # Reshape to (L, C, T, H, W) then transpose to (L, T, H, W, C)
+        # for Conv3D with channels_last layout.
         x = x.reshape(
             L, C, self.temporal_patch_size, self.patch_size, self.patch_size
         )
@@ -1102,7 +1091,7 @@ class Qwen3VLVisionTransformer(nnx.Module):
             dtype=dtype,
         )
 
-        # Learned PE, 48 x 48 H W
+        # Learned positional embedding: VISION_GRID_SIZE x VISION_GRID_SIZE grid.
         num_position_embeddings = getattr(
             vision_config, "num_position_embeddings", VISION_GRID_SIZE * VISION_GRID_SIZE
         )
@@ -1113,7 +1102,6 @@ class Qwen3VLVisionTransformer(nnx.Module):
             embedding_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rngs,
         )
-        # TODO: learned PE shape = 48x48. Don't make this robust.
         image_size = getattr(vision_config, "image_size", None)
         pos_embed_grid_h = pos_embed_grid_w = None
         if isinstance(image_size, (tuple, list)) and len(image_size) == 2:
@@ -1495,10 +1483,11 @@ class Qwen3VLModel(nnx.Module):
             for _ in range(text_config.num_hidden_layers)
         ]
 
-        self.norm = Qwen3VLTextRMSNorm(
+        self.norm = JaxRmsNorm(
             hidden_size,
-            eps=rms_norm_eps,
-            dtype=dtype,
+            epsilon=rms_norm_eps,
+            param_dtype=dtype,
+            rngs=rng,
         )
 
         if hf_config.tie_word_embeddings:
@@ -1915,8 +1904,6 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             video_grid_thw=video_grid_thw,
             image_token_id=hf_config.image_token_id,
             video_token_id=hf_config.video_token_id,
-            vision_start_token_id=getattr(hf_config, "vision_start_token_id",
-                                          self.vision_start_token_id),
             spatial_merge_size=hf_config.vision_config.spatial_merge_size,
         )
 
