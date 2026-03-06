@@ -868,8 +868,8 @@ class DeepseekV2Moe(JaxModule):
             intermediate_size=num_shared_experts * moe_intermediate_size,
             rngs=rng,
             activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
-            df_sharding=P(None, ShardingAxisName.MLP_TENSOR),
-            fd_sharding=P(ShardingAxisName.MLP_TENSOR, None),
+            df_sharding=P(None, ShardingAxisName.ATTN_HEAD),
+            fd_sharding=P(ShardingAxisName.ATTN_HEAD, None),
             quant_config=quant_config)
 
         # routed experts
@@ -1162,10 +1162,10 @@ class DeepSeekV3(JaxModule):
                 query_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR)
                 keyvalue_skh_spec = P(None, ShardingAxisName.MLP_TENSOR)
                 attn_o_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR)
-            rd_sharding = (ShardingAxisName.MLP_TENSOR, None)
-            ap_sharding = (None, ShardingAxisName.MLP_TENSOR)
-            q_da_sharding = (None, ShardingAxisName.MLP_TENSOR)
-            kv_da_sharding = (None, ShardingAxisName.MLP_TENSOR)
+            rd_sharding = P(ShardingAxisName.ATTN_HEAD, None)
+            ap_sharding = P(None, ShardingAxisName.ATTN_HEAD)
+            q_da_sharding = P(None, ShardingAxisName.ATTN_HEAD)
+            kv_da_sharding = P(None, ShardingAxisName.ATTN_HEAD)
 
             if self.vllm_config.additional_config.get("replicate_attn_weights",
                                                       False):
@@ -1259,8 +1259,8 @@ class DeepSeekV3(JaxModule):
                     intermediate_size=ffw_intermediate_size,
                     rngs=rng,
                     activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
-                    df_sharding=P(None, ShardingAxisName.MLP_TENSOR),
-                    fd_sharding=P(ShardingAxisName.MLP_TENSOR, None),
+                    df_sharding=P(None, ShardingAxisName.ATTN_HEAD),
+                    fd_sharding=P(ShardingAxisName.ATTN_HEAD, None),
                     quant_config=quant_config)
             else:
                 # MoE Layer
