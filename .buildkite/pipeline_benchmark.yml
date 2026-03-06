@@ -18,6 +18,7 @@ steps:
      agents:
        queue: cpu
      env:
+       CLEANUP_BM_VLLM_RESOURCES: "true"
        GCP_PROJECT_ID: "cloud-tpu-inference-test"
        GCP_REGION: "southamerica-west1"
        ARTIFACT_REPO: "vllm-tpu-bm-bk"

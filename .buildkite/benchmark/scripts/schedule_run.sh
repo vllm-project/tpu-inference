@@ -164,7 +164,6 @@ while read -r line || [ -n "${line}" ]; do
   # cancel_grace_period sets a duration to ensure the cleanup can be completed.
   pipeline_yaml=$(cat <<EOF
 - label: "Publish: benchmark - RecordId: ${RECORD_ID}"
-  cancel_grace_period: 120
   depends_on: "build-vllm-tpu-image"
   env:
     CLEANUP_BM_VLLM_RESOURCES: "true"
