@@ -554,7 +554,7 @@ class TestFp8FusedMoE:
                 ed_sharding=(None, None),
                 e_sharding=(None, ))
 
-            layer = JaxMoE(dtype=jnp.float8_e4m3fn,
+            layer = JaxMoE(dtype=jnp.bfloat16,
                         num_local_experts=num_experts,
                         apply_expert_weight_before_computation=False,
                         expert_axis_name=expert_axis_name,
