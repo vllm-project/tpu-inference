@@ -1,0 +1,46 @@
+#!/bin/bash
+# .buildkite/hooks/pre-exit
+
+set -euo pipefail
+
+echo "--- Checking if cleanup is required"
+
+if [ "${CLEANUP_BM_VLLM_RESOURCES:-false}" = "true" ]; then
+    echo "--- :docker: Cleaning up vllm-tpu resources for this step"
+
+    CONTAINER_NAME="${CONTAINER_NAME:-}"
+    if [ -z "$CONTAINER_NAME" ]; then
+        echo "Info: CONTAINER_NAME is not set. Skipping container cleanup."
+    else
+        echo "Attempting to remove container: ${CONTAINER_NAME}"
+        
+        # Check if container exists (running or stopped)
+        if [ "$(docker ps -aq -f name="^${CONTAINER_NAME}$")" ]; then
+            # -f (force) stops and removes the container in one command
+            docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+            echo "Successfully removed container ${CONTAINER_NAME}."
+        else
+            echo "Container ${CONTAINER_NAME} not found on this agent. Nothing to do."
+        fi
+    fi
+
+    CODE_HASH=$(buildkite-agent meta-data get "CODE_HASH" --default "")
+    if [ -z "$CODE_HASH" ]; then
+        echo "Info: Metadata 'CODE_HASH' is empty or not found. Skipping image cleanup."
+    else
+        IMAGE_TAG="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$ARTIFACT_REPO/vllm-tpu:$CODE_HASH"
+        echo "Attempting to remove image: ${IMAGE_TAG}"
+
+        # Execute docker rmi
+        if docker images -q "$IMAGE_TAG" > /dev/null 2>&1; then
+            docker rmi -f "$IMAGE_TAG" > /dev/null 2>&1 || true
+            echo "Successfully sent removal command for ${IMAGE_TAG}."
+        else
+            echo "Image ${IMAGE_TAG} not found on this agent. Nothing to do."
+        fi
+    fi
+    echo "Cleanup stage complete."
+
+else
+    echo "No cleanup needed for this step. Skipping."
+fi

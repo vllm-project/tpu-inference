@@ -160,10 +160,14 @@ while read -r line || [ -n "${line}" ]; do
 
   # Publishing to Buildkite step (main parameter: $RECORD_ID)
   # For each line in csv file, generate a command step
+  # CLEANUP_BM_VLLM_RESOURCES` is used to trigger the cleanup process in pre-exit hooks, and
+  # cancel_grace_period sets a duration to ensure the cleanup can be completed.
   pipeline_yaml=$(cat <<EOF
 - label: "Publish: benchmark - RecordId: ${RECORD_ID}"
+  cancel_grace_period: 120
   depends_on: "build-vllm-tpu-image"
   env:
+    CLEANUP_BM_VLLM_RESOURCES: "true"
     BUILDKITE_GIT_SUBMODULES: "true"
     GCP_PROJECT_ID: "cloud-tpu-inference-test"
     GCP_REGION: "southamerica-west1"
@@ -171,6 +175,7 @@ while read -r line || [ -n "${line}" ]; do
     ARTIFACT_REPO: "vllm-tpu-bm-bk"
     GCP_INSTANCE_ID: "vllm-bm-inst"
     GCP_DATABASE_ID: "vllm-bm-bk-runs"
+    CONTAINER_NAME: "vllm-tpu"
   agents:
     queue: $BUILDKITE_AGENT_QUEUE
   command: 

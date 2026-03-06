@@ -89,7 +89,7 @@ done
 # Add static fields
 cat <<EOF >> "${ENV_FILE}"
 TEST_NAME=static
-CONTAINER_NAME=vllm-tpu
+CONTAINER_NAME=${CONTAINER_NAME:-vllm-tpu}
 LOCAL_HF_HOME="/mnt/disks/persist/models"
 DOCKER_HF_HOME="/tmp/hf_home"
 EOF
