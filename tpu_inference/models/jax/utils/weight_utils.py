@@ -755,6 +755,32 @@ def jax_array_from_reshaped_torch(
         return t2j(torch_weight, use_dlpack=False)
 
 
+def assign_and_shard_param(jax_param: nnx.Param,
+                           jax_weight: jax.Array,
+                           param_name: str = "Unknown"):
+    """Distributes a JAX array across devices according to the `nnx.Param`'s sharding metadata, assigns it to the parameter, and marks it as loaded.
+
+    Args:
+        jax_param: The target nnx.Param to assign the weight to.
+        jax_weight: The JAX array containing the weight data.
+        param_name: The name of the parameter, used for error logging.
+    """
+    spec = jax_param.get_metadata().get("sharding", ())
+    if isinstance(spec, NamedSharding):
+        spec = spec.spec
+    elif isinstance(spec, SingleDeviceSharding):
+        spec = ()
+    mesh = jax_param.get_metadata().get("mesh", None)
+
+    try:
+        jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
+        jax_param.set_metadata("_is_loaded", True)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to load weight '{param_name}' with shape {jax_weight.shape} into param with shape {jax_param.value.shape}"
+        ) from e
+
+
 def load_nnx_param_from_reshaped_torch(
         jax_param: nnx.Param,
         torch_weight: torch.Tensor,
@@ -781,20 +807,7 @@ def load_nnx_param_from_reshaped_torch(
     assert tuple(jax_weight.shape) == jax_param.value.shape, \
         f"Shape mismatch when loading weight '{param_name}': torch {jax_weight.shape} vs jax {jax_param.value.shape}"
 
-    spec = jax_param.get_metadata().get('sharding', ())
-    if isinstance(spec, NamedSharding):
-        spec = spec.spec
-    elif isinstance(spec, SingleDeviceSharding):
-        spec = ()
-    mesh = jax_param.get_metadata().get('mesh', None)
-
-    try:
-        jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
-        jax_param.set_metadata('_is_loaded', True)
-    except Exception as e:
-        raise RuntimeError(
-            f"Failed to load weight '{param_name}' with shape {jax_weight.shape} into param with shape {jax_param.value.shape}"
-        ) from e
+    assign_and_shard_param(jax_param, jax_weight, param_name)
 
 
 class JaxAutoWeightsLoader(AutoWeightsLoader):
@@ -894,22 +907,19 @@ class JaxDummyModelLoader(DummyModelLoader):
 
     def load_weights(self, model: JaxModule,
                      model_config: ModelConfig) -> None:
-        params = nnx.state(model, nnx.Param)
-        graph_def, params = nnx.flatten(params)
-        for path, param in params:
-            assert isinstance(
-                param,
-                nnx.Param), f"Expected nnx.Param, got {type(param)} {param=}"
-            param.value = jax.random.uniform(
-                jax.random.PRNGKey(0),
-                param.value.shape,
-                dtype=param.value.dtype,
-                # upstream claims this range works well
-                # https://github.com/vllm-project/vllm/blob/7291d1b288558d48508e1a17c37b0aa170332264/vllm/model_executor/model_loader/weight_utils.py#L1088
-                minval=-1e-3,
-                maxval=1e-3)
-        params = nnx.unflatten(graph_def, params)
-        nnx.update(model, params)
+        for param_name, param in model.named_parameters():
+            with jax.default_device(jax.devices("cpu")[0]):
+                dummy_weight = jax.random.uniform(
+                    jax.random.PRNGKey(0),
+                    param.value.shape,
+                    dtype=param.value.dtype,
+                    # upstream claims this range works well
+                    # https://github.com/vllm-project/vllm/blob/7291d1b288558d48508e1a17c37b0aa170332264/vllm/model_executor/model_loader/weight_utils.py#L1088
+                    minval=-1e-3,
+                    maxval=1e-3,
+                )
+
+            assign_and_shard_param(param, dummy_weight, param_name)
 
         self._process_weights_after_loading(model)
 
