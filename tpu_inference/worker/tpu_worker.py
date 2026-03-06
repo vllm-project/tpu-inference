@@ -341,7 +341,7 @@ class TPUWorker(WorkerBase):
                 scheduler_output, self.rank - 1, self.step_counter)
             # TODO: this method might only works for vllm model, not sure about jax models.
             tensor_spec = self.model_runner.get_intermediate_tensor_spec(
-                scheduler_output.total_num_scheduled_tokens)
+                scheduler_output)
             intermediate_tensors_dict = get_pp_group().recv_tensor_dict(
                 uuid, tensor_spec)
             intermediate_tensors = JaxIntermediateTensors(

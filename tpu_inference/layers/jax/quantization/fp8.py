@@ -76,7 +76,7 @@ def load_fp8_weight(jax_param: nnx.Param, torch_weight: torch.Tensor,
         )
         jax_weight = jax_weight.astype(jax_param[...].dtype)
 
-    jax_param[...] = shard_put(jax_weight, spec, mesh=mesh)
+    jax_param.set_raw_value(shard_put(jax_weight, spec, mesh=mesh))
 
 
 class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
@@ -117,7 +117,8 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
         # Attach custom loader to avoid default upcasting behavior
         layer.weight.set_metadata(
             'weight_loader',
-            functools.partial(load_fp8_weight, param_name="weight"))
+            functools.partial(load_fp8_weight,
+                              param_name=layer.prefix + ".weight"))
 
         # Scale is always per-output-channel (1D).
         scale_sharding = None
@@ -450,7 +451,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                     E, K, N = param[...].shape
                     value = init_fn(rngs.params(), (E, K, N),
                                     jnp.float8_e4m3fn)
-                    param.value = value
+                    param.set_raw_value(value)
 
                     scale_value = jnp.zeros((E, (K + block_k - 1) // block_k,
                                              (N + block_n - 1) // block_n),
@@ -475,6 +476,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
             layer: The layer to process.
         """
         # TODO (#1681): support other backends
+
         if layer.moe_backend in FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS:
             gating_scale_name = f"kernel_gating_EDF_{self.weight_scale_name}"
             up_scale_name = f"kernel_up_proj_EDF_{self.weight_scale_name}"
@@ -541,20 +543,28 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
             del layer.kernel_up_proj_EDF
             delattr(layer, gating_scale_name)
             delattr(layer, up_scale_name)
+
             # TODO (jacobplatin): we probably want to make the sharding configurable
             layer.kernel_gating_upproj_EDF = nnx.Param(
                 shard_put(weights.w13_weight, shardings=layer.edf_sharding))
             layer.kernel_down_proj_EFD = nnx.Param(
                 shard_put(weights.w2_weight, shardings=layer.efd_sharding))
-            # NOTE: we aren't sharding the weight scales
+            # gmm expects shape [num_groups, num_blocks, 1, n]
+            # TODO(gpolovets1): Make sure it works for gmm_v2 as well.
+            edf_scale_sharding = (layer.edf_sharding[0], ) + (None, ) * (
+                weights.w13_weight_scale.ndim - 2) + (layer.edf_sharding[-1], )
+            efd_scale_sharding = (layer.efd_sharding[0], ) + (None, ) * (
+                weights.w2_weight_scale.ndim - 2) + (layer.efd_sharding[-1], )
             setattr(
                 layer, f"kernel_gating_upproj_EDF_{self.weight_scale_name}",
                 nnx.Param(
-                    shard_put(weights.w13_weight_scale, shardings=(None, ))))
+                    shard_put(weights.w13_weight_scale,
+                              shardings=edf_scale_sharding)))
             setattr(
                 layer, f"kernel_down_proj_EFD_{self.weight_scale_name}",
                 nnx.Param(
-                    shard_put(weights.w2_weight_scale, shardings=(None, ))))
+                    shard_put(weights.w2_weight_scale,
+                              shardings=efd_scale_sharding)))
         else:
             raise NotImplementedError(
                 f"Unsupported moe backend: {layer.moe_backend}! Currently supported: {FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS}"
