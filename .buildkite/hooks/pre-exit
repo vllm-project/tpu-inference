@@ -30,9 +30,10 @@ if [ "${CLEANUP_BM_VLLM_RESOURCES:-false}" = "true" ]; then
     else
         IMAGE_TAG="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$ARTIFACT_REPO/vllm-tpu:$CODE_HASH"
         echo "Attempting to remove image: ${IMAGE_TAG}"
+        IMAGE_ID=$(docker images -q "$IMAGE_TAG")
 
         # Execute docker rmi
-        if docker images -q "$IMAGE_TAG" > /dev/null 2>&1; then
+        if [ -n "$IMAGE_ID" ]; then
             docker rmi -f "$IMAGE_TAG" > /dev/null 2>&1 || true
             echo "Successfully sent removal command for ${IMAGE_TAG}."
         else
