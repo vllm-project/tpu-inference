@@ -32,8 +32,7 @@ from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
 from tpu_inference.layers.jax.norm import JaxRmsNorm
-from tpu_inference.layers.jax.pp_utils import (PPMissingLayer,
-                                               get_start_end_layer)
+from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
@@ -50,8 +49,12 @@ init_fn = nnx.initializers.uniform()
 # MLP arch is the same as Gemma3
 class Gemma4MLP(JaxModule):
 
-    def __init__(self, config: Gemma4TextConfig, dtype: jnp.dtype,
-                 rng: nnx.Rngs, quant_config: VllmQuantConfig):
+    def __init__(self,
+                 config: Gemma4TextConfig,
+                 dtype: jnp.dtype,
+                 rng: nnx.Rngs,
+                 quant_config: VllmQuantConfig,
+                 prefix: str = ""):
         hidden_size = config.hidden_size
         intermediate_size = config.intermediate_size
 
@@ -63,6 +66,7 @@ class Gemma4MLP(JaxModule):
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".gate_proj",
         )
         self.up_proj = JaxLinear(
             hidden_size,
@@ -72,6 +76,7 @@ class Gemma4MLP(JaxModule):
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".up_proj",
         )
         self.down_proj = JaxLinear(
             intermediate_size,
@@ -81,6 +86,7 @@ class Gemma4MLP(JaxModule):
             kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".down_proj",
         )
         self.act_fn = partial(nnx.gelu, approximate=True)
 
@@ -94,9 +100,15 @@ class Gemma4MLP(JaxModule):
 
 class Gemma4Attention(JaxModule):
 
-    def __init__(self, config: Gemma4TextConfig, layer_idx: int,
-                 dtype: jnp.dtype, rng: nnx.Rngs, mesh: Mesh,
-                 kv_cache_dtype: str, quant_config: VllmQuantConfig):
+    def __init__(self,
+                 config: Gemma4TextConfig,
+                 layer_idx: int,
+                 dtype: jnp.dtype,
+                 rng: nnx.Rngs,
+                 mesh: Mesh,
+                 kv_cache_dtype: str,
+                 quant_config: VllmQuantConfig,
+                 prefix: str = ""):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.rms_norm_eps = config.rms_norm_eps
@@ -169,6 +181,7 @@ class Gemma4Attention(JaxModule):
             if config.attention_bias else None,
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".q_proj",
         )
         self.q_norm = JaxRmsNorm(
             self.head_dim,
@@ -177,6 +190,7 @@ class Gemma4Attention(JaxModule):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".q_norm",
         )
 
         # --- Shared KV Projection Logic ---
@@ -193,6 +207,7 @@ class Gemma4Attention(JaxModule):
                 if config.attention_bias else None,
                 rngs=rng,
                 quant_config=quant_config,
+                prefix=prefix + ".k_proj",
             )
             self.v_proj = None
         else:
@@ -209,6 +224,7 @@ class Gemma4Attention(JaxModule):
                 if config.attention_bias else None,
                 rngs=rng,
                 quant_config=quant_config,
+                prefix=prefix + ".k_proj",
             )
             self.v_proj = JaxEinsum(
                 "TD,DKH->TKH",
@@ -222,6 +238,7 @@ class Gemma4Attention(JaxModule):
                 if config.attention_bias else None,
                 rngs=rng,
                 quant_config=quant_config,
+                prefix=prefix + ".v_proj",
             )
 
         self.k_norm = JaxRmsNorm(
@@ -231,6 +248,7 @@ class Gemma4Attention(JaxModule):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".k_norm",
         )
         # Gemma4: Use value norm (need to disable scaling)
         self.v_norm = JaxRmsNorm(
@@ -241,6 +259,7 @@ class Gemma4Attention(JaxModule):
                 init_fn, (None, )),  # need to disable scaling for value norm
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".v_norm",
         )
         self.o_proj = JaxEinsum(
             "TNH,NHD->TD",
@@ -252,6 +271,7 @@ class Gemma4Attention(JaxModule):
             if config.attention_bias else None,
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".o_proj",
         )
 
         self._q_scale = 1.0
@@ -328,9 +348,15 @@ class Gemma4Attention(JaxModule):
 
 class Gemma4DecoderLayer(JaxModule):
 
-    def __init__(self, config: Gemma4TextConfig, layer_idx: int,
-                 dtype: jnp.dtype, rng: nnx.Rngs, mesh: Mesh,
-                 kv_cache_dtype: str, quant_config: VllmQuantConfig):
+    def __init__(self,
+                 config: Gemma4TextConfig,
+                 layer_idx: int,
+                 dtype: jnp.dtype,
+                 rng: nnx.Rngs,
+                 mesh: Mesh,
+                 kv_cache_dtype: str,
+                 quant_config: VllmQuantConfig,
+                 prefix: str = ""):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
 
@@ -356,6 +382,7 @@ class Gemma4DecoderLayer(JaxModule):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".input_layernorm",
         )
         self.self_attn = Gemma4Attention(config=config,
                                          layer_idx=layer_idx,
@@ -363,7 +390,8 @@ class Gemma4DecoderLayer(JaxModule):
                                          rng=rng,
                                          mesh=mesh,
                                          kv_cache_dtype=kv_cache_dtype,
-                                         quant_config=quant_config)
+                                         quant_config=quant_config,
+                                         prefix=prefix + ".self_attn")
         self.post_attention_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
@@ -371,6 +399,7 @@ class Gemma4DecoderLayer(JaxModule):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".post_attention_layernorm",
         )
         self.pre_feedforward_layernorm = JaxRmsNorm(
             hidden_size,
@@ -379,12 +408,14 @@ class Gemma4DecoderLayer(JaxModule):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".pre_feedforward_layernorm",
         )
         self.mlp = Gemma4MLP(
             config=config,
             dtype=dtype,
             rng=rng,
             quant_config=quant_config,
+            prefix=prefix + ".mlp",
         )
         self.post_feedforward_layernorm = JaxRmsNorm(
             hidden_size,
@@ -393,6 +424,7 @@ class Gemma4DecoderLayer(JaxModule):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
+            prefix=prefix + ".post_feedforward_layernorm",
         )
 
     def __call__(
@@ -424,8 +456,11 @@ class Gemma4DecoderLayer(JaxModule):
 
 class Gemma4Model(JaxModule):
 
-    def __init__(self, vllm_config: VllmConfig, rng: nnx.Rngs,
-                 mesh: Mesh) -> None:
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 rng: nnx.Rngs,
+                 mesh: Mesh,
+                 prefix: str = "model") -> None:
         model_config = vllm_config.model_config
         hf_config = model_config.hf_config
         text_config = hf_config.text_config
@@ -449,32 +484,24 @@ class Gemma4Model(JaxModule):
                 embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
                 rngs=rng,
                 quant_config=vllm_config.quant_config,
+                prefix=prefix + ".embed_tokens",
             )
         else:
             self.embed_tokens = PPMissingLayer()
 
-        layers = []
-        self.start_layer, self.end_layer = get_start_end_layer(
-            self.num_layers,
-            get_pp_group().rank_in_group,
-            get_pp_group().world_size)
-        for i in range(self.start_layer):
-            layers.append(PPMissingLayer())
-
-        for i in range(self.start_layer, self.end_layer):
-            layer = Gemma4DecoderLayer(
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            text_config.num_hidden_layers,
+            lambda layer_index: Gemma4DecoderLayer(
                 config=text_config,
-                layer_idx=i,
+                layer_idx=layer_index,
                 dtype=dtype,
                 rng=rng,
                 mesh=mesh,
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
-                quant_config=vllm_config.quant_config)
-            layers.append(layer)
-        for i in range(self.end_layer, self.num_layers):
-            layers.append(PPMissingLayer())
+                quant_config=vllm_config.quant_config,
+                prefix=f"{prefix}.layers.{layer_index}",
+            ))
 
-        self.layers = nnx.List(layers)
         if self.is_last_rank:
             self.norm = JaxRmsNorm(
                 hidden_size,
@@ -483,6 +510,7 @@ class Gemma4Model(JaxModule):
                 scale_init=nnx.with_partitioning(init_fn, (None, )),
                 rngs=rng,
                 quant_config=vllm_config.quant_config,
+                prefix=prefix + ".norm",
             )
         else:
             self.norm = PPMissingLayer()
@@ -540,6 +568,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
             vllm_config=vllm_config,
             rng=rng,
             mesh=mesh,
+            prefix="model",
         )
         model_config = vllm_config.model_config
 
@@ -558,6 +587,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
                     dtype=model_config.dtype,
                     rngs=rng,
                     quant_config=vllm_config.quant_config,
+                    prefix="lm_head",
                 )
             else:
                 self.lm_head = PPMissingLayer()
@@ -608,7 +638,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if hasattr(self, 'lm_head'):
-            return self.lm_head(hidden_states)
+            logits = self.lm_head(hidden_states)
         else:
             logits = self.model.embed_tokens.decode(hidden_states)
 
