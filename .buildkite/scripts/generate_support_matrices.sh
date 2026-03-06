@@ -134,6 +134,11 @@ process_features() {
         local category
         category=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${feature}_category" --default "feature support matrix")
 
+        # Skip quantization reporting if MODEL_IMPL_TYPE is default
+        if [[ "${category}" == "quantization support matrix" && "${MODEL_IMPL_TYPE:-auto}" == "auto" ]]; then
+            continue
+        fi
+
         local category_filename=${category// /_}
         # Use the TPU_DIR prefix for the CSV path
         local category_csv="${TPU_DIR}/${category_filename}.csv"
