@@ -164,8 +164,10 @@ def apply_rope(
 
         # Broadcast over the 'heads' dimension, assuming shape (batch*seq, heads, head_dim)
         sinusoid_inp = sinusoid_inp[:, jnp.newaxis, ...]
-        sin = jnp.sin(sinusoid_inp)
-        cos = jnp.cos(sinusoid_inp)
+
+        # Explicitly cast to the input dtype (BF16) to prevent FP32 RoPE fusions
+        sin = jnp.sin(sinusoid_inp).astype(inputs.dtype)
+        cos = jnp.cos(sinusoid_inp).astype(inputs.dtype)
 
         if rope_input_ordering == "interleaved":
             # Reshape to group adjacent features for rotation, matching new_apply_rope
