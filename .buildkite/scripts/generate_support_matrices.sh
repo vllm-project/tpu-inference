@@ -173,11 +173,21 @@ process_features() {
                 result="✅ Passing"
             else
                 result=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${feature}:${stage}" --default "⚪ N/A")
+                # Format any remaining custom strings from upstream configs
+                if [[ "${result,,}" == "beta" ]]; then
+                    result="⚠️ Beta"
+                elif [[ "${result,,}" == "experimental" ]]; then
+                    result="🧪 Experimental"
+                elif [[ "${result,,}" == "planned" ]]; then
+                    result="📝 Planned"
+                elif [[ "${result,,}" == "unplanned" ]]; then
+                    result="⛔️ Unplanned"
+                fi
             fi
             row="$row,$result"
 
             # Check for failure (exclude the hardcoded TPU generation column and Quantization Methods column)
-            if [ "$stage" != "QuantizationMethods" ] && [ "$stage" != "RecommendedTPUGenerations" ] && [ "${result}" != "✅ Passing" ] && [ "${result}" != "⚪ N/A" ] && [ "${result}" != "❓ Untested" ]; then
+            if [ "$stage" != "QuantizationMethods" ] && [ "$stage" != "RecommendedTPUGenerations" ] && [[ "${result}" != "✅ Passing" && "${result}" != "⚪ N/A" && "${result}" != "❓ Untested" && "${result}" != "⚠️ Beta" && "${result}" != "🧪 Experimental" && "${result,,}" != "📝 planned" ]]; then
                 ANY_FAILED=true
             fi
 
