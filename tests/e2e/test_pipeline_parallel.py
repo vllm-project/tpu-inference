@@ -65,6 +65,7 @@ def _run_inference_with_config(model_name: str,
         enable_prefix_caching=enable_prefix_caching,
         additional_config=additional_config,
         kv_cache_dtype=kv_cache_dtype,
+        async_scheduling=False,
     )
 
     engine_args_dict = asdict(engine_args)
