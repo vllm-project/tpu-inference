@@ -85,6 +85,10 @@ class GmmConfigs:
     acc_dtype: jnp.dtype
     zero_init: bool
 
+    @property
+    def num_quant_blocks_per_tile_k(self) -> int:
+        return pl.cdiv(self.tiles.tile_k, self.rhs_cfgs.quant_block_size)
+
 
 TileFn = Callable[[jnp.dtype, jnp.dtype, Dimensions, InputConfigs, int],
                   TileSizes]
@@ -120,11 +124,9 @@ class IndexMaps:
     def rhs_scale_index_map(self, n_id: jax.Array, gm_id: jax.Array,
                             k_id: jax.Array):
         group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
-        num_quant_blocks_per_tile_k = pl.cdiv(
-            self.cfgs.tiles.tile_k, self.cfgs.rhs_cfgs.quant_block_size)
         b_i = (k_id *
                self.cfgs.tiles.tile_k) // self.cfgs.rhs_cfgs.quant_block_size
-        b_tile_i = b_i // num_quant_blocks_per_tile_k
+        b_tile_i = b_i // self.cfgs.num_quant_blocks_per_tile_k
         return (group_id, b_tile_i, 0, n_id)
 
     def out_index_map(self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array):
@@ -167,10 +169,8 @@ def generate_block_specs(
             index_map.rhs_bias_index_map,
         )
     if cfgs.rhs_cfgs.has_scale:
-        num_quant_blocks_per_tile_k = pl.cdiv(cfgs.tiles.tile_k,
-                                              cfgs.rhs_cfgs.quant_block_size)
         rhs_scale_block_spec = pl.BlockSpec(
-            (None, num_quant_blocks_per_tile_k, 1, cfgs.tiles.tile_n),
+            (None, cfgs.num_quant_blocks_per_tile_k, 1, cfgs.tiles.tile_n),
             index_map.rhs_scale_index_map,
         )
 
@@ -230,8 +230,7 @@ def inner_kernel(
         tiled_lhs = tiled_lhs_ref.reshape(-1, cfgs.tiles.tile_k)[...]
         tiled_rhs = tiled_rhs_ref.weight[...]
 
-        num_quant_blocks_per_tile_k = pl.cdiv(cfgs.tiles.tile_k,
-                                              cfgs.rhs_cfgs.quant_block_size)
+        num_quant_blocks_per_tile_k = cfgs.num_quant_blocks_per_tile_k
 
         # When rhs is packed (quantized dtype packed into uint32), unpack it
         # back to the original dtype using pltpu.bitcast which operates on K
