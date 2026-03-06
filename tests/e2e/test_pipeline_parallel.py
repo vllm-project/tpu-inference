@@ -79,7 +79,6 @@ def _run_inference_with_config(model_name: str,
         time.sleep(5)
 
 
-@pytest.mark.skip(reason="PP is not fully enabled.")
 def test_pipeline_parallelism_jax_model(
     model_name: str,
     test_prompts: list,
@@ -113,7 +112,6 @@ def test_pipeline_parallelism_jax_model(
     )
 
 
-@pytest.mark.skip(reason="PP is not fully enabled.")
 def test_pipeline_parallelism_vllm_model(
     model_name: str,
     test_prompts: list,
@@ -150,7 +148,6 @@ def test_pipeline_parallelism_vllm_model(
     )
 
 
-@pytest.mark.skip(reason="PP is not fully enabled.")
 def test_pipeline_parallelism_jax_model_correctness(
     model_name: str,
     test_prompts: list,
