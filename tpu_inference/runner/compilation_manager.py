@@ -83,6 +83,7 @@ class CompilationManager:
         if envs.SKIP_JAX_PRECOMPILE or self.runner.model_config.enforce_eager:
             return
         logger.info("Precompile all the subgraphs with possible input shapes.")
+        compilation_start_time = time.perf_counter()
 
         with self.runner.maybe_setup_dummy_loras(
                 self.runner.lora_config), jax.set_mesh(self.runner.mesh):
@@ -111,6 +112,9 @@ class CompilationManager:
             self._precompile_structured_decoding()
             if self.runner.speculative_config:
                 self._precompile_speculative_decoding()
+
+        elapsed = time.perf_counter() - compilation_start_time
+        self.runner.vllm_config.compilation_config.compilation_time += elapsed
 
     def _precompile_input_embeddings_merger(self) -> None:
         for num_tokens in self.runner.num_tokens_paddings:

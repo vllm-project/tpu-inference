@@ -190,7 +190,8 @@ def quantize_array(
 
     # TODO(kyuyeunk): Investigate performance gain from non xlu transpose.
     scale = jnp.transpose(x_abs_max / dtype_max)
-    return (x / scale).astype(quant_dtype), scale.astype(jnp.float32)
+    scale_inv = jnp.nan_to_num(1 / scale, dtype_max)
+    return (x * scale_inv).astype(quant_dtype), scale.astype(jnp.float32)
 
 
 def get_vmem_limit(

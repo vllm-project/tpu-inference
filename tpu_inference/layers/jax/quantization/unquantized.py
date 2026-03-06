@@ -67,7 +67,7 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
         self.extra_backend_kwargs = {}
 
     def process_weights_after_loading(self, layer: JaxMoE, *args,
-                                      **kwargs) -> None:
+                                      **kwargs) -> bool:
         """
         Process weights after loading.
 
@@ -112,7 +112,7 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             if any(
                     any(w is None for w in param._weights_to_load) for param in
                 [layer.kernel_gating_EDF, layer.kernel_up_proj_EDF]):
-                return
+                return False
             w_gate = layer.kernel_gating_EDF.value
             w_up = layer.kernel_up_proj_EDF.value
 
@@ -125,6 +125,8 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
 
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
+
+        return True
 
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
         assert isinstance(layer, JaxMoE)

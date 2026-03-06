@@ -48,6 +48,10 @@ _MODEL_REGISTRY = {}
 _VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset(
     {"GptOssForCausalLM", "Qwen3MoeForCausalLM"})
 
+# List of architectures that don't have pipeline parallelism support in jax yet.
+_PP_DISABLED_MODELS: frozenset[str] = frozenset(
+    {"DeepseekV3ForCausalLM", "Eagle3LlamaForCausalLM", "GptOssForCausalLM"})
+
 
 class UnsupportedArchitectureError(ValueError):
     """Raised when a model architecture is not supported in the registry."""
@@ -58,7 +62,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # NOTE: Use inline imports here, otherwise the normal imports
     # would cause JAX init failure when using multi hosts with Ray.
 
-    from tpu_inference.models.jax.deepseek_v3 import DeepSeekV3
+    from tpu_inference.models.jax.deepseek_v3 import DeepseekV3ForCausalLM
     from tpu_inference.models.jax.gpt_oss import GptOss
     from tpu_inference.models.jax.llama3 import LlamaForCausalLM
     from tpu_inference.models.jax.llama4 import Llama4ForCausalLM
@@ -70,7 +74,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
     from tpu_inference.models.jax.qwen3_moe import Qwen3MoeForCausalLM
     _MODEL_REGISTRY["Llama4ForCausalLM"] = Llama4ForCausalLM
-    _MODEL_REGISTRY["DeepseekV3ForCausalLM"] = DeepSeekV3
+    _MODEL_REGISTRY["DeepseekV3ForCausalLM"] = DeepseekV3ForCausalLM
     _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
     _MODEL_REGISTRY["Llama4ForConditionalGeneration"] = LlamaGuard4ForCausalLM
     _MODEL_REGISTRY["Qwen3ForCausalLM"] = Qwen3ForCausalLM
@@ -382,10 +386,12 @@ def get_model(
     match impl:
         case "flax_nnx":
             with jax.set_mesh(mesh):
-                if vllm_config.parallel_config.pipeline_parallel_size > 1:
+                arch = getattr(vllm_config.model_config.hf_config,
+                               "architectures", [None])[0]
+                if vllm_config.parallel_config.pipeline_parallel_size > 1 and arch in _PP_DISABLED_MODELS:
                     logger.warning(
-                        "PP is not fully supported on Jax flax_nnx models yet, fallback to vllm models."
-                    )
+                        "PP is not fully supported on Jax flax_nnx %s models yet, fallback to vllm models.",
+                        arch)
                     return get_vllm_model(vllm_config, rng, mesh)
                 try:
                     # Try to load the flax model first

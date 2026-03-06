@@ -22,6 +22,13 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+# Util.
+
+
+def align_to(x, a):
+    return pl.cdiv(x, a) * a
+
+
 # Define data classes.
 
 
@@ -198,12 +205,11 @@ def inner_kernel(
 
     Args:
         tiled_lhs_ref: Contains value lhs[m_start:m_end, k_start:k_end]
-        tiled_rhs_ref: Contains value rhs[g_id, k_start:k_end, n_start:n_end].
-            where g_id is the group associated with lhs[m_start:m_end, :]
+        tiled_rhs_ref: Contains value rhs[g_id, k_start:k_end, n_start:n_end]. where
+            g_id is the group associated with lhs[m_start:m_end, :]
         tiled_out_ref: Contains value out[m_start:m_end, n_start:n_end]
-        partial_out_ref: Contains last size_lhs_sublane rows of the previous
-            output.  If this is the first tile for grid[n_id, :, :], it will be
-            initialized to zeros.
+        partial_out_ref: Contains last size_lhs_sublane rows of the previous output.
+            Will be initialized to zero if this is first tile for grid[n_id, :, :].
         acc_ref: Reference to the accumulator.
         metadata_ref: Reference to the metadata.
         cfgs: GmmConfigs.
@@ -211,12 +217,19 @@ def inner_kernel(
 
     def _matmul(is_first_k_step: bool, is_last_k_step: bool):
         tiled_lhs = tiled_lhs_ref.reshape(-1, cfgs.tiles.tile_k)[...]
+        tiled_rhs = tiled_rhs_ref.weight[...]
+
+        valid_k = cfgs.dims.size_k % cfgs.tiles.tile_k
+        if is_last_k_step and valid_k != 0:
+            mask_rhs = lax.broadcasted_iota(jnp.int32, tiled_rhs.shape,
+                                            0) < valid_k
+            tiled_rhs = jnp.where(mask_rhs, tiled_rhs, 0)
 
         if cfgs.lhs_cfgs.quant_dtype is None:
             # Unquantized matmul path.
             acc = jnp.matmul(
                 tiled_lhs,
-                tiled_rhs_ref.weight[...],
+                tiled_rhs,
                 preferred_element_type=jnp.float32,
             ).astype(acc_ref.dtype)
         else:
@@ -249,8 +262,7 @@ def inner_kernel(
                     end_k = min(cfgs.tiles.tile_k, start_k + q_block_size)
 
                     block_lhs = tiled_lhs[:, start_k:end_k]
-                    block_rhs = tiled_rhs_ref.weight[start_k:end_k,
-                                                     start_n:end_n]
+                    block_rhs = tiled_rhs[start_k:end_k, start_n:end_n]
 
                     # Perform lhs quantization. Note that for every block_lhs,
                     # same computation will be performed tiles_n//mxu_size times.
@@ -323,8 +335,8 @@ def inner_kernel(
             # fill size_lhs_sublane rows and will be revisited at the next step. By
             # storing the partial rows into the partial_out_ref, the next step can
             # read them and accumulate to them.  Additionally, for group id of 2,
-            # since it completely fills the size_lhs_sublane rows, we need to
-            # initialize the partial_out_ref to zeros.
+            # since it completely fills the size_lhs_sublane rows, we need to zero out
+            # partial_out_ref to avoid numeric error for group 3.
             last_row = m_end_local // cfgs.dims.size_lhs_sublane
             partial_out_ref[...] = jnp.where(
                 m_end_local % cfgs.dims.size_lhs_sublane == 0,
@@ -390,8 +402,8 @@ def fill_metadata(
     Args:
         lhs_group_sizes_ref: The group sizes of lhs.
         group_offset_ref: Offset of the first group to process.
-        metadata_ref: Metadata that is used to determine the group id and m
-            offsets for each gmm tile.
+        metadata_ref: Metadata that is used to determine the group id and m offsets
+            for each gmm tile.
         cfgs: GmmConfigs.
 
     Returns:
@@ -403,16 +415,16 @@ def fill_metadata(
     metadata_ref.gm_id_to_m_offset[0] = 0
 
     @jax.named_scope("inner_tm_loop")
-    def inner_tm_loop(tm_id, curr_m_offset, *, end_m_offset, group_id, num_gm):
+    def inner_tm_loop(tm_id, curr_m_offset, *, end_m_offset, group_id):
         local_offset = curr_m_offset % cfgs.dims.size_lhs_sublane
         tm_size = jnp.minimum(cfgs.tiles.tile_m - local_offset,
                               end_m_offset - curr_m_offset)
 
-        metadata_ref.gm_id_to_group_id[num_gm + tm_id] = group_id
+        metadata_ref.gm_id_to_group_id[tm_id] = group_id
 
         next_m_offset = curr_m_offset + tm_size
-        metadata_ref.gm_id_to_m_offset[num_gm + tm_id] = curr_m_offset
-        metadata_ref.gm_id_to_m_offset[num_gm + tm_id + 1] = next_m_offset
+        metadata_ref.gm_id_to_m_offset[tm_id] = curr_m_offset
+        metadata_ref.gm_id_to_m_offset[tm_id + 1] = next_m_offset
 
         return next_m_offset
 
@@ -447,16 +459,16 @@ def fill_metadata(
         # 2. If group comes before the group_offset, we should not process it.
         should_process = jnp.logical_and(group_size > 0, group_id >= 0)
         curr_num_gm = jnp.where(should_process, curr_num_gm, 0)
+        next_num_gm = num_gm + curr_num_gm
 
         tm_loop_fn = functools.partial(
             inner_tm_loop,
             end_m_offset=end_m_offset,
             group_id=group_id,
-            num_gm=num_gm,
         )
-        lax.fori_loop(0, curr_num_gm, tm_loop_fn, start_m_offset)
+        lax.fori_loop(num_gm, next_num_gm, tm_loop_fn, start_m_offset)
 
-        return num_gm + curr_num_gm, end_m_offset
+        return next_num_gm, end_m_offset
 
     num_gm, _ = lax.fori_loop(0, max_num_group, outer_group_loop, (0, 0))
     return num_gm
@@ -478,7 +490,7 @@ def zero_out_start(
     zero_ref[...] = jnp.zeros_like(zero_ref)
 
     zero_dma = zero_ref.reshape(-1, dims.size_lhs_sublane, num_lanes)
-    out_dma = out_ref.reshape(-1, dims.size_lhs_sublane, dims.size_n)
+    out_dma = out_ref.reshape(-1, dims.size_lhs_sublane, out_ref.shape[-1])
     row_size = zero_dma.shape[0]
 
     compute_start = metadata_ref.gm_id_to_m_offset[0]
@@ -501,9 +513,9 @@ def zero_out_start(
 
         # Static loop. Will be unrolled during compile time.
         for n_start in range(0, dims.size_n, num_lanes):
-            n_end = min(n_start + num_lanes, dims.size_n)
+            n_end = n_start + num_lanes
             pltpu.make_async_copy(
-                src_ref=zero_dma.at[pl.ds(0, dma_size), :, :n_end - n_start],
+                src_ref=zero_dma.at[pl.ds(0, dma_size)],
                 dst_ref=out_dma.at[pl.ds(dma_start, dma_size), :,
                                    n_start:n_end],
                 sem=semaphore_ref.at[0],
@@ -537,7 +549,7 @@ def zero_out_end(
     *,
     dims: Dimensions,
 ):
-    out_dma = out_ref.reshape(-1, dims.size_lhs_sublane, dims.size_n)
+    out_dma = out_ref.reshape(-1, dims.size_lhs_sublane, out_ref.shape[-1])
     pltpu.make_async_copy(
         src_ref=out_dma.at[pl.ds(0, zero_size)],
         dst_ref=out_dma.at[pl.ds(0, zero_size)],
@@ -590,8 +602,8 @@ def kernel_main(
         cfgs: GmmConfigs.
     """
 
-    num_k = cfgs.dims.size_k // cfgs.tiles.tile_k
-    num_n = cfgs.dims.size_n // cfgs.tiles.tile_n
+    num_k = pl.cdiv(cfgs.dims.size_k, cfgs.tiles.tile_k)
+    num_n = pl.cdiv(cfgs.dims.size_n, cfgs.tiles.tile_n)
 
     # Fill metadata buffer and return number of group & m interations.
     num_gm = fill_metadata(
@@ -623,8 +635,8 @@ def kernel_main(
 
     # Bounded slice requires second last dim to be aligned to the sublane size.
     # rhs_ref uses static tiling thus reshape is not needed.
-    lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, cfgs.dims.size_k)
-    out_in = out_ref.reshape(-1, cfgs.dims.size_lhs_sublane, cfgs.dims.size_n)
+    lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, lhs_ref.shape[-1])
+    out_in = out_ref.reshape(-1, cfgs.dims.size_lhs_sublane, out_ref.shape[-1])
     scratches = [partial_out_ref, acc_ref, metadata_ref]
     pipeline_fn(lhs_in, rhs_ref, out_in, scratches=scratches)
 
@@ -643,13 +655,8 @@ def calculate_tiling(
     lhs_bits = jax.dtypes.itemsize_bits(lhs_dtype)
     rhs_bits = jax.dtypes.itemsize_bits(rhs_dtype)
 
-    # Otherwise we run into a VMEM OOM
-    # TODO (jacobplatin/wenxindongwork): remove this hotfix once FP4 RHS bug is fixed
-    if rhs_bits == 4:
-        rhs_bits = 8
-
     # When using bf16 for lhs and rhs, 128 is the largest tile_m value that is
-    # safe to use for most scenarios. But if are using lower bitwidth, we need
+    # safe to use for most scenarios. But if lower bitwidth is used, we need
     # to tweak tile_m to account for using faster hardware unit.
     # TODO(kyuyeunk): Account for different TPU hardware specs.
     bf16_bf16_tile_m = 128
@@ -661,10 +668,7 @@ def calculate_tiling(
     # Calculate vmem limit for a single rhs buffer when using triple buffers.
     num_rhs_buffers = 3
     rhs_vmem_target = vmem_limit_bytes // num_rhs_buffers
-    rhs_base_size_bytes = rhs_size_bytes = (dims.size_k * dims.size_n *
-                                            rhs_bits // 8)
-
-    num_lanes = pltpu.get_tpu_info().num_lanes
+    base_rhs_size_bytes = dims.size_k * dims.size_n * rhs_bits // 8
 
     # To avoid stalling MXU, we add some buffer room where tile_n cannot go
     # smaller than 2x of mxu_column_size.
@@ -672,49 +676,35 @@ def calculate_tiling(
     tile_n_limit = min(tile_n_limit, dims.size_n)
 
     # Initialize tile_k and tile_n to their maximum valid values.
-    num_k_tiles = 1
-    tile_k = dims.size_k
-    k_rem = 0
-
-    # last_valid_n_tiles stores num_n_tiles that can evenly divide size_n but may
-    # or may not be sufficient to fit rhs into vmem target without changing
-    # tile_k.
-    last_valid_n_tiles = num_n_tiles = 1
-    tile_n = dims.size_n
-    n_rem = 0
+    num_k_tiles = num_n_tiles = 1
+    num_lanes = pltpu.get_tpu_info().num_lanes
+    tile_k = align_to(dims.size_k, num_lanes)
+    tile_n = align_to(dims.size_n, num_lanes)
 
     # Multiple k tiles will introduce accumulation overhead. Thus, we first try
     # to fit rhs into vmem by only adjusting tile_n.
 
     # Decrease tile_n until rhs fits in vmem target.
-    while rhs_size_bytes > rhs_vmem_target or n_rem or tile_n % num_lanes:
-        if n_rem == 0 and tile_n % num_lanes == 0:
-            last_valid_n_tiles = num_n_tiles
+    while (pl.cdiv(base_rhs_size_bytes, num_n_tiles) >= rhs_vmem_target
+           and tile_n >= tile_n_limit):
         num_n_tiles += 1
-        tile_n = dims.size_n // num_n_tiles
-        n_rem = dims.size_n % num_n_tiles
-        rhs_size_bytes = rhs_base_size_bytes // num_n_tiles
+        tile_n = align_to(dims.size_n, num_n_tiles * num_lanes) // num_n_tiles
 
     # If decreasing tile_n is no longer possible, we decrease tile_k instead.
-    if tile_n % num_lanes or n_rem or tile_n < tile_n_limit:
-        num_n_tiles = last_valid_n_tiles
-        tile_n = dims.size_n // num_n_tiles
-        rhs_size_bytes = rhs_base_size_bytes // num_n_tiles
+    if tile_n < tile_n_limit:
+        num_n_tiles -= 1
+        tile_n = align_to(dims.size_n, num_n_tiles * num_lanes) // num_n_tiles
 
         # Decrease tile_k until rhs fits in vmem target.
-        while rhs_size_bytes > rhs_vmem_target or k_rem or tile_k % num_lanes:
+        base_rhs_size_bytes = pl.cdiv(base_rhs_size_bytes, num_n_tiles)
+        while pl.cdiv(base_rhs_size_bytes, num_k_tiles) >= rhs_vmem_target:
             num_k_tiles += 1
-            tile_k = dims.size_k // num_k_tiles
-            k_rem = dims.size_k % num_k_tiles
-            rhs_size_bytes = rhs_base_size_bytes // (num_k_tiles * num_n_tiles)
+            tile_k = align_to(dims.size_k,
+                              num_k_tiles * num_lanes) // num_k_tiles
 
-    is_tile_n_invalid = tile_n % num_lanes or n_rem or tile_n < tile_n_limit
-    is_tile_k_invalid = tile_k % num_lanes or k_rem
-
-    if is_tile_n_invalid or is_tile_k_invalid:
+    if tile_n == 0 or tile_k == 0:
         raise ValueError(
-            f"Could not find valid tile sizes for {dims=} and"
-            f" {rhs_vmem_target=}. Last tried tiles: {tile_m=} {tile_k=} {tile_n=}"
+            f"Could not find valid tile sizes for {dims=} and {rhs_vmem_target=}."
         )
 
     return TileSizes(tile_m=tile_m, tile_k=tile_k, tile_n=tile_n)
@@ -748,15 +738,8 @@ def validate_inputs(
 
     assert group_offset.shape == (1, )
 
-    # TODO(kyuyeunk): Add support for implicit padding along lane dimensions.
-    num_lanes = pltpu.get_tpu_info().num_lanes
-    if size_k % num_lanes != 0 or size_n % num_lanes != 0:
-        raise NotImplementedError(
-            "Implicit padding along lane dimensions is not supported.")
-
-    bitwidth = jax.dtypes.itemsize_bits(lhs.dtype)
-    packing = 32 // bitwidth
-    size_lhs_sublane = pltpu.get_tpu_info().num_sublanes * packing
+    size_lhs_sublane = pltpu.get_tpu_info().get_sublane_tiling(lhs.dtype)
+    size_lhs_sublane = min(size_lhs_sublane, size_m)
 
     return Dimensions(
         size_m=size_m,
@@ -766,22 +749,6 @@ def validate_inputs(
         size_lhs_group=size_lhs_group,
         size_lhs_sublane=size_lhs_sublane,
     )
-
-
-def validate_tiles(tiles: TileSizes, dims: Dimensions):
-    """Validates the tile sizes for the GMM kernel."""
-
-    def _validate(x: int, tx: int, name: str):
-        if x % tx != 0:
-            raise ValueError(
-                f"size_{name}={x} is not divisible by tile_{name}={tx}.")
-        if tx > x:
-            raise ValueError(
-                f"tile_{name}={tx} is larger than size_{name}={x}.")
-
-    _validate(dims.size_m, pltpu.get_tpu_info().num_sublanes, "m")
-    _validate(dims.size_k, tiles.tile_k, "k")
-    _validate(dims.size_n, tiles.tile_n, "n")
 
 
 def get_cost_estimate(
@@ -797,9 +764,8 @@ def get_cost_estimate(
 
     lhs_bytes = dims.size_m * dims.size_k * lhs.dtype.itemsize
 
-    # TODO(kyuyeunk): Handle 4-bit quantization case.
     rhs_bytes = (dims.size_group * dims.size_k * dims.size_n *
-                 rhs.weight.dtype.itemsize)
+                 jax.dtypes.itemsize_bits(rhs.weight)) // 8
     if rhs.scale is not None:
         rhs_bytes += dims.size_n * jnp.dtype(jnp.float32).itemsize
     if rhs.bias is not None:
@@ -900,8 +866,6 @@ def make_gmm_configs(
         lhs_q_dtype = lhs_q_dtype if lhs_q_dtype is not None else lhs.dtype
         tiles = tile_info(lhs_q_dtype, rhs.dtype, dims, vmem_limit_bytes)
 
-    validate_tiles(tiles, dims)
-
     return GmmConfigs(
         dims=dims,
         tiles=tiles,
@@ -952,7 +916,7 @@ def gmm_v2(
     """GMM kernel implemented with emit_pipeline.
 
     Dynamically calculate offset lhs/out tiles to reduce redundant computations.
-    Additionally, adjusting dma size based on number of valid rows and utilize
+    Additionally, it adjusts dma size based on number of valid rows and utilize
     triple buffering on weights to better utilize memory.
 
     Args:
@@ -1012,7 +976,7 @@ def gmm_v2(
         rhs_bias_spec = pl.BlockSpec(memory_space=pltpu.HBM)
 
     # Initialize scratch shapes.
-    max_num_gm = dims.size_group + dims.size_m // tiles.tile_m - 1
+    max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
 
     scratch_shapes = [
         # partial_out_ref
@@ -1026,6 +990,7 @@ def gmm_v2(
         ),
     ]
 
+    num_lanes = pltpu.get_tpu_info().num_lanes
     if cfgs.zero_init:
         # TODO(kyuyeunk): Create better heuristics for determining this value.
         target_zero_ref_bytes = 2 * 1024 * 1024
@@ -1040,7 +1005,6 @@ def gmm_v2(
         # (which is smallest allowed column size for DMA) and reuse the buffer by
         # size_n//num_lanes times in a single tile, we can significantly increase
         # tile_zero_m without triggering OOM.
-        num_lanes = pltpu.get_tpu_info().num_lanes
         out_bytes = jnp.dtype(cfgs.out_dtype).itemsize
         tile_zero_m = target_zero_ref_bytes // num_lanes // out_bytes
         tile_zero_m = min(tile_zero_m, dims.size_m)
@@ -1052,7 +1016,8 @@ def gmm_v2(
     else:
         scratch_shapes += [None, None]
 
-    out_init = jax.ShapeDtypeStruct((dims.size_m, dims.size_n), cfgs.out_dtype)
+    aligned_n = align_to(dims.size_n, num_lanes)
+    out_init = jax.ShapeDtypeStruct((dims.size_m, aligned_n), cfgs.out_dtype)
     rhs_weights = WeightsRef(weight=rhs, scale=rhs_scale, bias=rhs_bias)
 
     return pl.pallas_call(
@@ -1079,25 +1044,11 @@ def gmm_v2(
         cost_estimate=get_cost_estimate(lhs, rhs_weights, out_init.dtype,
                                         dims),
         metadata=get_metadata(cfgs),
-    )(group_sizes, group_offset, lhs, rhs_weights)
+    )(group_sizes, group_offset, lhs, rhs_weights)[:, :dims.size_n]
 
 
-def is_supported_by_gmm_v2(lhs: jax.Array, rhs: jax.Array,
-                           rhs_scale: jax.Array | None) -> bool:
-    """Return false if gmm_v2 does not support the inputs yet."""
-
+def is_supported_by_gmm_v2(rhs_scale: jax.Array | None) -> bool:
+    # gmm_v2 does not support subchannel quantization.
     if rhs_scale is not None and rhs_scale.shape[1] != 1:
-        # gmm_v2 does not support subchannel quantization.
-        return False
-    # gmm_v2 does not support implicit padding along lane dimension.
-    num_lanes = pltpu.get_tpu_info().num_lanes
-    if lhs.shape[-1] % num_lanes != 0 or rhs.shape[-1] % num_lanes != 0:
-        return False
-    # gmm_v2 does not support when lhs is not multiple of sublane size.
-    lhs_bytes = lhs.dtype.itemsize
-    if lhs.shape[0] % (pltpu.get_tpu_info().num_sublanes * lhs_bytes) != 0:
-        return False
-    # Handle weird edge cases where inputs are already quantized.
-    if lhs.dtype not in [jnp.bfloat16, jnp.float32]:
         return False
     return True
