@@ -270,7 +270,6 @@ def quantized_matmul_kernel(
         w_q=w_q,
         w_scale=w_scale,
         x_abs_max=x_abs_max,
-        x_q_dtype=x_q_dtype,
         batch_block_size=batch_block_size,
         out_block_size=out_block_size,
         in_block_size=in_block_size,
