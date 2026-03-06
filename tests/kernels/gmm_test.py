@@ -17,10 +17,7 @@ import jax.numpy as jnp
 from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 
-from tpu_inference.kernels.megablox.gmm import gmm
-from tpu_inference.kernels.megablox.gmm_v2 import (gmm_v2,
-                                                   is_supported_by_gmm_v2)
-
+from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 jax.config.parse_flags_with_absl()
 
 
@@ -219,25 +216,15 @@ class GmmTest(jtu.JaxTestCase):
             group_offset=group_offset,
         )
 
-        if is_supported_by_gmm_v2(rhs_scale):
-            actual = gmm_v2(
-                lhs,
-                rhs_q,
-                group_sizes,
-                rhs_scale=rhs_scale,
-                group_offset=group_offset,
-                rhs_bias=rhs_bias,
-                maybe_quantize_lhs=False,
-            ).astype(lhs.dtype)
-        else:
-            actual = gmm(
-                lhs,
-                rhs_q,
-                group_sizes,
-                rhs_scale=rhs_scale,
-                group_offset=group_offset,
-                rhs_bias=rhs_bias,
-            ).astype(lhs.dtype)
+        actual = gmm_v2(
+            lhs,
+            rhs_q,
+            group_sizes,
+            rhs_scale=rhs_scale,
+            group_offset=group_offset,
+            rhs_bias=rhs_bias,
+            maybe_quantize_lhs=False,
+        ).astype(lhs.dtype)
 
         self.assertArraysAllClose(actual, expected, atol=3e-1, rtol=3e-1)
 
