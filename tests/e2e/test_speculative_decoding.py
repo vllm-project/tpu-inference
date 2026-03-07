@@ -59,11 +59,24 @@ def get_eagle3_test_prompts():
     return prompts
 
 
+def get_dflash_test_prompts():
+    num_prompts = 100
+    prompts = []
+
+    for _ in range(num_prompts):
+        prompts.append(
+            "Predict the continuation of this sequence: 1 2 3 4 5 6 7 8")
+
+    return prompts
+
+
 def get_test_prompts(speculative_config: dict):
     if speculative_config['method'] == 'ngram':
         return get_ngram_test_prompts()
     elif speculative_config['method'] == 'eagle3':
         return get_eagle3_test_prompts()
+    elif speculative_config['method'] == 'dflash':
+        return get_dflash_test_prompts()
     else:
         raise NotImplementedError(
             f"{speculative_config['method']} is not supported yet.")
@@ -313,3 +326,40 @@ def test_eagle3_performance(
             "num_speculative_tokens": 2,
             "draft_tensor_parallel_size": 1
         }, 0.6 if _is_v7x() else 1.8)
+
+
+def test_dflash_correctness(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+):
+    '''
+    Compare the outputs of a original LLM and a speculative LLM
+    should be the same when using DFlash speculative decoding.
+    '''
+    model_name = 'Qwen/Qwen3-4B'
+
+    _test_correctness_helper(
+        monkeypatch, sampling_config, model_name, {
+            'model': "z-lab/Qwen3-4B-DFlash-b16",
+            "num_speculative_tokens": 16,
+            "method": "dflash",
+            "draft_tensor_parallel_size": 1
+        })
+
+
+def test_dflash_performance(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+):
+    '''
+    Test that DFlash speculative decoding provides significant performance
+    improvement. Compares timing between reference LLM and speculative LLM
+    using Qwen3-4B.
+    '''
+    _test_performance_helper(
+        monkeypatch, sampling_config, {
+            "method": "dflash",
+            "model": "z-lab/Qwen3-4B-DFlash-b16",
+            "num_speculative_tokens": 16,
+            "draft_tensor_parallel_size": 1
+        }, 0.6 if _is_v7x() else 1.5)
