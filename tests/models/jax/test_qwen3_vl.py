@@ -743,7 +743,8 @@ class TestQwen3VLForConditionalGeneration:
         """get_input_embeddings with None/empty multimodal should return text embeddings."""
         input_ids = jnp.array([1, 2, 3, 4, 5], dtype=jnp.int32)
         mock_text_embeds = jnp.ones((5, model.config.hidden_size))
-        model.language_model.embed = MagicMock(return_value=mock_text_embeds)
+        model.language_model.embed_tokens = MagicMock(
+            return_value=mock_text_embeds)
 
         # Test with None
         result = model.get_input_embeddings(input_ids, None)
@@ -763,7 +764,8 @@ class TestQwen3VLForConditionalGeneration:
         """get_input_embeddings with multimodal should call merge function."""
         input_ids = jnp.array([1, 2, 3, 4, 5], dtype=jnp.int32)
         mock_text_embeds = jnp.ones((5, model.config.hidden_size))
-        model.language_model.embed = MagicMock(return_value=mock_text_embeds)
+        model.language_model.embed_tokens = MagicMock(
+            return_value=mock_text_embeds)
 
         mm_embeds = jnp.ones((3, model.config.hidden_size))
         mock_merged = jnp.ones((5, model.config.hidden_size))
@@ -802,17 +804,17 @@ class TestQwen3VLForConditionalGeneration:
         assert len(new_kvs) == 1
         assert x.shape == (10, model.config.hidden_size)
 
-    def test_compute_logits_delegates_to_language_model(
+    def test_compute_logits_uses_lm_head_when_present(
         self, model: Qwen3VLForConditionalGeneration
     ):
-        """compute_logits should delegate to language model."""
+        """compute_logits should use the wrapper lm_head when untied."""
         hidden_states = jnp.ones((10, model.config.hidden_size))
         mock_logits = jnp.ones((10, model.config.vocab_size))
-        model.language_model.compute_logits = MagicMock(return_value=mock_logits)
+        model.lm_head = MagicMock(return_value=mock_logits)
 
         logits = model.compute_logits(hidden_states)
         np.testing.assert_array_equal(np.array(logits), np.array(mock_logits))
-        model.language_model.compute_logits.assert_called_once_with(hidden_states)
+        model.lm_head.assert_called_once_with(hidden_states)
 
     @patch('tpu_inference.models.jax.qwen3_vl.load_hf_weights')
     def test_load_weights(
@@ -914,7 +916,7 @@ class TestServingIntegration:
         input_ids = jnp.array(input_ids_list, dtype=jnp.int32)
 
         # Merge multimodal embeddings into text embeddings.
-        base_text = model.language_model.embed(input_ids)
+        base_text = model.language_model.embed_tokens(input_ids)
         merged = model.get_input_embeddings(input_ids, mm_flat)
         assert merged.shape == base_text.shape
 
