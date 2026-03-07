@@ -395,6 +395,49 @@ def shard_moe_weights(
     return weights
 
 
+def shard_fp8_moe_weights_to_tpu(
+    weights: FusedMoEWeights,
+    mesh: Mesh,
+    source_mesh: Mesh | None = None,
+) -> FusedMoEWeights:
+    """Shard FP8 MoE weights onto TPU before requantization.
+
+    Transfers FP8 weights from CPU to TPU with expert-dimension sharding
+    so that the subsequent dequant/requant in process_fp8_moe_weights runs
+    on TPU in parallel across experts. This avoids OOM (no single TPU holds
+    the full unsharded weight) and is much faster than CPU requantization.
+
+    For meshes without an EXPERT axis (e.g. GMM_TP), falls back to the
+    first mesh axis to distribute experts across devices.
+
+    Args:
+        weights: FP8 MoE weights (typically on CPU).
+        mesh: The TPU device mesh for inference.
+        source_mesh: The mesh the weights currently reside on (e.g.
+            cpu_mesh()). None when weights are plain CPU arrays.
+
+    Returns:
+        FusedMoEWeights sharded across TPU devices.
+    """
+    if ShardingAxisName.EXPERT in mesh.axis_names:
+        shard_axis = ShardingAxisName.EXPERT
+    else:
+        shard_axis = mesh.axis_names[0]
+    ep_sharding = NamedSharding(mesh, P(shard_axis))
+
+    result_fields = {}
+    for field in fields(FusedMoEWeights):
+        key = field.name
+        weight = getattr(weights, key)
+        if weight is not None:
+            result_fields[key] = general_device_put(weight,
+                                                    ep_sharding,
+                                                    source_mesh=source_mesh)
+        else:
+            result_fields[key] = None
+    return FusedMoEWeights(**result_fields)
+
+
 @jax.jit(static_argnames=(
     "moe_backend",
     "mesh",
