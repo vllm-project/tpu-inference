@@ -17,7 +17,12 @@ CSV_MAP = {
         "v7_pytorch": "support_matrices/nightly/vllm/v7/feature_support_matrix.csv",
         "v7_default": "support_matrices/nightly/default/v7/feature_support_matrix.csv"
     },
-    "parallelism": "support_matrices/parallelism_support_matrix.csv",
+    "parallelism": {
+        "v6_flax": "support_matrices/nightly/flax_nnx/v6/parallelism_support_matrix.csv",
+        "v6_pytorch": "support_matrices/nightly/vllm/v6/parallelism_support_matrix.csv",
+        "v7_flax": "support_matrices/nightly/flax_nnx/v7/parallelism_support_matrix.csv",
+        "v7_pytorch": "support_matrices/nightly/vllm/v7/parallelism_support_matrix.csv"
+    },
     "quantization": {
         "static": "support_matrices/quantization_support_matrix.csv",
         "v6_flax": "support_matrices/nightly/flax_nnx/v6/quantization_support_matrix.csv",
@@ -149,6 +154,47 @@ def generate_html_feature_table(headers, data):
         html.append(f"      <td>{merged_flax}</td>")
         html.append(f"      <td>{merged_pytorch}</td>")
         html.append(f"      <td>{merged_default}</td>")
+        html.append("    </tr>")
+        
+    html.append("  </tbody>")
+    html.append("</table>")
+    return "\n".join(html)
+
+def generate_html_parallelism_table(headers, data):
+    """Generates an HTML table specifically for the parallelism techniques matrix."""
+    if not headers: return ""
+    
+    html = []
+    html.append("<table>")
+    html.append("  <thead>")
+    html.append("    <tr>")
+    html.append("      <th rowspan=\"2\">Feature</th>")
+    html.append("      <th colspan=\"2\">Flax</th>")
+    html.append("      <th colspan=\"2\">torchax</th>")
+    html.append("    </tr>")
+    html.append("    <tr>")
+    html.append("      <th>CorrectnessTest</th>")
+    html.append("      <th>PerformanceTest</th>")
+    html.append("      <th>CorrectnessTest</th>")
+    html.append("      <th>PerformanceTest</th>")
+    html.append("    </tr>")
+    html.append("  </thead>")
+    html.append("  <tbody>")
+
+    for row in data:
+        html.append("    <tr>")
+        technique_display = f"<strong>{row[0]}</strong>"
+        raw_statuses = row[5] if len(row) > 5 else []
+        
+        if row[0].strip() == "SP":
+            if any("Experimental" in str(s) for s in raw_statuses):
+                technique_display += " <a href=\"https://github.com/vllm-project/tpu-inference/issues/1749\">(vote to prioritize)</a>"
+
+        html.append(f"      <td>{technique_display}</td>")
+        html.append(f"      <td>{row[1]}</td>")
+        html.append(f"      <td>{row[2]}</td>")
+        html.append(f"      <td>{row[3]}</td>")
+        html.append(f"      <td>{row[4]}</td>")
         html.append("    </tr>")
         
     html.append("  </tbody>")
@@ -334,6 +380,47 @@ def update_readme():
                 
             headers = ["Feature"]
             new_table = generate_html_feature_table(headers, all_data)
+            
+        elif section_key == "parallelism":
+            merged_features = {}
+            for col_key, fpath in file_sources.items():
+                h, d = read_csv_data(fpath)
+                if d:
+                    for r in d:
+                        if not r: continue
+                        feature = r[0].strip()
+                        if feature not in merged_features:
+                            merged_features[feature] = {
+                                "v6_flax": ["❓ Untested", "❓ Untested"], 
+                                "v6_pytorch": ["❓ Untested", "❓ Untested"], 
+                                "v7_flax": ["❓ Untested", "❓ Untested"], 
+                                "v7_pytorch": ["❓ Untested", "❓ Untested"]
+                            }
+                        c = r[1] if len(r) > 1 and r[1].strip() and r[1].strip() != "-" else "❓ Untested"
+                        p = r[2] if len(r) > 2 and r[2].strip() and r[2].strip() != "-" else "❓ Untested"
+                        merged_features[feature][col_key] = [c, p]
+
+            for feature in sorted(merged_features.keys(), key=lambda x: x.lower()):
+                metrics = merged_features[feature]
+                flax_c = _merge_hw_status(metrics["v6_flax"][0], metrics["v7_flax"][0])
+                flax_p = _merge_hw_status(metrics["v6_flax"][1], metrics["v7_flax"][1])
+                torch_c = _merge_hw_status(metrics["v6_pytorch"][0], metrics["v7_pytorch"][0])
+                torch_p = _merge_hw_status(metrics["v6_pytorch"][1], metrics["v7_pytorch"][1])
+                
+                raw_statuses = metrics["v6_flax"] + metrics["v7_flax"] + metrics["v6_pytorch"] + metrics["v7_pytorch"]
+                
+                row = [
+                    feature,
+                    flax_c,
+                    flax_p,
+                    torch_c,
+                    torch_p,
+                    raw_statuses
+                ]
+                all_data.append(row)
+                
+            headers = ["Feature"]
+            new_table = generate_html_parallelism_table(headers, all_data)
             
         elif section_key == "microbenchmarks":
             # Custom merge logic for microbenchmarks (Horizontal Join of v6 and v7)

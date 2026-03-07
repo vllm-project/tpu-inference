@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-03-05 12:25 AM UTC*
+*Last Updated: 2026-03-07 03:01 AM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -254,15 +254,65 @@ Below is the live status of our supported models, features, and kernels. Click o
 <summary>Parallelism Techniques</summary>
 
 <!-- START: parallelism -->
-| Feature | CorrectnessTest | PerformanceTest |
-| --- | --- | --- |
-| CP | <span title="❓&nbsp;Untested">❓</span> | <span title="❓&nbsp;Untested">❓</span> |
-| DP | <span title="✅&nbsp;Passing">✅</span> | <span title="❓&nbsp;Untested">❓</span> |
-| EP | <span title="✅&nbsp;Passing">✅</span> | <span title="❓&nbsp;Untested">❓</span> |
-| PP | <span title="✅&nbsp;Passing">✅</span> | <span title="✅&nbsp;Passing">✅</span> |
-| SP | <span title="❓&nbsp;Untested">❓</span> | <span title="❓&nbsp;Untested">❓</span> |
-| TP | <span title="✅&nbsp;Passing">✅</span> | <span title="❓&nbsp;Untested">❓</span> |
-
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2">Feature</th>
+      <th colspan="2">Flax</th>
+      <th colspan="2">torchax</th>
+    </tr>
+    <tr>
+      <th>CorrectnessTest</th>
+      <th>PerformanceTest</th>
+      <th>CorrectnessTest</th>
+      <th>PerformanceTest</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>CP</strong></td>
+      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓ Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td><strong>DP</strong></td>
+      <td><span title="✅ Passing">✅</span></td>
+      <td><span title="✅ Passing">✅</span></td>
+      <td><span title="✅ Passing">✅</span></td>
+      <td><span title="✅ Passing">✅</span></td>
+    </tr>
+    <tr>
+      <td><strong>EP</strong></td>
+      <td><span title="✅ Passing">✅</span></td>
+      <td><span title="✅ Passing">✅</span></td>
+      <td><span title="✅ Passing">✅</span></td>
+      <td><span title="✅ Passing">✅</span></td>
+    </tr>
+    <tr>
+      <td><strong>PP</strong></td>
+      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓ Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td><strong>SP</strong></td>
+      <td><span title="❌ Failing">❌</span></td>
+      <td><span title="⚪ N/A">⚪</span></td>
+      <td><span title="❌ Failing">❌</span></td>
+      <td><span title="⚪ N/A">⚪</span></td>
+    </tr>
+    <tr>
+      <td><strong>TP</strong></td>
+      <td><span title="✅ Passing">✅</span></td>
+      <td><span title="✅ Passing">✅</span></td>
+      <td><span title="✅ Passing">✅</span></td>
+      <td><span title="✅ Passing">✅</span></td>
+    </tr>
+  </tbody>
+</table>
 <!-- END: parallelism -->
 
 </details>
