@@ -231,8 +231,8 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                     (((1, ), (1, )), ((), ())),
                     preferred_element_type=jnp.float32,
                 )
-                # TODO(kyuyeunk): Investigate performance gain from merging scales.
-                # out *= weight_scale_jax
+                # TODO(kyuyeunk): Investigate performance gain from merging
+                # scales.  out *= weight_scale_jax
                 out *= weight_scale_jax * input_scale
                 out = out.astype(x_jax.dtype)
             else:
