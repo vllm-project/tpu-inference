@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
 import jax
@@ -354,6 +355,76 @@ class TestMultiModalManager:
         assert gathered_embeds_3.shape == expected_embeds_3.shape
         np.testing.assert_array_equal(np.asarray(gathered_embeds_3),
                                       np.asarray(expected_embeds_3))
+
+    def test_gather_mm_embeddings_deepstack_uses_embed_indices(self):
+        req_id = "req-1"
+        encoder_embedding = jnp.arange(2 * 4, dtype=jnp.float32).reshape((2,
+                                                                          4))
+        deepstack_embedding = [encoder_embedding + 100]
+        self.runner.encoder_cache = {req_id: encoder_embedding}
+        self.runner.deepstack_cache = {req_id: deepstack_embedding}
+
+        mock_sampling_params = MagicMock()
+        mock_sampling_params.sampling_type = SamplingType.GREEDY
+        mock_sampling_params.top_k = -1
+        mock_sampling_params.top_p = 1.0
+        mock_sampling_params.temperature = 0.0
+        mock_sampling_params.min_tokens = 0
+        mock_sampling_params.logprobs = None
+        mock_sampling_params.logit_bias = None
+        mock_sampling_params.allowed_token_ids = set()
+        mock_sampling_params.bad_words_token_ids = None
+        mock_sampling_params.all_stop_token_ids = set()
+
+        @dataclass
+        class DummyPlaceholderRange:
+            offset: int
+            length: int
+            is_embed: np.ndarray
+
+            def get_embeds_indices_in_range(self, start: int, end: int):
+                start = int(start)
+                end = int(end)
+                embed_start = int(self.is_embed[:start].sum())
+                embed_end = embed_start + int(self.is_embed[start:end].sum())
+                return embed_start, embed_end
+
+        pos_info = DummyPlaceholderRange(
+            offset=0,
+            length=4,
+            is_embed=np.array([True, False, True, False], dtype=np.bool_),
+        )
+
+        req_state = CachedRequestState(
+            req_id=req_id,
+            prompt_token_ids=list(range(4)),
+            output_token_ids=[],
+            sampling_params=mock_sampling_params,
+            block_ids=([], ),
+            num_computed_tokens=0,
+            mm_features=[
+                MultiModalFeatureSpec(data=None,
+                                      identifier=req_id,
+                                      modality="image",
+                                      mm_position=pos_info)
+            ],
+            lora_request=None,
+            pooling_params=None,
+            generator=None,
+        )
+        self.runner.requests = {req_id: req_state}
+        self.runner.input_batch.add_request(req_state)
+
+        mock_scheduler_output = MagicMock(spec=VllmSchedulerOutput)
+        mock_scheduler_output.num_scheduled_tokens = {req_id: 4}
+
+        mm_embeds, deepstack_embeds = self.runner.mm_manager.gather_mm_embeddings(
+            mock_scheduler_output, target_pad_len=2)
+
+        np.testing.assert_array_equal(mm_embeds, encoder_embedding)
+        assert len(deepstack_embeds) == 1
+        np.testing.assert_array_equal(deepstack_embeds[0],
+                                      deepstack_embedding[0])
 
     def test_calc_mrope_positions(self):
         """Tests the calculation of M-RoPE positions for mixed prompt/completion."""

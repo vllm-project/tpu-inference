@@ -16,67 +16,17 @@ from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
 from tpu_inference.models.jax.utils.multi_modal_utils import (
-    flatten_embeddings, gather_mm_placeholders, sanity_check_mm_encoder_outputs,
-    scatter_mm_placeholders)
+    flatten_embeddings, normalize_mm_grid_thw,
+    sanity_check_mm_encoder_outputs)
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
-
-
-def _normalize_grid_thw(grid_thw: object) -> tuple[tuple[int, int, int], ...]:
-    """Normalize grid_thw into a tuple-of-tuples, flattening batch dim if present.
-
-    Note: Multimodal processing currently uses a single batch dimension, but
-    sequence-level batching may introduce a leading B dim (B, N, 3). We flatten
-    it here to keep the encoder interface stable.
-    """
-    if grid_thw is None:
-        return ()
-
-    if isinstance(grid_thw, (list, tuple)):
-        if len(grid_thw) == 0:
-            return ()
-        if len(grid_thw) == 3 and all(
-                isinstance(v, (int, np.integer)) for v in grid_thw):
-            return (tuple(int(v) for v in grid_thw), )
-        if all(isinstance(row, (list, tuple)) for row in grid_thw):
-            if grid_thw and grid_thw[0] and isinstance(grid_thw[0][0],
-                                                      (list, tuple)):
-                # Flatten (B, N, 3) -> (B*N, 3)
-                flat_rows = [row for batch in grid_thw for row in batch]
-                return tuple(tuple(int(v) for v in row) for row in flat_rows)
-            return tuple(tuple(int(v) for v in row) for row in grid_thw)
-
-    # Handle torch/jax/numpy tensors.
-    if hasattr(grid_thw, "detach"):
-        grid_thw = grid_thw.detach().cpu()
-    if hasattr(grid_thw, "numpy"):
-        try:
-            grid_thw = grid_thw.numpy()
-        except Exception:
-            pass
-
-    arr = np.asarray(grid_thw)
-    if arr.size == 0:
-        return ()
-    if arr.ndim == 1 and arr.shape[0] == 3:
-        return (tuple(int(v) for v in arr.tolist()), )
-    if arr.ndim == 2 and arr.shape[1] == 3:
-        return tuple(tuple(int(v) for v in row) for row in arr.tolist())
-    if arr.ndim == 3 and arr.shape[2] == 3:
-        flat = arr.reshape(-1, 3)
-        return tuple(tuple(int(v) for v in row) for row in flat.tolist())
-
-    raise ValueError(
-        "Incorrect type/shape of grid_thw. Expected (3,), (N, 3), or (B, N, 3)."
-    )
 
 
 class MultiModalManager:
@@ -171,9 +121,9 @@ class MultiModalManager:
                     batched_mm_inputs[key] = torch.cat(
                         batched_mm_inputs[key], dim=0)
 
-            image_grid_thw = _normalize_grid_thw(
+            image_grid_thw = normalize_mm_grid_thw(
                 batched_mm_inputs.pop("image_grid_thw", None))
-            video_grid_thw = _normalize_grid_thw(
+            video_grid_thw = normalize_mm_grid_thw(
                 batched_mm_inputs.pop("video_grid_thw", None))
             if video_grid_thw:
                 batched_mm_inputs["video_grid_thw"] = video_grid_thw
@@ -297,11 +247,11 @@ class MultiModalManager:
                         deepstack_dtype = deepstack_output[0].dtype
                         deepstack_layers = [[] for _ in range(len(deepstack_output))]
                     for layer_idx, layer_embeds in enumerate(deepstack_output):
-                        layer_slice = layer_embeds[start_idx:end_idx]
-                        layer_item = gather_mm_placeholders(
-                            layer_slice,
-                            is_embed=is_embed,
-                        )
+                        if is_embed is not None:
+                            layer_item = layer_embeds[
+                                curr_embeds_start:curr_embeds_end]
+                        else:
+                            layer_item = layer_embeds[start_idx:end_idx]
                         deepstack_layers[layer_idx].append(layer_item)
         if not mm_embeds:
             if deepstack_layers is None:
