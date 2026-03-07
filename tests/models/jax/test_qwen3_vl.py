@@ -1049,3 +1049,55 @@ class TestServingIntegration:
         diff = np.abs(np.array(out_deep - out_base))
         placeholder_mask = np.array(input_ids) == model.image_token_id
         assert diff[placeholder_mask].max() > 0
+
+    def test_deepstack_injection_uses_global_layer_indices(
+        self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
+    ):
+        """DeepStack injection should use global decoder layer indices."""
+        model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+        language_model = model.language_model
+        hidden_size = model.config.hidden_size
+        seq_len = 4
+
+        base_hidden = jnp.zeros((seq_len, hidden_size),
+                                dtype=model.vllm_config.model_config.dtype)
+        language_model.start_layer = 1
+        language_model.end_layer = 3
+        language_model.embed_tokens = MagicMock(return_value=base_hidden)
+        language_model.norm = MagicMock(side_effect=lambda x: x)
+        language_model.layers = [
+            MagicMock(side_effect=lambda kv, x, md: (kv, x))
+            for _ in range(4)
+        ]
+
+        injected = []
+
+        def record_injection(x, mask, visual_embeds):
+            del mask
+            injected.append(np.array(visual_embeds))
+            return x
+
+        language_model._inject_visual_features = MagicMock(
+            side_effect=record_injection)
+
+        kv_caches = [jnp.zeros((1,), dtype=jnp.int32) for _ in range(2)]
+        attn_meta = _make_attention_metadata(seq_len)
+        visual_mask = jnp.array([True, False, False, False], dtype=jnp.bool_)
+        deepstack = [
+            jnp.full((1, hidden_size), float(i),
+                     dtype=model.vllm_config.model_config.dtype)
+            for i in range(4)
+        ]
+
+        language_model(
+            kv_caches=kv_caches,
+            input_ids=jnp.arange(seq_len, dtype=jnp.int32),
+            attention_metadata=attn_meta,
+            inputs_embeds=base_hidden,
+            visual_pos_mask=visual_mask,
+            deepstack_visual_embeds=deepstack,
+        )
+
+        assert len(injected) == 2
+        np.testing.assert_array_equal(injected[0], np.array(deepstack[1]))
+        np.testing.assert_array_equal(injected[1], np.array(deepstack[2]))

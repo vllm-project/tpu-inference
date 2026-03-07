@@ -1338,17 +1338,18 @@ class Qwen3VLModel(Qwen3Model):
 
         for i, layer in enumerate(islice(self.layers, self.start_layer,
                                          self.end_layer)):
+            global_i = self.start_layer + i
             kv_cache = kv_caches[i]
             kv_cache, x = layer(kv_cache, x, attention_metadata)
             kv_caches[i] = kv_cache
 
             if (
                 deepstack_visual_embeds is not None
-                and i < len(deepstack_visual_embeds)
+                and global_i < len(deepstack_visual_embeds)
                 and visual_pos_mask is not None
             ):
                 x = self._inject_visual_features(
-                    x, visual_pos_mask, deepstack_visual_embeds[i]
+                    x, visual_pos_mask, deepstack_visual_embeds[global_i]
                 )
 
         x = self.norm(x)
