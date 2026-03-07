@@ -24,6 +24,7 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import \
     Qwen2_5_VLConfig
+from tpu_inference.models.jax.utils.multi_modal_utils import reshape_mm_tensor
 from vllm.config import (CacheConfig, DeviceConfig, MultiModalConfig,
                          ParallelConfig, SchedulerConfig)
 
@@ -420,24 +421,23 @@ class TestQwen2_5_VLForConditionalGeneration:
             model.compute_logits = MagicMock()
             yield model
 
-    def test_validate_and_reshape_mm_tensor(
+    def test_reshape_mm_tensor(
             self, model: Qwen2_5_VLForConditionalGeneration):
         data_list = [np.ones((2, 4)), np.ones((3, 4))]
-        reshaped_list = model._validate_and_reshape_mm_tensor(
-            data_list, "test_list")
+        reshaped_list = reshape_mm_tensor(data_list, "test_list")
         assert reshaped_list.shape == (5, 4)
         assert isinstance(reshaped_list, jax.Array)
 
         data_2d = np.ones((5, 4))
-        reshaped_2d = model._validate_and_reshape_mm_tensor(data_2d, "test_2d")
+        reshaped_2d = reshape_mm_tensor(data_2d, "test_2d")
         assert reshaped_2d.shape == (5, 4)
 
         data_3d = np.ones((2, 5, 4))
-        reshaped_3d = model._validate_and_reshape_mm_tensor(data_3d, "test_3d")
+        reshaped_3d = reshape_mm_tensor(data_3d, "test_3d")
         assert reshaped_3d.shape == (10, 4)
 
         with pytest.raises(ValueError, match="Incorrect type of test_invalid"):
-            model._validate_and_reshape_mm_tensor("invalid", "test_invalid")
+            reshape_mm_tensor("invalid", "test_invalid")
 
     def test_parse_and_validate_image_input(
             self, model: Qwen2_5_VLForConditionalGeneration):

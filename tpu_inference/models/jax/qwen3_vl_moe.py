@@ -3,15 +3,14 @@
 
 from dataclasses import InitVar, dataclass
 
+from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.models.jax.qwen3_vl import (
-    get_mrope_input_positions,
-    apply_rotary_pos_emb_thd_padded,
+    build_mrope_input_positions,
     _ModelConfigAdapter,
     Qwen3VLImagePixelInputs,
     Qwen3VLImageInputs,
     Qwen3VLVisionTransformer,
-    Qwen3VLTextRotaryEmbedding,
 )
 
 from typing import List, Optional, Tuple
@@ -34,6 +33,9 @@ from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     merge_multimodal_embeddings,
+    normalize_mm_grid_thw,
+    reshape_mm_tensor,
+    split_mm_embeddings_by_grid,
 )
 from tpu_inference.models.jax.utils.weight_utils import (
     get_default_maps,
@@ -200,6 +202,8 @@ class Qwen3VLMoeTextAttention(nnx.Module):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
+        self.rope_theta = getattr(config, "rope_theta", 1000000.0)
+        self.rope_scaling = getattr(config, "rope_scaling", None)
         self.rms_norm_eps = config.rms_norm_eps
 
         self.head_dim_original = getattr(config, "head_dim",
@@ -257,7 +261,7 @@ class Qwen3VLMoeTextAttention(nnx.Module):
         kv_cache: Optional[jax.Array],
         hidden_states: jax.Array,
         attention_metadata: AttentionMetadata,
-        position_embeddings: Tuple[jax.Array, jax.Array],
+        input_positions: jax.Array,
     ) -> Tuple[jax.Array, jax.Array]:
         q = self.q_proj(hidden_states)
         q = self.q_norm(q)
@@ -265,9 +269,16 @@ class Qwen3VLMoeTextAttention(nnx.Module):
         k = self.k_proj(hidden_states)
         k = self.k_norm(k)
 
-        cos, sin = position_embeddings
-        q = apply_rotary_pos_emb_thd_padded(q, cos, sin, self.head_dim_original)
-        k = apply_rotary_pos_emb_thd_padded(k, cos, sin, self.head_dim_original)
+        if input_positions.ndim == 1:
+            input_positions = jnp.broadcast_to(input_positions[None, :],
+                                               (3, input_positions.shape[0]))
+
+        q = apply_rope(q, input_positions, self.head_dim_original,
+                       self.rope_theta, self.rope_scaling,
+                       rope_input_ordering="interleaved")
+        k = apply_rope(k, input_positions, self.head_dim_original,
+                       self.rope_theta, self.rope_scaling,
+                       rope_input_ordering="interleaved")
 
         v = self.v_proj(hidden_states)
         q_scale = k_scale = v_scale = None
@@ -394,7 +405,7 @@ class Qwen3VLMoeTextDecoderLayer(nnx.Module):
         kv_cache: jax.Array,
         hidden_states: jax.Array,
         attention_metadata: AttentionMetadata,
-        position_embeddings: Tuple[jax.Array, jax.Array],
+        input_positions: jax.Array,
     ) -> Tuple[jax.Array, jax.Array]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -402,7 +413,7 @@ class Qwen3VLMoeTextDecoderLayer(nnx.Module):
             kv_cache=kv_cache,
             hidden_states=hidden_states,
             attention_metadata=attention_metadata,
-            position_embeddings=position_embeddings,
+            input_positions=input_positions,
         )
         hidden_states = residual + hidden_states
 
@@ -459,23 +470,6 @@ class Qwen3VLMoeTextModel(nnx.Module):
             epsilon=rms_norm_eps,
             param_dtype=dtype,
             rngs=rngs,
-        )
-
-        rope_scaling = getattr(config, "rope_scaling", None)
-        rope_theta = getattr(config, "rope_theta", 1000000.0)
-        max_position_embeddings = getattr(config, "max_position_embeddings", 128000)
-        head_dim = getattr(config, "head_dim", hidden_size // config.num_attention_heads)
-
-        mrope_section = None
-        if rope_scaling is not None:
-            mrope_section = rope_scaling.get("mrope_section", [24, 20, 20])
-
-        self.rotary_emb = Qwen3VLTextRotaryEmbedding(
-            dim=head_dim,
-            max_position_embeddings=max_position_embeddings,
-            rope_theta=rope_theta,
-            rope_type="default",
-            mrope_section=mrope_section,
         )
 
         # LM head
@@ -536,18 +530,7 @@ class Qwen3VLMoeTextModel(nnx.Module):
         else:
             x = self.embed_tokens(input_ids)
 
-        # Compute position embeddings from attention metadata
-        pos = attention_metadata.input_positions
-        # Handle (seq_len,), (3, seq_len), or (3, bs, seq_len) inputs
-        if pos.ndim == 1:
-            # (seq_len,) -> (3, seq_len) for text-only
-            pos = jnp.broadcast_to(pos[None, :], (3, pos.shape[0]))
-        elif pos.ndim == 2:
-            # (3, seq_len) -> (3, 1, seq_len)
-            pos = pos[:, None, :]
-
-        cos, sin = self.rotary_emb(pos)
-        position_embeddings = (cos, sin)
+        input_positions = attention_metadata.input_positions
 
         for i, layer in enumerate(self.layers):
             kv_cache = kv_caches[i]
@@ -555,7 +538,7 @@ class Qwen3VLMoeTextModel(nnx.Module):
                 kv_cache=kv_cache,
                 hidden_states=x,
                 attention_metadata=attention_metadata,
-                position_embeddings=position_embeddings,
+                input_positions=input_positions,
             )
             kv_caches[i] = kv_cache
 
@@ -649,47 +632,6 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
         """Compute input embeddings and merge multimodal embeddings if present."""
         return self.get_input_embeddings(input_ids, multimodal_embeddings)
 
-    def _validate_and_reshape_mm_tensor(self, mm_input: object,
-                                        name: str) -> jax.Array:
-        if isinstance(mm_input, list):
-            arrays_to_concat = [jnp.asarray(item) for item in mm_input]
-            return jnp.concatenate(arrays_to_concat, axis=0)
-
-        if hasattr(mm_input, 'ndim'):
-            array_input = jnp.asarray(mm_input)
-            if array_input.ndim == 2:
-                return array_input
-            if array_input.ndim == 3:
-                return array_input.reshape(-1, array_input.shape[-1])
-
-        raise ValueError(f"Incorrect type of {name}. "
-                         f"Got type: {type(mm_input)}")
-
-    def _normalize_grid_thw(
-            self, grid_thw: object) -> Tuple[Tuple[int, int, int], ...]:
-        if grid_thw is None:
-            return ()
-        if isinstance(grid_thw, (list, tuple)):
-            if len(grid_thw) == 0:
-                return ()
-            if len(grid_thw) == 3 and all(
-                    isinstance(v, (int, np.integer)) for v in grid_thw):
-                return (tuple(int(v) for v in grid_thw), )
-            if isinstance(grid_thw[0], (list, tuple)):
-                return tuple(tuple(int(v) for v in row) for row in grid_thw)
-        if hasattr(grid_thw, 'ndim'):
-            array_input = np.asarray(grid_thw)
-            if array_input.size == 0:
-                return ()
-            if array_input.ndim == 1 and array_input.shape[0] == 3:
-                return (tuple(int(v) for v in array_input.tolist()), )
-            if array_input.ndim == 2 and array_input.shape[1] == 3:
-                return tuple(
-                    tuple(int(v) for v in row)
-                    for row in array_input.tolist())
-        raise ValueError("Incorrect type of grid_thw. "
-                         f"Got type: {type(grid_thw)}")
-
     def _parse_and_validate_image_input(
             self, image_grid_thw: Tuple[Tuple[int, int, int], ...],
             **kwargs: object) -> Optional[Qwen3VLImageInputs]:
@@ -702,8 +644,7 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
             return None
 
         if pixel_values is not None:
-            pixel_values = self._validate_and_reshape_mm_tensor(
-                pixel_values, "pixel values")
+            pixel_values = reshape_mm_tensor(pixel_values, "pixel values")
 
             if not isinstance(pixel_values, jax.Array):
                 raise ValueError("Incorrect type of pixel values. "
@@ -716,8 +657,7 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
 
         # NOTE: Not supporting image embeddings precomputed. Matches Qwen2.5VL.
         # if image_embeds is not None:
-        #     image_embeds = self._validate_and_reshape_mm_tensor(
-        #         image_embeds, "image embeds")
+        #     image_embeds = reshape_mm_tensor(image_embeds, "image embeds")
         #     if not isinstance(image_embeds, jax.Array):
         #         raise ValueError("Incorrect type of image embeddings. "
         #                          f"Got type: {type(image_embeds)}")
@@ -756,37 +696,9 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
         else:
             pixel_values = image_input["pixel_values"]
             image_embeds, deepstack_embeds = self.visual(pixel_values, grid_thw)
-
-        sizes = np.array([
-            t * (h // self.spatial_merge_size) * (w // self.spatial_merge_size)
-            for t, h, w in grid_thw
-        ])
-
-        if sizes.size == 0:
-            return (), None
-        if sizes.size == 1:
-            image_splits = (image_embeds, )
-            deepstack_by_item = None
-            if deepstack_embeds:
-                deepstack_by_item = [
-                    [layer_embeds for layer_embeds in deepstack_embeds]
-                ]
-            return image_splits, deepstack_by_item
-
-        split_indices = np.cumsum(sizes)[:-1]
-        image_splits = tuple(jnp.split(image_embeds, split_indices))
-        deepstack_by_item = None
-        if deepstack_embeds:
-            layer_splits = [
-                tuple(jnp.split(layer_embeds, split_indices))
-                for layer_embeds in deepstack_embeds
-            ]
-            deepstack_by_item = []
-            for item_idx in range(len(image_splits)):
-                deepstack_by_item.append(
-                    [layer_split[item_idx] for layer_split in layer_splits]
-                )
-        return image_splits, deepstack_by_item
+        return split_mm_embeddings_by_grid(image_embeds, grid_thw,
+                                           self.spatial_merge_size,
+                                           deepstack_embeds)
 
     def embed_multimodal(
         self,
@@ -807,9 +719,9 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
               - "embeds": Tuple of embeddings, one per image (Qwen 2.5 VL format)
               - "deepstack": Optional list of per-image DeepStack embeddings
         """
-        image_grid_thw = self._normalize_grid_thw(image_grid_thw)
+        image_grid_thw = normalize_mm_grid_thw(image_grid_thw)
         if not image_grid_thw:
-            image_grid_thw = self._normalize_grid_thw(
+            image_grid_thw = normalize_mm_grid_thw(
                 kwargs.get("video_grid_thw", None))
 
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(
@@ -882,7 +794,8 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
     ) -> Tuple[jax.Array, int]:
         """Compute MRoPE 3D position IDs for input sequence.
 
-        This is a wrapper around the module-level get_mrope_input_positions function
+        This is a wrapper around the module-level
+        build_mrope_input_positions function
         that uses the model's configuration.
 
         Args:
@@ -909,7 +822,7 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
                 expanded_video.extend([(1, int(h), int(w))] * t_val)
             video_grid_thw = expanded_video
 
-        llm_positions, mrope_position_delta = get_mrope_input_positions(
+        llm_positions, mrope_position_delta = build_mrope_input_positions(
             input_tokens=input_tokens,
             image_grid_thw=image_grid_thw,
             video_grid_thw=video_grid_thw,

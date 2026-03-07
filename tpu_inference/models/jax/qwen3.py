@@ -47,6 +47,7 @@ init_fn = nnx.initializers.uniform()
 
 
 class Qwen3Attention(JaxModule):
+    rope_input_ordering = "split"
 
     def __init__(self, config: Qwen3Config, dtype: jnp.dtype, rng: nnx.Rngs,
                  mesh: Mesh, kv_cache_dtype: str,
@@ -129,7 +130,8 @@ class Qwen3Attention(JaxModule):
 
     def _apply_rope(self, x: jax.Array, positions: jax.Array) -> jax.Array:
         return apply_rope(x, positions, self.head_dim_original,
-                          self.rope_theta, self.rope_scaling)
+                          self.rope_theta, self.rope_scaling,
+                          self.rope_input_ordering)
 
     def __call__(
         self,

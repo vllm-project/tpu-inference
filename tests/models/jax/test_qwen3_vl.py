@@ -24,13 +24,11 @@ from tpu_inference.models.jax.qwen3_vl import (
     Qwen3VLVisionTransformer,
     SegmentIds,
     _infer_pos_embed_grid_hw,
-    apply_interleaved_mrope,
     apply_rotary_pos_emb_vision,
+    build_mrope_input_positions,
     compute_vision_counts_per_sequence,
     generate_segment_ids_from_grid_thw,
-    get_mrope_input_positions,
     pad_segment_ids_for_attention,
-    rotate_half,
 )
 from tpu_inference.runner.kv_cache import create_kv_caches
 
@@ -323,53 +321,71 @@ class TestInferPosEmbedGridHw:
         assert h * w == 2
 
 
-class TestApplyInterleavedMrope:
-    """Tests for apply_interleaved_mrope MRoPE interleaving logic."""
+class TestApplyRopeWithMRoPE:
+    """Tests for apply_rope's shared MRoPE path."""
 
-    def test_equal_sections_interleave_correctly(self):
-        # mrope_section = [4, 4, 4] with head_dim//2 = 12
-        freqs = jnp.ones((3, 1, 8, 12), dtype=jnp.float32)
-        result = apply_interleaved_mrope(freqs, [4, 4, 4])
-        assert result.shape == (1, 8, 12)
+    def test_apply_rope_handles_qwen3vl_positions(self, hf_config: Qwen3Config):
+        seq_len = 8
+        num_heads = 2
+        head_dim = 16
+        x = jnp.ones((seq_len, num_heads, head_dim), dtype=jnp.bfloat16)
+        positions = jnp.arange(seq_len, dtype=jnp.int32)
+        positions_3d = jnp.stack([positions, positions + 1, positions + 2])
 
-    def test_unequal_sections_with_t_remainder(self):
-        # mrope_section = [6, 3, 3] - T has 3 extra dims after interleaving
-        freqs = jnp.arange(36, dtype=jnp.float32).reshape(3, 1, 1, 12)
-        result = apply_interleaved_mrope(freqs, [6, 3, 3])
-        assert result.shape == (1, 1, 12)
+        y = apply_rope(
+            x,
+            positions_3d,
+            head_dim=head_dim,
+            rope_theta=float(hf_config.rope_theta),
+            rope_scaling=getattr(hf_config, "rope_scaling", None),
+            rope_input_ordering="interleaved",
+        )
+        assert y.shape == x.shape
+        assert y.dtype == x.dtype
 
-    def test_typical_qwen3vl_section(self):
-        # Default Qwen3VL dense uses [24, 20, 20] for head_dim=128 (half=64)
-        freqs = jnp.ones((3, 2, 16, 64), dtype=jnp.float32)
-        result = apply_interleaved_mrope(freqs, [24, 20, 20])
-        assert result.shape == (2, 16, 64)
+    def test_apply_rope_interleaves_axes_per_mrope_section(self):
+        head_dim = 6
+        rope_theta = 10.0
+        positions_3d = jnp.array([[1], [2], [3]], dtype=jnp.int32)
+        x = jnp.array([[[1.0, 1.0, 1.0, 0.0, 0.0, 0.0]]], dtype=jnp.float32)
 
-    def test_small_section_values(self):
-        # mrope_section = [2, 2, 2] with head_dim//2 = 6
-        freqs = jnp.ones((3, 1, 4, 6), dtype=jnp.float32)
-        result = apply_interleaved_mrope(freqs, [2, 2, 2])
-        assert result.shape == (1, 4, 6)
+        y = apply_rope(
+            x,
+            positions_3d,
+            head_dim=head_dim,
+            rope_theta=rope_theta,
+            rope_scaling={"mrope_section": [1, 1, 1]},
+            rope_input_ordering="interleaved",
+        )
 
-    def test_interleaving_preserves_values(self):
-        # Verify the interleaving pattern is correct
-        # With [1, 1, 1], we should get [T0, H0, W0] ordering
-        # freqs shape must be (3, bs, seq_len, head_dim//2) where head_dim//2 = sum(mrope_section) = 3
-        t_val, h_val, w_val = 1.0, 2.0, 3.0
-        # Create freqs with shape (3, 1, 1, 3) - each axis has values at its section indices
-        freqs = jnp.zeros((3, 1, 1, 3), dtype=jnp.float32)
-        freqs = freqs.at[0, 0, 0, 0].set(t_val)  # T section is [0:1]
-        freqs = freqs.at[1, 0, 0, 1].set(h_val)  # H section is [1:2]
-        freqs = freqs.at[2, 0, 0, 2].set(w_val)  # W section is [2:3]
-        result = apply_interleaved_mrope(freqs, [1, 1, 1])
-        # Result should be (1, 1, 3) with values interleaved as [T0, H0, W0]
-        assert result.shape == (1, 1, 3)
-        np.testing.assert_allclose(np.array(result[0, 0]), [t_val, h_val, w_val])
+        inv_freq = 1.0 / (rope_theta**((2 * np.arange(head_dim // 2)) /
+                                        head_dim))
+        expected_angles = np.array(
+            [1.0 * inv_freq[0], 2.0 * inv_freq[1], 3.0 * inv_freq[2]],
+            dtype=np.float32,
+        )
+
+        np.testing.assert_allclose(np.array(y[0, 0, :3]),
+                                   np.cos(expected_angles),
+                                   rtol=1e-5,
+                                   atol=1e-5)
+        np.testing.assert_allclose(np.array(y[0, 0, 3:]),
+                                   np.sin(expected_angles),
+                                   rtol=1e-5,
+                                   atol=1e-5)
 
     def test_zero_section_allowed(self):
-        # Edge case: one section can be zero
-        freqs = jnp.ones((3, 1, 4, 6), dtype=jnp.float32)
-        result = apply_interleaved_mrope(freqs, [3, 3, 0])
-        assert result.shape == (1, 4, 6)
+        x = jnp.ones((4, 1, 6), dtype=jnp.float32)
+        positions_3d = jnp.stack([jnp.arange(4), jnp.arange(4),
+                                  jnp.arange(4)])
+        result = apply_rope(
+            x,
+            positions_3d,
+            head_dim=6,
+            rope_scaling={"mrope_section": [3, 3, 0]},
+            rope_input_ordering="interleaved",
+        )
+        assert result.shape == x.shape
 
 
 class TestComputeVisionCountsPerSequence:
@@ -447,40 +463,10 @@ class TestComputeVisionCountsPerSequence:
         assert int(num_videos[0]) == 0
 
 
-class TestRotateHalf:
-    """Tests for rotate_half RoPE helper function."""
-
-    def test_basic_rotation(self):
-        x = jnp.array([1.0, 2.0, 3.0, 4.0])
-        result = rotate_half(x)
-        # First half becomes negated second half, second half becomes first half
-        # [-3, -4, 1, 2]
-        np.testing.assert_allclose(np.array(result), [-3.0, -4.0, 1.0, 2.0])
-
-    def test_2d_input(self):
-        x = jnp.array([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
-        result = rotate_half(x)
-        expected = jnp.array([[-3.0, -4.0, 1.0, 2.0], [-7.0, -8.0, 5.0, 6.0]])
-        np.testing.assert_allclose(np.array(result), np.array(expected))
-
-    def test_3d_input(self):
-        x = jnp.ones((2, 3, 4))
-        result = rotate_half(x)
-        assert result.shape == x.shape
-        # First half of last dim should be -1, second half should be 1
-        np.testing.assert_allclose(np.array(result[..., :2]), -1.0 * np.ones((2, 3, 2)))
-        np.testing.assert_allclose(np.array(result[..., 2:]), 1.0 * np.ones((2, 3, 2)))
-
-    def test_preserves_dtype(self):
-        x = jnp.ones((4,), dtype=jnp.bfloat16)
-        result = rotate_half(x)
-        assert result.dtype == jnp.bfloat16
-
-
 class TestMRoPEPositions:
     def test_mrope_text_only_positions(self, hf_config: Qwen3Config):
         tokens = [1, 2, 3, 4]
-        positions, delta = get_mrope_input_positions(
+        positions, delta = build_mrope_input_positions(
             input_tokens=tokens,
             image_grid_thw=None,
             video_grid_thw=None,
@@ -496,7 +482,7 @@ class TestMRoPEPositions:
 
     def test_mrope_vision_start_at_end_does_not_crash(self, hf_config: Qwen3Config):
         tokens = [1, 2, hf_config.vision_start_token_id]
-        positions, delta = get_mrope_input_positions(
+        positions, delta = build_mrope_input_positions(
             input_tokens=tokens,
             image_grid_thw=None,
             video_grid_thw=None,
@@ -513,7 +499,7 @@ class TestMRoPEPositions:
         n_img = _num_placeholders_for_grid(grid, hf_config.vision_config.spatial_merge_size)
 
         tokens = [11, hf_config.vision_start_token_id] + [hf_config.image_token_id] * n_img + [12]
-        positions, _ = get_mrope_input_positions(
+        positions, _ = build_mrope_input_positions(
             input_tokens=tokens,
             image_grid_thw=[grid],
             video_grid_thw=None,
@@ -548,7 +534,7 @@ class TestMRoPEPositions:
             + [hf_config.vision_start_token_id]
             + [hf_config.video_token_id] * n_vid
         )
-        positions, _ = get_mrope_input_positions(
+        positions, _ = build_mrope_input_positions(
             input_tokens=tokens,
             image_grid_thw=[img_grid],
             video_grid_thw=[vid_grid],
@@ -574,7 +560,7 @@ class TestMRoPEPositions:
             + [hf_config.vision_start_token_id]
             + [hf_config.image_token_id] * n_img
         )
-        positions, _ = get_mrope_input_positions(
+        positions, _ = build_mrope_input_positions(
             input_tokens=tokens,
             image_grid_thw=[grid, grid],
             video_grid_thw=None,
@@ -597,7 +583,7 @@ class TestMRoPEPositions:
             + [hf_config.vision_start_token_id]
             + [hf_config.image_token_id] * n_img
         )
-        positions, _ = get_mrope_input_positions(
+        positions, _ = build_mrope_input_positions(
             input_tokens=tokens,
             image_grid_thw=[img_grid],
             video_grid_thw=[vid_grid],
@@ -614,7 +600,7 @@ class TestMRoPEPositions:
         n_img = _num_placeholders_for_grid(grid, hf_config.vision_config.spatial_merge_size)
         tokens = [hf_config.vision_start_token_id] + [hf_config.image_token_id] * n_img
         # Provide 3 grids but only 1 image
-        positions, _ = get_mrope_input_positions(
+        positions, _ = build_mrope_input_positions(
             input_tokens=tokens,
             image_grid_thw=[grid, grid, grid],
             video_grid_thw=None,
@@ -641,6 +627,7 @@ class TestRopeInterface:
             head_dim=head_dim,
             rope_theta=float(hf_config.rope_theta),
             rope_scaling=getattr(hf_config, "rope_scaling", None),
+            rope_input_ordering="interleaved",
         )
         assert y.shape == x.shape
         assert y.dtype == x.dtype
@@ -951,6 +938,7 @@ class TestServingIntegration:
             head_dim=head_dim,
             rope_theta=float(model.config.rope_theta),
             rope_scaling=getattr(model.config, "rope_scaling", None),
+            rope_input_ordering="interleaved",
         )
         assert q_rot.shape == q.shape
 

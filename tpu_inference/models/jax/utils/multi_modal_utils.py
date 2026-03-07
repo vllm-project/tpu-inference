@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Union
+from typing import Optional, Union
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from typing_extensions import TypeAlias
 from vllm.logger import init_logger
 
@@ -89,6 +90,116 @@ def _embedding_count_expression(embeddings: NestedTensors) -> str:
         _embedding_count_expression(inner) for inner in embeddings)
 
 
+def normalize_mm_grid_thw(
+    grid_thw: object,
+) -> tuple[tuple[int, int, int], ...]:
+    """Normalize grid_thw into a tuple-of-tuples.
+
+    Accepts (3,), (N, 3), or (B, N, 3) style list/tuple/numpy/torch/jax inputs.
+    """
+    if grid_thw is None:
+        return ()
+
+    if isinstance(grid_thw, (list, tuple)):
+        if len(grid_thw) == 0:
+            return ()
+        if len(grid_thw) == 3 and all(
+                isinstance(v, (int, np.integer)) for v in grid_thw):
+            return (tuple(int(v) for v in grid_thw), )
+        if all(isinstance(row, (list, tuple)) for row in grid_thw):
+            if grid_thw and grid_thw[0] and isinstance(grid_thw[0][0],
+                                                      (list, tuple)):
+                flat_rows = [row for batch in grid_thw for row in batch]
+                return tuple(tuple(int(v) for v in row) for row in flat_rows)
+            return tuple(tuple(int(v) for v in row) for row in grid_thw)
+
+    if hasattr(grid_thw, "detach"):
+        grid_thw = grid_thw.detach().cpu()
+    if hasattr(grid_thw, "numpy"):
+        try:
+            grid_thw = grid_thw.numpy()
+        except Exception:
+            pass
+
+    arr = np.asarray(grid_thw)
+    if arr.size == 0:
+        return ()
+    if arr.ndim == 1 and arr.shape[0] == 3:
+        return (tuple(int(v) for v in arr.tolist()), )
+    if arr.ndim == 2 and arr.shape[1] == 3:
+        return tuple(tuple(int(v) for v in row) for row in arr.tolist())
+    if arr.ndim == 3 and arr.shape[2] == 3:
+        flat = arr.reshape(-1, 3)
+        return tuple(tuple(int(v) for v in row) for row in flat.tolist())
+
+    raise ValueError(
+        "Incorrect type/shape of grid_thw. Expected (3,), (N, 3), or (B, N, 3)."
+    )
+
+
+def reshape_mm_tensor(mm_input: object, name: str) -> jax.Array:
+    """Normalize multimodal tensor input to a 2D JAX array."""
+    if isinstance(mm_input, list):
+        arrays_to_concat = [jnp.asarray(item) for item in mm_input]
+        return jnp.concatenate(arrays_to_concat, axis=0)
+
+    if hasattr(mm_input, "detach"):
+        mm_input = mm_input.detach().cpu()
+    if hasattr(mm_input, "numpy"):
+        try:
+            mm_input = mm_input.numpy()
+        except Exception:
+            pass
+
+    if hasattr(mm_input, 'ndim'):
+        array_input = jnp.asarray(mm_input)
+        if array_input.ndim == 2:
+            return array_input
+        if array_input.ndim == 3:
+            return array_input.reshape(-1, array_input.shape[-1])
+
+    raise ValueError(f"Incorrect type of {name}. "
+                     f"Got type: {type(mm_input)}")
+
+
+def split_mm_embeddings_by_grid(
+    embeddings: jax.Array,
+    grid_thw: tuple[tuple[int, int, int], ...],
+    spatial_merge_size: int,
+    deepstack_embeddings: Optional[list[jax.Array]] = None,
+) -> tuple[tuple[jax.Array, ...], Optional[list[list[jax.Array]]]]:
+    """Split concatenated multimodal embeddings back into per-item chunks."""
+    sizes = np.array([
+        t * (h // spatial_merge_size) * (w // spatial_merge_size)
+        for t, h, w in grid_thw
+    ],
+                     dtype=np.int64)
+
+    if sizes.size == 0:
+        return (), None
+    if sizes.size == 1:
+        item_splits = (embeddings, )
+        if not deepstack_embeddings:
+            return item_splits, None
+        return item_splits, [[layer_embeds for layer_embeds in deepstack_embeddings]]
+
+    split_indices = np.cumsum(sizes)[:-1]
+    item_splits = tuple(jnp.split(embeddings, split_indices))
+
+    if not deepstack_embeddings:
+        return item_splits, None
+
+    layer_splits = [
+        tuple(jnp.split(layer_embeds, split_indices))
+        for layer_embeds in deepstack_embeddings
+    ]
+    deepstack_by_item = []
+    for item_idx in range(len(item_splits)):
+        deepstack_by_item.append(
+            [layer_split[item_idx] for layer_split in layer_splits])
+    return item_splits, deepstack_by_item
+
+
 def _merge_multimodal_embeddings(
     inputs_embeds: jax.Array,
     is_multimodal: jax.Array,
@@ -129,89 +240,6 @@ def _merge_multimodal_embeddings(
     # Use jnp.where to select between original and new embeddings.
     condition = jnp.expand_dims(is_multimodal, axis=-1)
     return jnp.where(condition, update_values, inputs_embeds)
-
-
-def _to_jax_array(x):
-    """Convert torch.Tensor or numpy array to JAX array."""
-    if x is None:
-        return None
-    if isinstance(x, jax.Array):
-        return x
-    # Handle torch.Tensor - convert via numpy
-    if hasattr(x, 'numpy'):
-        return jnp.array(x.numpy())
-    return jnp.array(x)
-
-
-def scatter_mm_placeholders(
-    embeds: jax.Array,
-    is_embed: Union[jax.Array, "torch.Tensor", None],
-) -> jax.Array:
-    """
-    Scatter the multimodal embeddings into a contiguous tensor that represents
-    the placeholder tokens.
-
-    JAX-compatible version of vllm.v1.worker.utils.scatter_mm_placeholders.
-
-    Args:
-        embeds: Multimodal embeddings of shape (num_embeds, embed_dim)
-        is_embed: Boolean mask of shape (num_placeholders,) indicating which
-            positions should receive embeddings. Can be JAX array or torch.Tensor.
-            If None, returns embeds as-is.
-
-    Returns:
-        Placeholder tensor of shape (num_placeholders, embed_dim) with NaN at
-        non-embedding positions.
-    """
-    if is_embed is None:
-        return embeds
-
-    # Convert inputs to JAX arrays
-    embeds = _to_jax_array(embeds)
-    is_embed = _to_jax_array(is_embed)
-
-    # Create gather indices using cumsum (similar to _merge_multimodal_embeddings)
-    # For True positions: maps to 0, 1, 2, ... (embedding indices)
-    # For False positions: maps to len(embeds) (NaN row)
-    embed_indices = jnp.cumsum(is_embed) - 1
-
-    # Append a NaN row for non-embedding positions
-    nan_row = jnp.full((1, embeds.shape[-1]), jnp.nan, dtype=embeds.dtype)
-    padded_embeds = jnp.concatenate([embeds, nan_row], axis=0)
-
-    # For False positions, point to the NaN row
-    max_idx = embeds.shape[0]
-    gather_indices = jnp.where(is_embed, embed_indices, max_idx)
-
-    return padded_embeds[gather_indices]
-
-
-def gather_mm_placeholders(
-    placeholders: jax.Array,
-    is_embed: Union[jax.Array, "torch.Tensor", None],
-) -> jax.Array:
-    """
-    Reconstructs the embeddings from the placeholder tokens.
-
-    JAX-compatible version of vllm.v1.worker.utils.gather_mm_placeholders.
-
-    Args:
-        placeholders: Placeholder tensor of shape (num_placeholders, embed_dim)
-        is_embed: Boolean mask indicating which positions have embeddings.
-            Can be JAX array or torch.Tensor. If None, returns placeholders as-is.
-
-    Returns:
-        Embeddings extracted from True positions in the mask.
-    """
-    if is_embed is None:
-        return placeholders
-
-    # Convert inputs to JAX arrays
-    placeholders = _to_jax_array(placeholders)
-    is_embed = _to_jax_array(is_embed)
-
-    # Use boolean indexing to extract embeddings
-    return placeholders[is_embed]
 
 
 def merge_multimodal_embeddings(
