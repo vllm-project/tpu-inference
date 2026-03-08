@@ -440,11 +440,11 @@ class Gemma3ForCausalLM(JaxModule, LoadableWithIterator):
             mesh=mesh,
         )
         model_config = vllm_config.model_config
-        text_config = getattr(model_config.hf_config, 'text_config', model_config.hf_config)
+        text_config = getattr(model_config.hf_config, 'text_config',
+                              model_config.hf_config)
 
-        self.final_logit_softcapping = getattr(
-            text_config, "final_logit_softcapping",
-            None)
+        self.final_logit_softcapping = getattr(text_config,
+                                               "final_logit_softcapping", None)
 
         if not model_config.hf_config.tie_word_embeddings:
             if self.model.is_last_rank:

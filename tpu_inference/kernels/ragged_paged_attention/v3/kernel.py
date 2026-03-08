@@ -427,8 +427,8 @@ def _ragged_paged_attention_kernel(
         head_acc_ref = acc_ref.at[kv_head_idx, :p.shape[0]]
 
         def load_with_init(ref, init_val):
-            return jnp.where(bkv_idx == bkv_idx_start, jnp.full_like(ref, init_val),
-                             ref[...])
+            return jnp.where(bkv_idx == bkv_idx_start,
+                             jnp.full_like(ref, init_val), ref[...])
 
         pv = jnp.matmul(p, v, preferred_element_type=jnp.float32)
         if v_scale is not None:
@@ -939,7 +939,11 @@ def _ragged_paged_attention_kernel(
                     kv_head_idx=prev_kv_head_idx,
                 )
 
-            lax.fori_loop(bkv_idx_start, num_bkv, compute_with_bkv, None, unroll=False)
+            lax.fori_loop(bkv_idx_start,
+                          num_bkv,
+                          compute_with_bkv,
+                          None,
+                          unroll=False)
 
             # Load acc and calculate final output.
             acc = acc_ref[...]

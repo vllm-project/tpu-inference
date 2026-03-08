@@ -1,21 +1,34 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from unittest.mock import MagicMock, patch
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from vllm.config import ModelConfig
 from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
+from tpu_inference import utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.models.jax.gemma3 import Gemma3ForCausalLM
 from tpu_inference.models.jax.utils.qwix.qwix_utils import \
     apply_qwix_quantization
 from tpu_inference.runner.kv_cache import create_kv_caches
-from tpu_inference import utils
 
 
 class MockVllmConfig:
@@ -47,6 +60,7 @@ def mesh():
               axis_names=('data', 'attn_dp', 'expert', 'model')) as m:
         yield m
 
+
 @pytest.fixture
 def mock_model_inputs():
     num_tokens = 8
@@ -71,10 +85,12 @@ def mock_model_inputs():
 
     return (input_ids, attention_metadata, indices_do_sample)
 
+
 @pytest.fixture
 def rng() -> PRNGKey:
     """Provides a reusable JAX PRNGKey."""
     return jax.random.PRNGKey(42)
+
 
 @pytest.fixture(autouse=True)
 def mock_get_pp_group():
@@ -84,6 +100,7 @@ def mock_get_pp_group():
                                       rank_in_group=0,
                                       world_size=1)):
         yield
+
 
 class TestGemma3ForCausalLM:
 
@@ -98,7 +115,7 @@ class TestGemma3ForCausalLM:
         }]
     ])
     def test_gemma3_1B(self, model_name, kv_cache_type, qwix_rules, rng, mesh,
-                        mock_model_inputs):
+                       mock_model_inputs):
         """Tests model init and model forward for the 1B model variant."""
         mock_vllm_config = MockVllmConfig(model_name, kv_cache_type)
         if qwix_rules:
@@ -173,15 +190,21 @@ class TestGemma3ForCausalLM:
                 expected_scaling = rope_scaling
             assert attn.rope_scaling == expected_scaling
 
-            assert attn.q_proj.weight.shape == (hidden_size, num_heads, head_dim)
-            assert attn.k_proj.weight.shape == (hidden_size, num_kv_heads, head_dim)
-            assert attn.v_proj.weight.shape == (hidden_size, num_kv_heads, head_dim)
-            assert attn.o_proj.weight.shape == (num_heads, head_dim, hidden_size)
+            assert attn.q_proj.weight.shape == (hidden_size, num_heads,
+                                                head_dim)
+            assert attn.k_proj.weight.shape == (hidden_size, num_kv_heads,
+                                                head_dim)
+            assert attn.v_proj.weight.shape == (hidden_size, num_kv_heads,
+                                                head_dim)
+            assert attn.o_proj.weight.shape == (num_heads, head_dim,
+                                                hidden_size)
 
             mlp = layers[sliding_layer_idx].mlp
-            assert mlp.gate_proj.weight.shape == (hidden_size, intermediate_size)
+            assert mlp.gate_proj.weight.shape == (hidden_size,
+                                                  intermediate_size)
             assert mlp.up_proj.weight.shape == (hidden_size, intermediate_size)
-            assert mlp.down_proj.weight.shape == (intermediate_size, hidden_size)
+            assert mlp.down_proj.weight.shape == (intermediate_size,
+                                                  hidden_size)
 
         # Test full attention layer
         if full_layer_idx is not None:
@@ -232,8 +255,7 @@ class TestGemma3ForCausalLM:
             layer_names=["layer"] * hf_config.num_hidden_layers,
             cache_dtype=jnp.float8_e4m3fn
             if mock_vllm_config.cache_config.cache_dtype == "fp8" else
-            jnp.bfloat16
-        )
+            jnp.bfloat16)
         # 1 seq with 8 tokens
         input_ids, attention_metadata, indices_do_sample = mock_model_inputs
         kv_caches, hidden_states, aux_hidden_states = model(
