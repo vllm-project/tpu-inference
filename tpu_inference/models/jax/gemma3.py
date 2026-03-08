@@ -339,7 +339,7 @@ class Gemma3Model(JaxModule):
                  mesh: Mesh) -> None:
         model_config = vllm_config.model_config
         hf_config = model_config.hf_config
-        text_config = hf_config.text_config
+        text_config = getattr(hf_config, 'text_config', hf_config)
         vocab_size = model_config.get_vocab_size()
         dtype = model_config.dtype
         rms_norm_eps = text_config.rms_norm_eps
@@ -440,15 +440,16 @@ class Gemma3ForCausalLM(JaxModule, LoadableWithIterator):
             mesh=mesh,
         )
         model_config = vllm_config.model_config
+        text_config = getattr(model_config.hf_config, 'text_config', model_config.hf_config)
 
         self.final_logit_softcapping = getattr(
-            model_config.hf_config.text_config, "final_logit_softcapping",
+            text_config, "final_logit_softcapping",
             None)
 
         if not model_config.hf_config.tie_word_embeddings:
             if self.model.is_last_rank:
                 vocab_size = model_config.get_vocab_size()
-                hidden_size = model_config.hf_config.text_config.hidden_size
+                hidden_size = text_config.hidden_size
                 self.lm_head = JaxEinsum(
                     einsum_str="TD,DV->TV",
                     kernel_shape=(hidden_size, vocab_size),
