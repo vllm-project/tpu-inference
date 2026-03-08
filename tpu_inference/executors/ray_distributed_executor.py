@@ -430,11 +430,7 @@ class RayWorkerWrapper(RayWorkerWrapperV1):
     The implementation is similar to vllm/v1/executor/ray_utils.py
     
     _is_intermediate_tensors: check whether the output is JaxIntermediateTensors.
-    _is_last_rank: check whether this Ray worker is the last PP stage.
     """
 
     def _is_intermediate_tensors(self, output) -> bool:
         return isinstance(output, JaxIntermediateTensors)
-
-    def _is_last_rank(self) -> bool:
-        return get_pp_group().is_last_rank
