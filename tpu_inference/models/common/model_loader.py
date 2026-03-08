@@ -82,6 +82,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["GptOssForCausalLM"] = GptOss
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
     _MODEL_REGISTRY["Gemma3ForConditionalGeneration"] = Gemma3ForCausalLM
+    _MODEL_REGISTRY["Gemma3ForCausalLM"] = Gemma3ForCausalLM
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
