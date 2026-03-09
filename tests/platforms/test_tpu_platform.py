@@ -27,7 +27,6 @@ class TestTpuPlatform:
     def vllm_config(self):
         cache_config = CacheConfig(block_size=16,
                                    gpu_memory_utilization=0.9,
-                                   swap_space=4,
                                    cache_dtype="fp8")
 
         vllm_config = MagicMock(spec=VllmConfig)
