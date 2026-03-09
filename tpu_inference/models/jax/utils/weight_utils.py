@@ -18,6 +18,7 @@ import glob
 import math
 import os
 import re
+import time
 from collections import defaultdict
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
@@ -905,23 +906,39 @@ class JaxDummyModelLoader(DummyModelLoader):
     implementation overrides the load_weights method to support flax_nnx models.
     """
 
+    def _generate_and_shard(self,
+                            param: nnx.Param,
+                            param_name: str = "Unknown"):
+        """Helper function to generate and shard a single dummy weight."""
+        with jax.default_device(jax.devices("cpu")[0]):
+            dummy_weight = jax.random.uniform(
+                jax.random.PRNGKey(0),
+                param.value.shape,
+                dtype=param.value.dtype,
+                # upstream claims this range works well
+                # https://github.com/vllm-project/vllm/blob/7291d1b288558d48508e1a17c37b0aa170332264/vllm/model_executor/model_loader/weight_utils.py#L1088
+                minval=-1e-3,
+                maxval=1e-3,
+            )
+        assign_and_shard_param(param, dummy_weight, param_name)
+
     def load_weights(self, model: JaxModule,
                      model_config: ModelConfig) -> None:
-        for param_name, param in model.named_parameters():
-            with jax.default_device(jax.devices("cpu")[0]):
-                dummy_weight = jax.random.uniform(
-                    jax.random.PRNGKey(0),
-                    param.value.shape,
-                    dtype=param.value.dtype,
-                    # upstream claims this range works well
-                    # https://github.com/vllm-project/vllm/blob/7291d1b288558d48508e1a17c37b0aa170332264/vllm/model_executor/model_loader/weight_utils.py#L1088
-                    minval=-1e-3,
-                    maxval=1e-3,
-                )
+        counter_before_load_weights = time.perf_counter()
+        named_params = list(model.named_parameters())
 
-            assign_and_shard_param(param, dummy_weight, param_name)
+        with ThreadPoolExecutor() as executor:
+            futures = [
+                executor.submit(self._generate_and_shard, param, param_name)
+                for param_name, param in named_params
+            ]
+            for future in futures:
+                future.result()  # Raise exceptions if any occurred
 
         self._process_weights_after_loading(model)
+        logger.info_once(
+            f"Loading weights took {time.perf_counter() - counter_before_load_weights:.2f} seconds."
+        )
 
     def _process_weights_after_loading(
             self, module: JaxModule | JaxModuleList) -> None:
