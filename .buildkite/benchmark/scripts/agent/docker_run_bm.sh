@@ -103,6 +103,7 @@ fi
 echo "starting docker...$CONTAINER_NAME"
 echo
 docker run \
+ --rm \
  -v $LOCAL_HF_HOME:$DOCKER_HF_HOME \
  --env-file $ENV_FILE \
  -e HF_TOKEN="$HF_TOKEN" \
