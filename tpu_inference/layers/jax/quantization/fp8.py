@@ -517,10 +517,6 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 w13_weight = jnp.concatenate([w_gate, w_up], axis=1)
                 w13_weight_scale = jnp.concatenate([s_gate, s_up], axis=1)
 
-                weight_block_size = None
-                if self.weight_block_size is not None:
-                    weight_block_size = tuple(self.weight_block_size)
-
                 # TODO (jacobplatin): we should support bias
                 input_weights = FusedMoEWeights(
                     w13_weight=w13_weight,

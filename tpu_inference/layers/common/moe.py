@@ -125,7 +125,7 @@ def moe_apply(
                 topk_indices = None
                 if isinstance(gating_output, tuple):
                     topk_weights, topk_indices = gating_output
-                    gating_output = None # Not used if pre-calculated
+                    gating_output = None  # Not used if pre-calculated
 
                 output = fused_moe_func(
                     hidden_states=x,
