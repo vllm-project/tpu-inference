@@ -147,6 +147,7 @@ class ExecuteModelState:
 
     scheduler_output: "VllmSchedulerOutput"
     attn_metadata: AttentionMetadata
+    sampling_metadata: TPUSupportedSamplingMetadata
     input_ids: Optional[jax.Array]
     hidden_states: jax.Array
     logits: jax.Array
@@ -618,11 +619,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # This can happen in pipeline parallel case.
             return EMPTY_MODEL_RUNNER_OUTPUT
 
-        (scheduler_output, attn_metadata, input_ids, hidden_states, logits,
-         aux_hidden_states, spec_decode_metadata, kv_connector_output,
-         logits_indices_selector,
+        (scheduler_output, attn_metadata, sampling_metadata, input_ids,
+         hidden_states, logits, aux_hidden_states, spec_decode_metadata,
+         kv_connector_output, logits_indices_selector,
          padded_num_reqs) = (self.execute_model_state.scheduler_output,
                              self.execute_model_state.attn_metadata,
+                             self.execute_model_state.sampling_metadata,
                              self.execute_model_state.input_ids,
                              self.execute_model_state.hidden_states,
                              self.execute_model_state.logits,
@@ -645,9 +647,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 arange,
             )
         return self._sample_from_logits(
-            scheduler_output, attn_metadata, input_ids, hidden_states, logits,
-            aux_hidden_states, spec_decode_metadata, kv_connector_output,
-            logits_indices_selector, padded_num_reqs)
+            scheduler_output, attn_metadata, sampling_metadata, input_ids,
+            hidden_states, logits, aux_hidden_states, spec_decode_metadata,
+            kv_connector_output, logits_indices_selector, padded_num_reqs)
 
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
@@ -759,7 +761,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             input_ids,
             input_positions,
             attn_metadata,
-            _,
+            sampling_metadata,
             logits_indices,
             spec_decode_metadata,
             logits_indices_selector,
@@ -847,6 +849,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.execute_model_state = ExecuteModelState(
             scheduler_output=scheduler_output,
             attn_metadata=attn_metadata,
+            sampling_metadata=sampling_metadata,
             input_ids=input_ids,
             hidden_states=hidden_states,
             logits=logits,
@@ -861,6 +864,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self,
         scheduler_output: "VllmSchedulerOutput",
         attn_metadata: AttentionMetadata,
+        tpu_sampling_metadata: TPUSupportedSamplingMetadata,
         input_ids: Optional[jax.Array],
         hidden_states: jax.Array,
         logits: jax.Array,
@@ -874,15 +878,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
                 self.input_batch.num_reqs, self.max_num_reqs)
 
-        sharding = None
-        if self.dp_size > 1:
-            sharding = NamedSharding(self.mesh,
-                                     PartitionSpec(ShardingAxisName.MLP_DATA))
-
-        tpu_sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
-            self.mesh, self.input_batch, padded_num_reqs, sharding=sharding)
-
-        # TODO(pooyam): Should we move this to `_prepare_inputs`?
         if tpu_sampling_metadata.do_sampling:
             self.rng_params_for_sampling, step_rng = jax.random.split(
                 self.rng_params_for_sampling)
@@ -1440,8 +1435,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.mesh,
             self.input_batch,
             padded_num_reqs,
-            sharding=NamedSharding(self.mesh,
-                                   PartitionSpec(ShardingAxisName.MLP_DATA)),
+            sharding=data_parallel_attn_sharding,
         )
         if self.uses_mrope:
             positions = mrope_positions
