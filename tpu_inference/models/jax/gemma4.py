@@ -114,7 +114,7 @@ class Gemma4Attention(JaxModule):
         self.rms_norm_eps = config.rms_norm_eps
 
         # Assuming Gemma 4 also uses a custom scalar, not 1/sqrt(head_dim)
-        self.scaling = config.query_pre_attn_scalar**-0.5  # may not be true, need to check with config
+        self.scaling = 1.0  # may not be true, need to check with config
 
         # Same as Gemma3: use layer_idx to handle GLOBAL/LOCAL layer
         self.layer_type = "full_attention"
