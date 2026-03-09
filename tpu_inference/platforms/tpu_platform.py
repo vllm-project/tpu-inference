@@ -247,9 +247,8 @@ class TpuPlatform(Platform):
     @classmethod
     def validate_request(
         cls,
-        prompt: PromptType,
-        params: Union["SamplingParams", PoolingParams],
         processed_inputs: ProcessorInputs,
+        params: Union["SamplingParams", PoolingParams],
     ) -> None:
         """Raises if this request is unsupported on this platform"""
         from vllm.sampling_params import SamplingParams, SamplingType
