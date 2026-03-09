@@ -167,7 +167,21 @@ class TPUWorker(WorkerBase):
                     tpu_visible_chips=""):
         # set tpu visible devices for Jax runtime in single host PP.
         multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
-        if multihost_backend != "ray" and self.parallel_config.pipeline_parallel_size > 1:
+        if self.parallel_config.pipeline_parallel_size > 1:
+            # Log environment variables for debugging
+            tpu_env_vars = [
+                "TPU_PROCESS_ADDRESSES",
+                "TPU_PROCESS_PORT",
+                "CLOUD_TPU_TASK_ID",
+                "TPU_PROCESS_BOUNDS",
+                "TPU_CHIPS_PER_PROCESS_BOUNDS",
+                "TPU_VISIBLE_CHIPS",
+            ]
+            env_dump = {v: os.environ.get(v) for v in tpu_env_vars}
+            logger.debug(
+                f"Worker {self.rank} JAX/TPU environment before init_device: {env_dump}"
+            )
+
             tpu_ports = [
                 jax_parallel_state.BASE_JAX_PORT + i
                 for i in range(self.pp_config.pp_world_size)
@@ -198,6 +212,11 @@ class TPUWorker(WorkerBase):
                 "TPU_VISIBLE_CHIPS"] = tpu_visible_chips \
                     if tpu_visible_chips \
                         else self.pp_config.default_tpu_visible_chips
+
+            env_dump = {v: os.environ.get(v) for v in tpu_env_vars}
+            logger.debug(
+                f"Worker {self.rank} JAX/TPU environment after init_device: {env_dump}"
+            )
 
         if not self.devices:
             sharding_config: ShardingConfigManager = self.vllm_config.sharding_config

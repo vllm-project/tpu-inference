@@ -167,9 +167,10 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
             f"RayDistributedExecutor | placement_group_specs={placement_group_specs}"
         )
 
-        # By default, Ray packs resources as much as possible.
+        # Use STRICT_SPREAD for PP to ensure each host participates in JAX initialization.
+        strategy = "STRICT_SPREAD" if pp_size > 1 else "PACK"
         current_placement_group = ray.util.placement_group(
-            placement_group_specs, strategy="PACK")
+            placement_group_specs, strategy=strategy)
         _wait_until_pg_ready(current_placement_group)
 
         assert current_placement_group is not None
@@ -321,11 +322,13 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
             additional_vars=set(current_platform.additional_env_vars),
             destination="workers")
 
-        # Copy existing env vars to each worker's args
-        for args in all_args_to_update_environment_variables:
+        # Copy existing env vars to each worker's args, but don't overwrite
+        # and don't copy global topology bounds from the driver.
+        for i, args in enumerate(all_args_to_update_environment_variables):
             for name in env_vars_to_copy:
                 if name in os.environ:
                     args[name] = os.environ[name]
+            logger.debug(f"Worker {i} environment variables: {args}")
 
         self._env_vars_for_all_workers = (
             all_args_to_update_environment_variables)
