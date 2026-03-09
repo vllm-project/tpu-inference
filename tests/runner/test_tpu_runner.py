@@ -45,7 +45,6 @@ class TestTPUJaxRunner:
             cache_config = CacheConfig(
                 block_size=16,
                 gpu_memory_utilization=0.9,
-                swap_space=4,
                 cache_dtype="auto",
             )
             scheduler_config = SchedulerConfig(max_num_seqs=16,
@@ -202,7 +201,6 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
             cache_config = CacheConfig(
                 block_size=16,
                 gpu_memory_utilization=0.9,
-                swap_space=4,
                 cache_dtype="auto",
             )
             scheduler_config = SchedulerConfig(max_num_seqs=16,
