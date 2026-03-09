@@ -130,8 +130,8 @@ class Gemma4Attention(JaxModule):
         if self.layer_type in rope_parameters:
             # Transformers v5 rope config.
             rope_parameters = rope_parameters[self.layer_type]
-            self.rope_theta = rope_parameters.get("rope_theta",
-                                                  config.rope_theta)
+            self.rope_theta = rope_parameters.get(
+                "rope_theta", getattr(config, "rope_theta", 10000.0))
             self.rope_scaling = rope_parameters.get(
                 "rope_scaling", getattr(config, "rope_scaling", None))
             if not self.is_sliding:  # GLOBAL layer
