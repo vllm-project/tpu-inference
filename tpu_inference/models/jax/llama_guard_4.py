@@ -63,7 +63,7 @@ class LlamaGuard4WeightLoader(BaseWeightLoader):
             vllm_config,
             framework="flax",
             filter_regex=
-            "^(language_model|vision_model|multi_modal_projector)\..*",
+            r"^(language_model|vision_model|multi_modal_projector)\..*",
         )
         # Set is_runai_streamer so we can use this in load_weights
         self.is_runai_streamer = getattr(
