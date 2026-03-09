@@ -62,7 +62,8 @@ def _swigluoai(x1: jax.Array,
 
 def gmm_wrapper(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset,
                 last_gmm):
-    if not last_gmm:
+    # if not last_gmm:
+    if (not last_gmm or lhs.shape[0] < 1024):
         gmm_res = gmm_v2(
             lhs=lhs,
             rhs=rhs,
