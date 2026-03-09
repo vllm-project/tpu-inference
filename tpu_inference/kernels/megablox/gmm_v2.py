@@ -270,15 +270,16 @@ def inner_kernel(
                     block_abs_max = jnp.max(jnp.abs(block_lhs),
                                             axis=1,
                                             keepdims=True)
-
-                    # If block_abs_max=0, it will cause division by zero and return NaNs
-                    # during quantization. To avoid this, we add smallest representable
-                    # value to avoid block_abs_max being zero.
-                    block_abs_max += jnp.finfo(
-                        block_abs_max.dtype).smallest_subnormal
                     block_scale = block_abs_max / dtype_max
+
+                    # If block_scale=0, it will cause division by zero and return either
+                    # NaN or Inf. Since this can cause numeric issue when downcasting to
+                    # quantized value, we convert them into 0.
+                    block_scale_inv = jnp.where(block_scale == 0, 0,
+                                                1 / block_scale)
                     # Convert lhs into quantized dtype.
-                    block_lhs_q = (block_lhs / block_scale).astype(lhs_q_dtype)
+                    block_lhs_q = (block_lhs *
+                                   block_scale_inv).astype(lhs_q_dtype)
 
                     block_acc = jnp.matmul(
                         block_lhs_q,

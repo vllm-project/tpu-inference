@@ -57,6 +57,7 @@ def quantize_tensor(x: jax.Array,
     x_blocked_q = jnp.clip(x_blocked / scale, min_val, max_val).astype(dtype)
 
     x_q = x_blocked_q.reshape(orig_shape)
+    x_q = jnp.nan_to_num(x_q)
     scale = scale.squeeze(axis=axis + 1).astype(jnp.float32)
     return x_q, scale
 
