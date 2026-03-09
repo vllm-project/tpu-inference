@@ -255,8 +255,8 @@ class Gemma4Attention(JaxModule):
             self.head_dim,
             epsilon=self.rms_norm_eps,
             param_dtype=dtype,
-            scale_init=nnx.with_partitioning(
-                init_fn, (None, )),  # need to disable scaling for value norm
+            use_scale=False,
+            scale_init=None,
             rngs=rng,
             quant_config=quant_config,
             prefix=prefix + ".v_norm",
@@ -369,11 +369,9 @@ class Gemma4DecoderLayer(JaxModule):
         self.is_sliding = self.layer_type == "sliding_attention"
 
         if not self.is_sliding:
-            self.skip_scale = nnx.Param(jnp.ones(
-                (1, ),
-                dtype=dtype))  # placeholder for learnable skip_scale value
+            self.layer_scalar = nnx.Param(jnp.ones((1, ), dtype=dtype))
         else:
-            self.skip_scale = None
+            self.layer_scalar = None
 
         self.input_layernorm = JaxRmsNorm(
             hidden_size,
@@ -448,8 +446,8 @@ class Gemma4DecoderLayer(JaxModule):
         mlp_output = self.post_feedforward_layernorm(mlp_output)
         outputs = residual + mlp_output
 
-        if self.skip_scale is not None:
-            outputs = outputs * self.skip_scale.value
+        if self.layer_scalar is not None:
+            outputs = outputs * self.layer_scalar.value
 
         return kv_cache, outputs
 
