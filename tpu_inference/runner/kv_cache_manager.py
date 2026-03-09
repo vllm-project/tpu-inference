@@ -64,10 +64,6 @@ class KVCacheManager:
             num_kv_heads: int,
             head_size: int,
             sliding_window: bool | None = None) -> KVCacheSpec:
-        print(
-            f"\n[DEBUG] _create_attention_spec called with: block_size={block_size}, "
-            f"num_kv_heads={num_kv_heads}, head_size={head_size}, "
-            f"sliding_window={sliding_window}")
         if self.use_mla:
             page_size_bytes = get_attention_page_size_bytes(
                 self.runner.mesh, block_size, num_kv_heads, head_size,
