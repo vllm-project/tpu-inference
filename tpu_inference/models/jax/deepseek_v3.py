@@ -820,9 +820,6 @@ class SharedFusedMoe(JaxMoE):
         # Compute Routed Experts
         final_hidden_states = super().__call__(x_TD)
 
-        # Apply scaling factor
-        final_hidden_states *= self.routed_scaling_factor
-
         # (Maybe) Compute Shared Experts
         if self.shared_experts is not None:
             shared_output = self.shared_experts(x_TD)
@@ -1048,14 +1045,15 @@ class DeepSeekV3Router(JaxEinsum):
                 scores_TE, (-1, self.n_groups, experts_per_group))
             group_scores_TG2 = jax.lax.top_k(group_scores_TGM, k=2)[0]
             group_scores_TG = jnp.sum(group_scores_TG2, axis=-1)
-            indices = jax.lax.top_k(group_scores_TG, k=self.topk_groups)[1]
+            group_indices = jax.lax.top_k(group_scores_TG, k=self.topk_groups)[1]
 
-            mask_TG = jnp.any(jnp.arange(
-                self.n_groups)[:, None] == indices[..., None, :],
-                              axis=-1)
-            mask_TE = jnp.repeat(mask_TG,
-                                 scores_TE.shape[-1] // mask_TG.shape[-1], -1)
-            scores_TE = jnp.where(mask_TE, scores_TE, -jnp.inf)
+            # Apply mask at the group level before flattening
+            mask_TG1 = jax.nn.one_hot(group_indices, self.n_groups).sum(axis=1)[..., None].astype(jnp.bool_)
+            
+            # Apply mask to each group of experts
+            group_scores_TGM = jnp.where(mask_TG1, group_scores_TGM, -jnp.inf)
+            
+            scores_TE = jnp.reshape(group_scores_TGM, (-1, self.num_experts))
 
         indices_TX = jax.lax.top_k(scores_TE, k=self.num_experts_per_tok)[1]
 
@@ -1095,6 +1093,9 @@ class DeepSeekV3Router(JaxEinsum):
 
         if self.norm_topk_prob:
             weights_TX /= jnp.sum(weights_TX, axis=-1)[..., None] + 1e-20
+
+        # Scale expert weights before taking linear combination of experts.
+        weights_TX *= self.routed_scaling_factor
 
         return weights_TX.astype(self.dtype), topk_indices_TX
 
