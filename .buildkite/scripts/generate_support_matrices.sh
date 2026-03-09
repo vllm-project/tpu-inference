@@ -51,10 +51,10 @@ declare -a default_feature_names=()
 
 # Determine sub-directory based on TPU_VERSION
 if [[ "${TPU_VERSION:-tpu6e}" == "v7"* ]]; then
-    TPU_DIR="v7"
+    TPU_DIR="v7x"
     TPU_METADATA_PREFIX="v7"
 else
-    TPU_DIR="v6"
+    TPU_DIR="v6e"
     TPU_METADATA_PREFIX="v6"
 fi
 
