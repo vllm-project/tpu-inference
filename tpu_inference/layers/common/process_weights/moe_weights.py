@@ -16,6 +16,7 @@ from dataclasses import dataclass, fields
 import jax
 import jax.numpy as jnp
 from jax.experimental.layout import Layout, with_layout_constraint
+from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.tensor import Tensor
 
@@ -489,8 +490,6 @@ def process_fp8_moe_weights(
     logger.info(moe_logging_str)
 
     # Pre-compute pad widths and block sizes for requantization.
-    # Padding aligns dims to block_size so quantize_tensor doesn't fail.
-    # For standard models (dims divisible by block_size), padding is zero.
     _, orig_hidden_size, orig_intermediate_size = w2_weight.shape
     if requant_block_size is None:
         w13_block_size = w13_weight.shape[-1]
@@ -504,83 +503,100 @@ def process_fp8_moe_weights(
     w2_pad = ((0, hidden_size - orig_hidden_size),
               (0, intermediate_size - orig_intermediate_size))
 
-    # How many full-expert-equivalents of FP32 memory to allow per scan step.
-    # Higher = faster requant but more peak HBM. Lower = slower but less peak.
-    # Consistent across TP/EP configs: budget * tp_size = experts_per_step.
-    requant_memory_budget = 0.5
-    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.MLP_TENSOR)
-    num_experts = w13_weight.shape[0]
-    target = max(1, int(requant_memory_budget * tp_size))
-    scan_batch_size = max(d for d in range(1, target + 1)
-                          if num_experts % d == 0)
+    # Determine which mesh axis the expert dim is sharded across.
+    if ShardingAxisName.EXPERT in mesh.axis_names:
+        shard_axis = ShardingAxisName.EXPERT
+    else:
+        shard_axis = mesh.axis_names[0]
+
+    # Use batch_size=1 to minimize per-step FP32 intermediates,
+    # which reduces XLA program reservation (bytes_reserved).
+    scan_batch_size = 1
 
     # Pad widths for the batched case (3D tensors with expert dim).
     w13_pad_3d = ((0, 0), ) + w13_pad
     w2_pad_3d = ((0, 0), ) + w2_pad
 
-    def _requant_expert_batch(carry, batch_inputs):
-        w13, w13_scale, w2, w2_scale = batch_inputs
-        # Dequant FP8 -> FP32. Axes (1, 2) are the weight dims.
-        w13_fp32 = dequantize_tensor(w13,
-                                     w13_scale, (1, 2),
-                                     jnp.float32,
-                                     block_size=weight_block_size)
-        w2_fp32 = dequantize_tensor(w2,
-                                    w2_scale, (1, 2),
-                                    jnp.float32,
-                                    block_size=weight_block_size)
-        # Pad to block alignment.
-        w13_fp32 = jnp.pad(w13_fp32, w13_pad_3d)
-        w2_fp32 = jnp.pad(w2_fp32, w2_pad_3d)
-        # Requant FP32 -> target dtype. Axis 2 is the contracting dim.
-        w13_q, w13_s = quantize_tensor(desired_quant_dtype, w13_fp32, 2,
-                                       w13_block_size)
-        w2_q, w2_s = quantize_tensor(desired_quant_dtype, w2_fp32, 2,
-                                     w2_block_size)
-        return carry, (w13_q, w13_s, w2_q, w2_s)
-
-    num_batches = num_experts // scan_batch_size
-
-    def _reshape_to_batches(x):
-        return x.reshape(num_batches, scan_batch_size, *x.shape[1:])
-
-    def _reshape_from_batches(x):
-        return x.reshape(num_experts, *x.shape[2:])
-
-    xs = jax.tree.map(
-        _reshape_to_batches,
-        (w13_weight, w13_weight_scale, w2_weight, w2_weight_scale),
-    )
-    _, (w13_q, w13_s, w2_q, w2_s) = jax.lax.scan(
-        _requant_expert_batch,
-        init=None,
-        xs=xs,
-    )
-    w13_q, w13_s, w2_q, w2_s = jax.tree.map(_reshape_from_batches,
-                                            (w13_q, w13_s, w2_q, w2_s))
-
     w13_interleave = activation == "swigluoai"
     w13_reorder_size = get_mesh_shape_product(mesh,
                                               ShardingAxisName.MLP_TENSOR)
 
-    out = process_moe_weights(
-        FusedMoEWeights(
-            w13_weight=w13_q,
-            w13_weight_scale=w13_s,
-            w13_bias=None,
-            w2_weight=w2_q,
-            w2_weight_scale=w2_s,
-            w2_bias=None,
-        ),
-        moe_backend=moe_backend,
-        w13_reorder_size=w13_reorder_size,
-        w13_interleave=w13_interleave,
+    expert_p = P(shard_axis)
+
+    def _requant_and_process_local(w13, w13_scale, w2, w2_scale):
+        """Per-device requant + process. Shapes are local [local_experts, ...]."""
+        n_local = w13.shape[0]
+        n_batches = n_local // scan_batch_size
+
+        def _requant_expert_batch(carry, batch_inputs):
+            w13_b, w13_s_b, w2_b, w2_s_b = batch_inputs
+            w13_fp32 = dequantize_tensor(w13_b,
+                                         w13_s_b, (1, 2),
+                                         jnp.float32,
+                                         block_size=weight_block_size)
+            w2_fp32 = dequantize_tensor(w2_b,
+                                        w2_s_b, (1, 2),
+                                        jnp.float32,
+                                        block_size=weight_block_size)
+            w13_fp32 = jnp.pad(w13_fp32, w13_pad_3d)
+            w2_fp32 = jnp.pad(w2_fp32, w2_pad_3d)
+            w13_q, w13_s_new = quantize_tensor(desired_quant_dtype, w13_fp32,
+                                               2, w13_block_size)
+            w2_q, w2_s_new = quantize_tensor(desired_quant_dtype, w2_fp32, 2,
+                                             w2_block_size)
+            return carry, (w13_q, w13_s_new, w2_q, w2_s_new)
+
+        def _reshape_to_batches(x):
+            return x.reshape(n_batches, scan_batch_size, *x.shape[1:])
+
+        def _reshape_from_batches(x):
+            return x.reshape(n_local, *x.shape[2:])
+
+        xs = jax.tree.map(_reshape_to_batches, (w13, w13_scale, w2, w2_scale))
+        _, (w13_q, w13_s, w2_q, w2_s) = jax.lax.scan(_requant_expert_batch,
+                                                     init=None,
+                                                     xs=xs)
+        w13_q, w13_s, w2_q, w2_s = jax.tree.map(_reshape_from_batches,
+                                                (w13_q, w13_s, w2_q, w2_s))
+
+        out = process_moe_weights(
+            FusedMoEWeights(
+                w13_weight=w13_q,
+                w13_weight_scale=w13_s,
+                w13_bias=None,
+                w2_weight=w2_q,
+                w2_weight_scale=w2_s,
+                w2_bias=None,
+            ),
+            moe_backend=moe_backend,
+            w13_reorder_size=w13_reorder_size,
+            w13_interleave=w13_interleave,
+        )
+        return (out.w13_weight, out.w13_weight_scale, out.w2_weight,
+                out.w2_weight_scale)
+
+    # Use shard_map so XLA compiles with per-device local shapes,
+    # reducing program reservation (bytes_reserved) while keeping
+    # SPMD parallel execution speed.
+    w13_q, w13_s, w2_q, w2_s = shard_map(
+        _requant_and_process_local,
+        mesh=mesh,
+        in_specs=(expert_p, expert_p, expert_p, expert_p),
+        out_specs=(expert_p, expert_p, expert_p, expert_p),
+        check_rep=False,
+    )(w13_weight, w13_weight_scale, w2_weight, w2_weight_scale)
+
+    out = FusedMoEWeights(
+        w13_weight=w13_q,
+        w13_weight_scale=w13_s,
+        w13_bias=None,
+        w2_weight=w2_q,
+        w2_weight_scale=w2_s,
+        w2_bias=None,
     )
 
     # Apply sharding constraints so the JIT output matches what
-    # shard_moe_weights expects. Without this, lax.scan loses the
-    # input sharding annotations and shard_moe_weights has to do
-    # an expensive reshard instead of being a no-op.
+    # shard_moe_weights expects.
     target_shardings = _get_moe_weight_shardings(out, moe_backend, mesh)
     for field in fields(FusedMoEWeights):
         key = field.name
