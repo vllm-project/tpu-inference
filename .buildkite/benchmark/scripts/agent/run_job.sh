@@ -91,6 +91,13 @@ else
 fi
 
 #
+# Cleanup Docker images and containers
+#
+# shellcheck disable=SC1091
+source ".buildkite/scripts/setup_docker_env.sh"
+cleanup_docker_resource "vllm-tpu"
+
+#
 # Run job in docker
 #
 if (( BM_JOB_STATUS == EXIT_SUCCESS )); then
