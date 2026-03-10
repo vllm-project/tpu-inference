@@ -65,6 +65,7 @@ def _run_inference_with_config(model_name: str,
         enable_prefix_caching=enable_prefix_caching,
         additional_config=additional_config,
         kv_cache_dtype=kv_cache_dtype,
+        async_scheduling=False,
     )
 
     engine_args_dict = asdict(engine_args)
@@ -79,7 +80,6 @@ def _run_inference_with_config(model_name: str,
         time.sleep(5)
 
 
-@pytest.mark.skip(reason="PP is not fully enabled.")
 def test_pipeline_parallelism_jax_model(
     model_name: str,
     test_prompts: list,
@@ -113,7 +113,6 @@ def test_pipeline_parallelism_jax_model(
     )
 
 
-@pytest.mark.skip(reason="PP is not fully enabled.")
 def test_pipeline_parallelism_vllm_model(
     model_name: str,
     test_prompts: list,
@@ -150,7 +149,6 @@ def test_pipeline_parallelism_vllm_model(
     )
 
 
-@pytest.mark.skip(reason="PP is not fully enabled.")
 def test_pipeline_parallelism_jax_model_correctness(
     model_name: str,
     test_prompts: list,

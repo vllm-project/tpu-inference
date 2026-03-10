@@ -12,9 +12,9 @@ RUN_MULTIHOST_SCRIPT="${TOP_DIR}/.buildkite/scripts/run_multihost.sh"
 
 # Auto-update the codebase before running the benchmark
 echo "--- Updating codebase..."
-# pushd "$TOP_DIR" > /dev/null
-# git pull origin main || echo "Warning: Failed to pull latest changes. Continuing with current codebase."
-# popd > /dev/null
+pushd "$TOP_DIR" > /dev/null
+git pull origin main || echo "Warning: Failed to pull latest changes. Continuing with current codebase."
+popd > /dev/null
 
 # Ensure essential environment variables are set for Spanner reporting
 export GCP_PROJECT_ID="${GCP_PROJECT_ID:-cloud-tpu-inference-test}"
