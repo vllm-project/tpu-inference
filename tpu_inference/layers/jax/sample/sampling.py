@@ -34,6 +34,11 @@ def sample(
     tpu_sampling_metadata: TPUSupportedSamplingMetadata,
 ) -> jax.Array:
     # (B, vocab_size)
+    if tpu_sampling_metadata._cache_collision_dummy is not None:
+        # Force a dependency on the dummy tensor's shape to ensure unique HLO.
+        logits = logits + 0 * jnp.sum(
+            tpu_sampling_metadata._cache_collision_dummy)
+
     if tpu_sampling_metadata.do_sampling:
         # Unshard the logits explicity to avoid latency increase.
         logits = jax.lax.with_sharding_constraint(

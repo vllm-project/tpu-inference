@@ -535,10 +535,20 @@ class CompilationManager:
                         top_k = None
                         top_p = None
 
+                    # Use a dummy tensor with a unique shape for each logprobs config.
+                    # This avoids persistent cache collisions.
+                    dummy_shape = (1 if logprobs else 2, )
+                    _cache_collision_dummy = jnp.zeros(dummy_shape,
+                                                       dtype=jnp.int32)
+                    _cache_collision_dummy = jax.device_put(
+                        _cache_collision_dummy,
+                        NamedSharding(self.runner.mesh, PartitionSpec(None)))
+
                     sampling_metadata = TPUSupportedSamplingMetadata(
                         temperature=temperature,
                         top_k=top_k,
                         top_p=top_p,
+                        _cache_collision_dummy=_cache_collision_dummy,
                         do_sampling=do_sampling,
                         logprobs=logprobs)
                     self._run_compilation(

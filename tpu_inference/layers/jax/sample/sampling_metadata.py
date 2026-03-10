@@ -37,6 +37,7 @@ DEFAULT_SAMPLING_PARAMS = dict(
         "temperature",
         "top_k",
         "top_p",
+        "_cache_collision_dummy",
     ],
     meta_fields=["do_sampling", "logprobs"],
 )
@@ -45,6 +46,7 @@ class TPUSupportedSamplingMetadata:
     temperature: Optional[jnp.ndarray] = None
     top_k: Optional[jnp.ndarray] = None
     top_p: Optional[jnp.ndarray] = None
+    _cache_collision_dummy: Optional[jnp.ndarray] = None
     do_sampling: bool = False
     logprobs: bool = False
 
