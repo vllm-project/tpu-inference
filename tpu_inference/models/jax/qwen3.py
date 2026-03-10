@@ -78,7 +78,7 @@ class Qwen3Attention(JaxModule):
         self.q_proj = JaxEinsum(
             "TD,DNH->TNH",
             (self.hidden_size, self.num_heads, self.head_dim),
-            dtype=dtype,
+            param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
             quant_config=quant_config,
@@ -87,7 +87,7 @@ class Qwen3Attention(JaxModule):
         self.q_norm = JaxRmsNorm(
             self.head_dim,
             epsilon=self.rms_norm_eps,
-            dtype=dtype,
+            param_dtype=dtype,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
@@ -96,7 +96,7 @@ class Qwen3Attention(JaxModule):
         self.k_proj = JaxEinsum(
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
-            dtype=dtype,
+            param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
             quant_config=quant_config,
@@ -105,7 +105,7 @@ class Qwen3Attention(JaxModule):
         self.k_norm = JaxRmsNorm(
             self.head_dim,
             epsilon=self.rms_norm_eps,
-            dtype=dtype,
+            param_dtype=dtype,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
@@ -114,7 +114,7 @@ class Qwen3Attention(JaxModule):
         self.v_proj = JaxEinsum(
             "TD,DKH->TKH",
             (self.hidden_size, self.num_kv_heads, self.head_dim),
-            dtype=dtype,
+            param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             rngs=rng,
             quant_config=quant_config,
@@ -123,7 +123,7 @@ class Qwen3Attention(JaxModule):
         self.o_proj = JaxEinsum(
             "TNH,NHD->TD",
             (self.num_heads, self.head_dim, self.hidden_size),
-            dtype=dtype,
+            param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
             rngs=rng,
             quant_config=quant_config,
@@ -202,7 +202,7 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
         self.input_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
-            dtype=dtype,
+            param_dtype=dtype,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
@@ -218,7 +218,7 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
         self.post_attention_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
-            dtype=dtype,
+            param_dtype=dtype,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
@@ -255,7 +255,7 @@ class Qwen3Model(Qwen2Model):
             self.embed_tokens = JaxEmbed(
                 num_embeddings=vocab_size,
                 features=hidden_size,
-                dtype=dtype,
+                param_dtype=dtype,
                 embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
                 rngs=rng,
                 quant_config=vllm_config.quant_config,
@@ -280,7 +280,7 @@ class Qwen3Model(Qwen2Model):
             self.norm = JaxRmsNorm(
                 hidden_size,
                 epsilon=rms_norm_eps,
-                dtype=dtype,
+                param_dtype=dtype,
                 scale_init=nnx.with_partitioning(init_fn, (None, )),
                 rngs=rng,
                 quant_config=vllm_config.quant_config,
