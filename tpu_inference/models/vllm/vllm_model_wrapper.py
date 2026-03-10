@@ -289,6 +289,8 @@ class VllmModelWrapper:
 
     def jit_compute_logits_func(self):
 
+        # TODO(gxd3): revisit if the sharding below is the best way to shard the
+        # output logits.
         @jax.jit(out_shardings=(NamedSharding(
             self.mesh,
             PartitionSpec(ShardingAxisName.MLP_DATA,

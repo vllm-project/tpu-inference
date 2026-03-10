@@ -36,8 +36,10 @@ def sample(
     # (B, vocab_size)
     if tpu_sampling_metadata.do_sampling:
         # Unshard the logits explicity to avoid latency increase.
+        # TODO(gxd3): revisit if the 2nd dimension of the logits can be sharded
+        # instead of being replicated.
         logits = jax.lax.with_sharding_constraint(
-            logits, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
+            logits, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
     greedy_sampled = jnp.argmax(logits, axis=-1)
     if not tpu_sampling_metadata.do_sampling:
         return greedy_sampled
@@ -65,8 +67,13 @@ def sample(
     next_tokens = jax.random.categorical(rng, logits)
     # Note: avoid using the sample result when temperature < _SAMPLING_EPS
     # If temperature < 0, logits /= temperatures will flip the result, causing error.
-    return jnp.where(tpu_sampling_metadata.temperature < _SAMPLING_EPS,
-                     greedy_sampled, next_tokens)
+    ret = jnp.where(tpu_sampling_metadata.temperature < _SAMPLING_EPS,
+                    greedy_sampled, next_tokens)
+    # Replicate the result so that in multi-controller jax setup
+    # (i.e. Ray based multi-host setup), we won't hit error like
+    # RuntimeError: Fetching value for `jax.Array` that spans non-addressable
+    # (non process local) devices is not possible.
+    return jax.lax.with_sharding_constraint(ret, NamedSharding(mesh, P()))
 
 
 def compute_logprobs(logits: jax.Array) -> jax.Array:
