@@ -18,6 +18,44 @@
 
 set -e
 
+# Function to print logs on exit
+print_logs_on_exit() {
+  echo "--- Script exiting, displaying logs ---"
+
+  # The logs are written inside containers to /root/logs, which is mapped from $LOG_DIR on the host.
+  LOG_DIR=$HOME/logs
+
+  if [ -d "$LOG_DIR" ]; then
+    echo "--- Contents of $LOG_DIR/prefill.txt ---"
+    if [ -f "$LOG_DIR/prefill.txt" ]; then
+      cat "$LOG_DIR/prefill.txt"
+    else
+      echo "File not found."
+    fi
+
+    echo "--- Contents of $LOG_DIR/decode.txt ---"
+    if [ -f "$LOG_DIR/decode.txt" ]; then
+      cat "$LOG_DIR/decode.txt"
+    else
+      echo "File not found."
+    fi
+
+    echo "--- Contents of $LOG_DIR/benchmark.txt ---"
+    if [ -f "$LOG_DIR/benchmark.txt" ]; then
+      cat "$LOG_DIR/benchmark.txt"
+    else
+      echo "File not found."
+    fi
+  else
+    echo "Log directory '$LOG_DIR' not found."
+  fi
+  echo "--- End of logs ---"
+}
+
+# Register the cleanup function to be called on script exit (normal or error)
+trap print_logs_on_exit EXIT
+
+
 # Parameters may come from external
 # docker related
 CONTAINER_PREFIX=${CONTAINER_PREFIX:="disagg-node"}
