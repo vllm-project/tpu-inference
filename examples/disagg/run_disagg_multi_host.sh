@@ -22,16 +22,16 @@ set -e
 # docker related
 CONTAINER_PREFIX=${CONTAINER_PREFIX:="disagg-node"}
 RUN_IN_BUILDKITE=${RUN_IN_BUILDKITE:=false}
-TPU_VERSION=${TPU_VERSION:=tpu6e}
+TPU_VERSION=${TPU_VERSION:=tpu7x}
 MODEL=${MODEL:="Qwen/Qwen3-0.6B"}
 DOCKER_IMAGE=${DOCKER_IMAGE:="vllm-tpu:000"}
 
 # benchmark related
 INPUT_LEN=${INPUT_LEN:=128}
 OUTPUT_LEN=${OUTPUT_LEN:=20}
-NUM_PROMPTS=${NUM_PROMPTS:=10}
+NUM_PROMPTS=${NUM_PROMPTS:=100}
 RANDOM_SEED=${RANDOM_SEED:=10}
-MAX_CONCURRENCY=${MAX_CONCURRENCY:=1}
+MAX_CONCURRENCY=${MAX_CONCURRENCY:=10}
 TEST_MODE=${TEST_MODE:=1} # if 1, run benchmark; if 2, run correctness; if 3, run both
 ############################
 
