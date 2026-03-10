@@ -22,7 +22,7 @@ TARGET_BRANCH="update_ci_unit_test"
 COMMIT_MESSAGE="Update verified commit hashes"
 
 # Construct the repository URL with the access token for authentication.
-AUTHENTICATED_REPO_URL="https://x-access-token:${GITHUB_PAT}@${REPO_URL#https://}"
+# AUTHENTICATED_REPO_URL="https://x-access-token:${GITHUB_PAT}@${REPO_URL#https://}"
 
 # Ensure the GITHUB_PAT is available before proceeding.
 if [ -z "${GITHUB_PAT:-}" ]; then
