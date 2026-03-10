@@ -755,6 +755,7 @@ class JAXUnfoldConvolution(nnx.Module):
             patch_flat_dim,
             cfg.hidden_size,
             use_bias=False,
+            param_dtype=dtype,
             dtype=dtype,
             kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(),
                                               (None, "model")),
@@ -799,6 +800,7 @@ class JAXLlama4VisionMLP(nnx.Module):
             cfg.hidden_size,
             cfg.intermediate_size,
             use_bias=True,
+            param_dtype=dtype,
             dtype=dtype,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.glorot_uniform(), (None, "model")),
@@ -810,6 +812,7 @@ class JAXLlama4VisionMLP(nnx.Module):
             cfg.intermediate_size,
             cfg.hidden_size,
             use_bias=True,
+            param_dtype=dtype,
             dtype=dtype,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.glorot_uniform(), ("model", None)),
@@ -871,6 +874,7 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
         self.input_layernorm = nnx.LayerNorm(
             cfg.hidden_size,
             epsilon=cfg.norm_eps,
+            param_dtype=dtype,
             dtype=dtype,
             rngs=rngs,
             scale_init=nnx.with_partitioning(nnx.initializers.ones, P()),
@@ -878,6 +882,7 @@ class JAXLlama4VisionEncoderLayer(nnx.Module):
         self.post_attention_layernorm = nnx.LayerNorm(
             cfg.hidden_size,
             epsilon=cfg.norm_eps,
+            param_dtype=dtype,
             dtype=dtype,
             rngs=rngs,
             scale_init=nnx.with_partitioning(nnx.initializers.ones, P()),
@@ -1005,6 +1010,7 @@ class JAXLlama4VisionMLP2(nnx.Module):
             cfg.intermediate_size,
             cfg.projector_input_dim,
             use_bias=False,
+            param_dtype=dtype,
             dtype=dtype,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.glorot_uniform(), (None, "model")),
@@ -1014,6 +1020,7 @@ class JAXLlama4VisionMLP2(nnx.Module):
             cfg.projector_output_dim,
             cfg.projector_output_dim,
             use_bias=False,
+            param_dtype=dtype,
             dtype=dtype,
             kernel_init=nnx.with_partitioning(
                 nnx.initializers.glorot_uniform(), ("model", None)),
@@ -1110,6 +1117,7 @@ class JAXLlama4VisionModel(nnx.Module):
         self.layernorm_pre = nnx.LayerNorm(
             self.hidden_size,
             epsilon=self.norm_eps,
+            param_dtype=dtype,
             dtype=dtype,
             rngs=rngs,
             scale_init=nnx.with_partitioning(nnx.initializers.ones, P()),
@@ -1117,6 +1125,7 @@ class JAXLlama4VisionModel(nnx.Module):
         self.layernorm_post = nnx.LayerNorm(
             self.hidden_size,
             epsilon=self.norm_eps,
+            param_dtype=dtype,
             dtype=dtype,
             rngs=rngs,
             scale_init=nnx.with_partitioning(nnx.initializers.ones, P()),
@@ -1194,6 +1203,7 @@ class JAXLlama4MultiModalProjector(nnx.Module):
             cfg["vision_config"].vision_output_dim,
             cfg["text_config"].hidden_size,
             use_bias=False,
+            param_dtype=dtype,
             dtype=dtype,
             kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(),
                                               (None, "model")),
