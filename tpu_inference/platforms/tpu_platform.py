@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Optional, Tuple, Union
 
 import jax.numpy as jnp
 import torch
@@ -163,8 +163,7 @@ class TpuPlatform(Platform):
 
         cache_config = vllm_config.cache_config
         # For v0, the default block size is 16.
-        if cache_config and cache_config.block_size is None:
-            cache_config.block_size = cast(BlockSize, 16)
+        if cache_config and not cache_config.user_specified_block_size:
             if vllm_config.model_config:
                 from tpu_inference.layers.vllm.backends.flash_attn import \
                     PallasAttentionBackend
@@ -225,6 +224,12 @@ class TpuPlatform(Platform):
         from tpu_inference.core.sched.dp_scheduler import \
             update_vllm_config_for_dp_scheduler
         update_vllm_config_for_dp_scheduler(vllm_config)
+
+    @classmethod
+    def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
+        # TODO: TPU still sets block_size in check_and_update_config.
+        # Move that logic here so block_size is chosen by the backend.
+        pass
 
     @classmethod
     def is_pin_memory_available(cls):
