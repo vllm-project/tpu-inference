@@ -22,7 +22,7 @@ set -e
 # docker related
 CONTAINER_PREFIX=${CONTAINER_PREFIX:="disagg-node"}
 RUN_IN_BUILDKITE=${RUN_IN_BUILDKITE:=false}
-TPU_VERSION=${TPU_VERSION:=tpu7x}
+TPU_VERSION=${TPU_VERSION:=tpu6e}
 MODEL=${MODEL:="Qwen/Qwen3-0.6B"}
 DOCKER_IMAGE=${DOCKER_IMAGE:="vllm-tpu:000"}
 
