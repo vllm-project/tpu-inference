@@ -213,11 +213,11 @@ if [[ "$RUN_TYPE" == *"ACCURACY"* ]]; then
     fi
 else
     # Performance run logic
-    throughput=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
+    throughput=$(grep -i "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
     echo "throughput for $TEST_NAME at $VLLM_HASH: $throughput"
 
-    output_token_throughput=$(grep "Output token throughput (tok/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
-    total_token_throughput=$(grep "Total Token throughput (tok/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
+    output_token_throughput=$(grep -i "Output token throughput (tok/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
+    total_token_throughput=$(grep -i "Total Token throughput (tok/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
 
     if [[ -z "$throughput" || ! "$throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
         echo "Failed to get the throughput and this is not an accuracy run."
