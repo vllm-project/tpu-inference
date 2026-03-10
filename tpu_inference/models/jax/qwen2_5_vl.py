@@ -330,6 +330,7 @@ class Qwen2_5_VisionBlock(nnx.Module):
         dim = vision_config.hidden_size
         norm_layer = partial(nnx.RMSNorm,
                              epsilon=config.rms_norm_eps,
+                             param_dtype=dtype,
                              scale_init=nnx.with_partitioning(
                                  init_fn, (None, )))
 
@@ -405,6 +406,7 @@ class Qwen2_5_VisionPatchMerger(nnx.Module):
                  spatial_merge_size: int, dtype: jnp.dtype, rngs: nnx.Rngs):
         self.hidden_size = context_dim * (spatial_merge_size**2)
         self.ln_q = norm_layer(context_dim,
+                               param_dtype=dtype,
                                dtype=dtype,
                                rngs=rngs,
                                scale_init=nnx.with_partitioning(
