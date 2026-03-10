@@ -113,6 +113,7 @@ cleanup() {
   fi
 
   echo "   -> Cleaning Head Node..."
+  docker cp node:/root/vllm_serve.log /tmp/vllm_serve.log >/dev/null 2>&1 || true
   docker stop node >/dev/null 2>&1 || true
   docker rm -f node >/dev/null 2>&1 || true
   rm -f /root/vllm_serve.log || true

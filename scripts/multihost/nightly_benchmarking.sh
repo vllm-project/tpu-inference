@@ -231,6 +231,15 @@ EOF
 
 fi
 
+# Upload vllm_serve.log to GCS
+LOG_GCS_URI="gs://tpu-commons-ci/logs/${MODEL_NAME}_${INPUT_LEN}_${OUTPUT_LEN}_${JOB_REFERENCE}_vllm_serve.log"
+if [ -f "/tmp/vllm_serve.log" ]; then
+  echo "Uploading vllm_serve.log to $LOG_GCS_URI"
+  gsutil cp /tmp/vllm_serve.log "$LOG_GCS_URI" || echo "Warning: Failed to upload vllm_serve.log"
+else
+  echo "Warning: /tmp/vllm_serve.log not found, skipping upload."
+fi
+
 if [[ "${SKIP_DB_UPLOAD}" == "true" ]]; then
   echo "=== Skipping Spanner DB Upload (--skip-db-upload specified) ==="
   echo "=== Nightly benchmark script completed successfully ==="
