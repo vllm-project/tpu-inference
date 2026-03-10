@@ -22,8 +22,8 @@ echo "./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/case
 ./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_qwen_llama_tpu7x_2.csv "$CODE_HASH" $TAG DAILY
 
 # Ironwood Deepseek
-echo "./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_deepseek_tpu7x_8.csv $CODE_HASH $TAG DAILY \"JAX_RANDOM_WEIGHTS=true;VLLM_MLA_DISABLE=1;NEW_MODEL_DESIGN=True;TPU_BACKEND_TYPE=jax\""
-./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_deepseek_tpu7x_8.csv "$CODE_HASH" $TAG DAILY "JAX_RANDOM_WEIGHTS=true;VLLM_MLA_DISABLE=1;NEW_MODEL_DESIGN=True;TPU_BACKEND_TYPE=jax"
+echo "./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_deepseek_tpu7x_8.csv $CODE_HASH $TAG DAILY \"VLLM_MLA_DISABLE=1;TPU_BACKEND_TYPE=vllm\""
+./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_deepseek_tpu7x_8.csv "$CODE_HASH" $TAG DAILY "VLLM_MLA_DISABLE=1;TPU_BACKEND_TYPE=vllm"
 
 # # Ironwood Deepseek Accuracy
 echo "./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/accuracy_jax_v7x.csv $CODE_HASH $TAG JAX_ACCURACY \"VLLM_MLA_DISABLE=1;NEW_MODEL_DESIGN=True;TPU_BACKEND_TYPE=jax;\""
