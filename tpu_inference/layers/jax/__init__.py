@@ -12,14 +12,54 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Iterator
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Iterable, Iterator, Optional
 
 from flax import nnx
+
+if TYPE_CHECKING:
+    import jax
+    from jax.sharding import Mesh
+    from vllm.config import VllmConfig
 
 
 class JaxModule(nnx.Module):
     """Base module for JAX layers, extending flax.nnx.Module.
     """
+
+    @classmethod
+    def create_model(
+        cls,
+        vllm_config: "VllmConfig",
+        rng: "jax.Array",
+        mesh: "Mesh",
+    ) -> Optional["JaxModule"]:
+        """Create and return a fully initialized model, ready for inference.
+
+        Override this classmethod in model subclasses that need full control
+        over model creation — for example, models that manage their own
+        sharding internally and do not need the default ``@jax.jit`` wrapper
+        provided by the loader.
+
+        When overridden, the returned model should be fully sharded, have
+        weights loaded (or random-initialized for dummy mode), and have any
+        quantization / cache initialization already applied.
+
+        The default implementation returns ``None``, which signals the loader
+        to use its standard creation pipeline.
+
+        Args:
+            vllm_config: The VllmConfig for this model.
+            rng: The JAX PRNG key.
+            mesh: The device mesh.
+
+        Returns:
+            A fully initialized ``nnx.Module`` ready for inference, or
+            ``None`` to fall back to the default loader pipeline.
+        """
+        del vllm_config, rng, mesh  # unused in default implementation
+        return None
 
     def _get_name(self) -> str:
         return self.__class__.__name__

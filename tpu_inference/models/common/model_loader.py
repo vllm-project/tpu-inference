@@ -96,12 +96,111 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     )
 
 
+def jit_model(
+    model: nnx.Module,
+    vllm_config: VllmConfig,
+    rng: jax.Array,
+    mesh: Mesh,
+    use_qwix_on_abstract_model: bool = False,
+) -> nnx.Module:
+    """JIT-compile a model to eliminate PjitFunction overhead.
+
+    This applies an ``@nnx.jit`` pass that extracts and re-applies the model
+    state, and optionally applies Qwix quantization on the concrete model.
+
+    Out-of-tree models that override ``create_model()`` can call this as the
+    final step of their pipeline when they still want the standard JIT
+    finalization.
+
+    Args:
+        model: An instantiated (possibly abstract) ``nnx.Module``.
+        vllm_config: The VllmConfig for this model.
+        rng: The JAX PRNG key.
+        mesh: The device mesh.
+        use_qwix_on_abstract_model: If ``True``, skip concrete Qwix
+            quantization (it was already applied on the abstract model).
+
+    Returns:
+        The JIT-compiled model.
+    """
+
+    @nnx.jit(donate_argnums=(0, ),
+             static_argnames=('_use_qwix_on_abstract_model', ))
+    def _jit_model(
+            model: nnx.Module,
+            _use_qwix_on_abstract_model: bool = False) -> nnx.Module:
+        state = nnx.state(model)
+        nnx.update(model, state)
+        if not _use_qwix_on_abstract_model:
+            # NOTE: if Qwix is not configured, this will be a no-op
+            model = apply_qwix_quantization(vllm_config,
+                                            model,
+                                            rng,
+                                            mesh,
+                                            apply_to_abstract_model=False)
+        return model
+
+    return _jit_model(model,
+                      _use_qwix_on_abstract_model=use_qwix_on_abstract_model)
+
+
+def load_model_weights(
+    model: nnx.Module,
+    vllm_config: VllmConfig,
+    rng: jax.Array,
+) -> None:
+    """Load weights into a model using the configured loader.
+
+    Dispatches to the appropriate weight-loading strategy based on the model
+    type and the configured ``load_format``.  Supports
+    :class:`LoadableWithIterator`, :class:`RunaiModelStreamerLoader`, and the
+    default ``model.load_weights(rng)`` path.
+
+    Out-of-tree models that override ``create_model()`` can call this helper
+    to reuse the standard weight-loading logic.
+
+    Args:
+        model: The model to load weights into (mutated in-place).
+        vllm_config: The VllmConfig for this model.
+        rng: The JAX PRNG key.
+    """
+    loader = get_model_loader(vllm_config.load_config)
+    if isinstance(model, LoadableWithIterator):
+        assert isinstance(model, JaxModule)
+        loader.load_weights(model, vllm_config.model_config)
+    elif isinstance(loader, RunaiModelStreamerLoader):
+        model_weights = vllm_config.model_config.model
+        if hasattr(vllm_config.model_config, "model_weights"):
+            model_weights = vllm_config.model_config.model_weights
+        weights_iterator = loader._get_weights_iterator(
+            model_weights, vllm_config.model_config.revision)
+        # We set the weights iterator at runtime, to prevent having to change
+        # every model's load_weights signature. This also prevents us from
+        # hitting a TypeError at runtime if you use the
+        # RunaiModelStreamerLoader with any flax_nnx model whose
+        # load_weights function does not accept the weights_iterator
+        # keyword argument.
+        vllm_config.model_config.runai_model_weights_iterator = weights_iterator
+        model.load_weights(rng)
+        del vllm_config.model_config.runai_model_weights_iterator
+    else:
+        model.load_weights(rng)
+
+
 def _get_nnx_model(
     model_class: Any,
     vllm_config: VllmConfig,
     rng: jax.Array,
     mesh: Mesh,
 ) -> nnx.Module:
+
+    # If the model class defines its own creation pipeline, use it.
+    # Models that manage their own sharding / JIT / weight-loading can
+    # override create_model() and return a fully-initialized model.
+    if hasattr(model_class, 'create_model'):
+        model = model_class.create_model(vllm_config, rng, mesh)
+        if model is not None:
+            return model
 
     def create_abstract_model() -> nnx.Module:
         """
@@ -111,32 +210,6 @@ def _get_nnx_model(
             An abstract model function.
         """
         return model_class(vllm_config, rng, mesh)
-
-    @nnx.jit(donate_argnums=(0, ),
-             static_argnames=('use_qwix_on_abstract_model', ))
-    def create_jit_model(
-            model: nnx.Module,
-            use_qwix_on_abstract_model: bool = False) -> nnx.Module:
-        """
-        Create a jit model.
-
-        Args:
-            model: The model to jit.
-            use_qwix_on_abstract_model: Whether to apply Qwix on the abstract model.
-
-        Returns:
-            The jitted model.
-        """
-        state = nnx.state(model)
-        nnx.update(model, state)
-        if not use_qwix_on_abstract_model:
-            # NOTE: if Qwix is not configured, this will be a no-op
-            model = apply_qwix_quantization(vllm_config,
-                                            model,
-                                            rng,
-                                            mesh,
-                                            apply_to_abstract_model=False)
-        return model
 
     if vllm_config.load_config.load_format == "dummy":
         # Create a sharded model with random inited weights.
@@ -160,9 +233,11 @@ def _get_nnx_model(
             load_random_weights_into_qwix_abstract_model(
                 rng, model, mesh, quantization_config)
             with mesh:
-                jit_model = create_jit_model(model,
-                                             use_qwix_on_abstract_model=True)
-            return jit_model
+                return jit_model(model,
+                                 vllm_config,
+                                 rng,
+                                 mesh,
+                                 use_qwix_on_abstract_model=True)
 
         @jax.jit
         def create_sharded_model():
@@ -175,15 +250,15 @@ def _get_nnx_model(
             return model
 
         with mesh:
-            jit_model = create_sharded_model()
+            result = create_sharded_model()
             # In this case, we are applying Qwix quantization to the true, concrete model
-            jit_model = apply_qwix_quantization(vllm_config,
-                                                jit_model,
-                                                rng,
-                                                mesh,
-                                                apply_to_abstract_model=False)
-            if hasattr(jit_model, 'initialize_cache'):
-                jit_model.initialize_cache()
+            result = apply_qwix_quantization(vllm_config,
+                                             result,
+                                             rng,
+                                             mesh,
+                                             apply_to_abstract_model=False)
+            if hasattr(result, 'initialize_cache'):
+                result.initialize_cache()
     else:
         # We first create an abstract model without allocating any weights,
         # then fill in its weigths during load_weights from HF.
@@ -213,30 +288,14 @@ def _get_nnx_model(
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
         with jax.set_mesh(mesh):
-            loader = get_model_loader(vllm_config.load_config)
-            if isinstance(model, LoadableWithIterator):
-                assert isinstance(model, JaxModule)
-                loader.load_weights(model, vllm_config.model_config)
-            elif isinstance(loader, RunaiModelStreamerLoader):
-                model_weights = vllm_config.model_config.model
-                if hasattr(vllm_config.model_config, "model_weights"):
-                    model_weights = vllm_config.model_config.model_weights
-                weights_iterator = loader._get_weights_iterator(
-                    model_weights, vllm_config.model_config.revision)
-                # We set the weights iterator at runtime, to prevent having to change
-                # every model's load_weights signature. This also prevents us from hitting
-                # a TypeError at runtime if you use the RunaiModelStreamerLoader with any
-                # flax_nnx model whose load_weights function does not accept the
-                # weights_iterator keyword argument.
-                vllm_config.model_config.runai_model_weights_iterator = weights_iterator
-                model.load_weights(rng)
-                del vllm_config.model_config.runai_model_weights_iterator
-            else:
-                model.load_weights(rng)
-            jit_model = create_jit_model(
+            load_model_weights(model, vllm_config, rng)
+            result = jit_model(
                 model,
+                vllm_config,
+                rng,
+                mesh,
                 use_qwix_on_abstract_model=should_apply_qwix_on_abstract_model)
-    return jit_model
+    return result
 
 
 def _not_support(*args, **kwargs):
