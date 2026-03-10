@@ -203,3 +203,6 @@ shellcheck*/
 csrc/moe/marlin_moe_wna16/kernel_*
 
 !/support_matrices/**
+
+.gemini/
+gha-creds-*.json

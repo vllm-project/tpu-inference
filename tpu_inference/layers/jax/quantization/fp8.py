@@ -76,7 +76,7 @@ def load_fp8_weight(jax_param: nnx.Param, torch_weight: torch.Tensor,
         )
         jax_weight = jax_weight.astype(jax_param[...].dtype)
 
-    jax_param.set_raw_value(shard_put(jax_weight, spec, mesh=mesh))
+    jax_param[...] = shard_put(jax_weight, spec, mesh=mesh)
 
 
 class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
@@ -117,8 +117,7 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
         # Attach custom loader to avoid default upcasting behavior
         layer.weight.set_metadata(
             'weight_loader',
-            functools.partial(load_fp8_weight,
-                              param_name=layer.prefix + ".weight"))
+            functools.partial(load_fp8_weight, param_name="weight"))
 
         # Scale is always per-output-channel (1D).
         scale_sharding = None
@@ -254,22 +253,14 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         if layer.bias is not None:
             layer.bias.set_metadata('mesh', cpu_mesh())
 
-    def process_weights_after_loading(self, layer: JaxEinsum) -> bool:
+    def process_weights_after_loading(self, layer):
         assert isinstance(layer, JaxEinsum)
         assert self.quant_config.weight_block_size is not None
 
         if self.batch_features:
             # Batched case: weight stays in FP8. No blockwise processing
             # needed — the batched matmul uses dot_general with FP8 natively.
-            return True
-
-        if not layer.weight.get_metadata(
-                "_is_loaded",
-                False) or not layer.weight_scale_inv.get_metadata(
-                    "_is_loaded", False):
-            # Weight and scale could spread across multiple files,
-            # so we only process once both of them are loaded.
-            return False
+            return
 
         # Do the re-quant process on CPU to avoid OOM on device.
         with cpu_mesh_context():
@@ -310,8 +301,6 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         else:
             raise NotImplementedError(
                 "Fp8 block-wise linear method only supports fuse_matmuls.")
-
-        return True
 
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
         if self.batch_features:
@@ -451,7 +440,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                     E, K, N = param[...].shape
                     value = init_fn(rngs.params(), (E, K, N),
                                     jnp.float8_e4m3fn)
-                    param.set_raw_value(value)
+                    param.value = value
 
                     scale_value = jnp.zeros((E, (K + block_k - 1) // block_k,
                                              (N + block_n - 1) // block_n),
@@ -465,7 +454,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 f"Unsupported moe backend: {layer.moe_backend}! Currently supported: {FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS}"
             )
 
-    def process_weights_after_loading(self, layer: JaxMoE) -> bool:
+    def process_weights_after_loading(self, layer: JaxMoE) -> None:
         """
         Process weights after loading.
 
@@ -476,7 +465,6 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
             layer: The layer to process.
         """
         # TODO (#1681): support other backends
-
         if layer.moe_backend in FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS:
             gating_scale_name = f"kernel_gating_EDF_{self.weight_scale_name}"
             up_scale_name = f"kernel_up_proj_EDF_{self.weight_scale_name}"
@@ -492,7 +480,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 ]):
                 # If weights for a module is spread across multiple files, this function may be called
                 # more than once. We only want to process the weights once all of them are loaded.
-                return False
+                return
 
             with cpu_mesh_context():
                 w_gate = jnp.concatenate(
@@ -539,38 +527,29 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                     weight_block_size=weight_block_size,
                 )
 
-            del layer.kernel_gating_EDF
-            del layer.kernel_up_proj_EDF
-            delattr(layer, gating_scale_name)
-            delattr(layer, up_scale_name)
-
             # TODO (jacobplatin): we probably want to make the sharding configurable
             layer.kernel_gating_upproj_EDF = nnx.Param(
                 shard_put(weights.w13_weight, shardings=layer.edf_sharding))
             layer.kernel_down_proj_EFD = nnx.Param(
                 shard_put(weights.w2_weight, shardings=layer.efd_sharding))
-            # gmm expects shape [num_groups, num_blocks, 1, n]
-            # TODO(gpolovets1): Make sure it works for gmm_v2 as well.
-            edf_scale_sharding = (layer.edf_sharding[0], ) + (None, ) * (
-                weights.w13_weight_scale.ndim - 2) + (layer.edf_sharding[-1], )
-            efd_scale_sharding = (layer.efd_sharding[0], ) + (None, ) * (
-                weights.w2_weight_scale.ndim - 2) + (layer.efd_sharding[-1], )
+            # NOTE: we aren't sharding the weight scales
             setattr(
                 layer, f"kernel_gating_upproj_EDF_{self.weight_scale_name}",
                 nnx.Param(
-                    shard_put(weights.w13_weight_scale,
-                              shardings=edf_scale_sharding)))
+                    shard_put(weights.w13_weight_scale, shardings=(None, ))))
             setattr(
                 layer, f"kernel_down_proj_EFD_{self.weight_scale_name}",
                 nnx.Param(
-                    shard_put(weights.w2_weight_scale,
-                              shardings=efd_scale_sharding)))
+                    shard_put(weights.w2_weight_scale, shardings=(None, ))))
+
+            del layer.kernel_gating_EDF
+            del layer.kernel_up_proj_EDF
+            delattr(layer, gating_scale_name)
+            delattr(layer, up_scale_name)
         else:
             raise NotImplementedError(
                 f"Unsupported moe backend: {layer.moe_backend}! Currently supported: {FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS}"
             )
-
-        return True
 
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
         """

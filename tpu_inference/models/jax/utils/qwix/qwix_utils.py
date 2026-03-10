@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import functools
 import os
 from typing import TYPE_CHECKING, Callable, List
@@ -33,6 +34,74 @@ DEFAULT_NUM_BLOCKS_FOR_JIT_KV_CACHE = 2048
 DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS = 512
 DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS = 256
 DEFAULT_MAX_NUM_BLOCKS_PER_REQ = 16
+
+# TODO (#1680): remove once FP8 linear support lands
+DEFAULT_DEEPSEEK_FP8_CONFIG = {
+    "qwix": {
+        "use_abstract_model":
+        True,
+        "scale_dtype":
+        "bfloat16",
+        "rules": [
+            {
+                "module_path": ".*.custom_module.experts.router.*",
+                "weight_qtype": None,
+            },
+            {
+                "module_path": ".*",
+                "weight_qtype": "float8_e4m3fn",
+                "act_qtype": "float8_e4m3fn",
+            },
+        ],
+    }
+}
+
+# TODO (#1680): remove once FP8 linear support lands
+DEFAULT_DEEPSEEK_FP4_MLP_MOE_FP8_ATTN_CONFIG = {
+    "qwix": {
+        "use_abstract_model":
+        True,
+        "scale_dtype":
+        "bfloat16",
+        "rules": [
+            # Exclude router from quantization
+            {
+                "module_path": ".*.mlp.experts.router.*",
+                "weight_qtype": None,
+            },
+            # Avoid the combine expert ops
+            {
+                "module_path": ".*combine_experts.*",
+                "weight_qtype": None,
+            },
+            # Attention layers: keep FP8 for weights and activations
+            {
+                "module_path": ".*.attn.*",
+                "weight_qtype": "float8_e4m3fn",
+                "act_qtype": "float8_e4m3fn",
+            },
+            # MoE experts: use FP4 for expert weights
+            {
+                "module_path": ".*.mlp.*",
+                "weight_qtype": "float4_e2m1fn",
+                "act_qtype": "float8_e4m3fn",
+                "tile_size": 256,
+            },
+            # Shared experts: also FP4
+            {
+                "module_path": ".*.shared_experts.*",
+                "weight_qtype": "float4_e2m1fn",
+                "act_qtype": "float8_e4m3fn",
+                "tile_size": 256,
+            },
+            {
+                "module_path": ".*",
+                "weight_qtype": "float8_e4m3fn",
+                "act_qtype": "float8_e4m3fn",
+            },
+        ],
+    }
+}
 
 DEFAULT_LLAMA4_FP8_CONFIG = {
     "qwix": {
@@ -73,6 +142,12 @@ DEFAULT_GPT_OSS_FP4_CONFIG = {
         ],
     }
 }
+
+# TODO (jacobplatin): remove this once the JAX path refactor is complete
+NATIVE_FP8_CHECKPOINT_MODELS = [
+    "deepseek-ai/deepseek-v3", "deepseek-ai/deepseek-r1-0528",
+    "deepseek-ai/deepseek-r1"
+]
 
 
 def parse_qwix_config_to_rules(
@@ -251,7 +326,11 @@ def apply_qwix_quantization(
 
     Note that we currently support different methods for applying Qwix quantization.  The typical
     approach is to apply quantization on the concrete model, which already has the weights
-    loaded in.
+    loaded in.  However, for models like DeepSeek, which are already quantized, we need to
+    first create the abstract model, then apply Qwix quantization to the abstract model, and
+    finally load the weights in.  To use the latter approach, you will need to modify the
+    model weight loading code appropriately (see deepseek_v3.py for an example) and
+    pass and `use_abstract_model=True` in the quantization config.
 
     Args:
         vllm_config: the base VLLM config
@@ -259,9 +338,9 @@ def apply_qwix_quantization(
             (e.g. _create_abstract_model).  Otherwise, this will be the concrete model (nnx.Module).
         rng: JAX RNG
         mesh: model Mesh
-        apply_to_abstract_model: (Deprecated) if True, we will apply Qwix quantization to the abstract model,
-            which assumes that, during weight loading, the caller will thus override the QArray weights.
-            Otherwise, we will will apply Qwix quantization to the
+        apply_to_abstract_model: if True, we will apply Qwix quantization to the abstract model, which
+            assumes that, during weight loading, the caller will thus override the QArray weights
+            (see deepseek_v3.py for an example).  Otherwise, we will will apply Qwix quantization to the
             concrete model, which already has the weights loaded in.
 
     Returns:
@@ -351,6 +430,9 @@ def apply_qwix_quantization(
         Helper function to create and quantize the abstract model.
         """
         model = model_or_model_fn()
+        # Handle the DeepSeek case, where this needs to be called in the abstract model
+        if hasattr(model, 'initialize_cache'):
+            model.initialize_cache()
         return qwix_quantize_fn_for_eval(model=model, rng=rng)
 
     return create_and_quantize_model_factory
@@ -358,7 +440,7 @@ def apply_qwix_quantization(
 
 def apply_qwix_on_abstract_model(vllm_config: "VllmConfig") -> bool:
     """
-    Determines whether to apply Qwix quantization on the abstract model
+    Determines whether to apply Qwix quantization on the abstract model (e.g. for DeepSeek)
     or the concrete model.  See `apply_qwix_quantization` for more details on the differences
     between these two approaches.
     Args:
@@ -395,7 +477,55 @@ def get_default_qwix_quantization_config(
         hf_config, "quantization_config") else None
     # TODO (jacobplatin): remove this so that we can support various quantization types + make
     # more flexible
-    if model_type == "llama4" and quant_method == "compressed-tensors":
+    # NOTE (jacobplatin): we'll default to mixed FP8 (attention) + FP4 (MoE experts)
+    # for DeepSeek
+    if model_type == "deepseek_v3" and quant_method == "fp8":
+        # Dynamically fetch block size from HF config if available
+        # Config fmt: 'weight_block_size': [1, 512] -> we want the 2nd dim for tile_size
+        # NOTE: if the checkpoint is not 1D subchannel, we will throw an error
+        hf_quant_config = hf_config.quantization_config
+        assert "weight_block_size" in hf_quant_config, "Expected weight_block_size in quantization_config"
+        block_size = hf_quant_config["weight_block_size"]
+
+        # TODO (jacobplatin): remove this (not so nice!) logic once the refactor on the JAX happens
+        # NOTE: this is needed / added to support backwards compatibility for the native FP8 DeepSeek checkpoints
+        # (e.g. deepseek-ai/DeepSeek-R1-0528)
+        if block_size == [128, 128]:
+            model_name = hf_config._name_or_path.lower()
+            if model_name not in NATIVE_FP8_CHECKPOINT_MODELS:
+                raise ValueError(
+                    f"Expected to find DeepSeek checkpoint with block_size of [128, 128], but got {model_name}.  Expexted one of {NATIVE_FP8_CHECKPOINT_MODELS}"
+                )
+            return DEFAULT_DEEPSEEK_FP8_CONFIG
+
+        config = copy.deepcopy(DEFAULT_DEEPSEEK_FP4_MLP_MOE_FP8_ATTN_CONFIG)
+
+        if isinstance(block_size, (list, tuple)) and len(block_size) == 2:
+            assert block_size[
+                0] == 1, f"Expected first dimension to be 1 (unchanneled), but got {block_size[0]}! If you are trying to run quantized DeepSeek, we currently only support 1D-subchannel quantization and those models can be found here: https://huggingface.co/collections/jrplatin/deepseek-r1-1d-subchannel"
+            tile_size = block_size[1]
+            assert tile_size > 1, f"Expected tile_size > 1 for DeepSeek, but got {tile_size}"
+            logger.info(
+                f"Detected DeepSeek tile_size from config: {tile_size}")
+
+            # Update tile_size in the rules, since we might not always use a 1D subchannel size of
+            # 256
+            for rule in config["qwix"]["rules"]:
+                if "tile_size" in rule:
+                    rule["tile_size"] = tile_size
+                # TODO (jacobplatin): need to make this MUCH more robust, but basically the TPU-friendly checkpoints
+                # always (for now) keep FP8 for the attention layers but can be FP4 or FP8 for the MLP layers
+                mlp_dtype = hf_quant_config.get("tpu_settings",
+                                                {}).get("mlp_dtype", None)
+                if mlp_dtype is not None and rule[
+                        "weight_qtype"] == "float4_e2m1fn":
+                    rule["weight_qtype"] = mlp_dtype
+        else:
+            raise ValueError(
+                f"Invalid weight_block_size config: {block_size}, expected a list/tuple of length 2"
+            )
+        return config
+    elif model_type == "llama4" and quant_method == "compressed-tensors":
         return DEFAULT_LLAMA4_FP8_CONFIG
     # MXFP4 (GPT-OSS): provide a default configuration to quantize MoE experts via Qwix
     elif model_type == "gpt_oss" and quant_method == "mxfp4":
@@ -548,6 +678,10 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
             rng, mesh, param, param_shape, param_dtype,
             ".".join([str(x) for x in path]))
 
+    # Handles the DeepSeek case, where this needs to be called to make the cache weights
+    # concrete
+    if hasattr(model, 'initialize_cache'):
+        model.initialize_cache()
     logger.info("Done initializing Qwix-quantized model with random weights")
 
 

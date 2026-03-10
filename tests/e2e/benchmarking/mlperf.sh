@@ -288,7 +288,7 @@ for model_name in $model_list; do
 
     # Spin up the vLLM server
     echo "Spinning up the vLLM server..."
-    (vllm serve "$model_name" --max-model-len=1024 --max-num-batched-tokens "$max_batched_tokens" "${current_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
+    (vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens "$max_batched_tokens" "${current_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
 
     # Set initial trap to ensure cleanup happens even on immediate exit
     trap 'cleanUp "$model_name"' EXIT

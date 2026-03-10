@@ -25,10 +25,6 @@ if [ "$#" -eq 0 ]; then
   exit 1
 fi
 
-# TODO(Qiliang Cui): This is temp solution to mitigate the docker image
-#     not cleaned issue when migrating benchmark to buildkite.
-docker rm -f vllm-tpu || true
-
 # Environment variables for docker run
 ENV_VARS=(
   -e TEST_MODEL="${TEST_MODEL:-}"

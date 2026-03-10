@@ -67,22 +67,12 @@ class QuantizeMethodBase(ABC):
         raise NotImplementedError
 
     def process_weights_after_loading(self, layer: JaxModule, *args,
-                                      **kwargs) -> bool:
-        """Processes weigths after loading.
-
-        Common use cases includes re-quantize the weights to TPU-friendly format,
-        or fuse several weights into one for better performance.
-
-        This function may be called multiple times, if the weights for the
-        layer is distributed across multiple files.
+                                      **kwargs) -> None:
+        """
+        Processes weigths after loading.
 
         Args:
             layer: The layer to process
-
-        Returns:
-            Whether the post-loading processing is done. Since the function may
-            be called before all weights are loaded, it can return False to indicate
-            that the processing is not done yet.
         """
 
-        return True
+        pass

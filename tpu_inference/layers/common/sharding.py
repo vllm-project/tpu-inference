@@ -153,8 +153,7 @@ class ShardingConfigManager:
         parallel_config = vllm_config.parallel_config
         # Currently tensor_parallelism is also used for other things like determining number of Ray workers.
         pc_tensor_parallelism = parallel_config.tensor_parallel_size
-        ss_tensor_parallelsim = sharding_strategy.get("tensor_parallelism",
-                                                      None)
+        ss_tensor_parallelsim = sharding_strategy.get("tensor_parallelism", 1)
         data_parallelism = parallel_config.data_parallel_size
         expert_parallelism = sharding_strategy.get("expert_parallelism", 1)
         sequence_parallelism = sharding_strategy.get("sequence_parallelism", 1)
@@ -162,7 +161,7 @@ class ShardingConfigManager:
 
         enable_dp_attention = sharding_strategy.get("enable_dp_attention",
                                                     False)
-        if pc_tensor_parallelism != ss_tensor_parallelsim and ss_tensor_parallelsim:
+        if pc_tensor_parallelism != ss_tensor_parallelsim and ss_tensor_parallelsim > 1:
             # The user has explicitly set the tensor parallelism in the sharding config.
             tensor_parallelism = ss_tensor_parallelsim
         else:

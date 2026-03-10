@@ -121,7 +121,6 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
             1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
         return inv_freq
 
-    @jax.jit
     def _compute_sin_cos(self):
         inv_freq_H = self._compute_inv_freq()
         t = jnp.arange(self.original_max_position_embeddings *

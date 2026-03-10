@@ -11,13 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import jax
 import torch
 import torchax
-from jax.sharding import NamedSharding
-from jax.sharding import PartitionSpec as P
 from torch.nn import Parameter
-from torchax.interop import jax_view, torch_view
+from torchax.interop import torch_view
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.attention.attention import \
     get_attention_context
@@ -29,7 +26,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.v1.attention.backend import AttentionType
 
 from tpu_inference import utils
-from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
 
@@ -75,19 +71,6 @@ class VllmTPUMLAAttention(MLAAttention):
 
             # NOTE: vLLM dequantizes kv_b_proj weights which causes more memory
             # usage than expected.
-
-            # TODO(gxd3): consider quantize W_UK_T, W_UV back to fp8.
-            # Device_put `W_UK_T`, `W_UV` to TPUs
-            mesh = self.kv_b_proj.quant_method.linear_config.mesh
-            self.W_UK_T = torch_view(
-                jax.device_put(
-                    jax_view(self.W_UK_T),
-                    NamedSharding(mesh, P(ShardingAxisName.ATTN_HEAD, ))))
-            self.W_UV = torch_view(
-                jax.device_put(
-                    jax_view(self.W_UV),
-                    NamedSharding(mesh, P(ShardingAxisName.ATTN_HEAD, ))))
-
             self.W_UK_T = Parameter(self.W_UK_T, requires_grad=False)
             self.W_UV = Parameter(self.W_UV, requires_grad=False)
 

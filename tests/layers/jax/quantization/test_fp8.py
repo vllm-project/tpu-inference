@@ -180,12 +180,10 @@ class TestFp8BlockwiseJaxLinear:
 
         # Use a dummy mesh for testing
         devices = jax.devices()[:num_devices]
-        mesh = jax.sharding.Mesh(np.array(devices).reshape(-1, 1, 1), ('in', 'out', 'data'))
+        mesh = jax.sharding.Mesh(np.array(devices).reshape(-1, 1), ('in', 'out'))
         with jax.set_mesh(mesh):
             # Process weights in mesh context
-            layer.weight.set_metadata("_is_loaded", True)
-            layer.weight_scale_inv.set_metadata("_is_loaded", True)
-            assert layer.quant_method.process_weights_after_loading(layer)
+            layer.quant_method.process_weights_after_loading(layer)
 
             # Prepare input
             x = jax.random.normal(rngs.params(), (batch_size, in_features))
@@ -226,12 +224,10 @@ class TestFp8BlockwiseJaxLinear:
 
         # Use a dummy mesh for testing
         devices = jax.devices()
-        mesh = jax.sharding.Mesh(np.array(devices).reshape(-1, 1, 1), ('in', 'out', 'data'))
+        mesh = jax.sharding.Mesh(np.array(devices).reshape(-1, 1), ('in', 'out'))
         with jax.set_mesh(mesh):
             # Process weights in mesh context
-            layer.weight.set_metadata("_is_loaded", True)
-            layer.weight_scale_inv.set_metadata("_is_loaded", True)
-            assert layer.quant_method.process_weights_after_loading(layer)
+            layer.quant_method.process_weights_after_loading(layer)
 
             # Prepare input (B, D)
             x = jax.random.normal(rngs.params(), (batch_size, kernel_shape[0]))
@@ -275,7 +271,7 @@ class TestFp8BlockwiseJaxLinear:
         devices = jax.devices()
         mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
         with jax.set_mesh(mesh):
-            assert layer.quant_method.process_weights_after_loading(layer)
+            layer.quant_method.process_weights_after_loading(layer)
 
             x = jax.random.normal(rngs.params(), (batch_size, N, H))
             output = layer(x)
@@ -305,7 +301,7 @@ class TestFp8BlockwiseJaxLinear:
         devices = jax.devices()
         mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
         with jax.set_mesh(mesh):
-            assert layer.quant_method.process_weights_after_loading(layer)
+            layer.quant_method.process_weights_after_loading(layer)
 
             x = jax.random.normal(rngs.params(), (batch_size, N, A))
             output = layer(x)
@@ -554,7 +550,7 @@ class TestFp8FusedMoE:
                 ed_sharding=(None, None),
                 e_sharding=(None, ))
 
-            layer = JaxMoE(dtype=jnp.bfloat16,
+            layer = JaxMoE(dtype=jnp.float8_e4m3fn,
                         num_local_experts=num_experts,
                         apply_expert_weight_before_computation=False,
                         expert_axis_name=expert_axis_name,
@@ -626,7 +622,7 @@ class TestFp8FusedMoE:
         # End mimic loading weights from checkpoint.
 
         with jax.set_mesh(mesh):
-            assert layer.quant_method.process_weights_after_loading(layer)
+            layer.quant_method.process_weights_after_loading(layer)
 
         # Patch the router since we don't want to use the
         # real router
