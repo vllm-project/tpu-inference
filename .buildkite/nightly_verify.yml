@@ -99,3 +99,4 @@ steps:
        - |
          .buildkite/scripts/run_in_docker.sh bash -c "pip install pytest-cov pytest-split; python3 -m pytest -s -v -x --store-durations --cov tpu_inference tests/ --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --ignore=/workspace/tpu_inference/tests/layers/jax/moe/test_moe.py; if [ -f .test_durations ]; then cp .test_durations /tmp/hf_home/.test_durations; else exit 1; fi"
        - cp /mnt/disks/persist/models/.test_durations ./
+       - bash .buildkite/scripts/commit_test_duration.sh

@@ -115,7 +115,7 @@ upload_with_priority() {
 upload_pipeline() {
     if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
       # Upload JAX pipeline for v6 (default)
-      upload_with_priority .buildkite/pipeline_jax.yml
+      # upload_with_priority .buildkite/pipeline_jax.yml
 
       # Upload JAX pipeline for v7
       export TESTS_GROUP_LABEL="[jax] TPU7x Tests Group"
