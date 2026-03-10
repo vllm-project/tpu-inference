@@ -117,7 +117,10 @@ def general_device_put(tensor: jax.Array,
 
     def _put(t):
         multihost_backend = envs.TPU_MULTIHOST_BACKEND
-        if multihost_backend != "ray":
+        # If we are not in multi-host setup, or the tensor is not fully addressable,
+        # we can use jax.device_put directly.
+        if multihost_backend != "ray" or (isinstance(t, jax.Array)
+                                          and not t.is_fully_addressable):
             if layout is not None:
                 return jax.device_put(t, Format(layout, sharding))
             else:
