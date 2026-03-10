@@ -25,10 +25,10 @@ COMMIT_MESSAGE="Update verified commit hashes"
 # AUTHENTICATED_REPO_URL="https://x-access-token:${GITHUB_PAT}@${REPO_URL#https://}"
 
 # Ensure the GITHUB_PAT is available before proceeding.
-if [ -z "${GITHUB_PAT:-}" ]; then
-  echo "--- ERROR: GITHUB_PAT secret not found. Cannot proceed."
-  exit 1
-fi
+#if [ -z "${GITHUB_PAT:-}" ]; then
+#  echo "--- ERROR: GITHUB_PAT secret not found. Cannot proceed."
+#  exit 1
+#fi
 
 echo "--- Configuring Git user details"
 git config user.name "Buildkite Bot"
