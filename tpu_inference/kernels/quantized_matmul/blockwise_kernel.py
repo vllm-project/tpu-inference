@@ -134,19 +134,39 @@ def quantized_matmul_kernel(
     compute_tile_n = MXU_SIZE * n_lane_multiplier
     steps_n = out_block_size // compute_tile_n
 
-    def kernel(lhs_ref, rhs_ref, w_scales_ref, out_ref, acc_scratch):
+    def kernel(lhs_ref, rhs_ref, w_scales_ref, out_ref, acc_scratch,
+               x_q_scratch, x_scale_scratch):
         pid_k = pl.program_id(2)
+        pid_out = pl.program_id(1)
         is_first_step = pid_k == 0
         is_last_step = pid_k == (orig_n_in // in_block_size - 1)
 
-        def accum(is_first_step, is_last_step):
+        if save_x_q:
+            quant = pid_out == 0
+        else:
+            quant = quantize_activation
+
+        def accum(quant, is_first_step, is_last_step):
             accumulators = [None] * steps_n
 
             for i in range(steps_k):
                 k_start, k_end = i * block_size, (i + 1) * block_size
-                lhs_sub = lhs_ref[:, k_start:k_end].astype(jnp.float32)
-                lhs_q, lhs_scale = util.quantize_block(lhs_sub, 1, x_q_dtype)
-                lhs_scale = lhs_scale.astype(acc_dtype)
+                
+                if quantize_activation:
+                    if quant:
+                        lhs_sub = lhs_ref[:, k_start:k_end].astype(jnp.float32)
+                        lhs_q_sub, lhs_scale_sub = util.quantize_block(lhs_sub, 1, x_q_dtype)
+                        if save_x_q:
+                            x_q_scratch[:, k_start:k_end] = lhs_q_sub
+                            x_scale_scratch[:, i:i+1] = lhs_scale_sub
+                    else:
+                        lhs_q_sub = x_q_scratch[:, k_start:k_end]
+                        lhs_scale_sub = x_scale_scratch[:, i:i+1]
+                    
+                    lhs_q = lhs_q_sub
+                    lhs_scale = lhs_scale_sub.astype(acc_dtype)
+                else:
+                    lhs_q = lhs_ref[:, k_start:k_end]
 
                 rhs_q_full = rhs_ref[:, k_start:k_end]
                 rhs_scale_full = w_scales_ref[i, :, :].astype(acc_dtype)
@@ -168,7 +188,8 @@ def quantized_matmul_kernel(
                         preferred_element_type=preferred_element_type,
                     )
                     res = dot_res.astype(acc_dtype)
-                    res = res * lhs_scale
+                    if quantize_activation:
+                        res = res * lhs_scale
                     res = res * rhs_scale_slice
                     if i == 0:
                         accumulators[j] = res
@@ -185,7 +206,7 @@ def quantized_matmul_kernel(
             else:
                 acc_scratch[...] = acc_block
 
-        unfold_args((is_first_step, is_last_step), (), accum)
+        unfold_args((quant, is_first_step, is_last_step), (), accum)
 
     kernel = pl.pallas_call(
         kernel,
@@ -211,7 +232,12 @@ def quantized_matmul_kernel(
             out_specs=pl.BlockSpec((batch_block_size, out_block_size),
                                    lambda b, o, i: (b, o)),
             scratch_shapes=[
-                pltpu.VMEM((batch_block_size, out_block_size), jnp.bfloat16)
+                (pltpu.VMEM((batch_block_size, out_block_size), acc_dtype)
+                 if save_acc else None),  # acc_scratch
+                (pltpu.VMEM((batch_block_size, in_block_size), x_q_dtype)
+                 if save_x_q else None),  # x_q_scratch
+                (pltpu.VMEM((batch_block_size, steps_k), jnp.float32)
+                 if save_x_q else None),  # x_scale_scratch
             ],
             grid=(n_batch, n_out, n_in),
         ),
