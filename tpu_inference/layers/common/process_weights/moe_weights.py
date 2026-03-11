@@ -408,6 +408,21 @@ def process_fp8_moe_weights(
     activation: str,
     weight_block_size: tuple[int, ...] | None = None,
 ) -> FusedMoEWeights:
+    # Skip dequant→requant and only apply backend layout (transpose,
+    # reshape, reorder) when weights are already in the target dtype.
+    if envs.MOE_SKIP_REQUANTIZE:
+        logger.info(
+            "[MoE requantization]: skipping — weights are pre-quantized")
+        w13_interleave = activation == "swigluoai"
+        w13_reorder_size = get_mesh_shape_product(mesh,
+                                                  ShardingAxisName.MLP_TENSOR)
+        return process_moe_weights(
+            weights,
+            moe_backend=moe_backend,
+            w13_reorder_size=w13_reorder_size,
+            w13_interleave=w13_interleave,
+        )
+
     w13_weight = weights.w13_weight
     w13_weight_scale = weights.w13_weight_scale
     w2_weight = weights.w2_weight

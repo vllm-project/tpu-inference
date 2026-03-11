@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
     MOE_REQUANTIZE_BLOCK_SIZE: int | None = None
     MOE_REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
+    MOE_SKIP_REQUANTIZE: bool = False
     LAYOUT_Q_PROJ_AS_NDH: bool = False
 
 
@@ -185,6 +186,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "MOE_REQUANTIZE_BLOCK_SIZE":
     lambda: int(block_size) if (block_size := os.getenv(
         "MOE_REQUANTIZE_BLOCK_SIZE")) is not None else None,
+    # Skip MoE dequant→requant when weights are already in the target dtype
+    "MOE_SKIP_REQUANTIZE":
+    env_bool("MOE_SKIP_REQUANTIZE", default=False),
     # dictates whether to layout q-proj as NDH (q-heads, model dim, head dim)
     # or DNH (model dim, q-heads, head dim), which is the default (False)
     "LAYOUT_Q_PROJ_AS_NDH":
