@@ -101,6 +101,8 @@ def quantized_matmul_kernel(
     # best performance, only enable this behavior when single input block is
     # used per batch.
     save_x_q = quantize_activation and n_in == 1 and n_out > 1
+    print(f"--- [DEBUG] blockwise_kernel.py: quantized_matmul_kernel CALLED! ---")
+    print(f"    save_acc={save_acc}, save_x_q={save_x_q}, quantize_activation={quantize_activation}")
 
     # TODO(amandaliang): Make this configurable.
     acc_dtype = jnp.bfloat16
@@ -139,7 +141,7 @@ def quantized_matmul_kernel(
         pid_k = pl.program_id(2)
         pid_out = pl.program_id(1)
         is_first_step = pid_k == 0
-        is_last_step = pid_k == (orig_n_in // in_block_size - 1)
+        is_last_step = pid_k == (n_in - 1)
 
         if save_x_q:
             quant = pid_out == 0
@@ -198,12 +200,12 @@ def quantized_matmul_kernel(
 
             acc_block = jnp.concatenate(accumulators, axis=1)
 
-            if not is_first_step:
+            if save_acc and not is_first_step:
                 acc_block += acc_scratch[...]
 
             if is_last_step:
                 out_ref[...] = acc_block.astype(out_ref.dtype)
-            else:
+            elif save_acc:
                 acc_scratch[...] = acc_block
 
         unfold_args((quant, is_first_step, is_last_step), (), accum)
