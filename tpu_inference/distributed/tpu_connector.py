@@ -586,9 +586,16 @@ class TPUConnectorWorker:
             if req_meta.remote_block_ids is not None:
                 # The request requires to pull KV from P, build the connection and pull
                 # the data asyncly.
+
+                # We execute device_array here so JAX sees the exact same sequence
+                # of local_block_ids across all TPU nodes simultaneously.
+                # TODO(xiang): pad block_ids to avoid recompilation
+                indices = device_array(self.mesh,
+                                       np.array(req_meta.local_block_ids))
                 conn = self._maybe_build_kv_connection(req_meta)
+
                 self.reqs_pulling[req_id] = self.pull_executor.submit(
-                    self._pull_kv, req_id, conn, req_meta)
+                    self._pull_kv, req_id, conn, req_meta, indices)
             else:
                 # The request has finished pulling the KV from remote, or it has full local
                 # prefix cache, need to notify P to let it free blocks.
@@ -626,7 +633,8 @@ class TPUConnectorWorker:
             )
         return conn
 
-    def _pull_kv(self, req_id: str, conn: Any, req_meta: LoadMeta):
+    def _pull_kv(self, req_id: str, conn: Any, req_meta: LoadMeta,
+                 indices: jax.Array):
         # The local allocated blocks which don't hit prefix caching.
         local_block_ids = req_meta.local_block_ids
         # The remote computed blocks which need to pull from P.
@@ -636,8 +644,6 @@ class TPUConnectorWorker:
         assert len(local_block_ids) == len(remote_block_ids)
 
         kv_spec = self._get_kv_spec(len(remote_block_ids))
-        # TODO(xiang): pad block_ids to avoid recompilation
-        indices = device_array(self.mesh, np.array(local_block_ids))
         logger.info(
             f"Worker {self.node_id} --> kv transfer | start pull req_id={req_id} | uuid={req_meta.uuid}"
         )
