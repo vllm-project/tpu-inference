@@ -48,6 +48,7 @@ def _run_inference_with_config(model_name: str,
                                sampling_params: SamplingParams,
                                tensor_parallel_size: int = 1,
                                pipeline_parallel_size: int = 1,
+                               data_parallel_size: int = 1,
                                additional_config: dict = {},
                                kv_cache_dtype: str = "auto",
                                enable_prefix_caching: bool = False) -> list:
@@ -59,6 +60,7 @@ def _run_inference_with_config(model_name: str,
         max_model_len=128,
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
+        data_parallel_size=data_parallel_size,
         gpu_memory_utilization=0.95,
         max_num_batched_tokens=128,
         max_num_seqs=16,
@@ -78,6 +80,82 @@ def _run_inference_with_config(model_name: str,
         del llm
         # Wait for TPUs to be released
         time.sleep(5)
+
+
+def test_pipeline_parallel_ep_jax_model(
+    model_name: str,
+    test_prompts: list,
+    sampling_params: SamplingParams,
+):
+    """
+    Test pp=2, ep=2 works on Jax models
+    """
+    # For EP, we use an MoE model
+    moe_model = "Qwen/Qwen1.5-MoE-A2.7B"
+    outputs = _run_inference_with_config(
+        model_name=moe_model,
+        test_prompts=test_prompts,
+        sampling_params=sampling_params,
+        tensor_parallel_size=1,
+        pipeline_parallel_size=2,
+        additional_config={
+            "sharding": {
+                "sharding_strategy": {
+                    "expert_parallelism": 2
+                }
+            }
+        },
+    )
+
+    assert len(outputs) == len(test_prompts)
+    for output in outputs:
+        assert len(output.outputs) > 0
+        assert len(output.outputs[0].text.strip()) > 0
+
+
+def test_pipeline_parallel_dp_jax_model(
+    model_name: str,
+    test_prompts: list,
+    sampling_params: SamplingParams,
+):
+    """
+    Test pp=2, dp=2 works on Jax models
+    """
+    outputs = _run_inference_with_config(
+        model_name=model_name,
+        test_prompts=test_prompts,
+        sampling_params=sampling_params,
+        tensor_parallel_size=1,
+        pipeline_parallel_size=2,
+        data_parallel_size=2,
+    )
+
+    assert len(outputs) == len(test_prompts)
+    for output in outputs:
+        assert len(output.outputs) > 0
+        assert len(output.outputs[0].text.strip()) > 0
+
+
+def test_pipeline_parallel_tp_jax_model(
+    model_name: str,
+    test_prompts: list,
+    sampling_params: SamplingParams,
+):
+    """
+    Test pp=2, tp=2 works on Jax models
+    """
+    outputs = _run_inference_with_config(
+        model_name=model_name,
+        test_prompts=test_prompts,
+        sampling_params=sampling_params,
+        tensor_parallel_size=2,
+        pipeline_parallel_size=2,
+    )
+
+    assert len(outputs) == len(test_prompts)
+    for output in outputs:
+        assert len(output.outputs) > 0
+        assert len(output.outputs[0].text.strip()) > 0
 
 
 def test_pipeline_parallelism_jax_model(
