@@ -29,22 +29,31 @@ FEATURE_STAGES=("CorrectnessTest" "PerformanceTest")
 FEATURE_STAGES_QUANTIZATION=("QuantizationMethods" "RecommendedTPUGenerations" "CorrectnessTest" "PerformanceTest")
 FEATURE_STAGES_MICROBENCHMARKS=("CorrectnessTest" "PerformanceTest")
 
-declare -A TPU_GENERATIONS=(
-    ["INT8 W8A8"]="\"v5, v6\""
-    ["INT4 W4A16"]="\"v5, v6\""
-    ["FP8 W8A8"]="v7"
-    ["FP8 W8A16"]="v7"
-    ["FP4 W4A16"]="v7"
-    ["AWQ INT4"]="\"v5, v6\""
-)
-declare -A QUANTIZATION_METHODS=(
-    ["INT8 W8A8"]="compressed-tensor"
-    ["INT4 W4A16"]="awq"
-    ["FP8 W8A8"]="compressed-tensor"
-    ["FP8 W8A16"]="compressed-tensor"
-    ["FP4 W4A16"]="mxfp4"
-    ["AWQ INT4"]=""
-)
+get_tpu_generation() {
+    local key="$1"
+    case "$key" in
+        "INT8 W8A8") echo "\"v5, v6\"" ;;
+        "INT4 W4A16") echo "\"v5, v6\"" ;;
+        "FP8 W8A8") echo "v7" ;;
+        "FP8 W8A16") echo "v7" ;;
+        "FP4 W4A16") echo "v7" ;;
+        "AWQ INT4") echo "\"v5, v6\"" ;;
+        *) echo "N/A" ;;
+    esac
+}
+
+get_quantization_method() {
+    local key="$1"
+    case "$key" in
+        "INT8 W8A8") echo "compressed-tensor" ;;
+        "INT4 W4A16") echo "awq" ;;
+        "FP8 W8A8") echo "compressed-tensor" ;;
+        "FP8 W8A16") echo "compressed-tensor" ;;
+        "FP4 W4A16") echo "mxfp4" ;;
+        "AWQ INT4") echo "" ;;
+        *) echo "N/A" ;;
+    esac
+}
 declare -a model_csv_files=()
 declare -a feature_csv_files=()
 declare -a default_feature_names=()
@@ -164,30 +173,32 @@ process_features() {
             local result
             if [ "$is_quantization_matrix" = true ] && [ "$stage" == "RecommendedTPUGenerations" ]; then
                 # If it's the quantization matrix, hardcode the TPU generation
-                result="${TPU_GENERATIONS["$feature"]:-N/A}"
+                result="$(get_tpu_generation "$feature")"
             elif [ "$is_quantization_matrix" = true ] && [ "$stage" == "QuantizationMethods" ]; then
                 # If it's the quantization matrix, hardcode the quantization methods
-                result="${QUANTIZATION_METHODS["$feature"]:-N/A}"
+                result="$(get_quantization_method "$feature")"
 
             elif [[ "$mode" == "DEFAULT" ]]; then
                 result="✅ Passing"
             else
                 result=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${feature}:${stage}" --default "⚪ N/A")
                 # Format any remaining custom strings from upstream configs
-                if [[ "${result,,}" == "beta" ]]; then
+                local result_lower
+                result_lower="$(echo "$result" | tr '[:upper:]' '[:lower:]')"
+                if [[ "$result_lower" == "beta" ]]; then
                     result="⚠️ Beta"
-                elif [[ "${result,,}" == "experimental" ]]; then
+                elif [[ "$result_lower" == "experimental" ]]; then
                     result="🧪 Experimental"
-                elif [[ "${result,,}" == "planned" ]]; then
+                elif [[ "$result_lower" == "planned" ]]; then
                     result="📝 Planned"
-                elif [[ "${result,,}" == "unplanned" ]]; then
+                elif [[ "$result_lower" == "unplanned" ]]; then
                     result="⛔️ Unplanned"
                 fi
             fi
             row="$row,$result"
 
             # Check for failure (exclude the hardcoded TPU generation column and Quantization Methods column)
-            if [ "$stage" != "QuantizationMethods" ] && [ "$stage" != "RecommendedTPUGenerations" ] && [[ "${result}" != "✅ Passing" && "${result}" != "⚪ N/A" && "${result}" != "❓ Untested" && "${result}" != "⚠️ Beta" && "${result}" != "🧪 Experimental" && "${result,,}" != "📝 planned" ]]; then
+            if [ "$stage" != "QuantizationMethods" ] && [ "$stage" != "RecommendedTPUGenerations" ] && [[ "${result}" != "✅ Passing" && "${result}" != "⚪ N/A" && "${result}" != "❓ Untested" && "${result}" != "⚠️ Beta" && "${result}" != "🧪 Experimental" && "${result}" != "📝 Planned" && "${result}" != "⛔️ Unplanned" ]]; then
                 ANY_FAILED=true
             fi
 
@@ -233,7 +244,7 @@ process_kernel_matrix_to_pivot() {
             }
 
             # Store original Correctness ($2) and Performance ($3)
-            matrix[base_kernel_key][quant_type] = $2 OFS $3;
+            matrix[base_kernel_key, quant_type] = $2 OFS $3;
 
             if (! (base_kernel_key in kernels)) {
                 kernels[base_kernel_key] = 1;
@@ -258,7 +269,7 @@ process_kernel_matrix_to_pivot() {
                 for (j=1; j<=6; j++) {
                     q = q_order[j];
                     # Use formatted N/A if data is missing
-                    data = (matrix[k][q] == "") ? "⚪ N/A,⚪ N/A" : matrix[k][q];
+                    data = (matrix[k, q] == "") ? "⚪ N/A,⚪ N/A" : matrix[k, q];
                     row = row OFS data;
                 }
                 print row >> "'"$output_file"'";

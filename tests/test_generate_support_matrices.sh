@@ -20,6 +20,7 @@ echo "Running Support Matrices Generator Tests..."
 export TPU_VERSION="tpu6e"
 export BUILDKITE_TAG="test_version"
 TEST_DIR=$(mktemp -d)
+export TEST_DIR
 trap 'rm -rf "$TEST_DIR" v6' EXIT
 
 cd "$(dirname "$0")/.."
@@ -122,7 +123,7 @@ if ! grep -q "\"fused_moe\",⚪ N/A,⚪ N/A,❓ Untested,❓ Untested,✅ Passin
 fi
 
 # Verify string substitution correctness
-if ! grep -q "\"generic ragged paged attention v3\*\",✅ Passing,✅ Passing,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A" "$PIVOT_CSV"; then
+if ! grep -q "\"generic ragged paged<br>attention v3\*\",✅ Passing,✅ Passing,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A" "$PIVOT_CSV"; then
     echo "❌ ERROR: generic ragged paged attention v3 substitution failed."
     cat "$PIVOT_CSV"
     exit 1
