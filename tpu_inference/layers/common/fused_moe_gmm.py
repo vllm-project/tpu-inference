@@ -20,9 +20,7 @@ from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference.kernels.megablox.gmm import gmm
-from tpu_inference.kernels.megablox.gmm_v2 import (gmm_v2,
-                                                   is_supported_by_gmm_v2)
+from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
 
@@ -63,30 +61,17 @@ def _swigluoai(x1: jax.Array,
 
 def gmm_wrapper(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset,
                 last_gmm):
-    if is_supported_by_gmm_v2(lhs, rhs, rhs_scale):
-        gmm_res = gmm_v2(
-            lhs=lhs,
-            rhs=rhs,
-            rhs_scale=rhs_scale,
-            rhs_bias=rhs_bias,
-            group_sizes=group_sizes,
-            group_offset=group_offset[0],
-            # If it's last gmm, we need to zero out unvisited rows because it would
-            # cause numeric error during final reduce if the rows are unitialized.
-            zero_initialize=last_gmm,
-        )
-    else:
-        gmm_res = gmm(
-            lhs=lhs,
-            rhs=rhs,
-            rhs_scale=rhs_scale,
-            rhs_bias=rhs_bias,
-            group_sizes=group_sizes,
-            preferred_element_type=lhs.dtype,
-            tiling=None,
-            group_offset=group_offset[0],
-        )
-
+    gmm_res = gmm_v2(
+        lhs=lhs,
+        rhs=rhs,
+        rhs_scale=rhs_scale,
+        rhs_bias=rhs_bias,
+        group_sizes=group_sizes,
+        group_offset=group_offset[0],
+        # If it's last gmm, we need to zero out unvisited rows because it would
+        # cause numeric error during final reduce if the rows are unitialized.
+        zero_initialize=last_gmm,
+    )
     return gmm_res
 
 

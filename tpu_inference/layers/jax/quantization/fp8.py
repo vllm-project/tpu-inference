@@ -118,7 +118,7 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
         layer.weight.set_metadata(
             'weight_loader',
             functools.partial(load_fp8_weight,
-                              param_name=layer.prefix + "weight"))
+                              param_name=layer.prefix + ".weight"))
 
         # Scale is always per-output-channel (1D).
         scale_sharding = None

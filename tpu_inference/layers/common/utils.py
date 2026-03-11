@@ -16,8 +16,8 @@ from contextlib import nullcontext
 
 import jax
 import jax.numpy as jnp
-from jax.experimental.layout import Format
-from jax.sharding import Mesh
+from jax.experimental.layout import Format, Layout
+from jax.sharding import Mesh, Sharding
 
 from tpu_inference import envs
 
@@ -104,10 +104,10 @@ def slice_sharded_tensor_for_concatenation(sharded_tensor: jax.Array,
 
 
 def general_device_put(tensor: jax.Array,
-                       sharding,
+                       sharding: Sharding,
                        *,
-                       layout=None,
-                       source_mesh=None) -> jax.Array:
+                       layout: Layout | None = None,
+                       source_mesh: Mesh | None = None) -> jax.Array:
     """
     Put a tensor onto devices with the given sharding.
     This method handles both single-host and multi-host cases.
@@ -118,7 +118,10 @@ def general_device_put(tensor: jax.Array,
     def _put(t):
         multihost_backend = envs.TPU_MULTIHOST_BACKEND
         if multihost_backend != "ray":
-            return jax.device_put(t, sharding)
+            if layout is not None:
+                return jax.device_put(t, Format(layout, sharding))
+            else:
+                return jax.device_put(t, sharding)
 
         # NOTE: at here, num_global_devices != num_local_devices
         # meaning we are in multi-host setup. Each host will run the same process
