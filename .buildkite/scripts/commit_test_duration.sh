@@ -16,8 +16,8 @@
 set -e
 
 # --- Configuration ---
-REPO_URL="https://github.com/ernie-chang/tpu-inference.git"
-TARGET_BRANCH="update_ci_unit_test"
+REPO_URL="https://github.com/vllm-project/tpu-inference.git"
+TARGET_BRANCH="main"
 
 COMMIT_MESSAGE="Update verified commit hashes"
 # Construct the repository URL with the access token for authentication.

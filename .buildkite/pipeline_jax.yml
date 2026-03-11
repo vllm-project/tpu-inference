@@ -96,7 +96,6 @@ steps:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
           - rm -f .coverage.part1.${TPU_VERSION:-tpu6e}
-          - "buildkite-agent artifact download \".test_durations\" . --build 019cc245-30b9-43fe-a17c-82d4865fac29"  
           - |
             .buildkite/scripts/run_in_docker.sh bash -c "pip install pytest-cov pytest-split; python3 -m pytest -s -v -x --splits 2 --group 1 --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference tests/ --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --ignore=/workspace/tpu_inference/tests/layers/jax/moe/test_moe.py; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part1.${TPU_VERSION:-tpu6e}; else exit 1; fi"
           - cp /mnt/disks/persist/models/.coverage.part1.${TPU_VERSION:-tpu6e} ./
@@ -109,7 +108,6 @@ steps:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
           - rm -f .coverage.part2.${TPU_VERSION:-tpu6e}
-          - "buildkite-agent artifact download \".test_durations\" . --build 019cc245-30b9-43fe-a17c-82d4865fac29"
           - |
             .buildkite/scripts/run_in_docker.sh bash -c "pip install pytest-cov pytest-split; python3 -m pytest -s -v -x --splits 2 --group 2 --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference tests/ --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --ignore=/workspace/tpu_inference/tests/layers/jax/moe/test_moe.py; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part2.${TPU_VERSION:-tpu6e}; else exit 1; fi"
           - cp /mnt/disks/persist/models/.coverage.part2.${TPU_VERSION:-tpu6e} ./
