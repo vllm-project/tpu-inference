@@ -340,10 +340,13 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
             destination="workers")
 
         # Copy existing env vars to each worker's args
-        for args in all_args_to_update_environment_variables:
+        for i, args in enumerate(all_args_to_update_environment_variables):
             for name in env_vars_to_copy:
                 if name in os.environ:
                     args[name] = os.environ[name]
+            logger.info(
+                f"RayDistributedExecutor | Worker {i} environment variables: {args}"
+            )
 
         self._env_vars_for_all_workers = (
             all_args_to_update_environment_variables)
