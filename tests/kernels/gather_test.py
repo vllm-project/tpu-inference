@@ -12,6 +12,7 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 from tpu_inference.kernels.gather.gather import gather
+from tpu_inference.kernels.gather.gather2d_sc_impl import gather_3d_to_2d
 from tpu_inference.kernels.gather.gather2 import ragged_gather
 
 jax.config.parse_flags_with_absl()
@@ -53,6 +54,36 @@ class MoeRoutingTest(jtu.JaxTestCase):
     expected = gather_direct(indices, a)
     actual = gather(a, indices)
     self.assertAllClose(actual, expected)
+
+  @parameterized.product(
+      (
+          {"a_shape": (1, 8, 128), "num_indices": 1},
+          {"a_shape": (32, 8, 128), "num_indices": 32},
+          {"a_shape": (32, 8, 384), "num_indices": 32},
+      ),
+      dtype=(jnp.uint16, jnp.bfloat16),
+  )
+  def test_output_matches_jnp_take(
+      self,
+      a_shape: tuple[int, int, int],
+      num_indices: int,
+      dtype: jnp.dtype,
+  ):
+    a, indices = self._make_test_data(a_shape, num_indices, dtype)
+    gather_compiled = gather_3d_to_2d.lower(
+        a, indices, window_bounds=(8,)
+    ).compile()
+    take_compiled = _take.lower(a, indices).compile()
+    mosaic_result = gather_compiled(a, indices)
+    jnp_result = take_compiled(a, indices)
+
+    self.assertAllClose(jnp_result, mosaic_result)
+
+@jax.jit
+def _take(a, indices):
+  return jnp.take(a, indices, axis=0).reshape(
+      indices.shape[0], np.prod(a.shape[1:])
+  )
 
 
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
