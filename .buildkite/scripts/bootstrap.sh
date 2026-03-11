@@ -194,7 +194,8 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
 else
   # Note: PR and Nightly pipelines will load VLLM_COMMIT_HASH from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo
   if [ -f .buildkite/vllm_lkg.version ]; then
-      VLLM_COMMIT_HASH="$(cat .buildkite/vllm_lkg.version)"
+      # pinning to upstream v0.17.1 release for RC
+      VLLM_COMMIT_HASH="95c0f928cdeeaa21c4906e73cee6a156e1b3b995"
   fi
   if [ -z "${VLLM_COMMIT_HASH:-}" ]; then
       VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
