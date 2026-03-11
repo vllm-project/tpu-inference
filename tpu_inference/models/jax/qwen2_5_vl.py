@@ -22,7 +22,6 @@ import jax.numpy as jnp
 import numpy as np
 from flax import nnx
 from jax.sharding import Mesh
-from transformers import modeling_flax_utils
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
 from vllm.config import VllmConfig
@@ -32,6 +31,7 @@ from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer
 from tpu_inference.logger import init_logger
@@ -46,6 +46,7 @@ from tpu_inference.models.jax.utils.weight_utils import StandardWeightLoader
 logger = init_logger(__name__)
 
 init_fn = nnx.initializers.uniform()
+modeling_flax_utils = FlaxUtils()
 
 DEFAULT_BLOCK_K_MAJOR = 128
 
@@ -329,6 +330,7 @@ class Qwen2_5_VisionBlock(nnx.Module):
         dim = vision_config.hidden_size
         norm_layer = partial(nnx.RMSNorm,
                              epsilon=config.rms_norm_eps,
+                             param_dtype=dtype,
                              scale_init=nnx.with_partitioning(
                                  init_fn, (None, )))
 
@@ -404,6 +406,7 @@ class Qwen2_5_VisionPatchMerger(nnx.Module):
                  spatial_merge_size: int, dtype: jnp.dtype, rngs: nnx.Rngs):
         self.hidden_size = context_dim * (spatial_merge_size**2)
         self.ln_q = norm_layer(context_dim,
+                               param_dtype=dtype,
                                dtype=dtype,
                                rngs=rngs,
                                scale_init=nnx.with_partitioning(

@@ -29,14 +29,11 @@ export GCP_INSTANCE_NAME="${GCP_INSTANCE_NAME:-${TPU_NAME:-$(curl -s -H "Metadat
 RECORD_ID="$(uuidgen)"
 JOB_REFERENCE="$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$SCRIPT_DIR/artifacts"
-BENCHMARK_LOG="$SCRIPT_DIR/artifacts/${RECORD_ID}_benchmark.log"
-RESULT_FILE="$SCRIPT_DIR/artifacts/${RECORD_ID}.result"
 
 # ---------------------------------------------------------
-# Benchmark Configuration Variables
-# These explicitly dictate the vLLM arguments and align
-# perfectly with the output Spanner database metrics schema
+# Benchmark Configuration Variables & Argument Parsing
 # ---------------------------------------------------------
+# Default values align with the original Qwen configuration
 export RUN_TYPE="DAILY"
 export MAX_NUM_SEQS="128"
 export MAX_MODEL_LEN="10240"
@@ -53,9 +50,108 @@ export DEVICE="tpu7x-16"
 export CODE_HASH="a4047d4-cf732f1-"
 export CREATED_BY="bm-scheduler"
 
+# New parameters for advanced/experimental models like DeepSeek
+export NEW_MODEL_DESIGN="0"
+export GPU_MEMORY_UTILIZATION="0.90"
+export ENABLE_EXPERT_PARALLEL=""
+export ADDITIONAL_CONFIG=""
+export DISABLE_SHARED_EXPERTS_STREAM="1"
+export GENERATION_CONFIG=""
+export VLLM_MLA_DISABLE_ENV=""
+export MOE_REQUANTIZE_BLOCK_SIZE=""
+export MOE_REQUANTIZE_WEIGHT_DTYPE=""
+export MOE_REQUANTIZE_BLOCK_SIZE_ENV=""
+export MOE_REQUANTIZE_WEIGHT_DTYPE_ENV=""
+export PHASED_PROFILING_DIR=""
+export PHASED_PROFILING_DIR_ENV=""
+export SKIP_DB_UPLOAD="false"
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --model-path) TARGET_MODEL_PATH="$2"; shift 2 ;;
+    --model-name) MODEL_NAME="$2"; shift 2 ;;
+    --tokenizer) TARGET_TOKENIZER="$2"; shift 2 ;;
+    --input-len) INPUT_LEN="$2"; shift 2 ;;
+    --output-len) OUTPUT_LEN="$2"; shift 2 ;;
+    --tp-size) TENSOR_PARALLEL_SIZE="$2"; shift 2 ;;
+    --max-seqs) MAX_NUM_SEQS="$2"; shift 2 ;;
+    --max-model-len) MAX_MODEL_LEN="$2"; shift 2 ;;
+    --max-batched-tokens) MAX_NUM_BATCHED_TOKENS="$2"; shift 2 ;;
+    --num-prompts) NUM_PROMPTS="$2"; shift 2 ;;
+    --dataset-name) DATASET_NAME="$2"; shift 2 ;;
+    --run-type) RUN_TYPE="$2"; shift 2 ;;
+    --device) DEVICE="$2"; shift 2 ;;
+    --code-hash) CODE_HASH="$2"; shift 2 ;;
+    --created-by) CREATED_BY="$2"; shift 2 ;;
+    --new-model-design) NEW_MODEL_DESIGN="$2"; shift 2 ;;
+    --gpu-memory-utilization) GPU_MEMORY_UTILIZATION="$2"; shift 2 ;;
+    --enable-expert-parallel) ENABLE_EXPERT_PARALLEL="--enable-expert-parallel"; shift 1 ;;
+    --additional-config) ADDITIONAL_CONFIG="--additional_config='${2}'"; shift 2 ;;
+    --disable-shared-experts-stream) DISABLE_SHARED_EXPERTS_STREAM="$2"; shift 2 ;;
+    --generation-config) GENERATION_CONFIG="$2"; shift 2 ;;
+    --vllm-mla-disable) VLLM_MLA_DISABLE_ENV="VLLM_MLA_DISABLE=${2}"; shift 2 ;;
+    --moe-requantize-block-size) export MOE_REQUANTIZE_BLOCK_SIZE="$2"; MOE_REQUANTIZE_BLOCK_SIZE_ENV="MOE_REQUANTIZE_BLOCK_SIZE=$2"; shift 2 ;;
+    --moe-requantize-weight-dtype) export MOE_REQUANTIZE_WEIGHT_DTYPE="$2"; MOE_REQUANTIZE_WEIGHT_DTYPE_ENV="MOE_REQUANTIZE_WEIGHT_DTYPE=$2"; shift 2 ;;
+    --phased-profiling-dir) export PHASED_PROFILING_DIR="$2"; PHASED_PROFILING_DIR_ENV="PHASED_PROFILING_DIR=$2"; shift 2 ;;
+    --skip-db-upload) export SKIP_DB_UPLOAD="true"; shift 1 ;;
+    *) echo "Unknown parameter passed: $1"; exit 1 ;;
+  esac
+done
+
+BENCHMARK_LOG="$SCRIPT_DIR/artifacts/${MODEL_NAME}_${INPUT_LEN}_${OUTPUT_LEN}_${RECORD_ID}_benchmark.log"
+RESULT_FILE="$SCRIPT_DIR/artifacts/${MODEL_NAME}_${INPUT_LEN}_${OUTPUT_LEN}_${RECORD_ID}.result"
+
+PRE_SERVER_CMD=""
+EXTRA_SERVER_ARGS=""
+
+if [[ -n "${GENERATION_CONFIG}" ]]; then
+  echo "--- Generation config URL provided, preparing download to workspace..."
+  # e.g GENERATION_CONFIG="gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1"
+  CONFIG_URL="${GENERATION_CONFIG%/*}" # gs://gpolovets-inference/deepseek/generation_configs
+  CONFIG_DIR_NAME=$(basename "${CONFIG_URL}") # generation_configs
+  CONFIG_FILE_NAME=$(basename "${GENERATION_CONFIG}") # DeepSeek-R1
+  
+  # Download to /workspace/ so it creates /workspace/generation_configs/ inside the docker container
+  PRE_SERVER_CMD="if ! command -v gsutil &> /dev/null; then curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts > /dev/null; export PATH=\"\$PATH:/root/google-cloud-sdk/bin\"; fi && mkdir -p /workspace && gsutil -m cp -r ${CONFIG_URL} /workspace/ && "
+  EXTRA_SERVER_ARGS="--generation-config /workspace/${CONFIG_DIR_NAME}/${CONFIG_FILE_NAME}"
+fi
+
 # Define the commands utilizing the unified parameters
-SERVER_CMD="TPU_BACKEND_TYPE=jax MODEL_IMPL_TYPE=vllm VLLM_DISABLE_SHARED_EXPERTS_STREAM=1 vllm serve --seed 42 --model ${TARGET_MODEL_PATH} --max-model-len=${MAX_MODEL_LEN} --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} --max-num-seqs ${MAX_NUM_SEQS} --no-enable-prefix-caching --disable-log-requests --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} --kv_cache_dtype=\"fp8\" --no-async-scheduling --load-format=runai_streamer"
-BENCHMARK_CMD="vllm bench serve --model ${TARGET_MODEL_PATH} --tokenizer ${TARGET_TOKENIZER} --dataset-name ${DATASET_NAME} --random-input-len ${INPUT_LEN} --random-output-len ${OUTPUT_LEN} --num-prompts ${NUM_PROMPTS} --ignore-eos"
+SERVER_CMD="${PRE_SERVER_CMD}VLLM_DISABLE_SHARED_EXPERTS_STREAM=${DISABLE_SHARED_EXPERTS_STREAM} \
+NEW_MODEL_DESIGN=${NEW_MODEL_DESIGN} \
+${VLLM_MLA_DISABLE_ENV} \
+${MOE_REQUANTIZE_BLOCK_SIZE_ENV} \
+${MOE_REQUANTIZE_WEIGHT_DTYPE_ENV} \
+${PHASED_PROFILING_DIR_ENV} \
+TPU_BACKEND_TYPE=jax \
+MODEL_IMPL_TYPE=vllm \
+vllm serve \
+  --seed 42 \
+  --model ${TARGET_MODEL_PATH} \
+  ${EXTRA_SERVER_ARGS} \
+  --served-model-name ${TARGET_TOKENIZER} \
+  --max-model-len=${MAX_MODEL_LEN} \
+  --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \
+  --max-num-seqs ${MAX_NUM_SEQS} \
+  --no-enable-prefix-caching \
+  --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \
+  --kv_cache_dtype=\"fp8\" \
+  --no-async-scheduling \
+  --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION} \
+  ${ENABLE_EXPERT_PARALLEL} \
+  ${ADDITIONAL_CONFIG} \
+  --load-format=runai_streamer \
+  --trust-remote-code"
+
+BENCHMARK_CMD="vllm bench serve \
+  --model ${TARGET_TOKENIZER} \
+  --dataset-name ${DATASET_NAME} \
+  --random-input-len ${INPUT_LEN} \
+  --random-output-len ${OUTPUT_LEN} \
+  --num-prompts ${NUM_PROMPTS} \
+  --ignore-eos \
+  --trust-remote-code"
 
 
 echo "=== Starting nightly benchmark (Record ID: $RECORD_ID) ==="
@@ -133,6 +229,21 @@ Model=${MODEL_NAME}
 JobReference=${JOB_REFERENCE}
 EOF
 
+fi
+
+# Upload vllm_serve.log to GCS
+LOG_GCS_URI="gs://tpu-commons-ci/logs/${MODEL_NAME}_${INPUT_LEN}_${OUTPUT_LEN}_${JOB_REFERENCE}_vllm_serve.log"
+if [ -f "/tmp/vllm_serve.log" ]; then
+  echo "Uploading vllm_serve.log to $LOG_GCS_URI"
+  gsutil cp /tmp/vllm_serve.log "$LOG_GCS_URI" || echo "Warning: Failed to upload vllm_serve.log"
+else
+  echo "Warning: /tmp/vllm_serve.log not found, skipping upload."
+fi
+
+if [[ "${SKIP_DB_UPLOAD}" == "true" ]]; then
+  echo "=== Skipping Spanner DB Upload (--skip-db-upload specified) ==="
+  echo "=== Nightly benchmark script completed successfully ==="
+  exit 0
 fi
 
 # 3. Report results to Spanner (mimicking bm-infra/scripts/agent/report_result.sh but inserting instead of updating)

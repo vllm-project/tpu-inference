@@ -403,6 +403,8 @@ class TestTPUConnectorWorker(unittest.TestCase):
         self.vllm_config.kv_transfer_config.is_kv_producer = False
         worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
         worker._maybe_build_kv_connection = MagicMock(return_value="conn")
+        mock_indices = "mocked_indices"
+        self.all_mocks["device_array"].return_value = mock_indices
 
         meta = tpu_connector.TPUConnectorMetadata()
         load_meta = tpu_connector.LoadMeta(uuid=1,
@@ -417,7 +419,7 @@ class TestTPUConnectorWorker(unittest.TestCase):
         worker._maybe_build_kv_connection.assert_called_once_with(load_meta)
         self.all_mocks[
             "ThreadPoolExecutor"].return_value.submit.assert_called_once_with(
-                worker._pull_kv, "req1", "conn", load_meta)
+                worker._pull_kv, "req1", "conn", load_meta, mock_indices)
 
     def test_process_send_load_for_consumer_notifying(self):
         """Tests process_send_load for a consumer that needs to notify."""

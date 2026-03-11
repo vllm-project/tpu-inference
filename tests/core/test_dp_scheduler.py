@@ -936,6 +936,68 @@ class TestDPScheduler:
                 scheduler.input_queues[0].put.assert_called()
                 scheduler.input_queues[1].put.assert_called()
 
+    def test_combine_scheduler_outputs_max_tokens(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """Test _combine_scheduler_outputs calculates max_num_scheduled_tokens_per_dp_rank."""
+        with patch(
+                'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
+        ):
+            with patch('multiprocessing.get_context'):
+                scheduler = DPScheduler(
+                    vllm_config=mock_vllm_config,
+                    kv_cache_config=mock_kv_cache_config,
+                    structured_output_manager=mock_structured_output_manager,
+                    block_size=16,
+                )
+
+                # Mock SchedulerOutput for two DP ranks
+                # Rank 0 has 10 tokens, Rank 1 has 20 tokens
+                output_0 = MagicMock(spec=SchedulerOutput)
+                output_0.num_scheduled_tokens = {"req1": 10}
+                output_0.total_num_scheduled_tokens = 10
+                output_0.scheduled_new_reqs = []
+                output_0.scheduled_spec_decode_tokens = {}
+                output_0.scheduled_encoder_inputs = {}
+                output_0.finished_req_ids = set()
+                output_0.scheduled_cached_reqs = MagicMock(
+                    spec=CachedRequestData)
+                output_0.scheduled_cached_reqs.req_ids = ["req1"]
+                output_0.scheduled_cached_reqs.resumed_req_ids = set()
+                output_0.scheduled_cached_reqs.new_token_ids = [[1, 2]]
+                output_0.scheduled_cached_reqs.all_token_ids = {}
+                output_0.scheduled_cached_reqs.new_block_ids = [None]
+                output_0.scheduled_cached_reqs.num_computed_tokens = [10]
+                output_0.scheduled_cached_reqs.num_output_tokens = [1]
+                output_0.num_common_prefix_blocks = []
+
+                output_1 = MagicMock(spec=SchedulerOutput)
+                output_1.num_scheduled_tokens = {"req2": 20}
+                output_1.total_num_scheduled_tokens = 20
+                output_1.scheduled_new_reqs = []
+                output_1.scheduled_spec_decode_tokens = {}
+                output_1.scheduled_encoder_inputs = {}
+                output_1.finished_req_ids = set()
+                output_1.scheduled_cached_reqs = MagicMock(
+                    spec=CachedRequestData)
+                output_1.scheduled_cached_reqs.req_ids = ["req2"]
+                output_1.scheduled_cached_reqs.resumed_req_ids = set()
+                output_1.scheduled_cached_reqs.new_token_ids = [[3, 4]]
+                output_1.scheduled_cached_reqs.all_token_ids = {}
+                output_1.scheduled_cached_reqs.new_block_ids = [None]
+                output_1.scheduled_cached_reqs.num_computed_tokens = [20]
+                output_1.scheduled_cached_reqs.num_output_tokens = [2]
+                output_1.num_common_prefix_blocks = []
+
+                scheduler.assigned_dp_rank = {"req1": 0, "req2": 1}
+
+                combined = scheduler._combine_scheduler_outputs(
+                    [output_0, output_1])
+
+                assert combined.total_num_scheduled_tokens == 30
+                # Max tokens across ranks is 20
+                assert combined.max_num_scheduled_tokens_per_dp_rank == 20
+
     def test_shutdown(self, mock_vllm_config, mock_kv_cache_config,
                       mock_structured_output_manager):
         """Test shutdown sends SHUTDOWN command to all workers."""
