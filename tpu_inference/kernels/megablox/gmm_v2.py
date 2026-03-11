@@ -753,8 +753,8 @@ def calculate_tiling(
     # to fit rhs into vmem by only adjusting tile_n.
 
     # Decrease tile_n until rhs fits in vmem target.
-    while (pl.cdiv(base_rhs_size_bytes, num_n_tiles) >= rhs_vmem_target
-           and tile_n >= tile_n_limit):
+    while (pl.cdiv(base_rhs_size_bytes, num_n_tiles) > rhs_vmem_target
+           and tile_n > tile_n_limit):
         num_n_tiles += 1
         tile_n = align_to(dims.size_n, num_n_tiles * num_lanes) // num_n_tiles
 
