@@ -434,10 +434,17 @@ def shard_fp8_moe_weights_to_tpu(
     Returns:
         FusedMoEWeights sharded across TPU devices.
     """
-    if ShardingAxisName.EXPERT in mesh.axis_names:
-        shard_axis = ShardingAxisName.EXPERT
+    expert_axis = ShardingAxisName.EXPERT
+    if isinstance(expert_axis, str):
+        if expert_axis in mesh.axis_names:
+            shard_axis = expert_axis
+        else:
+            shard_axis = mesh.axis_names[0]
     else:
-        shard_axis = mesh.axis_names[0]
+        if all(a in mesh.axis_names for a in expert_axis):
+            shard_axis = expert_axis
+        else:
+            shard_axis = mesh.axis_names[0]
     ep_sharding = NamedSharding(mesh, P(shard_axis))
 
     result_fields = {}
@@ -504,10 +511,22 @@ def process_fp8_moe_weights(
               (0, intermediate_size - orig_intermediate_size))
 
     # Determine which mesh axis the expert dim is sharded across.
-    if ShardingAxisName.EXPERT in mesh.axis_names:
-        shard_axis = ShardingAxisName.EXPERT
+    # ShardingAxisName.EXPERT may be a compound axis (tuple of axis names)
+    # for multi-dimensional meshes (e.g. 5D mesh with NEW_MODEL_DESIGN).
+    # The `in` check doesn't work for compound tuples against individual
+    # axis name strings, so we check component axes individually.
+    expert_axis = ShardingAxisName.EXPERT
+    if isinstance(expert_axis, str):
+        if expert_axis in mesh.axis_names:
+            shard_axis = expert_axis
+        else:
+            shard_axis = mesh.axis_names[0]
     else:
-        shard_axis = mesh.axis_names[0]
+        # Compound axis (tuple) — verify all components exist in mesh
+        if all(a in mesh.axis_names for a in expert_axis):
+            shard_axis = expert_axis
+        else:
+            shard_axis = mesh.axis_names[0]
 
     # Use batch_size=1 to minimize per-step FP32 intermediates,
     # which reduces XLA program reservation (bytes_reserved).
@@ -578,6 +597,23 @@ def process_fp8_moe_weights(
     # Use shard_map so XLA compiles with per-device local shapes,
     # reducing program reservation (bytes_reserved) while keeping
     # SPMD parallel execution speed.
+
+    # --- DEBUG: memory tracking helper ---
+    def _log_mem(label):
+        stats = jax.local_devices()[0].memory_stats()
+        if stats:
+            reserved = stats.get('bytes_reserved', 0)
+            peak_reserved = stats.get('peak_bytes_reserved', 0)
+            in_use = stats.get('bytes_in_use', 0)
+            peak_in_use = stats.get('peak_bytes_in_use', 0)
+            logger.warning(f"[MEM {label}] reserved={reserved/1e9:.3f}G "
+                           f"peak_reserved={peak_reserved/1e9:.3f}G "
+                           f"in_use={in_use/1e9:.3f}G "
+                           f"peak_in_use={peak_in_use/1e9:.3f}G")
+
+    # --- END DEBUG ---
+
+    _log_mem("before shard_map")
     w13_q, w13_s, w2_q, w2_s = shard_map(
         _requant_and_process_local,
         mesh=mesh,
@@ -585,6 +621,8 @@ def process_fp8_moe_weights(
         out_specs=(expert_p, expert_p, expert_p, expert_p),
         check_rep=False,
     )(w13_weight, w13_weight_scale, w2_weight, w2_weight_scale)
+    jax.block_until_ready((w13_q, w13_s, w2_q, w2_s))
+    _log_mem("after shard_map")
 
     out = FusedMoEWeights(
         w13_weight=w13_q,
@@ -605,4 +643,5 @@ def process_fp8_moe_weights(
             sharding = getattr(target_shardings, key)
             setattr(out, key,
                     jax.lax.with_sharding_constraint(weight, sharding))
+    _log_mem("after with_sharding_constraint")
     return out

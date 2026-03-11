@@ -246,6 +246,22 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
 
         input_weights = shard_fp8_moe_weights_to_tpu(input_weights, self.mesh)
 
+        # --- DEBUG: memory tracking before process_fp8_moe_weights ---
+        def _log_mem(label):
+            stats = jax.local_devices()[0].memory_stats()
+            if stats:
+                reserved = stats.get('bytes_reserved', 0)
+                peak_reserved = stats.get('peak_bytes_reserved', 0)
+                in_use = stats.get('bytes_in_use', 0)
+                peak_in_use = stats.get('peak_bytes_in_use', 0)
+                logger.warning(f"[MEM {label}] reserved={reserved/1e9:.3f}G "
+                               f"peak_reserved={peak_reserved/1e9:.3f}G "
+                               f"in_use={in_use/1e9:.3f}G "
+                               f"peak_in_use={peak_in_use/1e9:.3f}G")
+
+        _log_mem("before process_fp8_moe_weights")
+        # --- END DEBUG ---
+
         weights = process_fp8_moe_weights(
             input_weights,
             moe_backend=self.moe_backend,
@@ -254,6 +270,10 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
             # Convert to tuple so jax jit can hash it
             weight_block_size=weight_block_size,
         )
+
+        # --- DEBUG: memory tracking after process_fp8_moe_weights ---
+        _log_mem("after process_fp8_moe_weights")
+        # --- END DEBUG ---
         weights = torch_view(
             shard_moe_weights(weights, self.moe_backend, self.mesh))
 
