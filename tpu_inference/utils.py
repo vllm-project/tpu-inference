@@ -296,6 +296,26 @@ def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
     return jax.device_put(*args, device=sharding, **kwargs)
 
 
+def device_tensor(mesh: Mesh, *args, sharding=None, **kwargs) -> torch.Tensor:
+    """
+    Create a device tensor with the specified mesh and sharding.
+
+    Args:
+        mesh: The JAX mesh to use for device placement
+        *args: Positional arguments to pass to jax.device_put
+        sharding: Optional sharding specification. If None, uses PartitionSpec(None)
+        **kwargs: Keyword arguments to pass to jax.device_put
+
+    Returns:
+        A torch tensor placed on the specified devices
+    """
+    from torchax.interop import torch_view
+    j_array = device_array(mesh, *args, sharding=sharding, **kwargs)
+    if isinstance(j_array, (list, tuple)):
+        return type(j_array)(torch_view(x) for x in j_array)
+    return torch_view(j_array)
+
+
 def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
     """
     A wrapper function of vllm.utils.hashing.get_hash_fn_by_name to support builtin

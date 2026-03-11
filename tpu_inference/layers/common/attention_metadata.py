@@ -34,16 +34,16 @@ import jax
 @dataclass
 class AttentionMetadata(object):
     # (padded_total_num_scheduled_tokens,)
-    input_positions: jax.Array
+    input_positions: Any
     # (max_num_seqs * max_num_blocks_per_req,)
     # None for pooling models that using no KV cache
-    block_tables: jax.Array | None = None
+    block_tables: Any = None
     # (max_num_seqs,)
-    seq_lens: jax.Array = None
+    seq_lens: Any = None
     # (max_num_seqs + 1,)
-    query_start_loc: jax.Array = None
+    query_start_loc: Any = None
     # (3,)
-    request_distribution: jax.Array = None
+    request_distribution: Any = None
 
     query_start_loc_cpu: Any = field(init=False)
     seq_lens_cpu: Any = field(init=False)

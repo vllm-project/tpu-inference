@@ -79,8 +79,9 @@ from tpu_inference.runner.speculative_decoding_manager import (
 from tpu_inference.runner.structured_decoding_manager import \
     StructuredDecodingManager
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
-from tpu_inference.utils import (device_array, make_optimized_mesh,
-                                 time_function, to_jax_dtype, to_torch_dtype)
+from tpu_inference.utils import (device_array, device_tensor,
+                                 make_optimized_mesh, time_function,
+                                 to_jax_dtype, to_torch_dtype)
 
 logger = init_logger(__name__)
 
@@ -106,7 +107,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
     def __init__(
         self,
         model_runner_output: ModelRunnerOutput,
-        next_tokens: jax.Array,
+        next_tokens: Any,
         num_reqs: int,
         discard_sampled_tokens_req_indices: list[int],
         logits_indices_selector: Optional[List[int]] = None,
@@ -118,7 +119,13 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         self.logits_indices_selector: list[int] = logits_indices_selector
 
     def get_output(self) -> ModelRunnerOutput:
-        next_tokens_cpu = np.asarray(jax.device_get(self._next_tokens))
+        from torchax.interop import jax_view
+
+        next_tokens = self._next_tokens
+        if isinstance(next_tokens, torch.Tensor):
+            next_tokens = jax_view(next_tokens)
+
+        next_tokens_cpu = np.asarray(jax.device_get(next_tokens))
         if self.logits_indices_selector is not None:
             next_tokens_cpu = next_tokens_cpu[self.logits_indices_selector]
         selected_token_ids = np.expand_dims(next_tokens_cpu[:self._num_reqs],
@@ -661,7 +668,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         pre_discard_sampled_tokens_req_indices = self._pre_async_results.discard_sampled_tokens_req_indices
         pre_logits_indices_selector = self._pre_async_results.logits_indices_selector
 
-        next_tokens_cpu = np.asarray(jax.device_get(pre_next_tokens))
+        from torchax.interop import jax_view
+
+        def to_jax(x):
+            if isinstance(x, torch.Tensor):
+                return jax_view(x)
+            return x
+
+        next_tokens_cpu = np.asarray(jax.device_get(to_jax(pre_next_tokens)))
         if pre_logits_indices_selector is not None:
             next_tokens_cpu = next_tokens_cpu[pre_logits_indices_selector]
         selected_token_ids = np.expand_dims(next_tokens_cpu[:len(pre_req_ids)],
@@ -907,9 +921,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             )
             target_logits = self._select_from_array_fn(
                 logits, spec_decode_metadata.target_logits_indices)
+
+            from torchax.interop import jax_view
+
+            def to_jax(x):
+                if isinstance(x, torch.Tensor):
+                    return jax_view(x)
+                return x
+
             next_tokens = self.rejection_sampler(
-                draft_token_ids=spec_decode_metadata.draft_token_ids,
-                num_draft_tokens=spec_decode_metadata.draft_lengths,
+                draft_token_ids=to_jax(spec_decode_metadata.draft_token_ids),
+                num_draft_tokens=to_jax(spec_decode_metadata.draft_lengths),
                 draft_probs=None,
                 target_logits=target_logits,
                 bonus_token_ids=bonus_token_ids,
@@ -1070,8 +1092,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
         return model_runner_output
 
-    @jax.jit(static_argnums=(0, ))
     def _select_from_array_fn(self, array, indices_to_select):
+        from torchax.interop import jax_view
+
+        if isinstance(array, torch.Tensor):
+            array = jax_view(array)
+        if isinstance(indices_to_select, torch.Tensor):
+            indices_to_select = jax_view(indices_to_select)
+
+        return self._select_from_array_jit(array, indices_to_select)
+
+    @jax.jit(static_argnums=(0, ))
+    def _select_from_array_jit(self, array, indices_to_select):
 
         def select_local_fn(local_array, local_indices):
             return local_array[local_indices]
@@ -1083,8 +1115,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                       PartitionSpec(ShardingAxisName.ATTN_DATA)),
             out_specs=PartitionSpec(ShardingAxisName.ATTN_DATA))(
                 array, indices_to_select)
-
         return ret
+
 
     @staticmethod
     @jax.jit(static_argnames=("max_logprobs", ))
@@ -1229,16 +1261,27 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             mode='constant',
             constant_values=-1)
 
+        put_fn = device_array
+        if envs.MODEL_IMPL_TYPE == "vllm":
+            put_fn = device_tensor
+
         (padded_token_in_tpu_cur_input_indices,
-         padded_token_in_tpu_pre_next_tokens_indices) = device_array(
+         padded_token_in_tpu_pre_next_tokens_indices) = put_fn(
              self.mesh, (padded_token_in_tpu_cur_input_indices,
                          padded_token_in_tpu_pre_next_tokens_indices))
 
+        from torchax.interop import jax_view
+
+        def to_jax(x):
+            if isinstance(x, torch.Tensor):
+                return jax_view(x)
+            return x
+
         with self.maybe_forbid_compile:
             input_ids = self._substitute_placeholder_token_fn(
-                input_ids, padded_token_in_tpu_cur_input_indices,
-                padded_token_in_tpu_pre_next_tokens_indices,
-                self._pre_async_results.next_tokens,
+                to_jax(input_ids), to_jax(padded_token_in_tpu_cur_input_indices),
+                to_jax(padded_token_in_tpu_pre_next_tokens_indices),
+                to_jax(self._pre_async_results.next_tokens),
                 len(token_in_tpu_cur_input_indices))
 
         return input_ids
@@ -1444,15 +1487,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logits_indices_cpu = logits_indices
         seq_lens_cpu = seq_lens
 
+        put_fn = device_array
+        if envs.MODEL_IMPL_TYPE == "vllm":
+            put_fn = device_tensor
+
         (input_ids, positions, query_start_loc, seq_lens, logits_indices,
-         request_distribution) = device_array(
+         request_distribution) = put_fn(
              self.mesh,
              (input_ids, positions, query_start_loc, seq_lens, logits_indices,
               request_distribution),
              sharding=data_parallel_attn_sharding,
          )
 
-        def build_block_table(kv_cache_gid: int) -> jax.Array:
+        def build_block_table(kv_cache_gid: int) -> Any:
             block_tables = self.block_tables_cpu[kv_cache_gid][:self.
                                                                max_num_reqs]
             for dp_rank in range(dp_size):
@@ -1465,14 +1512,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                         kv_cache_gid].get_cpu_tensor()[req_indices_dp[dp_rank]]
             # Convert block_tables to 1D on cpu.
             block_tables = block_tables.reshape(-1)
-            block_tables = device_array(
+            block_tables = put_fn(
                 self.mesh,
                 (block_tables),
                 sharding=data_parallel_attn_sharding,
             )
             return block_tables
 
-        def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
+        def build_attn(block_tables: Any | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
                 block_tables=block_tables,
@@ -1668,8 +1715,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         query_start_loc_cpu = query_start_loc
         seq_lens_cpu = seq_lens
 
+        put_fn = device_array
+        if envs.MODEL_IMPL_TYPE == "vllm":
+            put_fn = device_tensor
+
         (input_ids, positions, query_start_loc, seq_lens,
-         logits_indices, request_distribution) = device_array(
+         logits_indices, request_distribution) = put_fn(
              self.mesh, (input_ids, positions, query_start_loc, seq_lens,
                          logits_indices, request_distribution))
 
@@ -1681,7 +1732,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 [:num_reqs])
             # Convert block_tables to 1D on cpu.
             block_tables = block_tables.reshape(-1)
-            block_tables = device_array(self.mesh, (block_tables))
+            block_tables = put_fn(self.mesh, (block_tables))
             return block_tables
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
@@ -28,11 +30,11 @@ _SAMPLING_EPS = 1e-5
 
 @jax.jit(static_argnames=["mesh"])
 def sample(
-    rng: jax.Array,
+    rng: Any,
     mesh: Mesh,
-    logits: jax.Array,
+    logits: Any,
     tpu_sampling_metadata: TPUSupportedSamplingMetadata,
-) -> jax.Array:
+) -> Any:
     # (B, vocab_size)
     if tpu_sampling_metadata.do_sampling:
         # Unshard the logits explicity to avoid latency increase.
@@ -76,13 +78,13 @@ def sample(
     return jax.lax.with_sharding_constraint(ret, NamedSharding(mesh, P()))
 
 
-def compute_logprobs(logits: jax.Array) -> jax.Array:
+def compute_logprobs(logits: Any) -> Any:
     return jax.nn.log_softmax(logits, axis=-1)
 
 
 def gather_logprobs(
-    logprobs: jax.Array,
-    token_ids: jax.Array,
+    logprobs: Any,
+    token_ids: Any,
     num_logprobs: int,
 ) -> LogprobsTensors:
     """

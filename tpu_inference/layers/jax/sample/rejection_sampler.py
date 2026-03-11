@@ -18,7 +18,7 @@ This implementation follows the same algorithm as the GPU version but is
 designed for JAX/TPU compatibility. It currently only supports greedy sampling.
 """
 
-from typing import Optional
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
@@ -47,18 +47,18 @@ class RejectionSampler:
     def __call__(
         self,
         # [num_tokens] - flattened format
-        draft_token_ids: jnp.ndarray,
+        draft_token_ids: Any,
         # [batch_size] - number of draft tokens per request
-        num_draft_tokens: jnp.ndarray,
+        num_draft_tokens: Any,
         # [num_tokens, vocab_size] - flattened format
-        draft_probs: Optional[jnp.ndarray],
+        draft_probs: Optional[Any],
         # [num_tokens, vocab_size] - flattened format
-        target_logits: jnp.ndarray,
+        target_logits: Any,
         # [batch_size]
-        bonus_token_ids: jnp.ndarray,
+        bonus_token_ids: Any,
         sampling_metadata: TPUSupportedSamplingMetadata,
         key: Optional[jax.random.PRNGKey] = None,
-    ) -> jnp.ndarray:
+    ) -> Any:
         """
         Perform rejection sampling on draft tokens with flattened inputs.
 
@@ -88,18 +88,18 @@ class RejectionSampler:
     def forward(
         self,
         # [num_tokens] - flattened format
-        draft_token_ids: jnp.ndarray,
+        draft_token_ids: Any,
         # [batch_size] - number of draft tokens per request
-        num_draft_tokens: jnp.ndarray,
+        num_draft_tokens: Any,
         # [num_tokens, vocab_size] - flattened format
-        draft_probs: Optional[jnp.ndarray],
+        draft_probs: Optional[Any],
         # [num_tokens, vocab_size] - flattened format
-        target_logits: jnp.ndarray,
+        target_logits: Any,
         # [batch_size]
-        bonus_token_ids: jnp.ndarray,
+        bonus_token_ids: Any,
         sampling_metadata: TPUSupportedSamplingMetadata,
         key: Optional[jax.random.PRNGKey] = None,
-    ) -> jnp.ndarray:
+    ) -> Any:
         """
         Perform rejection sampling on draft tokens with flattened inputs.
 

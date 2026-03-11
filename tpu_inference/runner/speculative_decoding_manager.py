@@ -15,17 +15,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import jax.numpy as jnp
 import numpy as np
+import torch
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
+from tpu_inference import envs
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
-from tpu_inference.utils import device_array
+from tpu_inference.utils import device_array, device_tensor
 
 if TYPE_CHECKING:
     from tpu_inference.layers.common.attention_metadata import \
@@ -35,13 +37,13 @@ if TYPE_CHECKING:
 
 @dataclass
 class SpecDecodeMetadata:
-    """Metadata for speculative decoding on JAX/TPU, containing all necessary indices."""
-    draft_token_ids: jnp.ndarray
-    draft_lengths: jnp.ndarray
+    """Metadata for speculative decoding, containing all necessary indices."""
+    draft_token_ids: Any
+    draft_lengths: Any
     draft_lengths_cpu: np.ndarray
-    target_logits_indices: jnp.ndarray
-    bonus_logits_indices: jnp.ndarray
-    final_logits_indices: jnp.ndarray
+    target_logits_indices: Any
+    bonus_logits_indices: Any
+    final_logits_indices: Any
 
 
 class SpeculativeDecodingManager:
@@ -121,7 +123,11 @@ class SpeculativeDecodingManager:
         assert pad_len >= 0
         next_token_ids += [0] * pad_len
 
-        next_token_ids = device_array(
+        put_fn = device_array
+        if envs.MODEL_IMPL_TYPE == "vllm":
+            put_fn = device_tensor
+
+        next_token_ids = put_fn(
             self.runner.mesh, np.array(next_token_ids, dtype=jnp.int32))
 
         if spec_decode_metadata is None:
@@ -135,7 +141,7 @@ class SpeculativeDecodingManager:
 
             pad_len = self.runner.max_num_reqs - len(num_rejected_tokens)
             num_rejected_tokens += [0] * pad_len
-            num_rejected_tokens = device_array(
+            num_rejected_tokens = put_fn(
                 self.runner.mesh, np.array(num_rejected_tokens,
                                            dtype=jnp.int32))
 
@@ -241,9 +247,13 @@ class SpeculativeDecodingManager:
 
         padded_num_draft_tokens_cpu = padded_num_draft_tokens
         # CPU -> TPU copy.
+        put_fn = device_array
+        if envs.MODEL_IMPL_TYPE == "vllm":
+            put_fn = device_tensor
+
         (padded_num_draft_tokens, padded_draft_token_ids,
          padded_logits_indices, padded_target_logits_indices,
-         padded_bonus_logits_indices) = device_array(
+         padded_bonus_logits_indices) = put_fn(
              self.runner.mesh,
              (padded_num_draft_tokens, padded_draft_token_ids,
               padded_logits_indices, padded_target_logits_indices,

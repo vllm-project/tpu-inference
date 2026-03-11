@@ -18,6 +18,7 @@ from typing import Any, Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
+import torch
 from flax import nnx
 from jax import lax
 from jax.sharding import NamedSharding, PartitionSpec
@@ -201,6 +202,32 @@ class Eagle3Proposer:
         Returns updated AttentionMetadata (positions, query_start_loc, seq_lens)
         and the selected `target_token_ids` and `target_hidden_states`.
         """
+        from torchax.interop import jax_view
+
+        def to_jax(x):
+            if x is None:
+                return None
+            if isinstance(x, torch.Tensor):
+                return jax_view(x)
+            if isinstance(x, (list, tuple)):
+                return type(x)(to_jax(v) for v in x)
+            return x
+
+        input_ids = to_jax(input_ids)
+        aux_hidden_states = to_jax(aux_hidden_states)
+        next_token_ids = to_jax(next_token_ids)
+        num_rejected_tokens = to_jax(num_rejected_tokens)
+
+        # Update attn_metadata fields if they are torch tensors
+        attn_metadata = replace(
+            attn_metadata,
+            input_positions=to_jax(attn_metadata.input_positions),
+            block_tables=to_jax(attn_metadata.block_tables),
+            seq_lens=to_jax(attn_metadata.seq_lens),
+            query_start_loc=to_jax(attn_metadata.query_start_loc),
+            request_distribution=to_jax(attn_metadata.request_distribution),
+        )
+
         assert aux_hidden_states is not None and len(aux_hidden_states) > 0, (
             "EAGLE3 requires auxiliary hidden states from the target model.")
 
