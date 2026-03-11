@@ -83,6 +83,23 @@ class RPAConfig:
     v_scale: Any = None
     vmem_limit_bytes: int | None = 60 * 1024 * 1024
     case: RpaCase = RpaCase.MIXED
+    n_buffer: int = 2
+
+    @property
+    def bkv_p_cache(self) -> int:
+        if self.case == RpaCase.PREFILL:
+            return 0
+        return self.bkv_p
+
+    @property
+    def bkv_p_new(self) -> int:
+        if self.case == RpaCase.DECODE:
+            return 1
+        return self.bkv_p
+
+    @property
+    def num_page_indices(self) -> int:
+        return self.num_seq * self.pages_per_seq
 
 
 def get_dtype_bitwidth(dtype):
@@ -115,11 +132,12 @@ class RPASchedule:
     is_last_k: Any  # [steps * batch]
     do_writeback: Any  # [steps * batch]
     dma_q: Any  # [steps * batch * 2]
-    dma_kv_cache: Any  # [steps * batch * bkv_p * 3]
-    dma_kv_new: Any  # [steps * batch * bkv_p * 4]
+    dma_kv_cache: Any  # [steps * batch * bkv_p_cache * 3]
+    dma_kv_new: Any  # [steps * batch * bkv_p_new * 4]
     actual_steps: Any
     batch_size: int = dataclasses.field(default=0, metadata={"static": True})
-    bkv_p: int = dataclasses.field(default=0, metadata={"static": True})
+    bkv_p_cache: int = dataclasses.field(default=0, metadata={"static": True})
+    bkv_p_new: int = dataclasses.field(default=0, metadata={"static": True})
 
     def tree_flatten(self):
         return (
@@ -132,17 +150,24 @@ class RPASchedule:
             self.dma_kv_cache,
             self.dma_kv_new,
             self.actual_steps,
-        ), (self.batch_size, self.bkv_p)
+        ), (self.batch_size, self.bkv_p_cache, self.bkv_p_new)
 
     @classmethod
     def tree_unflatten(cls, aux, children):
-        return cls(*children, batch_size=aux[0], bkv_p=aux[1])
+        return cls(
+            *children,
+            batch_size=aux[0],
+            bkv_p_cache=aux[1],
+            bkv_p_new=aux[2],
+        )
+
+    num_metadata_arrays = 9
 
     def get_dma_kv_cache(self, step: int, batch_idx: int,
                          page_idx: int) -> tuple[int, int, int]:
         # Stride is 3: src_hbm, dst_vmem, size
-        cache_step_stride = self.batch_size * self.bkv_p * 3
-        cache_batch_stride = self.bkv_p * 3
+        cache_step_stride = self.batch_size * self.bkv_p_cache * 3
+        cache_batch_stride = self.bkv_p_cache * 3
         idx = (step * cache_step_stride + batch_idx * cache_batch_stride +
                page_idx * 3)
         # 0: src_hbm, 1: dst_vmem, 2: size
@@ -154,8 +179,9 @@ class RPASchedule:
     def get_dma_kv_new(self, step: int, batch_idx: int,
                        page_idx: int) -> tuple[int, int, int, int]:
         # Stride is 4: dst_hbm, src_hbm, dst_vmem, size
-        new_step_stride = self.batch_size * self.bkv_p * 4
-        base_idx = step * new_step_stride + batch_idx * self.bkv_p * 4 + page_idx * 4
+        new_step_stride = self.batch_size * self.bkv_p_new * 4
+        base_idx = (step * new_step_stride + batch_idx * self.bkv_p_new * 4 +
+                    page_idx * 4)
         # 0: dst_hbm, 1: src_hbm, 2: dst_vmem, 3: size
         dst_hbm = self.dma_kv_new[base_idx + 0]
         src_hbm = self.dma_kv_new[base_idx + 1]
@@ -173,75 +199,68 @@ class RPASchedule:
         return src_hbm, sz
 
     @classmethod
-    def out_shape(cls, config: RPAConfig):
-        """Returns a Pytree of ShapeDtypeStruct for pallas_call."""
+    def _map_shapes(cls, config: RPAConfig, wrapper):
         bs = config.batch_size
         steps = config.max_steps_ub
         return cls(
-            s_idx=jax.ShapeDtypeStruct((steps * bs, ), jnp.int32),
-            q_idx=jax.ShapeDtypeStruct((steps * bs, ), jnp.int32),
-            k_idx=jax.ShapeDtypeStruct((steps * bs, ), jnp.int32),
-            is_last_k=jax.ShapeDtypeStruct((steps * bs, ), jnp.int32),
-            do_writeback=jax.ShapeDtypeStruct((steps * bs, ), jnp.int32),
-            dma_q=jax.ShapeDtypeStruct((steps * bs * 2, ), jnp.int32),
-            dma_kv_cache=jax.ShapeDtypeStruct(
-                (steps * bs * config.bkv_p * 3, ), jnp.int32),
-            dma_kv_new=jax.ShapeDtypeStruct((steps * bs * config.bkv_p * 4, ),
-                                            jnp.int32),
-            actual_steps=jax.ShapeDtypeStruct((1, ), jnp.int32),
+            s_idx=wrapper((steps * bs, ), is_smem=False),
+            q_idx=wrapper((steps * bs, ), is_smem=False),
+            k_idx=wrapper((steps * bs, ), is_smem=False),
+            is_last_k=wrapper((steps * bs, ), is_smem=False),
+            do_writeback=wrapper((steps * bs, ), is_smem=False),
+            dma_q=wrapper((steps * bs * 2, ), is_smem=False),
+            # we do this hacky workaround because xla throws an error if we have
+            # zero-sized tensors.
+            dma_kv_cache=wrapper(
+                (max(1, steps * bs * config.bkv_p_cache * 3), ),
+                is_smem=False),
+            dma_kv_new=wrapper((max(1, steps * bs * config.bkv_p_new * 4), ),
+                               is_smem=False),
+            # this needs to be in SMEM when we prefetch it so we can read from it immediately
+            actual_steps=wrapper((1, ), is_smem=True),
             batch_size=bs,
-            bkv_p=config.bkv_p,
+            bkv_p_cache=config.bkv_p_cache,
+            bkv_p_new=config.bkv_p_new,
         )
+
+    @classmethod
+    def out_shape(cls, config: RPAConfig):
+        """Returns a Pytree of ShapeDtypeStruct for pallas_call."""
+        return cls._map_shapes(
+            config,
+            lambda shape, is_smem=False: jax.ShapeDtypeStruct(
+                shape, jnp.int32),
+        )
+
+    @classmethod
+    def test_specs(cls, config: RPAConfig):
+        """Returns a Pytree of BlockSpecs matching the output structure."""
+
+        def wrapper(shape, is_smem=False):
+            memory_space = pltpu.SMEM if is_smem else pltpu.HBM
+            return pl.BlockSpec(memory_space=memory_space, block_shape=shape)
+
+        return cls._map_shapes(config, wrapper)
 
     @classmethod
     def out_specs(cls, config: RPAConfig):
         """Returns a Pytree of BlockSpecs matching the output structure."""
 
-        def bs_spec(shape):
+        def wrapper(shape, is_smem=False):
             return pl.BlockSpec(memory_space=pltpu.SMEM, block_shape=shape)
 
-        bs = config.batch_size
-        steps = config.max_steps_ub
-        return cls(
-            s_idx=bs_spec((steps * bs, )),
-            q_idx=bs_spec((steps * bs, )),
-            k_idx=bs_spec((steps * bs, )),
-            is_last_k=bs_spec((steps * bs, )),
-            do_writeback=bs_spec((steps * bs, )),
-            dma_q=bs_spec((steps * bs * 2, )),
-            dma_kv_cache=bs_spec((steps * bs * config.bkv_p * 3, )),
-            dma_kv_new=bs_spec((steps * bs * config.bkv_p * 4, )),
-            actual_steps=bs_spec((1, )),
-            batch_size=bs,
-            bkv_p=config.bkv_p,
-        )
+        return cls._map_shapes(config, wrapper)
 
     @classmethod
     def smem_specs(cls, config: RPAConfig):
         """Returns a Pytree of pltpu.SMEM matching the output structure."""
-        bs = config.batch_size
-        steps = config.max_steps_ub
-        return cls(
-            s_idx=pltpu.SMEM((steps * bs, ), jnp.int32),
-            q_idx=pltpu.SMEM((steps * bs, ), jnp.int32),
-            k_idx=pltpu.SMEM((steps * bs, ), jnp.int32),
-            is_last_k=pltpu.SMEM((steps * bs, ), jnp.int32),
-            do_writeback=pltpu.SMEM((steps * bs, ), jnp.int32),
-            dma_q=pltpu.SMEM((steps * bs * 2, ), jnp.int32),
-            dma_kv_cache=pltpu.SMEM((steps * bs * config.bkv_p * 3, ),
-                                    jnp.int32),
-            dma_kv_new=pltpu.SMEM((steps * bs * config.bkv_p * 4, ),
-                                  jnp.int32),
-            actual_steps=pltpu.SMEM((1, ), jnp.int32),
-            batch_size=bs,
-            bkv_p=config.bkv_p,
-        )
+        return cls._map_shapes(
+            config, lambda shape, is_smem=False: pltpu.SMEM(shape, jnp.int32))
 
 
 def rpa_metadata_schedule_kernel(
     cu_q_lens_ref,
     kv_lens_ref,
-    page_indices_ref,
     distribution_ref,
     schedule: RPASchedule,
     lane_lengths_ref,
@@ -284,6 +303,12 @@ def rpa_metadata_schedule_kernel(
             end_k_idx = jnp.minimum(n_k, end_k_idx_causal)
 
             def k_loop(k_idx, curr_ptr):
+                # pl.debug_check(
+                #     curr_ptr < config.max_steps_ub,
+                #     f"ERROR: rpa_metadata_schedule_kernel overflow: curr_ptr ({curr_ptr}) "
+                #     f"exceeds max_steps_ub ({config.max_steps_ub})"
+                # )
+
                 idx = curr_ptr * config.batch_size + target_lane
                 schedule.s_idx[idx] = s_idx
                 schedule.q_idx[idx] = q_idx
@@ -302,19 +327,17 @@ def rpa_metadata_schedule_kernel(
                 kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
                 p_offset = s_idx * config.pages_per_seq + kv_p_start
 
-                kv_cache_base = curr_ptr * (config.batch_size * config.bkv_p *
-                                            3) + target_lane * (config.bkv_p *
-                                                                3)
-                for i in range(config.bkv_p):
+                kv_cache_base = curr_ptr * (
+                    config.batch_size * config.bkv_p_cache *
+                    3) + target_lane * (config.bkv_p_cache * 3)
+                for i in range(config.bkv_p_cache):
                     sz = jnp.clip(kv_left_frm_cache - i * config.page_size, 0,
                                   config.page_size)
                     p_idx = jnp.minimum(p_offset + i,
-                                        page_indices_ref.shape[0] - 1)
+                                        config.num_page_indices - 1)
 
                     base_i = kv_cache_base + i * 3
-                    schedule.dma_kv_cache[base_i +
-                                          0] = (page_indices_ref[p_idx] *
-                                                config.page_size)
+                    schedule.dma_kv_cache[base_i + 0] = p_idx
                     schedule.dma_kv_cache[base_i + 1] = i * config.page_size
                     schedule.dma_kv_cache[base_i + 2] = sz
 
@@ -329,28 +352,51 @@ def rpa_metadata_schedule_kernel(
                 schedule.do_writeback[idx] = jnp.asarray(
                     (new_sz > 0) & (q_idx == q_wb), dtype=jnp.int32)
 
-                kv_new_base = curr_ptr * (config.batch_size * config.bkv_p *
-                                          4) + target_lane * (config.bkv_p * 4)
-                for i in range(config.bkv_p):
-                    slot_start = i * config.page_size
-                    slot_end = (i + 1) * config.page_size
+                kv_new_base = curr_ptr * (
+                    config.batch_size * config.bkv_p_new *
+                    4) + target_lane * (config.bkv_p_new * 4)
 
-                    start_in_slot = jnp.maximum(slot_start, bkv_sz_cache)
-                    end_in_slot = jnp.minimum(slot_end, bkv_sz_cache + new_sz)
-                    sz = jnp.maximum(0, end_in_slot - start_in_slot)
+                if config.case == RpaCase.DECODE:
+                    # During DECODE, we only have 1 new token, so we only need 1 page slot.
+                    start_in_slot = bkv_sz_cache
+                    sz = new_sz
 
                     p_idx = (kv_len_start + start_in_slot) // config.page_size
                     p_idx = jnp.minimum(p_idx, config.pages_per_seq - 1)
                     p_off = (kv_len_start + start_in_slot) % config.page_size
-                    hbm_page = page_indices_ref[s_idx * config.pages_per_seq +
-                                                p_idx]
+                    global_p_idx = s_idx * config.pages_per_seq + p_idx
 
-                    base_i = kv_new_base + i * 4
-                    schedule.dma_kv_new[
-                        base_i + 0] = hbm_page * config.page_size + p_off
-                    schedule.dma_kv_new[base_i + 1] = q_end - kv_left_frm_new
-                    schedule.dma_kv_new[base_i + 2] = start_in_slot
-                    schedule.dma_kv_new[base_i + 3] = sz
+                    schedule.dma_kv_new[kv_new_base +
+                                        0] = (global_p_idx * config.page_size +
+                                              p_off)
+                    schedule.dma_kv_new[kv_new_base +
+                                        1] = q_end - kv_left_frm_new
+                    schedule.dma_kv_new[kv_new_base + 2] = start_in_slot
+                    schedule.dma_kv_new[kv_new_base + 3] = sz
+                else:
+                    for i in range(config.bkv_p_new):
+                        slot_start = i * config.page_size
+                        slot_end = (i + 1) * config.page_size
+
+                        start_in_slot = jnp.maximum(slot_start, bkv_sz_cache)
+                        end_in_slot = jnp.minimum(slot_end,
+                                                  bkv_sz_cache + new_sz)
+                        sz = jnp.maximum(0, end_in_slot - start_in_slot)
+
+                        p_idx = (kv_len_start +
+                                 start_in_slot) // config.page_size
+                        p_idx = jnp.minimum(p_idx, config.pages_per_seq - 1)
+                        p_off = (kv_len_start +
+                                 start_in_slot) % config.page_size
+                        global_p_idx = s_idx * config.pages_per_seq + p_idx
+
+                        base_i = kv_new_base + i * 4
+                        schedule.dma_kv_new[base_i + 0] = (
+                            global_p_idx * config.page_size + p_off)
+                        schedule.dma_kv_new[base_i +
+                                            1] = q_end - kv_left_frm_new
+                        schedule.dma_kv_new[base_i + 2] = start_in_slot
+                        schedule.dma_kv_new[base_i + 3] = sz
                 return curr_ptr + 1
 
             lane_lengths_ref[target_lane] = jax.lax.fori_loop(
@@ -386,17 +432,17 @@ def rpa_metadata_schedule_kernel(
             schedule.dma_q[q_base + 0] = 0
             schedule.dma_q[q_base + 1] = 0
 
-            cache_base = (step * config.batch_size * config.bkv_p * 3 +
-                          b * config.bkv_p * 3)
-            for i in range(config.bkv_p):
+            cache_base = (step * config.batch_size * config.bkv_p_cache * 3 +
+                          b * config.bkv_p_cache * 3)
+            for i in range(config.bkv_p_cache):
                 base_i = cache_base + i * 3
                 schedule.dma_kv_cache[base_i + 0] = 0
                 schedule.dma_kv_cache[base_i + 1] = 0
                 schedule.dma_kv_cache[base_i + 2] = 0
 
-            new_base = (step * config.batch_size * config.bkv_p * 4 +
-                        b * config.bkv_p * 4)
-            for i in range(config.bkv_p):
+            new_base = (step * config.batch_size * config.bkv_p_new * 4 +
+                        b * config.bkv_p_new * 4)
+            for i in range(config.bkv_p_new):
                 base_i = new_base + i * 4
                 schedule.dma_kv_new[base_i + 0] = 0
                 schedule.dma_kv_new[base_i + 1] = 0
@@ -411,54 +457,20 @@ def rpa_metadata_schedule_kernel(
 def generate_rpa_metadata(
     cu_q_lens,
     kv_lens,
-    page_indices,
-    bq_sz,
-    bkv_sz,
-    page_size,
-    batch_size,
+    distribution,
+    config: RPAConfig,
+    *,
     interpret=False,
-    max_steps_ub=-1,
 ):
-    # this method is just for testing, it's not used in the final kernel.
-    num_seq = len(kv_lens)
-    bkv_p = bkv_sz // page_size
-    pages_per_seq = len(page_indices) // num_seq
-
-    if max_steps_ub == -1:
-        # Static upper bound calculation
-        n_q = (cu_q_lens[1:] - cu_q_lens[:-1] + bq_sz - 1) // bq_sz
-        n_k = (kv_lens + bkv_sz - 1) // bkv_sz
-        if batch_size == 1:
-            max_steps_ub = int(jnp.sum(n_q * n_k))
-        else:
-            max_steps_ub = int(
-                jnp.sum(n_q * n_k) // batch_size + jnp.max(n_q * n_k))
-
-        # Round up to nearest 128
-        max_steps_ub = (max_steps_ub + 127) // 128 * 128
-
-    config = RPAConfig(
-        num_seq=num_seq,
-        bq_sz=bq_sz,
-        bkv_sz=bkv_sz,
-        batch_size=batch_size,
-        page_size=page_size,
-        bkv_p=bkv_p,
-        pages_per_seq=pages_per_seq,
-        max_steps_ub=max_steps_ub,
-        total_q_tokens=cu_q_lens[-1],
-        case=RpaCase.MIXED,
-    )
-
     return pl.pallas_call(
         functools.partial(rpa_metadata_schedule_kernel, config=config),
         out_shape=RPASchedule.out_shape(config),
         grid_spec=pltpu.PrefetchScalarGridSpec(
-            num_scalar_prefetch=3,
+            num_scalar_prefetch=3,  # cu_q_lens, kv_lens, distribution
             in_specs=[],
             out_specs=RPASchedule.out_specs(config),
-            scratch_shapes=[pltpu.SMEM((batch_size, ), jnp.int32)],
+            scratch_shapes=[pltpu.SMEM((config.batch_size, ), jnp.int32)],
         ),
         interpret=interpret,
         name="rpa_metadata_schedule",
-    )(cu_q_lens, kv_lens, page_indices, jnp.array([0, 0, num_seq]))
+    )(cu_q_lens, kv_lens, distribution)
