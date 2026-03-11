@@ -301,6 +301,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # in the future.
             self.mesh = self._create_2d_mesh()
 
+        logger.info(f"TPUModelRunner | Final Mesh: {self.mesh}")
+        logger.info(
+            f"TPUModelRunner | Final Mesh Devices IDs: {[d.id for d in self.mesh.devices.flat]}"
+        )
+
         logger.info(f"Init mesh | mesh={self.mesh}")
 
     def _create_new_model_mesh(self) -> jax.sharding.Mesh:
@@ -329,12 +334,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Attempt to create a physically optimized mesh. Fall back to a simple
         # logical reshape for non-power-of-two device counts (e.g., DP=6) to
         # bypass strict physical topology constraints.
+        logger.info(
+            f"TPUModelRunner | Creating single slice mesh: shape={mesh_shape}, "
+            f"device_ids={[d.id for d in self.devices]}")
         try:
-            return mesh_utils.create_device_mesh(
+            res = mesh_utils.create_device_mesh(
                 mesh_shape,
                 self.devices,
                 allow_split_physical_axes=True,
             )
+            logger.info(
+                f"TPUModelRunner | Created Mesh IDs: {[[d.id for d in row.flatten()] for row in res] if res.ndim > 1 else [d.id for d in res]}"
+            )
+            return res
         except (AssertionError, ValueError, RuntimeError) as e:
             logger.warning(
                 "Physical mesh creation failed (shape=%s, devices=%d). "
@@ -407,6 +419,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _init_mm(self) -> None:
         self.is_multimodal_model = None
         self.uses_mrope = self.model_config.uses_mrope
+        self.supports_mm_inputs = True
 
     def _init_speculative_decoding(self) -> None:
         self.drafter = None

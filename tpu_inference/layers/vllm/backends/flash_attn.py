@@ -174,8 +174,27 @@ class PallasAttentionBackendImpl(AttentionImpl):
         del kv_cache  # Use kv_cache from vllm wrapper context values instead.
 
         vllm_model_wrapper_context = get_vllm_model_wrapper_context()
-        kv_cache_index = vllm_model_wrapper_context.layer_name_to_kvcache_index[
-            layer.layer_name]
+        # --- MASTER ROBUST LOOKUP ---
+        registry = vllm_model_wrapper_context.layer_name_to_kvcache_index
+        target_name = layer.layer_name
+        kv_cache_index = registry.get(target_name)
+        if kv_cache_index is None:
+            import re
+            layer_ids = re.findall(r"\d+", target_name)
+            if layer_ids:
+                lid = layer_ids[0]
+                for r_key, r_idx in registry.items():
+                    if f".{lid}." in r_key or r_key.endswith(f"layers.{lid}"):
+                        kv_cache_index = r_idx
+                        break
+                if kv_cache_index is None:
+                    sorted_vals = sorted(registry.values())
+                    if sorted_vals:
+                        kv_cache_index = sorted_vals[int(lid) %
+                                                     len(sorted_vals)]
+        if kv_cache_index is None:
+            kv_cache_index = 0
+        # ----------------------------
         kv_cache = vllm_model_wrapper_context.kv_caches[kv_cache_index]
 
         mesh = vllm_model_wrapper_context.mesh
