@@ -157,8 +157,11 @@ def apply_rope(
         rope_angles = int(rope_proportion * head_dim // 2)
         nope_angles = head_dim // 2 - rope_angles
 
-        fraction = 2 * jnp.arange(0, rope_angles, dtype=jnp.float32) / head_dim
-        timescale = 1.0 / (rope_theta**fraction)
+        # 1. Cast the arange to the working dtype
+        fraction = 2 * jnp.arange(0, rope_angles, dtype=inputs.dtype) / head_dim
+        
+        # 2. Wrap rope_theta in an array of the same dtype to prevent implicit fp32 upcasting
+        timescale = 1.0 / (jnp.array(rope_theta, dtype=inputs.dtype) ** fraction)
 
         # Apply scaling if provided
         if rope_scaling:
@@ -170,9 +173,9 @@ def apply_rope(
                                 constant_values=0.0)
 
         # Prepare for rotation by calculating sin and cos values
-        # `sinusoid_inp` gets shape (batch * seq_len, head_dim/2)
+        # 3. Remove the hardcoded float32 cast here as well
         sinusoid_inp = positions[..., jnp.newaxis].astype(
-            jnp.float32) * timescale[jnp.newaxis, :]
+            inputs.dtype) * timescale[jnp.newaxis, :]
 
         # Broadcast over the 'heads' dimension, assuming shape (batch*seq, heads, head_dim)
         sinusoid_inp = sinusoid_inp[:, jnp.newaxis, ...]
