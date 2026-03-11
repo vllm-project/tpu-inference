@@ -101,8 +101,6 @@ def quantized_matmul_kernel(
     # best performance, only enable this behavior when single input block is
     # used per batch.
     save_x_q = quantize_activation and n_in == 1 and n_out > 1
-    print(f"--- [DEBUG] blockwise_kernel.py: quantized_matmul_kernel CALLED! ---")
-    print(f"    save_acc={save_acc}, save_x_q={save_x_q}, quantize_activation={quantize_activation}")
 
     # TODO(amandaliang): Make this configurable.
     acc_dtype = jnp.bfloat16
