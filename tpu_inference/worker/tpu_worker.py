@@ -222,6 +222,10 @@ class TPUWorker(WorkerBase):
                     if tpu_visible_chips \
                         else self.pp_config.default_tpu_visible_chips
 
+            logger.debug(
+                f"TPUWorker | Worker {self.rank} JAX/TPU environment after init_device: {env_dump}"
+            )
+
         if not self.devices:
             sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
             device_indexes = sharding_config.device_indexes
