@@ -90,7 +90,8 @@ steps:
      command:
        - bash .buildkite/scripts/commit_verified_commit_hashes.sh
 
-   - label: "Upload pytest duration artifact"     
+   - label: "Upload pytest duration artifact"
+     if: build.env("NIGHTLY") == "1"     
      key: unit_test_duration
      artifact_paths: .test_durations
      agents:
