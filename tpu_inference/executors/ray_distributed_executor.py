@@ -344,7 +344,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
             for name in env_vars_to_copy:
                 if name in os.environ:
                     args[name] = os.environ[name]
-            logger.info(
+            logger.debug(
                 f"RayDistributedExecutor | Worker {i} environment variables: {args}"
             )
 

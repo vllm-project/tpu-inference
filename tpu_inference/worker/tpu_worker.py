@@ -76,7 +76,11 @@ class PPConfig:
             chips_per_stage = math.ceil(total_cores_per_stage / cores_per_chip)
 
             if chips_per_stage > 0:
-                start_chip = self.rank * chips_per_stage
+                multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND",
+                                                   "").lower()
+                # For multi-host PP, each host is an independent JAX cluster,
+                # so chips always start from index 0 on each host.
+                start_chip = 0 if multihost_backend == "ray" else self.rank * chips_per_stage
                 self.default_tpu_visible_chips = ",".join(
                     str(i)
                     for i in range(start_chip, start_chip + chips_per_stage))
@@ -165,28 +169,29 @@ class TPUWorker(WorkerBase):
                     tpu_chips_per_process_bounds="",
                     tpu_visible_chips=""):
 
-        # Log environment variables for debugging
-        tpu_env_vars = [
-            "TPU_PROCESS_ADDRESSES",
-            "TPU_PROCESS_PORT",
-            "CLOUD_TPU_TASK_ID",
-            "TPU_PROCESS_BOUNDS",
-            "TPU_CHIPS_PER_PROCESS_BOUNDS",
-            "TPU_VISIBLE_CHIPS",
-        ]
-        env_dump = {v: os.environ.get(v) for v in tpu_env_vars}
-        logger.info(
-            f"TPUWorker | Worker {self.rank} JAX/TPU environment before init_device: {env_dump}"
-        )
         # set tpu visible devices for Jax runtime in PP.
         multihost_backend = envs.TPU_MULTIHOST_BACKEND
         if self.parallel_config.pipeline_parallel_size > 1:
+            # Log environment variables for debugging
+            tpu_env_vars = [
+                "TPU_PROCESS_ADDRESSES",
+                "TPU_PROCESS_PORT",
+                "CLOUD_TPU_TASK_ID",
+                "TPU_PROCESS_BOUNDS",
+                "TPU_CHIPS_PER_PROCESS_BOUNDS",
+                "TPU_VISIBLE_CHIPS",
+            ]
+            env_dump = {v: os.environ.get(v) for v in tpu_env_vars}
+            logger.debug(
+                f"TPUWorker | Worker {self.rank} JAX/TPU environment before init_device: {env_dump}"
+            )
             if multihost_backend == "ray":
                 # For multi-host PP on Ray, isolate each host as its own JAX cluster.
                 # This ensures TP collectives work correctly on the local chips
                 # despite non-contiguous global ID layouts.
-                os.environ["TPU_PROCESS_ADDRESSES"] = "localhost:8476"
-                os.environ["TPU_PROCESS_PORT"] = "8476"
+                port = os.environ.get("TPU_PROCESS_PORT", "8476")
+                os.environ["TPU_PROCESS_ADDRESSES"] = f"localhost:{port}"
+                os.environ["TPU_PROCESS_PORT"] = port
                 os.environ["CLOUD_TPU_TASK_ID"] = "0"
             else:
                 # Single host PP logic
@@ -216,11 +221,6 @@ class TPUWorker(WorkerBase):
                 "TPU_VISIBLE_CHIPS"] = tpu_visible_chips \
                     if tpu_visible_chips \
                         else self.pp_config.default_tpu_visible_chips
-
-        logger.info(f"TPUWorker | Rank {self.rank} JAX initialization: "
-                    f"local_devices={[d.id for d in jax.local_devices()]}, "
-                    f"local_coords={[d.coords for d in jax.local_devices()]}, "
-                    f"all_devices_count={len(jax.devices())}")
 
         if not self.devices:
             sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
@@ -255,8 +255,8 @@ class TPUWorker(WorkerBase):
                 else:
                     # In a multi-host distributed env, say: Ray, local_device count may smaller
                     # than the total devices, we just choose the smaller set here.
-                    self.devices = jax.local_devices()[:sharding_config.
-                                                       total_devices]
+                    self.devices = jax.devices()[:sharding_config.
+                                                 total_devices]
 
         # Initialize the vLLM distribution layer as a single chip environment,
         # we'll swap the model's parallel modules with TPU SPMD equivalents.
