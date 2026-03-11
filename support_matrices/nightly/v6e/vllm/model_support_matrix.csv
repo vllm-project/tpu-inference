@@ -14,4 +14,3 @@ Model,Type,UnitTest,Accuracy/Correctness,Benchmark
 "meta-llama/Llama-Guard-4-12B/Text-Only",Text,✅,✅,✅
 "moonshotai/Kimi-K2-Thinking",Text,unverified,unverified,unverified
 "openai/gpt-oss-120b",Text,unverified,unverified,unverified
-"zai-org/GLM-4.5-Air",Text,unverified,unverified,unverified
