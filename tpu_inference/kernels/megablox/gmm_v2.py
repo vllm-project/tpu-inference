@@ -927,20 +927,6 @@ def make_gmm_configs(
         dtype=lhs.dtype,
     )
 
-    # Validate that rhs quant block size >= lhs quant block size and is
-    # divisible by it. This ensures the lhs quantization loop (which steps by
-    # lhs_quant_block_size) correctly maps to rhs scale blocks.
-    if lhs_cfgs.quant_dtype is not None and rhs_cfgs.quant_dtype is not None:
-        lhs_qbs = lhs_cfgs.quant_block_size
-        rhs_qbs = rhs_cfgs.quant_block_size
-        if rhs_qbs < lhs_qbs:
-            raise ValueError(f"rhs quant_block_size={rhs_qbs} must be >= lhs"
-                             f" quant_block_size={lhs_qbs}.")
-        if rhs_qbs % lhs_qbs != 0:
-            raise ValueError(
-                f"rhs quant_block_size={rhs_qbs} must be divisible by lhs"
-                f" quant_block_size={lhs_qbs}.")
-
     if out_dtype is None:
         out_dtype = lhs.dtype
 

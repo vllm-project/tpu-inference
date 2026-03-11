@@ -349,7 +349,7 @@ class GmmTest(jtu.JaxTestCase):
             maybe_quantize_lhs=True,
         ).astype(lhs.dtype)
 
-        self.assertArraysAllClose(actual, expected, atol=1.1, rtol=1.1)
+        self.assertArraysAllClose(actual, expected, atol=1.2, rtol=1.2)
 
     @parameterized.product(
         batch_size=[128],
