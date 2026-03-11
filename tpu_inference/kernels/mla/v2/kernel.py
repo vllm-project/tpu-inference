@@ -759,7 +759,8 @@ def _mla_ragged_paged_attention_kernel(
             def loop_body(i, _):
                 sz_per_kv_packing = jnp.minimum(
                     page_size_per_kv_packing,
-                    kv_left_frm_cache_per_packing - i * page_size_per_kv_packing,
+                    kv_left_frm_cache_per_packing -
+                    i * page_size_per_kv_packing,
                 )
                 page_idx = jnp.minimum(page_indices_offset + i,
                                        num_page_indices - 1)
@@ -769,7 +770,7 @@ def _mla_ragged_paged_attention_kernel(
                         sz_per_kv_packing,
                     ), ..., :nope_dim],
                     bkvc_vmem_ref.at[pl.ds(i * page_size_per_kv_packing,
-                                          sz_per_kv_packing)],
+                                           sz_per_kv_packing)],
                     sem,
                     wait=False,
                 )
@@ -779,7 +780,7 @@ def _mla_ragged_paged_attention_kernel(
                         sz_per_kv_packing,
                     ), ..., nope_dim:],
                     bkvpe_vmem_ref.at[pl.ds(i * page_size_per_kv_packing,
-                                           sz_per_kv_packing)],
+                                            sz_per_kv_packing)],
                     sem,
                     wait=False,
                 )
@@ -789,8 +790,8 @@ def _mla_ragged_paged_attention_kernel(
                     sz_per_kv_packing,
                 )
 
-            actual_bkv_p = jnp.minimum(
-                cdiv(kv_left_frm_cache, page_size), bkv_p)
+            actual_bkv_p = jnp.minimum(cdiv(kv_left_frm_cache, page_size),
+                                       bkv_p)
             lax.fori_loop(
                 0,
                 actual_bkv_p,
@@ -810,7 +811,7 @@ def _mla_ragged_paged_attention_kernel(
                 new_kv_c_hbm_ref.at[pl.ds(new_kv_row_start,
                                           kv_left_frm_new_per_packing)],
                 bkvc_vmem_ref.at[pl.ds(new_kv_row_start_frm_cache,
-                                      kv_left_frm_new_per_packing)],
+                                       kv_left_frm_new_per_packing)],
                 sem,
                 wait,
             )
@@ -818,7 +819,7 @@ def _mla_ragged_paged_attention_kernel(
                 new_k_pe_hbm_ref.at[pl.ds(new_kv_row_start,
                                           kv_left_frm_new_per_packing)],
                 bkvpe_vmem_ref.at[pl.ds(new_kv_row_start_frm_cache,
-                                       kv_left_frm_new_per_packing)],
+                                        kv_left_frm_new_per_packing)],
                 sem,
                 wait,
             )
@@ -944,6 +945,7 @@ def _mla_ragged_paged_attention_kernel(
                 sem=sem,
                 wait=True,
             )
+
     def _fetch_bq(seq_idx, bq_idx, bq_sem_idx, *, wait=False):
         sem = sems.at[1, bq_sem_idx]
         bq_nope_vmem_ref = bq_nope_x2_ref.at[bq_sem_idx]
