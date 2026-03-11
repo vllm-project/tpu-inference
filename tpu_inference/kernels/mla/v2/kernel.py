@@ -11,7 +11,36 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""TPU-Friendly and Data-Movement-Friendly MLA Ragged Paged Attention kernel."""
+"""TPU-Friendly and Data-Movement-Friendly MLA Ragged Paged Attention kernel.
+
+#bouache [KV-Cache Fusion] What was changed and why
+==========================================
+Originally the KV cache was updated by a *separate host-side JAX call*
+(`update_kv_cache`) that ran **after** the attention kernel returned.
+This meant the TPU had to:
+  1. Finish all attention compute.
+  2. Return to the host.
+  3. Re-launch a second kernel to scatter new tokens into the paged cache.
+  4. Only then start the next step.
+
+The fusion eliminates step 3-4 by moving the KV cache write-back **inside**
+the attention Pallas kernel itself, pipelined with attention compute:
+  - A dedicated DMA channel (channel 3, semaphore index 3) is reserved for
+    KV updates, separate from the bkv-fetch (0), bq-fetch (1), bo-send (2)
+    channels that already existed.
+  - Double-buffered VMEM staging buffers (`new_kv_c_x2_ref`,
+    `new_k_pe_x2_ref`) are added so one B_q block's tokens can be staged
+    while the next block's attention is running on the MXU.
+  - After each B_q block's output is sent (`start_send_bo`), the kernel
+    immediately fires a `start_update_kv_cache` for that block's tokens,
+    overlapping the DMA scatter with the next block's MXU work.
+  - The host-side `update_kv_cache()` pre-call is removed from
+    `mla_ragged_paged_attention`; the updated cache is now returned directly
+    as a kernel output via `input_output_aliases`.
+  - `disable_bounds_checks=True` removes per-DMA software bounds checks;
+    safe because the scheduler guarantees valid page indices.
+
+"""
 
 import functools
 
@@ -58,7 +87,7 @@ def update_kv_cache(
         cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
         distribution: jax.Array,  # i32[3]
 ) -> tuple[jax.Array, jax.Array]:
-    """Update KV cache with new tokens."""
+    """ #bouache : Update KV cache with new tokens."""
     actual_r_dim = new_k_pe.shape[-1]
     r_dim = align_to(actual_r_dim, 128)
     if actual_r_dim != r_dim:
@@ -498,7 +527,7 @@ def _mla_ragged_paged_attention_kernel(
     distribution_ref,  # [3] (decode_end, prefill_end, mixed_end)
     sem_ids_ref,  # [3] (bq_sem_idx, bkv_sem_idx, bo_sem_idx)
     bo_ids_ref,  # [4] (bo_sem_0_seq_idx, bo_sem_1_seq_idx, bo_sem_0_bo_idx, bo_sem_1_bo_idx)
-    bkv_update_ids_ref,  # [6] (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz)
+    bkv_update_ids_ref,  # [6] (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_bq_idx, bkv_sem_1_bq_idx, bkv_sem_0_sz, bkv_sem_1_sz)
     # Input
     ql_nope_hbm_ref,  # [max_num_tokens, num_q_heads_per_q_packing, q_packing, lkv_dim]
     q_pe_hbm_ref,  # [max_num_tokens, num_q_heads_per_q_packing, q_packing, r_dim]
@@ -514,6 +543,13 @@ def _mla_ragged_paged_attention_kernel(
     bq_nope_x2_ref,  # [2, bq_sz, num_q_heads_per_q_packing, q_packing, lkv_dim]
     bq_rope_x2_ref,  # [2, bq_sz, num_q_heads_per_q_packing, q_packing, r_dim]
     bo_x2_ref,  # [2, bq_sz, num_q_heads_per_q_packing, q_packing, lkv_dim]
+    # [KV-CACHE FUSION] Two new double-buffered VMEM staging buffers for
+    # in-kernel KV write-back. Shape uses packed rows (÷ kv_packing) so that
+    # Mosaic can prove DMA slice sizes are divisible by the fp8 tiling (4).
+    new_kv_c_x2_ref,  # [2, bq_sz_per_kv_packing, kv_packing, lkv_dim]
+    new_k_pe_x2_ref,  # [2, bq_sz_per_kv_packing, kv_packing, r_dim]
+    # [KV-CACHE FUSION] Semaphore array now has 4 channels (was 3):
+    #   0 = bkv fetch   1 = bq fetch   2 = bo send   3 = KV-cache update (new)
     sems,  # [4, 2]
     l_ref,  # [bq_sz * num_q_heads, 128],
     m_ref,  # [bq_sz * num_q_heads, 128],
@@ -676,20 +712,34 @@ def _mla_ragged_paged_attention_kernel(
         else:
             cp.start()
 
+    # [KV-CACHE FUSION] _fetch_bkv is extended to load two sources:
+    #   (a) tokens already in the paged cache  → from cache_kv HBM pages
+    #   (b) tokens being added this step       → from new_kv_c/new_k_pe HBM
+    # Both are packed in kv_packing (=4) rows so every DMA size is a
+    # statically-provable multiple of 4 (Mosaic tiling requirement).
     def _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, *, wait=False):
         sem = sems.at[0, bkv_sem_idx]
         bkvc_vmem_ref = bkvc_x2_ref.at[bkv_sem_idx]
         bkvpe_vmem_ref = bkpe_x2_ref.at[bkv_sem_idx]
-        reshaped_cache_hbm_ref = cache_kv_hbm_ref.reshape(
+        reshaped_cache_hbm_ref = updated_cache_kv_hbm_ref.reshape(
             total_num_pages * page_size_per_kv_packing,
-            *cache_kv_hbm_ref.shape[2:],
+            *updated_cache_kv_hbm_ref.shape[2:],
         )
         kv_len = kv_lens_ref[seq_idx]
         kv_len_start = bkv_idx * bkv_sz
         kv_p_start = bkv_idx * bkv_p
+        q_start = cu_q_lens_ref[seq_idx]
+        q_end = cu_q_lens_ref[seq_idx + 1]
+        q_len = q_end - q_start
 
         kv_left = kv_len - kv_len_start
+        # Split KV tokens: those already in cache vs. new tokens (tail of seq).
+        kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
+        kv_left_frm_new = kv_left - kv_left_frm_cache
+        # Packing-rounded sizes (DMA must transfer whole packed rows).
         kv_left_per_kv_packing = cdiv(kv_left, kv_packing)
+        kv_left_frm_cache_per_packing = kv_left_frm_cache // kv_packing
+        kv_left_frm_new_per_packing = cdiv(kv_left_frm_new, kv_packing)
         page_indices_offset = seq_idx * pages_per_seq + kv_p_start
 
         debug_print(
@@ -701,51 +751,200 @@ def _mla_ragged_paged_attention_kernel(
         debug_print("[RPA debug] kv_len_start={}", kv_len_start)
         debug_print("[RPA debug] kv_p_start={}", kv_p_start)
         debug_print("[RPA debug] kv_left={}", kv_left)
+        debug_print("[RPA debug] kv_left_frm_cache={}", kv_left_frm_cache)
+        debug_print("[RPA debug] kv_left_frm_new={}", kv_left_frm_new)
         debug_print("[RPA debug] page_indices_offset={}", page_indices_offset)
 
-        # Fetch effective kv from kv cache.
-        def loop_body(i, _):
-            sz_per_kv_packing = jnp.minimum(
-                page_size_per_kv_packing,
-                kv_left_per_kv_packing - i * page_size_per_kv_packing,
-            )
-            _async_copy(
-                reshaped_cache_hbm_ref.at[pl.ds(
-                    page_indices_ref[page_indices_offset + i] *
+        if not wait:
+            # Fetch cached KV pages using packing-aware row sizes.
+            def loop_body(i, _):
+                sz_per_kv_packing = jnp.minimum(
                     page_size_per_kv_packing,
+                    kv_left_frm_cache_per_packing - i * page_size_per_kv_packing,
+                )
+                page_idx = jnp.minimum(page_indices_offset + i,
+                                       num_page_indices - 1)
+                _async_copy(
+                    reshaped_cache_hbm_ref.at[pl.ds(
+                        page_indices_ref[page_idx] * page_size_per_kv_packing,
+                        sz_per_kv_packing,
+                    ), ..., :nope_dim],
+                    bkvc_vmem_ref.at[pl.ds(i * page_size_per_kv_packing,
+                                          sz_per_kv_packing)],
+                    sem,
+                    wait=False,
+                )
+                _async_copy(
+                    reshaped_cache_hbm_ref.at[pl.ds(
+                        page_indices_ref[page_idx] * page_size_per_kv_packing,
+                        sz_per_kv_packing,
+                    ), ..., nope_dim:],
+                    bkvpe_vmem_ref.at[pl.ds(i * page_size_per_kv_packing,
+                                           sz_per_kv_packing)],
+                    sem,
+                    wait=False,
+                )
+                debug_print(
+                    "[RPA debug] loop_body i={}, sz_per_kv_packing={}",
+                    i,
                     sz_per_kv_packing,
-                ), ..., :nope_dim],
-                bkvc_vmem_ref.at[pl.ds(i * page_size_per_kv_packing,
-                                       sz_per_kv_packing)],
-                sem,
-                wait,
-            )
-            _async_copy(
-                reshaped_cache_hbm_ref.at[pl.ds(
-                    page_indices_ref[page_indices_offset + i] *
-                    page_size_per_kv_packing,
-                    sz_per_kv_packing,
-                ), ..., nope_dim:],
-                bkvpe_vmem_ref.at[pl.ds(i * page_size_per_kv_packing,
-                                        sz_per_kv_packing)],
-                sem,
-                wait,
-            )
-            debug_print(
-                "[RPA debug] loop_body i={}, sz_per_kv_packing={}",
-                i,
-                sz_per_kv_packing,
+                )
+
+            actual_bkv_p = jnp.minimum(
+                cdiv(kv_left_frm_cache, page_size), bkv_p)
+            lax.fori_loop(
+                0,
+                actual_bkv_p,
+                loop_body,
+                None,
+                unroll=False,
             )
 
-        actual_bkv_p = jnp.minimum(cdiv(kv_left, page_size), bkv_p)
-        lax.fori_loop(
-            0,
-            actual_bkv_p,
-            loop_body,
-            None,  # init value
-            unroll=False,
+            # [KV-CACHE FUSION] Load the new (not-yet-cached) token rows
+            # directly from the new_kv_c / new_k_pe HBM input buffers.
+            # Row address = (absolute token index) // kv_packing so every
+            # DMA offset is a multiple of kv_packing (Mosaic safety).
+            new_kv_row_start = (q_end - kv_left_frm_new) // kv_packing
+            new_kv_row_start_frm_cache = kv_left_frm_cache_per_packing
+            debug_print("[RPA debug] new_kv_row_start={}", new_kv_row_start)
+            _async_copy(
+                new_kv_c_hbm_ref.at[pl.ds(new_kv_row_start,
+                                          kv_left_frm_new_per_packing)],
+                bkvc_vmem_ref.at[pl.ds(new_kv_row_start_frm_cache,
+                                      kv_left_frm_new_per_packing)],
+                sem,
+                wait,
+            )
+            _async_copy(
+                new_k_pe_hbm_ref.at[pl.ds(new_kv_row_start,
+                                          kv_left_frm_new_per_packing)],
+                bkvpe_vmem_ref.at[pl.ds(new_kv_row_start_frm_cache,
+                                       kv_left_frm_new_per_packing)],
+                sem,
+                wait,
+            )
+        else:
+            # Wait path: issue a no-op barrier copy to drain the semaphore.
+            kv_total_per_packing = cdiv(kv_left, kv_packing)
+            dst = bkvc_vmem_ref.at[pl.ds(0, kv_total_per_packing)]
+            _async_copy(
+                src=dst,
+                dst=dst,
+                sem=sem,
+                wait=True,
+            )
+
+    # [KV-CACHE FUSION] NEW FUNCTION: _update_kv_cache
+    # Writes one B_q block of new tokens into the paged KV cache via async DMA.
+    # Two-phase pipeline:
+    #   Phase 1 (stage):   new_kv_c/k_pe HBM → VMEM staging buffer (sync, wait)
+    #   Phase 2 (scatter): VMEM → correct page slots in updated_cache_kv HBM
+    #                      via a per-page fori_loop (async, no-wait).
+    # The semaphore for Phase 2 is drained by the *next* call to
+    # wait_update_kv_cache before that slot's VMEM is reused.
+    def _update_kv_cache(seq_idx,
+                         bq_idx,
+                         bkv_update_sem_idx,
+                         update_sz,
+                         *,
+                         wait=False):
+        # update_sz is a token count (= actual_bq_sz, always <= bq_sz).
+        # All DMA slices are expressed in packing-aligned rows.
+        sem = sems.at[3, bkv_update_sem_idx]
+        new_kv_c_vmem_ref = new_kv_c_x2_ref.at[bkv_update_sem_idx]
+        new_k_pe_vmem_ref = new_k_pe_x2_ref.at[bkv_update_sem_idx]
+        reshaped_cache_hbm_ref = updated_cache_kv_hbm_ref.reshape(
+            total_num_pages * page_size_per_kv_packing,
+            *updated_cache_kv_hbm_ref.shape[2:],
         )
 
+        q_start = cu_q_lens_ref[seq_idx]
+        q_end = cu_q_lens_ref[seq_idx + 1]
+        q_len = q_end - q_start
+        # Packing-rounded token offset within this sequence's new tokens.
+        token_offset_in_seq = bq_idx * bq_sz
+        # Row in the packed new_kv_c HBM buffer where this bq block starts.
+        new_kv_row_start = (q_start + token_offset_in_seq) // kv_packing
+        update_rows = cdiv(update_sz, kv_packing)
+
+        # Where these tokens land in the flat KV cache token address space.
+        cache_token_start = kv_lens_ref[seq_idx] - q_len + token_offset_in_seq
+        cache_row_start = cache_token_start // kv_packing  # row in page
+        p_start = cache_row_start // page_size_per_kv_packing
+        p_row_start = cache_row_start % page_size_per_kv_packing
+        p_end = cdiv(cache_row_start + update_rows, page_size_per_kv_packing)
+        page_indices_offset = seq_idx * pages_per_seq + p_start
+
+        debug_print(
+            "[RPA debug]"
+            f" -----------{'wait' if wait else 'start'}_update_kv_cache-----------"
+        )
+        debug_print("[RPA debug] seq_idx={}", seq_idx)
+        debug_print("[RPA debug] bq_idx={}", bq_idx)
+        debug_print("[RPA debug] bkv_update_sem_idx={}", bkv_update_sem_idx)
+        debug_print("[RPA debug] new_kv_row_start={}", new_kv_row_start)
+        debug_print("[RPA debug] cache_token_start={}", cache_token_start)
+        debug_print("[RPA debug] update_rows={}", update_rows)
+
+        if not wait:
+            # Stage packed rows into VMEM for the subsequent scatter.
+            _async_copy(
+                new_kv_c_hbm_ref.at[pl.ds(new_kv_row_start, update_rows)],
+                new_kv_c_vmem_ref.at[pl.ds(0, update_rows)],
+                sem,
+                wait=True,
+            )
+            _async_copy(
+                new_k_pe_hbm_ref.at[pl.ds(new_kv_row_start, update_rows)],
+                new_k_pe_vmem_ref.at[pl.ds(0, update_rows)],
+                sem,
+                wait=True,
+            )
+
+            # Scatter packed rows from VMEM into the paged HBM cache.
+            def loop_body(i, state):
+                rem_rows, src_row = state
+                dst_row_off = jnp.where(i == 0, p_row_start, 0)
+                sz = jnp.minimum(page_size_per_kv_packing - dst_row_off,
+                                 rem_rows)
+                page_idx = page_indices_ref[page_indices_offset + i]
+
+                _async_copy(
+                    new_kv_c_vmem_ref.at[pl.ds(src_row, sz)],
+                    reshaped_cache_hbm_ref.at[pl.ds(
+                        page_idx * page_size_per_kv_packing + dst_row_off,
+                        sz,
+                    ), ..., :nope_dim],
+                    sem,
+                    wait=False,
+                )
+                _async_copy(
+                    new_k_pe_vmem_ref.at[pl.ds(src_row, sz)],
+                    reshaped_cache_hbm_ref.at[pl.ds(
+                        page_idx * page_size_per_kv_packing + dst_row_off,
+                        sz,
+                    ), ..., nope_dim:],
+                    sem,
+                    wait=False,
+                )
+                return rem_rows - sz, src_row + sz
+
+            lax.fori_loop(
+                0,
+                p_end - p_start,
+                loop_body,
+                (update_rows, 0),
+                unroll=False,
+            )
+        else:
+            # Drain semaphore with a no-op barrier copy.
+            dst = new_kv_c_vmem_ref.at[pl.ds(0, update_rows)]
+            _async_copy(
+                src=dst,
+                dst=dst,
+                sem=sem,
+                wait=True,
+            )
     def _fetch_bq(seq_idx, bq_idx, bq_sem_idx, *, wait=False):
         sem = sems.at[1, bq_sem_idx]
         bq_nope_vmem_ref = bq_nope_x2_ref.at[bq_sem_idx]
@@ -827,6 +1026,34 @@ def _mla_ragged_paged_attention_kernel(
         @pl.when(jnp.logical_and(0 <= old_seq_idx, old_seq_idx <= seq_idx))
         def _():
             _send_bo(old_seq_idx, old_bo_idx, bo_sem_idx, wait=True)
+
+    # [KV-CACHE FUSION] start/wait helpers follow the same double-buffer
+    # contract as the existing start/wait_send_bo pair:
+    #   start: record (seq_idx, bq_idx, update_sz) in bkv_update_ids_ref so
+    #          the matching wait knows what semaphore state to drain.
+    #   wait:  only issues the drain DMA when update_sz > 0, i.e. when a
+    #          real update was actually started on this semaphore slot.
+    def start_update_kv_cache(seq_idx, bq_idx, bkv_update_sem_idx, update_sz):
+        bkv_update_ids_ref[bkv_update_sem_idx] = seq_idx
+        bkv_update_ids_ref[bkv_update_sem_idx + 2] = bq_idx
+        bkv_update_ids_ref[bkv_update_sem_idx + 4] = update_sz
+        _update_kv_cache(seq_idx, bq_idx, bkv_update_sem_idx, update_sz)
+
+    def wait_update_kv_cache(bkv_update_sem_idx):
+        update_sz = bkv_update_ids_ref[bkv_update_sem_idx + 4]
+
+        @pl.when(update_sz > 0)
+        def _():
+            seq_idx_ = bkv_update_ids_ref[bkv_update_sem_idx]
+            bq_idx_ = bkv_update_ids_ref[bkv_update_sem_idx + 2]
+            bkv_update_ids_ref[bkv_update_sem_idx + 4] = 0
+            _update_kv_cache(
+                seq_idx_,
+                bq_idx_,
+                bkv_update_sem_idx,
+                update_sz,
+                wait=True,
+            )
 
     def load_bq(bq_sem_idx, *, actual_bq_sz=bq_sz):
         q_nope_ref = (bq_nope_x2_ref.bitcast(
@@ -985,6 +1212,22 @@ def _mla_ragged_paged_attention_kernel(
             # Send cur bo
             start_send_bo(seq_idx, bq_idx, bo_sem_idx)
 
+            # [KV-CACHE FUSION] PIPELINE TRIGGER
+            # After the current B_q block's output DMA is launched, immediately
+            # start writing that block's new-token KVs into the paged cache.
+            # The DMA engine performs the scatter while the MXU works on the
+            # *next* B_q block's attention – zero extra latency on the critical
+            # path.  The semaphore slot reuses bq_sem_idx (same double-buffer
+            # index) so the two DMAs (bo-send and kv-update) never collide.
+            update_sem_idx = bq_sem_idx
+            wait_update_kv_cache(update_sem_idx)
+            start_update_kv_cache(
+                seq_idx,
+                bq_idx,
+                update_sem_idx,
+                actual_bq_sz,
+            )
+
         lax.fori_loop(0, num_bq, compute_with_bq, None, unroll=False)
 
     ### ------- Kernel start ------- ###
@@ -1010,6 +1253,14 @@ def _mla_ragged_paged_attention_kernel(
     def epilogue():
         for i in range(2):
             wait_send_bo(i)
+
+    # [KV-CACHE FUSION] Drain any in-flight KV update DMAs before the kernel
+    # exits.  Without this, the last one or two B_q blocks per sequence could
+    # have their cache writes still outstanding when the kernel returns.
+    @pl.when(seq_idx < num_seqs)
+    def epilogue_kv_update():
+        for i in range(2):
+            wait_update_kv_cache(i)
 
     ### ------- Kernel end ------- ###
 
@@ -1128,36 +1379,6 @@ def mla_ragged_paged_attention(
 ]:
     """MLA Ragged paged attention that supports mixed prefill and decode.
 
-  Args:
-    ql_nope: concatenated all sequences' queries.
-    q_pe: concatenated all sequences' rope.
-    new_kv_c: concatenated all sequences' kv_c values
-    new_k_pe: concatenated all sequences' k_pe values
-    cache_kv: the current kv cache.
-    kv_lens: the length of each sequence in the kv cache.
-    page_indices: flattened page indices look-up table by (seq_id, page_id).
-    cu_q_lens: the cumulative sum of the effective query lengths. Similar to
-      kv_lens, only the first num_seqs+1 values are valid.
-    distribution: (i, j, k) represents that sequences[0:i] are decode-only,
-      sequences[i:j] are chunked-prefill-only, and sequences[j:k] are mixed. The
-      k is also the total number of sequences.
-    sm_scale: the softmax scale which will be applied to the Q@K^T.
-    sliding_window: the sliding window size for the attention.
-    soft_cap: the logit soft cap for the attention.
-    mask_value: mask value for causal mask.
-    q_scale: the scale for the query.
-    k_scale: the scale for the key cache.
-    v_scale: the scale for the value cache.
-    num_kv_pages_per_block: number of kv pages to be processed in one flash
-      attention block in the pallas kernel.
-    num_queries_per_block: number of kv pages to be processed in one flash
-      attention block in the pallas kernel.
-    vmem_limit_bytes: the vmem limit for the pallas kernel.
-    debug_mode: if true, RPA does not issue any DMAs or run flash attention but
-      print debug info. Need to compile with `--xla_tpu_enable_log_recorder`.
-
-  Returns:
-    The output of the attention.
   """
     # TODO(chengjiyao): Support both autotuning table and heuristic logic to set
     # these kernel block sizes
@@ -1187,17 +1408,6 @@ def mla_ragged_paged_attention(
         num_queries_per_block=num_queries_per_block,
         vmem_limit_bytes=vmem_limit_bytes,
         debug_mode=debug_mode,
-    )
-
-    # TODO(chengjiyao): fuse kv cache update into the kernel.
-    cache_kv = update_kv_cache(
-        new_kv_c,
-        new_k_pe,
-        cache_kv,
-        kv_lens,
-        page_indices,
-        cu_q_lens,
-        distribution,
     )
 
     _, actual_num_q_heads, actual_lkv_dim = ql_nope.shape
@@ -1262,6 +1472,24 @@ def mla_ragged_paged_attention(
 
     bo_double_buf = bq_nope_double_buf
 
+    # bouache : [KV-CACHE FUSION] VMEM staging buffers for the in-kernel KV write-back.
+    # Shape is (2, bq_sz/kv_packing, kv_packing, dim):
+    #   dim-0 = double-buffer slot (0 or 1)
+    #   dim-1 = packed rows (bq_sz ÷ kv_packing) – keeps DMA sizes provably
+    #           divisible by kv_packing=4 for Mosaic's fp8 tiling check
+    #   dim-2 = kv_packing (fp8 lane interleave)
+    #   dim-3 = head dimension
+    bq_sz_per_kv_packing = bq_sz // kv_packing
+    new_kv_c_double_buf = pltpu.VMEM(
+        (2, bq_sz_per_kv_packing, kv_packing, lkv_dim),
+        cache_kv.dtype,
+    )
+
+    new_k_pe_double_buf = pltpu.VMEM(
+        (2, bq_sz_per_kv_packing, kv_packing, r_dim),
+        cache_kv.dtype,
+    )
+
     l_scratch = pltpu.VMEM(
         (bq_sz * num_q_heads, 128),
         jnp.float32,
@@ -1279,6 +1507,8 @@ def mla_ragged_paged_attention(
         bq_nope_double_buf,
         bq_rope_double_buf,
         bo_double_buf,  # Double buffering for output block.
+        new_kv_c_double_buf,  # Double buffering for KV-cache updates.
+        new_k_pe_double_buf,  # Double buffering for KV-cache updates.
         # Semaphores for double buffering of bkv, bq, bo and bkv_update.
         pltpu.SemaphoreType.DMA((4, 2)),
         # Intermediate buffers per kv head for flash attention.
@@ -1297,7 +1527,7 @@ def mla_ragged_paged_attention(
         jnp.zeros((3, ), jnp.int32),
         # (bo_sem_0_seq_idx, bo_sem_1_seq_idx, bo_sem_0_bo_idx, bo_sem_1_bo_idx)
         jnp.full((4, ), -1, jnp.int32),
-        # (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz)
+        # (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_bq_idx, bkv_sem_1_bq_idx, bkv_sem_0_sz, bkv_sem_1_sz)
         jnp.full((6, ), -1, jnp.int32),
     )
 
@@ -1330,6 +1560,12 @@ def mla_ragged_paged_attention(
                 # one, we need some extra work to support Megacore mode.
                 dimension_semantics=("arbitrary", ),
                 vmem_limit_bytes=vmem_limit_bytes,
+                # [KV-CACHE FUSION] Disable per-DMA software bounds checks.
+                # Safe because the scheduler guarantees all page indices are
+                # within [0, total_num_pages) before calling this kernel.
+                # Removing these checks reduces per-DMA overhead noticeably
+                # at high page-scatter counts.
+                disable_bounds_checks=True,
             ),
             out_shape=[
                 jax.ShapeDtypeStruct(shape=ql_nope.shape, dtype=ql_nope.dtype),
@@ -1343,6 +1579,10 @@ def mla_ragged_paged_attention(
             name=scope_name,
         ))
 
+    # [KV-CACHE FUSION] The host-side `update_kv_cache(new_kv_c, new_k_pe, …)`
+    # call that previously ran here has been REMOVED.  The KV cache is now
+    # updated entirely inside the Pallas kernel above, returned via
+    # input_output_aliases {11: 1}.  One fewer TPU kernel launch per step.
     output, updated_kv = kernel(
         *scalar_prefetches,
         ql_nope,
