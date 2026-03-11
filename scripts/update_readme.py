@@ -47,15 +47,18 @@ def read_csv_data(file_path):
 
 def generate_markdown_table(headers, data):
     """Generates a Markdown table string."""
-    if not headers: return ""
+    if not headers:
+        return ""
     
     # helper to replace spaces with &nbsp; for consistent markdown sizing
     def _nbsp(text):
-        if not text: return text
+        if not text:
+            return text
         return text.replace(" ", "&nbsp;")
         
     def _format_markdown_cell(text):
-        if not text: return ""
+        if not text:
+            return ""
         text_str = _nbsp(str(text))
         return text_str
 
@@ -88,7 +91,7 @@ def _format_cell(status_string, hw_prefix=None):
     clean_string = status_string.replace("&nbsp;", " ")
     parts = clean_string.split(" ", 1)
     icon = parts[0] if parts else ""
-    text_status = parts[1] if len(parts) > 1 else ""
+    # Unused text_status variable removed
     
     # Build the visual display text (just icon, or icon + prefix)
     display_text = icon
@@ -113,7 +116,8 @@ def _merge_hw_status(status_v6, status_v7):
 
 def generate_html_feature_table(headers, data):
     """Generates an HTML table specifically for the core feature matrix, merging v6e and v7x."""
-    if not headers: return ""
+    if not headers:
+        return ""
     
     html = []
     html.append("<table>")
@@ -146,7 +150,8 @@ def generate_html_feature_table(headers, data):
 
 def generate_html_quantization_table(headers, data):
     """Generates an HTML table specifically for the quantization methods matrix."""
-    if not headers: return ""
+    if not headers:
+        return ""
     
     html = []
     html.append("<table>")
@@ -214,7 +219,8 @@ def format_kernel_name(name):
     current_len = 0
     
     for w in words:
-        if not w: continue
+        if not w:
+            continue
         # If adding this word exceeds ~15 chars and we already have words on this line, break it
         if current_len + len(w) > 15 and current_line:
             lines.append("&nbsp;".join(current_line))
@@ -268,7 +274,8 @@ def generate_html_microbenchmark_table(headers, data):
     
     for cat_name in ["Moe", "Dense", "Attention"]:
         rows = categories[cat_name]
-        if not rows: continue
+        if not rows:
+            continue
         
         html.append("  <tbody>")
         for idx, row in enumerate(rows):
@@ -303,7 +310,8 @@ def update_readme():
                 h, d = read_csv_data(fpath)
                 if d:
                     for r in d:
-                        if not r: continue
+                        if not r:
+                            continue
                         feature = r[0].strip()
                         if feature not in merged_features:
                             merged_features[feature] = {"v6_flax": "", "v6_pytorch": "", "v6_default": "", "v7_flax": "", "v7_pytorch": "", "v7_default": ""}
@@ -335,12 +343,14 @@ def update_readme():
             merged_data = {}
             if v6_d:
                 for row in v6_d:
-                    if not row or row[0].lower() == "kernels": continue
+                    if not row or row[0].lower() == "kernels":
+                        continue
                     merged_data[row[0]] = {"v6": row[1:]}
                     
             if v7_d:
                 for row in v7_d:
-                    if not row or row[0].lower() == "kernels": continue
+                    if not row or row[0].lower() == "kernels":
+                        continue
                     if row[0] not in merged_data:
                         merged_data[row[0]] = {}
                     merged_data[row[0]]["v7"] = row[1:]
@@ -366,7 +376,8 @@ def update_readme():
         elif section_key == "quantization":
             static_file = file_sources["static"]
             headers, static_d = read_csv_data(static_file)
-            if not headers: continue
+            if not headers:
+                continue
             
             nightly_data = {}
             for k in ["v6_flax", "v6_pytorch", "v6_default", "v7_flax", "v7_pytorch", "v7_default"]:
@@ -374,13 +385,15 @@ def update_readme():
                 nightly_data[k] = d
 
             def find_status(weight, method, nightly_rows):
-                if not nightly_rows: return "❓ Untested"
+                if not nightly_rows:
+                    return "❓ Untested"
                 weight = weight.lower().replace(" ", "")
                 method = method.lower().replace(" ", "").rstrip('s')
                 
                 matched = []
                 for nr in nightly_rows:
-                    if not nr: continue
+                    if not nr:
+                        continue
                     nr_dtype = nr[0].lower().replace(" ", "")
                     nr_method = nr[1].lower().replace(" ", "") if len(nr) > 1 else ""
                     
@@ -388,22 +401,28 @@ def update_readme():
                         if method in nr_method or method in nr_dtype:
                             matched.append(nr)
                             
-                if not matched: return "❓ Untested"
+                if not matched:
+                    return "❓ Untested"
                     
                 overall_corr, overall_perf = "✅", "✅"
                 for nr in matched:
                     c = nr[3] if len(nr) > 3 else ""
                     p = nr[4] if len(nr) > 4 else ""
-                    if "unverified" in c.lower() or "untested" in c.lower() or "❓" in c: overall_corr = "❓"
-                    elif "fail" in c.lower() or "❌" in c: overall_corr = "❌"
+                    if "unverified" in c.lower() or "untested" in c.lower() or "❓" in c:
+                        overall_corr = "❓"
+                    elif "fail" in c.lower() or "❌" in c:
+                        overall_corr = "❌"
                         
-                    if "unverified" in p.lower() or "untested" in p.lower() or "❓" in p: overall_perf = "❓"
-                    elif "fail" in p.lower() or "❌" in p: overall_perf = "❌"
+                    if "unverified" in p.lower() or "untested" in p.lower() or "❓" in p:
+                        overall_perf = "❓"
+                    elif "fail" in p.lower() or "❌" in p:
+                        overall_perf = "❌"
                         
                 return merge_metrics(overall_corr, overall_perf)
                 
             for row in static_d:
-                if not row or len(row) < 3: continue
+                if not row or len(row) < 3:
+                    continue
                 w = row[0]
                 m = row[1]
                 v6_f = find_status(w, m, nightly_data["v6_flax"])
@@ -423,7 +442,8 @@ def update_readme():
             for i, file_path in enumerate(sources):
                 h, d = read_csv_data(file_path)
                 if h:
-                    if not headers: headers = h
+                    if not headers:
+                        headers = h
                     all_data.extend(d)
             
             if section_key == "core_features":
@@ -440,13 +460,10 @@ def update_readme():
         # Special handling for microbenchmarks to append footer
         if section_key == "microbenchmarks":
             try:
-                import datetime
-                v7_path = file_sources["v7"]
-                mtime = os.path.getmtime(v7_path)
-                dt = datetime.datetime.fromtimestamp(mtime)
-                date_str = dt.strftime("%Y%m%d")
+                # dt and date_str removed
+                pass
             except Exception:
-                date_str = "Unknown"
+                pass
 
             footer = (
                 "\n\n> **Note:**\n"
