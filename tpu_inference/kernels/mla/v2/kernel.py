@@ -737,7 +737,6 @@ def _mla_ragged_paged_attention_kernel(
         kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
         kv_left_frm_new = kv_left - kv_left_frm_cache
         # Packing-rounded sizes (DMA must transfer whole packed rows).
-        kv_left_per_kv_packing = cdiv(kv_left, kv_packing)
         kv_left_frm_cache_per_packing = kv_left_frm_cache // kv_packing
         kv_left_frm_new_per_packing = cdiv(kv_left_frm_new, kv_packing)
         page_indices_offset = seq_idx * pages_per_seq + kv_p_start
