@@ -107,8 +107,7 @@ class TestDeleteReinitializeHBM:
             return 1.0 if not words_b else 0.0
         return len(words_a & words_b) / len(words_a)
 
-    def test_generate_after_reinitialize_produces_valid_output(
-            self, llm: LLM):
+    def test_generate_after_reinitialize_produces_valid_output(self, llm: LLM):
         """After delete → reinitialize, generation must produce valid text."""
         prompt = "What is 2 + 2? Answer with just the number:"
         sampling_params = SamplingParams(temperature=0,
@@ -142,15 +141,13 @@ class TestDeleteReinitializeHBM:
         prompt = "The largest planet in our solar system is"
         sampling_params = SamplingParams(temperature=0, max_tokens=10)
 
-        reference = llm.generate([prompt],
-                                 sampling_params)[0].outputs[0].text
+        reference = llm.generate([prompt], sampling_params)[0].outputs[0].text
 
         for cycle in range(3):
             llm.collective_rpc("delete_kv_cache")
             llm.collective_rpc("reinitialize_kv_cache")
 
-            result = llm.generate([prompt],
-                                  sampling_params)[0].outputs[0].text
+            result = llm.generate([prompt], sampling_params)[0].outputs[0].text
             overlap = self._word_overlap(reference, result)
             print(f"  Cycle {cycle} overlap: {overlap:.0%}")
             assert overlap >= self._WORD_OVERLAP_THRESHOLD, (
@@ -308,11 +305,11 @@ class TestLogprobsLatency:
     def test_logprobs_latency_overhead(self, llm: LLM, test_prompts):
         """Logprobs overhead should be within 50 % of the no-logprobs run."""
         sp_no_lp = SamplingParams(temperature=0,
-                                   max_tokens=MAX_TOKENS_DEFAULT,
-                                   logprobs=None)
+                                  max_tokens=MAX_TOKENS_DEFAULT,
+                                  logprobs=None)
         sp_lp = SamplingParams(temperature=0,
-                                max_tokens=MAX_TOKENS_DEFAULT,
-                                logprobs=5)
+                               max_tokens=MAX_TOKENS_DEFAULT,
+                               logprobs=5)
 
         # Warm up both paths.
         llm.generate(test_prompts, sp_no_lp)
@@ -354,8 +351,7 @@ class TestGroupSamplingPrefixCache:
         times.sort()
         return times[len(times) // 2]
 
-    def test_group_sampling_hits_prefix_cache(
-            self, llm: LLM):
+    def test_group_sampling_hits_prefix_cache(self, llm: LLM):
         """Repeated group sampling on the same prompt should speed up.
 
         The first call with a prompt populates the prefix cache but does
@@ -382,11 +378,13 @@ class TestGroupSamplingPrefixCache:
         )
 
         # First call – populates the prefix cache for *prompt*.
-        t_first = self._generate_timed(llm, [prompt], sampling_params,
+        t_first = self._generate_timed(llm, [prompt],
+                                       sampling_params,
                                        num_runs=1)
 
         # Second call (same prompt) – should hit the prefix cache.
-        t_cached = self._generate_timed(llm, [prompt], sampling_params,
+        t_cached = self._generate_timed(llm, [prompt],
+                                        sampling_params,
                                         num_runs=3)
 
         speedup = t_first / t_cached if t_cached > 0 else 0
@@ -400,8 +398,7 @@ class TestGroupSamplingPrefixCache:
             f"Expected cached call to be at least as fast as the first "
             f"call, got {speedup:.2f}x")
 
-    def test_group_sampling_produces_diverse_outputs(
-            self, llm: LLM):
+    def test_group_sampling_produces_diverse_outputs(self, llm: LLM):
         """n=16 with temperature > 0 should produce diverse continuations."""
         prompt = "Write a creative one-sentence story about a robot:"
         sampling_params = SamplingParams(
