@@ -146,11 +146,7 @@ def update_json_registry(path: str, new_data: Dict[str, Any]):
             if isinstance(
                     v,
                     dict) and "stats" in v and "latency_avg_ns" in v["stats"]:
-                # The target is now a flattened list, so we can't check its stats!
-                # Since the old stats are stripped out of the registry, we just overwrite
-                # if the target is a list (meaning it exists but we don't know latency).
-                # Actually, in this autotuner, `results.json` contains stats, but `tuned_data/*.json` 
-                # (target) is now flat lists. We should just overwrite it for now if it's flat.
+                
                 if isinstance(target[k], list):
                     target[k] = _extract_flat_config(v)
                     updated += 1

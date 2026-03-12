@@ -46,11 +46,11 @@ Use this tuner if you are changing sequence lengths, head dimensions, or the num
 
 ```bash
 tpu-tune rpa-v3 \
-    --page-size 128 \
-    --head-dim 128 \
-    --num-q-heads 32 \
-    --num-kv-heads 8 \
-    --max-model-len 8192 \
+    --page-size-list 128 \
+    --head-dim-list 128 \
+    --num-q-heads-list 32 \
+    --num-kv-heads-list 8 \
+    --max-model-len-list 8192 \
     --run-name my_llama_tune \
     --update-registry
 ```
@@ -59,13 +59,13 @@ tpu-tune rpa-v3 \
 
 | Option | Default | Description |
 | :--- | :--- | :--- |
-| `--page-size` | `128` | Size of the KV cache page. |
-| `--head-dim` | `128` | Dimension of each attention head. |
-| `--num-q-heads` | `128` | **Global** number of Query heads. |
-| `--num-kv-heads` | `1` | **Global** number of Key/Value heads. |
-| `--q-dtype` | `bfloat16` | Data type for query tensor (e.g., `bfloat16`). |
-| `--kv-dtype` | `bfloat16` | Data type for KV cache. Use `float8_e4m3fn` if the model runs with `--kv-cache-dtype fp8`. |
-| `--max-model-len` | `1024` | Maximum sequence length to tune for. |
+| `--page-size-list` | `128` | Size of the KV cache page. |
+| `--head-dim-list` | `128` | Dimension of each attention head. |
+| `--num-q-heads-list` | `128` | **Global** number of Query heads. |
+| `--num-kv-heads-list` | `1` | **Global** number of Key/Value heads. |
+| `--q-dtype-list` | `bfloat16` | Data type for query tensor (e.g., `bfloat16`). |
+| `--kv-dtype-list` | `bfloat16` | Data type for KV cache. Use `float8_e4m3fn` if the model runs with `--kv-cache-dtype fp8`. |
+| `--max-model-len-list` | `1024` | Maximum sequence length to tune for. |
 | `--tp-size` | `1` | Tensor Parallelism degree. Scales global heads to local heads automatically. |
 | `--benchmarking-method` | `amortized` | `amortized` (recommended) or `xprof`. |
 | `--run-name` | `auto` | Name of the experiment folder in `tuning_runs/`. |
