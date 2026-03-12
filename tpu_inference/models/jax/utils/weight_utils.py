@@ -222,6 +222,8 @@ def shard_put(x: jax.Array,
               mesh: jax.sharding.Mesh | None = None) -> jax.Array:
     # Single device sharding requires this special handling
     # to avoid the recursive jit error.
+    print(f'{shardings=}')
+    print(f'{type(shardings)=}')
     if mesh is None:
         mesh = get_mesh()
 
@@ -230,14 +232,17 @@ def shard_put(x: jax.Array,
         x_mesh = x.sharding.mesh
 
     if math.prod(mesh.axis_sizes) == 1:
-        return general_device_put(x,
-                                  mesh.devices.flatten()[0],
-                                  source_mesh=x_mesh)
+        return jax.device_put(x, mesh.devices.flatten()[0])
+
+    if shardings is None:
+        shardings = ()
 
     if isinstance(shardings, tuple):
         return general_device_put(x,
                                   NamedSharding(mesh, P(*shardings)),
                                   source_mesh=x_mesh)
+    elif isinstance(shardings, P):
+        return general_device_put(x, NamedSharding(mesh, shardings), source_mesh=x_mesh)
     else:
         return general_device_put(x, shardings, source_mesh=x_mesh)
 
