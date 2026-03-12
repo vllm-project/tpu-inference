@@ -45,7 +45,7 @@ def test_quantized_matmul_command(runner):
     with patch("tpu_inference.tools.autotune.v1.quantized_matmul.tune_matmul"
                ) as mock_tune_matmul:
         result = runner.invoke(cli.quantized_matmul, [
-            "--batch-sizes", "128", "--out-in-features", "1024/1024",
+            "--batch-size-list", "128", "--out-in-features-list", "1024/1024",
             "--dry-run", "--num-iterations", "1"
         ])
 

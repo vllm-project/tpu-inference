@@ -166,11 +166,11 @@ def rpa_v3(page_size_list, q_dtype_list, kv_dtype_list, num_q_heads_list, num_kv
 
 
 @main.command(name='quantized-matmul')
-@click.option('--batch-sizes',
+@click.option('--batch-size-list',
               required=True,
               help="Comma separated batch sizes")
 @click.option(
-    '--out-in-features',
+    '--out-in-features-list',
     required=True,
     help=
     "Comma separated out/in features ex: 2048/4096 (divide by TP if sharded)")
@@ -212,19 +212,19 @@ def rpa_v3(page_size_list, q_dtype_list, kv_dtype_list, num_q_heads_list, num_kv
               default='out',
               help="Dimension to split for TP (out or in)",
               show_default=True)
-def quantized_matmul(batch_sizes, out_in_features, x_q_dtype, w_q_dtype,
+def quantized_matmul(batch_size_list, out_in_features_list, x_q_dtype, w_q_dtype,
                      dry_run, num_iterations, num_repeats, benchmarking_method,
                      update_registry, tp_size, tp_split_dim, run_name,
                      output_dir, no_save):
     """Tune Quantized Matmul kernels."""
 
-    batch_sizes_list = parse_arg(batch_sizes, int)
+    batch_sizes_parsed = parse_arg(batch_size_list, int)
 
     # Custom parsing for out/in features tuple list
     # Still doing this manually as it's specific tuple parsing
-    out_in_features_list = [
+    out_in_features_parsed = [
         tuple(int(x) for x in feature.split('/'))
-        for feature in out_in_features.split(',')
+        for feature in out_in_features_list.split(',')
     ]
 
     if update_registry and dry_run:
@@ -233,8 +233,8 @@ def quantized_matmul(batch_sizes, out_in_features, x_q_dtype, w_q_dtype,
         )
         update_registry = False
 
-    matmul_lib.tune_matmul(batch_sizes=batch_sizes_list,
-                           out_in_features=out_in_features_list,
+    matmul_lib.tune_matmul(batch_sizes=batch_sizes_parsed,
+                           out_in_features=out_in_features_parsed,
                            x_q_dtype=x_q_dtype,
                            w_q_dtype=w_q_dtype,
                            dry_run=dry_run,

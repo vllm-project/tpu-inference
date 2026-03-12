@@ -78,8 +78,8 @@ Use this tuner for linear layers, such as MLP blocks or input/output projections
 
 ```bash
 tpu-tune quantized-matmul \
-    --batch-sizes 16,32,64 \
-    --out-in-features 4096/12288 \
+    --batch-size-list 16,32,64 \
+    --out-in-features-list 4096/12288 \
     --tp-size 4 \
     --tp-split-dim out \
     --update-registry
@@ -89,8 +89,8 @@ tpu-tune quantized-matmul \
 
 | Option | Default | Description |
 | :--- | :--- | :--- |
-| `--batch-sizes` | *(Required)* | Comma-separated list of batch sizes (e.g., `16,32`). |
-| `--out-in-features` | *(Required)* | Dimensions as `OUT/IN` pairs (e.g., `4096/12288`). |
+| `--batch-size-list` | *(Required)* | Comma-separated list of batch sizes (e.g., `16,32`). |
+| `--out-in-features-list` | *(Required)* | Dimensions as `OUT/IN` pairs (e.g., `4096/12288`). |
 | `--tp-size` | `1` | Tensor Parallelism degree. |
 | `--tp-split-dim` | `out` | Dimension to split: `out` (Column Parallel) or `in` (Row Parallel). |
 | `--x-q-dtype` | `int8` | Quantization type for input activation. |
@@ -98,7 +98,7 @@ tpu-tune quantized-matmul \
 | `--benchmarking-method` | `amortized` | `amortized` (recommended) or `xprof`. |
 | `--update-registry` | `False` | Update JSON registry with best results. |
 
-For the `--out-in-features` argument, format pairs as `OUT/IN`. When using Tensor Parallelism, specify which dimension is split using `--tp-split-dim` (use `out` for Column Parallel and `in` for Row Parallel).
+For the `--out-in-features-list` argument, format pairs as `OUT/IN`. When using Tensor Parallelism, specify which dimension is split using `--tp-split-dim` (use `out` for Column Parallel and `in` for Row Parallel).
 
 ## Benchmarking Methods
 The tools provide two methods for measuring performance.
