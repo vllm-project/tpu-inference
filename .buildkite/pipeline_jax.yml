@@ -97,7 +97,7 @@ steps:
         commands:
           - rm -f .coverage.part1.${TPU_VERSION:-tpu6e}
           - |
-            .buildkite/scripts/run_in_docker.sh bash -c "pip install pytest-cov pytest-split; python3 -m pytest -s -v -x --splits 2 --group 1 --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference tests/ --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --ignore=/workspace/tpu_inference/tests/layers/jax/moe/test_moe.py; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part1.${TPU_VERSION:-tpu6e}; else exit 1; fi"
+            .buildkite/scripts/run_in_docker.sh bash -c "pip install pytest-cov pytest-split; python3 -m pytest -s -v -x --splits 2 --durations-path .test_durations --group 1 --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference tests/ --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --ignore=/workspace/tpu_inference/tests/layers/jax/moe/test_moe.py; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part1.${TPU_VERSION:-tpu6e}; else exit 1; fi"
           - cp /mnt/disks/persist/models/.coverage.part1.${TPU_VERSION:-tpu6e} ./
 
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests part2"
@@ -109,7 +109,7 @@ steps:
         commands:
           - rm -f .coverage.part2.${TPU_VERSION:-tpu6e}
           - |
-            .buildkite/scripts/run_in_docker.sh bash -c "pip install pytest-cov pytest-split; python3 -m pytest -s -v -x --splits 2 --group 2 --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference tests/ --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --ignore=/workspace/tpu_inference/tests/layers/jax/moe/test_moe.py; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part2.${TPU_VERSION:-tpu6e}; else exit 1; fi"
+            .buildkite/scripts/run_in_docker.sh bash -c "pip install pytest-cov pytest-split; python3 -m pytest -s -v -x --splits 2 --durations-path .test_durations --group 2 --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference tests/ --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --ignore=/workspace/tpu_inference/tests/layers/jax/moe/test_moe.py; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part2.${TPU_VERSION:-tpu6e}; else exit 1; fi"
           - cp /mnt/disks/persist/models/.coverage.part2.${TPU_VERSION:-tpu6e} ./
 
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests combine and report"
