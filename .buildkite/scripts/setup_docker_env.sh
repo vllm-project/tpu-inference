@@ -17,6 +17,67 @@
 # Exit on error, exit on unset variable, fail on pipe errors.
 set -euo pipefail
 
+cleanup_docker_resource() {
+  # Define defaults and get the parameter
+  DEFAULT_IMAGES=("vllm-tpu")
+  IMAGE_NAME="${1:-}"
+
+  # Combine image sets
+  COMBINED_IMAGES=("${DEFAULT_IMAGES[@]}")
+  if [[ -n "${IMAGE_NAME}" ]]; then
+    COMBINED_IMAGES+=("${IMAGE_NAME}")
+  fi
+
+  # Deduplicate arrays and remove empty strings
+  mapfile -t TARGET_IMAGES < <(printf "%s\n" "${COMBINED_IMAGES[@]}" | sort -u | grep -v '^$')
+
+  if [[ ${#TARGET_IMAGES[@]} -eq 0 ]]; then
+    echo "No target images provided for cleanup."
+    exit 0
+  fi
+
+  echo "Images to clean up : ${TARGET_IMAGES[*]}"
+
+  # Iterate and cleanup
+  for IMG in "${TARGET_IMAGES[@]}"; do
+    echo "----------------------------------------"
+    echo "Starting cleanup for ${IMG}"
+
+    # Use format to get "Repository ID" and use awk for exact or suffix matching.
+    # $1 == img          -> Matches exact local image (e.g., "vllm-tpu")
+    # $1 ~ "/"img"$"     -> Matches Google Artifact Registry paths (e.g., ".../.../vllm-tpu")
+    OLD_IMAGES=$(docker images --format '{{.Repository}} {{.ID}}' | awk -v img="${IMG}" '$1 == img || $1 ~ "/"img"$" {print $2}' | sort -u)
+    
+    if [[ -n "$OLD_IMAGES" ]]; then
+      echo "Found matching images for ${IMG}. Checking for dependent containers..."
+      
+      TOTAL_CONTAINERS=""
+      for img_id in $OLD_IMAGES; do
+        # Find containers using this image ID
+        TOTAL_CONTAINERS="$TOTAL_CONTAINERS $(docker ps -a -q --filter "ancestor=$img_id")"
+      done
+      
+      # Format and remove any found containers
+      CLEANED_CONTAINERS=$(echo "$TOTAL_CONTAINERS" | tr ' ' '\n' | grep -v '^$' | sort -u || true)
+      if [[ -n "$CLEANED_CONTAINERS" ]]; then
+        echo "Removing leftover containers using ${IMG} image(s)..."
+        echo "$CLEANED_CONTAINERS" | xargs -r docker rm -f
+      fi
+      
+      echo "Removing old ${IMG} image(s) by ID..."
+      # Using ID directly ensures all tags of that specific image are untagged and removed
+      echo "$OLD_IMAGES" | xargs -r docker rmi -f
+    else
+      echo "No images matching ${IMG} found to clean up."
+    fi
+  done
+
+  echo "Pruning old Docker build cache..."
+  docker builder prune -f
+
+  echo "Cleanup complete."
+}
+
 setup_environment() {
   local image_name_param=${1:-"vllm-tpu"}
   local should_push=${2:-"false"}
@@ -42,37 +103,7 @@ setup_environment() {
 
   # shellcheck disable=1091
   source /etc/environment
-
-  # Cleanup of existing containers and images.
-  echo "Starting cleanup for ${IMAGE_NAME}..."
-  # Get all unique image IDs for the repository
-  old_images=$(docker images "${IMAGE_NAME}" -q | uniq)
-  total_containers=""
-
-  if [ -n "$old_images" ]; then
-      echo "Found old ${IMAGE_NAME} images. Checking for dependent containers..."
-      # Loop through each image ID and find any containers (running or not) using it.
-      for img_id in $old_images;
-      do
-          total_containers="$total_containers $(docker ps -a -q --filter "ancestor=$img_id")"
-      done
-
-      # Remove any found containers
-      if [ -n "$total_containers" ]; then
-          echo "Removing leftover containers using ${IMAGE_NAME} image(s)..."
-          echo "$total_containers" | xargs -n1 | sort -u | xargs -r docker rm -f
-      fi
-
-      echo "Removing old ${IMAGE_NAME} image(s)..."
-      docker rmi -f "$old_images"
-  else
-      echo "No ${IMAGE_NAME} images found to clean up."
-  fi
-
-  echo "Pruning old Docker build cache..."
-  docker builder prune -f
-
-  echo "Cleanup complete."
+  cleanup_docker_resource "${IMAGE_NAME}"
 
   if [ -z "${BUILDKITE:-}" ]; then
       VLLM_COMMIT_HASH=""

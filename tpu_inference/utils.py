@@ -20,6 +20,7 @@ from vllm import envs as vllm_envs
 from vllm import utils
 
 from tpu_inference import envs
+from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.logger import init_logger
 
 GBYTES = 1024 * 1024 * 1024
@@ -284,16 +285,16 @@ def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
 
     Args:
         mesh: The JAX mesh to use for device placement
-        *args: Positional arguments to pass to jax.device_put
+        *args: Positional arguments to pass to general_device_put
         sharding: Optional sharding specification. If None, uses PartitionSpec(None)
-        **kwargs: Keyword arguments to pass to jax.device_put
+        **kwargs: Keyword arguments to pass to general_device_put
 
     Returns:
         A JAX array placed on the specified devices
     """
     if sharding is None:
         sharding = NamedSharding(mesh, PartitionSpec(None))
-    return jax.device_put(*args, device=sharding, **kwargs)
+    return general_device_put(*args, sharding=sharding, **kwargs)
 
 
 def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
