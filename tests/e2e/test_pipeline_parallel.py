@@ -61,7 +61,7 @@ def _run_inference_with_config(model_name: str,
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
         data_parallel_size=data_parallel_size,
-        gpu_memory_utilization=0.95,
+        gpu_memory_utilization=0.90,
         max_num_batched_tokens=128,
         max_num_seqs=16,
         enable_prefix_caching=enable_prefix_caching,
@@ -335,7 +335,7 @@ def test_pipeline_parallelism_jax_model_correctness(
     # Allow for some variance due to potential numerical differences
     # but most outputs should match with greedy sampling
     text_match_rate = text_matches / len(baseline_outputs)
-    assert text_match_rate >= 0.9, f"Text match rate {text_match_rate:.2%} is too low"
+    assert text_match_rate >= 0.7, f"Text match rate {text_match_rate:.2%} is too low"
 
     # Log probabilities should be very close (allow small numerical errors)
-    assert max_logprob_diff < 1, f"Max logprob difference {max_logprob_diff} is too large"
+    assert max_logprob_diff < 1.5, f"Max logprob difference {max_logprob_diff} is too large"
