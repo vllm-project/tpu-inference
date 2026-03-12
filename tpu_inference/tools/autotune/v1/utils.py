@@ -395,26 +395,6 @@ class XprofProfileSession(contextlib.AbstractContextManager):
                 self._profile_tempdir = None
 
 
-def amortized_wrapper(fn, n_iter: int = 100):
-    """Wraps a JAX function in a lax.fori_loop to run n_iter times on device.
-    
-    Used for amortizing python dispatch overhead when XProf is unavailable.
-    """
-
-    def looped_fn(*args, **kwargs):
-        # Run once to get initial value and ensure invariant shape for loop carry
-        init_val = fn(*args, **kwargs)
-
-        def body(i, val):
-            # We ignore the incoming `val` (carry) and re-run fn to get new output
-            # (or simple dependencies if needed, but for benchmark reuse inputs is fine)
-            return fn(*args, **kwargs)
-
-        # Run n_iter more times
-        return jax.lax.fori_loop(0, n_iter, body, init_val)
-
-    return looped_fn
-
 
 # --- Sharding Utilities ---
 

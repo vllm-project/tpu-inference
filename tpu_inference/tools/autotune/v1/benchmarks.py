@@ -54,19 +54,13 @@ def _benchmark_amortized(
     """Benchmarks using repeated amortized loops."""
     samples_ns = []
 
-    # Prepare amortized function
-    # Note: compiled_fn is already the amortized_jit function from the caller
-    # but strictly speaking, the caller constructs the amortized function.
-    # To keep it generic, we expect the caller to pass a function that
-    # executes 'num_iterations' internally.
-
     # Warmup
-    outputs = compiled_fn(*args)
-    utils.block_until_ready(outputs)
+    utils.block_until_ready(compiled_fn(*args))
 
     for _ in range(num_repeats):
         start = time.perf_counter_ns()
-        outputs = compiled_fn(*args)
+        for _ in range(num_iterations):
+            outputs = compiled_fn(*args)
         utils.block_until_ready(outputs)
         end = time.perf_counter_ns()
 
@@ -92,8 +86,7 @@ def _benchmark_xprof(
     for _ in range(num_repeats):
         try:
             with utils.XprofProfileSession() as session:
-                outputs = compiled_fn(*args)
-                utils.block_until_ready(outputs)
+                utils.block_until_ready(compiled_fn(*args))
 
             # session.total_op_time is now in ns (from utils update)
             samples_ns.append(session.total_op_time)
@@ -116,12 +109,8 @@ def benchmark_kernel(
     """Main entry point for benchmarking."""
 
     if method == BenchmarkMethod.AMORTIZED:
-        # Wrap in amortized loop
-        amortized_fn = utils.amortized_wrapper(benchmark_fn,
-                                               n_iter=num_iterations)
-        amortized_jit = jax.jit(amortized_fn)
-        # Pass the JIT-ed amortized function
-        samples_ns = _benchmark_amortized(amortized_jit, args, num_iterations,
+        compiled_fn = jax.jit(benchmark_fn)
+        samples_ns = _benchmark_amortized(compiled_fn, args, num_iterations,
                                           num_repeats)
 
     elif method == BenchmarkMethod.XPROF:

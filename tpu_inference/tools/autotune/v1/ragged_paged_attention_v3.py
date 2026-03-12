@@ -172,13 +172,6 @@ def benchmark_kernel(
     rpa_fn = (mod.ragged_paged_attention_hd64
               if head_dim == 64 else mod.ragged_paged_attention)
 
-    # Validation
-    kwargs = {
-        "num_kv_pages_per_block": num_kv_pages_per_block,
-        "num_queries_per_block": num_q_per_block,
-        "vmem_limit_bytes": vmem_limit_bytes,
-    }
-
     # Prepare Inputs
     cu_q_lens = jnp.array(cu_q_lens, dtype=jnp.int32)
     kv_lens = jnp.array(kv_lens, dtype=jnp.int32)
@@ -226,6 +219,11 @@ def benchmark_kernel(
         return benchmarks.BenchmarkResult(float("inf"), 0.0, 0.0, 0.0, [], {})
 
     # Validate
+    kwargs = {
+        "num_kv_pages_per_block": num_kv_pages_per_block,
+        "num_queries_per_block": num_q_per_block,
+        "vmem_limit_bytes": vmem_limit_bytes,
+    }
     try:
         mod.dynamic_validate_inputs(*args, **kwargs)
     except Exception as e:

@@ -128,8 +128,6 @@ def get_device_name(num_devices: int | None = None):
     elif kind.endswith('p'):
         kind = kind[:-1]
         suffix = 'p'
-    elif kind == 'TPU7x':
-        kind = 'TPU v7'
     assert kind.startswith('TPU v'), kind
     kind += suffix
     if num_devices is not None:
@@ -139,11 +137,7 @@ def get_device_name(num_devices: int | None = None):
 
 def get_tpu_generation() -> int:
     """Returns the numeric generation of the TPU (e.g. 5, 6, 7)."""
-    try:
-        name = get_device_name()
-    except RuntimeError:
-        # Not a TPU device
-        return -1
+    name = get_device_name()
 
     # format is "TPU v{gen}{suffix}"
     # e.g. "TPU v5e", "TPU v7", "TPU v6e", "TPU v10"
