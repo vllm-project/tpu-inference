@@ -52,3 +52,4 @@ def assert_is_supported_dtype(dtype: jnp.dtype) -> None:
             jnp.uint4,
     ]:
         raise ValueError(f"No support for {dtype=}.")
+
