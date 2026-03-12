@@ -225,6 +225,10 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         assert self.block_quant
         assert not self.moe.has_bias
 
+        if hasattr(layer.router, "e_score_correction_bias"):
+            layer.router.e_score_correction_bias = torch_view(t2j(layer.router.e_score_correction_bias, use_dlpack=False))
+
+
         w13_weight = t2j(layer.w13_weight, use_dlpack=False)
         w13_weight_scale = t2j(layer.w13_weight_scale_inv, use_dlpack=False)
 
