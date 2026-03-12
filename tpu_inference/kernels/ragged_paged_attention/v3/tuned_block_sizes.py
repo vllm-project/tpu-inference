@@ -54,19 +54,15 @@ def _load_tuning_data(device_name: str) -> dict:
 
     file_path = _get_tuning_file_path(device_name)
     if not os.path.exists(file_path):
-        # Cache None to avoid repeated filesystem checks
-        _TUNING_DATA_CACHE[device_name] = None
-        return None
+        raise FileNotFoundError(
+            f"Tuning data not found for device '{device_name}' at {file_path}. "
+            "Ensure the tpu_inference package is installed correctly."
+        )
 
-    try:
-        with open(file_path, 'r') as f:
-            data = json.load(f)
-            _TUNING_DATA_CACHE[device_name] = data
-            return data
-    except Exception as e:
-        logger.error(f"Failed to load tuning data from {file_path}: {e}")
-        _TUNING_DATA_CACHE[device_name] = None
-        return None
+    with open(file_path, 'r') as f:
+        data = json.load(f)
+        _TUNING_DATA_CACHE[device_name] = data
+        return data
 
 
 def get_tuned_block_sizes(
@@ -109,7 +105,7 @@ def get_tuned_block_sizes(
             else:
                 bkv_p, bq = entry
 
-        except (KeyError, TypeError):
+        except KeyError:
             # Not found in JSON
             pass
 
@@ -190,7 +186,11 @@ def get_simplified_raw_key(
     sliding_window,
 ):
     """Get the simplified key."""
-    if head_dim == 64:
+    # The `hd64` optimized kernels currently only support MHA
+    # (where actual_num_q_heads == actual_num_kv_heads).
+    # If the model is GQA/MQA with head_dim=64 (like Qwen), 
+    # we fall back to the standard padded 128 logic below.
+    if head_dim == 64 and actual_num_q_heads == actual_num_kv_heads:
         # Legacy logic from tuned_block_sizes_hd64.py
         # Maintains strict parity for head_dim=64 kernels
         # assert head_dim == 64
@@ -213,7 +213,7 @@ def get_simplified_raw_key(
             sliding_window,
         )
 
-    # Standard logic for other head dimensions
+    # Standard logic for other head dimensions (and head_dim=64 GQA)
     assert actual_num_q_heads % actual_num_kv_heads == 0
     actual_num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
     q_packing = get_dtype_packing(q_dtype)
