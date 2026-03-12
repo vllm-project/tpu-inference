@@ -1,10 +1,10 @@
-# Copyright 2026 Google LLC
+# Copyright 2024 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,509 +12,333 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import jax
-import jax.numpy as jnp
-from absl.testing import absltest, parameterized
-from jax._src import test_util as jtu
+import functools
 
-from tpu_inference.kernels.megablox.gmm_v2 import TileSizes, gmm_v2
+from absl.testing import absltest
+from absl.testing import parameterized
+import jax
+from jax._src import test_util as jtu
+import jax.experimental.pallas.ops.tpu.megablox as mblx
+import jax.numpy as jnp
+import numpy as np
+
+import hypothesis as hp
+import hypothesis.strategies as hps
 
 jax.config.parse_flags_with_absl()
 
+P = jax.sharding.PartitionSpec
 
-def get_group_sizes(batch_size: int, num_groups: int) -> jax.Array:
-    distribution = jax.random.uniform(jax.random.key(0), (num_groups - 1, ),
-                                      dtype=jnp.float32)
-    distribution = distribution / jnp.sum(distribution)
-    group_sizes = jnp.floor(distribution * batch_size).astype(jnp.int32)
-    return jnp.append(group_sizes, batch_size - jnp.sum(group_sizes))
+partial = functools.partial
 
+hp.settings.register_profile(
+    "deterministic",
+    database=None,
+    derandomize=True,
+    deadline=None,
+    max_examples=10,
+    print_blob=True,
+)
+hp.settings.load_profile("deterministic")
 
-def quantize_tensor(x: jax.Array,
-                    dtype: jnp.dtype,
-                    axis: int = -1,
-                    block_size: int = 256):
-    if jnp.issubdtype(dtype, jnp.integer):
-        dtype_info = jnp.iinfo(dtype)
-        max_val = int(dtype_info.max)
-        min_val = int(dtype_info.min)
-    else:
-        dtype_info = jnp.finfo(dtype)
-        max_val = float(dtype_info.max)
-        min_val = float(dtype_info.min)
+def seed_strategy() -> hps.SearchStrategy[int]:
+  return hps.integers(min_value=0, max_value=4)
 
-    orig_shape = x.shape
-    blocked_shape = orig_shape[:axis] + (-1,
-                                         block_size) + orig_shape[axis + 1:]
-    x_blocked = x.reshape(blocked_shape)
+@hps.composite
+def group_strategy(
+    draw: hps.DrawFn,
+    max_groups: int = 32,
+    max_stride: int = 32,
+    min_groups: int = 1,
+) -> tuple[int, int]:
+  assert max_stride <= max_groups
 
-    x_blocked_abs_max = jnp.max(jnp.abs(x_blocked),
-                                axis=axis + 1,
-                                keepdims=True)
-    scale = x_blocked_abs_max / max_val
-    x_blocked_q = jnp.clip(x_blocked / scale, min_val, max_val).astype(dtype)
+  # Sample the number of groups owned by each shard.
+  group_stride = draw(hps.integers(min_value=1, max_value=max_stride))
 
-    x_q = x_blocked_q.reshape(orig_shape)
-    x_q = jnp.nan_to_num(x_q)
-    scale = scale.squeeze(axis=axis + 1).astype(jnp.float32)
-    return x_q, scale
+  # Sample the number of groups as a multiple of the stride to ensure that we
+  # have an equal number of groups per shard. Round down s.t. num_groups <=
+  # max_groups.
+  num_groups = group_stride * draw(
+      hps.integers(min_value=min_groups, max_value=max_groups // group_stride)
+  )
+  return num_groups, group_stride
 
+@hps.composite
+def group_sizes_strategy(
+    draw: hps.DrawFn, m: int, num_groups: int
+) -> jnp.ndarray:
+  # Randomly sample the ends of the groups in the m-dimension. Let the fuzzer
+  # sample with replacement so that it's possible to get zero-sized groups. Get
+  # 'num_groups - 1' run ends. The final group will end at 'm'.
+  ends_no_final = np.sort(
+      np.array(
+          [
+              draw(hps.integers(min_value=0, max_value=m))
+              for _ in range(num_groups - 1)
+          ],
+          dtype=np.int32,
+      ),
+  )
+  ends = np.concatenate([ends_no_final, np.array([m], dtype=np.int32)])
+
+  # Calculate the run starts by shifting ends 1 to the right. The first run
+  # starts at zero.
+  starts = np.concatenate([np.zeros(1, dtype=np.int32), ends_no_final])
+  return jnp.array(ends - starts, dtype=jnp.int32)
+
+GROUPED_MATMUL_TESTS = (
+    (128, 128, 128),  # Small
+    (512, 2048, 256),  # Big
+    (128, 8, 16),  # Test partial tiles.
+)
+
+def random_dense(
+    shape: tuple[int, ...],
+    key: jax.Array,
+    dtype: jnp.dtype,
+    limit: int | None = None,
+) -> jnp.ndarray:
+  if limit is None:
+    limit = 1 / np.prod(shape)
+  x = jax.random.uniform(key, shape, dtype, minval=-limit, maxval=limit)  # pylint: disable=invalid-unary-operand-type
+  return x.astype(jnp.bfloat16).astype(dtype)
+
+def dot(
+    lhs: jnp.ndarray,
+    rhs: jnp.ndarray,
+    transpose_lhs: bool = False,
+    transpose_rhs: bool = False,
+    preferred_element_type: jnp.dtype = jnp.float32,
+) -> jnp.ndarray:
+  lhs = jnp.transpose(lhs) if transpose_lhs else lhs
+  rhs = jnp.transpose(rhs) if transpose_rhs else rhs
+  return jax.lax.dot(lhs, rhs, preferred_element_type=preferred_element_type)
 
 def reference_gmm(
-    lhs: jax.Array,
-    rhs: jax.Array,
-    group_sizes: jax.Array,
-    rhs_scale: jax.Array | None = None,
-    rhs_bias: jax.Array | None = None,
-    group_offset: jax.Array | None = None,
-):
-    num_tokens = lhs.shape[0]
-    num_groups, in_size, out_size = rhs.shape
-    assert lhs.shape[1] == in_size
+    lhs: jnp.ndarray,
+    rhs: jnp.ndarray,
+    group_sizes: jnp.ndarray,
+    preferred_element_type: jnp.dtype = jnp.float32,
+) -> jnp.ndarray:
 
-    if group_offset is None:
-        group_offset = jnp.array([0], dtype=jnp.int32)
-    elif jnp.isscalar(group_offset):
-        assert group_offset.size == 1
-        if jnp.isscalar(group_offset):
-            group_offset = group_offset[None]
+  start = 0
+  out = []
+  for i, size in enumerate(group_sizes):
+    result = dot(
+        lhs[start : start + size, :],
+        rhs[i, :, :],
+        preferred_element_type=preferred_element_type,
+    )
 
-    if rhs_scale is not None:
-        num_blocks = rhs_scale.shape[1]
-    else:
-        num_blocks = 1
-    block_size = in_size // num_blocks
+    out.append(result)
+    start += group_sizes[i]
+  return jnp.concatenate(out, axis=0)
 
-    start = 0
-    gmm_out = []
-    for global_group in range(group_sizes.size):
-        group_size = group_sizes[global_group]
+def tolerances(
+    lhs_dtype: jnp.dtype, rhs_dtype: jnp.dtype, out_dtype: jnp.dtype
+) -> tuple[float, float]:
+  if (
+      lhs_dtype == jnp.bfloat16
+      or rhs_dtype == jnp.bfloat16
+      or out_dtype == jnp.bfloat16
+  ):
+    if jtu.is_device_tpu(7):
+      return 2e-2, 1e-2
+    return 1e-3, 1e-2  # atol, rtol
+  return 1e-3, 1e-5  # atol, rtol
 
-        group = global_group - group_offset[0]
-        end = min(start + group_size, num_tokens)
-        group_size = end - start
-        if 0 <= group and group < num_groups:
-            lhs_slice = lhs[start:end]
-            rhs_slice = rhs[group]
-
-            out = 0
-            for block in range(num_blocks):
-                block_start = block * block_size
-                block_end = block_start + block_size
-                lhs_block = lhs_slice[:, block_start:block_end].astype(
-                    jnp.float32)
-                rhs_block = rhs_slice[block_start:block_end, :].astype(
-                    jnp.float32)
-
-                acc = jnp.einsum("bd,dh->bh", lhs_block, rhs_block)
-                if rhs_scale is not None:
-                    acc *= rhs_scale[group][block]
-                out += acc
-            if rhs_bias is not None:
-                out = out + rhs_bias[group]
-        else:
-            out = jnp.zeros((group_size, out_size), dtype=lhs.dtype)
-
-        gmm_out.append(out.astype(lhs.dtype))
-        start = end
-
-    return jnp.concat(gmm_out, axis=0)
-
-
+# TODO(tgale): Fix errors with strict dtype promotion.
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
-class GmmTest(jtu.JaxTestCase):
+@jtu.thread_unsafe_test_class()  # hypothesis is not thread safe
+class GroupedMatmulTest(jtu.JaxTestCase):
 
-    @parameterized.product(
-        batch_size=[128],
-        in_size=[512, 1024],
-        out_size=[512, 1024],
-        num_groups=[16, 32],
-        has_bias=[True, False],
-        group_offset=[0, 2, 3],
+  def setUp(self):
+    if not jtu.test_device_matches(["tpu"]):
+      self.skipTest("Test requires TPU device.")
+
+    super().setUp()
+    self.key = jax.random.PRNGKey(1234)
+
+  def assert_allclose(
+      self,
+      out: jnp.ndarray,
+      expected_out: jnp.ndarray,
+      *,
+      atol: float = 1e-5,
+      rtol: float = 1e-5,
+  ):
+    self.assertEqual(out.dtype, expected_out.dtype)
+    np.testing.assert_allclose(
+        out.astype(jnp.float32),
+        expected_out.astype(jnp.float32),
+        atol=atol,
+        rtol=rtol,
     )
-    def test_gmm(self, batch_size, in_size, out_size, num_groups, has_bias,
-                 group_offset):
-        num_local_groups = num_groups - group_offset
-        key = jax.random.key(0)
 
-        lhs = jax.random.normal(key, (batch_size, in_size), dtype=jnp.bfloat16)
-        rhs = jax.random.normal(key, (num_local_groups, in_size, out_size),
-                                dtype=jnp.bfloat16)
-        rhs_bias = None
-        if has_bias:
-            rhs_bias = jax.random.normal(key, (num_local_groups, 1, out_size),
-                                         dtype=jnp.bfloat16)
-
-        group_sizes = get_group_sizes(batch_size, num_groups)
-        group_offset = jnp.array(group_offset, dtype=jnp.int32)
-
-        expected = reference_gmm(lhs,
-                                 rhs,
-                                 group_sizes,
-                                 rhs_bias=rhs_bias,
-                                 group_offset=group_offset)
-
-        actual = gmm_v2(
-            lhs,
-            rhs,
-            group_sizes,
-            rhs_bias=rhs_bias,
-            group_offset=group_offset,
-        )
-
-        self.assertArraysAllClose(actual, expected)
-
-    @parameterized.product(
-        batch_size=[128],
-        in_size=[512, 1024],
-        out_size=[512, 1024],
-        num_groups=[16, 32],
-        has_bias=[True, False],
-        weight_dtype=[jnp.int8, jnp.float8_e4m3fn, jnp.float4_e2m1fn],
-        block_size=[64, 128, 256, 512],
-        group_offset=[0, 2, 3],
+  def gmm_test(
+      self,
+      m: int,
+      k: int,
+      n: int,
+      data: hps.SearchStrategy[hps.DataObject],
+      interpret: bool = False,
+  ):
+    seed = data.draw(seed_strategy())
+    num_groups, _ = data.draw(group_strategy(max_stride=1))
+    lhs_dtype, rhs_dtype, out_dtype = (
+        data.draw(hps.sampled_from([jnp.float32, jnp.bfloat16]))
+        for _ in range(3)
     )
-    def test_gmm_weight_quantized(
-        self,
-        batch_size,
-        in_size,
-        out_size,
-        num_groups,
-        has_bias,
-        weight_dtype,
-        block_size,
-        group_offset,
+    transpose_rhs = data.draw(hps.booleans())
+
+    key = jax.random.key(seed)
+    k1, k2 = jax.random.split(key, 2)
+    lhs = random_dense((m, k), k1, lhs_dtype, limit=1)
+    rhs = random_dense((num_groups, k, n), k2, rhs_dtype, limit=1)
+    group_sizes = data.draw(group_sizes_strategy(m=m, num_groups=num_groups))
+
+    out, vjpfun = jax.vjp(
+        partial(
+            mblx.gmm,
+            preferred_element_type=out_dtype,
+            transpose_rhs=transpose_rhs,
+            interpret=interpret,
+        ),
+        lhs,
+        rhs.swapaxes(1, 2) if transpose_rhs else rhs,
+        group_sizes,
+    )
+
+    def reference_fn(lhs, rhs, group_sizes, preferred_element_type):
+      rhs = rhs.swapaxes(1, 2) if transpose_rhs else rhs
+      return reference_gmm(
+          lhs, rhs, group_sizes, preferred_element_type=preferred_element_type
+      )
+
+    expected_out, reference_vjpfun = jax.vjp(
+        partial(reference_fn, preferred_element_type=out_dtype),
+        lhs,
+        rhs.swapaxes(1, 2) if transpose_rhs else rhs,
+        group_sizes,
+    )
+    self.assertEqual(out.dtype, out_dtype)
+    self.assertEqual(expected_out.dtype, out_dtype)
+
+    atol, rtol = tolerances(lhs_dtype, rhs_dtype, out_dtype)
+    self.assert_allclose(out, expected_out, atol=atol, rtol=rtol)
+
+    cotangent = random_dense((m, n), k1, out_dtype, limit=1)
+    grad_lhs, grad_rhs, *_ = vjpfun(cotangent)
+    expected_grad_lhs, expected_grad_rhs, *_ = reference_vjpfun(cotangent)
+    self.assert_allclose(grad_lhs, expected_grad_lhs, atol=atol, rtol=rtol)
+    self.assert_allclose(grad_rhs, expected_grad_rhs, atol=atol, rtol=rtol)
+
+  @parameterized.parameters(*GROUPED_MATMUL_TESTS)
+  @hp.given(hps.data())
+  def test_gmm(
+      self,
+      m: int,
+      k: int,
+      n: int,
+      data: hps.SearchStrategy[hps.DataObject],
+  ):
+    self.gmm_test(m, k, n, data)
+
+  # NOTE: Run fewer tests with interpret mode. We just want to sanity check that
+  # changes do not break running these kernels with interpret=True.
+  @parameterized.parameters(*GROUPED_MATMUL_TESTS[0:1])
+  @hp.given(hps.data())
+  def test_gmm_interpret(
+      self,
+      m: int,
+      k: int,
+      n: int,
+      data: hps.SearchStrategy[hps.DataObject],
+  ):
+    self.skipTest("interpret mode with dynamic grids is unsupported")
+    self.gmm_test(
+        m,
+        k,
+        n,
+        data=data,
+        interpret=True,
+    )
+
+  @parameterized.parameters(*GROUPED_MATMUL_TESTS)
+  @hp.given(hps.data())
+  def test_gmm_sharded_groups(
+      self,
+      m: int,
+      k: int,
+      n: int,
+      data: hps.SearchStrategy[hps.DataObject],
+  ):
+    if not jtu.is_cloud_tpu_at_least(2026, 2, 24):
+      self.skipTest("Known regression in libtpu 0.0.36")
+    seed = data.draw(seed_strategy())
+    num_groups, group_stride = data.draw(group_strategy())
+    lhs_dtype, rhs_dtype, out_dtype = (
+        data.draw(hps.sampled_from([jnp.float32, jnp.bfloat16]))
+        for _ in range(3)
+    )
+
+    key = jax.random.key(seed)
+    k1, k2 = jax.random.split(key, 2)
+    lhs = random_dense((m, k), k1, lhs_dtype, limit=1)
+    rhs = random_dense((num_groups, k, n), k2, rhs_dtype, limit=1)
+    group_sizes = data.draw(group_sizes_strategy(m=m, num_groups=num_groups))
+
+    out, shard_vjpfun = jax.vjp(
+        partial(mblx.gmm, preferred_element_type=out_dtype),
+        lhs,
+        rhs[0:group_stride],
+        group_sizes,
+    )
+    vjpfuns = [shard_vjpfun]
+    for group_offset in range(group_stride, num_groups, group_stride):
+      out, shard_vjpfun = jax.vjp(
+          lambda lhs, rhs, group_sizes, out: mblx.gmm(
+              lhs,
+              rhs,
+              group_sizes,
+              out_dtype,
+              group_offset=jnp.array(group_offset, dtype=jnp.int32),  # pylint: disable=cell-var-from-loop
+              existing_out=out,
+          ),
+          lhs,
+          rhs[group_offset : group_offset + group_stride],
+          group_sizes,
+          out,
+      )
+      vjpfuns.append(shard_vjpfun)
+
+    expected_out, reference_vjpfun = jax.vjp(
+        partial(reference_gmm, preferred_element_type=out_dtype),
+        lhs,
+        rhs,
+        group_sizes,
+    )
+    self.assertEqual(out.dtype, out_dtype)
+    self.assertEqual(expected_out.dtype, out_dtype)
+    atol, rtol = tolerances(lhs_dtype, rhs_dtype, out_dtype)
+    self.assert_allclose(out, expected_out, atol=atol, rtol=rtol)
+
+    cotangent = random_dense((m, n), k1, out_dtype, limit=1)
+    shard_grad_lhs, shard_grad_rhs, *_ = vjpfuns[0](cotangent)
+    grad_lhs = shard_grad_lhs
+    grad_rhs = [shard_grad_rhs]
+    for i, group_offset in enumerate(
+        range(group_stride, num_groups, group_stride)
     ):
-        if weight_dtype == jnp.float4_e2m1fn and not jtu.is_device_tpu_at_least(
-                version=7):
-            self.skipTest("Expect TPUv7+")
-        num_local_groups = num_groups - group_offset
-        key = jax.random.key(0)
-
-        lhs = jax.random.uniform(key, (batch_size, in_size), jnp.bfloat16, -1,
-                                 1)
-        rhs = jax.random.uniform(key, (num_local_groups, in_size, out_size),
-                                 jnp.bfloat16, -1, 1)
-        rhs_q, rhs_scale = quantize_tensor(rhs,
-                                           weight_dtype,
-                                           axis=1,
-                                           block_size=block_size)
-        rhs_scale = jnp.expand_dims(rhs_scale, axis=2)
-
-        rhs_bias = None
-        if has_bias:
-            rhs_bias = jax.random.normal(key, (num_local_groups, 1, out_size),
-                                         dtype=jnp.bfloat16)
-
-        group_sizes = get_group_sizes(batch_size, num_groups)
-        group_offset = jnp.array(group_offset, dtype=jnp.int32)
-
-        expected = reference_gmm(
-            lhs,
-            rhs_q,
-            group_sizes,
-            rhs_scale=rhs_scale,
-            rhs_bias=rhs_bias,
-            group_offset=group_offset,
-        )
-
-        actual = gmm_v2(
-            lhs,
-            rhs_q,
-            group_sizes,
-            rhs_scale=rhs_scale,
-            group_offset=group_offset,
-            rhs_bias=rhs_bias,
-            maybe_quantize_lhs=False,
-        ).astype(lhs.dtype)
-
-        self.assertArraysAllClose(actual, expected, atol=3e-1, rtol=3e-1)
-
-    @parameterized.product(
-        batch_size=[128],
-        in_size=[1024],
-        out_size=[512],
-        num_groups=[16],
-        weight_dtype=[jnp.int8, jnp.float8_e4m3fn, jnp.float4_e2m1fn],
-        block_size=[1024],
-        tile_k=[128, 256, 512],
-        group_offset=[0],
-    )
-    def test_gmm_weight_quantized_block_larger_than_tile_k(
-        self,
-        batch_size,
-        in_size,
-        out_size,
-        num_groups,
-        weight_dtype,
-        block_size,
-        tile_k,
-        group_offset,
-    ):
-        """Test that quant_block_size > tile_k is handled correctly."""
-        if weight_dtype == jnp.float4_e2m1fn and not jtu.is_device_tpu_at_least(
-                version=7):
-            self.skipTest("Expect TPUv7+")
-        num_local_groups = num_groups - group_offset
-        key = jax.random.key(0)
-
-        lhs = jax.random.uniform(key, (batch_size, in_size), jnp.bfloat16, -1,
-                                 1)
-        rhs = jax.random.uniform(key, (num_local_groups, in_size, out_size),
-                                 jnp.bfloat16, -1, 1)
-        rhs_q, rhs_scale = quantize_tensor(rhs,
-                                           weight_dtype,
-                                           axis=1,
-                                           block_size=block_size)
-        rhs_scale = jnp.expand_dims(rhs_scale, axis=2)
-
-        group_sizes = get_group_sizes(batch_size, num_groups)
-        group_offset = jnp.array(group_offset, dtype=jnp.int32)
-
-        expected = reference_gmm(
-            lhs,
-            rhs_q,
-            group_sizes,
-            rhs_scale=rhs_scale,
-            group_offset=group_offset,
-        )
-
-        tile_info = TileSizes(tile_m=128, tile_k=tile_k, tile_n=out_size)
-        actual = gmm_v2(
-            lhs,
-            rhs_q,
-            group_sizes,
-            rhs_scale=rhs_scale,
-            group_offset=group_offset,
-            tile_info=tile_info,
-            maybe_quantize_lhs=False,
-        ).astype(lhs.dtype)
-
-        self.assertArraysAllClose(actual, expected, atol=3e-1, rtol=3e-1)
-
-    @parameterized.product(
-        batch_size=[128],
-        in_size=[1024],
-        out_size=[512],
-        num_groups=[16],
-        weight_dtype=[jnp.int8, jnp.float8_e4m3fn],
-        block_size=[1024],
-        tile_k=[128, 256, 512],
-        group_offset=[0],
-    )
-    def test_gmm_activation_weight_quantized_block_larger_than_tile_k(
-        self,
-        batch_size,
-        in_size,
-        out_size,
-        num_groups,
-        weight_dtype,
-        block_size,
-        tile_k,
-        group_offset,
-    ):
-        """Test activation+weight quantized path with quant_block_size > tile_k."""
-        num_local_groups = num_groups - group_offset
-        key = jax.random.key(0)
-
-        lhs = jax.random.uniform(key, (batch_size, in_size), jnp.bfloat16, -1,
-                                 1)
-        rhs = jax.random.uniform(key, (num_local_groups, in_size, out_size),
-                                 jnp.bfloat16, -1, 1)
-        rhs_q, rhs_scale = quantize_tensor(rhs,
-                                           weight_dtype,
-                                           axis=1,
-                                           block_size=block_size)
-        rhs_scale = jnp.expand_dims(rhs_scale, axis=2)
-
-        group_sizes = get_group_sizes(batch_size, num_groups)
-        group_offset = jnp.array(group_offset, dtype=jnp.int32)
-
-        expected = reference_gmm(
-            lhs,
-            rhs_q,
-            group_sizes,
-            rhs_scale=rhs_scale,
-            group_offset=group_offset,
-        )
-
-        tile_info = TileSizes(tile_m=128, tile_k=tile_k, tile_n=out_size)
-        actual = gmm_v2(
-            lhs,
-            rhs_q,
-            group_sizes,
-            rhs_scale=rhs_scale,
-            group_offset=group_offset,
-            tile_info=tile_info,
-            maybe_quantize_lhs=True,
-        ).astype(lhs.dtype)
-
-        self.assertArraysAllClose(actual, expected, atol=1.2, rtol=1.2)
-
-    @parameterized.product(
-        batch_size=[128],
-        in_size=[512, 1024],
-        out_size=[512, 1024],
-        num_groups=[16, 32],
-        weight_dtype=[jnp.int8, jnp.float8_e4m3fn],
-        block_size=[512, 1024],
-        group_offset=[0, 2, 3],
-    )
-    def test_gmm_activation_weight_quantized(
-        self,
-        batch_size,
-        in_size,
-        out_size,
-        num_groups,
-        weight_dtype,
-        block_size,
-        group_offset,
-    ):
-        if weight_dtype == jnp.float4_e2m1fn and not jtu.is_device_tpu_at_least(
-                version=7):
-            self.skipTest("Expect TPUv7+")
-        if block_size > in_size:
-            self.skipTest("block_size must be <= in_size")
-        num_local_groups = num_groups - group_offset
-        key = jax.random.key(0)
-
-        lhs = jax.random.uniform(key, (batch_size, in_size), jnp.bfloat16, -1,
-                                 1)
-        rhs = jax.random.uniform(key, (num_local_groups, in_size, out_size),
-                                 jnp.bfloat16, -1, 1)
-        rhs_q, rhs_scale = quantize_tensor(rhs,
-                                           weight_dtype,
-                                           axis=1,
-                                           block_size=block_size)
-        rhs_scale = jnp.expand_dims(rhs_scale, axis=2)
-        group_sizes = get_group_sizes(batch_size, num_groups)
-        group_offset = jnp.array(group_offset, dtype=jnp.int32)
-
-        expected = reference_gmm(
-            lhs,
-            rhs_q,
-            group_sizes,
-            rhs_scale=rhs_scale,
-            group_offset=group_offset,
-        )
-
-        actual = gmm_v2(
-            lhs,
-            rhs_q,
-            group_sizes,
-            rhs_scale=rhs_scale,
-            group_offset=group_offset,
-            maybe_quantize_lhs=True,
-        ).astype(lhs.dtype)
-
-        self.assertArraysAllClose(actual, expected, atol=1.1, rtol=1.1)
-
-    @parameterized.product(
-        batch_size=[128, 256],
-        in_size=[255, 500],
-        out_size=[255, 500],
-        num_groups=[16],
-        has_bias=[True, False],
-        group_offset=[0],
-    )
-    def test_gmm_implicit_padding(self, batch_size, in_size, out_size,
-                                  num_groups, has_bias, group_offset):
-        num_local_groups = num_groups - group_offset
-        key = jax.random.key(0)
-
-        lhs = jax.random.normal(key, (batch_size, in_size), dtype=jnp.bfloat16)
-        rhs = jax.random.normal(key, (num_local_groups, in_size, out_size),
-                                dtype=jnp.bfloat16)
-        rhs_bias = None
-        if has_bias:
-            rhs_bias = jax.random.normal(key, (num_local_groups, 1, out_size),
-                                         dtype=jnp.bfloat16)
-
-        group_sizes = get_group_sizes(batch_size, num_groups)
-        group_offset = jnp.array(group_offset, dtype=jnp.int32)
-
-        expected = reference_gmm(
-            lhs,
-            rhs,
-            group_sizes,
-            rhs_bias=rhs_bias,
-            group_offset=group_offset,
-        )
-
-        actual = gmm_v2(
-            lhs,
-            rhs,
-            group_sizes,
-            rhs_bias=rhs_bias,
-            group_offset=group_offset,
-        )
-
-        self.assertEqual(actual.shape, (batch_size, out_size))
-        self.assertArraysAllClose(actual, expected)
-
-    @parameterized.product(
-        batch_size=[128],
-        in_size=[512],
-        out_size=[500],
-        num_groups=[16],
-        has_bias=[True, False],
-        weight_dtype=[jnp.int8, jnp.float8_e4m3fn],
-        block_size=[512],
-        group_offset=[0],
-    )
-    def test_gmm_weight_quantized_padding(
-        self,
-        batch_size,
-        in_size,
-        out_size,
-        num_groups,
-        has_bias,
-        weight_dtype,
-        block_size,
-        group_offset,
-    ):
-        num_local_groups = num_groups - group_offset
-        key = jax.random.key(0)
-
-        lhs = jax.random.normal(key, (batch_size, in_size), dtype=jnp.bfloat16)
-        rhs = jax.random.normal(key, (num_local_groups, in_size, out_size),
-                                dtype=jnp.bfloat16)
-        rhs_q, rhs_scale = quantize_tensor(rhs,
-                                           weight_dtype,
-                                           axis=1,
-                                           block_size=block_size)
-        rhs_scale = jnp.expand_dims(rhs_scale, axis=2)
-
-        rhs_bias = None
-        if has_bias:
-            rhs_bias = jax.random.normal(key, (num_local_groups, 1, out_size),
-                                         dtype=jnp.bfloat16)
-
-        group_sizes = get_group_sizes(batch_size, num_groups)
-        group_offset = jnp.array(group_offset, dtype=jnp.int32)
-
-        expected = reference_gmm(
-            lhs,
-            rhs_q,
-            group_sizes,
-            rhs_scale=rhs_scale,
-            rhs_bias=rhs_bias,
-            group_offset=group_offset,
-        )
-
-        actual = gmm_v2(
-            lhs,
-            rhs_q,
-            group_sizes,
-            rhs_scale=rhs_scale,
-            group_offset=group_offset,
-            rhs_bias=rhs_bias,
-            maybe_quantize_lhs=False,
-        ).astype(lhs.dtype)
-
-        self.assertEqual(actual.shape, (batch_size, out_size))
-        self.assertArraysAllClose(actual, expected, atol=3e-1, rtol=3e-1)
+      shard_grad_lhs, shard_grad_rhs, *_ = vjpfuns[i + 1](cotangent)
+      grad_lhs += shard_grad_lhs
+      grad_rhs.append(shard_grad_rhs)
+    grad_rhs = jnp.concatenate(grad_rhs, axis=0)
+    expected_grad_lhs, expected_grad_rhs, *_ = reference_vjpfun(cotangent)
+    self.assert_allclose(grad_lhs, expected_grad_lhs, atol=atol, rtol=rtol)
+    self.assert_allclose(grad_rhs, expected_grad_rhs, atol=atol, rtol=rtol)
 
 
 if __name__ == "__main__":
-    absltest.main(testLoader=jtu.JaxTestLoader())
+  absltest.main(testLoader=jtu.JaxTestLoader())
