@@ -42,7 +42,7 @@ buildkite-agent() {
         elif [[ "$key" == "v6test_model:Accuracy/Correctness" ]]; then
             echo "❌ Failing"
         elif [[ "$key" == "v6test_model:Benchmark" ]]; then
-            echo "⚪ N/A"
+            echo "❓ Untested"
         elif [[ "$key" == "v6kernel support matrix microbenchmarks_category" ]]; then
             echo "kernel support matrix microbenchmarks"
         else
@@ -80,7 +80,7 @@ cat << 'EOF' > v6/kernel_support_matrix_microbenchmarks.csv
 kernels,CorrectnessTest,PerformanceTest,TPU Versions
 fused_moe-w8a8,❓ Untested,❓ Untested,v6
 fused_moe-w8a16,✅ Passing,✅ Passing,v6
-fused_moe-w16a16,⚪ N/A,⚪ N/A,v6
+fused_moe-w16a16,❓ Untested,❓ Untested,v6
 mla,✅ Passing,❓ Untested,v6
 generic ragged paged attention v3,✅ Passing,✅ Passing,v6
 EOF
@@ -109,21 +109,21 @@ if ! grep -q "Kernel,W16 A16 (Corr),W16 A16 (Perf),W8 A8 (Corr),W8 A8 (Perf),W8 
 fi
 
 # Verify mla outputs correctly
-if ! grep -q "\"mla\*\",✅ Passing,❓ Untested,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A" "$PIVOT_CSV"; then
+if ! grep -q "\"mla\*\",✅ Passing,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested" "$PIVOT_CSV"; then
     echo "❌ ERROR: mla parsing failed or default values are incorrect."
     cat "$PIVOT_CSV"
     exit 1
 fi
 
 # Verify fused_moe outputs correctly
-if ! grep -q "\"fused_moe\",⚪ N/A,⚪ N/A,❓ Untested,❓ Untested,✅ Passing,✅ Passing,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A" "$PIVOT_CSV"; then
+if ! grep -q "\"fused_moe\",❓ Untested,❓ Untested,❓ Untested,❓ Untested,✅ Passing,✅ Passing,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested" "$PIVOT_CSV"; then
     echo "❌ ERROR: fused_moe parsing failed."
     cat "$PIVOT_CSV"
     exit 1
 fi
 
 # Verify string substitution correctness
-if ! grep -q "\"generic ragged paged<br>attention v3\*\",✅ Passing,✅ Passing,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A,⚪ N/A" "$PIVOT_CSV"; then
+if ! grep -q "\"generic ragged paged<br>attention v3\*\",✅ Passing,✅ Passing,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested,❓ Untested" "$PIVOT_CSV"; then
     echo "❌ ERROR: generic ragged paged attention v3 substitution failed."
     cat "$PIVOT_CSV"
     exit 1

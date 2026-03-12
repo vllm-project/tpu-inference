@@ -120,7 +120,7 @@ process_models() {
                     result="Text"
                 fi
             else
-                result=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${model}:${stage}" --default "⚪ N/A")
+                result=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${model}:${stage}" --default "❓ Untested")
             fi
             row="$row,$result"
             if [ "$stage" != "Type" ] && [ "${result}" != "✅ Passing" ] && [ "${result}" != "⚪ N/A" ] && [ "${result}" != "❓ Untested" ]; then
@@ -181,7 +181,7 @@ process_features() {
             elif [[ "$mode" == "DEFAULT" ]]; then
                 result="✅ Passing"
             else
-                result=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${feature}:${stage}" --default "⚪ N/A")
+                result=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${feature}:${stage}" --default "❓ Untested")
                 # Format any remaining custom strings from upstream configs
                 local result_lower
                 result_lower="$(echo "$result" | tr '[:upper:]' '[:lower:]')"
@@ -269,7 +269,7 @@ process_kernel_matrix_to_pivot() {
                 for (j=1; j<=6; j++) {
                     q = q_order[j];
                     # Use formatted N/A if data is missing
-                    data = (matrix[k, q] == "") ? "⚪ N/A,⚪ N/A" : matrix[k, q];
+                    data = (matrix[k, q] == "") ? "❓ Untested,❓ Untested" : matrix[k, q];
                     row = row OFS data;
                 }
                 print row >> "'"$output_file"'";

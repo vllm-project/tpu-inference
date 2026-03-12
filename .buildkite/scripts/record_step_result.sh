@@ -47,7 +47,7 @@ case $OUTCOME in
     message="✅ Passing"
     ;;
   "skipped")
-    message="⚪ N/A"
+    message="❓ Untested"
     ;;
   "unverified")
     message="❓ Untested"
