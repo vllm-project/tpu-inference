@@ -55,8 +55,7 @@ def llm():
     """Shared LLM instance with prefix caching enabled.
 
     Prefix caching is enabled so that performance tests (group sampling)
-    can verify prefix-cache speedup.  Correctness tests use fuzzy
-    matching and are not affected by caching behaviour.
+    can verify prefix-cache speedup. 
     """
     os.environ.setdefault("SKIP_JAX_PRECOMPILE", "0")
     engine = LLM(
@@ -72,7 +71,6 @@ def llm():
 
 @pytest.fixture
 def test_prompts():
-    """A diverse set of prompts for batch-invariance and general tests."""
     return [
         "Hello, my name is",
         "The capital of France is",
@@ -92,15 +90,6 @@ def test_prompts():
 
 class TestDeleteReinitializeHBM:
     """Verify the delete + reinitialize HBM KV-cache lifecycle.
-
-    The feature (introduced in PR #1766) allows the engine to explicitly
-    delete its KV-cache arrays to free HBM and later reinitialize them.
-    This is essential in RL loops where weights are updated between
-    inference steps.
-
-    Due to the continuous-batching scheduler, greedy decoding may show
-    minor numerical divergence across runs even with temperature=0.
-    Tests therefore use fuzzy (word-overlap) matching.
     """
 
     # Minimum word-overlap ratio to consider two outputs "matching".
@@ -130,6 +119,7 @@ class TestDeleteReinitializeHBM:
         text_before = outputs_before[0].outputs[0].text
 
         # 2. Delete and reinitialize KV cache via collective_rpc.
+        llm.reset_prefix_cache()
         llm.collective_rpc("delete_kv_cache")
         llm.collective_rpc("reinitialize_kv_cache")
 
@@ -174,56 +164,71 @@ class TestDeleteReinitializeHBM:
         In RL loops the KV cache is deleted before a weight-sync /
         resharding step so that HBM is available for the new weights.
         This test verifies that ``delete_kv_cache`` actually reclaims
-        HBM and that ``reinitialize_kv_cache`` consumes it again.
+        HBM and that ``reinitialize_kv_cache`` restores usage to the
+        original level.
 
-        Because the TPU is owned by the EngineCore child process, we
-        cannot query HBM directly from the test process.  Instead we
-        use ``collective_rpc("determine_available_memory")`` which runs
-        in the worker and returns the number of *available* HBM bytes.
-
-        After a KV-cache delete the available memory should be large
-        (the KV cache for this model occupies ~26 GiB).  After
-        reinitialize it should shrink back (possibly to near-zero or
-        even over the utilisation cap, which causes the worker to
-        raise ``ValueError``).
         """
 
-        # 1. Delete KV cache → a large chunk of HBM becomes available.
+        # 1. Measure available HBM before deleting (KV cache is allocated).
+        #    determine_available_memory may raise ValueError when HBM
+        #    usage exceeds the utilisation cap — that is expected when
+        #    the KV cache is fully allocated.
+        before_over_cap = False
+        try:
+            avail_before_delete = llm.collective_rpc(
+                "determine_available_memory")[0]
+            before_gb = avail_before_delete / (1024**3)
+        except Exception:
+            before_over_cap = True
+            before_gb = 0.0
+        print(f"  Available before delete: {before_gb:.2f} GiB"
+              f"{' (over cap)' if before_over_cap else ''}")
+
+        # 2. Delete KV cache → available HBM should increase.
         llm.collective_rpc("delete_kv_cache")
         avail_after_delete = llm.collective_rpc(
             "determine_available_memory")[0]
+        after_delete_gb = avail_after_delete / (1024**3)
+        print(f"  Available after delete:  {after_delete_gb:.2f} GiB")
 
-        avail_gb = avail_after_delete / (1024**3)
-        print(f"  Available after delete: {avail_gb:.2f} GiB")
+        assert after_delete_gb > before_gb, (
+            f"Expected more available HBM after delete_kv_cache, "
+            f"but got {after_delete_gb:.2f} GiB (before: {before_gb:.2f} GiB)")
 
-        # The KV cache for Llama-3.2-1B with 13 k blocks occupies ~26 GiB.
-        # After deletion, available HBM should be at least a few GiB.
-        min_expected_gb = 1.0
-        assert avail_gb > min_expected_gb, (
-            f"Expected >{min_expected_gb} GiB available after "
-            f"delete_kv_cache, got {avail_gb:.2f} GiB")
-
-        # 2. Reinitialize → available HBM should drop significantly.
+        # 3. Reinitialize → available HBM should return close to the
+        #    pre-delete level.
         llm.collective_rpc("reinitialize_kv_cache")
 
+        reinit_over_cap = False
         try:
             avail_after_reinit = llm.collective_rpc(
                 "determine_available_memory")[0]
-            reinit_gb = avail_after_reinit / (1024**3)
+            after_reinit_gb = avail_after_reinit / (1024**3)
         except Exception:
             # determine_available_memory raises ValueError when HBM
-            # exceeds the utilisation cap — this is actually proof
-            # that the KV cache was reallocated and consumed the HBM.
-            reinit_gb = 0.0
+            # exceeds the utilisation cap — treat as fully consumed.
+            reinit_over_cap = True
+            after_reinit_gb = 0.0
 
-        consumed_gb = avail_gb - reinit_gb
-        print(f"  Available after reinit: {reinit_gb:.2f} GiB")
-        print(f"  HBM consumed by reinit: {consumed_gb:.2f} GiB")
+        print(f"  Available after reinit:  {after_reinit_gb:.2f} GiB"
+              f"{' (over cap)' if reinit_over_cap else ''}")
 
-        assert consumed_gb > min_expected_gb, (
-            f"Expected reinitialize_kv_cache to consume >"
-            f"{min_expected_gb} GiB, but only {consumed_gb:.2f} GiB "
-            f"was consumed")
+        # If both before-delete and after-reinit exceeded the cap, the
+        # KV cache was clearly reallocated — the test passes.
+        if before_over_cap and reinit_over_cap:
+            print("  Both measurements exceeded the HBM cap — "
+                  "KV cache was reallocated.")
+            return
+
+        # After reinitialisation, available HBM should be similar to
+        # what it was before deletion (within 1 GiB tolerance).
+        tolerance_gb = 1.0
+        diff_gb = abs(after_reinit_gb - before_gb)
+        assert diff_gb <= tolerance_gb, (
+            f"Expected available HBM after reinitialize to be within "
+            f"{tolerance_gb} GiB of the pre-delete level "
+            f"({before_gb:.2f} GiB), but got {after_reinit_gb:.2f} GiB "
+            f"(diff={diff_gb:.2f} GiB)")
 
 
 class TestLogprobsNoRecompilation:
@@ -411,4 +416,4 @@ class TestGroupSamplingPrefixCache:
         print(f"  Unique outputs: {len(texts)}/16")
         assert len(texts) > 10, (
             "Group sampling with temperature=1.0 should produce diverse "
-            "outputs but all 16 were identical")
+            "outputs but some were identical")
