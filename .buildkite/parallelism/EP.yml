@@ -65,8 +65,8 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_EP_PerformanceTest_Single_Host
 
-  - label: "${TPU_VERSION:-tpu6e} Correctness tests for EP (single-host)"
-    key: "${TPU_VERSION:-tpu6e}_EP_CorrectnessTest_Single_Host"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for EP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_EP_CorrectnessTest_Multi_Host"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v7x_8_queue}"
@@ -77,23 +77,22 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh \
           bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "Qwen/Qwen1.5-MoE-A2.7B" --use_moe_ep_kernel 0 --tensor_parallel_size 4 --max_model_len 1024 --max_num_batched_tokens 128 --max_gen_toks 128 --enable_expert_parallel 1 --flex_threshold 0.37 --strict_threshold 0.06
-  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for EP (single-host)"
-    key: "${TPU_VERSION:-tpu6e}_record_EP_CorrectnessTest_Single_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_EP_CorrectnessTest_Single_Host"
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for EP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_EP_CorrectnessTest_Multi_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_EP_CorrectnessTest_Multi_Host"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "EP"
-      CI_STAGE: "Single-Host CorrectnessTest"
+      CI_STAGE: "Multi-Host CorrectnessTest"
       CI_CATEGORY: "parallelism support matrix"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_EP_CorrectnessTest_Single_Host
-
-  - label: "${TPU_VERSION:-tpu6e} Performance tests for EP (single-host)"
-    key: "${TPU_VERSION:-tpu6e}_EP_PerformanceTest_Single_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_EP_CorrectnessTest_Single_Host"
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_EP_CorrectnessTest_Multi_Host
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for EP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_EP_PerformanceTest_Multi_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_EP_CorrectnessTest_Multi_Host"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v7x_8_queue}"
@@ -101,16 +100,16 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh \
           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_expert_parallel.py'
-  - label: "${TPU_VERSION:-tpu6e} Record performance test result for EP (single-host)"
-    key: "${TPU_VERSION:-tpu6e}_record_EP_PerformanceTest_Single_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_EP_PerformanceTest_Single_Host"
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for EP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_EP_PerformanceTest_Multi_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_EP_PerformanceTest_Multi_Host"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "EP"
-      CI_STAGE: "Single-Host PerformanceTest"
+      CI_STAGE: "Multi-Host PerformanceTest"
       CI_CATEGORY: "parallelism support matrix"
     agents:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_EP_PerformanceTest_Single_Host
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_EP_PerformanceTest_Multi_Host
