@@ -15,7 +15,7 @@
 
 # === Usage ===
 if [ "$#" -lt 4 ]; then
-  echo "Usage: $0 <input.csv|gs://path/to/input.csv> CODE_HASH JOB_REFERENCE RUN_TYPE [EXTRA_ENVS]"
+  echo "Usage: $0 <input.csv|gs://path/to/input.csv> CODE_HASH JOB_REFERENCE RUN_TYPE JOB_PRIORITY [EXTRA_ENVS]"
   exit 1
 fi
 
@@ -23,7 +23,8 @@ CSV_FILE_ARG="$1"
 CODE_HASH="$2"
 JOB_REFERENCE="$3"
 RUN_TYPE="$4"
-EXTRA_ENVS="${5:-}"
+JOB_PRIORITY="$5"
+EXTRA_ENVS="${6:-}"
 
 if [[ "$CSV_FILE_ARG" == gs://* ]]; then
   echo "GCS path detected. Downloading from $CSV_FILE_ARG"
@@ -186,7 +187,7 @@ done < <(tail -n +2 "$CSV_FILE")
 # --- Upload Benchmark Dynamic Pipeline ---
 if [[ "${#pipeline_steps[@]}" -gt 0 ]]; then
   echo "--- Uploading Benchmark Dynamic Pipeline Steps"
-  final_pipeline_yaml="steps:"$'\n'
+  final_pipeline_yaml="priority: ${JOB_PRIORITY:-1}"$'\n'"steps:"$'\n'
   final_pipeline_yaml+=$(printf "%s\n" "${pipeline_steps[@]}")
   echo "Upload YML: ${final_pipeline_yaml}"
   echo -e "${final_pipeline_yaml}" | buildkite-agent pipeline upload
