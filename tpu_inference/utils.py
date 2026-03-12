@@ -130,7 +130,7 @@ def get_device_name(num_devices: int | None = None):
         suffix = 'p'
     elif kind == 'TPU7x':
         kind = 'TPU v7'
-    assert kind.startswith('TPU v'), kind
+    assert kind[:-1] == 'TPU v', kind
     kind += suffix
     if num_devices is not None:
         kind += f'-{num_devices}'
