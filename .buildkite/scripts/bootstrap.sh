@@ -21,8 +21,49 @@ set -euo pipefail
 readonly PRIORITY_POST_MERGE=10
 readonly PRIORITY_PRE_MERGE=5
 readonly PRIORITY_INTEGRATION=3
+readonly PRIORITY_BENCHMARK=2
 readonly PRIORITY_DEFAULT=1
 readonly PRIORITY_NIGHTLY=0
+
+# --- Determine Job Priority ---
+echo "--- Determining job priority"
+if [[ "${NIGHTLY:-0}" == "1" ]]; then
+    # Nightly build (Lowest priority)
+    export JOB_PRIORITY=$PRIORITY_NIGHTLY
+    echo "Build type: Nightly - Priority: $JOB_PRIORITY"
+elif [[ "${BENCHMARK_SCHEDULE:-0}" == "1" ]]; then
+    # Benchmark pipeline
+    export JOB_PRIORITY=$PRIORITY_BENCHMARK
+    echo "Build type: Benchmark - Priority: $JOB_PRIORITY"
+elif [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
+    # Integration pipeline
+    export JOB_PRIORITY=$PRIORITY_INTEGRATION
+    echo "Build type: Integration - Priority: $JOB_PRIORITY"
+elif [[ "$BUILDKITE_PULL_REQUEST" != "false" ]]; then
+    # Pre-merge PR tests
+    export JOB_PRIORITY=$PRIORITY_PRE_MERGE
+    echo "Build type: Pre-merge (PR #$BUILDKITE_PULL_REQUEST) - Priority: $JOB_PRIORITY"
+elif [[ "$BUILDKITE_BRANCH" == "main" && "$BUILDKITE_PULL_REQUEST" == "false" ]]; then
+    # Post-merge tests on main (Highest priority)
+    export JOB_PRIORITY=$PRIORITY_POST_MERGE
+    echo "Build type: Post-merge (Main branch) - Priority: $JOB_PRIORITY"
+else
+    # Default priority for other branches or manual builds
+    export JOB_PRIORITY=$PRIORITY_DEFAULT
+    echo "Build type: General - Priority: $JOB_PRIORITY"
+fi
+
+buildkite-agent meta-data set "JOB_PRIORITY" "$JOB_PRIORITY"
+
+# Implemented dynamic job prioritization by injecting integers during upload
+upload_with_priority() {
+  local yaml_file=$1
+  echo "--- :pipeline: Uploading $yaml_file with priority ${JOB_PRIORITY:-1}"
+  { 
+    echo "priority: ${JOB_PRIORITY:-1}"; 
+    cat "$yaml_file"; 
+  } | buildkite-agent pipeline upload
+}
 
 upload_benchmark_pipeline() {
     # load VLLM_COMMIT_HASH from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo
@@ -39,7 +80,7 @@ upload_benchmark_pipeline() {
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     echo "Using vllm-tpu commit hash: $(buildkite-agent meta-data get "CODE_HASH")"
 
-    buildkite-agent pipeline upload .buildkite/pipeline_benchmark.yml
+    upload_with_priority .buildkite/pipeline_benchmark.yml
 }
 
 # When BENCHMARK_SCHEDULE is set to 1, execute the benchmark
@@ -100,42 +141,6 @@ fi
 
 # Store changed files in metadata for sub-pipelines (newlines to commas)
 echo "$FILES_CHANGED" | tr '\n' ',' | buildkite-agent meta-data set "changed_files"
-
-# --- Determine Job Priority ---
-echo "--- Determining job priority"
-if [[ "${NIGHTLY:-0}" == "1" ]]; then
-    # Nightly build (Lowest priority)
-    export JOB_PRIORITY=$PRIORITY_NIGHTLY
-    echo "Build type: Nightly - Priority: $JOB_PRIORITY"
-elif [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
-    # Integration pipeline
-    export JOB_PRIORITY=$PRIORITY_INTEGRATION
-    echo "Build type: Integration - Priority: $JOB_PRIORITY"
-elif [[ "$BUILDKITE_PULL_REQUEST" != "false" ]]; then
-    # Pre-merge PR tests
-    export JOB_PRIORITY=$PRIORITY_PRE_MERGE
-    echo "Build type: Pre-merge (PR #$BUILDKITE_PULL_REQUEST) - Priority: $JOB_PRIORITY"
-elif [[ "$BUILDKITE_BRANCH" == "main" && "$BUILDKITE_PULL_REQUEST" == "false" ]]; then
-    # Post-merge tests on main (Highest priority)
-    export JOB_PRIORITY=$PRIORITY_POST_MERGE
-    echo "Build type: Post-merge (Main branch) - Priority: $JOB_PRIORITY"
-else
-    # Default priority for other branches or manual builds
-    export JOB_PRIORITY=$PRIORITY_DEFAULT
-    echo "Build type: General - Priority: $JOB_PRIORITY"
-fi
-
-buildkite-agent meta-data set "job_priority" "$JOB_PRIORITY"
-
-# Implemented dynamic job prioritization by injecting integers during upload
-upload_with_priority() {
-  local yaml_file=$1
-  echo "--- :pipeline: Uploading $yaml_file with priority ${JOB_PRIORITY:-1}"
-  { 
-    echo "priority: ${JOB_PRIORITY:-1}"; 
-    cat "$yaml_file"; 
-  } | buildkite-agent pipeline upload
-}
 
 upload_pipeline() {
     if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
