@@ -49,6 +49,7 @@ def _run_inference_with_config(model_name: str,
                                tensor_parallel_size: int = 1,
                                pipeline_parallel_size: int = 1,
                                data_parallel_size: int = 1,
+                               enable_expert_parallel: bool = False,
                                additional_config: dict = {},
                                kv_cache_dtype: str = "auto",
                                enable_prefix_caching: bool = False) -> list:
@@ -61,13 +62,14 @@ def _run_inference_with_config(model_name: str,
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
         data_parallel_size=data_parallel_size,
-        gpu_memory_utilization=0.90,
+        gpu_memory_utilization=0.40,
         max_num_batched_tokens=128,
         max_num_seqs=16,
         enable_prefix_caching=enable_prefix_caching,
         additional_config=additional_config,
         kv_cache_dtype=kv_cache_dtype,
         async_scheduling=False,
+        enable_expert_parallel=enable_expert_parallel,
     )
 
     engine_args_dict = asdict(engine_args)
@@ -98,6 +100,7 @@ def test_pipeline_parallel_ep_jax_model(
         sampling_params=sampling_params,
         tensor_parallel_size=1,
         pipeline_parallel_size=2,
+        enable_expert_parallel=True,
         additional_config={
             "sharding": {
                 "sharding_strategy": {
