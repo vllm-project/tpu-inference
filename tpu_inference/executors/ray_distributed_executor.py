@@ -80,6 +80,13 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
        And we omit the driver worker related logic.
     """
 
+    @classmethod
+    def supports_async_scheduling(cls) -> bool:
+        """
+        Whether the executor supports async scheduling.
+        """
+        return True
+
     def _init_executor(self) -> None:
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
 

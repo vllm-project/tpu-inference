@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Tuple, Union
 
 import jax.numpy as jnp
 import torch
@@ -277,12 +277,3 @@ class TpuPlatform(Platform):
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True
-
-    @classmethod
-    def executors_supports_async_scheduling(cls) -> List:
-        """
-        Get the list of executor backends that support async scheduling for the current platform.
-        """
-        from tpu_inference.executors.ray_distributed_executor import \
-            RayDistributedExecutor
-        return ["mp", "uni", "external_launcher", RayDistributedExecutor]
