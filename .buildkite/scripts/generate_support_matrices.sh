@@ -153,7 +153,7 @@ process_features() {
             header="kernels,CorrectnessTest,PerformanceTest"
         elif [ "$category" == "parallelism support matrix" ]; then
             stages_to_use=("${PARALLELISM_STAGES[@]}")
-            header="Feature,Single-Host Correctness,Single-Host Performance,Multi-Host Correctness,Multi-Host Performance"
+            header="Feature,Single-Host CorrectnessTest,Single-Host PerformanceTest,Multi-Host CorrectnessTest,Multi-Host PerformanceTest"
         fi
 
         if [ ! -f "$category_csv" ]; then
