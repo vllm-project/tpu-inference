@@ -27,8 +27,8 @@ source .venv/bin/activate
 
 # 2. Run Tuner
 tpu-tune quantized-matmul \
-    --batch-sizes 16 \
-    --out-in-features 2048/4096 \
+    --batch-size-list 16 \
+    --out-in-features-list 2048/4096 \
     --update-registry
 ```
 
@@ -66,8 +66,12 @@ tpu-tune rpa-v3 \
 | `--q-dtype-list` | `bfloat16` | Data type for query tensor (e.g., `bfloat16`). |
 | `--kv-dtype-list` | `bfloat16` | Data type for KV cache. Use `float8_e4m3fn` if the model runs with `--kv-cache-dtype fp8`. |
 | `--max-model-len-list` | `1024` | Maximum sequence length to tune for. |
+| `--kv-block-sizes` | `1,2,4,8...` | Search space for KV pages per block. |
+| `--q-block-sizes` | `8,16,32...` | Search space for Q queries per block. |
 | `--tp-size` | `1` | Tensor Parallelism degree. Scales global heads to local heads automatically. |
 | `--benchmarking-method` | `amortized` | `amortized` (recommended) or `xprof`. |
+| `--num-iterations` | `100` | Number of iterations per benchmark run. |
+| `--num-repeats` | `5` | Number of outer benchmark loops for std-dev calc. |
 | `--run-name` | `auto` | Name of the experiment folder in `tuning_runs/`. |
 | `--update-registry` | `False` | Algorithmically update the JSON registry with best results. |
 
@@ -96,6 +100,9 @@ tpu-tune quantized-matmul \
 | `--x-q-dtype` | `int8` | Quantization type for input activation. |
 | `--w-q-dtype` | `int8` | Quantization type for weights. |
 | `--benchmarking-method` | `amortized` | `amortized` (recommended) or `xprof`. |
+| `--num-iterations` | `10` | Number of iterations per benchmark run. |
+| `--num-repeats` | `5` | Number of outer benchmark loops for std-dev calc. |
+| `--run-name` | `auto` | Name of the experiment folder in `tuning_runs/`. |
 | `--update-registry` | `False` | Update JSON registry with best results. |
 
 For the `--out-in-features-list` argument, format pairs as `OUT/IN`. When using Tensor Parallelism, specify which dimension is split using `--tp-split-dim` (use `out` for Column Parallel and `in` for Row Parallel).
