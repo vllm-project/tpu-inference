@@ -116,10 +116,11 @@ def parse_arg(arg, type_fn=str):
               default=1,
               help="Tensor Parallelism degree (divides num_heads)",
               show_default=True)
-def rpa_v3(page_size_list, q_dtype_list, kv_dtype_list, num_q_heads_list, num_kv_heads_list, head_dim_list,
-           max_model_len_list, num_iterations, num_repeats, benchmarking_method,
-           dry_run, num_sequences, kv_block_sizes, q_block_sizes,
-           update_registry, tp_size, run_name, output_dir, no_save):
+def rpa_v3(page_size_list, q_dtype_list, kv_dtype_list, num_q_heads_list,
+           num_kv_heads_list, head_dim_list, max_model_len_list,
+           num_iterations, num_repeats, benchmarking_method, dry_run,
+           num_sequences, kv_block_sizes, q_block_sizes, update_registry,
+           tp_size, run_name, output_dir, no_save):
     """Tune Ragged Paged Attention (RPA) kernels."""
 
     # Parse args
@@ -212,10 +213,10 @@ def rpa_v3(page_size_list, q_dtype_list, kv_dtype_list, num_q_heads_list, num_kv
               default='out',
               help="Dimension to split for TP (out or in)",
               show_default=True)
-def quantized_matmul(batch_size_list, out_in_features_list, x_q_dtype, w_q_dtype,
-                     dry_run, num_iterations, num_repeats, benchmarking_method,
-                     update_registry, tp_size, tp_split_dim, run_name,
-                     output_dir, no_save):
+def quantized_matmul(batch_size_list, out_in_features_list, x_q_dtype,
+                     w_q_dtype, dry_run, num_iterations, num_repeats,
+                     benchmarking_method, update_registry, tp_size,
+                     tp_split_dim, run_name, output_dir, no_save):
     """Tune Quantized Matmul kernels."""
 
     batch_sizes_parsed = parse_arg(batch_size_list, int)

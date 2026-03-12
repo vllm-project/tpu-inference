@@ -30,8 +30,8 @@ def test_rpa_command(runner):
             "tpu_inference.tools.autotune.v1.ragged_paged_attention_v3.tune_rpa"
     ) as mock_tune_rpa:
         result = runner.invoke(cli.rpa_v3, [
-            "--page-size-list", "128", "--q-dtype-list", "bfloat16", "--kv-dtype-list",
-            "bfloat16", "--num-iterations", "1", "--dry-run"
+            "--page-size-list", "128", "--q-dtype-list", "bfloat16",
+            "--kv-dtype-list", "bfloat16", "--num-iterations", "1", "--dry-run"
         ])
 
         assert result.exit_code == 0

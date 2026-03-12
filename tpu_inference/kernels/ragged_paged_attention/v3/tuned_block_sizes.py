@@ -56,8 +56,7 @@ def _load_tuning_data(device_name: str) -> dict:
     if not os.path.exists(file_path):
         raise FileNotFoundError(
             f"Tuning data not found for device '{device_name}' at {file_path}. "
-            "Ensure the tpu_inference package is installed correctly."
-        )
+            "Ensure the tpu_inference package is installed correctly.")
 
     with open(file_path, 'r') as f:
         data = json.load(f)
@@ -188,7 +187,7 @@ def get_simplified_raw_key(
     """Get the simplified key."""
     # The `hd64` optimized kernels currently only support MHA
     # (where actual_num_q_heads == actual_num_kv_heads).
-    # If the model is GQA/MQA with head_dim=64 (like Qwen), 
+    # If the model is GQA/MQA with head_dim=64 (like Qwen),
     # we fall back to the standard padded 128 logic below.
     if head_dim == 64 and actual_num_q_heads == actual_num_kv_heads:
         # Legacy logic from tuned_block_sizes_hd64.py

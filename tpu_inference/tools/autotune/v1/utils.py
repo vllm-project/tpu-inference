@@ -131,14 +131,17 @@ def update_json_registry(path: str, new_data: Dict[str, Any]):
             if "config" in val_dict:
                 cfg = val_dict["config"]
                 if "num_kv_pages_per_block" in cfg:
-                    return [cfg["num_kv_pages_per_block"], cfg["num_q_per_block"]]
+                    return [
+                        cfg["num_kv_pages_per_block"], cfg["num_q_per_block"]
+                    ]
                 elif "block_m" in cfg:
                     return [cfg["block_m"], cfg["block_n"], cfg["block_k"]]
             return val_dict
-            
+
         for k, v in source.items():
             if k not in target:
-                target[k] = _extract_flat_config(v) if isinstance(v, dict) and "config" in v else v
+                target[k] = _extract_flat_config(v) if isinstance(
+                    v, dict) and "config" in v else v
                 updated += 1
                 continue
 
@@ -146,7 +149,7 @@ def update_json_registry(path: str, new_data: Dict[str, Any]):
             if isinstance(
                     v,
                     dict) and "stats" in v and "latency_avg_ns" in v["stats"]:
-                
+
                 if isinstance(target[k], list):
                     target[k] = _extract_flat_config(v)
                     updated += 1
@@ -180,7 +183,8 @@ def update_json_registry(path: str, new_data: Dict[str, Any]):
                 skipped += s
             else:
                 # Leaf node rewrite (non-stats)
-                target[k] = _extract_flat_config(v) if isinstance(v, dict) and "config" in v else v
+                target[k] = _extract_flat_config(v) if isinstance(
+                    v, dict) and "config" in v else v
                 updated += 1
 
         return updated, skipped
@@ -393,7 +397,6 @@ class XprofProfileSession(contextlib.AbstractContextManager):
             finally:
                 self._profile_tempdir.cleanup()
                 self._profile_tempdir = None
-
 
 
 # --- Sharding Utilities ---
