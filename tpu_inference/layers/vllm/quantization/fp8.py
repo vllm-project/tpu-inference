@@ -21,6 +21,7 @@ from jax.sharding import Mesh, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
+from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers import linear as vllm_linear
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
@@ -215,7 +216,8 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
 
     @property
     def is_monolithic(self) -> bool:
-        return True
+        # DeepSeek uses its own custom routing.
+        return self.moe.routing_method != RoutingMethodType.DeepSeekV3
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, FusedMoE)
@@ -282,3 +284,25 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
                               quant_method_instance=self,
                               x=x,
                               router_logits=router_logits)
+
+    def apply(
+            self,
+            layer: FusedMoE,
+            x: torch.Tensor,
+            topk_weights: torch.Tensor,
+            topk_ids: torch.Tensor,
+            shared_experts_input: torch.Tensor | None = None,
+    ):
+        weights = FusedMoEWeights(
+            w13_weight=jax_view(layer.w13_weight),
+            w13_weight_scale=jax_view(layer.w13_weight_scale_inv),
+            w13_bias=jax_view(layer.w13_bias) if self.moe.has_bias else None,
+            w2_weight=jax_view(layer.w2_weight),
+            w2_weight_scale=jax_view(layer.w2_weight_scale_inv),
+            w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
+        )
+        return vllm_moe_apply(layer=layer,
+                              weights=weights,
+                              quant_method_instance=self,
+                              x=x,
+                              router_logits=(topk_weights, topk_ids))

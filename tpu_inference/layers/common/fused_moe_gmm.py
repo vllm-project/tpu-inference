@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import functools
-from typing import Literal
+from typing import Literal, Tuple, Union
 
 import jax
 from jax import numpy as jnp
@@ -281,7 +281,7 @@ def fused_moe_func(
     w2_scale: jax.Array | None,
     w1_bias: jax.Array | None,
     w2_bias: jax.Array | None,
-    gating_output: jax.Array,
+    gating_output: Union[jax.Array, Tuple[jax.Array, jax.Array]],
     topk: int,
     renormalize: bool,
     mesh: Mesh,
@@ -317,17 +317,26 @@ def fused_moe_func(
     assert (num_tokens * topk) % 16 == 0, (
         "The kernel requires num_tokens * topk to be a multiple of "
         f"16 but got {num_tokens}*{topk}={num_tokens*topk}")
+   
+    is_gating_output_precomputed = isinstance(gating_output, tuple)
+    if is_gating_output_precomputed:
+        topk_weights, topk_indices = gating_output
+        topk_weights = jax.lax.with_sharding_constraint(
+            topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
+        topk_indices = jax.lax.with_sharding_constraint(
+            topk_indices, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
+        del gating_outputs
+    else:
+        assert gating_output.shape == (num_tokens, global_num_experts)
 
-    assert gating_output.shape == (num_tokens, global_num_experts)
-
-    topk_weights = apply_scoring_fn(scoring_fn, gating_output)
-    # All-gather topk weights for attention dp
-    topk_weights = jax.lax.with_sharding_constraint(
-        topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
-    topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
-    topk_weights = topk_weights.astype(dtype)
+        topk_weights = apply_scoring_fn(scoring_fn, gating_output)
+        # All-gather topk weights for attention dp
+        topk_weights = jax.lax.with_sharding_constraint(
+            topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
+        topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
+        if renormalize:
+            topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
+        topk_weights = topk_weights.astype(dtype)
 
     def _process_tokens_locally(hidden_states_local, topk_indices_local):
         num_tokens_local = hidden_states_local.shape[0]

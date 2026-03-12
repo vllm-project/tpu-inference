@@ -13,6 +13,7 @@
 # limitations under the License.
 import torch
 from torchax.interop import jax_view, torch_view
+from typing import Tuple, Union
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 
@@ -39,7 +40,6 @@ def select_moe_backend_from_fused_moe_config(
     Returns:
         The selected MoE backend.
     """
-
     if envs.USE_MOE_EP_KERNEL:
         if moe.use_ep:
             logger.info_once("[MoE]: Using fused MoE EP kernel")
@@ -59,7 +59,7 @@ def select_moe_backend_from_fused_moe_config(
 
 def vllm_moe_apply(layer: FusedMoE, weights: FusedMoEWeights,
                    quant_method_instance: FusedMoEMethodBase, x: torch.Tensor,
-                   router_logits: torch.Tensor) -> torch.Tensor:
+                   router_logits: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]) -> torch.Tensor:
     """
     Shared function for applying a FusedMoE layer for the TorchAX/vLLM backend.
 
@@ -76,12 +76,13 @@ def vllm_moe_apply(layer: FusedMoE, weights: FusedMoEWeights,
     assert isinstance(layer, FusedMoE)
     assert isinstance(quant_method_instance, FusedMoEMethodBase)
     assert isinstance(weights, FusedMoEWeights)
-
+    gating_output = tuple(jax_view(tensor) for tensor in router_logits) if isinstance(
+        router_logits, tuple) else jax_view(router_logits)
     return torch_view(
         moe_apply(
             layer=layer,
             x=jax_view(x),
-            gating_output=jax_view(router_logits),
+            gating_output=gating_output,
             weights=weights,
             moe_backend=quant_method_instance.moe_backend,
             mesh=quant_method_instance.mesh,
