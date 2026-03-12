@@ -127,9 +127,18 @@ def update_json_registry(path: str, new_data: Dict[str, Any]):
         updated = 0
         skipped = 0
 
+        def _extract_flat_config(val_dict: Dict[str, Any]) -> list[int]:
+            if "config" in val_dict:
+                cfg = val_dict["config"]
+                if "num_kv_pages_per_block" in cfg:
+                    return [cfg["num_kv_pages_per_block"], cfg["num_q_per_block"]]
+                elif "block_m" in cfg:
+                    return [cfg["block_m"], cfg["block_n"], cfg["block_k"]]
+            return val_dict
+            
         for k, v in source.items():
             if k not in target:
-                target[k] = v
+                target[k] = _extract_flat_config(v) if isinstance(v, dict) and "config" in v else v
                 updated += 1
                 continue
 
@@ -137,7 +146,15 @@ def update_json_registry(path: str, new_data: Dict[str, Any]):
             if isinstance(
                     v,
                     dict) and "stats" in v and "latency_avg_ns" in v["stats"]:
-                if isinstance(target[k], dict) and "stats" in target[k]:
+                # The target is now a flattened list, so we can't check its stats!
+                # Since the old stats are stripped out of the registry, we just overwrite
+                # if the target is a list (meaning it exists but we don't know latency).
+                # Actually, in this autotuner, `results.json` contains stats, but `tuned_data/*.json` 
+                # (target) is now flat lists. We should just overwrite it for now if it's flat.
+                if isinstance(target[k], list):
+                    target[k] = _extract_flat_config(v)
+                    updated += 1
+                elif isinstance(target[k], dict) and "stats" in target[k]:
                     try:
                         new_lat = float(v["stats"].get("latency_avg_ns",
                                                        float('inf')))
@@ -156,8 +173,8 @@ def update_json_registry(path: str, new_data: Dict[str, Any]):
                         target[k] = v
                         updated += 1
                 else:
-                    # Target has no stats, overwrite
-                    target[k] = v
+                    # Target has no stats (e.g. flat list or dict without stats), overwrite
+                    target[k] = _extract_flat_config(v)
                     updated += 1
 
             elif isinstance(v, dict) and isinstance(target[k], dict):
@@ -167,7 +184,7 @@ def update_json_registry(path: str, new_data: Dict[str, Any]):
                 skipped += s
             else:
                 # Leaf node rewrite (non-stats)
-                target[k] = v
+                target[k] = _extract_flat_config(v) if isinstance(v, dict) and "config" in v else v
                 updated += 1
 
         return updated, skipped
