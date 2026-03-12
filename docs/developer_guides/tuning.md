@@ -1,12 +1,12 @@
 # Kernel Tuning Guide
 
 > [!CAUTION]
-> **Alpha Status**: These tools are in active development.
+> **Experimental Status**: The autotuning scripts are experimental and under active development. They are not yet integrated into the standard vLLM serving execution path automatically.
 
-This guide explains how to optimize block sizes for Pallas kernels (RPA and Quantized Matmul) on TPU. Correct tuning is essential for maximizing serving throughput.
+This guide explains how to optimize block sizes for Pallas kernels (RPA and Quantized Matmul) on TPU using the experimental `tpu-tune` CLI. Correct tuning can be essential for maximizing serving throughput.
 
 ## Installation
-The autotuning tools require additional dependencies (`click`, `rich`). Install them using the `tuning` extra:
+The autotuning tools require additional dependencies (`click`, `rich`). Install them along with the main `tpu-inference` package using the `tuning` extra:
 
 ```bash
 # Standard pip

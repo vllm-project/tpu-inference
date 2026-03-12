@@ -44,31 +44,31 @@ def parse_arg(arg, type_fn=str):
 
 
 @main.command(name='rpa-v3')
-@click.option('--page-size',
+@click.option('--page-size-list',
               default='128',
               help="Comma separated list of page sizes",
               show_default=True)
-@click.option('--q-dtype',
+@click.option('--q-dtype-list',
               default='bfloat16',
               help="Comma separated list of q dtypes",
               show_default=True)
-@click.option('--kv-dtype',
+@click.option('--kv-dtype-list',
               default='bfloat16',
               help="Comma separated list of kv dtypes",
               show_default=True)
-@click.option('--num-q-heads',
+@click.option('--num-q-heads-list',
               default='128',
               help="Comma separated list of local num q heads (per chip)",
               show_default=True)
-@click.option('--num-kv-heads',
+@click.option('--num-kv-heads-list',
               default='1',
               help="Comma separated list of local num kv heads (per chip)",
               show_default=True)
-@click.option('--head-dim',
+@click.option('--head-dim-list',
               default='128',
               help="Comma separated list of head dims",
               show_default=True)
-@click.option('--max-model-len',
+@click.option('--max-model-len-list',
               default='1024',
               help="Comma separated list of max model lengths",
               show_default=True)
@@ -116,20 +116,20 @@ def parse_arg(arg, type_fn=str):
               default=1,
               help="Tensor Parallelism degree (divides num_heads)",
               show_default=True)
-def rpa_v3(page_size, q_dtype, kv_dtype, num_q_heads, num_kv_heads, head_dim,
-           max_model_len, num_iterations, num_repeats, benchmarking_method,
+def rpa_v3(page_size_list, q_dtype_list, kv_dtype_list, num_q_heads_list, num_kv_heads_list, head_dim_list,
+           max_model_len_list, num_iterations, num_repeats, benchmarking_method,
            dry_run, num_sequences, kv_block_sizes, q_block_sizes,
            update_registry, tp_size, run_name, output_dir, no_save):
     """Tune Ragged Paged Attention (RPA) kernels."""
 
     # Parse args
-    page_sizes_parsed = parse_arg(page_size, int)
-    q_dtypes_parsed = parse_arg(q_dtype, str)
-    kv_dtypes_parsed = parse_arg(kv_dtype, str)
-    num_q_heads_parsed = parse_arg(num_q_heads, int)
-    num_kv_heads_parsed = parse_arg(num_kv_heads, int)
-    head_dims_parsed = parse_arg(head_dim, int)
-    max_model_lens_parsed = parse_arg(max_model_len, int)
+    page_sizes_parsed = parse_arg(page_size_list, int)
+    q_dtypes_parsed = parse_arg(q_dtype_list, str)
+    kv_dtypes_parsed = parse_arg(kv_dtype_list, str)
+    num_q_heads_parsed = parse_arg(num_q_heads_list, int)
+    num_kv_heads_parsed = parse_arg(num_kv_heads_list, int)
+    head_dims_parsed = parse_arg(head_dim_list, int)
+    max_model_lens_parsed = parse_arg(max_model_len_list, int)
 
     kv_block_sizes_parsed = parse_arg(kv_block_sizes, int)
     q_block_sizes_parsed = parse_arg(q_block_sizes, int)
