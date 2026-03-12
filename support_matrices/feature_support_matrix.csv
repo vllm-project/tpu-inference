@@ -13,6 +13,5 @@ Feature,CorrectnessTest,PerformanceTest
 "async scheduler",✅,✅
 "data_parallelism",✅,unverified
 "runai_model_streamer_loader",✅,N/A
-"RL_Integration",unverified,unverified
 "sampling_params",✅,N/A
 "structured_decoding",✅,N/A
