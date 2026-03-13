@@ -46,7 +46,7 @@ steps:
     soft_fail: true
     env:
       TEST_MODEL: Qwen/Qwen3-30B-A3B
-      TENSOR_PARALLEL_SIZE: 4
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
       MINIMUM_ACCURACY_THRESHOLD: 0.89
     commands:
       - |
@@ -73,7 +73,7 @@ steps:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     env:
       TEST_MODEL: Qwen/Qwen3-30B-A3B
-      TENSOR_PARALLEL_SIZE: 4
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
       MINIMUM_THROUGHPUT_THRESHOLD: 7.20
       INPUT_LEN: 1800
       OUTPUT_LEN: 128

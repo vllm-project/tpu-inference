@@ -18,7 +18,7 @@ steps:
   - label: "${{TPU_VERSION:-tpu6e}} Unit tests for {MODEL_NAME}"
     key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_UnitTest"
     agents:
-      queue: {QUEUE}
+      queue: "${{TPU_QUEUE_SINGLE:-tpu_v6e_queue}}"
     soft_fail: true
     commands:
       - echo "placeholder"  # TODO: replace with your unit test command
@@ -40,11 +40,14 @@ steps:
     key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_Accuracy"
     depends_on: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_MODEL_NAME}_UnitTest"
     agents:
-      queue: {QUEUE}
+      queue: "${{TPU_QUEUE_SINGLE:-tpu_v6e_queue}}"
     soft_fail: true
     env:
       TEST_MODEL: {MODEL_NAME}
-      TENSOR_PARALLEL_SIZE: {TENSOR_PARALLEL_SIZE}
+      # TODO: If you change the queue to multi-host, update TENSOR_PARALLEL_SIZE to use TENSOR_PARALLEL_SIZE_MULTI.
+      # e.g., TENSOR_PARALLEL_SIZE: "${{TENSOR_PARALLEL_SIZE_MULTI:-8}}"
+      # The default values are for tpu6e. For tpu7x, set: export TENSOR_PARALLEL_SIZE_SINGLE=2, export TENSOR_PARALLEL_SIZE_MULTI=8
+      TENSOR_PARALLEL_SIZE: "${{TENSOR_PARALLEL_SIZE_SINGLE:-1}}"
       MINIMUM_ACCURACY_THRESHOLD: 0  # TODO : replace 0 with your accuracy threshold
     commands:
       - |

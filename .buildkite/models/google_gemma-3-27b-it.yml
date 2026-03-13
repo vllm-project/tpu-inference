@@ -46,7 +46,7 @@ steps:
     soft_fail: true
     env:
       TEST_MODEL: google/gemma-3-27b-it
-      TENSOR_PARALLEL_SIZE: 8
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
       MINIMUM_ACCURACY_THRESHOLD: 0.56
     commands:
       - |
@@ -73,7 +73,7 @@ steps:
     soft_fail: true
     env:
       TEST_MODEL: google/gemma-3-27b-it
-      TENSOR_PARALLEL_SIZE: 8
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
       MINIMUM_THROUGHPUT_THRESHOLD: 21
       INPUT_LEN: 1000
       OUTPUT_LEN: 100

@@ -17,8 +17,6 @@ import sys
 from enum import Enum
 from pathlib import Path
 
-from constant import QUEUE_TO_TENSOR_PARALLEL_SIZE_MAP
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = SCRIPT_DIR.parent / "models"
 
@@ -39,21 +37,15 @@ MODEL_TYPE_TO_TEMPLATE = {
 }
 
 
-def generate_from_template(model_name: str, queue: str, model_type: str,
+def generate_from_template(model_name: str, model_type: str,
                            model_category: str) -> None:
     """
     Generates a buildkite yml file from model template.
     Args:
         model_name (str): The full name of the model on Hugging Face.
-        queue (str): The buildkite queue to run tests for this model on.
         model_type (str): The type of model (tpu-optimized or vllm-native).
+        model_category (str): The category of the model.
     """
-    if queue not in QUEUE_TO_TENSOR_PARALLEL_SIZE_MAP:
-        print(
-            f"Queue {queue} not previously registered on Buildkite. If you added a queue, please add it to QUEUE_TO_TENSOR_PARALLEL_SIZE_MAP"
-        )
-        sys.exit(1)
-
     print(f"Starting to generate for model '{model_name}'")
 
     # Check if the template file exists.
@@ -85,8 +77,6 @@ def generate_from_template(model_name: str, queue: str, model_type: str,
             MODEL_NAME=model_name,
             CATEGORY=model_category,
             SANITIZED_MODEL_NAME=sanitized_model_name,
-            QUEUE=queue,
-            TENSOR_PARALLEL_SIZE=QUEUE_TO_TENSOR_PARALLEL_SIZE_MAP[queue],
         )
         print("File content generated.")
     except KeyError as e:
@@ -122,11 +112,6 @@ def main():
         "The full name of the model on Hugging Face (ex: 'meta-llama/Llama-3.1-8B')."
     )
     parser.add_argument(
-        "--queue",
-        type=str,
-        required=True,
-        help="The name of the agent queue to use (ex: 'tpu_v6e_queue')")
-    parser.add_argument(
         '--type',
         choices=[ModelType.TPU_OPTIMIZED.value, ModelType.VLLM_NATIVE.value],
         default='tpu-optimized',
@@ -145,7 +130,6 @@ def main():
 
     args = parser.parse_args()
     generate_from_template(model_name=args.model_name,
-                           queue=args.queue,
                            model_type=args.type,
                            model_category=args.category)
 
