@@ -26,6 +26,7 @@ import jaxtyping
 import numpy as np
 import vllm.envs as vllm_envs
 from flax import nnx
+from jax._src import mesh as mesh_lib
 from jax._src.pallas.utils import next_power_of_2
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
@@ -386,8 +387,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             and len(self.vllm_config.sharding_config.device_indexes) > 0)
 
         if enforce_device_order:
+            axis_types = (mesh_lib.AxisType.Auto, ) * len(mesh_shape)
             return jax.make_mesh(mesh_shape,
                                  MESH_AXIS_NAMES_2D,
+                                 axis_types,
                                  devices=self.devices)
         else:
             return make_optimized_mesh(mesh_shape,
