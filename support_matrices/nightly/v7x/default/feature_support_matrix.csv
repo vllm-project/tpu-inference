@@ -6,6 +6,7 @@ Feature,CorrectnessTest,PerformanceTest
 "Multimodal Inputs",❌,N/A
 "Out-of-tree model support",✅,❌
 "Prefix Caching",✅,✅
+"RL_Integration",✅,✅
 "Single Program Multi Data",✅,✅
 "Single-Host-P-D-disaggregation",✅,N/A
 "Speculative Decoding: Eagle3",✅,✅

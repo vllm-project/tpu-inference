@@ -270,7 +270,11 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
     # for non-power-of-two device counts (e.g., DP=6) to bypass strict
     # hardware topology constraints that would otherwise cause an AssertionError.
     try:
-        return jax.make_mesh(axis_shapes, axis_names, devices=devices)
+        axis_types = (mesh_lib.AxisType.Auto, ) * len(axis_shapes)
+        return jax.make_mesh(axis_shapes,
+                             axis_names,
+                             axis_types,
+                             devices=devices)
     except (AssertionError, ValueError, RuntimeError) as e:
         logger.warning(
             "jax.make_mesh failed due to topology constraints. Falling back to manual mesh: %s",
