@@ -81,7 +81,9 @@ cleanup_docker_resource() {
 setup_environment() {
   local image_name_param=${1:-"vllm-tpu"}
   local should_push=${2:-"false"}
+  local base_image_param=${3:-"python:3.12-slim-bookworm"}
   IMAGE_NAME="$image_name_param"
+  BASE_IMAGE="$base_image_param"
 
   local DOCKERFILE_NAME="Dockerfile"
 
@@ -116,6 +118,7 @@ setup_environment() {
   # Build with specific hash and 'latest' tag for convenience
   docker build \
       --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" \
+      --build-arg BASE_IMAGE="${BASE_IMAGE}" \
       --build-arg IS_TEST="true" \
       --no-cache -f docker/"${DOCKERFILE_NAME}" \
       -t "${IMAGE_NAME}:${TPU_INFERENCE_HASH}" \
