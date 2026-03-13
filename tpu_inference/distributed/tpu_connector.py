@@ -506,6 +506,12 @@ class TPUConnectorWorker:
         self.shape = list(kv_layer.shape)
         self.dtype = kv_layer.dtype
         self.sharding = kv_layer.sharding
+        self.host_sharding = jax.sharding.NamedSharding(
+            self.sharding.mesh,
+            self.sharding.spec,
+            memory_kind='pinned_host',
+        )
+        
         logger.info(f"TPUConnector Worker --> register_runner | "
                     f"node_id={self.node_id} | "
                     f"ip={self.host_ip} | "
@@ -650,6 +656,34 @@ class TPUConnectorWorker:
         start_time = time.perf_counter()
         kv = conn.pull(req_meta.uuid, kv_spec)
         end_time = time.perf_counter()
+        # --- ADDED: Trace Memory Location ---
+        try:
+            # Grab the first tensor (assuming kv is a list/tuple of layer blocks)
+            sample_tensor = kv[0] if isinstance(kv, (list, tuple)) else kv
+            
+            
+            if isinstance(sample_tensor, np.ndarray):
+                mem_location = "Host DRAM (Standard NumPy Array)"
+            elif isinstance(sample_tensor, jax.Array):
+                # Inspect the physical devices attached to the JAX array
+                devices = sample_tensor.devices()
+                device_kinds = {d.device_kind for d in devices}
+                
+                # If the device kind contains 'TPU', it's in HBM
+                if any("TPU" in kind.upper() for kind in device_kinds):
+                    mem_location = f"TPU HBM (Devices: {devices})"
+                else:
+                    mem_location = f"Host DRAM (JAX CPU Device: {devices})"
+            elif hasattr(sample_tensor, "device"):
+                # Fallback for PyTorch or other frameworks
+                mem_location = f"Device: {sample_tensor.device}"
+            else:
+                mem_location = f"Unknown Type: {type(sample_tensor)}"
+
+            logger.info(f"Worker {self.node_id} --> [Memory Trace] req_id={req_id} resides in: {mem_location}")
+        except Exception as e:
+            logger.warning(f"Worker {self.node_id} --> [Memory Trace] Failed to trace memory location: {e}")
+        # -------------------------------------
         kv_size_mb = sum(k.nbytes for k in kv) / (1024 * 1024)
         logger.info(
             f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | uuid={req_meta.uuid} | duration={(end_time - start_time) * 1000:.2f}ms | size={kv_size_mb:.2f}MB"
@@ -661,7 +695,7 @@ class TPUConnectorWorker:
         shape = copy.copy(self.shape)
         shape[0] = num_blocks
         return [
-            jax.ShapeDtypeStruct(shape, self.dtype, sharding=self.sharding)
+            jax.ShapeDtypeStruct(shape, self.dtype, sharding=self.host_sharding)
         ] * self.num_layers
 
     def _maybe_build_notif_socket(self, req_meta: LoadMeta) -> zmq.Socket:
@@ -704,8 +738,9 @@ class TPUConnectorWorker:
                 # NOTE(xiang): we do the scatter in main thread to avoid data racing.
                 # The data racing is not for the kv_caches buffer, it's for the runner.kv_caches ref.
                 kv, indices = future.result()
+                new_kv = jax.device_put(kv, self.sharding)
                 self.runner.kv_caches = scatter_kv_slices(
-                    self.runner.kv_caches, kv, indices)
+                    self.runner.kv_caches, new_kv, indices)
                 del self.reqs_pulling[req_id]
                 done_recving.add(req_id)
 
