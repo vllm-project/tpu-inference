@@ -413,12 +413,12 @@ def get_default_block_sizes(
     )
     return {
         "bq_sz": 1,
-        "bkv_sz": 2048,
-        "batch_size": 3,
+        "bkv_sz": 1024,
+        "batch_size": 10
     }, {
-        "bq_sz": 256,
+        "bq_sz": 128,
         "bkv_sz": 512,
-        "batch_size": 1,
+        "batch_size": 2,
     }
 
 
@@ -582,49 +582,35 @@ def ragged_paged_attention(
             n_buffer=n_buffer,
         )
         rpa_kernel_instance = kernel.make_rpa_kernel(config)
-        rpa_schedule = schedule.generate_rpa_metadata(
-            cu_q_lens,
-            kv_lens,
-            distribution,
-            config,
+        kv_packing = schedule.get_dtype_packing(kv_cache.dtype)
+        bkv_stride = (actual_num_kv_heads * 2) // kv_packing
+        if schedule.has_bank_conflicts(bkv_stride):
+            bkv_stride += 1
+        kv_vmem_shape_single = (
+            kernel_bkv_sz,
+            bkv_stride,
+            kv_packing,
+            aligned_head_dim,
         )
+        kv_cache_zero_hbm = jnp.zeros(kv_vmem_shape_single,
+                                      dtype=kv_cache.dtype)
         o_hbm, kv_cache = rpa_kernel_instance(
             cu_q_lens,
             kv_lens,
             page_indices,
-            rpa_schedule,
+            distribution,
             q_hbm,
             new_kv_hbm,
             kv_cache,
             o_hbm,
+            kv_cache_zero_hbm,
         )
         return o_hbm, kv_cache
 
-    num_decode = distribution[0]
-    num_prefill = distribution[1] - distribution[0]
-    num_mixed = distribution[2] - distribution[1]
-
-    o_hbm, kv_cache = jax.lax.cond(
-        num_decode > 0,
-        lambda o, kv: run_rpa_kernel(schedule.RpaCase.DECODE, q_hbm, o, kv),
-        lambda o, kv: (o, kv),
-        o_hbm,
-        kv_cache,
-    )
-    o_hbm, kv_cache = jax.lax.cond(
-        num_prefill > 0,
-        lambda o, kv: run_rpa_kernel(schedule.RpaCase.PREFILL, q_hbm, o, kv),
-        lambda o, kv: (o, kv),
-        o_hbm,
-        kv_cache,
-    )
-    o_hbm, kv_cache = jax.lax.cond(
-        num_mixed > 0,
-        lambda o, kv: run_rpa_kernel(schedule.RpaCase.MIXED, q_hbm, o, kv),
-        lambda o, kv: (o, kv),
-        o_hbm,
-        kv_cache,
-    )
+    o_hbm, kv_cache = run_rpa_kernel(schedule.RpaCase.DECODE, q_hbm, o_hbm,
+                                     kv_cache)
+    o_hbm, kv_cache = run_rpa_kernel(schedule.RpaCase.PREFILL, q_hbm, o_hbm,
+                                     kv_cache)
 
     # o_hbm: [kv_heads, max_tokens, q_per_kv // q_packing, q_packing, d]
     o_hbm = prepare_outputs(o_hbm)
