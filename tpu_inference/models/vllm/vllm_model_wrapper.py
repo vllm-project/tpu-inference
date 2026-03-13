@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import copy
-import functools
 import time
 from collections.abc import Sequence
 from contextlib import nullcontext
@@ -34,6 +33,7 @@ from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
@@ -46,6 +46,8 @@ from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.vllm.mla_attention import \
+    VllmTPUMultiHeadLatentAttentionWrapper
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     shard_model_to_tpu
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
@@ -110,6 +112,9 @@ class VllmModelWrapper:
         self.vllm_config.quant_config = get_tpu_quantization_config(
             self.vllm_config, self.mesh)
         self._apply_pp_patch()
+
+        MultiHeadLatentAttentionWrapper.register_oot(
+            VllmTPUMultiHeadLatentAttentionWrapper)
 
     def _apply_pp_patch(self):
         # patch `get_pp_group` in vLLM to jax's get_pp_group.
@@ -176,7 +181,6 @@ class VllmModelWrapper:
         jax_context = jax.default_device(
             jax.devices("cpu")
             [0]) if not vllm_envs.VLLM_TPU_USING_PATHWAYS else nullcontext()
-
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
         with load_context, jax_context:
@@ -210,8 +214,7 @@ class VllmModelWrapper:
 
     def jit_step_func(self):
 
-        @functools.partial(
-            jax.jit,
+        @jax.jit(
             donate_argnames=("kv_caches", ),
             out_shardings=(
                 None,  # kv_caches - keep original sharding
@@ -225,8 +228,11 @@ class VllmModelWrapper:
                 "xla_tpu_reduce_scatter_collective_matmul_mode":
                 "post_spmd_conservative"
             },
-            static_argnames=("layer_name_to_kvcache_index", "is_first_rank",
-                             "is_last_rank"),
+            static_argnames=(
+                "layer_name_to_kvcache_index",
+                "is_first_rank",
+                "is_last_rank",
+            ),
         )
         def step_fun(
             params_and_buffers,  # This has been wrapped into torchax TorchValue
@@ -283,13 +289,12 @@ class VllmModelWrapper:
 
     def jit_compute_logits_func(self):
 
-        @functools.partial(
-            jax.jit,
-            out_shardings=(NamedSharding(
-                self.mesh,
-                PartitionSpec(ShardingAxisName.MLP_DATA,
-                              ShardingAxisName.MLP_TENSOR))),
-        )
+        # TODO(gxd3): revisit if the sharding below is the best way to shard the
+        # output logits.
+        @jax.jit(out_shardings=(NamedSharding(
+            self.mesh,
+            PartitionSpec(ShardingAxisName.MLP_DATA,
+                          ShardingAxisName.MLP_TENSOR))))
         def compute_logits_func(
             params_and_buffers: Any,
             hidden_states: jax.Array,

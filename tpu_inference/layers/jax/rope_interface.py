@@ -58,6 +58,8 @@ def apply_rope(
     rope_theta: float = 10000,
     rope_scaling: Dict[str, Any] = None,
     rope_input_ordering: str = "split",
+    *,
+    rope_proportion: float = 1.0,
 ) -> jax.Array:
     """
     Applies Rotary Positional Embedding using the sine and cosine strategy.
@@ -153,19 +155,80 @@ def apply_rope(
 
         out = jnp.concatenate([outputs_real, outputs_imag], axis=-1)
 
-    # Standard RoPE
+    # The positions tensor is multidimensional for vision (hence >= 2) and
+    # the value of the last axis should be 2 as the tensor holds the pre-computed
+    # rotation factors (cosine and sine values) for each position.
+    elif positions.ndim >= 2 and positions.shape[-1] == 2:  #VISION RoPE
+        # positions = freqs_cis_stacked: (S, D_rot, 2)
+        # Unstack to get the complex rotation factors (cos + i*sin) in a trace-compatible way.
+        cos = jax.lax.slice_in_dim(positions, 0, 1, axis=-1)
+        sin = jax.lax.slice_in_dim(positions, 1, 2, axis=-1)
+
+        # Squeeze the trailing 1 dimension to get (S, D_rot)
+        cos = jnp.squeeze(cos, axis=-1)
+        sin = jnp.squeeze(sin, axis=-1)
+
+        seq_len_input = inputs.shape[0]
+        seq_len_pos = cos.shape[0]
+
+        if seq_len_input != seq_len_pos:
+            # Calculate how many images/blocks are in the input
+            num_repeats = seq_len_input // seq_len_pos
+            cos = jnp.tile(cos, (num_repeats, 1))
+            sin = jnp.tile(sin, (num_repeats, 1))
+
+        # Reshape to (S, 1, D_rot) for broadcasting over heads
+        cos = cos[:, jnp.newaxis, :]
+        sin = sin[:, jnp.newaxis, :]
+
+        cos_f32 = cos.astype(jnp.float32)
+        sin_f32 = sin.astype(jnp.float32)
+        inputs_f32 = inputs.astype(jnp.float32)
+
+        if rope_input_ordering == "interleaved":
+            shape_pre = inputs_f32.shape[:-1]
+            inputs_reshaped = inputs_f32.reshape(*shape_pre, -1, 2)
+
+            inputs_real = inputs_reshaped[..., 0]
+            inputs_imag = inputs_reshaped[..., 1]
+
+            outputs_real = inputs_real * cos_f32 - inputs_imag * sin_f32
+            outputs_imag = inputs_real * sin_f32 + inputs_imag * cos_f32
+
+            out_stacked = jnp.stack([outputs_real, outputs_imag], axis=-1)
+            out = out_stacked.reshape(inputs.shape)
+
+        else:
+            inputs_real = inputs_f32[..., :head_dim // 2]
+            inputs_imag = inputs_f32[..., head_dim // 2:head_dim]
+
+            outputs_real = inputs_real * cos_f32 - inputs_imag * sin_f32
+            outputs_imag = inputs_real * sin_f32 + inputs_imag * cos_f32
+
+            out = jnp.concatenate([outputs_real, outputs_imag], axis=-1)
+
+    # Standard RoPE or Partial RoPE
     else:
         # Calculate inverse frequencies (timescale)
-        fraction = 2 * jnp.arange(0, head_dim // 2) / head_dim
+        rope_angles = int(rope_proportion * head_dim // 2)
+        nope_angles = head_dim // 2 - rope_angles
+
+        fraction = 2 * jnp.arange(0, rope_angles, dtype=jnp.float32) / head_dim
         timescale = 1.0 / (rope_theta**fraction)
 
         # Apply scaling if provided
         if rope_scaling:
             timescale = apply_rope_scaling(timescale, rope_scaling)
 
+        if nope_angles > 0:
+            timescale = jnp.pad(timescale, (0, nope_angles),
+                                mode="constant",
+                                constant_values=0.0)
+
         # Prepare for rotation by calculating sin and cos values
         # `sinusoid_inp` gets shape (batch * seq_len, head_dim/2)
-        sinusoid_inp = positions[..., jnp.newaxis] * timescale[jnp.newaxis, :]
+        sinusoid_inp = positions[..., jnp.newaxis].astype(
+            jnp.float32) * timescale[jnp.newaxis, :]
 
         # Broadcast over the 'heads' dimension, assuming shape (batch*seq, heads, head_dim)
         sinusoid_inp = sinusoid_inp[:, jnp.newaxis, ...]
@@ -229,14 +292,15 @@ def apply_longrope(
     if seq_len > original_max_position_embeddings:
         long_factor = jnp.array(rope_scaling.get("long_factor"))
         timescale = 1.0 / (long_factor * (rope_theta**(
-            (2 * jnp.arange(0, head_dim // 2)) / head_dim)))
+            (2 * jnp.arange(0, head_dim // 2, dtype=jnp.float32)) / head_dim)))
     else:
         short_factor = jnp.array(rope_scaling.get("short_factor"))
         timescale = 1.0 / (short_factor * (rope_theta**(
-            (2 * jnp.arange(0, head_dim // 2)) / head_dim)))
+            (2 * jnp.arange(0, head_dim // 2, dtype=jnp.float32)) / head_dim)))
 
     # Calculate RoPE positions
-    sinusoid_inp = positions[..., jnp.newaxis] * timescale[jnp.newaxis, :]
+    sinusoid_inp = positions[..., jnp.newaxis].astype(
+        jnp.float32) * timescale[jnp.newaxis, :]
     sinusoid_inp = sinusoid_inp[:, jnp.newaxis, ...]
     sin = jnp.sin(sinusoid_inp) * mscale
     cos = jnp.cos(sinusoid_inp) * mscale

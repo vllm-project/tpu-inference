@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference.kernels.megablox.gmm import gmm
+from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
 
@@ -59,53 +59,19 @@ def _swigluoai(x1: jax.Array,
     return gated_activation * (x2 + 1)
 
 
-# TODO (jacobplatin): make this more generic
-def round_up_to_multiple_of_128_within_limit(x: int, limit: int) -> int:
-    """
-    Rounds the given integer `x` up to the nearest multiple of 128, without
-    exceeding the specified `limit`.
-
-    If `x` is less than or equal to 128, returns 128.
-    If `x` is less than `limit`, returns the smallest multiple of 128 greater
-    than or equal to `x`.
-    If `x` is greater than or equal to `limit`, searches for the largest
-    multiple of 128 less than or equal to `limit` (down to 512) that divides `x`
-    evenly, and returns it.
-    If no such candidate is found, returns `limit`.
-
-    Args:
-        x (int): The integer to round up.
-        limit (int): The upper bound (must be a multiple of 128).
-
-    Returns:
-        int: The rounded value according to the rules above.
-
-    Raises:
-        AssertionError: If `limit` is less than 128 or not a multiple of 128.
-    """
-    assert limit >= 128 and limit % 128 == 0
-    if x <= 128:
-        return 128
-    if x < limit:
-        return (x + 127) // 128 * 128
-    for candidate in range(limit, 511, -128):
-        if x % candidate == 0:
-            return candidate
-    return limit
-
-
-def gmm_wrapper(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset):
-    gmm_res = gmm(
+def gmm_wrapper(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset,
+                last_gmm):
+    gmm_res = gmm_v2(
         lhs=lhs,
         rhs=rhs,
         rhs_scale=rhs_scale,
         rhs_bias=rhs_bias,
         group_sizes=group_sizes,
-        preferred_element_type=lhs.dtype,
-        tiling=None,
         group_offset=group_offset[0],
+        # If it's last gmm, we need to zero out unvisited rows because it would
+        # cause numeric error during final reduce if the rows are unitialized.
+        zero_initialize=last_gmm,
     )
-
     return gmm_res
 
 
@@ -127,7 +93,7 @@ def moe_gmm_local(
     parallelism: Literal["tp", "ep"],
 ) -> jax.Array:
     """ Main MoE logic on a local shard can run in TP or EP mode.
-    
+
     Set parallelism for "tp" or "ep"
     """
 
@@ -136,7 +102,7 @@ def moe_gmm_local(
     # GMM1 computes x @ (W_up | W_gate) tegether and then split out to apply activation
     # to the gate result
     gmm1_res_gate_up = gmm_wrapper(x, w1, w1_scale, w1_bias, group_sizes,
-                                   group_offset)
+                                   group_offset, False)
     gmm1_res_gate, gmm1_res_up = jnp.split(gmm1_res_gate_up, 2, -1)
     gmm1_res = apply_act_fn(activation, gmm1_res_gate, gmm1_res_up)
 
@@ -148,7 +114,7 @@ def moe_gmm_local(
         w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
 
     gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
-                           group_offset)
+                           group_offset, True)
 
     # First run local reduction on topk experts owned by the rank for all tokens
     token_topk_hidden = gmm2_res[topk_argsort_revert_indices].reshape(
@@ -157,7 +123,8 @@ def moe_gmm_local(
                                                             axis=-1)
     token_hidden = token_topk_hidden.sum(axis=-2)
 
-    reduction_axis = ShardingAxisName.MLP_TENSOR if parallelism == "tp" else ShardingAxisName.EXPERT
+    reduction_axis = (ShardingAxisName.MLP_TENSOR
+                      if parallelism == "tp" else ShardingAxisName.EXPERT)
     # Then global reduction on all ranks for all tokens and all experts
     return jax.lax.psum(token_hidden, axis_name=reduction_axis)
 
@@ -184,29 +151,52 @@ def tensor_parallel_gmm(
     w1_spec = P(None, None, ShardingAxisName.MLP_TENSOR)
     w2_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
 
-    w1_scale_spec = None if w1_scale is None else P(
-        None, None, None, ShardingAxisName.MLP_TENSOR)
-    w1_bias_spec = None if w1_bias is None else P(None, None,
-                                                  ShardingAxisName.MLP_TENSOR)
+    w1_scale_spec = (None if w1_scale is None else P(
+        None, None, None, ShardingAxisName.MLP_TENSOR))
+    w1_bias_spec = (None if w1_bias is None else P(
+        None, None, ShardingAxisName.MLP_TENSOR))
 
     num_blocks = 1 if w2_scale is None else w2_scale.shape[1]
-    w2_scale_spec = None if num_blocks == 1 else P(
-        None, ShardingAxisName.MLP_TENSOR, None, None)
+    w2_scale_spec = (None if num_blocks == 1 else P(
+        None, ShardingAxisName.MLP_TENSOR, None, None))
     w2_bias_spec = None if w2_bias is None else P(None, None, None)
 
     return jax.shard_map(
-        functools.partial(moe_gmm_local,
-                          activation=activation,
-                          topk=topk,
-                          parallelism="tp"),
+        functools.partial(
+            moe_gmm_local,
+            activation=activation,
+            topk=topk,
+            parallelism="tp",
+        ),
         mesh=mesh,
-        in_specs=(data_p_spec, w1_spec, w1_scale_spec, w1_bias_spec, w2_spec,
-                  w2_scale_spec, w2_bias_spec, data_p_spec, data_p_spec,
-                  data_p_spec, data_p_spec),
+        in_specs=(
+            data_p_spec,
+            w1_spec,
+            w1_scale_spec,
+            w1_bias_spec,
+            w2_spec,
+            w2_scale_spec,
+            w2_bias_spec,
+            data_p_spec,
+            data_p_spec,
+            data_p_spec,
+            data_p_spec,
+        ),
         out_specs=(data_p_spec),
         check_vma=False,
-    )(x, w1, w1_scale, w1_bias, w2, w2_scale, w2_bias, group_sizes,
-      group_offset, topk_argsort_revert_indices, topk_weights)
+    )(
+        x,
+        w1,
+        w1_scale,
+        w1_bias,
+        w2,
+        w2_scale,
+        w2_bias,
+        group_sizes,
+        group_offset,
+        topk_argsort_revert_indices,
+        topk_weights,
+    )
 
 
 def expert_parallel_gmm(
@@ -238,31 +228,51 @@ def expert_parallel_gmm(
     w2_bias_spec = None if w2_bias is None else ep_p_spec
 
     return jax.shard_map(
-        functools.partial(moe_gmm_local,
-                          activation=activation,
-                          topk=topk,
-                          parallelism="ep"),
+        functools.partial(
+            moe_gmm_local,
+            activation=activation,
+            topk=topk,
+            parallelism="ep",
+        ),
         mesh=mesh,
-        in_specs=(data_p_spec, ep_p_spec, w1_scale_spec, w1_bias_spec,
-                  ep_p_spec, w2_scale_spec, w2_bias_spec, data_p_spec,
-                  ep_p_spec, data_p_spec, data_p_spec),
+        in_specs=(
+            data_p_spec,
+            ep_p_spec,
+            w1_scale_spec,
+            w1_bias_spec,
+            ep_p_spec,
+            w2_scale_spec,
+            w2_bias_spec,
+            data_p_spec,
+            ep_p_spec,
+            data_p_spec,
+            data_p_spec,
+        ),
         out_specs=(data_p_spec),
         check_vma=False,
-    )(x, w1, w1_scale, w1_bias, w2, w2_scale, w2_bias, group_sizes,
-      group_offset, topk_argsort_revert_indices, topk_weights)
+    )(
+        x,
+        w1,
+        w1_scale,
+        w1_bias,
+        w2,
+        w2_scale,
+        w2_bias,
+        group_sizes,
+        group_offset,
+        topk_argsort_revert_indices,
+        topk_weights,
+    )
 
 
-@functools.partial(
-    jax.jit,
-    static_argnames=(
-        "topk",
-        "renormalize",
-        "mesh",
-        "use_ep",
-        "activation",
-        "scoring_fn",
-    ),
-)
+@jax.jit(static_argnames=(
+    "topk",
+    "renormalize",
+    "mesh",
+    "use_ep",
+    "activation",
+    "scoring_fn",
+))
 def fused_moe_func(
     hidden_states: jax.Array,
     w1: jax.Array,
@@ -283,8 +293,8 @@ def fused_moe_func(
 
     Args:
         hidden_states: [num_tokens, hidden_size]
-        w1: first moe weights [num_experts, intermediate_size * 2, hidden_size]
-        w2: second moe weights [num_experts, hidden_size, intermediate_size]
+        w1: first moe weights [num_experts, hidden_size, intermediate_size * 2]
+        w2: second moe weights [num_experts, intermediate_size, hidden_size]
         w1_scale: w1 scale [num_experts, num_blocks, 1, intermediate_size * 2]
         w2_scale: w2 scale [num_experts, num_blocks, 1, hidden_size]
         w1_bias: optional bias of w1 [num_experts, 1, intermediate_size * 2]
@@ -323,55 +333,66 @@ def fused_moe_func(
         num_tokens_local = hidden_states_local.shape[0]
         topk_indices_flat = topk_indices_local.flatten()
         topk_argsort_indices = jnp.argsort(topk_indices_flat)
-        topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
         token_indices = jnp.arange(num_tokens_local,
                                    dtype=jnp.int32).repeat(topk)
         token_indices_sorted = token_indices[topk_argsort_indices]
-        group_sizes_local = jnp.bincount(topk_indices_flat,
-                                         length=global_num_experts)
-
         x = hidden_states_local[token_indices_sorted]
+        # Below one_hot is equivalent to jnp.bincount(topk_indices_flat,
+        # length=global_num_experts) but is more performant.
+        group_sizes_local = jax.nn.one_hot(topk_indices_flat,
+                                           global_num_experts,
+                                           dtype=jnp.int32).sum(axis=0)
+        topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
 
         return x, group_sizes_local, topk_argsort_revert_indices
 
     x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
         _process_tokens_locally,
         mesh=mesh,
-        in_specs=(P(ShardingAxisName.MLP_DATA,
-                    None), P(ShardingAxisName.MLP_DATA, None)),
-        out_specs=(P(ShardingAxisName.MLP_DATA,
-                     None), P(ShardingAxisName.MLP_DATA),
-                   P(ShardingAxisName.MLP_DATA)))(hidden_states, topk_indices)
+        in_specs=(
+            P(ShardingAxisName.MLP_DATA, None),
+            P(ShardingAxisName.MLP_DATA, None),
+        ),
+        out_specs=(
+            P(ShardingAxisName.MLP_DATA, None),
+            P(ShardingAxisName.MLP_DATA),
+            P(ShardingAxisName.MLP_DATA),
+        ),
+    )(hidden_states, topk_indices)
 
     x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
 
     if use_ep:
-        x = expert_parallel_gmm(x,
-                                w1,
-                                w1_scale,
-                                w1_bias,
-                                w2,
-                                w2_scale,
-                                w2_bias,
-                                group_sizes,
-                                topk_argsort_revert_indices,
-                                topk_weights,
-                                activation=activation,
-                                topk=topk,
-                                mesh=mesh)
+        x = expert_parallel_gmm(
+            x,
+            w1,
+            w1_scale,
+            w1_bias,
+            w2,
+            w2_scale,
+            w2_bias,
+            group_sizes,
+            topk_argsort_revert_indices,
+            topk_weights,
+            activation=activation,
+            topk=topk,
+            mesh=mesh,
+        )
     else:
-        x = tensor_parallel_gmm(x,
-                                w1,
-                                w1_scale,
-                                w1_bias,
-                                w2,
-                                w2_scale,
-                                w2_bias,
-                                group_sizes,
-                                topk_argsort_revert_indices,
-                                topk_weights,
-                                activation=activation,
-                                topk=topk,
-                                mesh=mesh)
+        x = tensor_parallel_gmm(
+            x,
+            w1,
+            w1_scale,
+            w1_bias,
+            w2,
+            w2_scale,
+            w2_bias,
+            group_sizes,
+            topk_argsort_revert_indices,
+            topk_weights,
+            activation=activation,
+            topk=topk,
+            mesh=mesh,
+        )
 
     return x[:num_tokens, :hidden_size]

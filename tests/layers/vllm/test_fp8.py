@@ -412,7 +412,7 @@ def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
 
 @pytest.mark.parametrize("use_ep", [True, False])
 @pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
-@pytest.mark.parametrize("num_tokens", [8])
+@pytest.mark.parametrize("num_tokens", [8, 32])
 @pytest.mark.parametrize("intermediate_size", [1024, 2048])
 @pytest.mark.parametrize("hidden_size", [128, 512])
 @pytest.mark.parametrize("num_experts", [8])
@@ -477,7 +477,7 @@ def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
     expected = test_utils.ref_moe(a, score, w1, w2, None, None,
                                   vllm_fused_moe.top_k,
                                   vllm_fused_moe.renormalize,
-                                  vllm_fused_moe.activation)
+                                  vllm_fused_moe.activation.value)
 
     with torchax.default_env(), set_forward_context(None, vllm_config):
         assert isinstance(vllm_fused_moe.quant_method, VllmFp8MoEMethod)
@@ -497,7 +497,7 @@ def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
                                    actual,
                                    check_device=False,
                                    atol=2e-2,
-                                   rtol=1e-1)
+                                   rtol=0.0)
 
 
 @pytest.mark.parametrize("requant_block_size", (128, 512))

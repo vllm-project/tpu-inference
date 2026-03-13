@@ -147,7 +147,7 @@ class Eagle3LlamaModel(nnx.Module):
             rngs=rng,
         )
 
-        self.layers = [
+        self.layers = nnx.List([
             Eagle3LlamaDecoderLayer(
                 config=hf_config,
                 dtype=dtype,
@@ -155,7 +155,7 @@ class Eagle3LlamaModel(nnx.Module):
                 mesh=mesh,
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype)
-        ]
+        ])
 
         if hasattr(hf_config, "target_hidden_size"):
             input_size = hf_config.target_hidden_size * 3

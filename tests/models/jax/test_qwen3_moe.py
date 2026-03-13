@@ -42,7 +42,8 @@ class TestQwen3MoeForCausalLM:
             # following are defined in conftest.py
             rng,
             mesh,
-            mock_vllm_config):
+            mock_vllm_config,
+            assert_weight_loading_memory_bounded):
         """Tests loading weights from HF model"""
         kv_cache_type = "auto"
         vllm_config = mock_vllm_config(model_name, kv_cache_type)
@@ -69,11 +70,20 @@ class TestQwen3MoeForCausalLM:
         seq_len = 2
         input = [[0.01 * i for i in range(model_dim)] for _ in range(seq_len)]
 
-        model = Qwen3MoeForCausalLM(vllm_config, rng, mesh)
-        # load weights from HF model
+        with jax.set_mesh(mesh):
+            model = Qwen3MoeForCausalLM(vllm_config, rng, mesh)
+
+        # load weights from HF model, monitoring device memory
         with jax.set_mesh(mesh):
             loader = get_model_loader(vllm_config.load_config)
-            loader.load_weights(model, model_config)
+            # Monitor device memory during weight loading to catch
+            # regressions.
+            with assert_weight_loading_memory_bounded(
+                    model,
+                    description=f"load_weights({model_name})",
+                    threshold_multiplier=0.3,
+            ):
+                loader.load_weights(model, model_config)
 
         layer_idx = model.model.start_layer
         jax_layer_0 = model.model.layers[layer_idx]

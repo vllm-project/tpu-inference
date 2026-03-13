@@ -30,12 +30,19 @@ class JaxRmsNorm(nnx.RMSNorm, JaxModule):
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = "",
                  **kwargs):
+        # nnx.RMSNorm uses `param_dtype` for parameter initialization dtype.
+        # Accept `dtype` as an alias for backward compatibility, but forward it
+        # as `param_dtype` so that weights are created with the correct dtype.
+        if "dtype" in kwargs and "param_dtype" not in kwargs:
+            kwargs["param_dtype"] = kwargs.pop("dtype")
         nnx.RMSNorm.__init__(self, *args, **kwargs)
         # For compatibility. HF model use 'weight' as name suffix, we alias `self.scale` to
         # `self.weight` such that `named_parameters()` can match the names in HF models. We also
         # apply transpose here to match HF weight layout.
         self.weight = self.scale
         delattr(self, 'scale')
+        if hasattr(self.weight, 'out_sharding'):
+            self.weight.set_metadata('sharding', self.weight.out_sharding)
 
         self.quant_method = None
         if quant_config is not None:

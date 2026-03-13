@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
-
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
@@ -28,10 +26,7 @@ from tpu_inference.layers.jax.sample.sampling_metadata import \
 _SAMPLING_EPS = 1e-5
 
 
-@functools.partial(
-    jax.jit,
-    static_argnames=["mesh"],
-)
+@jax.jit(static_argnames=["mesh"])
 def sample(
     rng: jax.Array,
     mesh: Mesh,
@@ -39,15 +34,28 @@ def sample(
     tpu_sampling_metadata: TPUSupportedSamplingMetadata,
 ) -> jax.Array:
     # (B, vocab_size)
+    if tpu_sampling_metadata._cache_collision_dummy is not None:
+        # Force a dependency on the dummy tensor's shape to ensure unique HLO.
+        logits = logits + 0 * jnp.sum(
+            tpu_sampling_metadata._cache_collision_dummy)
+
     if tpu_sampling_metadata.do_sampling:
         # Unshard the logits explicity to avoid latency increase.
+        # TODO(gxd3): revisit if the 2nd dimension of the logits can be sharded
+        # instead of being replicated.
         logits = jax.lax.with_sharding_constraint(
-            logits, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
+            logits, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
     greedy_sampled = jnp.argmax(logits, axis=-1)
     if not tpu_sampling_metadata.do_sampling:
         return greedy_sampled
 
     logits = logits.astype(jnp.float32)
+
+    # Temperature scaling
+    temperatures = tpu_sampling_metadata.temperature.astype(logits.dtype)
+    temperatures = jnp.expand_dims(temperatures, axis=-1)
+    logits /= temperatures
+
     # Only apply top-k masking if k > 0 for each token
     top_k = tpu_sampling_metadata.top_k
     should_apply_topk = jnp.expand_dims(top_k > 0, axis=-1)
@@ -60,16 +68,17 @@ def sample(
     topp_masked = topp_mask(logits, top_p, replace_val=-1e12)
     logits = jnp.where(should_apply_topp, topp_masked, logits)
 
-    temperatures = tpu_sampling_metadata.temperature.astype(logits.dtype)
-    temperatures = jnp.expand_dims(temperatures, axis=-1)
-    logits /= temperatures
-
     # (batch_size,)
     next_tokens = jax.random.categorical(rng, logits)
     # Note: avoid using the sample result when temperature < _SAMPLING_EPS
     # If temperature < 0, logits /= temperatures will flip the result, causing error.
-    return jnp.where(tpu_sampling_metadata.temperature < _SAMPLING_EPS,
-                     greedy_sampled, next_tokens)
+    ret = jnp.where(tpu_sampling_metadata.temperature < _SAMPLING_EPS,
+                    greedy_sampled, next_tokens)
+    # Replicate the result so that in multi-controller jax setup
+    # (i.e. Ray based multi-host setup), we won't hit error like
+    # RuntimeError: Fetching value for `jax.Array` that spans non-addressable
+    # (non process local) devices is not possible.
+    return jax.lax.with_sharding_constraint(ret, NamedSharding(mesh, P()))
 
 
 def compute_logprobs(logits: jax.Array) -> jax.Array:

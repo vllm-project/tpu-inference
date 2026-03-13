@@ -19,7 +19,6 @@ import jax.numpy as jnp
 import numpy as np
 from jax._src import dtypes
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from torchax.ops.mappings import t2j_dtype
 
 import tpu_inference.kernels.mla.v1.kernel as mla
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
@@ -27,6 +26,7 @@ import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
 from tpu_inference import utils
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
+from tpu_inference.utils import to_jax_dtype
 
 logger = init_logger(__name__)
 
@@ -45,17 +45,19 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
     axis_name = ShardingAxisName.ATTN_HEAD
     model_cnt = utils.get_mesh_shape_product(mesh, axis_name)
 
-    assert actual_num_kv_heads % model_cnt == 0
     # NOTE(chengjiyao): Currently, the attention kernel is tailored to the
     # specific model, rather than being determined by the head_dim. If new
     # models are introduced with a head_dim of 64, this will require additional
     # model-specific adjustments.
     if use_mla:
+        # No assertion needed: MLA compresses all KV into a single latent vector,
+        # so actual_num_kv_heads is never used in mla.get_kv_cache_shape().
         get_kv_cache_shape_fn = mla.get_kv_cache_shape
         shape = list(
             get_kv_cache_shape_fn(total_num_pages, page_size, actual_head_dim,
                                   kv_dtype))
     else:
+        assert actual_num_kv_heads % model_cnt == 0
         get_kv_cache_shape_fn = (
             rpa_hd64.get_kv_cache_shape if actual_head_dim == 64 \
                 else rpa.get_kv_cache_shape
@@ -129,9 +131,8 @@ def create_kv_caches(
 
 def get_attention_page_size_bytes(mesh, block_size, num_kv_heads, head_size,
                                   dtype, use_mla) -> int:
-    jax_dtype = t2j_dtype(dtype)
-    bits = (dtypes.bit_width(jax_dtype) if hasattr(dtypes, "bit_width") else
-            dtypes.itemsize_bits(jax_dtype))
+    jax_dtype = to_jax_dtype(dtype)
+    bits = dtypes.itemsize_bits(jax_dtype)
     kv_cache_shape = get_kv_cache_shape_with_mesh(
         mesh=mesh,
         total_num_pages=1,

@@ -26,6 +26,8 @@ import jaxtyping
 import numpy as np
 import vllm.envs as vllm_envs
 from flax import nnx
+from jax._src import mesh as mesh_lib
+from jax._src.pallas.utils import next_power_of_2
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig
@@ -146,6 +148,7 @@ class ExecuteModelState:
 
     scheduler_output: "VllmSchedulerOutput"
     attn_metadata: AttentionMetadata
+    sampling_metadata: TPUSupportedSamplingMetadata
     input_ids: Optional[jax.Array]
     hidden_states: jax.Array
     logits: jax.Array
@@ -156,7 +159,7 @@ class ExecuteModelState:
     padded_num_reqs: Optional[int] = None
 
 
-@functools.partial(jax.jit, donate_argnums=(0, 1, 2))
+@jax.jit(donate_argnums=(0, 1, 2))
 def _substitute_placeholder_token(
         input_ids: jax.Array, token_in_tpu_cur_input_indices: jax.Array,
         token_in_tpu_pre_next_tokens_indices: jax.Array,
@@ -324,11 +327,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             sharding_strategy.tp_size,
         )
 
-        return mesh_utils.create_device_mesh(
-            mesh_shape,
-            self.devices,
-            allow_split_physical_axes=True,
-        )
+        # Attempt to create a physically optimized mesh. Fall back to a simple
+        # logical reshape for non-power-of-two device counts (e.g., DP=6) to
+        # bypass strict physical topology constraints.
+        try:
+            return mesh_utils.create_device_mesh(
+                mesh_shape,
+                self.devices,
+                allow_split_physical_axes=True,
+            )
+        except (AssertionError, ValueError, RuntimeError) as e:
+            logger.warning(
+                "Physical mesh creation failed (shape=%s, devices=%d). "
+                "Falling back to logical reshape. Error: %s", mesh_shape,
+                len(self.devices), e)
+            return np.array(self.devices).reshape(mesh_shape)
 
     def _create_multi_slice_mesh(self, num_slices: int) -> jax.Array:
         sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
@@ -344,12 +357,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
         dcn_mesh_shape = (num_slices, 1, 1, 1, 1)
 
-        return mesh_utils.create_hybrid_device_mesh(
-            mesh_shape=ici_mesh_shape,
-            dcn_mesh_shape=dcn_mesh_shape,
-            devices=self.devices,
-            allow_split_physical_axes=True,
-        )
+        # Attempt to create a physically optimized hybrid mesh (ICI + DCN).
+        # Fall back to a logical reshape for non-power-of-two device counts
+        # to bypass strict hardware topology constraints across slices.
+        try:
+            return mesh_utils.create_hybrid_device_mesh(
+                mesh_shape=ici_mesh_shape,
+                dcn_mesh_shape=dcn_mesh_shape,
+                devices=self.devices,
+                allow_split_physical_axes=True,
+            )
+        except (AssertionError, ValueError, RuntimeError) as e:
+            logger.warning(
+                "Hybrid physical mesh creation failed. Falling back to logical reshape. "
+                "ICI shape: %s, DCN shape: %s, Error: %s", ici_mesh_shape,
+                dcn_mesh_shape, e)
+            return np.array(self.devices).reshape(
+                tuple(i * d for i, d in zip(ici_mesh_shape, dcn_mesh_shape)))
 
     def _create_2d_mesh(self) -> jax.sharding.Mesh:
 
@@ -364,8 +388,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             and len(self.vllm_config.sharding_config.device_indexes) > 0)
 
         if enforce_device_order:
+            axis_types = (mesh_lib.AxisType.Auto, ) * len(mesh_shape)
             return jax.make_mesh(mesh_shape,
                                  MESH_AXIS_NAMES_2D,
+                                 axis_types,
                                  devices=self.devices)
         else:
             return make_optimized_mesh(mesh_shape,
@@ -420,7 +446,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         kv_cache_dtype = to_jax_dtype(cache_dtype)
         kv_packing = common_utils.get_dtype_packing(kv_cache_dtype)
         self.num_tokens_paddings = runner_utils.get_token_paddings(
-            min_token_size=max(16, self.dp_size * kv_packing),
+            min_token_size=max(16, next_power_of_2(self.dp_size * kv_packing)),
             max_token_size=scheduler_config.max_num_batched_tokens *
             self.dp_size,
             padding_gap=vllm_envs.VLLM_TPU_BUCKET_PADDING_GAP)
@@ -467,7 +493,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Used to initialize positions / context_lens / seq_lens
         # Keep in int64 to avoid overflow with long context
         self.arange_cpu = np.arange(self.max_num_tokens, dtype=np.int64)
-        min_num_reqs = max(MIN_NUM_SEQS, self.dp_size)
+        min_num_reqs = max(MIN_NUM_SEQS, next_power_of_2(self.dp_size))
         self.num_reqs_paddings = runner_utils.get_req_paddings(
             min_req_size=min_num_reqs, max_req_size=self.max_num_reqs)
         self.num_reqs_paddings_per_dp = [
@@ -536,14 +562,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.rng_params_for_sampling = nnx.Rngs(
             jax.random.key(self.model_config.seed)).params()
-        self.is_multimodal_model = (
-            self.model_config.is_multimodal_model
-            and self.embed_multimodal_fn is not None and hasattr(
-                self.model_config.hf_config, "architectures"
-            )  #TODO: Remove Llama Guard 4 specific condition once the LG4 Vision portion is implemented
-            and len(self.model_config.hf_config.architectures) >= 1
-            and self.model_config.hf_config.architectures[0]
-            != "Llama4ForConditionalGeneration")
+        self.is_multimodal_model = (self.model_config.is_multimodal_model
+                                    and self.embed_multimodal_fn is not None
+                                    and hasattr(self.model_config.hf_config,
+                                                "architectures"))
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
@@ -569,6 +591,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if has_kv_transfer_group():
             get_kv_transfer_group().register_runner(self)
 
+    def delete_kv_cache(self) -> None:
+        self.kv_cache_manager.delete_kv_cache()
+
+    def reinitialize_kv_cache(self) -> None:
+        self.kv_cache_manager.reinitialize_kv_cache()
+
     def capture_model(self) -> None:
         self.compilation_manager.capture_model()
 
@@ -581,7 +609,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called "
                                "after execute_model() returns None.")
-        with jax.set_mesh(self.mesh):
+        reqs = self.input_batch.num_reqs
+        toks = scheduler_output.total_num_scheduled_tokens
+        with jax.set_mesh(self.mesh), jax.profiler.TraceAnnotation(
+                f"execute_model: {reqs} reqs, {toks} toks"):
             output = self._execute_model(scheduler_output,
                                          intermediate_tensors)
         return output
@@ -594,11 +625,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # This can happen in pipeline parallel case.
             return EMPTY_MODEL_RUNNER_OUTPUT
 
-        (scheduler_output, attn_metadata, input_ids, hidden_states, logits,
-         aux_hidden_states, spec_decode_metadata, kv_connector_output,
-         logits_indices_selector,
+        (scheduler_output, attn_metadata, sampling_metadata, input_ids,
+         hidden_states, logits, aux_hidden_states, spec_decode_metadata,
+         kv_connector_output, logits_indices_selector,
          padded_num_reqs) = (self.execute_model_state.scheduler_output,
                              self.execute_model_state.attn_metadata,
+                             self.execute_model_state.sampling_metadata,
                              self.execute_model_state.input_ids,
                              self.execute_model_state.hidden_states,
                              self.execute_model_state.logits,
@@ -621,9 +653,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 arange,
             )
         return self._sample_from_logits(
-            scheduler_output, attn_metadata, input_ids, hidden_states, logits,
-            aux_hidden_states, spec_decode_metadata, kv_connector_output,
-            logits_indices_selector, padded_num_reqs)
+            scheduler_output, attn_metadata, sampling_metadata, input_ids,
+            hidden_states, logits, aux_hidden_states, spec_decode_metadata,
+            kv_connector_output, logits_indices_selector, padded_num_reqs)
 
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
@@ -735,20 +767,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             input_ids,
             input_positions,
             attn_metadata,
-            _,
+            sampling_metadata,
             logits_indices,
             spec_decode_metadata,
             logits_indices_selector,
             padded_num_reqs,
         ) = self._prepare_inputs(scheduler_output)
-
-        is_llama_guard_4 = (
-            hasattr(
-                self.model_config.hf_config, "architectures"
-            )  #TODO: Remove Llama Guard 4 specific condition once the LG4 Vision portion is implemented
-            and len(self.model_config.hf_config.architectures) >= 1
-            and self.model_config.hf_config.architectures[0]
-            == "Llama4ForConditionalGeneration")
 
         # multi-modal support
         if self.is_multimodal_model:
@@ -757,13 +781,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.mm_manager.execute_mm_encoder(scheduler_output)
             mm_result = self.mm_manager.gather_mm_embeddings(
                 scheduler_output, input_ids.shape[0])
-        #TODO: Remove the follow elif statement once Llama Guard 4 Vision portion has been implemented
-        elif is_llama_guard_4 and any(
-                self.mm_manager.runner.requests[req_id].mm_features
-                for req_id in self.mm_manager.runner.input_batch.req_ids):
-            raise NotImplementedError(
-                "Llama Guard 4 (JAX) currently supports only text inputs. "
-                "Multimodal processing not yet implemented.")
         else:
             mm_result = []
 
@@ -844,6 +861,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.execute_model_state = ExecuteModelState(
             scheduler_output=scheduler_output,
             attn_metadata=attn_metadata,
+            sampling_metadata=sampling_metadata,
             input_ids=input_ids,
             hidden_states=hidden_states,
             logits=logits,
@@ -858,6 +876,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self,
         scheduler_output: "VllmSchedulerOutput",
         attn_metadata: AttentionMetadata,
+        tpu_sampling_metadata: TPUSupportedSamplingMetadata,
         input_ids: Optional[jax.Array],
         hidden_states: jax.Array,
         logits: jax.Array,
@@ -871,15 +890,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
                 self.input_batch.num_reqs, self.max_num_reqs)
 
-        sharding = None
-        if self.dp_size > 1:
-            sharding = NamedSharding(self.mesh,
-                                     PartitionSpec(ShardingAxisName.MLP_DATA))
-
-        tpu_sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
-            self.mesh, self.input_batch, padded_num_reqs, sharding=sharding)
-
-        # TODO(pooyam): Should we move this to `_prepare_inputs`?
         if tpu_sampling_metadata.do_sampling:
             self.rng_params_for_sampling, step_rng = jax.random.split(
                 self.rng_params_for_sampling)
@@ -1072,7 +1082,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
         return model_runner_output
 
-    @functools.partial(jax.jit, static_argnums=(0, ))
+    @jax.jit(static_argnums=(0, ))
     def _select_from_array_fn(self, array, indices_to_select):
 
         def select_local_fn(local_array, local_indices):
@@ -1089,7 +1099,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         return ret
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnames=("max_logprobs", ))
+    @jax.jit(static_argnames=("max_logprobs", ))
     def _compute_and_gather_logprobs(logits, next_tokens, max_logprobs):
         logprobs = compute_logprobs(logits)
         return gather_logprobs(logprobs, next_tokens, max_logprobs)
@@ -1437,8 +1447,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.mesh,
             self.input_batch,
             padded_num_reqs,
-            sharding=NamedSharding(self.mesh,
-                                   PartitionSpec(ShardingAxisName.MLP_DATA)),
+            sharding=data_parallel_attn_sharding,
         )
         if self.uses_mrope:
             positions = mrope_positions
@@ -1789,11 +1798,31 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             transpose_keys=transpose_keys,
             shard=shard)
 
-    def get_intermediate_tensor_spec(self, num_tokens: int):
+    def _get_padded_total_tokens(
+            self, scheduler_output: "VllmSchedulerOutput") -> int:
+        num_tokens = scheduler_output.total_num_scheduled_tokens
+
+        # Determine the capacity per rank (max tokens assigned to any single device)
+        max_tokens_per_rank = getattr(
+            scheduler_output, "max_num_scheduled_tokens_per_dp_rank",
+            (num_tokens + self.dp_size - 1) // self.dp_size)
+
+        # Map to the next local bucket and multiply by world size to get global shape
+        padded_per_rank = runner_utils.get_padded_token_len(
+            self.num_tokens_paddings_per_dp, max_tokens_per_rank)
+
+        return padded_per_rank * self.dp_size
+
+    def get_intermediate_tensor_spec(self,
+                                     scheduler_output: "VllmSchedulerOutput"):
         jax_dtype = to_jax_dtype(self.dtype)
-        num_padded_tokens = runner_utils.get_padded_token_len(
-            self.num_tokens_paddings, num_tokens)
-        sharding = NamedSharding(self.mesh, PartitionSpec())
+        num_padded_tokens = self._get_padded_total_tokens(scheduler_output)
+
+        if self.dp_size > 1:
+            sharding = NamedSharding(
+                self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+        else:
+            sharding = NamedSharding(self.mesh, PartitionSpec())
         hidden_size = self.model_config.get_hidden_size()
         spec = jax.ShapeDtypeStruct(shape=(num_padded_tokens, hidden_size),
                                     dtype=jax_dtype,

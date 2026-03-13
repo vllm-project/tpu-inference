@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Optional, Tuple, Union
 
 import jax.numpy as jnp
 import torch
@@ -56,6 +56,8 @@ class TpuPlatform(Platform):
         "NEW_MODEL_DESIGN",
         "MODEL_IMPL_TYPE",
         "VLLM_DISABLE_SHARED_EXPERTS_STREAM",
+        "MOE_REQUANTIZE_BLOCK_SIZE",
+        "MOE_REQUANTIZE_WEIGHT_DTYPE",
     ]
 
     @classmethod
@@ -65,8 +67,11 @@ class TpuPlatform(Platform):
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         # Invoke @register_backend in the module.
-        import tpu_inference.layers.vllm.attention  # noqa: F401
-        if selected_backend != AttentionBackendEnum.FLASH_ATTN:
+        import tpu_inference.layers.vllm.backends  # noqa: F401
+        use_mla = attn_selector_config.use_mla
+        if use_mla:
+            selected_backend = AttentionBackendEnum.FLASH_ATTN_MLA
+        elif selected_backend != AttentionBackendEnum.FLASH_ATTN:
             logger.info("Cannot use %s backend on TPU. Setting to FLASH_ATTN.",
                         selected_backend)
             selected_backend = AttentionBackendEnum.FLASH_ATTN
@@ -158,10 +163,9 @@ class TpuPlatform(Platform):
 
         cache_config = vllm_config.cache_config
         # For v0, the default block size is 16.
-        if cache_config and cache_config.block_size is None:
-            cache_config.block_size = cast(BlockSize, 16)
+        if cache_config and not cache_config.user_specified_block_size:
             if vllm_config.model_config:
-                from tpu_inference.layers.vllm.attention import \
+                from tpu_inference.layers.vllm.backends.flash_attn import \
                     PallasAttentionBackend
                 cache_config.block_size = PallasAttentionBackend.get_page_size(
                     vllm_config)  # type: ignore[assignment]
@@ -200,9 +204,6 @@ class TpuPlatform(Platform):
             parallel_config.distributed_executor_backend = RayDistributedExecutor
             logger.info(
                 "Force using RayDistributedExecutor for JAX on multihost.")
-            if parallel_config.pipeline_parallel_size > 1:
-                raise ValueError(
-                    "PP on Ray is disabled due to a pending change on vLLM.")
         else:
             logger.warning(
                 f"Unknown TPU multihost backend: {multihost_backend}. "
@@ -225,6 +226,12 @@ class TpuPlatform(Platform):
         update_vllm_config_for_dp_scheduler(vllm_config)
 
     @classmethod
+    def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
+        # TODO: TPU still sets block_size in check_and_update_config.
+        # Move that logic here so block_size is chosen by the backend.
+        pass
+
+    @classmethod
     def is_pin_memory_available(cls):
         logger.warning("Pin memory is not supported on TPU.")
         return False
@@ -245,9 +252,8 @@ class TpuPlatform(Platform):
     @classmethod
     def validate_request(
         cls,
-        prompt: PromptType,
-        params: Union["SamplingParams", PoolingParams],
         processed_inputs: ProcessorInputs,
+        params: Union["SamplingParams", PoolingParams],
     ) -> None:
         """Raises if this request is unsupported on this platform"""
         from vllm.sampling_params import SamplingParams, SamplingType

@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import copy
 import os
+from collections import defaultdict
 from typing import Dict, List, Optional
 
 import ray
@@ -31,21 +33,11 @@ from vllm.v1.executor.ray_executor import RayWorkerMetaData
 from vllm.v1.executor.ray_utils import RayWorkerWrapper as RayWorkerWrapperV1
 from vllm.v1.executor.ray_utils import _wait_until_pg_ready
 
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
+from tpu_inference.distributed.utils import set_node_kv_ip_port
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
-
-try:
-    from ray._private.state import available_resources_per_node
-except ImportError:
-    # Ray 2.9.x doesn't expose `available_resources_per_node`
-    from ray._private.state import state as _state
-    available_resources_per_node = _state._available_resources_per_node
-
-import asyncio
-from collections import defaultdict
-
-from tpu_inference.distributed.utils import set_node_kv_ip_port
 
 logger = init_logger(__name__)
 
@@ -112,8 +104,20 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         it will connect to the Ray cluster and create a placement group
         for the workers, which includes the specification of the resources
         for each distributed worker.
+
+        If a placement group is already provided (e.g., by ray.serve.llm),
+        this method will reuse it instead of creating a new one.
         """
         from vllm.platforms import current_platform
+
+        # Check if placement group is already provided (e.g., by ray.serve.llm)
+        # This allows ray.serve.llm to pre-create a placement group with the correct
+        # TPU topology (e.g., 4 bundles × 4 TPUs for v6e 4x4) and have vLLM reuse it.
+        if self.parallel_config.placement_group is not None:
+            logger.info(
+                f"Using existing placement group: {self.parallel_config.placement_group}"
+            )
+            return
 
         if ray.is_initialized():
             logger.info(
@@ -134,14 +138,24 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         ray_nodes = ray.nodes()
         logger.info(f"RayDistributedExecutor | ray_nodes={ray_nodes}")
 
+        # Filter nodes that have the required TPU
+        # This is necessary when the head node doesn't have TPU resources
+        # (e.g., KubeRay deployments where head runs on a non-TPU node)
+        nodes_with_device = [
+            n for n in ray_nodes if device_str in n.get("Resources", {})
+        ]
+        logger.info(
+            f"RayDistributedExecutor | nodes_with_device={len(nodes_with_device)} "
+            f"(filtered from {len(ray_nodes)} total nodes)")
+
         if pp_size == 1:
             placement_group_specs = [{
                 device_str: node['Resources'][device_str]
-            } for node in ray_nodes]
+            } for node in nodes_with_device]
         else:
             assert pp_size == len(
-                ray_nodes
-            ), f"Cannot use PP across hosts, please set --pipeline-parallel-size to 1 or {len(ray_nodes)}"
+                nodes_with_device
+            ), f"Cannot use PP across hosts, please set --pipeline-parallel-size to 1 or {len(nodes_with_device)}"
             num_devices_per_pp_rank = self.vllm_config.sharding_config.total_devices
             placement_group_specs = [{
                 device_str: num_devices_per_pp_rank
@@ -152,7 +166,12 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         # the current node has at least one device.
         current_ip = get_ip()
         current_node_id = ray.get_runtime_context().get_node_id()
-        current_node_resource = available_resources_per_node()[current_node_id]
+        # Get resources from ray.nodes() which is more reliable
+        # than available_resources_per_node() for TPU resource reporting
+        current_node_info = next(
+            (n for n in ray.nodes() if n["NodeID"] == current_node_id), None)
+        current_node_resource = (current_node_info.get("Resources", {})
+                                 if current_node_info else {})
         if current_node_resource.get(device_str, 0) < 1:
             raise ValueError(
                 f"Current node has no {device_str} available. "
@@ -385,13 +404,12 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         if self.parallel_config.pipeline_parallel_size > 1:
             self.collective_rpc("initialize_pp_transfer_connect")
         self.collective_rpc("load_model")
-
         if self.use_ray_spmd_worker:
             for pp_rank in range(self.parallel_config.pipeline_parallel_size):
                 self.pp_tp_workers.append([])
                 num_tp_workers = int(
-                    self.parallel_config.tensor_parallel_size //
-                    num_tpu_per_worker)
+                    len(self.workers) //
+                    self.parallel_config.pipeline_parallel_size)
                 for tp_rank in range(num_tp_workers):
                     # PP=2, TP=4, num_tpu_per_worker=2
                     # pp_tp_workers = [[0, 1], [2, 3]]
@@ -413,7 +431,11 @@ class RayWorkerWrapper(RayWorkerWrapperV1):
     The implementation is similar to vllm/v1/executor/ray_utils.py
     
     _is_intermediate_tensors: check whether the output is JaxIntermediateTensors.
+    _is_last_rank: check whether this Ray worker is the last PP stage.
     """
 
     def _is_intermediate_tensors(self, output) -> bool:
         return isinstance(output, JaxIntermediateTensors)
+
+    def _is_last_rank(self) -> bool:
+        return get_pp_group().is_last_rank

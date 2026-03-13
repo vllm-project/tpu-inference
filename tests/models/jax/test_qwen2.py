@@ -23,6 +23,8 @@ from jax.sharding import Mesh
 from vllm.config import ModelConfig
 from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
+from tpu_inference.distributed.jax_parallel_state import \
+    init_pp_distributed_environment
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.models.jax.qwen2 import Qwen2ForCausalLM
 from tpu_inference.runner.kv_cache import create_kv_caches
@@ -109,8 +111,16 @@ class TestQwen2ForCausalLM:
     def test_qwen25_1_5b(self, mock_vllm_config, rng, mesh, mock_model_inputs):
         """Tests model init and model forward for the 8B model variant."""
 
+        init_pp_distributed_environment(
+            ip="",
+            rank=0,
+            world_size=1,
+            device=jax.devices()[0],
+            need_pp=False,
+        )
         # Test model init
-        model = Qwen2ForCausalLM(mock_vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = Qwen2ForCausalLM(mock_vllm_config, rng, mesh)
         assert "1.5b" in model.vllm_config.model_config.model.lower()
 
         model_config = mock_vllm_config.model_config

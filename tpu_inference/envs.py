@@ -29,6 +29,9 @@ if TYPE_CHECKING:
     ENABLE_QUANTIZED_MATMUL_KERNEL: bool = False
     REQUANTIZE_BLOCK_SIZE: int | None = None
     REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
+    MOE_REQUANTIZE_BLOCK_SIZE: int | None = None
+    MOE_REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
+    LAYOUT_Q_PROJ_AS_NDH: bool = False
 
 
 def env_with_choices(
@@ -172,9 +175,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "REQUANTIZE_BLOCK_SIZE":
     lambda: int(block_size) if
     (block_size := os.getenv("REQUANTIZE_BLOCK_SIZE")) is not None else None,
-    # Specify dtype for quantized weights
+    # Specify dtype for quantized linear weights
     "REQUANTIZE_WEIGHT_DTYPE":
     lambda: os.getenv("REQUANTIZE_WEIGHT_DTYPE", "float8_e4m3fn"),
+    # Specify dtype for quantized MoE weights
+    "MOE_REQUANTIZE_WEIGHT_DTYPE":
+    lambda: os.getenv("MOE_REQUANTIZE_WEIGHT_DTYPE", "float8_e4m3fn"),
+    # Specify requantization block size for MoE weights
+    "MOE_REQUANTIZE_BLOCK_SIZE":
+    lambda: int(block_size) if (block_size := os.getenv(
+        "MOE_REQUANTIZE_BLOCK_SIZE")) is not None else None,
+    # dictates whether to layout q-proj as NDH (q-heads, model dim, head dim)
+    # or DNH (model dim, q-heads, head dim), which is the default (False)
+    "LAYOUT_Q_PROJ_AS_NDH":
+    lambda: bool(int(os.getenv("LAYOUT_Q_PROJ_AS_NDH") or "0")),
 }
 
 

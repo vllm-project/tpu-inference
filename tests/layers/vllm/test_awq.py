@@ -23,10 +23,12 @@ import torchax
 from jax.sharding import PartitionSpec
 from torchax.interop import torch_view
 from torchax.ops.mappings import j2t, t2j
-from vllm.config import set_current_vllm_config
+from vllm.config import ParallelConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
+from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
                                                MergedColumnParallelLinear,
@@ -38,9 +40,11 @@ from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.scalar_type import scalar_types
 
 from tests.layers.common import utils as test_utils
+from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.awq import (VllmAWQConfig,
-                                                        VllmAWQLinearMethod)
+                                                        VllmAWQLinearMethod,
+                                                        VllmAWQMoEMethod)
 from tpu_inference.layers.vllm.quantization.configs import \
     VllmQuantLinearConfig
 
@@ -58,7 +62,7 @@ def ref_quantize_uint4(x: torch.Tensor, group_size: int):
     # Equation for asymmetric quantization is x_q = (x + x_z) / scale where
     # x_z is calculated to ensure x + x_z does not contain any negative values.
     offset = torch.clamp(-torch.amin(x, dim=1, keepdim=True), min=0)
-    x += offset
+    x = x + offset
     # After adding offset, x will not contain any negative values.
     assert x.min() >= 0
 
@@ -68,6 +72,26 @@ def ref_quantize_uint4(x: torch.Tensor, group_size: int):
     x_q = torch.clip(x / x_s, 0, uint4_max).to(torch.int32)
     x_z = torch.clip(offset / x_s, 0, uint4_max).to(torch.int32)
     return x_q, x_z, x_s.to(torch.float32)
+
+
+def quantize_to_awq(weight: torch.Tensor, group_size: int):
+    uint4_max = 15
+    orig_shape = weight.shape
+
+    weight = weight.reshape(weight.shape[0], -1, group_size, weight.shape[-1])
+    offset = torch.clamp(-torch.amin(weight, dim=2, keepdim=True), min=0)
+    weight = weight + offset
+
+    abs_max = torch.amax(weight, dim=2, keepdim=True)
+    x_s = abs_max / uint4_max
+
+    x_q = torch.clip(weight / x_s, 0, uint4_max).to(torch.int32)
+    x_z = torch.clip(offset / x_s, 0, uint4_max).to(torch.int32)
+
+    x_q = pack_awq_weight_into_int32(x_q.reshape(orig_shape))
+    x_z = pack_awq_weight_into_int32(x_z.squeeze(2))
+
+    return x_q, x_z, x_s.squeeze(2).to(torch.float32)
 
 
 def ref_w4a16(x: torch.Tensor, w_q: torch.Tensor, w_z: torch.Tensor,
@@ -88,8 +112,8 @@ def pack_awq_weight_into_int32(weight: torch.Tensor):
     orig_shape = weight.shape
     weight = weight.reshape(orig_shape[:-1] + (-1, 8))
     weight = weight[..., awq_order].reshape(orig_shape)
-
-    return pack_quantized_values_into_int32(weight, scalar_types.uint4, 1)
+    return pack_quantized_values_into_int32(weight, scalar_types.uint4,
+                                            weight.ndim - 1)
 
 
 def return_ref_and_layer_output(
@@ -421,3 +445,101 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
     ref_output, layer_output = return_ref_and_layer_output(
         linear_layer, qweight, qzeros, scales)
     torch.testing.assert_close(ref_output, layer_output)
+
+
+@pytest.mark.parametrize("num_devices", [1, min(jax.local_device_count(), 2)])
+@pytest.mark.parametrize("num_tokens", [8])
+@pytest.mark.parametrize("intermediate_size", [1024])
+@pytest.mark.parametrize("hidden_size", [128])
+@pytest.mark.parametrize("num_experts", [8])
+@pytest.mark.parametrize("topk", [2])
+@pytest.mark.parametrize("use_ep", [True, False])
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+def test_fused_moe(num_devices, num_tokens, intermediate_size, hidden_size,
+                   num_experts, topk, use_ep, enable_attn_dp):
+    # Skip if enable_attn_dp is True but we don't have enough devices
+    if enable_attn_dp and num_devices < 2:
+        pytest.skip("enable_attn_dp requires at least 2 devices")
+
+    mesh = test_utils.get_spmd_mesh(num_devices, enable_attn_dp)
+    torch.manual_seed(42)
+    dtype = torch.bfloat16
+
+    a = torch.randn((num_tokens, hidden_size), dtype=dtype) / 10
+    w1 = torch.randn(
+        (num_experts, 2 * intermediate_size, hidden_size), dtype=dtype) / 10
+    w2 = torch.randn(
+        (num_experts, hidden_size, intermediate_size), dtype=dtype) / 10
+
+    w1_bias = torch.randn(
+        (num_experts, 2 * intermediate_size), dtype=dtype) / 10
+    w2_bias = torch.randn((num_experts, hidden_size), dtype=dtype) / 10
+    score = torch.randn((num_tokens, num_experts), dtype=dtype)
+
+    engine_args = EngineArgs(
+        model=MODELS[0],
+        max_model_len=64,
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+        load_format='dummy',
+        dtype='bfloat16',
+    )
+    vllm_config = engine_args.create_engine_config()
+    vllm_config.model_config.dtype = dtype
+    vllm_config.parallel_config = ParallelConfig(
+        tensor_parallel_size=mesh.devices.size, enable_expert_parallel=use_ep)
+
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+    with set_current_vllm_config(vllm_config):
+        vllm_fused_moe = FusedMoE(
+            num_experts=num_experts,
+            top_k=topk,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            reduce_results=False,
+            renormalize=False,
+            tp_size=1,
+            dp_size=1,
+            quant_config=quant_config,
+            has_bias=True,
+        )
+        vllm_fused_moe.moe_parallel_config.use_ep = use_ep
+
+    w13_q, w13_z, w13_s = quantize_to_awq(
+        w1.permute(0, 2, 1).float(), quant_config.group_size)
+    w2_q, w2_z, w2_s = quantize_to_awq(
+        w2.permute(0, 2, 1).float(), quant_config.group_size)
+
+    vllm_fused_moe.w13_qweight.data = w13_q
+    vllm_fused_moe.w2_qweight.data = w2_q
+    vllm_fused_moe.w13_scales.data = w13_s.to(dtype)
+    vllm_fused_moe.w2_scales.data = w2_s.to(dtype)
+    vllm_fused_moe.w13_qzeros.data = w13_z
+    vllm_fused_moe.w2_qzeros.data = w2_z
+    vllm_fused_moe.w13_bias.data = w1_bias
+    vllm_fused_moe.w2_bias.data = w2_bias
+
+    expected = test_utils.ref_moe(a, score, w1, w2, w1_bias, w2_bias,
+                                  vllm_fused_moe.top_k,
+                                  vllm_fused_moe.renormalize,
+                                  vllm_fused_moe.activation.value)
+
+    with torchax.default_env(), set_forward_context(None, vllm_config):
+        assert isinstance(vllm_fused_moe.quant_method, VllmAWQMoEMethod)
+        if use_ep:
+            assert vllm_fused_moe.quant_method.moe_backend == MoEBackend.GMM_EP
+        else:
+            assert vllm_fused_moe.quant_method.moe_backend == MoEBackend.GMM_TP
+
+        jax_a = a.to('jax')
+        score = score.to('jax')
+
+        vllm_fused_moe.quant_method.process_weights_after_loading(
+            vllm_fused_moe)
+        actual = vllm_fused_moe(jax_a, score)
+
+        torch.testing.assert_close(expected,
+                                   actual,
+                                   check_device=False,
+                                   atol=1e-1,
+                                   rtol=1e-1)

@@ -70,7 +70,7 @@ class TestJaxModule(unittest.TestCase):
                 self.my_module_2 = MyModule()
                 self.nested_module_a = NestedModule()
                 self.nested_module_b = NestedModule()
-                self.layers = [MyModule() for _ in range(3)]
+                self.layers = nnx.List([MyModule() for _ in range(3)])
 
         module = Depth3Module()
 

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import math
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -13,12 +14,12 @@ from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
-from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.v1 import utils as vllm_utils
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.worker.worker_base import WorkerBase
 
 from tpu_inference import envs, utils
 from tpu_inference.distributed import jax_parallel_state
@@ -36,6 +37,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class PPConfig:
+    vllm_config: VllmConfig
     rank: int
     ip: str
     prev_worker_ip: str
@@ -53,12 +55,37 @@ class PPConfig:
         # as an independent JAX cluster.
         # For single-host PP or multi-host with one host per stage,
         # the cluster size for each stage is 1.
+
+        # Defines the 3D topology of the JAX processes (nodes) in the cluster. Syntax: "a,b,c"
         self.default_tpu_process_bounds = "1,1,1"
+        # Defines how many physical TPU chips are allocated to each JAX process. Syntax: "a,b,c"
         self.default_tpu_chips_per_process_bounds = "1,1,1"
+        # Specifies the physical IDs of the TPU chips that this specific process is allowed to see and use. Syntax: comma separated ints like "a", "a,b"
         self.default_tpu_visible_chips = f"{self.rank}"
 
+        if self.pp_world_size > 1:
+            # We need to know if we are on a 2-core-per-chip (v7) or 1-core-per-chip (v6) system
+            from tpu_inference import tpu_info
+            cores_per_chip = tpu_info.get_num_cores_per_chip()
 
-class TPUWorker:
+            # This tells us how many logical JAX devices (cores) this specific pipeline stage needs. If you are doing Tensor Parallelism (TP) within a stage, total_devices would be the TP size.
+            sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
+            total_cores_per_stage = sharding_config.total_devices
+
+            # Number of physical chips needed for this stage.
+            chips_per_stage = math.ceil(total_cores_per_stage / cores_per_chip)
+
+            if chips_per_stage > 0:
+                start_chip = self.rank * chips_per_stage
+                self.default_tpu_visible_chips = ",".join(
+                    str(i)
+                    for i in range(start_chip, start_chip + chips_per_stage))
+
+                # Set bounds to match the visible chips exactly.
+                self.default_tpu_chips_per_process_bounds = f"1,{chips_per_stage},1"
+
+
+class TPUWorker(WorkerBase):
 
     def __init__(
         self,
@@ -71,18 +98,18 @@ class TPUWorker:
         ip: str = "localhost",
         prev_worker_ip: str = "localhost",
     ):
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.parallel_config = vllm_config.parallel_config
-        self.cache_config = vllm_config.cache_config
-        self.local_rank = local_rank
-        self.rank = rank
-        self.distributed_init_method = distributed_init_method
-        self.is_driver_worker = is_driver_worker
+        super().__init__(
+            vllm_config,
+            local_rank,
+            rank,
+            distributed_init_method,
+            is_driver_worker=is_driver_worker,
+        )
+
         self.devices = devices if devices is not None else []
         self.device_ranks = set(device.id for device in self.devices
                                 if isinstance(device, jaxlib._jax.Device))
-        self.pp_config = PPConfig(rank, ip, prev_worker_ip,
+        self.pp_config = PPConfig(vllm_config, rank, ip, prev_worker_ip,
                                   self.parallel_config.pipeline_parallel_size)
 
         # Explicitly trigger RunAI download on the worker if needed.
@@ -314,7 +341,7 @@ class TPUWorker:
                 scheduler_output, self.rank - 1, self.step_counter)
             # TODO: this method might only works for vllm model, not sure about jax models.
             tensor_spec = self.model_runner.get_intermediate_tensor_spec(
-                scheduler_output.total_num_scheduled_tokens)
+                scheduler_output)
             intermediate_tensors_dict = get_pp_group().recv_tensor_dict(
                 uuid, tensor_spec)
             intermediate_tensors = JaxIntermediateTensors(
@@ -347,14 +374,9 @@ class TPUWorker:
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         return self.model_runner.take_draft_token_ids()
 
-    def add_lora(
-        self,
-        lora_request: LoRARequest,
-    ) -> bool:
-        raise NotImplementedError(
-            "LoRA is not supported by the JAX worker yet.")
-
-    def profile(self, is_start: bool = True):
+    def profile(self,
+                is_start: bool = True,
+                profile_prefix: str | None = None):
         if is_start:
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
@@ -368,14 +390,12 @@ class TPUWorker:
     def load_model(self) -> None:
         self.model_runner.load_model()
 
-    def compile_or_warm_up_model(self) -> None:
+    def compile_or_warm_up_model(self) -> float:
         self.model_runner.capture_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         self.model_runner._init_random()
-
-    def reset_mm_cache(self) -> None:
-        pass
+        return self.compilation_config.compilation_time
 
     def get_model(self):
         return self.model_runner.get_model()
@@ -417,10 +437,6 @@ class TPUWorker:
         port = get_kv_transfer_port()
         return (int(self.topology_order_id), ip, int(port))
 
-    def check_health(self) -> None:
-        # worker will always be healthy as long as it's running.
-        return
-
     def sync_weights(
         self,
         updated_weights: jaxtyping.PyTree,
@@ -435,8 +451,11 @@ class TPUWorker:
                                                transpose_keys=transpose_keys,
                                                reshard_fn=reshard_fn)
 
-    def shutdown(self) -> None:
-        return
+    def delete_kv_cache(self) -> None:
+        self.model_runner.delete_kv_cache()
+
+    def reinitialize_kv_cache(self) -> None:
+        self.model_runner.reinitialize_kv_cache()
 
     # Ray executor do not need handshake metadata
     # as we pass the kv_parameters through proxy server

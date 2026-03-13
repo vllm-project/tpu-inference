@@ -239,11 +239,9 @@ def sparse_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
     weights_TX, indices_TX = gating_output
     if layer.qwix_quantized_weight_dtype:
         gating_up_proj_spec = (PartitionSpec(*layer.edf_sharding),
-                               PartitionSpec(layer.edf_sharding[0], None,
-                                             layer.edf_sharding[2]))
+                               PartitionSpec(*layer.edf_sharding))
         down_proj_spec = (PartitionSpec(*layer.efd_sharding),
-                          PartitionSpec(layer.efd_sharding[0], None,
-                                        layer.efd_sharding[2]))
+                          PartitionSpec(*layer.efd_sharding))
     else:
         gating_up_proj_spec = PartitionSpec(*layer.edf_sharding)
         down_proj_spec = PartitionSpec(*layer.efd_sharding)
@@ -274,19 +272,19 @@ def sparse_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
         "kernel_gating_EDF",
         layer.kernel_gating_EDF,
         channelwise_axes=[0, 2],
-        tiled_axes={})
+        tiled_axes={1: 128})
     kernel_up_proj_EDF = _process_weight_for_qwix(
         layer.qwix_quantized_weight_dtype,
         "kernel_up_proj_EDF",
         layer.kernel_up_proj_EDF,
         channelwise_axes=[0, 2],
-        tiled_axes={})
+        tiled_axes={1: 128})
     kernel_down_proj_EFD = _process_weight_for_qwix(
         layer.qwix_quantized_weight_dtype,
         "kernel_down_proj_EFD",
         layer.kernel_down_proj_EFD,
         channelwise_axes=[0, 2],
-        tiled_axes={})
+        tiled_axes={1: 128})
 
     weights.w1_weight = kernel_gating_EDF
     weights.w2_weight = kernel_up_proj_EDF

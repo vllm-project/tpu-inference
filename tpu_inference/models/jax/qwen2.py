@@ -19,7 +19,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
-from transformers import Qwen2Config, modeling_flax_utils
+from transformers import Qwen2Config
 from vllm.config import VllmConfig
 
 from tpu_inference import utils
@@ -29,6 +29,7 @@ from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.embed import JaxEmbed
+from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
@@ -43,6 +44,7 @@ from tpu_inference.models.jax.utils.weight_utils import (LoadableWithIterator,
 logger = init_logger(__name__)
 
 init_fn = nnx.initializers.uniform()
+modeling_flax_utils = FlaxUtils()
 
 
 class Qwen2MLP(JaxModule):

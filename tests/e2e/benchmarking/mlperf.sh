@@ -152,7 +152,7 @@ if [ "$USE_V6E8_QUEUE" == "True" ]; then
     # Set to 8 if job is in 8 chips queue.
     # TODO (Qiliang Cui) Rename USE_V6E8_QUEUE to USE_8_CHIPS_QUEUE
     extra_serve_args+=(--tensor-parallel-size 8)
-elif [ "$IS_FOR_V7X" == "true" ]; then
+elif [ "$TPU_VERSION" == "tpu7x" ]; then
     # Set the default value to 2 for tpu v7x
     # TODO (Qiliang Cui) Investigate why tensor-parallel-size=1 breaks in tpu7x
     extra_serve_args+=(--tensor-parallel-size 2)
@@ -288,7 +288,7 @@ for model_name in $model_list; do
 
     # Spin up the vLLM server
     echo "Spinning up the vLLM server..."
-    (vllm serve "$model_name" --max-model-len=1024 --disable-log-requests --max-num-batched-tokens "$max_batched_tokens" "${current_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
+    (vllm serve "$model_name" --max-model-len=1024 --max-num-batched-tokens "$max_batched_tokens" "${current_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
 
     # Set initial trap to ensure cleanup happens even on immediate exit
     trap 'cleanUp "$model_name"' EXIT

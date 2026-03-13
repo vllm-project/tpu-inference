@@ -25,6 +25,10 @@ if [ "$#" -eq 0 ]; then
   exit 1
 fi
 
+# TODO(Qiliang Cui): This is temp solution to mitigate the docker image
+#     not cleaned issue when migrating benchmark to buildkite.
+docker rm -f vllm-tpu || true
+
 # Environment variables for docker run
 ENV_VARS=(
   -e TEST_MODEL="${TEST_MODEL:-}"
@@ -73,7 +77,7 @@ else
   exit 1
 fi
 
-# Some test scripts set tp=2 on IS_FOR_V7X=true to mitigate test failures.
+# Some test scripts set tp=2 on TPU_VERSION=tpu7x to mitigate test failures.
 # TODO (Qiliang Cui) Investigate why tensor-parallel-size=1 breaks in tpu7x.
 
 exec docker run \
@@ -92,7 +96,7 @@ exec docker run \
   ${QUANTIZATION:+-e QUANTIZATION="$QUANTIZATION"} \
   ${NEW_MODEL_DESIGN:+-e NEW_MODEL_DESIGN="$NEW_MODEL_DESIGN"} \
   ${USE_V6E8_QUEUE:+-e USE_V6E8_QUEUE="$USE_V6E8_QUEUE"} \
-  ${IS_FOR_V7X:+-e IS_FOR_V7X="$IS_FOR_V7X"} \
+  ${TPU_VERSION:+-e TPU_VERSION="$TPU_VERSION"} \
   ${SKIP_ACCURACY_TESTS:+-e SKIP_ACCURACY_TESTS="$SKIP_ACCURACY_TESTS"} \
   ${VLLM_MLA_DISABLE:+-e VLLM_MLA_DISABLE="$VLLM_MLA_DISABLE"} \
   "${IMAGE_NAME}:${BUILDKITE_COMMIT}" \

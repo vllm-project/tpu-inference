@@ -59,11 +59,11 @@ class JaxModule(nnx.Module):
         for name, value in self.__dict__.items():
             if isinstance(value, JaxModule):
                 yield name, value
-            elif isinstance(value, list):
+            elif isinstance(value, list) or isinstance(value, nnx.List):
                 yield name, JaxModuleList(value)
 
 
-class JaxModuleList(list):
+class JaxModuleList(nnx.List):
     """A list container for JaxModule objects."""
 
     def __init__(self, modules: Iterable[JaxModule]):

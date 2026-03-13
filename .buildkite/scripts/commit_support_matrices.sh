@@ -23,22 +23,22 @@ TARGET_BRANCH="${BUILDKITE_BRANCH:-main}"
 if [ "${NIGHTLY}" = "1" ]; then
   # Set path and commit message for nightly builds.
   BASE_PATH="support_matrices/nightly"
-  
+  IMPL_TYPE_SUBDIR="default" # Default implementation subdir
+
   # Check for specific model implementation type to enable directory isolation.
   # If MODEL_IMPL_TYPE is 'vllm' or 'flax_nnx', use a implementation-specific subfolder.
   if [ "${MODEL_IMPL_TYPE:-auto}" = "vllm" ] || [ "${MODEL_IMPL_TYPE:-auto}" = "flax_nnx" ]; then
-    ARTIFACT_DOWNLOAD_PATH="${BASE_PATH}/${MODEL_IMPL_TYPE}"
-    COMMIT_MESSAGE="[skip ci] Update nightly support matrices for ${MODEL_IMPL_TYPE} (v6/v7)"
+    IMPL_TYPE_SUBDIR="${MODEL_IMPL_TYPE}"
+    COMMIT_MESSAGE="[skip ci] Update nightly support matrices for ${MODEL_IMPL_TYPE} (v6e/v7x)"
   else
-    # Default case: support_matrices/nightly
-    ARTIFACT_DOWNLOAD_PATH="${BASE_PATH}"
-    COMMIT_MESSAGE="[skip ci] Update nightly support matrices (v6/v7)"
+    # Default case: support_matrices/nightly/default
+    COMMIT_MESSAGE="[skip ci] Update nightly support matrices (v6e/v7x)"
   fi
 else
   # Set path and commit message for release tag builds.
   COMMIT_TAG="${BUILDKITE_TAG:-unknown-tag}"
   ARTIFACT_DOWNLOAD_PATH="support_matrices"
-  COMMIT_MESSAGE="[skip ci] Update support matrices for ${COMMIT_TAG} (v6/v7)"
+  COMMIT_MESSAGE="[skip ci] Update support matrices for ${COMMIT_TAG} (v6e/v7x)"
 fi
 # Construct the repository URL with the access token for authentication.
 AUTHENTICATED_REPO_URL="https://x-access-token:${GITHUB_PAT}@${REPO_URL#https://}"
@@ -59,20 +59,26 @@ git checkout "${TARGET_BRANCH}"
 git reset --hard origin/"${TARGET_BRANCH}"
 
 echo "--- Downloading CSV artifacts"
-# Download without --flat to preserve v6/ or v7/ folder structure
+# Download without --flat to preserve v6e/ or v7x/ folder structure
 buildkite-agent artifact download "v*/*.csv" "."
 
 # Iterate through v6 and v7 folders if they exist
-for ver in v6 v7; do
+for ver in v6e v7x; do
   if [ -d "$ver" ]; then
-    TARGET_DIR="${ARTIFACT_DOWNLOAD_PATH}/${ver}"
+    if [ "${NIGHTLY}" = "1" ]; then
+      # Nightly layout: support_matrices/nightly/{ver}/{impl_type}
+      TARGET_DIR="${BASE_PATH}/${ver}/${IMPL_TYPE_SUBDIR}"
+    else
+      # Release layout: support_matrices/{ver}
+      TARGET_DIR="${ARTIFACT_DOWNLOAD_PATH}/${ver}"
+    fi
     echo "Syncing ${ver} artifacts to ${TARGET_DIR}..."
-    
+
     mkdir -p "${TARGET_DIR}"
-    
+
     # Move the files to the final destination in the repo
     mv "${ver}"/*.csv "${TARGET_DIR}/"
-    
+
     # Clean up the temporary download directory
     rmdir "${ver}"
   else

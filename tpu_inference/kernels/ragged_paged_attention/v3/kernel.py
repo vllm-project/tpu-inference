@@ -1335,8 +1335,7 @@ def get_kernel_scope_name(bq_size, bkv_p, page_size, sliding_window):
     return name
 
 
-@functools.partial(
-    jax.jit,
+@jax.jit(
     static_argnames=(
         "sm_scale",
         "sliding_window",
