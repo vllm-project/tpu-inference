@@ -22,6 +22,7 @@ from tpu_inference.kernels.megablox.gmm_v2 import TileSizes, gmm_v2
 jax.config.parse_flags_with_absl()
 
 
+# xw32: batch_size is like num_tokens*topk
 def get_group_sizes(batch_size: int, num_groups: int) -> jax.Array:
   distribution = jax.random.uniform(jax.random.key(0), (num_groups - 1, ),
                                     dtype=jnp.float32)
@@ -30,7 +31,7 @@ def get_group_sizes(batch_size: int, num_groups: int) -> jax.Array:
   return jnp.append(group_sizes, batch_size - jnp.sum(group_sizes))
 
 
-def quantize_tensor(x: jax.Array,
+def quantize_tensor(x: jax.Array,  # (num_local_groups, in_size, out_size)
                     dtype: jnp.dtype,
                     axis: int = -1,
                     block_size: int = 256):
@@ -60,13 +61,19 @@ def quantize_tensor(x: jax.Array,
   return x_q, scale
 
 
+# xw32q: The reference implementation in gmm_v2_test.py @tests/kernels/gmm_v2_test.py:70 takes as input "group_offset". But the reference implementation in gmm v1 test @tests/kernels/gmm_test.py:118-136 doesn't. Which one is correct?
+# A:
+#   Both are correct for their respective kernels.
+#   Here's why:
+#   - gmm v1 (gmm.py line 320, ops.py line 18) supports group_offset in the actual kernel, but the v1 test's reference_gmm (line 118-136) omits it — it always starts from group 0. This is fine because the v1 tests only test with group_offset=0 (the default).
+#   - gmm v2 (gmm_v2.py lines 985-1026) also supports group_offset, and the v2 test's reference_gmm (line 64-70) correctly includes it. The key logic is on line 94: group = global_group - group_offset[0], which maps global group indices to local rhs indices — this is needed when the rhs only holds a subset of the expert weights (e.g., in tensor-parallel sharding).
 def reference_gmm(
-    lhs: jax.Array,
-    rhs: jax.Array,
-    group_sizes: jax.Array,
+    lhs: jax.Array,  # [m, k]=[num_tokens, k]
+    rhs: jax.Array,  # [num_groups, k, n]
+    group_sizes: jax.Array,  # [num_groups]
     rhs_scale: jax.Array | None = None,
     rhs_bias: jax.Array | None = None,
-    group_offset: jax.Array | None = None,
+    group_offset: jax.Array | None = None,  # int32[1]
 ):
   num_tokens = lhs.shape[0]
   num_groups, in_size, out_size = rhs.shape
@@ -90,6 +97,7 @@ def reference_gmm(
   for global_group in range(group_sizes.size):
     group_size = group_sizes[global_group]
 
+    # xw32: note the group_offset before sharding: group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
     group = global_group - group_offset[0]
     end = min(start + group_size, num_tokens)
     group_size = end - start
@@ -128,7 +136,7 @@ class GmmTest(jtu.JaxTestCase):
       batch_size=[128],
       in_size=[512, 1024],
       out_size=[512, 1024],
-      num_groups=[16, 32],
+      num_groups=[16, 32],  # xw32: num_group is like global_num_experts.
       has_bias=[True, False],
       group_offset=[0, 2, 3],
   )
@@ -145,7 +153,7 @@ class GmmTest(jtu.JaxTestCase):
       rhs_bias = jax.random.normal(key, (num_local_groups, 1, out_size),
                                    dtype=jnp.bfloat16)
 
-    group_sizes = get_group_sizes(batch_size, num_groups)
+    group_sizes = get_group_sizes(batch_size, num_groups)  # [num_groups]
     group_offset = jnp.array(group_offset, dtype=jnp.int32)
 
     expected = reference_gmm(lhs,
