@@ -316,11 +316,9 @@ def inner_kernel(
                     block_scale_inv = jnp.where(block_scale == 0, 0,
                                                 1 / block_scale)
                     # Convert lhs into quantized dtype.
-                    scaled = block_lhs * block_scale_inv
-                    bits = pltpu.prng_random_bits(scaled.shape).astype(
-                        jnp.uint32)
-                    block_lhs_q = pltpu.stochastic_round(
-                        scaled, bits, target_dtype=lhs_q_dtype)
+                    # NOTE(catswe): investigate stochastic rounding
+                    block_lhs_q = jnp.round(
+                        block_lhs * block_scale_inv).astype(lhs_q_dtype)
 
                     block_acc = jnp.matmul(
                         block_lhs_q,
