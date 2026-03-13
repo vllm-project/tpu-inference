@@ -84,150 +84,64 @@ def _run_inference_with_config(model_name: str,
         time.sleep(5)
 
 
-def test_pipeline_parallel_ep_model(
-    model_name: str,
-    test_prompts: list,
-    sampling_params: SamplingParams,
-):
-    """
-    Test pp=2, ep=2 works
-    """
-    # For EP, we use an MoE model
-    moe_model = "Qwen/Qwen1.5-MoE-A2.7B"
-    outputs = _run_inference_with_config(
-        model_name=moe_model,
-        test_prompts=test_prompts,
-        sampling_params=sampling_params,
-        tensor_parallel_size=1,
-        pipeline_parallel_size=2,
-        enable_expert_parallel=True,
-        additional_config={
+@pytest.mark.parametrize(
+    "model, tp, pp, dp, ep, impl, additional_config",
+    [
+        # test_pipeline_parallel_ep_model
+        ("Qwen/Qwen1.5-MoE-A2.7B", 1, 2, 1, True, "jax", {
             "sharding": {
                 "sharding_strategy": {
                     "expert_parallelism": 2
                 }
             }
-        },
-    )
-
-    assert len(outputs) == len(test_prompts)
-    for output in outputs:
-        assert len(output.outputs) > 0
-        assert len(output.outputs[0].text.strip()) > 0
-
-
-def test_pipeline_parallel_dp_jax_model(
+        }),
+        # test_pipeline_parallel_dp_jax_model
+        (None, 1, 2, 2, False, "jax", {}),
+        # test_pipeline_parallel_tp_jax_model
+        (None, 2, 2, 1, False, "jax", {}),
+        # test_pipeline_parallelism_jax_model
+        (None, 1, 2, 1, False, "jax", {}),
+        # test_pipeline_parallelism_vllm_model
+        (None, 1, 2, 1, False, "vllm", {}),
+    ],
+)
+def test_pipeline_parallel_configs(
+    model,
+    tp,
+    pp,
+    dp,
+    ep,
+    impl,
+    additional_config,
     model_name: str,
     test_prompts: list,
     sampling_params: SamplingParams,
 ):
     """
-    Test pp=2, dp=2 works on Jax models
+    Test various pipeline parallel configurations.
     """
+    if impl == 'vllm':
+        os.environ['MODEL_IMPL_TYPE'] = 'vllm'
+    else:
+        os.environ.pop('MODEL_IMPL_TYPE', None)
+
+    actual_model = model if model is not None else model_name
+
     outputs = _run_inference_with_config(
-        model_name=model_name,
+        model_name=actual_model,
         test_prompts=test_prompts,
         sampling_params=sampling_params,
-        tensor_parallel_size=1,
-        pipeline_parallel_size=2,
-        data_parallel_size=2,
+        tensor_parallel_size=tp,
+        pipeline_parallel_size=pp,
+        data_parallel_size=dp,
+        enable_expert_parallel=ep,
+        additional_config=additional_config,
     )
 
     assert len(outputs) == len(test_prompts)
     for output in outputs:
         assert len(output.outputs) > 0
         assert len(output.outputs[0].text.strip()) > 0
-
-
-def test_pipeline_parallel_tp_jax_model(
-    model_name: str,
-    test_prompts: list,
-    sampling_params: SamplingParams,
-):
-    """
-    Test pp=2, tp=2 works on Jax models
-    """
-    outputs = _run_inference_with_config(
-        model_name=model_name,
-        test_prompts=test_prompts,
-        sampling_params=sampling_params,
-        tensor_parallel_size=2,
-        pipeline_parallel_size=2,
-    )
-
-    assert len(outputs) == len(test_prompts)
-    for output in outputs:
-        assert len(output.outputs) > 0
-        assert len(output.outputs[0].text.strip()) > 0
-
-
-def test_pipeline_parallelism_jax_model(
-    model_name: str,
-    test_prompts: list,
-    sampling_params: SamplingParams,
-):
-    """
-    Test pipline parallelism works on Jax models
-
-    Equivalent to:
-    python examples/offline_inference.py --tensor_parallel_size=1 --pipeline_parallel_size=2
-    """
-    # Test with pipeline parallelism enabled
-    outputs = _run_inference_with_config(
-        model_name=model_name,
-        test_prompts=test_prompts,
-        sampling_params=sampling_params,
-        tensor_parallel_size=1,
-        pipeline_parallel_size=2,
-    )
-
-    # Verify we got outputs for all prompts
-    assert len(outputs) == len(test_prompts)
-
-    # Verify each output has generated text
-    for output in outputs:
-        assert len(output.outputs) > 0
-        assert len(output.outputs[0].text.strip()) > 0
-
-    print(
-        f"✓ Pipeline Parallelism Jax model test passed with {len(outputs)} outputs"
-    )
-
-
-def test_pipeline_parallelism_vllm_model(
-    model_name: str,
-    test_prompts: list,
-    sampling_params: SamplingParams,
-):
-    """
-    Test pipline parallelism works on vLLM models, and it also works with
-    with tensor parallelism.
-
-    Equivalent to:
-    MODEL_IMPL_TYPE=vllm python examples/offline_inference.py --tensor_parallel_size=1 --pipeline_parallel_size=2
-    """
-
-    os.environ['MODEL_IMPL_TYPE'] = 'vllm'
-    # Test with data parallelism enabled
-    outputs = _run_inference_with_config(
-        model_name=model_name,
-        test_prompts=test_prompts,
-        sampling_params=sampling_params,
-        tensor_parallel_size=1,
-        pipeline_parallel_size=2,
-    )
-
-    # Verify we got outputs for all prompts
-    assert len(outputs) == len(test_prompts)
-
-    # Verify each output has generated text
-    for output in outputs:
-        assert len(output.outputs) > 0
-        assert len(output.outputs[0].text.strip()) > 0
-
-    print(
-        f"✓ Pipeline Parallelism vLLM model test passed with {len(outputs)} outputs"
-    )
 
 
 def test_pipeline_parallelism_jax_model_correctness(
