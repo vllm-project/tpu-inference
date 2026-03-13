@@ -31,6 +31,7 @@ from vllm.model_executor.layers.quantization.base_config import \
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
+import tpu_inference.envs as envs
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.linear_weights import (
     shard_linear_weights, to_parameter_list)
@@ -248,7 +249,9 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         if self.weight_block_size is not None:
             weight_block_size = tuple(self.weight_block_size)
 
-        input_weights = shard_fp8_moe_weights_to_tpu(input_weights, self.mesh)
+        if envs.MOE_REQUANTIZE_ON_TPU:
+            input_weights = shard_fp8_moe_weights_to_tpu(
+                input_weights, self.mesh)
 
         # --- DEBUG: memory tracking before process_fp8_moe_weights ---
         def _log_mem(label):
