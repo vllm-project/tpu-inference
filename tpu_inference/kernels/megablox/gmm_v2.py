@@ -1,17 +1,3 @@
-# Copyright 2026 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 import dataclasses
 import functools
 from typing import Any, Callable, Tuple
@@ -83,7 +69,6 @@ class Dimensions:
   size_group: int
   size_lhs_group: int
   size_lhs_sublane: int
-  fuse_act: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -106,13 +91,14 @@ class GmmConfigs:
   out_dtype: jnp.dtype
   acc_dtype: jnp.dtype
   zero_init: bool
+  fuse_act: str | None = None
 
   @property
   def num_quant_blocks_per_tile_k(self) -> int:
     return pl.cdiv(self.tiles.tile_k, self.rhs_cfgs.quant_block_size)
 
 
-TileFn = Callable[[Dimensions, InputConfigs, InputConfigs, int], TileSizes]
+TileFn = Callable[[Dimensions, InputConfigs, InputConfigs, int, str | None], TileSizes]
 
 
 class IndexMaps:
@@ -253,7 +239,7 @@ def generate_block_specs(
   )
 
   in_specs = (lhs_block_spec, rhs_block_spec, None)
-  if cfgs.dims.fuse_act is not None:
+  if cfgs.fuse_act is not None:
       in_specs = (lhs_block_spec, rhs_block_spec, rhs_up_block_spec)
   return in_specs, out_block_spec
 
@@ -286,16 +272,15 @@ def inner_kernel(
   invalid data and needs to be masked out.
 
   Args:
-      tiled_lhs_ref: Contains value lhs[m_start:m_end, k_start:k_end]
-      tiled_rhs_ref: Contains value rhs[g_id, k_start:k_end, n_start:n_end].
-        where g_id is the group associated with lhs[m_start:m_end, :]
-      tiled_out_ref: Contains value out[m_start:m_end, n_start:n_end]
-      partial_out_ref: Contains last size_lhs_sublane rows of the previous
-        output. Will be initialized to zero if this is first tile for grid[n_id,
-        :, :].
-      acc_ref: Reference to the accumulator.
-      metadata_ref: Reference to the metadata.
-      cfgs: GmmConfigs.
+    tiled_lhs_ref: Contains value lhs[m_start:m_end, k_start:k_end]
+    tiled_rhs_ref: Contains value rhs[g_id, k_start:k_end, n_start:n_end]. where
+      g_id is the group associated with lhs[m_start:m_end, :]
+    tiled_out_ref: Contains value out[m_start:m_end, n_start:n_end]
+    partial_out_ref: Contains last size_lhs_sublane rows of the previous output.
+      Will be initialized to zero if this is first tile for grid[n_id, :, :].
+    acc_ref: Reference to the accumulator.
+    metadata_ref: Reference to the metadata.
+    cfgs: GmmConfigs.
   """
 
   def _matmul(is_first_k_step: bool, is_last_k_step: bool):
@@ -306,7 +291,7 @@ def inner_kernel(
     if cfgs.rhs_cfgs.packing > 1:
       tiled_rhs = pltpu.bitcast(tiled_rhs, cfgs.rhs_cfgs.quant_dtype)
 
-    if cfgs.dims.fuse_act is not None:
+    if cfgs.fuse_act is not None:
       assert (
           tiled_rhs_up_ref.weight is not None
       ), "tiled_rhs_up_ref.weight cannot be None when fuse_act is not None"
@@ -345,7 +330,7 @@ def inner_kernel(
           )
           if tiled_rhs_ref.scale is not None:
             tiled_rhs_scale = tiled_rhs_ref.scale[..., b_id, :, :]
-            if cfgs.dims.fuse_act is not None:
+            if cfgs.fuse_act is not None:
               assert tiled_rhs_up_ref.scale is not None
               tiled_rhs_up_scale = tiled_rhs_up_ref.scale[..., b_id, :, :]
               tiled_rhs_scale = jnp.concatenate(
@@ -391,14 +376,14 @@ def inner_kernel(
           # same computation will be performed tiles_n//mxu_size times.
           # But we can let compiler perform CSE and avoid recomputation.
           block_abs_max = jnp.max(jnp.abs(block_lhs), axis=1, keepdims=True)
+          block_scale = block_abs_max / dtype_max
 
-          # If block_abs_max=0, it will cause division by zero and return NaNs
-          # during quantization. To avoid this, we add smallest representable
-          # value to avoid block_abs_max being zero.
-          block_abs_max += jnp.finfo(block_abs_max.dtype).smallest_subnormal
-          lhs_block_scale = block_abs_max / dtype_max
+          # If block_scale=0, it will cause division by zero and return either
+          # NaN or Inf. Since this can cause numeric issue when downcasting to
+          # quantized value, we convert them into 0.
+          block_scale_inv = jnp.where(block_scale == 0, 0, 1 / block_scale)
           # Convert lhs into quantized dtype.
-          block_lhs_q = (block_lhs / lhs_block_scale).astype(lhs_q_dtype)
+          block_lhs_q = (block_lhs * block_scale_inv).astype(lhs_q_dtype)
 
           block_acc = jnp.matmul(
               block_lhs_q,
@@ -406,13 +391,13 @@ def inner_kernel(
               preferred_element_type=preferred_element_type,
           ).astype(acc_ref.dtype)
 
-          block_acc *= lhs_block_scale.astype(acc_ref.dtype)
+          block_acc *= block_scale.astype(acc_ref.dtype)
 
           # Apply rhs subchannel scale per quant block.
           if tiled_rhs_ref.scale is not None:
             b_id = start_k // cfgs.rhs_cfgs.quant_block_size
             rhs_scale_slice = tiled_rhs_ref.scale[..., b_id, :, :]
-            if cfgs.dims.fuse_act is not None:
+            if cfgs.fuse_act is not None:
               assert tiled_rhs_up_ref.scale is not None
               rhs_up_scale_slice = tiled_rhs_up_ref.scale[..., b_id, :, :]
               rhs_scale_slice = jnp.concatenate(
@@ -432,7 +417,7 @@ def inner_kernel(
     if is_last_k_step:
       if cfgs.rhs_cfgs.has_bias:
         tiled_rhs_bias = tiled_rhs_ref.bias[...]
-        if cfgs.dims.fuse_act is not None:
+        if cfgs.fuse_act is not None:
           assert (
               tiled_rhs_up_ref.bias is not None
           ), "tiled_rhs_up_ref.bias cannot be None when fuse_act is not None"
@@ -459,7 +444,7 @@ def inner_kernel(
           tiled_out_ref.shape[0], tiled_out_ref.shape[1], acc.shape[1]
       )
 
-      if cfgs.dims.fuse_act is not None:
+      if cfgs.fuse_act is not None:
         acc_masked_gate = acc_masked[..., : cfgs.tiles.tile_n]
         acc_masked_up = acc_masked[..., cfgs.tiles.tile_n :]
         assert acc_masked_gate.shape == acc_masked_up.shape, (
@@ -470,7 +455,7 @@ def inner_kernel(
         acc_masked = apply_act_fn(
             acc_masked_gate,
             acc_masked_up,
-            cfgs.dims.fuse_act,
+            cfgs.fuse_act,
         ).astype(acc_masked.dtype)
 
       assert acc_masked.shape == tiled_out_ref.shape, (
@@ -563,11 +548,11 @@ def fill_metadata(
   (gm_id_to_group_id) for each gm tile.
 
   Args:
-      lhs_group_sizes_ref: The group sizes of lhs.
-      group_offset_ref: Offset of the first group to process.
-      metadata_ref: Metadata that is used to determine the group id and m
-        offsets for each gmm tile.
-      cfgs: GmmConfigs.
+    lhs_group_sizes_ref: The group sizes of lhs.
+    group_offset_ref: Offset of the first group to process.
+    metadata_ref: Metadata that is used to determine the group id and m offsets
+      for each gmm tile.
+    cfgs: GmmConfigs.
 
   Returns:
       The number of gm tiles to process lhs with given group offset.
@@ -721,7 +706,6 @@ def kernel_main(
     # In
     lhs_ref: jax.Array,  # [size_m, size_k]
     rhs_ref: WeightsRef,  # [size_group, size_k, size_n]
-    # rhs_up_ref: WeightsRef,  # [size_group, size_k, size_n]
     # Out
     out_ref: jax.Array,  # [size_m, size_n]
     # Scratch memory
@@ -742,25 +726,25 @@ def kernel_main(
   - g: rhs group dimension
   - m: Batch dimension
   - gm: Batch tiling dimension. Aligned to size_lhs_sublane and has tile size
-      of tile_m. Skips over empty groups and accounts for revisited tiles.
+    of tile_m. Skips over empty groups and accounts for revisited tiles.
   - k: in dimension
   - n: out dimension
 
   Args:
-      lhs_group_sizes_ref: Reference to the group sizes of lhs.
-      group_offset_ref: Reference to the group offset.
-      lhs_ref: Reference to the lhs.
-      rhs_ref: Reference to the rhs.
-      out_ref: Reference to the out.
-      partial_out_ref: Reference to the partial output.
-      acc_ref: Reference to the accumulator.
-      metadata_ref: Reference to the metadata.
-      zero_ref: Scratch memory for storing zero values used in initialization.
-      semaphore_ref: Semaphore for zero initialization DMAs.
-      cfgs: GmmConfigs.
+    lhs_group_sizes_ref: Reference to the group sizes of lhs.
+    group_offset_ref: Reference to the group offset.
+    lhs_ref: Reference to the lhs.
+    rhs_ref: Reference to the rhs.
+    out_ref: Reference to the out.
+    partial_out_ref: Reference to the partial output.
+    acc_ref: Reference to the accumulator.
+    metadata_ref: Reference to the metadata.
+    zero_ref: Scratch memory for storing zero values used in initialization.
+    semaphore_ref: Semaphore for zero initialization DMAs.
+    cfgs: GmmConfigs.
   """
 
-  if cfgs.dims.fuse_act is not None:
+  if cfgs.fuse_act is not None:
     assert acc_ref.shape[1] == 2 * cfgs.tiles.tile_n, (
         f"acc_ref's n dimension {acc_ref.shape[1]} should be 2x of tile_n"
         f" {cfgs.tiles.tile_n} when fuse_act is not None"
@@ -790,7 +774,7 @@ def kernel_main(
     assert rhs_weight.shape == (
         cfgs.dims.size_group,
         cfgs.dims.size_k // cfgs.rhs_cfgs.packing,
-        cfgs.dims.size_n * (2 if cfgs.dims.fuse_act else 1),
+        cfgs.dims.size_n * (2 if cfgs.fuse_act else 1),
     )
     rhs_ref = dataclasses.replace(rhs_ref, weight=rhs_weight)
 
@@ -827,12 +811,12 @@ def kernel_main(
   lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, lhs_ref.shape[-1])
   out_in = out_ref.reshape(-1, cfgs.dims.size_lhs_sublane, out_ref.shape[-1])
   scratches = [partial_out_ref, acc_ref, metadata_ref]
-  if cfgs.dims.fuse_act is not None:
+  if cfgs.fuse_act is not None:
     assert len(in_specs) == 3, (
         "Expected 3 in_specs when fuse_act is not None, but got"
         f" {len(in_specs)}."
     )
-  rhs_up = rhs_ref if cfgs.dims.fuse_act is not None else None
+  rhs_up = rhs_ref if cfgs.fuse_act is not None else None
   pipeline_fn(lhs_in, rhs_ref, rhs_up, out_in, scratches=scratches)
 
   if cfgs.zero_init:
@@ -844,6 +828,7 @@ def calculate_tiling(
     lhs_cfgs: InputConfigs,
     rhs_cfgs: InputConfigs,
     vmem_limit_bytes: int,
+    fuse_act: str | None = None,
 ) -> TileSizes:
   """Calculate optimal tile sizes for GMM kernel."""
 
@@ -851,7 +836,6 @@ def calculate_tiling(
   rhs_dtype = rhs_cfgs.dtype
   lhs_bits = jax.dtypes.itemsize_bits(lhs_dtype)
   rhs_bits = jax.dtypes.itemsize_bits(rhs_dtype)
-  fuse_act = dims.fuse_act is not None
   base_rhs_bytes_multiplier = 2 if fuse_act else 1
 
   # When using bf16 for lhs and rhs, 128 is the largest tile_m value that is
@@ -973,7 +957,6 @@ def validate_inputs(
       size_group=size_group,
       size_lhs_group=size_lhs_group,
       size_lhs_sublane=size_lhs_sublane,
-      fuse_act=fuse_act,
   )
 
 
@@ -1014,9 +997,11 @@ def get_cost_estimate(cfgs: GmmConfigs):
   )
 
 
-def get_scope_name(dims: Dimensions, tiles: TileSizes) -> str:
+def get_scope_name(cfgs: GmmConfigs) -> str:
+  dims = cfgs.dims
+  tiles = cfgs.tiles
   return (
-      f"gmm_v2-g_{dims.size_group}-m_{dims.size_m}-k_{dims.size_k}-act_{dims.fuse_act}"
+      f"gmm_v2-g_{dims.size_group}-m_{dims.size_m}-k_{dims.size_k}-act_{cfgs.fuse_act}"
       f"-n_{dims.size_n}-tm_{tiles.tile_m}-tk_{tiles.tile_k}-tn_{tiles.tile_n}"
   )
 
@@ -1108,7 +1093,7 @@ def make_gmm_configs(
   if isinstance(tile_info, TileSizes):
     tiles = tile_info
   else:
-    tiles = tile_info(dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes)
+    tiles = tile_info(dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes, fuse_act)
 
   return GmmConfigs(
       dims=dims,
@@ -1118,6 +1103,7 @@ def make_gmm_configs(
       out_dtype=out_dtype,
       acc_dtype=acc_dtype,
       zero_init=zero_initialize,
+      fuse_act=fuse_act,
   )
 
 
@@ -1181,9 +1167,9 @@ def gmm_v2(
     acc_dtype: Optional jnp.dtype for the accumulator.
     maybe_quantize_lhs: Quantize lhs if set to True and rhs is quantized.
     zero_initialize: Whether to initialize unvisited output elements to zero.
-
+    fuse_act: Activation function to fuse with GMM, None if no fusion.
   Returns:
-      Output of shape [size_m, size_n].
+    Output of shape [size_m, size_n].
   """
 
   del precision
@@ -1195,7 +1181,7 @@ def gmm_v2(
       group_offset = group_offset[None]
 
   if vmem_limit_bytes is None:
-    vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.98)
+    vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.90)
 
   cfgs = make_gmm_configs(
       lhs,
@@ -1226,7 +1212,7 @@ def gmm_v2(
 
   # Initialize scratch shapes.
   max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
-  acc_cols = 2 * tiles.tile_n if dims.fuse_act is not None else tiles.tile_n
+  acc_cols = 2 * tiles.tile_n if cfgs.fuse_act is not None else tiles.tile_n
   scratch_shapes = [
       # partial_out_ref
       pltpu.VMEM((dims.size_lhs_sublane, tiles.tile_n), cfgs.out_dtype),
@@ -1281,7 +1267,6 @@ def gmm_v2(
                   scale=rhs_scale_spec,
                   bias=rhs_bias_spec,
               ),
-              # rhs_up_weights_spec
           ],
           out_specs=pl.BlockSpec(memory_space=pltpu.HBM),
           scratch_shapes=scratch_shapes,
@@ -1290,7 +1275,7 @@ def gmm_v2(
           vmem_limit_bytes=vmem_limit_bytes,
           disable_bounds_checks=True,
       ),
-      name=get_scope_name(dims, tiles),
+      name=get_scope_name(cfgs),
       cost_estimate=get_cost_estimate(cfgs),
       metadata=get_metadata(cfgs),
   )(group_sizes, group_offset, lhs, rhs_weights)[:, : dims.size_n]
