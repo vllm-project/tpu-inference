@@ -83,8 +83,8 @@ def moe_gmm_local(
     w2: jax.Array,
     w2_scale: jax.Array | None,
     w2_bias: jax.Array | None,
-    group_sizes: jax.Array,
-    group_offset: jax.Array,
+    group_sizes: jax.Array, # [global_num_experts]
+    group_offset: jax.Array,  # [EP_size]
     topk_argsort_revert_indices: jax.Array,
     topk_weights: jax.Array,
     *,
@@ -207,7 +207,7 @@ def expert_parallel_gmm(
     w2: jax.Array,
     w2_scale: jax.Array | None,
     w2_bias: jax.Array | None,
-    group_sizes: jax.Array,
+    group_sizes: jax.Array,  # [global_num_experts]
     topk_argsort_revert_indices: jax.Array,
     topk_weights: jax.Array,
     *,
@@ -371,7 +371,7 @@ def fused_moe_func(
             w2,
             w2_scale,
             w2_bias,
-            group_sizes,
+            group_sizes,  # [global_num_experts]
             topk_argsort_revert_indices,
             topk_weights,
             activation=activation,

@@ -583,6 +583,26 @@ def tgmm(
 ) -> jnp.ndarray:
   """Compute lhs[:, sizes[i-1]:sizes[i]] @ rhs[sizes[i-1]:sizes[i], :].
 
+  # xw32q: what are "lhs" and "rhs"? What is the relationship between the "lhs"/"rhs" and the "lhs"/"rhs" in gmm?
+  # A: Looking at how tgmm is called from the backward pass in ops.py:74-82:
+  # grad_rhs = backend.tgmm(
+  #     lhs.swapaxes(0, 1),  # lhs^T, shape [k, m]
+  #     grad,                 # grad of output, shape [m, n]
+  #     group_sizes,
+  #     ...
+  # )
+  # So in tgmm:
+  # - lhs (shape [k, m]) = the transpose of gmm's lhs (which was [m, k])
+  # - rhs (shape [m, n]) = the gradient of gmm's output (i.e., ∂L/∂out)
+  # The purpose is to compute ∂L/∂rhs_gmm, which requires computing lhs_gmm^T @ grad_out for each group. That's a "transposed
+  #  grouped matmul" — for each group i:
+  # out[i] = lhs[:, rows_i]  @  rhs[rows_i, :]
+  #        = lhs_gmm^T[k,m_i] @ grad[m_i, n]
+  #        → shape [k, n]
+  # This produces the 3D output [num_groups, k, n], which is the gradient for gmm's rhs.
+
+  # In summary: tgmm's lhs/rhs are not the same tensors as gmm's lhs/rhs. They are gmm.lhs^T and grad_output respectively,
+  # repurposed to compute the weight gradient via grouped matmul with transposed access patterns.
   Args:
     lhs: A 2d, jnp.ndarray with shape [k, m].
     rhs: A 2d, jnp.ndarray with shape [m, n].
@@ -630,6 +650,19 @@ def tgmm(
   del n_rem
 
   # Create the metadata we need for computation.
+  # xw32: you said "Calls make_group_metadata with visit_empty_groups=True — this is critical because tgmm needs to zero the output for empty groups (unlike gmm which can skip them)". Why tgmm needs to zero the output for empty group unlike gmm which can skip them?
+  # A: It comes down to the output shape:
+  # - gmm outputs [m, n] — indexed by row position. Empty groups have zero rows, so there are simply no output rows to write.
+  #  The output is "dense" in the m-dimension and there's no slot that would contain garbage. (For sharded cases,
+  # _zero_uninitialized_memory at line 554 handles zeroing rows outside the active range.)
+  # - tgmm outputs [num_groups, k, n] — indexed by group id. Every group has a dedicated [k, n] output slice regardless of
+  # whether it has any rows. If group i is empty and we skip it entirely, out[i, :, :] contains uninitialized VMEM garbage.
+  # By visiting empty groups with visit_empty_groups=True, the kernel handles zeroing inline. Trace what happens for an empty
+  #  group in the kernel:
+  # 1. Line 679–683: group_has_changed is True → accumulator scratch is zeroed
+  # 2. Line 686–688: dont_skip is False (group size is 0) → no accumulation happens
+  # 3. Line 728–735: group_is_changing is True → the zeroed scratch is stored to out[group_id, :, :]
+  # This writes zeros to the output slice for the empty group, avoiding uninitialized memory in the result.
   group_metadata, num_active_tiles = make_group_metadata(
       group_sizes=group_sizes,
       m=m,

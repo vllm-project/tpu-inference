@@ -228,6 +228,21 @@ class GroupedMatmulTest(jtu.JaxTestCase):
     atol, rtol = tolerances(lhs_dtype, rhs_dtype, out_dtype)
     self.assert_allclose(out, expected_out, atol=atol, rtol=rtol)
 
+    # xw32q: why is the input to vjpfun called "cotangent"?
+    # A: 
+    # It's the standard term from automatic differentiation theory.
+    # VJP = Vector-Jacobian Product. If the forward function is f(x) -> y, the
+    # Jacobian is J = ∂y/∂x. The VJP computes v^T · J — it left-multiplies the
+    # Jacobian by a vector v.
+    # That vector v lives in the output space (same shape as y). In differential
+    # geometry, vectors in the output/dual space are called cotangent vectors (as
+    # opposed to tangent vectors, which live in the input space).
+    # Concretely:
+    # - Tangent vectors — perturbations to the input, used in JVP (forward-mode AD)
+    # - Cotangent vectors — perturbations to the output, used in VJP (reverse-mode AD)
+    # So cotangent on line 231 is the "seed" gradient ∂L/∂out (shaped (m, n) like the
+    # output), and vjpfun(cotangent) propagates it backward to produce ∂L/∂lhs and
+    # ∂L/∂rhs.
     cotangent = random_dense((m, n), k1, out_dtype, limit=1)
     grad_lhs, grad_rhs, *_ = vjpfun(cotangent)
     expected_grad_lhs, expected_grad_rhs, *_ = reference_vjpfun(cotangent)
