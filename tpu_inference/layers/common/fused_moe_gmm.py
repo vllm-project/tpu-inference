@@ -67,9 +67,7 @@ def gmm_wrapper(lhs,
                 group_offset,
                 last_gmm,
                 fuse_act=None):
-    # if is_supported_by_gmm_v2(rhs_scale) and (not last_gmm
-    #                                           or lhs.shape[0] < 1024):
-   
+    # if (not last_gmm or lhs.shape[0] < 1024):
     gmm_res = gmm_v2(
         lhs=lhs,
         rhs=rhs,
@@ -101,6 +99,7 @@ def moe_gmm_local(
     activation: str,
     topk: int,
     parallelism: Literal["tp", "ep"],
+    fuse_act: bool = True,
 ) -> jax.Array:
     """ Main MoE logic on a local shard can run in TP or EP mode.
 
@@ -118,9 +117,10 @@ def moe_gmm_local(
                            group_sizes,
                            group_offset,
                            False,
-                           fuse_act=activation)
-    # gmm1_res_gate, gmm1_res_up = jnp.split(gmm1_res_gate_up, 2, -1)
-    # gmm1_res = apply_act_fn(activation, gmm1_res_gate, gmm1_res_up)
+                           fuse_act=activation if fuse_act else None)
+    if not fuse_act:
+        gmm1_res_gate, gmm1_res_up = jnp.split(gmm1_res, 2, -1)
+        gmm1_res = apply_act_fn(activation, gmm1_res_gate, gmm1_res_up)
 
     # When the parallelism is TP since w2_bias is not sharded, we should only apply bias
     # once, not applying to every shard. So we set w2_bias to 0 to all shards other than
@@ -160,6 +160,7 @@ def tensor_parallel_gmm(
     activation: str,
     topk: int,
     mesh: Mesh,
+    fuse_act: bool = True,
 ) -> jax.Array:
     data_p_spec = P(ShardingAxisName.MLP_DATA)
     group_offset = jnp.array([0])
@@ -183,6 +184,7 @@ def tensor_parallel_gmm(
             activation=activation,
             topk=topk,
             parallelism="tp",
+            fuse_act=fuse_act,
         ),
         mesh=mesh,
         in_specs=(
@@ -230,6 +232,7 @@ def expert_parallel_gmm(
     activation: str,
     topk: int,
     mesh: Mesh,
+    fuse_act: bool = True,
 ) -> jax.Array:
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
@@ -249,6 +252,7 @@ def expert_parallel_gmm(
             activation=activation,
             topk=topk,
             parallelism="ep",
+            fuse_act=fuse_act,
         ),
         mesh=mesh,
         in_specs=(
@@ -288,6 +292,7 @@ def expert_parallel_gmm(
     "use_ep",
     "activation",
     "scoring_fn",
+    "fuse_act"
 ))
 def fused_moe_func(
     hidden_states: jax.Array,
@@ -304,6 +309,7 @@ def fused_moe_func(
     use_ep: bool,
     activation: str,
     scoring_fn: str,
+    fuse_act: bool = True,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -393,6 +399,7 @@ def fused_moe_func(
             activation=activation,
             topk=topk,
             mesh=mesh,
+            fuse_act=fuse_act,
         )
     else:
         x = tensor_parallel_gmm(
@@ -409,6 +416,7 @@ def fused_moe_func(
             activation=activation,
             topk=topk,
             mesh=mesh,
+            fuse_act=fuse_act,
         )
 
     return x[:num_tokens, :hidden_size]
