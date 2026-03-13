@@ -44,6 +44,8 @@ class KVBufferedRef(pipeline.BufferedRef):
     page_size: int = dataclasses.field(metadata={"static": True})
     batch_size: int = dataclasses.field(metadata={"static": True})
     hbm_stride: int = dataclasses.field(metadata={"static": True})
+    page_size_log2: int = dataclasses.field(metadata={"static": True})
+    page_size_mask: int = dataclasses.field(metadata={"static": True})
 
     def __post_init__(self):
         # Override to bypass the buffer_count > 2 check for output refs
@@ -58,6 +60,8 @@ class KVBufferedRef(pipeline.BufferedRef):
         page_size: int,
         batch_size: int,
         hbm_stride: int,
+        page_size_log2: int,
+        page_size_mask: int,
     ):
         return cls(
             bkv_p_cache=bkv_p_cache,
@@ -65,6 +69,8 @@ class KVBufferedRef(pipeline.BufferedRef):
             page_size=page_size,
             batch_size=batch_size,
             hbm_stride=hbm_stride,
+            page_size_log2=page_size_log2,
+            page_size_mask=page_size_mask,
             **{
                 f.name: getattr(ref, f.name)
                 for f in dataclasses.fields(pipeline.BufferedRef)
@@ -81,6 +87,8 @@ class KVBufferedRef(pipeline.BufferedRef):
         page_size: int,
         batch_size: int,
         hbm_stride: int,
+        page_size_log2: int,
+        page_size_mask: int,
         buffer_count: int = 2,
         use_lookahead: bool = True,
     ):
@@ -100,6 +108,8 @@ class KVBufferedRef(pipeline.BufferedRef):
             page_size=page_size,
             batch_size=batch_size,
             hbm_stride=hbm_stride,
+            page_size_log2=page_size_log2,
+            page_size_mask=page_size_mask,
         )
 
     # def init_slots(self):
@@ -176,10 +186,10 @@ class KVBufferedRef(pipeline.BufferedRef):
             for i in range(self.bkv_p_new):
                 encoded_dst_hbm_off, _, src_vmem_off, new_sz = schedule.get_dma_kv_new(
                     block_idx, b, i)
-                global_p_idx = encoded_dst_hbm_off // self.page_size
-                p_off = encoded_dst_hbm_off % self.page_size
-                dst_hbm_off = page_indices_ref[
-                    global_p_idx] * self.page_size + p_off
+                global_p_idx = encoded_dst_hbm_off >> self.page_size_log2
+                p_off = encoded_dst_hbm_off & self.page_size_mask
+                dst_hbm_off = (page_indices_ref[global_p_idx] <<
+                               self.page_size_log2) | p_off
                 sz = jax.lax.select(do_writeback == 1, new_sz, 0)
                 tpu_primitives.make_async_copy(
                     vmem_src.at[b,

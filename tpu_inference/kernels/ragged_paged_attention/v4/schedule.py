@@ -101,6 +101,14 @@ class RPAConfig:
     def num_page_indices(self) -> int:
         return self.num_seq * self.pages_per_seq
 
+    @property
+    def page_size_log2(self) -> int:
+        return (self.page_size - 1).bit_length()
+
+    @property
+    def page_size_mask(self) -> int:
+        return self.page_size - 1
+
 
 def get_dtype_bitwidth(dtype):
     return dtypes.itemsize_bits(dtype)
@@ -331,14 +339,16 @@ def rpa_metadata_schedule_kernel(
                     config.batch_size * config.bkv_p_cache *
                     3) + target_lane * (config.bkv_p_cache * 3)
                 for i in range(config.bkv_p_cache):
-                    sz = jnp.clip(kv_left_frm_cache - i * config.page_size, 0,
-                                  config.page_size)
+                    sz = jnp.clip(
+                        kv_left_frm_cache - (i << config.page_size_log2), 0,
+                        config.page_size)
                     p_idx = jnp.minimum(p_offset + i,
                                         config.num_page_indices - 1)
 
                     base_i = kv_cache_base + i * 3
                     schedule.dma_kv_cache[base_i + 0] = p_idx
-                    schedule.dma_kv_cache[base_i + 1] = i * config.page_size
+                    schedule.dma_kv_cache[base_i +
+                                          1] = i << config.page_size_log2
                     schedule.dma_kv_cache[base_i + 2] = sz
 
                 kv_left_frm_new = kv_left - kv_left_frm_cache
@@ -361,22 +371,23 @@ def rpa_metadata_schedule_kernel(
                     start_in_slot = bkv_sz_cache
                     sz = new_sz
 
-                    p_idx = (kv_len_start + start_in_slot) // config.page_size
+                    p_idx = (kv_len_start +
+                             start_in_slot) >> config.page_size_log2
                     p_idx = jnp.minimum(p_idx, config.pages_per_seq - 1)
-                    p_off = (kv_len_start + start_in_slot) % config.page_size
+                    p_off = (kv_len_start +
+                             start_in_slot) & config.page_size_mask
                     global_p_idx = s_idx * config.pages_per_seq + p_idx
 
-                    schedule.dma_kv_new[kv_new_base +
-                                        0] = (global_p_idx * config.page_size +
-                                              p_off)
+                    schedule.dma_kv_new[kv_new_base + 0] = (
+                        (global_p_idx << config.page_size_log2) | p_off)
                     schedule.dma_kv_new[kv_new_base +
                                         1] = q_end - kv_left_frm_new
                     schedule.dma_kv_new[kv_new_base + 2] = start_in_slot
                     schedule.dma_kv_new[kv_new_base + 3] = sz
                 else:
                     for i in range(config.bkv_p_new):
-                        slot_start = i * config.page_size
-                        slot_end = (i + 1) * config.page_size
+                        slot_start = i << config.page_size_log2
+                        slot_end = (i + 1) << config.page_size_log2
 
                         start_in_slot = jnp.maximum(slot_start, bkv_sz_cache)
                         end_in_slot = jnp.minimum(slot_end,
@@ -384,15 +395,15 @@ def rpa_metadata_schedule_kernel(
                         sz = jnp.maximum(0, end_in_slot - start_in_slot)
 
                         p_idx = (kv_len_start +
-                                 start_in_slot) // config.page_size
+                                 start_in_slot) >> config.page_size_log2
                         p_idx = jnp.minimum(p_idx, config.pages_per_seq - 1)
                         p_off = (kv_len_start +
-                                 start_in_slot) % config.page_size
+                                 start_in_slot) & config.page_size_mask
                         global_p_idx = s_idx * config.pages_per_seq + p_idx
 
                         base_i = kv_new_base + i * 4
                         schedule.dma_kv_new[base_i + 0] = (
-                            global_p_idx * config.page_size + p_off)
+                            (global_p_idx << config.page_size_log2) | p_off)
                         schedule.dma_kv_new[base_i +
                                             1] = q_end - kv_left_frm_new
                         schedule.dma_kv_new[base_i + 2] = start_in_slot

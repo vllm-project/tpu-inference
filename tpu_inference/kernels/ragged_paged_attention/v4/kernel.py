@@ -34,25 +34,25 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
             cu_q_lens_ref,
             kv_lens_ref,
             page_indices_ref,
+            distribution_ref,
+
             # schedule flattened (9 arrays)
             # hbm inputs
-            schedule_hbm,
             q_hbm_ref,
             new_kv_hbm_ref,
             kv_cache_hbm_ref,
             _o_hbm_in_ref,
+            kv_cache_zero_hbm_ref,
             # output
             o_hbm_ref,
             kv_cache_out_ref,
             # scratch allocations
             schedule,
+            lane_lengths_smem,
             m_scratch,
             l_scratch,
             acc_scratch,
             dma_sem):
-        actual_steps = schedule_hbm.actual_steps[0]
-        safe_steps = jnp.minimum(actual_steps, config.max_steps_ub)
-        grid = (safe_steps, )
         # q_hbm_ref shape: [q_times_kv, max_tokens, d] or similar
         # We use config values for dimensions where possible, or infer from refs
         kv_heads = config.num_kv_heads
@@ -121,16 +121,20 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
                     config.bkv_sz * bkv_stride, config.head_dim))
 
                 if kv_packing == 1:
-                    k = strided_load(kv_ref,
-                                     start,
-                                     config.bkv_sz * bkv_stride,
-                                     bkv_stride,
-                                     dtype=config.kv_dtype)
-                    v = strided_load(kv_ref,
-                                     start + 1,
-                                     config.bkv_sz * bkv_stride,
-                                     bkv_stride,
-                                     dtype=config.kv_dtype)
+                    k = strided_load(
+                        kv_ref,
+                        start,
+                        config.bkv_sz * bkv_stride,
+                        bkv_stride,
+                        dtype=config.kv_dtype,
+                    )
+                    v = strided_load(
+                        kv_ref,
+                        start + 1,
+                        config.bkv_sz * bkv_stride,
+                        bkv_stride,
+                        dtype=config.kv_dtype,
+                    )
                     return [(k, v)]
 
                 kv = strided_load(kv_ref, start, config.bkv_sz * bkv_stride,
@@ -323,17 +327,6 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
             pipeline_mode=pl.Buffered(buffer_count=2, use_lookahead=False),
         )
 
-        pipeline_func = pipeline.emit_pipeline(
-            body=rpa_body,
-            grid=grid,
-            in_specs=[
-                q_spec,
-                kv_cache_spec,
-            ],
-            out_specs=[
-                o_spec,
-            ],
-        )
         # hbm_kv_packed_stride = (config.num_kv_heads * 2 + kv_packing - 1) // kv_packing
         kv_cache_alloc = bref_override.KVBufferedRef.create(
             spec=kv_cache_spec,
@@ -343,6 +336,8 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
             page_size=config.page_size,
             batch_size=config.batch_size,
             hbm_stride=num_kv_x2_packed,
+            page_size_log2=config.page_size_log2,
+            page_size_mask=config.page_size_mask,
             buffer_count=config.n_buffer,
             use_lookahead=True,
         )
@@ -364,20 +359,46 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
 
         def _run(final_allocs):
             sem = dma_sem.at[0]
-            flat_hbm = jax.tree_util.tree_leaves(schedule_hbm)
-            flat_smem = jax.tree_util.tree_leaves(schedule)
-            for h, s in zip(flat_hbm, flat_smem):
-                pltpu.make_async_copy(h, s, sem).start()
+            kv_alloc = final_allocs[1]
+            kv_ref_flat = kv_alloc.window_ref
+
+            copies = []
+            for buf in range(config.n_buffer):
+                for b in range(config.batch_size):
+                    copy = pltpu.make_async_copy(kv_cache_zero_hbm_ref,
+                                                 kv_ref_flat.at[buf, b], sem)
+                    copy.start()
+                    copies.append(copy)
 
             # Zero-initialize KV cache buffer
             # we do this weird dma thing to overlap with HBM -> SMEM fetch
-            with jax.named_scope("zero_kv_cache"):
-                kv_alloc = final_allocs[1]
-                kv_ref_flat = kv_alloc.window_ref.bitcast(jnp.uint32)
-                kv_ref_flat[...] = jnp.zeros_like(kv_ref_flat[...])
+            with jax.named_scope("schedule_kernel"):
+                schedule_lib.rpa_metadata_schedule_kernel(
+                    cu_q_lens_ref,
+                    kv_lens_ref,
+                    distribution_ref,
+                    schedule,
+                    lane_lengths_smem,
+                    config=config,
+                )
+            actual_steps = schedule.actual_steps[0]
 
-            for h, s in zip(flat_hbm, flat_smem):
-                pltpu.make_async_copy(h, s, sem).wait()
+            for copy in copies:
+                copy.wait()
+
+            safe_steps = jnp.minimum(actual_steps, config.max_steps_ub)
+            grid = (safe_steps, )
+            pipeline_func = pipeline.emit_pipeline(
+                body=rpa_body,
+                grid=grid,
+                in_specs=[
+                    q_spec,
+                    kv_cache_spec,
+                ],
+                out_specs=[
+                    o_spec,
+                ],
+            )
 
             pipeline_func(
                 (q_hbm_ref, schedule),
@@ -419,40 +440,48 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
         ),
     ]
 
-    def get_scratch_shapes():
-        schedule_shapes = schedule_lib.RPASchedule.smem_specs(config)
-
-        return [
-            schedule_shapes,
-            pltpu.VMEM(
-                (
-                    config.batch_size,
-                    config.num_kv_heads,
-                    config.bq_sz * config.num_q_heads_per_kv_head,
-                    128,
-                ),
-                dtype=jnp.float32,
-            ),  # m
-            pltpu.VMEM(
-                (
-                    config.batch_size,
-                    config.num_kv_heads,
-                    config.bq_sz * config.num_q_heads_per_kv_head,
-                    128,
-                ),
-                dtype=jnp.float32,
-            ),  # l
-            pltpu.VMEM(
-                (
-                    config.batch_size,
-                    config.num_kv_heads,
-                    config.bq_sz * config.num_q_heads_per_kv_head,
-                    config.head_dim,
-                ),
-                dtype=jnp.float32,
-            ),  # acc
-            pltpu.SemaphoreType.DMA((1, )),  # dma_sem
-        ]
+    schedule_shapes = schedule_lib.RPASchedule.smem_specs(config)
+    scratch_shapes = [
+        schedule_shapes,
+        pltpu.SMEM((config.batch_size, ), jnp.int32),  # lane_lengths
+        pltpu.VMEM(
+            (
+                config.batch_size,
+                config.num_kv_heads,
+                config.bq_sz * config.num_q_heads_per_kv_head,
+                128,
+            ),
+            dtype=jnp.float32,
+        ),  # m
+        pltpu.VMEM(
+            (
+                config.batch_size,
+                config.num_kv_heads,
+                config.bq_sz * config.num_q_heads_per_kv_head,
+                128,
+            ),
+            dtype=jnp.float32,
+        ),  # l
+        pltpu.VMEM(
+            (
+                config.batch_size,
+                config.num_kv_heads,
+                config.bq_sz * config.num_q_heads_per_kv_head,
+                config.head_dim,
+            ),
+            dtype=jnp.float32,
+        ),  # acc
+        pltpu.SemaphoreType.DMA((1, )),  # dma_sem
+    ]
+    in_specs = [
+        pl.BlockSpec(memory_space=pltpu.HBM),  # q_hbm_ref
+        pl.BlockSpec(memory_space=pltpu.HBM),  # new_kv_hbm_ref
+        pl.BlockSpec(memory_space=pltpu.HBM),  # kv_cache_hbm_ref
+        pl.BlockSpec(memory_space=pltpu.HBM),  # _o_hbm_in_ref
+        pl.BlockSpec(memory_space=pltpu.HBM),  # kv_cache_zero_hbm_ref
+    ]
+    num_scalar_prefetch = 4
+    input_output_aliases = {6: 1, 7: 0}
 
     scope_name = f"RPA{config.case.symbol}-p{config.page_size}-b{config.batch_size}-q{config.bq_sz}-k{config.bkv_sz}"
     if config.sliding_window:
@@ -462,31 +491,19 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
         out_shape=out_shape,
         grid_spec=pltpu.PrefetchScalarGridSpec(
             grid=(1, ),
-            num_scalar_prefetch=
-            3,  # cu_q_lens, , page_indices, kv_lens, distribution
-            in_specs=[
-                schedule_lib.RPASchedule.test_specs(config),
-                pl.BlockSpec(memory_space=pltpu.HBM),  # q_hbm_ref
-                pl.BlockSpec(memory_space=pltpu.HBM),  # new_kv_hbm_ref
-                pl.BlockSpec(memory_space=pltpu.HBM),  # kv_cache_hbm_ref
-                pl.BlockSpec(memory_space=pltpu.HBM),  # _o_hbm_in_ref
-            ],
+            num_scalar_prefetch=num_scalar_prefetch,
+            in_specs=in_specs,
             out_specs=[
                 pl.BlockSpec(memory_space=pltpu.HBM),  # o_hbm_ref
                 pl.BlockSpec(memory_space=pltpu.HBM),  # kv_cache_out_ref
             ],
-            scratch_shapes=get_scratch_shapes(),
+            scratch_shapes=scratch_shapes,
         ),
         compiler_params=pltpu.CompilerParams(
             dimension_semantics=("arbitrary", ),
             vmem_limit_bytes=config.vmem_limit_bytes,
             disable_bounds_checks=True,
         ),
-        # 14:1 -> kv_cache_hbm_ref (input 14) with kv_cache_out_ref (output 1).
-        # 15:0 -> o_hbm_ref (input 15) with o_hbm_ref (output 0).
-        input_output_aliases={
-            14: 1,
-            15: 0
-        },
+        input_output_aliases=input_output_aliases,
         name=scope_name,
     )
