@@ -46,7 +46,7 @@ steps:
     soft_fail: true
     env:
       TEST_MODEL: Qwen/Qwen2.5-VL-7B-Instruct
-      TENSOR_PARALLEL_SIZE: 1
+      TENSOR_PARALLEL_SIZE: ${{TENSOR_PARALLEL_SIZE_SINGLE:-1}}
       MINIMUM_ACCURACY_THRESHOLD: 0.72
     commands:
       - |
