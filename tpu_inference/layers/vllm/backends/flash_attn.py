@@ -246,8 +246,6 @@ def _jax_attn_func(
     v_scale: float | None = None,
     sliding_window: int | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
-    del scale  # Unused for now, as the attention function applies a default scale.
-
     # Get shapes from vllm
     q_len = q.shape[0]
     k_len = k.shape[0]
@@ -264,6 +262,7 @@ def _jax_attn_func(
         v,
         attention_metadata,
         mesh,
+        sm_scale=scale,
         q_scale=q_scale,
         k_scale=k_scale,
         v_scale=v_scale,
