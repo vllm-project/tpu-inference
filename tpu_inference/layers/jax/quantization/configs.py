@@ -55,11 +55,13 @@ class QuantizationConfig(ABC):
         prefix: str,
         *,
         ignored_layers: list[str],
-        fused_mapping: dict = dict()) -> bool:
+        fused_mapping: dict = None) -> bool:
         """Check if a layer should be skipped from quantization.
 
         Follows: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/utils/quant_utils.py#L418
         """
+        if fused_mapping is None:
+            fused_mapping = {}
 
         def prefix_full_match(prefix: str, ignored_layers: list[str]) -> bool:
             return prefix in ignored_layers

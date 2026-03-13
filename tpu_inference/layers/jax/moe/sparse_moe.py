@@ -299,8 +299,8 @@ def _process_weight_for_qwix(
         qwix_quantized_weight_dtype: jnp.dtype,
         name: str,
         weight_param: Union[ptq.WithAux, nnx.Param],
-        channelwise_axes: Optional[List[int]] = [],
-        tiled_axes: dict = {}
+        channelwise_axes: Optional[List[int]] = None,
+        tiled_axes: dict = None
 ) -> Union[jax.Array, Tuple[nnx.Param, nnx.Param]]:
     """
     Extracts weight value, applies quantization if needed,
@@ -316,6 +316,10 @@ def _process_weight_for_qwix(
     Returns:
         The quantized weight.
     """
+    if channelwise_axes is None:
+        channelwise_axes = []
+    if tiled_axes is None:
+        tiled_axes = {}
 
     weight = weight_param.value
 

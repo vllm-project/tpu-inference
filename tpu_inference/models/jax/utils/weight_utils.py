@@ -501,7 +501,7 @@ def load_hf_weights(
     is_draft_model: bool = False,
     keep_original_dtype_keys_regex: Optional[list[str]] = None,
     pp_missing_layers: list[str] | None = None,
-    keep_hf_weight_suffix_when_match: list[str] = [],
+    keep_hf_weight_suffix_when_match: list[str] = None,
 ):
     """Load weights into a JAX model from either an iterator or files.
 
@@ -512,6 +512,8 @@ def load_hf_weights(
     the ".weight" suffix removal logic altogether.
     TODO(#1479): remove this argument and related logic after the refactoring is done.
     """
+    if keep_hf_weight_suffix_when_match is None:
+        keep_hf_weight_suffix_when_match = []
     params = nnx.state(model)
     try:
         shardings = nnx.get_named_sharding(params, mesh)
@@ -698,7 +700,7 @@ class StandardWeightLoader(BaseWeightLoader):
     def load_weights(self,
                      model: nnx.Module,
                      mappings: dict | MetadataMap,
-                     keep_hf_weight_suffix_when_match: list[str] = []):
+                     keep_hf_weight_suffix_when_match: list[str] = None):
         """
         Calls the generic load_hf_weights utility, passing the correct
         weights iterator.
@@ -714,6 +716,8 @@ class StandardWeightLoader(BaseWeightLoader):
         we want to get rid of the ".weight" suffix removal logic altogether.
         TODO(#1479): remove this argument and related logic after the refactoring is done.
         """
+        if keep_hf_weight_suffix_when_match is None:
+            keep_hf_weight_suffix_when_match = []
         if isinstance(mappings, MetadataMap):
             metadata_map = mappings
         else:

@@ -37,7 +37,7 @@ def send_request(url, prompt, model_name, output_length):
         "temperature": 0.0,
     }
     try:
-        response = requests.post(url, headers=headers, data=json.dumps(data))
+        response = requests.post(url, headers=headers, data=json.dumps(data), timeout=10.0)
         response.raise_for_status()
         # Assuming the response format is similar to OpenAI's
         return response.json()["choices"][0]["text"].strip()

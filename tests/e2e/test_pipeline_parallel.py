@@ -48,10 +48,12 @@ def _run_inference_with_config(model_name: str,
                                sampling_params: SamplingParams,
                                tensor_parallel_size: int = 1,
                                pipeline_parallel_size: int = 1,
-                               additional_config: dict = {},
+                               additional_config: dict = None,
                                kv_cache_dtype: str = "auto",
                                enable_prefix_caching: bool = False) -> list:
     """Helper function to run inference with specified configuration."""
+    if additional_config is None:
+        additional_config = {}
 
     # Create LLM args using parser-based approach similar to offline_inference.py
     engine_args = EngineArgs(
