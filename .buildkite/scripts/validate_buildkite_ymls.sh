@@ -19,8 +19,8 @@ set -euo pipefail
 # Assign the first argument to a local variable
 RAW_FILES_TO_CHECK="${1:-}"
 
-# Define the pattern for files to skip (non-pipeline YAMLs)
-# Exclude the benchmark/lm_eval directory as it contains templates and configs
+# Define directory path for non-pipeline YAML files to skip during Buildkite validation
+# Exclude the benchmark/lm_eval directory as it contains YAML files that are not Buildkite pipelines
 EXCLUDE_PATTERN="\.buildkite/benchmark/lm_eval/.*\.ya?ml$"
 
 # Pre-filter: Only include .yml or .yaml files located within the .buildkite/ directory
