@@ -165,6 +165,27 @@ class QuantizationTest(jtu.JaxTestCase):
         self.assertAllClose(k_dequantized, k_original, rtol=0.2, atol=0.2)
         self.assertAllClose(v_dequantized, v_original, rtol=0.2, atol=0.2)
 
+    @parameterized.product(kv_quant_dtype=[jnp.float8_e4m3fn, jnp.int8])
+    def test_quantize_k_only(self, kv_quant_dtype):
+        """Tests the quantize_kv function with value=None."""
+        key = jax.random.key(0)
+
+        shape = (128, 128)
+        k_original = jax.random.normal(key, shape, jnp.bfloat16)
+        k_scale = 0.1
+
+        k_quantized, v_quantized = quantize_kv(
+            kv_quant_dtype,
+            k_original,
+            value=None,
+            k_scale=k_scale,
+        )
+
+        k_dequantized = k_quantized.astype(jnp.bfloat16) * k_scale
+
+        self.assertAllClose(k_dequantized, k_original, rtol=0.2, atol=0.2)
+        self.assertIsNone(v_quantized)
+
 
 if __name__ == "__main__":
     absltest.main(testLoader=jtu.JaxTestLoader())

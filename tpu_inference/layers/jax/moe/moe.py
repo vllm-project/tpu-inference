@@ -11,13 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 from dataclasses import InitVar, dataclass
-from typing import Optional
+from typing import Any, Iterable, Iterator, Optional
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 from flax.typing import Sharding
+from jax._src.dtypes import TypePromotionError
 from jaxtyping import Float
 
 from tpu_inference.layers.common.moe import MoEBackend
@@ -26,8 +28,12 @@ from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
+from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.utils.weight_utils import (
+    jax_array_from_reshaped_torch, shard_put)
 
 modeling_flax_utils = FlaxUtils()
+logger = init_logger(__name__)
 
 
 @dataclass(kw_only=True)
@@ -158,7 +164,7 @@ class JaxMoE(JaxModule):
 
     # ---- Quantization Specific Attributes ----
     quant_config: Optional[QuantizationConfig] = None
-    quant_prefix: str = ""
+    prefix: str = ""
 
     def __call__(self, x_TD: Float):
         """Performs the forward pass of the MoE layer.
@@ -175,18 +181,6 @@ class JaxMoE(JaxModule):
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Generates the kernels (weights) for the router and experts (gating, up-projection, and down-projection layers)."""
-        self.use_ep = self.num_expert_parallelism > 1
-        if self.quant_config is None:
-            self.quant_method = None
-        elif (quant_method :=
-              self.quant_config.get_quant_method(self,
-                                                 prefix=self.quant_prefix)):
-            assert isinstance(quant_method, QuantizeMethodBase)
-            self.quant_method = quant_method
-            self.quant_method.create_weights_jax(self)
-        else:
-            self.quant_method = None
-
         E = self.num_local_experts
         D = self.hidden_size
         F = self.intermediate_size_moe
@@ -219,3 +213,99 @@ class JaxMoE(JaxModule):
         self.use_ep = self.num_expert_parallelism > 1
         self.activation = self.hidden_act
         self.scoring_func = self.scoring_func
+
+        if self.quant_config is None:
+            self.quant_method = None
+        elif (quant_method :=
+              self.quant_config.get_quant_method(self, prefix=self.prefix)):
+            assert isinstance(quant_method, QuantizeMethodBase)
+            self.quant_method = quant_method
+            self.quant_method.create_weights_jax(self, rngs=rngs)
+        else:
+            self.quant_method = None
+
+    def named_parameters(self, *args, **kwargs) -> Iterator[tuple[str, Any]]:
+        for name, param in super().named_parameters(*args, **kwargs):
+            # Weight loader relies on this function to check if all parameters are loaded.
+            # We put router/gating param in JaxMoE because we fuse all kinds of MoE into one.
+            # However, router/gating param does not belong to "experts" but "mlp" in HF checkpoint,
+            # so we skip them in the named_parameters of JaxMoE to avoid confusion for weight loading completeness check.
+            if "router" in name:
+                continue
+            yield name, param
+
+    def load_weights(self, weights: Iterable):
+        """Used by JaxAutoWeightLoader to load HF weights into the layer."""
+        if self.quant_method is None or not hasattr(self.quant_method,
+                                                    "load_weights"):
+            return self._load_weights(weights)
+
+        return self.quant_method.load_weights(
+            layer=self,
+            original_load_weights_fn=self._load_weights,
+            weights=weights)
+
+    def _load_weights(self, weights: Iterable):
+        """Load HF weights into the layer.
+
+        self.quant_method might reuse this method if the quantization method has specific logic for loading weights.
+        """
+
+        cnt = 0
+        for param_name, torch_weight in weights:
+            cnt += 1
+            param_name: str = param_name.split(
+                self.prefix)[-1]  # ".0.down_proj.weight" for example
+            names = param_name.split(".")
+            assert len(
+                names
+            ) == 3, f"Expected param name to be .<expert_id>.<param_name>.weight, got {param_name}"
+            expert_id, param_type, _ = names
+            expert_id = int(expert_id)
+            jax_param = None
+            if param_type.endswith("up_proj"):
+                jax_param = self.kernel_up_proj_EDF
+            elif param_type.endswith("down_proj"):
+                jax_param = self.kernel_down_proj_EFD
+            elif param_type.endswith("gate_proj"):
+                jax_param = self.kernel_gating_EDF
+            else:
+                raise ValueError(
+                    f"Unexpected param type in {param_name}, expected up_proj, down_proj, gate_proj"
+                )
+
+            assert isinstance(jax_param, nnx.Param)
+            if not hasattr(jax_param, "_cnt_moe_weights_loaded"):
+                jax_param.value = jax.numpy.zeros(jax_param.value.shape,
+                                                  dtype=jax_param.value.dtype)
+                setattr(jax_param, "_cnt_moe_weights_loaded", 0)
+            jax_param._cnt_moe_weights_loaded += 1
+            assert isinstance(
+                jax_param.value,
+                jax.Array), f"Expecting jax.Array, got {type(jax_param.value)}"
+
+            jax_weight = jax_array_from_reshaped_torch(torch_weight)
+            try:
+                jax_param.value = jax_param.value.at[expert_id].set(jax_weight)
+            except TypePromotionError as e:
+                raise TypePromotionError(
+                    f"Error while loading weight for {param_name} with {jax_weight.dtype=} {jax_weight.shape=} "
+                    f"into {jax_param.value.dtype=} {jax_param.value.shape=}"
+                ) from e
+
+        logger.debug(f"Loaded {cnt} weights for {self.prefix} MoE layer.")
+
+        loaded_names = set()
+        # This function could be called more than once, if the weights for moe layer is spread
+        # across multiple safetensor files. Here we use counter to track the completion of weight loading, and only perform the fusion and sharding after all weights are loaded.
+        for param_name, param in {
+                "kernel_gating_EDF": self.kernel_gating_EDF,
+                "kernel_up_proj_EDF": self.kernel_up_proj_EDF,
+                "kernel_down_proj_EFD": self.kernel_down_proj_EFD
+        }.items():
+            if getattr(param, "_cnt_moe_weights_loaded",
+                       0) == self.num_local_experts:
+                param.value = shard_put(param.value, param.sharding)
+                loaded_names.add(param_name)
+
+        return loaded_names

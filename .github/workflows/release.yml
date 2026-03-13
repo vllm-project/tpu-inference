@@ -68,7 +68,7 @@ jobs:
     - name: Build package (sdist and wheel)
       env:
           VLLM_VERSION_OVERRIDE: ${{ steps.vars.outputs.VERSION }}
-          IS_FOR_V7X: "false"
+          IS_FOR_V7X: "true"
       run: python3 -m build
 
     - name: Publish package distributions to PyPI

@@ -147,7 +147,7 @@ vllm bench serve \
 --dataset-name=random \
 --random-input-len=4096 \
 --random-output-len=128 \
---num-prompts=300 \
+--num-prompts=30 \
 --ignore-eos \
 --host=localhost \
 --port 8000 \
@@ -162,7 +162,7 @@ vllm bench serve \
 --dataset-name=random \
 --random-input-len=4096 \
 --random-output-len=128 \
---num-prompts=100 \
+--num-prompts=30 \
 --ignore-eos \
 --host=localhost \
 --port 9400 \
@@ -178,7 +178,8 @@ The proxy server has been launched on: 127.0.0.1:8000
 curl http://localhost:8000/v1/completions -X POST -H "Content-Type: application/json" -d '{
     "model": "Qwen/Qwen3-0.6B",
     "prompt": "what is your pet name",
-    "max_tokens": 10
+    "max_tokens": 10,
+    "temperature": 0.0
 }'
 
 >> Stop the proxy server and all prefill/decode instances:

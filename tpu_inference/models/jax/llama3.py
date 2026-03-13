@@ -274,7 +274,7 @@ class LlamaModel(nnx.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             hf_config.num_hidden_layers,
-            lambda: LlamaDecoderLayer(
+            lambda _: LlamaDecoderLayer(
                 config=hf_config,
                 dtype=dtype,
                 rng=rng,

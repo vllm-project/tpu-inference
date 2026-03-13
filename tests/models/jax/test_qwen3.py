@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import jax
 import jax.numpy as jnp
@@ -98,6 +98,16 @@ def rng() -> PRNGKey:
     return jax.random.PRNGKey(42)
 
 
+@pytest.fixture(autouse=True)
+def mock_get_pp_group():
+    with patch("tpu_inference.models.jax.qwen3.get_pp_group",
+               return_value=MagicMock(is_first_rank=True,
+                                      is_last_rank=True,
+                                      rank_in_group=0,
+                                      world_size=1)):
+        yield
+
+
 class TestQwen3ForCausalLM:
 
     @pytest.mark.parametrize("model_name", ["Qwen/Qwen3-0.6B"])
@@ -118,6 +128,13 @@ class TestQwen3ForCausalLM:
             mock_vllm_config.additional_config["quanntization"] = dict(
                 qwix=dict(rules=qwix_rules))
 
+        init_pp_distributed_environment(
+            ip="",
+            rank=0,
+            world_size=1,
+            device=jax.devices()[0],
+            need_pp=False,
+        )
         # Test model init
         model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
 
@@ -201,13 +218,15 @@ class TestQwen3ForCausalLM:
                              ["Qwen/Qwen3-0.6B", "Qwen/Qwen3-0.6B-FP8"])
     @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
                                                        (3, 4)])
-    def test_model_loading(self, model_name, pp_rank, pp_world_size, rng,
-                           mesh):
+    def test_model_loading(self, model_name, pp_rank, pp_world_size, rng, mesh,
+                           mock_vllm_config):
         """Tests loading weights from HF model"""
         kv_cache_type = "auto"
-        mock_vllm_config = MockVllmConfig(model_name, kv_cache_type)
+        mock_vllm_config = mock_vllm_config(model_name, kv_cache_type)
         # No need to load full model.
-        mock_vllm_config.model_config.hf_overrides = {"num_hidden_layers": 3}
+        mock_vllm_config.model_config.hf_config.num_hidden_layers = 4
+        mock_vllm_config.load_config.load_format = "skip_layers_model_loader_for_test"
+        mock_vllm_config.load_config.num_layers_to_load_for_test = 4
 
         init_pp_distributed_environment(
             ip="",
@@ -231,7 +250,7 @@ class TestQwen3ForCausalLM:
         model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
         # load weights from HF model
         with jax.set_mesh(mesh):
-            loader = get_model_loader(LoadConfig(load_format="hf"))
+            loader = get_model_loader(mock_vllm_config.load_config)
             loader.load_weights(model, model_config)
 
         layer_idx = model.model.start_layer

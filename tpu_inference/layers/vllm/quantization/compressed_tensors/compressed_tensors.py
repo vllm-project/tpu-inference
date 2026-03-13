@@ -29,8 +29,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target, should_ignore_layer)
 
-from tpu_inference.layers.common.quant_methods import (COMPRESSED_TENSORS,
-                                                       get_tpu_quant_method)
+from tpu_inference.layers.common.quant_methods import COMPRESSED_TENSORS
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors_moe import \
     VllmCompressedTensorsMoEMethod
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
@@ -46,7 +45,7 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-@register_quantization_config(get_tpu_quant_method(COMPRESSED_TENSORS))
+@register_quantization_config(COMPRESSED_TENSORS)
 class VllmCompressedTensorsConfig(CompressedTensorsConfig, VllmQuantConfig):
 
     @classmethod

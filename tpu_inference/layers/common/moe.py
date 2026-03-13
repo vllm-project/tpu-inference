@@ -141,6 +141,7 @@ def moe_apply(
                     num_local_experts=layer.num_local_experts,
                     apply_expert_weight_before_computation=layer.
                     apply_expert_weight_before_computation,
+                    activation_ffw_ted=layer.activation_ffw_ted,
                     activation_ffw_td=layer.activation_ffw_td,
                     hidden_act=layer.hidden_act)
 

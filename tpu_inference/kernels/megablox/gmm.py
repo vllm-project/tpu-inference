@@ -25,6 +25,8 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.megablox import common
+from tpu_inference.kernels.megablox.tuned_block_sizes import \
+    get_tuned_block_sizes
 
 partial = functools.partial
 
@@ -333,7 +335,7 @@ def gmm(
     preferred_element_type: jnp.dtype = jnp.float32,
     rhs_scale: jnp.ndarray | None = None,
     rhs_bias: jnp.ndarray | None = None,
-    tiling: tuple[int, int, int] | LutFn | None = (128, 128, 128),
+    tiling: tuple[int, int, int] | LutFn | None = None,
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
     interpret: bool = False,
@@ -389,6 +391,17 @@ def gmm(
     # tuned tile dimensions are available throw an error.
     if callable(tiling):
         tiling = tiling(m, k, n)
+    elif tiling is None:
+        tiling = get_tuned_block_sizes(
+            m=m,
+            k=k,
+            n=n,
+            num_total_groups=num_total_groups,
+            num_current_groups=rhs.shape[0],
+            lhs_dtype=str(lhs.dtype),
+            rhs_dtype=str(rhs.dtype),
+            quant_block_size=k,
+        )
 
     if tiling is None:
         raise ValueError(

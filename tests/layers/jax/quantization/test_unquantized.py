@@ -77,3 +77,37 @@ class TestUnquantizedJaxLinear:
                                    y_from_method,
                                    rtol=1e-5,
                                    atol=1e-5)
+
+    @pytest.mark.parametrize(
+        "einsum_str,kernel_shape,input_shape",
+        [
+            ("TNH,ANH->TNA", (512, 8, 128), (4, 8, 128)),
+            ("TNA,ANH->TNH", (512, 8, 128), (4, 8, 512)),
+        ],
+    )
+    def test_batched_einsum_output_sizes(self, einsum_str, kernel_shape,
+                                         input_shape, rngs):
+        """Verify UnquantizedConfig computes correct output_sizes for 3D
+        batched einsums where the last output dim is not kernel_shape[-1].
+
+        Before the fix, UnquantizedConfig.get_quant_method always used
+        kernel_shape[-1] as the output size. For 'TNH,ANH->TNA' with
+        kernel_shape (A=512, N=8, H=128), this set output_sizes=[128]
+        instead of [512], causing _apply_fused to truncate the output.
+        """
+        x = jax.random.uniform(rngs.params(), input_shape)
+
+        jax_einsum = JaxEinsum(einsum_str, kernel_shape, rngs)
+        y_from_layer = jax_einsum(x)
+
+        method = UnquantizedConfig({}).get_quant_method(jax_einsum, prefix='')
+        assert isinstance(method, QuantizeMethodBase)
+        y_from_method = method.apply_jax(jax_einsum, x)
+
+        assert y_from_layer.shape == y_from_method.shape, (
+            f"Shape mismatch: layer produced {y_from_layer.shape} but "
+            f"quant method produced {y_from_method.shape}")
+        np.testing.assert_allclose(y_from_layer,
+                                   y_from_method,
+                                   rtol=1e-5,
+                                   atol=1e-5)

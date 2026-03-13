@@ -94,42 +94,7 @@ def round_up_to_multiple_of_128_within_limit(x: int, limit: int) -> int:
     return limit
 
 
-def _get_tiling_size_for_gmm_kernel(m: int, k: int, n: int,
-                                    g: int) -> tuple[int, int, int]:
-    """
-    Calculate optimal tiling sizes for a GMM kernel in a Mixture of Experts
-    (MoE) setting.
-
-    Args:
-        m (int): The total number of tokens.
-        n (int): The output feature dimension.
-        k (int): The input feature dimension.
-        g (int): The number of experts.
-
-    Returns:
-        tuple[int, int, int]: A tuple (tm, tk, tn)
-    """
-
-    # TODO(Chengji): increase the upper limit tiling size of m when we can set
-    # the vmem size to be used for gmm kernel.
-    # NOTE: In average each expert has m // g tokens, but as it might be
-    # unbalanced, here we doubled the token size when choosing tiling size of m.
-    # 2m//g can be either greater or less than 512. If there are 32 tokens and
-    # topk=2, m=topk * num_tokens=64, in this case, 2*m//g will be less than
-    # 512.
-    tm = round_up_to_multiple_of_128_within_limit(2 * m // g, 512)
-    tm = min(tm, m)  # there's a requirement that m % tm == 0
-    # k/n correspond to n_input_features/n_output_features in the matmul so they
-    # are normally greater than 2048, unless the num shards is large.
-    tk = round_up_to_multiple_of_128_within_limit(k, 2048)
-    tn = round_up_to_multiple_of_128_within_limit(n, 2048)
-    return tm, tk, tn
-
-
 def gmm_wrapper(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset):
-    m, g, k, n = lhs.shape[0], *rhs.shape
-    tm, tk, tn = _get_tiling_size_for_gmm_kernel(m, k, n, g)
-
     gmm_res = gmm(
         lhs=lhs,
         rhs=rhs,
@@ -137,7 +102,7 @@ def gmm_wrapper(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset):
         rhs_bias=rhs_bias,
         group_sizes=group_sizes,
         preferred_element_type=lhs.dtype,
-        tiling=(tm, tk, tn),
+        tiling=None,
         group_offset=group_offset[0],
     )
 

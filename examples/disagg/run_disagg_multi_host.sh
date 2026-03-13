@@ -26,11 +26,12 @@ MODEL=${MODEL:="Qwen/Qwen3-0.6B"}
 DOCKER_IMAGE=${DOCKER_IMAGE:="vllm-tpu:000"}
 
 # benchmark related
-INPUT_LEN=${INPUT_LEN:=1024}
-OUTPUT_LEN=${OUTPUT_LEN:=1024}
-NUM_PROMPTS=${NUM_PROMPTS:=1}
+INPUT_LEN=${INPUT_LEN:=128}
+OUTPUT_LEN=${OUTPUT_LEN:=20}
+NUM_PROMPTS=${NUM_PROMPTS:=10}
 RANDOM_SEED=${RANDOM_SEED:=10}
 MAX_CONCURRENCY=${MAX_CONCURRENCY:=1}
+TEST_MODE=${TEST_MODE:=1} # if 1, run benchmark; if 2, run correctness; if 3, run both
 ############################
 
 echo "--- The HOME variable is : $HOME ---"
@@ -293,21 +294,38 @@ set +x
  wait_for_server 8000 "${CONTAINER_PREFIX}-proxy-benchmark" "toy_proxy_server" "/root/logs/proxy.txt"
 
 # Run benchmark inside the proxy-benchmark-node container
-set -x
-docker exec ${CONTAINER_PREFIX}-proxy-benchmark /bin/bash -c "python3 /workspace/tpu_inference/scripts/vllm/benchmarking/benchmark_serving.py \
-    --backend vllm \
-    --host localhost \
-    --port 8000 \
-    --model ${MODEL} \
-    --dataset-name random \
-    --random-input-len ${INPUT_LEN} \
-    --random-output-len ${OUTPUT_LEN} \
-    --num-prompts ${NUM_PROMPTS} \
-    --request-rate inf \
-    --max-concurrency ${MAX_CONCURRENCY} \
-    --trust-remote-code \
-    --seed ${RANDOM_SEED} > /root/logs/benchmark.txt 2>&1"
-set +x
+if [ "$TEST_MODE" = "1" ] || [ "$TEST_MODE" = "3" ]; then
+    echo "Running benchmark test in container."
+    set -x
+    docker exec ${CONTAINER_PREFIX}-proxy-benchmark /bin/bash -c "python3 /workspace/tpu_inference/scripts/vllm/benchmarking/benchmark_serving.py \
+        --backend vllm \
+        --host localhost \
+        --port 8000 \
+        --model ${MODEL} \
+        --dataset-name random \
+        --random-input-len ${INPUT_LEN} \
+        --random-output-len ${OUTPUT_LEN} \
+        --num-prompts ${NUM_PROMPTS} \
+        --request-rate inf \
+        --max-concurrency ${MAX_CONCURRENCY} \
+        --trust-remote-code \
+        --seed ${RANDOM_SEED} > /root/logs/benchmark.txt 2>&1"
+    set +x
+fi
+
+# Run correctness test inside the proxy-benchmark-node container
+if [ "$TEST_MODE" = "2" ] || [ "$TEST_MODE" = "3" ]; then
+    echo "Running correctness test in container."
+    set -x
+    docker exec ${CONTAINER_PREFIX}-proxy-benchmark /bin/bash -c "python3 /workspace/tpu_inference/examples/disagg/test_disagg_correctness.py \
+        --baseline_url http://localhost:9400/v1/completions \
+        --disagg_url http://localhost:8000/v1/completions \
+        --model ${MODEL} \
+        --num_requests ${NUM_PROMPTS} \
+        --input_length ${INPUT_LEN} \
+        --output_length ${OUTPUT_LEN} > /root/logs/correctness.txt 2>&1"
+    set +x
+fi
 
 # Clean up
 

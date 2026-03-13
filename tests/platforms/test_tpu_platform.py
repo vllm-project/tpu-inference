@@ -49,6 +49,6 @@ class TestTpuPlatform:
         mock_chip_type.name = chip_name
 
         with patch('tpu_inference.platforms.tpu_platform.init_logger'), \
-             patch('tpu_inference.platforms.tpu_platform.device.get_local_chips', return_value=(mock_chip_type, None)), \
+             patch('tpu_info.device.get_local_chips', return_value=(mock_chip_type, None)), \
              patch('vllm.envs.VLLM_TPU_USING_PATHWAYS', False):
             assert TpuPlatform.fp8_dtype() == expected_dtype

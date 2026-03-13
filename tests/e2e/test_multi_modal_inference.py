@@ -63,8 +63,10 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes):
         gpu_memory_utilization=gpu_memory_utilization,
         max_num_seqs=1,
         mm_processor_kwargs={
-            "min_pixels": 28 * 28,
-            "max_pixels": 1280 * 28 * 28,
+            "size": {
+                "longest_edge": 1003520,
+                "shortest_edge": 3136
+            },
             "fps": 1,
         },
         limit_mm_per_prompt={modality: 1},

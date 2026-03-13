@@ -37,24 +37,20 @@ class JaxModule(nnx.Module):
         Yields:
             (string, Param): Tuple containing a name and parameter
         """
+        for name, param in self.__dict__.items():
+            if isinstance(param, nnx.Param):
+                yield (f"{prefix}.{name}" if prefix else name), param
+
         if not recurse:
-            for name, param in self.__dict__.items():
-                if isinstance(param, nnx.Param):
-                    yield (f"{prefix}.{name}" if prefix else name), param
             return
 
-        params = nnx.state(self, nnx.Param)
+        for name, child in self.named_children():
+            child_prefix = f"{prefix}.{name}" if prefix else name
+            yield from child.named_parameters(prefix=child_prefix,
+                                              recurse=True)
 
-        def _traverse_params(params, path=()):
-            if hasattr(params, 'items'):
-                for name, value in params.items():
-                    yield from _traverse_params(value, path + (str(name), ))
-            else:
-                yield ".".join(path), params
-
-        yield from _traverse_params(params, path=(prefix, ) if prefix else ())
-
-    def named_children(self) -> Iterator[tuple[str, nnx.Module | list]]:
+    def named_children(
+            self) -> Iterator[tuple[str, "JaxModule | JaxModuleList"]]:
         """Returns an iterator over immediate children modules.
         
         Yields:

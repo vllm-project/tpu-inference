@@ -93,10 +93,11 @@ def mesh():
         pytest.skip("No JAX devices available.")
     devices = np.array(jax.local_devices())
     num_devices = len(devices)
-    device_mesh = devices.reshape((num_devices, 1, 1, 1))
+    device_mesh = devices.reshape((num_devices, 1, 1, 1, 1))
     # Simplify axis names for testing
     with Mesh(device_mesh,
-              axis_names=('data', 'attn_dp', 'model', 'expert')) as m:
+              axis_names=('data', 'attn_dp', 'attn_dp_expert', 'model',
+                          'expert')) as m:
         yield m
 
 
@@ -175,11 +176,11 @@ class TestDeepSeekV3WeightLoader:
     @pytest.mark.parametrize("loaded_key, expected_mapped", [
         ("model.embed_tokens.weight", "embedder.input_embedding_table_VD"),
         ("model.layers.0.self_attn.q_a_proj.weight",
-         "layers.0.self_attn.kernel_q_down_proj_DA"),
+         "layers.0.self_attn.q_down_proj.weight"),
         ("model.layers.5.mlp.experts.10.gate_proj.weight",
          "layers.5.custom_module.experts.kernel_gating_EDF"),
         ("model.layers.1.mlp.shared_experts.down_proj.weight",
-         "layers.1.custom_module.shared_experts.kernel_down_proj_FD"),
+         "layers.1.custom_module.shared_experts.down_proj.weight"),
         ("model.norm.weight", "final_norm.scale"),
     ])
     def test_key_mapping(self, loader, loaded_key, expected_mapped):
@@ -248,7 +249,7 @@ class TestDeepSeekV3WeightLoader:
 
     def test_load_individual_weight_with_mxfp4(self, loader, mesh):
         """Tests the logic for unpacking MXFP4 weights."""
-        name = "layers.0.self_attn.kernel_q_down_proj_DA"
+        name = "layers.0.self_attn.q_down_proj.weight"
         # Mocking torch tensor as uint8 (packed fp4)
         expected_weight_shape = (128, 128)  # Unpacked
         expected_scale_shape = (128, 1)
@@ -265,8 +266,10 @@ class TestDeepSeekV3WeightLoader:
         mock_params = {
             "layers": {
                 "0": {
-                    "sefl_attn": {
-                        "kernel_q_down_proj_DA": mock_var
+                    "self_attn": {
+                        "q_down_proj": {
+                            "weight": mock_var
+                        }
                     }
                 }
             }
@@ -326,7 +329,7 @@ class TestDeepSeekV3WeightLoader:
         Tests the logic for loading 'unpacked' weights (e.g., standard FP8).
         This verifies the branch that uses DTYPE_VIEW_MAP for raw memory conversion.
         """
-        name = "layers.0.self_attn.kernel_q_down_proj_DA"
+        name = "layers.0.self_attn.q_down_proj.weight"
 
         # 1. Setup a standard 'unpacked' FP8 torch tensor
         # DeepSeek V3 weights are often float8_e4m3fn
@@ -340,7 +343,9 @@ class TestDeepSeekV3WeightLoader:
             "layers": {
                 "0": {
                     "self_attn": {
-                        "kernel_q_down_proj_DA": mock_var
+                        "q_down_proj": {
+                            "weight": mock_var
+                        }
                     }
                 }
             }
@@ -377,7 +382,7 @@ class TestDeepSeekV3WeightLoader:
         """
         Tests loading an unpacked weight that also has a quantization scale.
         """
-        name = "layers.0.custom_module.kernel_gating_DF"
+        name = "layers.0.custom_module.gating_proj.weight"
         weight_shape = (64, 128)
         scale_shape = (64, 1)
 
@@ -390,7 +395,9 @@ class TestDeepSeekV3WeightLoader:
             "layers": {
                 "0": {
                     "custom_module": {
-                        "kernel_gating_DF": mock_var
+                        "gating_proj": {
+                            "weight": mock_var
+                        }
                     }
                 }
             }
@@ -467,7 +474,7 @@ class TestDeepSeekV3NativeFP8:
         Tests the logic where the scale is repeated when scale dimension matches
         block dimension logic but is smaller than weight dimension.
         """
-        name = "layers.0.custom_module.kernel_gating_DF"
+        name = "layers.0.custom_module.gating_proj.weight"
 
         # Weight Dim 0: 256. Block size: 128. 256 // 128 = 2.
         # Scale Dim 0: 1.
@@ -487,7 +494,9 @@ class TestDeepSeekV3NativeFP8:
             "layers": {
                 "0": {
                     "custom_module": {
-                        "kernel_gating_DF": mock_var
+                        "gating_proj": {
+                            "weight": mock_var
+                        }
                     }
                 }
             }
@@ -689,10 +698,7 @@ class TestDeepseekV3Attention(unittest.TestCase):
             mha_layer.rope.initialize_cache(self.mesh)
 
             new_kv_cache, output = mha_layer(
-                x,
-                is_prefill=True,
-                kv_cache=kv_cache,
-                attention_metadata=attention_metadata)
+                x, kv_cache=kv_cache, attention_metadata=attention_metadata)
 
             self.assertEqual(output.shape, (seq_len, hidden_size))
             self.assertEqual(new_kv_cache.shape, kv_cache.shape)
@@ -781,7 +787,6 @@ class TestDeepseekV3Attention(unittest.TestCase):
             model.rope.initialize_cache(self.mesh)
 
             new_kv_cache, output = model(x,
-                                         is_prefill=True,
                                          kv_cache=kv_cache,
                                          attention_metadata=attention_metadata)
 
