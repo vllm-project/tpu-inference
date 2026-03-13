@@ -74,6 +74,7 @@ def get_tpu_metadata(key: str = "") -> str:
         accelerator_type_request = requests.get(
             os.path.join(GCE_TPU_ACCELERATOR_ENDPOINT, key),
             headers=GCE_TPU_HEADERS,
+            timeout=10.0,
         )
         if (accelerator_type_request.status_code == 200
                 and accelerator_type_request.text):
