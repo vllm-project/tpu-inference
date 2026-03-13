@@ -1,0 +1,166 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: CI/CD Health Check
+
+on:
+  schedule:
+    # Run every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Monitor CI/CD Status
+        id: monitor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/monitor_cicd.py --only-failures --json > cicd_status.json || true
+          
+          # Check if there are any failures
+          FAILURE_COUNT=$(jq 'length' cicd_status.json)
+          echo "failure_count=$FAILURE_COUNT" >> "$GITHUB_OUTPUT"
+          
+          if [ "$FAILURE_COUNT" -gt 0 ]; then
+            echo "has_failures=true" >> "$GITHUB_OUTPUT"
+            python scripts/monitor_cicd.py --only-failures > cicd_report.txt
+          else
+            echo "has_failures=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or update issue
+        if: steps.monitor.outputs.has_failures == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('cicd_report.txt', 'utf8');
+            const failureCount = '${{ steps.monitor.outputs.failure_count }}';
+            
+            const issueTitle = '🔴 CI/CD Health Check Alert';
+            const issueBody = `## CI/CD Failures Detected
+            
+            **Failures Found:** ${failureCount}
+            
+            ${report}
+            
+            ---
+            
+            **What to do:**
+            1. Review the failures listed above
+            2. See [CI/CD Monitoring Guide](docs/cicd-monitoring.md) for troubleshooting
+            3. Fix the issues in the respective PRs or branches
+            4. This issue will be automatically closed when all failures are resolved
+            
+            **Last checked:** ${new Date().toISOString()}
+            
+            _This issue is automatically managed by the CI/CD Health Check workflow._
+            `;
+            
+            // Search for existing open issue
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ['ci-cd-health'],
+            });
+            
+            const existingIssue = issues.data.find(issue => 
+              issue.title === issueTitle
+            );
+            
+            if (existingIssue) {
+              // Update existing issue
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existingIssue.number,
+                body: issueBody,
+              });
+              console.log(`Updated issue #${existingIssue.number}`);
+            } else {
+              // Create new issue
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: issueTitle,
+                body: issueBody,
+                labels: ['ci-cd-health', 'automated'],
+              });
+              console.log('Created new CI/CD health check issue');
+            }
+
+      - name: Close issue if no failures
+        if: steps.monitor.outputs.has_failures == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueTitle = '🔴 CI/CD Health Check Alert';
+            
+            // Search for existing open issue
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ['ci-cd-health'],
+            });
+            
+            const existingIssue = issues.data.find(issue => 
+              issue.title === issueTitle
+            );
+            
+            if (existingIssue) {
+              // Close the issue with a comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existingIssue.number,
+                body: '✅ All CI/CD checks are now passing. Closing this issue.\n\n' +
+                      `Last checked: ${new Date().toISOString()}`,
+              });
+              
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existingIssue.number,
+                state: 'closed',
+              });
+              
+              console.log(`Closed issue #${existingIssue.number}`);
+            } else {
+              console.log('No open CI/CD health check issue found');
+            }
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cicd-status
+          path: |
+            cicd_status.json
+            cicd_report.txt
+          retention-days: 7
