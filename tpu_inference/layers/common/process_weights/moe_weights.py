@@ -624,8 +624,6 @@ def process_fp8_moe_weights(
         out_specs=(expert_p, expert_p, expert_p, expert_p),
         check_rep=False,
     )(w13_weight, w13_weight_scale, w2_weight, w2_weight_scale)
-    jax.block_until_ready((w13_q, w13_s, w2_q, w2_s))
-
     out = FusedMoEWeights(
         w13_weight=w13_q,
         w13_weight_scale=w13_s,

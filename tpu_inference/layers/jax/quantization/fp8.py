@@ -537,14 +537,24 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 input_weights = shard_fp8_moe_weights_to_tpu(
                     input_weights, layer.mesh, source_mesh=cpu_mesh())
 
-            weights = process_fp8_moe_weights(
-                input_weights,
-                moe_backend=layer.moe_backend,
-                mesh=layer.mesh,
-                activation=layer.activation,
-                # Convert to tuple so jax jit can hash it
-                weight_block_size=weight_block_size,
-            )
+                weights = process_fp8_moe_weights(
+                    input_weights,
+                    moe_backend=layer.moe_backend,
+                    mesh=layer.mesh,
+                    activation=layer.activation,
+                    weight_block_size=weight_block_size,
+                )
+            else:
+                # Weights are on CPU; run under cpu_mesh_context
+                # so JIT targets CPU devices.
+                with cpu_mesh_context():
+                    weights = process_fp8_moe_weights(
+                        input_weights,
+                        moe_backend=layer.moe_backend,
+                        mesh=layer.mesh,
+                        activation=layer.activation,
+                        weight_block_size=weight_block_size,
+                    )
 
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
