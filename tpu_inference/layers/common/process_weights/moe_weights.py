@@ -496,6 +496,42 @@ def process_fp8_moe_weights(
         moe_logging_str += f" with block size {requant_block_size}"
     logger.info(moe_logging_str)
 
+    w13_interleave = activation == "swigluoai"
+    w13_reorder_size = get_mesh_shape_product(mesh,
+                                              ShardingAxisName.MLP_TENSOR)
+
+    if not envs.MOE_REQUANTIZE_ON_TPU:
+        # Default path: direct dequant → quantize → process (matches main branch).
+        w13_weight = dequantize_tensor(w13_weight,
+                                       w13_weight_scale, (1, 2),
+                                       jnp.float32,
+                                       block_size=weight_block_size)
+        w2_weight = dequantize_tensor(w2_weight,
+                                      w2_weight_scale, (1, 2),
+                                      jnp.float32,
+                                      block_size=weight_block_size)
+
+        weights = quantize_moe_weights(
+            FusedMoEWeights(
+                w13_weight=w13_weight,
+                w13_weight_scale=None,
+                w13_bias=None,
+                w2_weight=w2_weight,
+                w2_weight_scale=None,
+                w2_bias=None,
+            ),
+            desired_quant_dtype,
+            requant_block_size,
+        )
+        return process_moe_weights(
+            weights,
+            moe_backend=moe_backend,
+            w13_reorder_size=w13_reorder_size,
+            w13_interleave=w13_interleave,
+        )
+
+    # TPU path: shard_map + lax.scan for lower XLA reservation.
+
     # Pre-compute pad widths and block sizes for requantization.
     _, orig_hidden_size, orig_intermediate_size = w2_weight.shape
     if requant_block_size is None:
@@ -511,10 +547,6 @@ def process_fp8_moe_weights(
               (0, intermediate_size - orig_intermediate_size))
 
     # Determine which mesh axis the expert dim is sharded across.
-    # ShardingAxisName.EXPERT may be a compound axis (tuple of axis names)
-    # for multi-dimensional meshes (e.g. 5D mesh with NEW_MODEL_DESIGN).
-    # The `in` check doesn't work for compound tuples against individual
-    # axis name strings, so we check component axes individually.
     expert_axis = ShardingAxisName.EXPERT
     if isinstance(expert_axis, str):
         if expert_axis in mesh.axis_names:
@@ -522,23 +554,14 @@ def process_fp8_moe_weights(
         else:
             shard_axis = mesh.axis_names[0]
     else:
-        # Compound axis (tuple) — verify all components exist in mesh
         if all(a in mesh.axis_names for a in expert_axis):
             shard_axis = expert_axis
         else:
             shard_axis = mesh.axis_names[0]
 
-    # Use batch_size=1 to minimize per-step FP32 intermediates,
-    # which reduces XLA program reservation (bytes_reserved).
     scan_batch_size = 1
-
-    # Pad widths for the batched case (3D tensors with expert dim).
     w13_pad_3d = ((0, 0), ) + w13_pad
     w2_pad_3d = ((0, 0), ) + w2_pad
-
-    w13_interleave = activation == "swigluoai"
-    w13_reorder_size = get_mesh_shape_product(mesh,
-                                              ShardingAxisName.MLP_TENSOR)
 
     expert_p = P(shard_axis)
 
@@ -593,10 +616,6 @@ def process_fp8_moe_weights(
         )
         return (out.w13_weight, out.w13_weight_scale, out.w2_weight,
                 out.w2_weight_scale)
-
-    # Use shard_map so XLA compiles with per-device local shapes,
-    # reducing program reservation (bytes_reserved) while keeping
-    # SPMD parallel execution speed.
 
     # --- DEBUG: memory tracking helper ---
     def _log_mem(label):

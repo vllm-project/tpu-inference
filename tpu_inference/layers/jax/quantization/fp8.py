@@ -24,6 +24,7 @@ from flax import nnx
 from jax.sharding import PartitionSpec as P
 from torchax.ops.mappings import t2j
 
+import tpu_inference.envs as envs
 from tpu_inference.layers.common.linear import sharded_quantized_batched_matmul
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.linear_weights import \
@@ -530,10 +531,11 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                                             w2_weight_scale=w2_weight_scale,
                                             w2_bias=None)
 
-            # Shard FP8 weights to TPU before requantization so that
-            # process_fp8_moe_weights runs on TPU instead of CPU.
-            input_weights = shard_fp8_moe_weights_to_tpu(
-                input_weights, layer.mesh, source_mesh=cpu_mesh())
+            if envs.MOE_REQUANTIZE_ON_TPU:
+                # Shard FP8 weights to TPU before requantization so that
+                # process_fp8_moe_weights runs on TPU instead of CPU.
+                input_weights = shard_fp8_moe_weights_to_tpu(
+                    input_weights, layer.mesh, source_mesh=cpu_mesh())
 
             # --- DEBUG: memory tracking before process_fp8_moe_weights ---
             def _log_mem(label):
