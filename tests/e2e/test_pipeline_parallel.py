@@ -84,13 +84,13 @@ def _run_inference_with_config(model_name: str,
         time.sleep(5)
 
 
-def test_pipeline_parallel_ep_jax_model(
+def test_pipeline_parallel_ep_model(
     model_name: str,
     test_prompts: list,
     sampling_params: SamplingParams,
 ):
     """
-    Test pp=2, ep=2 works on Jax models
+    Test pp=2, ep=2 works
     """
     # For EP, we use an MoE model
     moe_model = "Qwen/Qwen1.5-MoE-A2.7B"
