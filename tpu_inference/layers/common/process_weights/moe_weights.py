@@ -617,22 +617,6 @@ def process_fp8_moe_weights(
         return (out.w13_weight, out.w13_weight_scale, out.w2_weight,
                 out.w2_weight_scale)
 
-    # --- DEBUG: memory tracking helper ---
-    def _log_mem(label):
-        stats = jax.local_devices()[0].memory_stats()
-        if stats:
-            reserved = stats.get('bytes_reserved', 0)
-            peak_reserved = stats.get('peak_bytes_reserved', 0)
-            in_use = stats.get('bytes_in_use', 0)
-            peak_in_use = stats.get('peak_bytes_in_use', 0)
-            logger.warning(f"[MEM {label}] reserved={reserved/1e9:.3f}G "
-                           f"peak_reserved={peak_reserved/1e9:.3f}G "
-                           f"in_use={in_use/1e9:.3f}G "
-                           f"peak_in_use={peak_in_use/1e9:.3f}G")
-
-    # --- END DEBUG ---
-
-    _log_mem("before shard_map")
     w13_q, w13_s, w2_q, w2_s = shard_map(
         _requant_and_process_local,
         mesh=mesh,
@@ -641,7 +625,6 @@ def process_fp8_moe_weights(
         check_rep=False,
     )(w13_weight, w13_weight_scale, w2_weight, w2_weight_scale)
     jax.block_until_ready((w13_q, w13_s, w2_q, w2_s))
-    _log_mem("after shard_map")
 
     out = FusedMoEWeights(
         w13_weight=w13_q,
@@ -662,5 +645,4 @@ def process_fp8_moe_weights(
             sharding = getattr(target_shardings, key)
             setattr(out, key,
                     jax.lax.with_sharding_constraint(weight, sharding))
-    _log_mem("after with_sharding_constraint")
     return out
