@@ -7,6 +7,7 @@ from vllm import LLM, EngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from tpu_inference.core import disagg_utils
+from tpu_inference.runner.rl_utils import get_weights, update_weights
 
 
 def create_parser():
@@ -90,9 +91,24 @@ def main(args: dict):
     if profiler_config.profiler == "torch":
         llm.start_profile()
     outputs = llm.generate(prompts, sampling_params)
+    
+    # weights = get_weights(llm)
+
     if profiler_config.profiler == "torch":
         llm.stop_profile()
 
+    # Print the outputs.
+    print("-" * 50)
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
+        print("-" * 50)
+    
+    # update_weights(llm, weights)
+
+    # outputs = llm.generate(prompts, sampling_params)
+    
     # Print the outputs.
     print("-" * 50)
     for output in outputs:

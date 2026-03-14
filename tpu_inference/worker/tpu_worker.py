@@ -437,6 +437,20 @@ class TPUWorker(WorkerBase):
         port = get_kv_transfer_port()
         return (int(self.topology_order_id), ip, int(port))
 
+    def update_weights(self, new_weights: jaxtyping.PyTree) -> None:
+        """Replace the model runner's state with *new_weights*.
+
+        This is the simplest weight-update API for RL loops: the caller
+        supplies a complete state PyTree (same structure as the model
+        runner's ``state``) and it is installed directly.  No key-mapping
+        or resharding is performed.
+        """
+        return self.model_runner._update_weights(new_weights=new_weights)
+
+    def get_weights(self) -> jaxtyping.PyTree:
+        """Return the current model state (weights) from the model runner."""
+        return self.model_runner.state
+
     def sync_weights(
         self,
         updated_weights: jaxtyping.PyTree,

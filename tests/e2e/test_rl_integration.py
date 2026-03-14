@@ -22,6 +22,8 @@
 #      then reallocate it and resume serving with correct outputs.
 #   2. Delete KV cache actually reclaims HBM (critical for weight-sync).
 #   3. Returning log-probs does not trigger recompilation.
+#   4. update_weights replaces the model state and generation recovers
+#      after restoring original weights.
 #
 # Performance tests verify that:
 #   1. Returning log-probs does not add significant latency overhead.
@@ -33,8 +35,12 @@ from __future__ import annotations
 import os
 import time
 
+import jax
+import jax.numpy as jnp
 import pytest
 from vllm import LLM, SamplingParams
+
+from tpu_inference.runner.rl_utils import get_weights, update_weights
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -55,9 +61,14 @@ def llm():
     """Shared LLM instance with prefix caching enabled.
 
     Prefix caching is enabled so that performance tests (group sampling)
-    can verify prefix-cache speedup. 
+    can verify prefix-cache speedup.
+
+    VLLM_ENABLE_V1_MULTIPROCESSING=0 is required so that the RL
+    weight-sync helpers (get_weights / update_weights) can access the
+    model runner directly, without going through IPC serialization.
     """
     os.environ.setdefault("SKIP_JAX_PRECOMPILE", "0")
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     engine = LLM(
         model=MODEL_NAME,
         max_model_len=MAX_MODEL_LEN,
@@ -280,6 +291,129 @@ class TestLogprobsNoRecompilation:
             for _token_id, logprob_obj in token_logprobs.items():
                 assert logprob_obj.logprob <= 0, (
                     f"Log probability must be <= 0, got {logprob_obj.logprob}")
+
+
+class TestUpdateWeights:
+    """Verify the ``update_weights`` API for RL weight-sync.
+
+    Uses the direct-access helpers from ``tpu_inference.runner.rl_utils``
+    to read/write the model runner's state (weights) without going
+    through ``collective_rpc`` (which would require serialisation of
+    JAX PyTrees).  Requires ``VLLM_ENABLE_V1_MULTIPROCESSING=0``.
+    """
+
+    # Minimum word-overlap ratio to consider two outputs "matching".
+    _WORD_OVERLAP_THRESHOLD = 0.7
+
+    @staticmethod
+    def _word_overlap(text_a: str, text_b: str) -> float:
+        words_a = set(text_a.strip().split())
+        words_b = set(text_b.strip().split())
+        if not words_a:
+            return 1.0 if not words_b else 0.0
+        return len(words_a & words_b) / len(words_a)
+
+    def test_update_with_same_weights_preserves_output(self, llm: LLM):
+        """Replacing state with an identical copy should not change output."""
+        prompt = "What is 2 + 2? Answer with just the number:"
+        sampling_params = SamplingParams(temperature=0,
+                                         max_tokens=MAX_TOKENS_DEFAULT)
+
+        # 1. Generate a reference output.
+        ref_outputs = llm.generate([prompt], sampling_params)
+        ref_text = ref_outputs[0].outputs[0].text
+
+        # 2. Retrieve current weights and re-install them.
+        current_weights = get_weights(llm)
+        update_weights(llm, current_weights)
+
+        # 3. Generate again — should match the reference.
+        llm.reset_prefix_cache()
+        new_outputs = llm.generate([prompt], sampling_params)
+        new_text = new_outputs[0].outputs[0].text
+
+        overlap = self._word_overlap(ref_text, new_text)
+        print(f"  Same-weights overlap: {overlap:.0%}")
+        assert overlap >= self._WORD_OVERLAP_THRESHOLD, (
+            f"Output changed after update_weights with identical state "
+            f"(overlap={overlap:.0%}): {ref_text!r} vs {new_text!r}")
+
+    def test_update_weights_and_restore(self, llm: LLM):
+        """Replacing weights with zeros should alter output; restoring
+        original weights should recover the original behaviour."""
+        prompt = "The capital of France is"
+        sampling_params = SamplingParams(temperature=0,
+                                         max_tokens=MAX_TOKENS_DEFAULT)
+
+        # 1. Generate a reference output with original weights.
+        ref_outputs = llm.generate([prompt], sampling_params)
+        ref_text = ref_outputs[0].outputs[0].text
+        assert len(ref_text.strip()) > 0, "Reference output should not be empty"
+
+        # 2. Save original weights.
+        original_weights = get_weights(llm)
+
+        # 3. Create zeroed-out weights (same structure, all zeros).
+        zeroed_weights = jax.tree.map(jnp.zeros_like, original_weights)
+        update_weights(llm, zeroed_weights)
+
+        # 4. Generate with zeroed weights — output should differ.
+        llm.reset_prefix_cache()
+        zero_outputs = llm.generate([prompt], sampling_params)
+        zero_text = zero_outputs[0].outputs[0].text
+
+        print(f"  Ref text:  {ref_text!r}")
+        print(f"  Zero text: {zero_text!r}")
+
+        # With zeroed weights the model should produce different (likely
+        # degenerate) output.
+        zero_overlap = self._word_overlap(ref_text, zero_text)
+        print(f"  Zero-weights overlap with reference: {zero_overlap:.0%}")
+
+        # 5. Restore original weights and verify recovery.
+        update_weights(llm, original_weights)
+        llm.reset_prefix_cache()
+        restored_outputs = llm.generate([prompt], sampling_params)
+        restored_text = restored_outputs[0].outputs[0].text
+
+        restored_overlap = self._word_overlap(ref_text, restored_text)
+        print(f"  Restored overlap: {restored_overlap:.0%}")
+        assert restored_overlap >= self._WORD_OVERLAP_THRESHOLD, (
+            f"Output did not recover after restoring original weights "
+            f"(overlap={restored_overlap:.0%}): "
+            f"{ref_text!r} vs {restored_text!r}")
+
+    def test_update_weights_with_delete_reinitialize_cycle(self, llm: LLM):
+        """update_weights should work correctly after a KV-cache
+        delete/reinitialize cycle (a typical RL weight-sync sequence)."""
+        prompt = "Explain gravity in one sentence:"
+        sampling_params = SamplingParams(temperature=0,
+                                         max_tokens=MAX_TOKENS_DEFAULT)
+
+        # 1. Reference output.
+        ref_outputs = llm.generate([prompt], sampling_params)
+        ref_text = ref_outputs[0].outputs[0].text
+
+        # 2. Save weights.
+        original_weights = get_weights(llm)
+
+        # 3. Delete + reinitialize KV cache (as done in RL loops).
+        llm.reset_prefix_cache()
+        llm.collective_rpc("delete_kv_cache")
+        llm.collective_rpc("reinitialize_kv_cache")
+
+        # 4. Update weights (re-install same weights to simulate sync).
+        update_weights(llm, original_weights)
+
+        # 5. Generate and verify output is consistent.
+        new_outputs = llm.generate([prompt], sampling_params)
+        new_text = new_outputs[0].outputs[0].text
+
+        overlap = self._word_overlap(ref_text, new_text)
+        print(f"  Post-cycle overlap: {overlap:.0%}")
+        assert overlap >= self._WORD_OVERLAP_THRESHOLD, (
+            f"Output diverged after KV-cache cycle + update_weights "
+            f"(overlap={overlap:.0%}): {ref_text!r} vs {new_text!r}")
 
 
 # ========================================================================

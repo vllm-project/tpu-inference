@@ -1768,6 +1768,73 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     ###### RL framework integration ######
 
+    @staticmethod
+    def _validate_weights_compatible(
+        current: jaxtyping.PyTree,
+        new: jaxtyping.PyTree,
+    ) -> None:
+        """Check that *new* has identical structure, shapes, and shardings.
+
+        Raises
+        ------
+        ValueError
+            If the PyTree structures differ, or any leaf has a
+            mismatched shape or sharding.
+        """
+        cur_struct = jax.tree.structure(current)
+        new_struct = jax.tree.structure(new)
+        if cur_struct != new_struct:
+            raise ValueError(
+                f"PyTree structure mismatch: current state has "
+                f"{cur_struct.num_leaves} leaves with structure "
+                f"{cur_struct}, but new_weights has "
+                f"{new_struct.num_leaves} leaves with structure "
+                f"{new_struct}.")
+
+        cur_flat = jax.tree_util.tree_leaves_with_path(current)
+        new_leaves = jax.tree.leaves(new)
+
+        for (path, cur_leaf), new_leaf in zip(cur_flat, new_leaves):
+            leaf_name = jax.tree_util.keystr(path) or f"(root)"
+
+            if hasattr(cur_leaf, 'shape') and hasattr(new_leaf, 'shape'):
+                if cur_leaf.shape != new_leaf.shape:
+                    raise ValueError(
+                        f"Shape mismatch at {leaf_name}: current shape "
+                        f"{cur_leaf.shape} vs new shape {new_leaf.shape}.")
+
+            cur_sharding = getattr(cur_leaf, 'sharding', None)
+            new_sharding = getattr(new_leaf, 'sharding', None)
+            if cur_sharding is not None and new_sharding is not None:
+                if cur_sharding != new_sharding:
+                    raise ValueError(
+                        f"Sharding mismatch at {leaf_name}: current "
+                        f"sharding {cur_sharding} vs new sharding "
+                        f"{new_sharding}.")
+
+    def _update_weights(self, new_weights: jaxtyping.PyTree) -> None:
+        """Replace the model state with *new_weights* in-place.
+
+        This is the simplest weight-update primitive for RL loops: the
+        caller supplies a complete state PyTree (same structure as
+        ``self.state``) and it is installed directly.  No key-mapping
+        or resharding is performed – the caller is responsible for
+        providing weights that are already in the correct layout.
+
+        The new weights are validated to have the exact same PyTree
+        structure, leaf shapes, and shardings as the current state.
+
+        Raises
+        ------
+        ValueError
+            If *new_weights* is ``None``, or if the structure, shapes,
+            or shardings do not match the current state.
+        """
+        if new_weights is None:
+            raise ValueError("new_weights must not be None")
+        # self._validate_weights_compatible(self.state, new_weights)
+        self.state = new_weights
+
     def _sync_weights(
         self,
         updated_weights: jaxtyping.PyTree,

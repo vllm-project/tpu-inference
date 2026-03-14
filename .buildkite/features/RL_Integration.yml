@@ -16,8 +16,9 @@
 # pipeline-type: feature support matrix
 # RL (Reinforcement Learning) integration tests verify features critical for
 # training-inference pipelines: HBM KV-cache delete/reinitialise, log-prob
-# correctness without recompilation, log-prob latency overhead, and group
-# sampling with prefix caching.
+# correctness without recompilation, log-prob latency overhead, group
+# sampling with prefix caching, and update_weights for direct weight
+# replacement.
 steps:
   # ------------------------------------------------------------------
   # Correctness tests
@@ -28,7 +29,7 @@ steps:
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
-      - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_rl_integration.py::TestDeleteReinitializeHBM /workspace/tpu_inference/tests/e2e/test_rl_integration.py::TestLogprobsNoRecompilation
+      - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_rl_integration.py::TestDeleteReinitializeHBM /workspace/tpu_inference/tests/e2e/test_rl_integration.py::TestLogprobsNoRecompilation /workspace/tpu_inference/tests/e2e/test_rl_integration.py::TestUpdateWeights
   - label: "${TPU_VERSION:-tpu6e} Record correctness test result for RL_Integration"
     key: "${TPU_VERSION:-tpu6e}_record_rl_integration_CorrectnessTest"
     depends_on: "${TPU_VERSION:-tpu6e}_rl_integration_CorrectnessTest"
