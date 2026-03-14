@@ -5,20 +5,17 @@ from typing import List, Literal, NamedTuple, Optional, Tuple, TypedDict, Union
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from flax import nnx
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
 
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import (
-    attention,
     sharded_flash_attention,
 )
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.logger import init_logger
 from tpu_inference.layers.jax.linear import JaxEinsum
-from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.models.jax.qwen3 import (
     Qwen3Attention,
     Qwen3DecoderLayer,
@@ -807,7 +804,7 @@ class Qwen3VLVisionTransformer(nnx.Module):
         self.rotary_pos_emb = Qwen3VLVisionRotaryEmbedding(head_dim // 2)
 
         intermediate_size = vision_config.intermediate_size
-        self.blocks = [
+        self.blocks = nnx.List([
             Qwen3VLVisionBlock(
                 hidden_size=self.hidden_size,
                 num_heads=self.num_heads,
@@ -818,7 +815,7 @@ class Qwen3VLVisionTransformer(nnx.Module):
                 norm_eps=norm_eps,
             )
             for _ in range(vision_config.depth)
-        ]
+        ])
 
         # Final merger settings
         # Qwen3VLConfig uses text_config for text model hidden_size
@@ -839,7 +836,7 @@ class Qwen3VLVisionTransformer(nnx.Module):
         self.deepstack_visual_indexes = getattr(
             vision_config, "deepstack_visual_indexes", [8, 16, 24]
         )
-        self.deepstack_merger_list = [
+        self.deepstack_merger_list = nnx.List([
             Qwen3VLVisionPatchMerger(
                 d_model=out_hidden_size,
                 context_dim=self.hidden_size,
@@ -850,7 +847,7 @@ class Qwen3VLVisionTransformer(nnx.Module):
                 norm_eps=norm_eps,
             )
             for _ in range(len(self.deepstack_visual_indexes))
-        ]
+        ])
 
         additional_config = getattr(vllm_config, "additional_config", None) or {}
         self.enable_dynamic_image_sizes = additional_config.get(

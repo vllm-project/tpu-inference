@@ -17,7 +17,6 @@ from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from flax import nnx
 from flax.typing import Sharding
 from jax.sharding import Mesh
@@ -453,7 +452,7 @@ class Qwen3VLMoeTextModel(nnx.Module):
         )
 
         # layer idx govern layer type
-        self.layers = [
+        self.layers = nnx.List([
             Qwen3VLMoeTextDecoderLayer(
                 config=config,
                 layer_idx=layer_idx,
@@ -463,7 +462,7 @@ class Qwen3VLMoeTextModel(nnx.Module):
                 kv_cache_dtype=kv_cache_dtype,
             )
             for layer_idx in range(num_hidden_layers)
-        ]
+        ])
 
         self.norm = JaxRmsNorm(
             hidden_size,
