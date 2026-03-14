@@ -28,6 +28,7 @@ MODEL_STAGES=("Type" "UnitTest" "Accuracy/Correctness" "Benchmark")
 FEATURE_STAGES=("CorrectnessTest" "PerformanceTest")
 FEATURE_STAGES_QUANTIZATION=("QuantizationMethods" "RecommendedTPUGenerations" "CorrectnessTest" "PerformanceTest")
 FEATURE_STAGES_MICROBENCHMARKS=("CorrectnessTest" "PerformanceTest")
+PARALLELISM_STAGES=("Single-Host CorrectnessTest" "Single-Host PerformanceTest" "Multi-Host CorrectnessTest" "Multi-Host PerformanceTest")
 
 declare -A TPU_GENERATIONS=(
     ["INT8 W8A8"]="\"v5, v6\""
@@ -150,6 +151,9 @@ process_features() {
         elif [ "$category" == "kernel support matrix microbenchmarks" ]; then
             stages_to_use=("${FEATURE_STAGES_MICROBENCHMARKS[@]}")
             header="kernels,CorrectnessTest,PerformanceTest"
+        elif [ "$category" == "parallelism support matrix" ]; then
+            stages_to_use=("${PARALLELISM_STAGES[@]}")
+            header="Feature,Single-Host CorrectnessTest,Single-Host PerformanceTest,Multi-Host CorrectnessTest,Multi-Host PerformanceTest"
         fi
 
         if [ ! -f "$category_csv" ]; then
