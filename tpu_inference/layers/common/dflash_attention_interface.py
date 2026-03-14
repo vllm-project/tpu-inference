@@ -55,6 +55,7 @@ def dflash_concat_attention(
             f"Expected num_heads divisible by num_kv_heads, got {num_heads=} {num_kv_heads=}"
         )
 
+    # Expand KV heads to match query head count for GQA/MQA.
     kv_repeat = num_heads // num_kv_heads
     if kv_repeat > 1:
         k_ctx = jnp.repeat(k_ctx, kv_repeat, axis=1)
@@ -62,6 +63,7 @@ def dflash_concat_attention(
         v_ctx = jnp.repeat(v_ctx, kv_repeat, axis=1)
         v_noise = jnp.repeat(v_noise, kv_repeat, axis=1)
 
+    # Pad so dynamic_slice_in_dim always has static size inside fori_loop.
     pad_len = max_query_len
     q = jnp.pad(q, ((0, pad_len), (0, 0), (0, 0)))
     k_ctx = jnp.pad(k_ctx, ((0, pad_len), (0, 0), (0, 0)))
@@ -69,6 +71,7 @@ def dflash_concat_attention(
     v_ctx = jnp.pad(v_ctx, ((0, pad_len), (0, 0), (0, 0)))
     v_noise = jnp.pad(v_noise, ((0, pad_len), (0, 0), (0, 0)))
 
+    # Per-request token offsets and lengths.
     query_start_loc = attention_metadata.query_start_loc
     req_lens = query_start_loc[1:] - query_start_loc[:-1]
     if attention_metadata.request_distribution is not None:
@@ -77,13 +80,16 @@ def dflash_concat_attention(
     else:
         num_reqs = req_lens.shape[0]
 
+    # KV range is 2x because context and noise are concatenated.
     arange_q = jnp.arange(max_query_len)
     arange_kv = jnp.arange(2 * max_query_len)
 
+    # Large negative for masking out padding positions before softmax.
     mask_value = -0.7 * float(jnp.finfo(jnp.float32).max)
     outputs = jnp.zeros_like(q)
 
     def _body(i: int, current: jax.Array) -> jax.Array:
+        # Process one request: slice, concat ctx+noise KV, attend, write back.
         start = query_start_loc[i]
         req_len = req_lens[i]
         req_len = jnp.clip(req_len, 0, max_query_len)
@@ -106,9 +112,11 @@ def dflash_concat_attention(
                                                max_query_len,
                                                axis=0)
 
+        # Concat context and noise KV along token axis. [2*max_query_len, N, H]
         k_blk = jnp.concatenate([k_ctx_blk, k_noise_blk], axis=0)
         v_blk = jnp.concatenate([v_ctx_blk, v_noise_blk], axis=0)
 
+        # Mask out padding positions for both Q and KV.
         q_valid = arange_q < req_len
         kv_valid_len = jnp.maximum(2 * req_len, 1)
         kv_valid = arange_kv < kv_valid_len
