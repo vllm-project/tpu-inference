@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     MOE_REQUANTIZE_BLOCK_SIZE: int | None = None
     MOE_REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
     LAYOUT_Q_PROJ_AS_NDH: bool = False
+    MOE_REQUANTIZE_ON_TPU: bool = False
 
 
 def env_with_choices(
@@ -189,6 +190,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # or DNH (model dim, q-heads, head dim), which is the default (False)
     "LAYOUT_Q_PROJ_AS_NDH":
     lambda: bool(int(os.getenv("LAYOUT_Q_PROJ_AS_NDH") or "0")),
+    # Requantize FP8 MoE weights on TPU
+    "MOE_REQUANTIZE_ON_TPU":
+    env_bool("MOE_REQUANTIZE_ON_TPU", default=False),
 }
 
 
