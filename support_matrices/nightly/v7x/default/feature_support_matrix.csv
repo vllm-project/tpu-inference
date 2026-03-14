@@ -4,7 +4,7 @@ Feature,CorrectnessTest,PerformanceTest
 "KV cache host offloading",unverified,unverified
 "LoRA_Torch",✅,✅
 "Multimodal Inputs",❌,N/A
-"Out-of-tree model support",✅,❌
+"Out-of-tree model support",✅,✅
 "Prefix Caching",✅,✅
 "RL_Integration",✅,✅
 "Single Program Multi Data",✅,✅
@@ -14,6 +14,6 @@ Feature,CorrectnessTest,PerformanceTest
 "async scheduler",✅,❌
 "hybrid kv cache",✅,N/A
 "multi-host",✅,unverified
-"runai_model_streamer_loader",❌,N/A
+"runai_model_streamer_loader",✅,N/A
 "sampling_params",✅,N/A
 "structured_decoding",✅,N/A
