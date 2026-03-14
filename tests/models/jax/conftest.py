@@ -77,7 +77,7 @@ def mock_vllm_config():
 @register_model_loader("skip_layers_model_loader_for_test")
 class SkipLayersModelLoaderForTest(DefaultModelLoader):
     """Weight loader that skips layers beyond given limit.
-    
+
     Some test are testing against weight loading, but it's meaningless
     to test all layers, assuming successfully loading the first few
     layers implies success of all layers. This special loader skips
