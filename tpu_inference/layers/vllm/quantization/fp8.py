@@ -108,6 +108,7 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
             raise ValueError(
                 "Blockwise quantization is supported by quantized matmul kernel. Please enable quantized_matmul_kernel or unset the quantize block size to trigger XLA per-channel quantization."
             )
+        self.key = jax.random.PRNGKey(0)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, vllm_linear.LinearBase)
@@ -171,7 +172,7 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
                 weight_jax = jax_view(layer.weight)
                 weight_scale_jax = jax_view(layer.weight_scale)
                 out = self._apply_fused(x_jax, weight_jax, weight_scale_jax,
-                                        bias_jax)
+                                        bias_jax, self.key)
             else:
                 assert isinstance(layer.weight, torch.nn.ParameterList)
                 assert isinstance(layer.weight_scale, torch.nn.ParameterList)
@@ -212,6 +213,7 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         self.extra_backend_kwargs = {}
         if self.moe_backend == MoEBackend.FUSED_MOE:
             self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
+        self.key = jax.random.PRNGKey(0)
 
     @property
     def is_monolithic(self) -> bool:
@@ -281,4 +283,5 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
                               weights=weights,
                               quant_method_instance=self,
                               x=x,
-                              router_logits=router_logits)
+                              router_logits=router_logits,
+                              key=self.key)

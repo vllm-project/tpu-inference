@@ -355,6 +355,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
         self.block_quant: bool = self.weight_block_size is not None
         self.weight_scale_name = ("weight_scale_inv"
                                   if self.block_quant else "weight_scale")
+        self.key = jax.random.PRNGKey(0)
 
     def load_weights(self, *, layer: JaxMoE, original_load_weights_fn,
                      weights: Iterable) -> set:
@@ -613,7 +614,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
 
         return moe_apply(layer, x_TD, router_logits, weights,
                          layer.moe_backend, layer.mesh,
-                         self.extra_backend_kwargs)
+                         self.extra_backend_kwargs, self.key)
 
 
 class Fp8Config(QuantizationConfig):

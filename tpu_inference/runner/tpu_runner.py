@@ -16,6 +16,7 @@ import copy
 import functools
 import logging
 import random
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
@@ -282,6 +283,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.is_pooling_model: bool = self.model_config.runner_type == "pooling"
         """Generative model or pooling model select different computations."""
+        self.step_counter = 0
+        self.accumulated_latency = 0.0
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -603,12 +606,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[JaxIntermediateTensors] = None,
     ) -> ModelRunnerOutput | JaxIntermediateTensors | None:
+        start_time = time.perf_counter()
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called "
                                "after execute_model() returns None.")
         with jax.set_mesh(self.mesh):
             output = self._execute_model(scheduler_output,
                                          intermediate_tensors)
+        self.accumulated_latency += (time.perf_counter() - start_time)
+        self.step_counter += 1
+        if self.step_counter % 200 == 0:
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] wyzhangd: execute_model avg step latency over last 200 steps: {(self.accumulated_latency / 200) * 1000} ms, accumulated time: {self.accumulated_latency}s")
+            self.accumulated_latency = 0.0
         return output
 
     def sample_tokens(

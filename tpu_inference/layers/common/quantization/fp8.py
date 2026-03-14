@@ -41,7 +41,8 @@ class Fp8LinearMethod:
 
     def _apply_fused(self, x: jax.Array, weight_jax: jax.Array,
                      weight_scale_jax: jax.Array,
-                     bias: Optional[jax.Array]) -> jax.Array:
+                     bias: Optional[jax.Array],
+                     key: Optional[jax.random.PRNGKey] = None) -> jax.Array:
         outs = sharded_quantized_matmul(x,
                                         weight_jax,
                                         weight_scale_jax,

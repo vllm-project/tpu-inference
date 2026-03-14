@@ -11,6 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from typing import Optional
+
+import jax
 import torch
 from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
@@ -59,7 +62,7 @@ def select_moe_backend_from_fused_moe_config(
 
 def vllm_moe_apply(layer: FusedMoE, weights: FusedMoEWeights,
                    quant_method_instance: FusedMoEMethodBase, x: torch.Tensor,
-                   router_logits: torch.Tensor) -> torch.Tensor:
+                   router_logits: torch.Tensor, key:Optional[jax.random.PRNGKey] = None ) -> torch.Tensor:
     """
     Shared function for applying a FusedMoE layer for the TorchAX/vLLM backend.
 
@@ -86,4 +89,5 @@ def vllm_moe_apply(layer: FusedMoE, weights: FusedMoEWeights,
             moe_backend=quant_method_instance.moe_backend,
             mesh=quant_method_instance.mesh,
             extra_backend_kwargs=quant_method_instance.extra_backend_kwargs,
+            key=key,
         ))

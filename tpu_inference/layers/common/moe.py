@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from enum import Enum
-from typing import TYPE_CHECKING, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -76,6 +76,7 @@ def moe_apply(
     moe_backend: MoEBackend,
     mesh: Mesh,
     extra_backend_kwargs: dict,
+    key: Optional[jax.random.PRNGKey] = None,
 ) -> jax.Array:
 
     with jax.named_scope(layer._get_name()):
@@ -136,6 +137,7 @@ def moe_apply(
                     use_ep=layer.use_ep,
                     activation=activation,
                     scoring_fn=layer.scoring_func,
+                    key=key,
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance

@@ -64,6 +64,7 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.extra_backend_kwargs = {}
+        self.key = jax.random.PRNGKey(0)
 
     def process_weights_after_loading(self, layer: JaxMoE, *args,
                                       **kwargs) -> None:
@@ -170,7 +171,7 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             raise ValueError(f"Unsupported moe backend {layer.moe_backend}")
         return moe_apply(layer, x_TD, router_logits, weights,
                          layer.moe_backend, layer.mesh,
-                         self.extra_backend_kwargs)
+                         self.extra_backend_kwargs, self.key)
 
 
 class UnquantizedConfig(QuantizationConfig):

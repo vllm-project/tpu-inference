@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import numpy as np
 import functools
-from typing import Literal
+from typing import Literal, Optional
 
 import jax
 from jax import numpy as jnp
@@ -26,6 +27,7 @@ from tpu_inference.kernels.megablox.gmm_v2 import (gmm_v2,
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
 
+np.set_printoptions(threshold=np.inf)
 
 def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
     match scoring_fn:
@@ -62,7 +64,8 @@ def _swigluoai(x1: jax.Array,
 
 
 def gmm_wrapper(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset):
-    if is_supported_by_gmm_v2(lhs, rhs, rhs_scale):
+    # if is_supported_by_gmm_v2(lhs, rhs, rhs_scale):
+    if False:
         gmm_res = gmm_v2(
             lhs=lhs,
             rhs=rhs,
@@ -275,6 +278,12 @@ def expert_parallel_gmm(
         topk_weights,
     )
 
+def print_topk_indices(topk_indices):
+    indices_np = np.array(topk_indices)
+    sorted_indices = np.sort(indices_np, axis=-1)
+    print("-------------")
+    print(sorted_indices)
+    print("\n")
 
 @functools.partial(
     jax.jit,
@@ -302,6 +311,7 @@ def fused_moe_func(
     use_ep: bool,
     activation: str,
     scoring_fn: str,
+    key: Optional[jax.random.PRNGKey] = None,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -339,6 +349,22 @@ def fused_moe_func(
     topk_weights = jax.lax.with_sharding_constraint(
         topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
     topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
+    if key is None:
+        key = jax.random.PRNGKey(hidden_states.sum().astype(jnp.int32))
+    prob = jax.random.uniform(key)
+    def true_fn(topk_indices):
+        jax.debug.callback(print_topk_indices, topk_indices)
+        return topk_indices + 0
+    def false_fn(topk_indices):
+        return topk_indices
+    topk_indices = jax.lax.cond(
+        prob < 0.5,
+        true_fn,
+        false_fn,
+        topk_indices
+    )
+    jax.debug.callback(print_topk_indices, topk_indices)
+    
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
     topk_weights = topk_weights.astype(dtype)

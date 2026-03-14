@@ -1,0 +1,20 @@
+iter=8
+
+for ratio in 1.0; do
+    for conc in 64 ; do
+        # Create the full command string
+        CMD="python run_serve_and_bench.py --num_iterations=$iter --random_range_ratio=$ratio --max_concurrency=$conc --num_prompts=$conc"
+        
+        # Print a clear, colored divider
+        echo -e "\n\033[1;36m======================================================================"
+        echo -e "RUNNING: $CMD"
+        echo -e "======================================================================\033[0m"
+        
+        # Execute the command
+        $CMD
+        echo -e "\n\033[1;36m======================================================================"
+        echo -e "END: $CMD"
+        echo -e "======================================================================\033[0m"        
+    done
+done
+
