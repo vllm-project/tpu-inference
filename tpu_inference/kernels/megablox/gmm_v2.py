@@ -270,9 +270,13 @@ def inner_kernel(
                     loaded_lhs_block = tiled_lhs[:, k_start:k_end]
 
                     if tiled_rhs_ref.zero_point is not None:
-                        loaded_rhs_block = loaded_rhs_block.astype(
-                            jnp.int8) - tiled_rhs_ref.zero_point[
-                                ..., b_id, :, start_n:end_n].squeeze(axis=0)
+                        loaded_rhs_block = (
+                            loaded_rhs_block.astype(jnp.int8).astype(
+                                jnp.bfloat16) -
+                            tiled_rhs_ref.zero_point[..., b_id, :,
+                                                     start_n:end_n].squeeze(
+                                                         axis=0)).astype(
+                                                             jnp.bfloat16)
 
                     partial_result = jnp.matmul(
                         loaded_lhs_block,
@@ -343,8 +347,11 @@ def inner_kernel(
                     block_scale_inv = jnp.where(block_scale == 0, 0,
                                                 1 / block_scale)
                     # Convert lhs into quantized dtype.
-                    block_lhs_q = (block_lhs *
-                                   block_scale_inv).astype(lhs_q_dtype)
+                    # TODO(catswe): investigate stochastic rounding
+                    scaled_lhs = block_lhs * block_scale_inv
+                    # if jnp.issubdtype(lhs_q_dtype, jnp.integer):
+                    #     scaled_lhs = jnp.round(scaled_lhs)
+                    block_lhs_q = scaled_lhs.astype(lhs_q_dtype)
 
                     block_acc = jnp.matmul(
                         block_lhs_q,
