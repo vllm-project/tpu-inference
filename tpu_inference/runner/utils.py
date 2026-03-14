@@ -310,6 +310,8 @@ class PhasedBasedProfiler:
         self.default_profiling_options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
 
         self.current_phase: str = ""
+        self.reset_sentinel_path: str = os.path.join(
+            self.profile_dir, "reset_profiler")
 
         logger.info(
             "Phased-based profiler enabled. Traces will be saved to: %s",
@@ -398,6 +400,28 @@ class PhasedBasedProfiler:
                     f"Profiling for {self.current_phase} phase finished")
                 self.current_phase = ""
 
+    def reset(self) -> None:
+        """
+        Resets the profiler so all phases can be captured again.
+        Called when the sentinel file is detected, allowing the bench
+        script to re-arm profiling between benchmark configurations.
+        """
+        for phase in self.inference_phase_seen:
+            self.inference_phase_seen[phase] = False
+        self.profiling_n_steps_left = 0
+        self.current_phase = ""
+        logger.info("Phased profiler reset — all phases will be re-captured")
+
+    def _check_reset_sentinel(self) -> None:
+        """
+        Checks for a sentinel file that signals the profiler should reset.
+        The bench script writes this file between benchmark configs so that
+        traces are captured for every ISL/OSL/concurrency combination.
+        """
+        if os.path.exists(self.reset_sentinel_path):
+            os.remove(self.reset_sentinel_path)
+            self.reset()
+
     def step(self, batch_composition_stats: dict) -> None:
         """
         Steps the profiler.
@@ -411,6 +435,7 @@ class PhasedBasedProfiler:
                     padded_total_num_scheduled_tokens: The padded total number of tokens scheduled for the batch.
                     num_reqs: The number of requests in the batch.
         """
+        self._check_reset_sentinel()
         have_seen_all_phases = all(self.inference_phase_seen.values())
         # We want to start profiling only after the first trial request
         is_past_initial_request = batch_composition_stats[
