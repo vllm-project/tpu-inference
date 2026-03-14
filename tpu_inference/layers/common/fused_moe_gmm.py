@@ -193,7 +193,7 @@ def tensor_parallel_gmm(
             w2_zero_point_spec,
             w2_bias_spec,
             data_p_spec,
-            data_p_spec,
+            P(),
             data_p_spec,
             data_p_spec,
         ),

@@ -995,8 +995,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Return Model output to executor
             model_runner_output = ModelRunnerOutput(
                 req_ids=req_ids,
-                req_id_to_index=copy.deepcopy(
-                    self.input_batch.req_id_to_index),
+                req_id_to_index=copy.copy(self.input_batch.req_id_to_index),
                 sampled_token_ids=[],  # Fill in async get
                 logprobs=logprobs_lists,
                 prompt_logprobs_dict=prompt_logprobs_dict,
