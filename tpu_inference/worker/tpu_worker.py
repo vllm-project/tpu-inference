@@ -76,7 +76,11 @@ class PPConfig:
             chips_per_stage = math.ceil(total_cores_per_stage / cores_per_chip)
 
             if chips_per_stage > 0:
-                start_chip = self.rank * chips_per_stage
+                multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND",
+                                                   "").lower()
+                # For multi-host PP, each host is an independent JAX cluster,
+                # so chips always start from index 0 on each host.
+                start_chip = 0 if multihost_backend == "ray" else self.rank * chips_per_stage
                 self.default_tpu_visible_chips = ",".join(
                     str(i)
                     for i in range(start_chip, start_chip + chips_per_stage))
@@ -165,27 +169,42 @@ class TPUWorker(WorkerBase):
                     tpu_process_bounds="",
                     tpu_chips_per_process_bounds="",
                     tpu_visible_chips=""):
-        # set tpu visible devices for Jax runtime in single host PP.
-        multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
-        if multihost_backend != "ray" and self.parallel_config.pipeline_parallel_size > 1:
-            tpu_ports = [
-                jax_parallel_state.BASE_JAX_PORT + i
-                for i in range(self.pp_config.pp_world_size)
-            ]
-            os.environ["TPU_PROCESS_ADDRESSES"] = ",".join(
-                [f"localhost:{port}" for port in tpu_ports])
-            os.environ["TPU_PROCESS_PORT"] = f"{tpu_ports[self.rank]}"
-            os.environ["CLOUD_TPU_TASK_ID"] = f"{self.rank}"
 
-            # Note: Below is the setting for v6e8 host (8 chips of v6e)
-            # Replace with your own topology.
-            # There are 2 ways of subslicing a v6e
-            # 1) 2 slices with 4 TPU chips each, we can do PP=2, TP=1/2/3/4
-            #   TPU_PROCESS_BOUNDS = "1,1,1"
-            #   TPU_CHIPS_PER_PROCESS_BOUNDS = "1,4,1"
-            #   TPU_VISIBLE_CHIPS = "0,1,2,3" or "4,5,6,7"
-            # 2) 1 chip for each subslice, with at most 8 subslices,
-            #    we can do TP=1, PP=1/2/3/4/5/6/7/8
+        # set tpu visible devices for Jax runtime in PP.
+        multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
+        if self.parallel_config.pipeline_parallel_size > 1:
+            # Log environment variables for debugging
+            tpu_env_vars = [
+                "TPU_PROCESS_ADDRESSES",
+                "TPU_PROCESS_PORT",
+                "CLOUD_TPU_TASK_ID",
+                "TPU_PROCESS_BOUNDS",
+                "TPU_CHIPS_PER_PROCESS_BOUNDS",
+                "TPU_VISIBLE_CHIPS",
+            ]
+            env_dump = {v: os.environ.get(v) for v in tpu_env_vars}
+            logger.debug(
+                f"TPUWorker | Worker {self.rank} JAX/TPU environment before init_device: {env_dump}"
+            )
+            if multihost_backend == "ray":
+                # For multi-host PP on Ray, isolate each host as its own JAX cluster.
+                # This ensures TP collectives work correctly on the local chips
+                # despite non-contiguous global ID layouts.
+                port = os.environ.get("TPU_PROCESS_PORT", "8476")
+                os.environ["TPU_PROCESS_ADDRESSES"] = f"localhost:{port}"
+                os.environ["TPU_PROCESS_PORT"] = port
+                os.environ["CLOUD_TPU_TASK_ID"] = "0"
+            else:
+                # Single host PP logic
+                tpu_ports = [
+                    jax_parallel_state.BASE_JAX_PORT + i
+                    for i in range(self.pp_config.pp_world_size)
+                ]
+                os.environ["TPU_PROCESS_ADDRESSES"] = ",".join(
+                    [f"localhost:{port}" for port in tpu_ports])
+                os.environ["TPU_PROCESS_PORT"] = f"{tpu_ports[self.rank]}"
+                os.environ["CLOUD_TPU_TASK_ID"] = f"{self.rank}"
+
             os.environ[
                 "TPU_PROCESS_BOUNDS"] = tpu_process_bounds \
                     if tpu_process_bounds \
@@ -194,10 +213,19 @@ class TPUWorker(WorkerBase):
                 "TPU_CHIPS_PER_PROCESS_BOUNDS"] = tpu_chips_per_process_bounds \
                     if tpu_chips_per_process_bounds \
                         else self.pp_config.default_tpu_chips_per_process_bounds
+
+            # If TPU_VISIBLE_CHIPS is already set (e.g. by Ray), keep it.
+            # Otherwise use the default from pp_config.
+            if not tpu_visible_chips:
+                tpu_visible_chips = os.environ.get("TPU_VISIBLE_CHIPS")
             os.environ[
                 "TPU_VISIBLE_CHIPS"] = tpu_visible_chips \
                     if tpu_visible_chips \
                         else self.pp_config.default_tpu_visible_chips
+
+            logger.debug(
+                f"TPUWorker | Worker {self.rank} JAX/TPU environment after init_device: {env_dump}"
+            )
 
         if not self.devices:
             sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
