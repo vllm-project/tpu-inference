@@ -1230,6 +1230,8 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
                 dtype=model_config.dtype,
                 rngs=self.rng,
                 quant_config=vllm_config.quant_config,
+                kernel_init=nnx.with_partitioning(
+                    init_fn, (None, "model")),
             )
 
         self.image_token_id = config.image_token_id
