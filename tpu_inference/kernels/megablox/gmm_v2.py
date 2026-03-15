@@ -45,6 +45,7 @@ class WeightsRef:
     weight: Any
     scale: Any | None
     bias: Any | None
+    zero_point: Any | None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -71,6 +72,7 @@ class InputConfigs:
     dtype: jnp.dtype
     has_bias: bool = False
     has_scale: bool = False
+    has_zero_point: bool = False
     packing: int = 1
     num_quant_blocks: int = 1
 
@@ -161,7 +163,7 @@ def generate_block_specs(
         index_map.rhs_weight_index_map,
         pipeline_mode=pl.Buffered(buffer_count=3),
     )
-    rhs_scale_block_spec = rhs_bias_block_spec = None
+    rhs_scale_block_spec = rhs_zero_point_block_spec = rhs_bias_block_spec = None
     if cfgs.rhs_cfgs.has_bias:
         rhs_bias_block_spec = pl.BlockSpec(
             (None, 1, cfgs.tiles.tile_n),
@@ -172,10 +174,16 @@ def generate_block_specs(
             (None, cfgs.num_quant_blocks_per_tile_k, 1, cfgs.tiles.tile_n),
             index_map.rhs_scale_index_map,
         )
+    if cfgs.rhs_cfgs.has_zero_point:
+        rhs_zero_point_block_spec = pl.BlockSpec(
+            (None, cfgs.num_quant_blocks_per_tile_k, 1, cfgs.tiles.tile_n),
+            index_map.rhs_scale_index_map,
+        )
 
     rhs_block_spec = WeightsRef(
         weight=rhs_weight_spec,
         scale=rhs_scale_block_spec,
+        zero_point=rhs_zero_point_block_spec,
         bias=rhs_bias_block_spec,
     )
 
@@ -257,11 +265,25 @@ def inner_kernel(
                 for b_id in range(num_quant_blocks_per_tile_k):
                     k_start = b_id * rhs_qbs
                     k_end = (b_id + 1) * rhs_qbs
+
+                    loaded_rhs_block = tiled_rhs[k_start:k_end, start_n:end_n]
+                    loaded_lhs_block = tiled_lhs[:, k_start:k_end]
+
+                    if tiled_rhs_ref.zero_point is not None:
+                        loaded_rhs_block = (
+                            loaded_rhs_block.astype(jnp.int8).astype(
+                                jnp.bfloat16) -
+                            tiled_rhs_ref.zero_point[..., b_id, :,
+                                                     start_n:end_n].squeeze(
+                                                         axis=0)).astype(
+                                                             jnp.bfloat16)
+
                     partial_result = jnp.matmul(
-                        tiled_lhs[:, k_start:k_end],
-                        tiled_rhs[k_start:k_end, start_n:end_n],
+                        loaded_lhs_block,
+                        loaded_rhs_block,
                         preferred_element_type=jnp.float32,
                     )
+
                     if tiled_rhs_ref.scale is not None:
                         rhs_scale_slice = tiled_rhs_ref.scale[..., b_id, :,
                                                               start_n:end_n]
@@ -302,6 +324,15 @@ def inner_kernel(
                     block_lhs = tiled_lhs[:, start_k:end_k]
                     block_rhs = tiled_rhs[start_k:end_k, start_n:end_n]
 
+                    if tiled_rhs_ref.zero_point is not None:
+                        b_id = start_k // rhs_qbs
+                        zero_point_slice = tiled_rhs_ref.zero_point[
+                            ..., b_id, :, start_n:end_n].squeeze(axis=0)
+                        block_rhs = (
+                            block_rhs.astype(jnp.bfloat16) -
+                            zero_point_slice.astype(jnp.bfloat16)).astype(
+                                jnp.int8)
+
                     # Perform lhs quantization. Note that for every block_lhs,
                     # same computation will be performed tiles_n//mxu_size times.
                     # But we can let compiler perform CSE and avoid recomputation.
@@ -316,8 +347,10 @@ def inner_kernel(
                     block_scale_inv = jnp.where(block_scale == 0, 0,
                                                 1 / block_scale)
                     # Convert lhs into quantized dtype.
-                    block_lhs_q = (block_lhs *
-                                   block_scale_inv).astype(lhs_q_dtype)
+                    scaled_lhs = block_lhs * block_scale_inv
+                    if jnp.issubdtype(lhs_q_dtype, jnp.integer):
+                        scaled_lhs = jnp.round(scaled_lhs)
+                    block_lhs_q = scaled_lhs.astype(lhs_q_dtype)
 
                     block_acc = jnp.matmul(
                         block_lhs_q,
@@ -784,6 +817,7 @@ def validate_inputs(
     lhs: jax.Array,
     rhs: jax.Array,
     rhs_scale: jax.Array | None,
+    rhs_zero_point: jax.Array | None,
     rhs_bias: jax.Array | None,
     group_sizes: jax.Array,
     group_offset: jax.Array,
@@ -802,6 +836,11 @@ def validate_inputs(
     if rhs_scale is not None:
         num_quant_blocks = rhs_scale.shape[1]
         assert rhs_scale.shape == (size_group, num_quant_blocks, 1, size_n)
+        assert size_k % num_quant_blocks == 0
+    if rhs_zero_point is not None:
+        num_quant_blocks = rhs_zero_point.shape[1]
+        assert rhs_zero_point.shape == (size_group, num_quant_blocks, 1,
+                                        size_n)
         assert size_k % num_quant_blocks == 0
 
     assert group_offset.shape == (1, )
@@ -835,6 +874,9 @@ def get_cost_estimate(cfgs: GmmConfigs):
     if cfgs.rhs_cfgs.has_scale:
         rhs_bytes += (dims.size_group * cfgs.rhs_cfgs.num_quant_blocks *
                       dims.size_n * jnp.dtype(jnp.float32).itemsize)
+    if cfgs.rhs_cfgs.has_zero_point:
+        rhs_bytes += (dims.size_group * cfgs.rhs_cfgs.num_quant_blocks *
+                      dims.size_n * jnp.dtype(jnp.float32).itemsize)
     if cfgs.rhs_cfgs.has_bias:
         rhs_bytes += dims.size_group * dims.size_n * jnp.dtype(
             jnp.float32).itemsize
@@ -861,6 +903,7 @@ def make_gmm_configs(
     lhs: jax.Array,
     rhs: jax.Array,
     rhs_scale: jax.Array | None,
+    rhs_zero_point: jax.Array | None,
     rhs_bias: jax.Array | None,
     group_sizes: jax.Array,
     group_offset: jax.Array,
@@ -874,8 +917,8 @@ def make_gmm_configs(
 ):
     """Fills the GMM config for the GMM kernel."""
 
-    dims = validate_inputs(lhs, rhs, rhs_scale, rhs_bias, group_sizes,
-                           group_offset)
+    dims = validate_inputs(lhs, rhs, rhs_scale, rhs_zero_point, rhs_bias,
+                           group_sizes, group_offset)
 
     if rhs_scale is not None:
         has_scale = True
@@ -900,6 +943,7 @@ def make_gmm_configs(
         dtype=rhs.dtype,
         has_bias=rhs_bias is not None,
         has_scale=has_scale,
+        has_zero_point=rhs_zero_point is not None,
         packing=rhs_packing,
         num_quant_blocks=num_blocks,
     )
@@ -982,6 +1026,8 @@ def gmm_v2(
     rhs_scale: jax.Array
     | None = None,  # [size_group, num_blocks, 1, out_size]
     rhs_bias: jax.Array | None = None,  # [size_group, 1, out_size]
+    rhs_zero_point: jax.Array
+    | None = None,  # [size_group, num_blocks, 1, out_size]
     group_offset: jax.Array | None = None,  # int32[1]
     *,
     tile_info: TileSizes | TileFn = calculate_tiling,
@@ -1032,6 +1078,7 @@ def gmm_v2(
         lhs,
         rhs,
         rhs_scale,
+        rhs_zero_point,
         rhs_bias,
         group_sizes,
         group_offset,
@@ -1046,10 +1093,13 @@ def gmm_v2(
     tiles = cfgs.tiles
 
     # Prepare block specs.
-    rhs_scale_spec = rhs_bias_spec = None
+    rhs_scale_spec = rhs_bias_spec = rhs_zero_point_spec = None
     if rhs_scale is not None:
         rhs_scale = rhs_scale.astype(jnp.float32)
         rhs_scale_spec = pl.BlockSpec(memory_space=pltpu.HBM)
+    if rhs_zero_point is not None:
+        rhs_zero_point = rhs_zero_point.astype(jnp.float32)
+        rhs_zero_point_spec = pl.BlockSpec(memory_space=pltpu.HBM)
     if rhs_bias is not None:
         rhs_bias = rhs_bias.astype(jnp.float32)
         rhs_bias_spec = pl.BlockSpec(memory_space=pltpu.HBM)
@@ -1097,7 +1147,10 @@ def gmm_v2(
 
     aligned_n = align_to(dims.size_n, num_lanes)
     out_init = jax.ShapeDtypeStruct((dims.size_m, aligned_n), cfgs.out_dtype)
-    rhs_weights = WeightsRef(weight=rhs, scale=rhs_scale, bias=rhs_bias)
+    rhs_weights = WeightsRef(weight=rhs,
+                             scale=rhs_scale,
+                             zero_point=rhs_zero_point,
+                             bias=rhs_bias)
 
     return pl.pallas_call(
         functools.partial(kernel_main, cfgs=cfgs),
@@ -1109,6 +1162,7 @@ def gmm_v2(
                 WeightsRef(
                     weight=pl.BlockSpec(memory_space=pltpu.HBM),
                     scale=rhs_scale_spec,
+                    zero_point=rhs_zero_point_spec,
                     bias=rhs_bias_spec,
                 ),
             ],
