@@ -1521,7 +1521,7 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         self.rng = nnx.Rngs(rng_key)
 
         mappings = {
-            "model.language_model.embed_tokens": "language_model.embed_tokens.embedding",
+            "model.language_model.embed_tokens": "language_model.embed_tokens.weight",
             "model.language_model.layers.*.input_layernorm": "language_model.layers.*.input_layernorm.weight",
             "model.language_model.layers.*.mlp.down_proj": "language_model.layers.*.mlp.down_proj.kernel",
             "model.language_model.layers.*.mlp.gate_proj": "language_model.layers.*.mlp.gate_proj.kernel",
