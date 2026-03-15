@@ -1,6 +1,6 @@
 Feature,CorrectnessTest,PerformanceTest
 "Chunked Prefill",✅,✅
-"DCN-based P/D disaggregation",❌,✅
+"DCN-based P/D disaggregation",✅,✅
 "KV cache host offloading",unverified,unverified
 "LoRA_Torch",✅,✅
 "Multimodal Inputs",❌,N/A
