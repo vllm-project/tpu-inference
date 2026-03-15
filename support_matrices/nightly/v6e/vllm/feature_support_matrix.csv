@@ -1,6 +1,6 @@
 Feature,CorrectnessTest,PerformanceTest
 "Chunked Prefill",✅,✅
-"DCN-based P/D disaggregation",✅,✅
+"DCN-based P/D disaggregation",❌,✅
 "KV cache host offloading",unverified,unverified
 "LoRA_Torch",✅,✅
 "Multimodal Inputs",❌,N/A
@@ -14,6 +14,6 @@ Feature,CorrectnessTest,PerformanceTest
 "async scheduler",✅,✅
 "hybrid kv cache",❌,N/A
 "multi-host",N/A,N/A
-"runai_model_streamer_loader",❌,N/A
+"runai_model_streamer_loader",✅,N/A
 "sampling_params",❌,N/A
 "structured_decoding",❌,N/A
