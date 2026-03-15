@@ -517,10 +517,6 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 w13_weight = jnp.concatenate([w_gate, w_up], axis=1)
                 w13_weight_scale = jnp.concatenate([s_gate, s_up], axis=1)
 
-                weight_block_size = None
-                if self.weight_block_size is not None:
-                    weight_block_size = tuple(self.weight_block_size)
-
                 # TODO (jacobplatin): we should support bias
                 input_weights = FusedMoEWeights(
                     w13_weight=w13_weight,
@@ -535,8 +531,8 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                     moe_backend=layer.moe_backend,
                     mesh=layer.mesh,
                     activation=layer.activation,
-                    # Convert to tuple so jax jit can hash it
-                    weight_block_size=weight_block_size,
+                    # Source block size should be inferred from scale shape
+                    weight_block_size=None,
                 )
 
             del layer.kernel_gating_EDF

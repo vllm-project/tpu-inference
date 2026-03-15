@@ -121,6 +121,12 @@ def moe_apply(
                     **extra_backend_kwargs,
                 )[:, :actual_hidden_size]
             case MoEBackend.GMM_EP | MoEBackend.GMM_TP:
+                topk_weights = None
+                topk_indices = None
+                if isinstance(gating_output, tuple):
+                    topk_weights, topk_indices = gating_output
+                    gating_output = None  # Not used if pre-calculated
+
                 output = fused_moe_func(
                     hidden_states=x,
                     w1=weights.w13_weight,
@@ -136,6 +142,8 @@ def moe_apply(
                     use_ep=layer.use_ep,
                     activation=activation,
                     scoring_fn=layer.scoring_func,
+                    topk_weights=topk_weights,
+                    topk_indices=topk_indices,
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance
