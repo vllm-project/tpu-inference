@@ -17,11 +17,13 @@ from typing import Any, Iterable, Iterator, Optional
 
 import jax
 import jax.numpy as jnp
+import torch
 from flax import nnx
 from flax.typing import Sharding
 from jax.sharding import NamedSharding, PartitionSpec
 from jaxtyping import Float
 
+from tpu_inference import envs
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.utils import cpu_mesh_context
 from tpu_inference.layers.jax import JaxModule
@@ -286,6 +288,16 @@ class JaxMoE(JaxModule):
 
             assert isinstance(jax_param, nnx.Param)
 
+            # Pre-quantized FP4 MoE weights may be stored as either
+            # float4_e2m1fn_x2 or uint8 (packed). Both need uint8 view
+            # for DLPack/JAX conversion; unpack happens later in
+            # process_weights_after_loading.
+            _fp4_x2 = getattr(torch, 'float4_e2m1fn_x2', None)
+            if envs.MOE_SKIP_REQUANTIZE and (
+                    torch_weight.dtype == torch.uint8 or
+                (_fp4_x2 is not None and torch_weight.dtype == _fp4_x2)):
+                if torch_weight.dtype != torch.uint8:
+                    torch_weight = torch_weight.view(torch.uint8)
             jax_weight = jax_array_from_reshaped_torch(
                 torch_weight, reshape_dims=(1, ) +
                 torch_weight.shape)  # add expert dim for concatenation later
