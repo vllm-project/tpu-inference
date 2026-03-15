@@ -19,7 +19,8 @@ import pytest
 
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     MultiModalEmbeddings, NestedTensors, flatten_embeddings,
-    merge_multimodal_embeddings, sanity_check_mm_encoder_outputs)
+    merge_multimodal_embeddings, normalize_mm_grid_thw,
+    sanity_check_mm_encoder_outputs, split_mm_embeddings_by_grid)
 
 # --- Tests for sanity_check_mm_encoder_outputs ---
 
@@ -120,6 +121,35 @@ def test_flatten_nested_list():
     result = flatten_embeddings(emb)
     expected = jnp.arange(15).reshape((5, 3))
     np.testing.assert_array_equal(result, expected)
+
+
+def test_normalize_mm_grid_thw_flattens_batched_input():
+    grid_thw = np.array([[[1, 2, 2]], [[2, 1, 1]]], dtype=np.int64)
+    result = normalize_mm_grid_thw(grid_thw)
+    assert result == ((1, 2, 2), (2, 1, 1))
+
+
+def test_split_mm_embeddings_by_grid_preserves_deepstack_alignment():
+    embeddings = jnp.arange(12, dtype=jnp.float32).reshape((3, 4))
+    deepstack = [
+        embeddings + 10,
+        embeddings + 20,
+    ]
+
+    item_splits, deepstack_by_item = split_mm_embeddings_by_grid(
+        embeddings,
+        ((1, 1, 2), (1, 1, 1)),
+        spatial_merge_size=1,
+        deepstack_embeddings=deepstack,
+    )
+
+    assert [split.shape[0] for split in item_splits] == [2, 1]
+    assert deepstack_by_item is not None
+    assert len(deepstack_by_item) == 2
+    np.testing.assert_array_equal(item_splits[0], embeddings[:2])
+    np.testing.assert_array_equal(item_splits[1], embeddings[2:])
+    np.testing.assert_array_equal(deepstack_by_item[0][0], deepstack[0][:2])
+    np.testing.assert_array_equal(deepstack_by_item[1][1], deepstack[1][2:])
 
 
 # --- Tests for merge_multimodal_embeddings ---

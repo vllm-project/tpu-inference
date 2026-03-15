@@ -47,6 +47,7 @@ init_fn = nnx.initializers.uniform()
 
 
 class Qwen3Attention(JaxModule):
+    rope_input_ordering = "split"
 
     def __init__(self,
                  config: Qwen3Config,
@@ -157,6 +158,11 @@ class Qwen3Attention(JaxModule):
             self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
                 kv_cache_dtype)
 
+    def _apply_rope(self, x: jax.Array, positions: jax.Array) -> jax.Array:
+        return apply_rope(x, positions, self.head_dim_original,
+                          self.rope_theta, self.rope_scaling,
+                          self.rope_input_ordering)
+
     def __call__(
         self,
         kv_cache: Optional[jax.Array],
@@ -167,14 +173,12 @@ class Qwen3Attention(JaxModule):
         # q: (T, N, H)
         q = self.q_proj(x)
         q = self.q_norm(q)
-        q = apply_rope(q, md.input_positions, self.head_dim_original,
-                       self.rope_theta, self.rope_scaling)
+        q = self._apply_rope(q, md.input_positions)
 
         # k: (T, K, H)
         k = self.k_proj(x)
         k = self.k_norm(k)
-        k = apply_rope(k, md.input_positions, self.head_dim_original,
-                       self.rope_theta, self.rope_scaling)
+        k = self._apply_rope(k, md.input_positions)
 
         # v: (T, K, H)
         v = self.v_proj(x)
@@ -206,6 +210,8 @@ class Qwen3Attention(JaxModule):
 
 
 class Qwen3DecoderLayer(Qwen2DecoderLayer):
+    attention_cls = Qwen3Attention
+    mlp_cls = Qwen3MLP
 
     def __init__(self,
                  config: Qwen3Config,
@@ -228,13 +234,13 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
             quant_config=quant_config,
             prefix=prefix + ".input_layernorm",
         )
-        self.self_attn = Qwen3Attention(config=config,
-                                        dtype=dtype,
-                                        rng=rng,
-                                        mesh=mesh,
-                                        kv_cache_dtype=kv_cache_dtype,
-                                        quant_config=quant_config,
-                                        prefix=prefix + ".self_attn")
+        self.self_attn = self.attention_cls(config=config,
+                                            dtype=dtype,
+                                            rng=rng,
+                                            mesh=mesh,
+                                            kv_cache_dtype=kv_cache_dtype,
+                                            quant_config=quant_config,
+                                            prefix=prefix + ".self_attn")
         self.post_attention_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
@@ -245,7 +251,7 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
             quant_config=quant_config,
             prefix=prefix + ".post_attention_layernorm",
         )
-        self.mlp = Qwen3MLP(
+        self.mlp = self.mlp_cls(
             config=config,
             dtype=dtype,
             rng=rng,
@@ -255,6 +261,7 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
 
 
 class Qwen3Model(Qwen2Model):
+    decoder_layer_cls = Qwen3DecoderLayer
 
     def __init__(self,
                  vllm_config: VllmConfig,
@@ -288,7 +295,7 @@ class Qwen3Model(Qwen2Model):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             hf_config.num_hidden_layers,
-            lambda layer_index: Qwen3DecoderLayer(
+            lambda layer_index: self.decoder_layer_cls(
                 config=hf_config,
                 dtype=dtype,
                 rng=rng,

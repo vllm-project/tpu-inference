@@ -40,7 +40,11 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
 from tpu_inference.models.jax.qwen2 import Qwen2Model
 # from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from tpu_inference.models.jax.utils.multi_modal_utils import (
-    MultiModalEmbeddings, merge_multimodal_embeddings)
+    MultiModalEmbeddings,
+    merge_multimodal_embeddings,
+    reshape_mm_tensor,
+    split_mm_embeddings_by_grid,
+)
 from tpu_inference.models.jax.utils.weight_utils import StandardWeightLoader
 
 logger = init_logger(__name__)
@@ -916,26 +920,6 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
 
         return llm_positions, mrope_position_delta
 
-    def _validate_and_reshape_mm_tensor(self, mm_input: object,
-                                        name: str) -> jax.Array:
-        if isinstance(mm_input, list):
-            # Assuming it's a list of arrays (e.g., np.ndarray, torch.Tensor)
-            # that can be concatenated.
-            arrays_to_concat = [jnp.asarray(item) for item in mm_input]
-            return jnp.concatenate(arrays_to_concat, axis=0)
-
-        # Handle single array-like objects (np.ndarray, torch.Tensor, jax.Array)
-        if hasattr(mm_input, 'ndim'):
-            array_input = jnp.asarray(mm_input)
-            if array_input.ndim == 2:
-                return array_input
-            if array_input.ndim == 3:
-                # This reshapes the batched 3D tensor to a 2D tensor.
-                return array_input.reshape(-1, array_input.shape[-1])
-
-        raise ValueError(f"Incorrect type of {name}. "
-                         f"Got type: {type(mm_input)}")
-
     def _parse_and_validate_image_input(
             self, image_grid_thw: tuple[tuple[int, int, int], ...],
             **kwargs: object) -> Optional[Qwen2_5_VLImageInputs]:
@@ -947,9 +931,9 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             return None
 
         if pixel_values is not None:
-            pixel_values = self._validate_and_reshape_mm_tensor(
-                pixel_values, "image pixel values")
-            # image_grid_thw = self._validate_and_reshape_mm_tensor(
+            pixel_values = reshape_mm_tensor(pixel_values,
+                                             "image pixel values")
+            # image_grid_thw = reshape_mm_tensor(
             #     image_grid_thw, "image grid_thw")
 
             if not isinstance(pixel_values, jax.Array):
@@ -962,10 +946,9 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
 
         # Note: comment them out for now and save for future support
         # if image_embeds is not None:
-        #     image_embeds = self._validate_and_reshape_mm_tensor(
-        #         image_embeds, "image embeds")
-        #     image_grid_thw = self._validate_and_reshape_mm_tensor(
-        #         image_grid_thw, "image grid_thw")
+        #     image_embeds = reshape_mm_tensor(image_embeds, "image embeds")
+        #     image_grid_thw = reshape_mm_tensor(image_grid_thw,
+        #                                       "image grid_thw")
 
         #     if not isinstance(image_embeds, jax.Array):
         #         raise ValueError("Incorrect type of image embeddings. "
@@ -1024,17 +1007,12 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             image_embeds = jnp.concatenate(image_embeds, axis=0)
 
         # Split concatenated embeddings for each image item.
-        merge_size = self.visual.config.spatial_merge_size
-        sizes = np.prod(np.array(grid_thw, dtype=np.int64),
-                        axis=-1) // merge_size // merge_size
-
-        if sizes.size == 0:
-            return ()
-        if sizes.size == 1:
-            return (image_embeds, )
-
-        split_indices = np.cumsum(sizes)[:-1]
-        return tuple(jnp.split(image_embeds, split_indices))
+        image_splits, _ = split_mm_embeddings_by_grid(
+            image_embeds,
+            grid_thw,
+            self.visual.config.spatial_merge_size,
+        )
+        return image_splits
 
     def embed_multimodal(self, image_grid_thw: tuple[tuple[int, int, int],
                                                      ...],
