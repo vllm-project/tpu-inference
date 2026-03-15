@@ -923,7 +923,8 @@ def make_gmm_configs(
         # scale value. Since this operation is very memory intensive, we use a
         # block size that is small enough to minimize memory overhead but large
         # enough to minimize compute overhead of quantization.
-        quant_block_size=512,
+        quant_block_size=rhs_cfgs.quant_block_size
+        if rhs_cfgs.has_scale else 512,
         dtype=lhs.dtype,
     )
 
