@@ -17,12 +17,92 @@
 set -euo pipefail
 
 # --- Configuration Constants ---
-# Priority: Post-merge > Pre-merge > Integration pipeline > Other/Default > Nightly
+# Priority: Post-merge > Pre-merge > Integration pipeline > Benchmark > Other/Default > Nightly
 readonly PRIORITY_POST_MERGE=10
 readonly PRIORITY_PRE_MERGE=5
 readonly PRIORITY_INTEGRATION=3
+readonly PRIORITY_BENCHMARK=2
 readonly PRIORITY_DEFAULT=1
 readonly PRIORITY_NIGHTLY=0
+
+determine_job_prioirty() {
+  local priority=""
+  echo "--- Determining job priority" >&2
+  if [[ "${NIGHTLY:-0}" == "1" ]]; then
+    # Nightly build (Lowest priority)
+    priority="$PRIORITY_NIGHTLY"
+    echo "Build type: Nightly - Priority: $priority" >&2
+  elif [[ "${BENCHMARK_SCHEDULE:-0}" == "1" ]]; then
+    # Benchmark pipeline
+    priority="$PRIORITY_BENCHMARK"
+    echo "Build type: Benchmark - Priority: $priority" >&2
+  elif [[ "$BUILDKITE_PIPELINE_SLUG" == "tpu-vllm-integration" ]]; then
+    # Integration pipeline
+    priority="$PRIORITY_INTEGRATION"
+    echo "Build type: Integration - Priority: $priority" >&2
+  elif [[ "$BUILDKITE_PULL_REQUEST" != "false" && -n "$BUILDKITE_PULL_REQUEST" ]]; then
+    # Pre-merge PR tests
+    priority="$PRIORITY_PRE_MERGE"
+    echo "Build type: Pre-merge (PR #$BUILDKITE_PULL_REQUEST) - Priority: $priority" >&2
+  elif [[ "$BUILDKITE_BRANCH" == "main" && "$BUILDKITE_PULL_REQUEST" == "false" ]]; then
+    # Post-merge tests on main (Highest priority)
+    priority="$PRIORITY_POST_MERGE"
+    echo "Build type: Post-merge (Main branch) - Priority: $priority" >&2
+  else
+    # Default priority for other branches or manual builds
+    priority="$PRIORITY_DEFAULT"
+    echo "Build type: General - Priority: $priority" >&2
+  fi
+
+  echo "$priority"
+}
+
+export JOB_PRIORITY=$(determine_job_prioirty)
+buildkite-agent meta-data set "JOB_PRIORITY" "$JOB_PRIORITY"
+
+# Implemented dynamic job prioritization by injecting integers during upload
+upload_with_priority() {
+  local yaml_file=$1
+  echo "--- :pipeline: Uploading $yaml_file with priority ${JOB_PRIORITY:-1}"
+  { 
+    echo "priority: ${JOB_PRIORITY:-1}"; 
+    cat "$yaml_file"; 
+  } | buildkite-agent pipeline upload
+}
+
+get_vllm_commit_hash() {
+  # load vllm commit hash from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo
+  local commit_hash=""
+  local version_file=".buildkite/vllm_lkg.version"
+
+  if [ -f "$version_file" ]; then
+    commit_hash="$(cat "$version_file")"
+  fi
+  if [ -z "${commit_hash:-}" ]; then
+    commit_hash=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
+  fi
+
+  echo "$commit_hash"
+}
+
+upload_benchmark_pipeline() {
+    VLLM_COMMIT_HASH=$(get_vllm_commit_hash)
+    buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
+    TPU_COMMIT_HASH=$(git rev-parse HEAD)
+    CODE_HASH="${VLLM_COMMIT_HASH}-${TPU_COMMIT_HASH}-"
+    buildkite-agent meta-data set "CODE_HASH" "${CODE_HASH}"
+    echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
+    echo "Using vllm-tpu commit hash: $(buildkite-agent meta-data get "CODE_HASH")"
+
+    upload_with_priority .buildkite/pipeline_benchmark.yml
+}
+
+# When BENCHMARK_SCHEDULE is set to 1, execute the benchmark
+if [[ "${BENCHMARK_SCHEDULE:-0}" == "1" ]]; then
+    upload_benchmark_pipeline
+    # Exit here; only schedule the benchmark and do nothing else
+    exit 0
+fi
 
 # --- Skip build if only docs/icons changed ---
 echo "--- :git: Checking changed files"
@@ -62,7 +142,7 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     fi
 
     # Validate modified YAML pipelines using bk pipeline validate
-    if .buildkite/scripts/validate_all_pipelines.sh "$NON_SKIPPABLE_FILES"; then
+    if .buildkite/scripts/validate_buildkite_ymls.sh "$NON_SKIPPABLE_FILES"; then
       echo "All pipelines syntax are valid. Proceeding with pipeline upload."
     else
       echo "Some pipelines syntax are invalid. Failing build."
@@ -75,42 +155,6 @@ fi
 
 # Store changed files in metadata for sub-pipelines (newlines to commas)
 echo "$FILES_CHANGED" | tr '\n' ',' | buildkite-agent meta-data set "changed_files"
-
-# --- Determine Job Priority ---
-echo "--- Determining job priority"
-if [[ "${NIGHTLY:-0}" == "1" ]]; then
-    # Nightly build (Lowest priority)
-    export JOB_PRIORITY=$PRIORITY_NIGHTLY
-    echo "Build type: Nightly - Priority: $JOB_PRIORITY"
-elif [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
-    # Integration pipeline
-    export JOB_PRIORITY=$PRIORITY_INTEGRATION
-    echo "Build type: Integration - Priority: $JOB_PRIORITY"
-elif [[ "$BUILDKITE_PULL_REQUEST" != "false" ]]; then
-    # Pre-merge PR tests
-    export JOB_PRIORITY=$PRIORITY_PRE_MERGE
-    echo "Build type: Pre-merge (PR #$BUILDKITE_PULL_REQUEST) - Priority: $JOB_PRIORITY"
-elif [[ "$BUILDKITE_BRANCH" == "main" && "$BUILDKITE_PULL_REQUEST" == "false" ]]; then
-    # Post-merge tests on main (Highest priority)
-    export JOB_PRIORITY=$PRIORITY_POST_MERGE
-    echo "Build type: Post-merge (Main branch) - Priority: $JOB_PRIORITY"
-else
-    # Default priority for other branches or manual builds
-    export JOB_PRIORITY=$PRIORITY_DEFAULT
-    echo "Build type: General - Priority: $JOB_PRIORITY"
-fi
-
-buildkite-agent meta-data set "job_priority" "$JOB_PRIORITY"
-
-# Implemented dynamic job prioritization by injecting integers during upload
-upload_with_priority() {
-  local yaml_file=$1
-  echo "--- :pipeline: Uploading $yaml_file with priority ${JOB_PRIORITY:-1}"
-  { 
-    echo "priority: ${JOB_PRIORITY:-1}"; 
-    cat "$yaml_file"; 
-  } | buildkite-agent pipeline upload
-}
 
 upload_pipeline() {
     if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
@@ -193,12 +237,7 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
 
 else
   # Note: PR and Nightly pipelines will load VLLM_COMMIT_HASH from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo
-  if [ -f .buildkite/vllm_lkg.version ]; then
-      VLLM_COMMIT_HASH="$(cat .buildkite/vllm_lkg.version)"
-  fi
-  if [ -z "${VLLM_COMMIT_HASH:-}" ]; then
-      VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
-  fi
+  VLLM_COMMIT_HASH=$(get_vllm_commit_hash)
   buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
   echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     
