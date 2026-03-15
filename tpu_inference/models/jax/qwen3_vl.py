@@ -416,6 +416,7 @@ class Qwen3VLVisionPatchEmbed(nnx.Module):
             kernel_init=nnx.with_partitioning(
                 init_fn, (None, None, None, None, "model")
             ),
+            bias_init=nnx.with_partitioning(init_fn, ("model",)),
             rngs=rngs,
         )
 
@@ -619,6 +620,7 @@ class Qwen3VLVisionBlock(nnx.Module):
             dtype=dtype,
             rngs=rngs,
             scale_init=nnx.with_partitioning(init_fn, (None,)),
+            bias_init=nnx.with_partitioning(init_fn, (None,)),
         )
         self.attn = Qwen3VLVisionAttention(
             hidden_size=hidden_size,
@@ -633,6 +635,7 @@ class Qwen3VLVisionBlock(nnx.Module):
             dtype=dtype,
             rngs=rngs,
             scale_init=nnx.with_partitioning(init_fn, (None,)),
+            bias_init=nnx.with_partitioning(init_fn, (None,)),
         )
         self.mlp = Qwen3VLVisionMLP(
             hidden_size=hidden_size,
@@ -681,6 +684,7 @@ class Qwen3VLVisionPatchMerger(nnx.Module):
             dtype=dtype,
             rngs=rngs,
             scale_init=nnx.with_partitioning(init_fn, (None,)),
+            bias_init=nnx.with_partitioning(init_fn, (None,)),
         )
 
         self.linear_fc1 = nnx.Linear(
