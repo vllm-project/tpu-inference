@@ -1521,16 +1521,16 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         self.rng = nnx.Rngs(rng_key)
 
         mappings = {
-            "model.language_model.embed_tokens": "language_model.embed_tokens.embedding",
+            "model.language_model.embed_tokens": "language_model.embed_tokens.weight",
             "model.language_model.layers.*.input_layernorm": "language_model.layers.*.input_layernorm.weight",
-            "model.language_model.layers.*.mlp.down_proj": "language_model.layers.*.mlp.down_proj.kernel",
-            "model.language_model.layers.*.mlp.gate_proj": "language_model.layers.*.mlp.gate_proj.kernel",
-            "model.language_model.layers.*.mlp.up_proj": "language_model.layers.*.mlp.up_proj.kernel",
+            "model.language_model.layers.*.mlp.down_proj": "language_model.layers.*.mlp.down_proj.weight",
+            "model.language_model.layers.*.mlp.gate_proj": "language_model.layers.*.mlp.gate_proj.weight",
+            "model.language_model.layers.*.mlp.up_proj": "language_model.layers.*.mlp.up_proj.weight",
             "model.language_model.layers.*.post_attention_layernorm": "language_model.layers.*.post_attention_layernorm.weight",
-            "model.language_model.layers.*.self_attn.k_proj": "language_model.layers.*.self_attn.k_proj.kernel",
-            "model.language_model.layers.*.self_attn.o_proj": "language_model.layers.*.self_attn.o_proj.kernel",
-            "model.language_model.layers.*.self_attn.q_proj": "language_model.layers.*.self_attn.q_proj.kernel",
-            "model.language_model.layers.*.self_attn.v_proj": "language_model.layers.*.self_attn.v_proj.kernel",
+            "model.language_model.layers.*.self_attn.k_proj": "language_model.layers.*.self_attn.k_proj.weight",
+            "model.language_model.layers.*.self_attn.o_proj": "language_model.layers.*.self_attn.o_proj.weight",
+            "model.language_model.layers.*.self_attn.q_proj": "language_model.layers.*.self_attn.q_proj.weight",
+            "model.language_model.layers.*.self_attn.v_proj": "language_model.layers.*.self_attn.v_proj.weight",
             "model.language_model.layers.*.self_attn.q_norm": "language_model.layers.*.self_attn.q_norm.weight",
             "model.language_model.layers.*.self_attn.k_norm": "language_model.layers.*.self_attn.k_norm.weight",
             "model.language_model.norm": "language_model.norm.weight",
@@ -1559,7 +1559,7 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
 
         hf_config = self.vllm_config.model_config.hf_config
         if not hf_config.tie_word_embeddings:
-            mappings["lm_head"] = "lm_head"
+            mappings["lm_head"] = "lm_head.weight"
 
         # Add deepstack_merger_list mappings dynamically based on config
         # weight_utils.py only handles "layers" and "blocks" wildcards,
