@@ -347,10 +347,9 @@ def inner_kernel(
                     block_scale_inv = jnp.where(block_scale == 0, 0,
                                                 1 / block_scale)
                     # Convert lhs into quantized dtype.
-                    # TODO(catswe): investigate stochastic rounding
                     scaled_lhs = block_lhs * block_scale_inv
-                    # if jnp.issubdtype(lhs_q_dtype, jnp.integer):
-                    #     scaled_lhs = jnp.round(scaled_lhs)
+                    if jnp.issubdtype(lhs_q_dtype, jnp.integer):
+                        scaled_lhs = jnp.round(scaled_lhs)
                     block_lhs_q = scaled_lhs.astype(lhs_q_dtype)
 
                     block_acc = jnp.matmul(
