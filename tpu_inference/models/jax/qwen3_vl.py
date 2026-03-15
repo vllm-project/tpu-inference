@@ -1521,29 +1521,29 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         self.rng = nnx.Rngs(rng_key)
 
         mappings = {
-            "model.language_model.embed_tokens": "language_model.embed_tokens.weight",
+            "model.language_model.embed_tokens": "language_model.embed_tokens.embedding",
             "model.language_model.layers.*.input_layernorm": "language_model.layers.*.input_layernorm.weight",
-            "model.language_model.layers.*.mlp.down_proj": "language_model.layers.*.mlp.down_proj.weight",
-            "model.language_model.layers.*.mlp.gate_proj": "language_model.layers.*.mlp.gate_proj.weight",
-            "model.language_model.layers.*.mlp.up_proj": "language_model.layers.*.mlp.up_proj.weight",
+            "model.language_model.layers.*.mlp.down_proj": "language_model.layers.*.mlp.down_proj.kernel",
+            "model.language_model.layers.*.mlp.gate_proj": "language_model.layers.*.mlp.gate_proj.kernel",
+            "model.language_model.layers.*.mlp.up_proj": "language_model.layers.*.mlp.up_proj.kernel",
             "model.language_model.layers.*.post_attention_layernorm": "language_model.layers.*.post_attention_layernorm.weight",
-            "model.language_model.layers.*.self_attn.k_proj": "language_model.layers.*.self_attn.k_proj.weight",
-            "model.language_model.layers.*.self_attn.o_proj": "language_model.layers.*.self_attn.o_proj.weight",
-            "model.language_model.layers.*.self_attn.q_proj": "language_model.layers.*.self_attn.q_proj.weight",
-            "model.language_model.layers.*.self_attn.v_proj": "language_model.layers.*.self_attn.v_proj.weight",
+            "model.language_model.layers.*.self_attn.k_proj": "language_model.layers.*.self_attn.k_proj.kernel",
+            "model.language_model.layers.*.self_attn.o_proj": "language_model.layers.*.self_attn.o_proj.kernel",
+            "model.language_model.layers.*.self_attn.q_proj": "language_model.layers.*.self_attn.q_proj.kernel",
+            "model.language_model.layers.*.self_attn.v_proj": "language_model.layers.*.self_attn.v_proj.kernel",
             "model.language_model.layers.*.self_attn.q_norm": "language_model.layers.*.self_attn.q_norm.weight",
             "model.language_model.layers.*.self_attn.k_norm": "language_model.layers.*.self_attn.k_norm.weight",
             "model.language_model.norm": "language_model.norm.weight",
-            "model.visual.patch_embed.proj": "visual.patch_embed.proj.weight",
+            "model.visual.patch_embed.proj": "visual.patch_embed.proj.kernel",
             "model.visual.patch_embed.proj.bias": "visual.patch_embed.proj.bias",
-            "model.visual.pos_embed": "visual.pos_embed.weight",
-            "model.visual.blocks.*.attn.qkv": "visual.blocks.*.attn.qkv_proj.weight",
+            "model.visual.pos_embed": "visual.pos_embed.embedding",
+            "model.visual.blocks.*.attn.qkv": "visual.blocks.*.attn.qkv_proj.kernel",
             "model.visual.blocks.*.attn.qkv.bias": "visual.blocks.*.attn.qkv_proj.bias",
-            "model.visual.blocks.*.attn.proj": "visual.blocks.*.attn.proj.weight",
+            "model.visual.blocks.*.attn.proj": "visual.blocks.*.attn.proj.kernel",
             "model.visual.blocks.*.attn.proj.bias": "visual.blocks.*.attn.proj.bias",
-            "model.visual.blocks.*.mlp.linear_fc1": "visual.blocks.*.mlp.fc1.weight",
+            "model.visual.blocks.*.mlp.linear_fc1": "visual.blocks.*.mlp.fc1.kernel",
             "model.visual.blocks.*.mlp.linear_fc1.bias": "visual.blocks.*.mlp.fc1.bias",
-            "model.visual.blocks.*.mlp.linear_fc2": "visual.blocks.*.mlp.fc2.weight",
+            "model.visual.blocks.*.mlp.linear_fc2": "visual.blocks.*.mlp.fc2.kernel",
             "model.visual.blocks.*.mlp.linear_fc2.bias": "visual.blocks.*.mlp.fc2.bias",
             "model.visual.blocks.*.norm1": "visual.blocks.*.norm1.scale",
             "model.visual.blocks.*.norm1.bias": "visual.blocks.*.norm1.bias",
@@ -1551,9 +1551,9 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             "model.visual.blocks.*.norm2.bias": "visual.blocks.*.norm2.bias",
             "model.visual.merger.norm": "visual.merger.norm.scale",
             "model.visual.merger.norm.bias": "visual.merger.norm.bias",
-            "model.visual.merger.linear_fc1": "visual.merger.linear_fc1.weight",
+            "model.visual.merger.linear_fc1": "visual.merger.linear_fc1.kernel",
             "model.visual.merger.linear_fc1.bias": "visual.merger.linear_fc1.bias",
-            "model.visual.merger.linear_fc2": "visual.merger.linear_fc2.weight",
+            "model.visual.merger.linear_fc2": "visual.merger.linear_fc2.kernel",
             "model.visual.merger.linear_fc2.bias": "visual.merger.linear_fc2.bias",
         }
 
@@ -1569,9 +1569,9 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         for i in range(len(deepstack_indexes)):
             mappings[f"model.visual.deepstack_merger_list.{i}.norm"] = f"visual.deepstack_merger_list.{i}.norm.scale"
             mappings[f"model.visual.deepstack_merger_list.{i}.norm.bias"] = f"visual.deepstack_merger_list.{i}.norm.bias"
-            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc1"] = f"visual.deepstack_merger_list.{i}.linear_fc1.weight"
+            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc1"] = f"visual.deepstack_merger_list.{i}.linear_fc1.kernel"
             mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc1.bias"] = f"visual.deepstack_merger_list.{i}.linear_fc1.bias"
-            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc2"] = f"visual.deepstack_merger_list.{i}.linear_fc2.weight"
+            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc2"] = f"visual.deepstack_merger_list.{i}.linear_fc2.kernel"
             mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc2.bias"] = f"visual.deepstack_merger_list.{i}.linear_fc2.bias"
 
         adapted_model_config = _ModelConfigAdapter(self.vllm_config.model_config)
