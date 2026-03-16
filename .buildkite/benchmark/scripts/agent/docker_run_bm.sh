@@ -21,18 +21,20 @@ fi
 ENV_FILE=$1
 
 # For testing on local vm, use `set -a` to export all variables
+# shellcheck disable=1091
 source /etc/environment
-source $ENV_FILE
+# shellcheck source=/dev/null
+source "$ENV_FILE"
 
 echo "--- Cat Env start"
-echo $(cat $ENV_FILE)
+cat "$ENV_FILE"
 echo "--- Cat Env end"
 
 remove_docker_container() {
     echo "Removing Docker container: $CONTAINER_NAME"
     docker rm -f tpu-test || true;
     docker rm -f vllm-tpu || true;
-    docker rm -f $CONTAINER_NAME || true;
+    docker rm -f "$CONTAINER_NAME" || true;
 }
 
 cleanup_docker_image() {
@@ -52,14 +54,14 @@ echo "Code_Hash: $CODE_HASH"
 
 IMAGE_TAG="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$ARTIFACT_REPO/vllm-tpu:$CODE_HASH"
 
-IFS='-' read -r VLLM_HASH TPU_INFERENCE_HASH TORCHAX_HASH _ <<< "$CODE_HASH"
+# shellcheck disable=SC2034
+IFS='-' read -r VLLM_HASH TPU_INFERENCE_HASH _ <<< "$CODE_HASH"
 
 echo "image tag: $IMAGE_TAG"
 
-gcloud auth configure-docker $GCP_REGION-docker.pkg.dev --quiet
-docker pull $IMAGE_TAG
+gcloud auth configure-docker "$GCP_REGION"-docker.pkg.dev --quiet
 
-if [ $? -ne 0 ]; then
+if ! docker pull "$IMAGE_TAG"; then
   echo "Failed to pull the Docker image: $IMAGE_TAG"
   exit 1
 fi
@@ -95,30 +97,31 @@ fi
 echo "Run model $MODEL"
 echo
 
-EXTRA_DOCKER_ARGS=""
+EXTRA_DOCKER_ARGS=()
 if [ -n "$SKIP_JAX_PRECOMPILE" ]; then
-  EXTRA_DOCKER_ARGS="-e SKIP_JAX_PRECOMPILE=$SKIP_JAX_PRECOMPILE"
+  EXTRA_DOCKER_ARGS+=("-e SKIP_JAX_PRECOMPILE=$SKIP_JAX_PRECOMPILE")
 fi
 
 echo "starting docker...$CONTAINER_NAME"
 echo
+# shellcheck disable=SC2153
 docker run \
  --rm \
- -v $LOCAL_HF_HOME:$DOCKER_HF_HOME \
- --env-file $ENV_FILE \
+ -v "$LOCAL_HF_HOME":"$DOCKER_HF_HOME" \
+ --env-file "$ENV_FILE" \
  -e HF_TOKEN="$HF_TOKEN" \
  -e HF_HOME="$DOCKER_HF_HOME" \
- -e TARGET_COMMIT=$TARGET_COMMIT \
- -e MODEL=$MODEL \
- -e DATASET=$DATASET \
+ -e TARGET_COMMIT="$TARGET_COMMIT" \
+ -e MODEL="$MODEL" \
+ -e DATASET="$DATASET" \
  -e WORKSPACE=/workspace \
- $EXTRA_DOCKER_ARGS \
- --name $CONTAINER_NAME \
+ "${EXTRA_DOCKER_ARGS[@]}" \
+ --name "$CONTAINER_NAME" \
  -d \
  --privileged \
  --network host \
  -v /dev/shm:/dev/shm \
- $IMAGE_TAG tail -f /dev/null
+ "$IMAGE_TAG" tail -f /dev/null
 
 # =============== temp solution start ===============
 
@@ -131,19 +134,19 @@ if [[ " ${DATASETS[*]} " == *" $DATASET "* ]]; then
 
   if [ "$DATASET" = "custom-token" ]; then
     # Download flat files for custom-token
-    gsutil -m cp gs://$GCS_BUCKET/dataset/*.* "$DATASET_DOWNLOAD_DIR/"
+    gsutil -m cp gs://"$GCS_BUCKET"/dataset/*.* "$DATASET_DOWNLOAD_DIR/"
   elif [ "$DATASET" = "mmlu" ]; then
     # Download mmlu directory recursively
-    gsutil -m cp -r gs://$GCS_BUCKET/dataset/mmlu/* "$DATASET_DOWNLOAD_DIR/"
+    gsutil -m cp -r gs://"$GCS_BUCKET"/dataset/mmlu/* "$DATASET_DOWNLOAD_DIR/"
   elif [ "$DATASET" = "mlperf" ]; then
     # Download single jsonl file for MLPerf
     gsutil -m cp gs://vllm-cb-storage2/dataset/mlperf/mlperf_shuffled.jsonl "$DATASET_DOWNLOAD_DIR/mlperf.jsonl"
   elif [[ "$DATASET" == "bench-custom-token" || "$DATASET" == "bench-custom-mm" ]]; then
     # Download flat files for custom-token and custom-mm
-    gsutil -m cp -r gs://$GCS_BUCKET/bench-dataset/* "$DATASET_DOWNLOAD_DIR/"
+    gsutil -m cp -r gs://"$GCS_BUCKET"/bench-dataset/* "$DATASET_DOWNLOAD_DIR/"
   elif [ "$DATASET" = "math500" ]; then
     # Download single jsonl file for math500
-    gsutil -m cp -r gs://$GCS_BUCKET/dataset/math500/math500.jsonl "$DATASET_DOWNLOAD_DIR/"
+    gsutil -m cp -r gs://"$GCS_BUCKET"/dataset/math500/math500.jsonl "$DATASET_DOWNLOAD_DIR/"
   fi
 
   echo "Copying dataset to container..."
@@ -163,7 +166,7 @@ fi
 if [ "$DATASET" = "sharegpt" ]; then
   echo "Copying dataset to container..."
   mkdir -p ./artifacts/dataset/
-  gsutil cp gs://$GCS_BUCKET/dataset/sharegpt/*.* ./artifacts/dataset/
+  gsutil cp gs://"$GCS_BUCKET"/dataset/sharegpt/*.* ./artifacts/dataset/
   docker cp artifacts/dataset "$CONTAINER_NAME:/workspace/"
 fi
 
@@ -197,7 +200,7 @@ docker cp "$CONTAINER_NAME:/workspace/profile/plugins/profile" "$PROFILE_FOLDER"
 docker cp "$CONTAINER_NAME:/workspace/failed_output.json" "$LOG_ROOT/failed_output.json" || true
 
 echo "gsutil cp $LOG_ROOT/* $REMOTE_LOG_ROOT"
-gsutil cp -r $LOG_ROOT/* $REMOTE_LOG_ROOT
+gsutil cp -r "$LOG_ROOT"/* "$REMOTE_LOG_ROOT"
 
 AccuracyMetricsJSON=$(grep -a "AccuracyMetrics:" "$BM_LOG" | sed 's/AccuracyMetrics: //')
 echo "AccuracyMetricsJSON: $AccuracyMetricsJSON"

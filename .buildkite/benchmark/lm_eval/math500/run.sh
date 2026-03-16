@@ -26,7 +26,8 @@ cd "$SCRIPT_DIR"
 export LOG_DIR=./results
 export MODEL_NAME=$MODEL
 export TASK_NAME=math500
-export OUTPUT_PREFIX=${TASK_NAME}_$(echo $MODEL_NAME | sed 's/\//-/g')
+OUTPUT_PREFIX="${TASK_NAME}_$(echo "$MODEL_NAME" | sed 's/\//-/g')"
+export OUTPUT_PREFIX
 
 export OUTPUT_BASE_PATH=$LOG_DIR/$OUTPUT_PREFIX.json
 export ACCURACY_JSON_PATH=/workspace/math500_accuracy.json

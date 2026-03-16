@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import argparse
+import json
 import os
-from datetime import datetime
 import sys
+from datetime import datetime
+
 
 def parse_results(file_path):
     """
@@ -30,7 +31,8 @@ def parse_results(file_path):
         try:
             data = json.load(f)
         except json.JSONDecodeError:
-            print(f"Error: Could not decode JSON from {file_path}", file=sys.stderr)
+            print(f"Error: Could not decode JSON from {file_path}",
+                  file=sys.stderr)
             sys.exit(1)
 
     # Extract the main task name (assuming one task per file)
@@ -38,7 +40,10 @@ def parse_results(file_path):
     results = data['results'][task_name]
 
     metrics_dict = {}
-    metrics = [key for key in results.keys() if '_stderr' not in key and isinstance(results[key], (int, float))]
+    metrics = [
+        key for key in results.keys()
+        if '_stderr' not in key and isinstance(results[key], (int, float))
+    ]
     for metric in metrics:
         metric_name = metric.replace(',none', '')
         metrics_dict[metric_name] = results[metric]
@@ -53,21 +58,22 @@ def parse_results(file_path):
     # Extract other key information
     model_name = data.get('model_name', 'N/A')
     num_fewshot = data.get('n-shot', {}).get(task_name, 'N/A')
-    num_samples = data.get('n-samples', {}).get(task_name, {}).get('effective', 'N/A')
+    num_samples = data.get('n-samples', {}).get(task_name,
+                                                {}).get('effective', 'N/A')
     total_time = data.get('total_evaluation_time_seconds', 'N/A')
     timestamp = data.get('date', 'N/A')
-    
+
     if timestamp != 'N/A':
         try:
             # Attempt to convert from Unix timestamp
             timestamp = float(timestamp)
-            date_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+            date_str = datetime.fromtimestamp(timestamp).strftime(
+                '%Y-%m-%d %H:%M:%S')
         except (ValueError, TypeError):
             # Fallback for non-timestamp formats
             date_str = str(timestamp)
     else:
         date_str = 'N/A'
-
 
     print("--- LM Evaluation Harness Results Summary ---", file=sys.stderr)
     print(f"File:          {os.path.basename(file_path)}", file=sys.stderr)
@@ -83,31 +89,33 @@ def parse_results(file_path):
             print(f"Total Time:    {total_time:.2f}s", file=sys.stderr)
         except (ValueError, TypeError):
             print(f"Total Time:    {total_time}", file=sys.stderr)
-    
+
     print("-" * 43, file=sys.stderr)
 
     # Find all metrics that don't end with _stderr
-    metrics = [key for key in results.keys() if '_stderr' not in key and isinstance(results[key], (int, float))]
+    metrics = [
+        key for key in results.keys()
+        if '_stderr' not in key and isinstance(results[key], (int, float))
+    ]
 
     for metric in metrics:
         metric_name = metric.replace(',none', '')
         print(f"Metric:        {metric_name}", file=sys.stderr)
         print(f"Value:         {results[metric]:.4f}", file=sys.stderr)
-        
+
         # Construct the corresponding stderr key
         stderr_key = metric.replace(',none', '_stderr,none')
-        
+
         # Check if the stderr key exists in the results
         if stderr_key in results:
             print(f"Std. Err.:     {results[stderr_key]:.4f}", file=sys.stderr)
-        
+
         print("-" * 43, file=sys.stderr)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Parse a JSON results file from lm-evaluation-harness."
-    )
+        description="Parse a JSON results file from lm-evaluation-harness.")
     parser.add_argument(
         "file_path",
         type=str,
