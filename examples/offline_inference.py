@@ -31,6 +31,7 @@ def main(args: dict):
     temperature = args.pop("temperature")
     top_p = args.pop("top_p")
     top_k = args.pop("top_k")
+    max_logprobs = args.pop("max_logprobs", None)
 
     # Create an LLM
     llm = LLM(**args)
@@ -45,6 +46,9 @@ def main(args: dict):
         sampling_params.top_p = top_p
     if top_k is not None:
         sampling_params.top_k = top_k
+    
+    if max_logprobs is not None:
+        sampling_params.logprobs = max_logprobs
 
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
@@ -99,6 +103,14 @@ def main(args: dict):
         prompt = output.prompt
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
+
+        generated_output = output.outputs[0]
+        if generated_output.logprobs is not None:
+            first_token_logprobs = generated_output.logprobs[0]
+            print(f"Logprobs (first token top-5): {first_token_logprobs}")
+        else:
+            print("Logprobs: Not found (check if --max-logprobs is set)")
+
         print("-" * 50)
 
 
