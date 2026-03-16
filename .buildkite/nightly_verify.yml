@@ -17,7 +17,7 @@ x-run-condition: &run-on-nightly-or-tag
 
 steps:
    - label: "Upload Tests for Models & Features (${MODEL_IMPL_TYPE:-auto})"
-     <<: *run-on-nightly-or-tag
+    #  <<: *run-on-nightly-or-tag
      agents:
        queue: cpu
      commands:
@@ -27,7 +27,7 @@ steps:
      continue_on_failure: true  # ensure we still generate support matrices even if some tests fail
 
    - label: "v6 Generate support matrices"
-     <<: *run-on-nightly-or-tag
+    #  <<: *run-on-nightly-or-tag
      key: "v6_generate_matrices"
      allow_dependency_failure: true 
      agents: { queue: cpu }
@@ -41,7 +41,7 @@ steps:
         fi
 
    - label: "v7 Generate support matrices"
-     <<: *run-on-nightly-or-tag
+    #  <<: *run-on-nightly-or-tag
      key: "v7_generate_matrices"
      allow_dependency_failure: true 
      agents: { queue: cpu }
@@ -55,20 +55,21 @@ steps:
       fi
   
    - label: "Commit support matrices if is nightly build or release tag specified"
-     <<: *run-on-nightly-or-tag
+    #  <<: *run-on-nightly-or-tag
      key: commit_support_matrices
      depends_on:
        - "v6_generate_matrices"
        - "v7_generate_matrices"
      agents:
        queue: cpu
-     secrets:
-      - GITHUB_PAT
+    #  secrets:
+    #   - GITHUB_PAT
      command:
-       - bash .buildkite/scripts/commit_support_matrices.sh
+       - echo .buildkite/scripts/commit_support_matrices.sh
+      #  - bash .buildkite/scripts/commit_support_matrices.sh
 
    - label: "Notify test results"
-     <<: *run-on-nightly-or-tag
+    #  <<: *run-on-nightly-or-tag
      key: notify_test_results
      depends_on: commit_support_matrices
      agents:
@@ -77,7 +78,7 @@ steps:
        - bash .buildkite/scripts/notify_test_results.sh
 
    - label: "Record verified commit hashes"
-     if: build.env("NIGHTLY") == "1"
+    #  if: build.env("NIGHTLY") == "1"
      key: record_verified_commit_hashes
      depends_on:
        - notify_test_results
@@ -85,7 +86,8 @@ steps:
        - tpu7x_tpu_test_notification
      agents:
        queue: cpu
-     secrets:
-      - GITHUB_PAT
+    #  secrets:
+    #   - GITHUB_PAT
      command:
-       - bash .buildkite/scripts/commit_verified_commit_hashes.sh
+       - echo .buildkite/scripts/commit_verified_commit_hashes.sh
+      #  - bash .buildkite/scripts/commit_verified_commit_hashes.sh
