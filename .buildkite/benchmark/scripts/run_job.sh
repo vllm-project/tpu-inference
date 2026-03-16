@@ -69,7 +69,7 @@ rm -rf artifacts
 #
 BM_JOB_STATUS=$EXIT_SUCCESS
 echo "Creating running config..."
-.buildkite/benchmark/scripts/agent/create_config.sh "$RECORD_ID" || {
+.buildkite/benchmark/scripts/create_config.sh "$RECORD_ID" || {
   echo "Error creating running config."
   BM_JOB_STATUS=$EXIT_FAILURE
 }
@@ -100,7 +100,7 @@ cleanup_docker_resource "vllm-tpu"
 #
 if (( BM_JOB_STATUS == EXIT_SUCCESS )); then
   echo "Running job in docker..."
-  .buildkite/benchmark/scripts/agent/docker_run_bm.sh "artifacts/${RECORD_ID}.env" || {
+  .buildkite/benchmark/scripts/docker_run_bm.sh "artifacts/${RECORD_ID}.env" || {
     echo "Error running benchmark job in docker."
     BM_JOB_STATUS=$EXIT_FAILURE
   }
@@ -114,7 +114,7 @@ echo "Benchmark script completed."
 # Report result
 #
 echo "Reporting result..."
-.buildkite/benchmark/scripts/agent/report_result.sh "$RECORD_ID"
+.buildkite/benchmark/scripts/report_result.sh "$RECORD_ID"
 
 echo ".buildkite/benchmark/scripts/cleanup_docker.sh"
 .buildkite/benchmark/scripts/cleanup_docker.sh
