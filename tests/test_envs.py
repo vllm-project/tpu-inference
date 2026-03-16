@@ -236,9 +236,9 @@ def test_none_default_env_vars(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_ray_env_vars(monkeypatch: pytest.MonkeyPatch):
-    assert envs.RAY_USAGE_STATS_ENABLED == "0"
+    assert not envs.RAY_USAGE_STATS_ENABLED
     monkeypatch.setenv("RAY_USAGE_STATS_ENABLED", "1")
-    assert envs.RAY_USAGE_STATS_ENABLED == "1"
+    assert envs.RAY_USAGE_STATS_ENABLED
 
     assert envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE == "shm"
 
