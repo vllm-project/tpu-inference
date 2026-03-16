@@ -47,10 +47,13 @@ from tpu_inference.layers.common.quantization import \
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
-from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
+from tpu_inference.layers.vllm.quantization.configs import (get_linear_config,
+                                                            get_moe_config)
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedLinearMethod
 from tpu_inference.logger import init_logger
+from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+    get_vllm_model_wrapper_context
 from tpu_inference.utils import get_mesh_shape_product
 
 REQUANTIZED_BLOCK_SIZE = 512
@@ -61,7 +64,7 @@ logger = init_logger(__name__)
 
 
 @register_quantization_config(MXFP4)
-class VllmMxfp4Config(Mxfp4Config, VllmQuantConfig):
+class VllmMxfp4Config(Mxfp4Config):
 
     @classmethod
     def get_name(cls):
@@ -71,7 +74,7 @@ class VllmMxfp4Config(Mxfp4Config, VllmQuantConfig):
                          prefix: str) -> Optional["QuantizeMethodBase"]:
 
         if isinstance(layer, LinearBase):
-            linear_config = self.get_linear_config(layer)
+            linear_config = get_linear_config(layer)
             if self.ignored_layers and is_layer_skipped(
                     prefix=prefix,
                     ignored_layers=self.ignored_layers,
@@ -83,8 +86,9 @@ class VllmMxfp4Config(Mxfp4Config, VllmQuantConfig):
                 "UnquantizedLinearMethod.")
             return VllmUnquantizedLinearMethod(linear_config)
         elif isinstance(layer, FusedMoE):
-            moe_config = self.get_moe_config(layer)
-            return VllmMxfp4MoEMethod(moe_config, self.mesh)
+            moe_config = get_moe_config(layer)
+            mesh = get_vllm_model_wrapper_context().mesh
+            return VllmMxfp4MoEMethod(moe_config, mesh)
         elif isinstance(layer, Attention):
             logger.warning_once("MXFP4 attention layer is not implemented. "
                                 "Skipping quantization for this layer.")

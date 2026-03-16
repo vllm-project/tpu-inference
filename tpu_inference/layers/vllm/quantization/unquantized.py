@@ -46,8 +46,10 @@ from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     _tensor_is_in_cpu
 from tpu_inference.layers.vllm.quantization.base import VllmQuantizationMethod
 from tpu_inference.layers.vllm.quantization.configs import (
-    VllmQuantConfig, VllmQuantLinearConfig)
+    VllmQuantLinearConfig, get_linear_config, get_moe_config)
 from tpu_inference.logger import init_logger
+from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+    get_vllm_model_wrapper_context
 from tpu_inference.utils import get_mesh_shape_product
 
 P = PartitionSpec
@@ -56,7 +58,7 @@ logger = init_logger(__name__)
 
 
 @register_quantization_config(UNQUANTIZED)
-class VllmUnquantizedConfig(QuantizationConfig, VllmQuantConfig):
+class VllmUnquantizedConfig(QuantizationConfig):
 
     @classmethod
     def get_name(cls) -> str:
@@ -81,11 +83,12 @@ class VllmUnquantizedConfig(QuantizationConfig, VllmQuantConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional[QuantizeMethodBase]:
         if isinstance(layer, vllm_linear.LinearBase):
-            linear_config = self.get_linear_config(layer)
+            linear_config = get_linear_config(layer)
             return VllmUnquantizedLinearMethod(linear_config)
         if isinstance(layer, FusedMoE):
-            moe_config = self.get_moe_config(layer)
-            return VllmUnquantizedFusedMoEMethod(moe_config, self.mesh)
+            mesh = get_vllm_model_wrapper_context().mesh
+            moe_config = get_moe_config(layer)
+            return VllmUnquantizedFusedMoEMethod(moe_config, mesh)
         if isinstance(layer, Attention):
             return None
         return None

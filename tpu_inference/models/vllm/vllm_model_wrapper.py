@@ -110,7 +110,7 @@ class VllmModelWrapper:
         self.mesh = mesh
 
         self.vllm_config.quant_config = get_tpu_quantization_config(
-            self.vllm_config, self.mesh)
+            self.vllm_config)
         self._apply_pp_patch()
 
         MultiHeadLatentAttentionWrapper.register_oot(
@@ -183,7 +183,8 @@ class VllmModelWrapper:
             [0]) if not vllm_envs.VLLM_TPU_USING_PATHWAYS else nullcontext()
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
-        with load_context, jax_context:
+        with load_context, jax_context, set_vllm_model_wrapper_context(
+                mesh=self.mesh):
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:

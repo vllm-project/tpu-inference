@@ -13,8 +13,8 @@
 # limitations under the License.
 
 import torchax
-from jax.sharding import Mesh, PartitionSpec
-from vllm.config import VllmConfig
+from jax.sharding import PartitionSpec
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEConfig
 # yapf: disable
@@ -29,6 +29,8 @@ from tpu_inference.layers.common.process_weights.linear_weights import \
     get_model_matmul_fusion_assignment
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+    get_vllm_model_wrapper_context
 from tpu_inference.utils import TPU_SECOND_LAST_MINOR, get_mesh_shape_product
 
 # yapf: enable
@@ -40,13 +42,13 @@ logger = init_logger(__name__)
 
 class VllmQuantLinearConfig(QuantLinearConfig):
 
-    def __init__(self, vllm_config: VllmConfig, mesh: Mesh, layer: LinearBase):
+    def __init__(self, vllm_config: VllmConfig, layer: LinearBase):
         assert isinstance(layer, LinearBase)
+        self.mesh = get_vllm_model_wrapper_context().mesh
 
         super().__init__(
             enable_sp=vllm_config.compilation_config.pass_config.enable_sp,
             output_sizes=[layer.output_size])
-        self.mesh = mesh
         self.tp_size = get_mesh_shape_product(self.mesh,
                                               ShardingAxisName.MLP_TENSOR)
 
@@ -108,22 +110,17 @@ class VllmQuantLinearConfig(QuantLinearConfig):
         return self.output_sharding
 
 
-class VllmQuantConfig:
-    vllm_config: VllmConfig
-    mesh: Mesh
+def get_linear_config(layer: LinearBase) -> VllmQuantLinearConfig:
+    assert isinstance(layer, LinearBase)
+    vllm_config = get_current_vllm_config()
+    return VllmQuantLinearConfig(vllm_config, layer)
 
-    @classmethod
-    def set_configs(cls, vllm_config: VllmConfig, mesh: Mesh):
-        cls.vllm_config = vllm_config
-        cls.mesh = mesh
 
-    def get_linear_config(self, layer: LinearBase) -> VllmQuantLinearConfig:
-        assert isinstance(layer, LinearBase)
-        return VllmQuantLinearConfig(self.vllm_config, self.mesh, layer)
+def get_moe_config(layer: FusedMoE) -> FusedMoEConfig:
+    assert isinstance(layer, FusedMoE)
+    vllm_config = get_current_vllm_config()
 
-    def get_moe_config(self, layer: FusedMoE) -> FusedMoEConfig:
-        assert isinstance(layer, FusedMoE)
-        moe_config = layer.moe_config
-        use_ep = self.vllm_config.parallel_config.enable_expert_parallel
-        moe_config.moe_parallel_config.use_ep = use_ep
-        return moe_config
+    moe_config = layer.moe_config
+    use_ep = vllm_config.parallel_config.enable_expert_parallel
+    moe_config.moe_parallel_config.use_ep = use_ep
+    return moe_config

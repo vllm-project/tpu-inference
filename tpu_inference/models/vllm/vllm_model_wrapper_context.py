@@ -14,7 +14,7 @@
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import jax
 from jax.sharding import Mesh
@@ -22,12 +22,12 @@ from jax.sharding import Mesh
 
 @dataclass
 class VllmModelWrapperContext:
-    kv_caches: List[jax.Array]
-    mesh: Mesh
-    layer_name_to_kvcache_index: Dict[str, int]
+    kv_caches: List[jax.Array] | None
+    mesh: Mesh | None
+    layer_name_to_kvcache_index: Dict[str, int] | None
 
 
-_vllm_model_wrapper_context: Optional[VllmModelWrapperContext] = None
+_vllm_model_wrapper_context: VllmModelWrapperContext | None = None
 
 
 def get_vllm_model_wrapper_context() -> VllmModelWrapperContext:
@@ -41,9 +41,9 @@ def get_vllm_model_wrapper_context() -> VllmModelWrapperContext:
 @contextmanager
 def set_vllm_model_wrapper_context(
     *,
-    kv_caches: List[jax.Array],
-    mesh: Mesh,
-    layer_name_to_kvcache_index: Dict[str, int] = None,
+    kv_caches: List[jax.Array] = None,
+    mesh: Mesh | None = None,
+    layer_name_to_kvcache_index: Dict[str, int] | None = None,
 ):
     global _vllm_model_wrapper_context
     prev_context = _vllm_model_wrapper_context

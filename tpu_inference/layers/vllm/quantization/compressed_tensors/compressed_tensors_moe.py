@@ -30,10 +30,11 @@ from tpu_inference.layers.common.process_weights.moe_weights import (
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
-from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedFusedMoEMethod
 from tpu_inference.logger import init_logger
+from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+    get_vllm_model_wrapper_context
 from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
@@ -48,6 +49,7 @@ class VllmCompressedTensorsMoEMethod(CompressedTensorsMoEMethod):
         layer_name: str,
     ) -> CompressedTensorsMoEMethod:
         assert isinstance(layer, FusedMoE)
+        mesh = get_vllm_model_wrapper_context().mesh
 
         # FusedMoE was made by combining multiple Linears so need to
         # make sure quantization config for Linear can target it
@@ -68,22 +70,20 @@ class VllmCompressedTensorsMoEMethod(CompressedTensorsMoEMethod):
                              "quantization scheme but found multiple")
 
         if scheme_dict is None:
-            return VllmUnquantizedFusedMoEMethod(layer.moe_config,
-                                                 quant_config.mesh)
+            return VllmUnquantizedFusedMoEMethod(layer.moe_config, mesh)
 
         weight_quant = scheme_dict.get("weights")
         input_quant = scheme_dict.get("input_activations")
 
         if quant_config._is_fp8_w8a8(weight_quant, input_quant):
             return VllmCompressedTensorsW8A8Fp8MoEMethod(
-                weight_quant, input_quant, layer.moe_config, quant_config.mesh)
+                weight_quant, input_quant, layer.moe_config, mesh)
         else:
             raise RuntimeError(
                 f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}")
 
 
-class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
-                                            VllmQuantConfig):
+class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod):
 
     def __init__(self,
                  weight_quant: QuantizationArgs,

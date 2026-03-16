@@ -36,7 +36,8 @@ from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compresse
     VllmCompressedTensorsW8A8Fp8
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_int8 import \
     VllmCompressedTensorsW8A8Int8
-from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
+from tpu_inference.layers.vllm.quantization.configs import (get_linear_config,
+                                                            get_moe_config)
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedConfig
 from tpu_inference.logger import init_logger
@@ -46,7 +47,7 @@ logger = init_logger(__name__)
 
 
 @register_quantization_config(COMPRESSED_TENSORS)
-class VllmCompressedTensorsConfig(CompressedTensorsConfig, VllmQuantConfig):
+class VllmCompressedTensorsConfig(CompressedTensorsConfig):
 
     @classmethod
     def get_name(cls) -> str:
@@ -91,7 +92,7 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, VllmQuantConfig):
 
         # TODO(kyuyeunk): Add support for different act_quant_format
 
-        linear_config = self.get_linear_config(layer)
+        linear_config = get_linear_config(layer)
         if self._is_fp8_w8a8(weight_quant, input_quant):
             is_static_input_scheme = input_quant and not input_quant.dynamic
             return VllmCompressedTensorsW8A8Fp8(
@@ -126,7 +127,7 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, VllmQuantConfig):
             layer.scheme = scheme
             return CompressedTensorsLinearMethod(self)
         if isinstance(layer, FusedMoE):
-            layer.moe_config = self.get_moe_config(layer)
+            layer.moe_config = get_moe_config(layer)
             return VllmCompressedTensorsMoEMethod.get_moe_method(
                 self, layer, layer_name=prefix)
         if isinstance(layer, Attention):

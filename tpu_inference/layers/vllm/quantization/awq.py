@@ -49,10 +49,12 @@ from tpu_inference.layers.common.utils import \
 from tpu_inference.layers.vllm.moe import (
     MoEBackend, select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import (
-    VllmQuantConfig, VllmQuantLinearConfig)
+    VllmQuantLinearConfig, get_linear_config, get_moe_config)
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedLinearMethod
 from tpu_inference.logger import init_logger
+from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+    get_vllm_model_wrapper_context
 from tpu_inference.utils import get_mesh_shape_product
 
 P = PartitionSpec
@@ -61,7 +63,7 @@ logger = init_logger(__name__)
 
 
 @register_quantization_config(AWQ)
-class VllmAWQConfig(AWQConfig, VllmQuantConfig):
+class VllmAWQConfig(AWQConfig):
 
     @classmethod
     def get_name(cls):
@@ -77,13 +79,14 @@ class VllmAWQConfig(AWQConfig, VllmQuantConfig):
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional[Union["LinearMethodBase", "QuantizeMethodBase"]]:
         if isinstance(layer, LinearBase):
-            linear_config = self.get_linear_config(layer)
+            linear_config = get_linear_config(layer)
             if is_layer_skipped(prefix, self.modules_to_not_convert):
                 return VllmUnquantizedLinearMethod(linear_config)
             return VllmAWQLinearMethod(self, linear_config)
         elif isinstance(layer, FusedMoE):
-            layer.moe_config = self.get_moe_config(layer)
-            return VllmAWQMoEMethod(self, layer, self.mesh)
+            layer.moe_config = get_moe_config(layer)
+            mesh = get_vllm_model_wrapper_context().mesh
+            return VllmAWQMoEMethod(self, layer, mesh)
         return None
 
 

@@ -42,10 +42,12 @@ from tpu_inference.layers.common.quantization import fp8 as common_fp8
 from tpu_inference.layers.vllm.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import (
-    VllmQuantConfig, VllmQuantLinearConfig)
+    VllmQuantLinearConfig, get_linear_config, get_moe_config)
 from tpu_inference.layers.vllm.quantization.unquantized import (
     VllmUnquantizedFusedMoEMethod, VllmUnquantizedLinearMethod)
 from tpu_inference.logger import init_logger
+from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+    get_vllm_model_wrapper_context
 
 P = PartitionSpec
 
@@ -53,7 +55,7 @@ logger = init_logger(__name__)
 
 
 @register_quantization_config(FP8)
-class VllmFp8Config(vllm_fp8.Fp8Config, VllmQuantConfig):
+class VllmFp8Config(vllm_fp8.Fp8Config):
 
     @classmethod
     def get_name(cls):
@@ -63,7 +65,7 @@ class VllmFp8Config(vllm_fp8.Fp8Config, VllmQuantConfig):
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional[Union[vllm_linear.LinearMethodBase, QuantizeMethodBase]]:
         if isinstance(layer, vllm_linear.LinearBase):
-            linear_config = self.get_linear_config(layer)
+            linear_config = get_linear_config(layer)
             if is_layer_skipped(
                     prefix=prefix,
                     ignored_layers=self.ignored_layers,
@@ -79,8 +81,9 @@ class VllmFp8Config(vllm_fp8.Fp8Config, VllmQuantConfig):
             ):
                 return VllmUnquantizedFusedMoEMethod(layer.moe_config)
             if self.is_checkpoint_fp8_serialized:
-                layer.moe_config = self.get_moe_config(layer)
-                return VllmFp8MoEMethod(self, layer, self.mesh)
+                layer.moe_config = get_moe_config(layer)
+                mesh = get_vllm_model_wrapper_context().mesh
+                return VllmFp8MoEMethod(self, layer, mesh)
             else:
                 raise NotImplementedError(
                     "FP8OnelineMoEMethod is not supported.")
