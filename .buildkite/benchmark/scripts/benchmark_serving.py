@@ -52,13 +52,17 @@ try:
     from vllm.utils import FlexibleArgumentParser
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
-
-from benchmark_dataset import (
-    AIMODataset, ASRDataset, BurstGPTDataset, ConversationDataset,
-    CustomDataset, CustomTokenDataset, HuggingFaceDataset,
-    InstructCoderDataset, MLPerfDataset, MMLUDataset, MTBenchDataset,
-    NextEditPredictionDataset, RandomDataset, SampleRequest, ShareGPTDataset,
-    SonnetDataset, VisionArenaDataset)
+# yapf conflicts with isort for this block
+# yapf: disable
+from benchmark_dataset import (AIMODataset, ASRDataset, BurstGPTDataset,
+                               ConversationDataset, CustomDataset,
+                               CustomTokenDataset, HuggingFaceDataset,
+                               InstructCoderDataset, MLPerfDataset,
+                               MMLUDataset, MTBenchDataset,
+                               NextEditPredictionDataset, RandomDataset,
+                               SampleRequest, ShareGPTDataset, SonnetDataset,
+                               VisionArenaDataset)
+# yapf: enable
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
