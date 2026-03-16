@@ -174,7 +174,7 @@ while read -r line || [ -n "${line}" ]; do
   agents:
     queue: $BUILDKITE_AGENT_QUEUE
   command: 
-    - ".buildkite/benchmark/scripts/agent/run_job.sh ${RECORD_ID}"
+    - ".buildkite/benchmark/scripts/run_job.sh ${RECORD_ID}"
 EOF
 )
 
