@@ -217,6 +217,8 @@ class MoEKernelTest(jtu.JaxTestCase):
 
     @parameterized.product(renormalize_topk_logits=[True, False], )
     def test_basic(self, renormalize_topk_logits):
+        if not jtu.is_device_tpu_at_least(version=7):
+            self.skipTest("Expect TPUv7+")
         dtype = jnp.bfloat16
         top_k = 8
         num_experts = 128
