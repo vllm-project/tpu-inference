@@ -23,7 +23,8 @@ cd "$(dirname "$0")"
 export LOG_DIR=./results
 export MODEL_NAME=$MODEL
 # Use a specific MMLU subtask if the MMLU_SUBTASK env var is set, otherwise default to the full mmlu group task.
-export OUTPUT_PREFIX=${TASK_NAME}_$(echo $MODEL_NAME | sed 's#/#-#g')
+OUTPUT_PREFIX="${TASK_NAME}_${MODEL_NAME//\//-}"
+export OUTPUT_PREFIX
 
 export OUTPUT_BASE_PATH=$LOG_DIR/$OUTPUT_PREFIX.json
 export ACCURACY_JSON_PATH=/workspace/mmlu_accuracy.json

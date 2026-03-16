@@ -17,6 +17,7 @@ import json
 import os
 import sys
 
+
 def parse_mmlu_results(input_file):
     """
     Parses the raw results from an lm_eval MMLU run. It prints a
@@ -31,7 +32,8 @@ def parse_mmlu_results(input_file):
         with open(input_file, 'r') as f:
             data = json.load(f)
     except json.JSONDecodeError:
-        print(f"Error: Could not decode JSON from {input_file}", file=sys.stderr)
+        print(f"Error: Could not decode JSON from {input_file}",
+              file=sys.stderr)
         sys.exit(1)
     except FileNotFoundError:
         print(f"Error: Input file not found at {input_file}", file=sys.stderr)
@@ -39,7 +41,7 @@ def parse_mmlu_results(input_file):
 
     results = data.get("results", {})
     groups = data.get("groups", {})
-    
+
     summary = {}
     acc_key = "exact_match,strict_match"
 
@@ -52,10 +54,10 @@ def parse_mmlu_results(input_file):
     # The overall aggregate is in the 'groups' dict under the key 'mmlu_llama'.
     # We rename it to 'mmlu_agg' for clarity in our database.
     if 'mmlu_llama' in groups and acc_key in groups['mmlu_llama']:
-         summary['mmlu_agg'] = groups['mmlu_llama'][acc_key]
-         # The 'mmlu' task is just the aggregate, so remove it to avoid duplication
-         if 'mmlu_llama' in summary:
-             del summary['mmlu_llama']
+        summary['mmlu_agg'] = groups['mmlu_llama'][acc_key]
+        # The 'mmlu' task is just the aggregate, so remove it to avoid duplication
+        if 'mmlu_llama' in summary:
+            del summary['mmlu_llama']
 
     # Print machine-readable JSON to stdout for the runner script
     print(json.dumps(summary))
@@ -64,9 +66,10 @@ def parse_mmlu_results(input_file):
     print("\n--- MMLU Results Summary ---", file=sys.stderr)
     print(f"File: {os.path.basename(input_file)}", file=sys.stderr)
     print("-" * 30, file=sys.stderr)
-    
+
     if 'mmlu_agg' in summary:
-        print(f"Overall MMLU Accuracy: {summary['mmlu_agg']:.4f}", file=sys.stderr)
+        print(f"Overall MMLU Accuracy: {summary['mmlu_agg']:.4f}",
+              file=sys.stderr)
         print("-" * 30, file=sys.stderr)
 
     print("Subtask Accuracies:", file=sys.stderr)
@@ -78,7 +81,9 @@ def parse_mmlu_results(input_file):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Parse lm_eval MMLU results.")
-    parser.add_argument("input_file", type=str, help="Path to the input JSON file from lm_eval.")
+    parser.add_argument("input_file",
+                        type=str,
+                        help="Path to the input JSON file from lm_eval.")
     args = parser.parse_args()
 
     parse_mmlu_results(args.input_file)

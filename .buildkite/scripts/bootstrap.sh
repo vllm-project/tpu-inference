@@ -25,7 +25,7 @@ readonly PRIORITY_BENCHMARK=2
 readonly PRIORITY_DEFAULT=1
 readonly PRIORITY_NIGHTLY=0
 
-determine_job_prioirty() {
+determine_job_priority() {
   local priority=""
   echo "--- Determining job priority" >&2
   if [[ "${NIGHTLY:-0}" == "1" ]]; then
@@ -57,7 +57,8 @@ determine_job_prioirty() {
   echo "$priority"
 }
 
-export JOB_PRIORITY=$(determine_job_prioirty)
+JOB_PRIORITY=$(determine_job_priority)
+export JOB_PRIORITY
 buildkite-agent meta-data set "JOB_PRIORITY" "$JOB_PRIORITY"
 
 # Implemented dynamic job prioritization by injecting integers during upload
