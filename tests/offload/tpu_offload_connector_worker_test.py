@@ -458,8 +458,11 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         connector = self._create_connector(swap_op_type,
                                            use_precompiled_swap_ops)
         worker = connector.connector_worker
-        # Ground truth cache on TPU
-        src_kv_cache = worker.runner.kv_caches
+        # Ground truth cache. We copy it to host early because the save
+        # operation will donate via stack_kv_cache_cross_layers.
+        src_kv_cache_baseline = [
+            np.array(cache) for cache in worker.runner.kv_caches
+        ]
         # Destination cache on TPU, should be modified by the load operation
         dst_kv_cache = [
             jax.device_put(jnp.zeros(self.cache_shape, dtype=self.cache_dtype),
@@ -557,7 +560,7 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
             for src_block_id in src_blocks:
                 for layer_idx in range(self.num_layers):
                     self.assertArraysEqual(
-                        np.array(src_kv_cache[layer_idx][src_block_id]),
+                        src_kv_cache_baseline[layer_idx][src_block_id],
                         np.array(dst_kv_cache[layer_idx][src_block_id]))
 
         # verify the loaded chunks

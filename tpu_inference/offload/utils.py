@@ -143,10 +143,14 @@ def jitted_insert_kv_cache_slices(
     return jax.tree.map(_update_layer, kv_caches, kv_cache_slices)
 
 
-@functools.partial(jax.jit, static_argnames=['num_blocks'])
-def stack_kv_cache_cross_layers(kv_caches: List[jax.Array],
-                                block_ids: jax.Array,
-                                num_blocks: int) -> List[jax.Array]:
+@functools.partial(
+    jax.jit,
+    static_argnames=['num_blocks'],
+    donate_argnames=('kv_caches', ),
+)
+def stack_kv_cache_cross_layers(
+        kv_caches: List[jax.Array], block_ids: jax.Array,
+        num_blocks: int) -> Tuple[List[jax.Array], List[jax.Array]]:
     """
     This uses jax.tree.map to apply the operation across all layers.
     """
@@ -164,7 +168,9 @@ def stack_kv_cache_cross_layers(kv_caches: List[jax.Array],
                              axis=0)
     # split_blocks = jnp.array_split(stacked_blocks, num_blocks, axis=0)
 
-    return split_blocks
+    kv_caches = jax.lax.optimization_barrier(kv_caches)
+
+    return kv_caches, split_blocks
 
 
 @functools.partial(
