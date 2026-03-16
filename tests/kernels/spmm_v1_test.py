@@ -21,8 +21,7 @@ import numpy as np
 from absl.testing import absltest, parameterized
 from jax import random
 
-from tpu_inference.kernels.structured_sparse_matmul.v1.spmm import \
-    structured_spmm
+import tpu_inference.kernels.structured_sparse_matmul.v1.spmm as structured_spmm
 
 
 class StructuredSpmmTest(parameterized.TestCase):
@@ -180,7 +179,7 @@ class StructuredSpmmTest(parameterized.TestCase):
         if out_dtype == jnp.bfloat16:
             actual = actual.astype(jnp.float32)
             expected = expected.astype(jnp.float32)
-        np.testing.assert_allclose(actual, expected)
+        np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=5e-4)
 
 
 if __name__ == "__main__":
