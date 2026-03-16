@@ -12,5 +12,5 @@ Model,Type,UnitTest,Accuracy/Correctness,Benchmark
 "meta-llama/Llama-3.1-8B-Instruct",Text,✅,❌,N/A
 "meta-llama/Llama-3.3-70B-Instruct",Text,✅,❌,N/A
 "meta-llama/Llama-Guard-4-12B/Text-Only",Text,✅,✅,✅
-"moonshotai/Kimi-K2-Thinking",Text,❌,N/A,N/A
+"moonshotai/Kimi-K2-Thinking",Text,unverified,unverified,unverified
 "openai/gpt-oss-120b",Text,unverified,unverified,unverified
