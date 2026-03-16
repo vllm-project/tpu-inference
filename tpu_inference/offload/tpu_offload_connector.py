@@ -2169,11 +2169,12 @@ class TPUOffloadConnectorWorker:
 
         return gathered_kv_caches_tpu, manifest, total_num_blocks_to_save
 
-    def _transfer_and_register_cpu_chunks(self,
-                                          flat_kv_caches_tpu: Any,
-                                          total_num_blocks_to_save: int,
-                                          manifest: list[SaveReqInfo],
-                                          is_batched: bool = False):
+    def _transfer_and_register_cpu_chunks(
+            self,
+            flat_kv_caches_tpu: Any,
+            total_num_blocks_to_save: int,
+            manifest: list[SaveReqInfo],
+            is_batched: bool = False) -> list[jax.Array]:
         """
         Asynchronously transfers KV blocks from TPU to CPU, unstitches them,
         and registers them with the CPU RAM backend store.
@@ -2196,7 +2197,7 @@ class TPUOffloadConnectorWorker:
                                           +-------+-------+-------+-------+-------+
                                                              ||
                                                              || DMA (Single Call)
-                                                             \/
+                                                             ||
                                            Unified Host Buffer (CPU RAM)
                                           +-------+-------+-------+-------+-------+
                                           | B1    | B2    | B3    | B4    | B5    |
@@ -2204,7 +2205,7 @@ class TPUOffloadConnectorWorker:
                                                              ||
               Unstitching Logic <============================++
                       ||
-                      \/
+                      ||
         Local CPU Backend (Cache)
         +---------------------------------------+
         | ID: C100 (B1) | ID: C101 (B2) | ...   |  <-- Req A chunks
@@ -2223,8 +2224,6 @@ class TPUOffloadConnectorWorker:
                 chunks_on_cpu.append(
                     jax.device_put(flat_kv_caches_tpu[i],
                                    self.expanded_host_sharding))
-            jax.block_until_ready(chunks_on_cpu)
-            # no split
         else:
             # dummy data
             chunks_on_cpu = [[(j * total_num_blocks_to_save + i)
@@ -2235,8 +2234,8 @@ class TPUOffloadConnectorWorker:
         KV_SAVE_TRANSFER_LATENCY.labels(
             is_batched=is_batched,
             num_blocks=str(total_num_blocks_to_save)).observe(duration)
-        logger.debug(f"Successfully saved {total_num_blocks_to_save} blocks "
-                     f"to CPU in {duration:.4f} seconds.")
+        logger.debug(f"Successfully started saving {total_num_blocks_to_save} "
+                     f"blocks to CPU in {duration:.4f} seconds.")
 
         if not self.no_op_swap_out:
 
@@ -2259,6 +2258,12 @@ class TPUOffloadConnectorWorker:
                     is_batched=is_batched).observe(bw_gbps)
 
         # 2. Unstitch and Register
+        # Registration happens immediately with potentially unready arrays.
+        # This is safe because:
+        # 1. We are storing references (futures) in the CPU backend.
+        # 2. JAX handles internal sync if the data is accessed before completion.
+        # 3. Our soft budgeting polling in _process_completed_saves prevents the
+        #    TPU staging buffer from being recycled until the D2H move is done.
         post_transfer_start_time = time.time()
         block_offset = 0
         for info in manifest:
@@ -2280,6 +2285,7 @@ class TPUOffloadConnectorWorker:
         logger.debug(
             f"{log_prefix}: e2e host processing of {total_num_blocks_to_save} chunks took {post_transfer_duration:.4f} seconds."
         )
+        return chunks_on_cpu
 
     def _start_batched_save_kv(self, metadata: TPUOffloadConnectorMetadata):
         """
@@ -2305,9 +2311,10 @@ class TPUOffloadConnectorWorker:
         # 2. ASYNC NON-BLOCKING: Single Batch Transfer
         def _async_batch_transfer_task(*args, **kwargs):
             try:
-                self._transfer_and_register_cpu_chunks(*args, **kwargs)
+                return self._transfer_and_register_cpu_chunks(*args, **kwargs)
             except Exception as e:
                 logger.error(f"Error in batched transfer: {e}", exc_info=True)
+                return None
 
         logger.info(
             f"Submitting batched transfer task for {len(manifest)} requests, {total_num_blocks_to_save} blocks total."
@@ -2321,7 +2328,7 @@ class TPUOffloadConnectorWorker:
                                            total_num_blocks_to_save,
                                            manifest,
                                            is_batched=True)
-        self._pending_save_futures.append((future, manifest))
+        self._pending_save_futures.append((future, manifest, None))
 
     def _get_blocks_for_req_from_metadata(
             self, info: SaveReqInfo,
@@ -2427,12 +2434,11 @@ class TPUOffloadConnectorWorker:
                 # Define a safe wrapper for the async part to ensure logging
                 def _async_transfer_task(req_id, *args):
                     try:
-                        self._transfer_and_register_cpu_chunks(*args)
+                        return self._transfer_and_register_cpu_chunks(*args)
                     except Exception as e:
                         raise ValueError(
                             f"Error transferring blocks for request {req_id}: {e}"
                         )
-                    return req_id
 
                 # 2. ASYNC NON-BLOCKING: Transfer to CPU and Register
                 logger.info(
@@ -2443,7 +2449,7 @@ class TPUOffloadConnectorWorker:
                                                    num_blocks_to_save, [info],
                                                    False)
 
-                self._pending_save_futures.append((future, [info]))
+                self._pending_save_futures.append((future, [info], None))
 
         self._processed_save_for_step = True
         SAVE_BATCH_SIZE.observe(len(self._pending_save_futures))
@@ -2453,6 +2459,10 @@ class TPUOffloadConnectorWorker:
         Checks for and processes completed asynchronous save operations.
         Supports both single and batched mode save operations using the
         list[SaveReqInfo] manifest.
+
+        This method implements soft budgeting by ensuring that staging buffer
+        slots are only released once the TPU hardware confirms the D2H transfer
+        is complete via the is_ready() check.
         """
         PROCESS_COMPLETED_SAVE_CALLS.inc()
         if not self._pending_save_futures:
@@ -2460,30 +2470,54 @@ class TPUOffloadConnectorWorker:
 
         start_time = time.time()
         completed_count = 0
-        remaining_futures: list[tuple[Future, list[SaveReqInfo]]] = []
+        remaining_futures: list[tuple[Future, list[SaveReqInfo],
+                                      Optional[list[jax.Array]]]] = []
         PENDING_SAVE_FUTURES_SIZE.set(len(self._pending_save_futures))
-        for future, manifest in self._pending_save_futures:
-            if future.done():
-                FUTURE_DONE_TOTAL.inc()
-                # Ensure the task finished successfully.
+        for future, manifest, unready_chunks in self._pending_save_futures:
+            if not future.done():
+                remaining_futures.append((future, manifest, unready_chunks))
+                continue
 
+            # Thread is finished, retrieve unready_chunks if we don't have them yet
+            if unready_chunks is None:
                 try:
-                    future.result()
-                    # Record saves for all requests in the manifest
-                    for info in manifest:
-                        if info.num_blocks > 0:
-                            self.offload_stats.record_save(
-                                req=info.req_id,
-                                saved_chunk_ids=info.dst_chunks)
-                            RECORD_SAVE_TOTAL.inc()
-
-                    completed_count += 1
+                    unready_chunks = future.result()
                 except Exception as e:
                     raise ValueError(f"A save operation failed: {e}")
+
+            # Stage 2: Wait for TPU Hardware to finish the actual DMA move.
+            # is_ready() is a non-blocking hardware bit-check.
+            #
+            # CONCURRENCY AND CONSISTENCY:
+            # We only finalize the save once the hardware confirms readiness. This
+            # establishes a 'Visibility Boundary'.
+            # 1. RAW Consistency: By waiting for is_ready() before recording the
+            #    save, we ensure that a concurrent Load request (prefix match)
+            #    cannot 'see' or fetch these chunks from the CPU backend until
+            #    the data is definitively resident in Host RAM. recording the
+            #    save signals the scheduler to eventually call `mark_completion`,
+            #    which is the only way a chunk becomes 'ready_to_load'.
+            # 2. Resource Safety: This also ensures the Physical HBM staging slots
+            #    remain 'Occupied' in the StagingBufferManager until the DMA read
+            #    is complete, preventing Stage 1 (Gather) from overwriting a slot
+            #    that is still being moved to the host.
+            if unready_chunks is not None and all(chunk.is_ready()
+                                                  for chunk in unready_chunks):
+                # SUCCESS: Data is safely on CPU and out of the Staging Buffer.
+                # Record saves for all requests in the manifest to signal
+                # the Scheduler to free the slots.
+                for info in manifest:
+                    if info.num_blocks > 0:
+                        self.offload_stats.record_save(
+                            req=info.req_id, saved_chunk_ids=info.dst_chunks)
+                        RECORD_SAVE_TOTAL.inc()
+                completed_count += 1
             else:
-                remaining_futures.append((future, manifest))
+                # Hardware still moving data or thread just finished and returned None, keep polling
+                remaining_futures.append((future, manifest, unready_chunks))
 
         if completed_count > 0:
+            FUTURE_DONE_TOTAL.inc(completed_count)
             duration = time.time() - start_time
             PROCESS_COMPLETED_SAVE_LATENCY.observe(duration)
             logger.info(f"collected {completed_count} save operation "
