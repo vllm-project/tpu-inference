@@ -86,7 +86,7 @@ while read -r line || [ -n "${line}" ]; do
   ADDITIONAL_CONFIG="${fields[13]}"
   EXTRA_ARGS="${fields[14]}"
 
-  RECORD_ID=$(uuidgen | tr 'A-Z' 'a-z')
+  RECORD_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 
   # Helper to handle SQL quoting for JSON/String fields.
   # This now properly escapes internal single quotes by doubling them (' -> '').
@@ -143,13 +143,12 @@ while read -r line || [ -n "${line}" ]; do
       '$EXTRA_ENVS',
       $SQL_ADDITIONAL_CONFIG,
       $SQL_EXTRA_ARGS
-    );"
+    );" || {
+      # If insert failed, just continue without publishing
+      echo "Insert failed for $RECORD_ID — skipping publish." >&2
+      continue
+  }
   
-  # If insert failed, just continue without publishing
-  if [ $? -ne 0 ]; then
-    echo "Insert failed for $RECORD_ID — skipping publish." >&2
-    continue
-  fi
 
   # Check if the DEVICE exists in the buildkite queue map
   if [[ -v BUILDKITE_QUEUE_DEVICE_MAP["$DEVICE"] ]]; then

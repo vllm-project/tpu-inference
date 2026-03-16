@@ -35,17 +35,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-import numpy as np
 import evaluate
+import numpy as np
+from backend_request_func import (ASYNC_REQUEST_FUNCS,
+                                  OPENAI_COMPATIBLE_BACKENDS, RequestFuncInput,
+                                  RequestFuncOutput)
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
-
-from backend_request_func import (
-    ASYNC_REQUEST_FUNCS,
-    OPENAI_COMPATIBLE_BACKENDS,
-    RequestFuncInput,
-    RequestFuncOutput,
-)
 
 try:
     from vllm.transformers_utils.tokenizer import get_tokenizer
@@ -58,24 +54,11 @@ except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
 from benchmark_dataset import (
-    AIMODataset,
-    ASRDataset,
-    BurstGPTDataset,
-    ConversationDataset,
-    CustomDataset,
-    CustomTokenDataset,
-    HuggingFaceDataset,
-    InstructCoderDataset,
-    MTBenchDataset,
-    MLPerfDataset,
-    MMLUDataset,
-    NextEditPredictionDataset,
-    RandomDataset,
-    SampleRequest,
-    ShareGPTDataset,
-    SonnetDataset,
-    VisionArenaDataset,
-)
+    AIMODataset, ASRDataset, BurstGPTDataset, ConversationDataset,
+    CustomDataset, CustomTokenDataset, HuggingFaceDataset,
+    InstructCoderDataset, MLPerfDataset, MMLUDataset, MTBenchDataset,
+    NextEditPredictionDataset, RandomDataset, SampleRequest, ShareGPTDataset,
+    SonnetDataset, VisionArenaDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
@@ -120,11 +103,8 @@ def _get_current_request_rate(
     total_requests: int,
     request_rate: float,
 ) -> float:
-    if (
-        ramp_up_strategy
-        and ramp_up_start_rps is not None
-        and ramp_up_end_rps is not None
-    ):
+    if (ramp_up_strategy and ramp_up_start_rps is not None
+            and ramp_up_end_rps is not None):
         progress = request_index / max(total_requests - 1, 1)
         if ramp_up_strategy == "linear":
             increase = (ramp_up_end_rps - ramp_up_start_rps) * progress
@@ -171,10 +151,10 @@ async def get_request(
             The ending request rate for ramp-up.
     """
     assert burstiness > 0, (
-        f"A positive burstiness factor is expected, but given {burstiness}."
-    )
+        f"A positive burstiness factor is expected, but given {burstiness}.")
     # Convert to list to get length for ramp-up calculations
-    if isinstance(input_requests, Iterable) and not isinstance(input_requests, list):
+    if isinstance(input_requests,
+                  Iterable) and not isinstance(input_requests, list):
         input_requests = list(input_requests)
 
     total_requests = len(input_requests)
@@ -205,6 +185,7 @@ async def get_request(
         interval = np.random.gamma(shape=burstiness, scale=theta)
         # The next request will be sent after the interval.
         await asyncio.sleep(interval)
+
 
 def calculate_rouge_metrics(
     input_requests: list[SampleRequest],
@@ -261,7 +242,8 @@ def calculate_mmlu_accuracy(
 
             predicted_choice = ""
             # Try to find "The answer is X" or "Answer: X"
-            match = re.search(r"(?:The answer is|Answer:)\s*\(?([A-D])\)?", generated_text, re.IGNORECASE)
+            match = re.search(r"(?:The answer is|Answer:)\s*\(?([A-D])\)?",
+                              generated_text, re.IGNORECASE)
             if match:
                 predicted_choice = match.group(1).upper()
             else:
@@ -269,18 +251,20 @@ def calculate_mmlu_accuracy(
                 # e.g., "(A)", "A."
                 choices = re.findall(r"^\s*\(?([A-D])\)?", generated_text)
                 if choices:
-                     predicted_choice = choices[0].upper()
+                    predicted_choice = choices[0].upper()
                 else:
                     # Last resort: first A, B, C, or D found
-                    first_letter = re.search(r"([A-D])", generated_text.upper())
+                    first_letter = re.search(r"([A-D])",
+                                             generated_text.upper())
                     if first_letter:
                         predicted_choice = first_letter.group(1)
 
             if predicted_choice == completion:
                 correct_predictions += 1
 
-    return (correct_predictions / completed_requests
-            if completed_requests > 0 else 0.0)
+    return (correct_predictions /
+            completed_requests if completed_requests > 0 else 0.0)
+
 
 def compute_accuracy_metrics(
     input_requests: list[SampleRequest],
@@ -307,6 +291,7 @@ def compute_accuracy_metrics(
         rouge_scores = calculate_rouge_metrics(input_requests, outputs)
         accuracy_metrics.update(rouge_scores)
     return accuracy_metrics
+
 
 def calculate_metrics(
     input_requests: list[SampleRequest],
@@ -338,10 +323,8 @@ def calculate_metrics(
                 # bundled together
                 # Note : this may inflate the output token count slightly
                 output_len = len(
-                    tokenizer(
-                        outputs[i].generated_text, add_special_tokens=False
-                    ).input_ids
-                )
+                    tokenizer(outputs[i].generated_text,
+                              add_special_tokens=False).input_ids)
             actual_output_lens.append(output_len)
             total_input += input_requests[i].prompt_len
             tpot = 0
@@ -364,19 +347,16 @@ def calculate_metrics(
 
         if "ttft" in goodput_config_dict:
             valid_metrics.append(ttfts)
-            slo_values.append(
-                goodput_config_dict["ttft"] / MILLISECONDS_TO_SECONDS_CONVERSION
-            )
+            slo_values.append(goodput_config_dict["ttft"] /
+                              MILLISECONDS_TO_SECONDS_CONVERSION)
         if "tpot" in goodput_config_dict:
             valid_metrics.append(all_tpots)
-            slo_values.append(
-                goodput_config_dict["tpot"] / MILLISECONDS_TO_SECONDS_CONVERSION
-            )
+            slo_values.append(goodput_config_dict["tpot"] /
+                              MILLISECONDS_TO_SECONDS_CONVERSION)
         if "e2el" in goodput_config_dict:
             valid_metrics.append(e2els)
-            slo_values.append(
-                goodput_config_dict["e2el"] / MILLISECONDS_TO_SECONDS_CONVERSION
-            )
+            slo_values.append(goodput_config_dict["e2el"] /
+                              MILLISECONDS_TO_SECONDS_CONVERSION)
 
         for req_metric in zip(*valid_metrics):
             is_good_req = all([s >= r for s, r in zip(slo_values, req_metric)])
@@ -390,7 +370,8 @@ def calculate_metrics(
             stacklevel=2,
         )
 
-    accuracy_metrics = compute_accuracy_metrics(input_requests, outputs, dataset_name)
+    accuracy_metrics = compute_accuracy_metrics(input_requests, outputs,
+                                                dataset_name)
 
     metrics = BenchmarkMetrics(
         completed=completed,
@@ -400,31 +381,27 @@ def calculate_metrics(
         request_goodput=good_completed / dur_s,
         output_throughput=sum(actual_output_lens) / dur_s,
         total_token_throughput=(total_input + sum(actual_output_lens)) / dur_s,
-        mean_ttft_ms=np.mean(ttfts or 0)
-        * 1000,  # ttfts is empty if streaming is not supported by backend
+        mean_ttft_ms=np.mean(ttfts or 0) *
+        1000,  # ttfts is empty if streaming is not supported by backend
         std_ttft_ms=np.std(ttfts or 0) * 1000,
         median_ttft_ms=np.median(ttfts or 0) * 1000,
-        percentiles_ttft_ms=[
-            (p, np.percentile(ttfts or 0, p) * 1000) for p in selected_percentiles
-        ],
+        percentiles_ttft_ms=[(p, np.percentile(ttfts or 0, p) * 1000)
+                             for p in selected_percentiles],
         mean_tpot_ms=np.mean(tpots or 0) * 1000,
         std_tpot_ms=np.std(tpots or 0) * 1000,
         median_tpot_ms=np.median(tpots or 0) * 1000,
-        percentiles_tpot_ms=[
-            (p, np.percentile(tpots or 0, p) * 1000) for p in selected_percentiles
-        ],
+        percentiles_tpot_ms=[(p, np.percentile(tpots or 0, p) * 1000)
+                             for p in selected_percentiles],
         mean_itl_ms=np.mean(itls or 0) * 1000,
         std_itl_ms=np.std(itls or 0) * 1000,
         median_itl_ms=np.median(itls or 0) * 1000,
-        percentiles_itl_ms=[
-            (p, np.percentile(itls or 0, p) * 1000) for p in selected_percentiles
-        ],
+        percentiles_itl_ms=[(p, np.percentile(itls or 0, p) * 1000)
+                            for p in selected_percentiles],
         mean_e2el_ms=np.mean(e2els or 0) * 1000,
         std_e2el_ms=np.std(e2els or 0) * 1000,
         median_e2el_ms=np.median(e2els or 0) * 1000,
-        percentiles_e2el_ms=[
-            (p, np.percentile(e2els or 0, p) * 1000) for p in selected_percentiles
-        ],
+        percentiles_e2el_ms=[(p, np.percentile(e2els or 0, p) * 1000)
+                             for p in selected_percentiles],
         accuracy_metrics=accuracy_metrics,
     )
 
@@ -487,16 +464,14 @@ async def benchmark(
     if not test_output.success:
         raise ValueError(
             "Initial test run failed - Please make sure benchmark arguments "
-            f"are correctly specified. Error: {test_output.error}"
-        )
+            f"are correctly specified. Error: {test_output.error}")
     else:
         print("Initial test run completed. Starting main benchmark run...")
 
     if lora_modules:
         # For each input request, choose a LoRA module at random.
         lora_modules = iter(
-            [random.choice(lora_modules) for _ in range(len(input_requests))]
-        )
+            [random.choice(lora_modules) for _ in range(len(input_requests))])
 
     if profile:
         print("Starting profiler...")
@@ -519,11 +494,9 @@ async def benchmark(
     distribution = "Poisson process" if burstiness == 1.0 else "Gamma distribution"
 
     if ramp_up_strategy is not None:
-        print(
-            f"Traffic ramp-up strategy: {ramp_up_strategy}. Will increase "
-            f"RPS from {ramp_up_start_rps} to {ramp_up_end_rps} RPS over "
-            "the duration of the benchmark."
-        )
+        print(f"Traffic ramp-up strategy: {ramp_up_strategy}. Will increase "
+              f"RPS from {ramp_up_start_rps} to {ramp_up_end_rps} RPS over "
+              "the duration of the benchmark.")
     else:
         print(f"Traffic request rate: {request_rate} RPS.")
 
@@ -540,9 +513,11 @@ async def benchmark(
 
     async def limited_request_func(request_func_input, pbar):
         if semaphore is None:
-            return await request_func(request_func_input=request_func_input, pbar=pbar)
+            return await request_func(request_func_input=request_func_input,
+                                      pbar=pbar)
         async with semaphore:
-            return await request_func(request_func_input=request_func_input, pbar=pbar)
+            return await request_func(request_func_input=request_func_input,
+                                      pbar=pbar)
 
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
@@ -551,27 +526,28 @@ async def benchmark(
     last_int_rps = -1
     if ramp_up_strategy is not None and ramp_up_start_rps is not None:
         last_int_rps = ramp_up_start_rps
-        rps_change_events.append(
-            {
-                "rps": last_int_rps,
-                "timestamp": datetime.now().isoformat(),
-            }
-        )
+        rps_change_events.append({
+            "rps": last_int_rps,
+            "timestamp": datetime.now().isoformat(),
+        })
 
     async for request, current_request_rate in get_request(
-        input_requests,
-        request_rate,
-        burstiness,
-        ramp_up_strategy,
-        ramp_up_start_rps,
-        ramp_up_end_rps,
+            input_requests,
+            request_rate,
+            burstiness,
+            ramp_up_strategy,
+            ramp_up_start_rps,
+            ramp_up_end_rps,
     ):
         if ramp_up_strategy is not None:
             current_int_rps = int(current_request_rate)
             if current_int_rps > last_int_rps:
                 timestamp = datetime.now().isoformat()
                 for rps_val in range(last_int_rps + 1, current_int_rps + 1):
-                    rps_change_events.append({"rps": rps_val, "timestamp": timestamp})
+                    rps_change_events.append({
+                        "rps": rps_val,
+                        "timestamp": timestamp
+                    })
                 last_int_rps = current_int_rps
 
         prompt, prompt_len, output_len, mm_content = (
@@ -597,7 +573,8 @@ async def benchmark(
             ignore_eos=ignore_eos,
             extra_body=extra_body,
         )
-        task = limited_request_func(request_func_input=request_func_input, pbar=pbar)
+        task = limited_request_func(request_func_input=request_func_input,
+                                    pbar=pbar)
         tasks.append(asyncio.create_task(task))
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
@@ -636,36 +613,25 @@ async def benchmark(
 
     print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
-    print("{:<40} {:<10.2f}".format("Benchmark duration (s):", benchmark_duration))
+    print("{:<40} {:<10.2f}".format("Benchmark duration (s):",
+                                    benchmark_duration))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
-    print("{:<40} {:<10}".format("Total generated tokens:", metrics.total_output))
-    print(
-        "{:<40} {:<10.2f}".format(
-            "Request throughput (req/s):", metrics.request_throughput
-        )
-    )
+    print("{:<40} {:<10}".format("Total generated tokens:",
+                                 metrics.total_output))
+    print("{:<40} {:<10.2f}".format("Request throughput (req/s):",
+                                    metrics.request_throughput))
     if goodput_config_dict:
-        print(
-            "{:<40} {:<10.2f}".format(
-                "Request goodput (req/s):", metrics.request_goodput
-            )
-        )
-    print(
-        "{:<40} {:<10.2f}".format(
-            "Output token throughput (tok/s):", metrics.output_throughput
-        )
-    )
-    print(
-        "{:<40} {:<10.2f}".format(
-            "Total Token throughput (tok/s):", metrics.total_token_throughput
-        )
-    )
+        print("{:<40} {:<10.2f}".format("Request goodput (req/s):",
+                                        metrics.request_goodput))
+    print("{:<40} {:<10.2f}".format("Output token throughput (tok/s):",
+                                    metrics.output_throughput))
+    print("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):",
+                                    metrics.total_token_throughput))
 
     if metrics.accuracy_metrics:
         print("{s:{c}^{n}}".format(s=" Accuracy Metrics ", n=50, c="-"))
         for metric_name, metric_value in metrics.accuracy_metrics.items():
             print("{:<40} {:<10.4f}".format(f"{metric_name}:", metric_value))
-
 
     result = {
         "duration": benchmark_duration,
@@ -673,7 +639,8 @@ async def benchmark(
         "total_input_tokens": metrics.total_input,
         "total_output_tokens": metrics.total_output,
         "request_throughput": metrics.request_throughput,
-        "request_goodput": metrics.request_goodput if goodput_config_dict else None,
+        "request_goodput":
+        metrics.request_goodput if goodput_config_dict else None,
         "output_throughput": metrics.output_throughput,
         "total_token_throughput": metrics.total_token_throughput,
         "accuracy_metrics": metrics.accuracy_metrics,
@@ -701,34 +668,30 @@ async def benchmark(
         if metric_attribute_name not in selected_percentile_metrics:
             return
         print("{s:{c}^{n}}".format(s=metric_header, n=50, c="-"))
-        print(
-            "{:<40} {:<10.2f}".format(
-                f"Mean {metric_name} (ms):",
-                getattr(metrics, f"mean_{metric_attribute_name}_ms"),
-            )
-        )
-        print(
-            "{:<40} {:<10.2f}".format(
-                f"Median {metric_name} (ms):",
-                getattr(metrics, f"median_{metric_attribute_name}_ms"),
-            )
-        )
+        print("{:<40} {:<10.2f}".format(
+            f"Mean {metric_name} (ms):",
+            getattr(metrics, f"mean_{metric_attribute_name}_ms"),
+        ))
+        print("{:<40} {:<10.2f}".format(
+            f"Median {metric_name} (ms):",
+            getattr(metrics, f"median_{metric_attribute_name}_ms"),
+        ))
         result[f"mean_{metric_attribute_name}_ms"] = getattr(
-            metrics, f"mean_{metric_attribute_name}_ms"
-        )
+            metrics, f"mean_{metric_attribute_name}_ms")
         result[f"median_{metric_attribute_name}_ms"] = getattr(
-            metrics, f"median_{metric_attribute_name}_ms"
-        )
+            metrics, f"median_{metric_attribute_name}_ms")
         result[f"std_{metric_attribute_name}_ms"] = getattr(
-            metrics, f"std_{metric_attribute_name}_ms"
-        )
-        for p, value in getattr(metrics, f"percentiles_{metric_attribute_name}_ms"):
+            metrics, f"std_{metric_attribute_name}_ms")
+        for p, value in getattr(metrics,
+                                f"percentiles_{metric_attribute_name}_ms"):
             p_word = str(int(p)) if int(p) == p else str(p)
-            print("{:<40} {:<10.2f}".format(f"P{p_word} {metric_name} (ms):", value))
+            print("{:<40} {:<10.2f}".format(f"P{p_word} {metric_name} (ms):",
+                                            value))
             result[f"p{p_word}_{metric_attribute_name}_ms"] = value
 
     process_one_metric("ttft", "TTFT", "Time to First Token")
-    process_one_metric("tpot", "TPOT", "Time per Output Token (excl. 1st token)")
+    process_one_metric("tpot", "TPOT",
+                       "Time per Output Token (excl. 1st token)")
     process_one_metric("itl", "ITL", "Inter-token Latency")
     process_one_metric("e2el", "E2EL", "End-to-end Latency")
 
@@ -748,14 +711,12 @@ def check_goodput_args(args):
                 raise ValueError(
                     f"Invalid metric name found, {slo_name}: {slo_val}. "
                     "The service level objective name should be one of "
-                    f"{str(VALID_NAMES)}. "
-                )
+                    f"{str(VALID_NAMES)}. ")
             if slo_val < 0:
                 raise ValueError(
                     f"Invalid value found, {slo_name}: {slo_val}. "
                     "The service level objective value should be "
-                    "non-negative."
-                )
+                    "non-negative.")
     return goodput_config_dict
 
 
@@ -770,14 +731,13 @@ def parse_goodput(slo_pairs):
             "Invalid format found for service level objectives. "
             'Specify service level objectives for goodput as "KEY:VALUE" '
             "pairs, where the key is a metric name, and the value is a "
-            "number in milliseconds."
-        ) from err
+            "number in milliseconds.") from err
     return goodput_config_dict
 
 
-def save_to_pytorch_benchmark_format(
-    args: argparse.Namespace, results: dict[str, Any], file_name: str
-) -> None:
+def save_to_pytorch_benchmark_format(args: argparse.Namespace,
+                                     results: dict[str, Any],
+                                     file_name: str) -> None:
     metrics = [
         "median_ttft_ms",
         "mean_ttft_ms",
@@ -797,11 +757,11 @@ def save_to_pytorch_benchmark_format(
     ignored_metrics = ["ttfts", "itls", "generated_texts", "errors"]
     pt_records = convert_to_pytorch_benchmark_format(
         args=args,
-        metrics={k: [results[k]] for k in metrics},
+        metrics={k: [results[k]]
+                 for k in metrics},
         extra_info={
             k: results[k]
-            for k in results
-            if k not in metrics and k not in ignored_metrics
+            for k in results if k not in metrics and k not in ignored_metrics
         },
     )
     if pt_records:
@@ -827,19 +787,18 @@ def main(args: argparse.Namespace):
             raise ValueError(
                 "When using ramp-up, do not specify --request-rate. "
                 "The request rate will be controlled by ramp-up parameters. "
-                "Please remove the --request-rate argument."
-            )
+                "Please remove the --request-rate argument.")
         if args.ramp_up_start_rps is None or args.ramp_up_end_rps is None:
             raise ValueError(
                 "When using --ramp-up-strategy, both --ramp-up-start-rps and "
-                "--ramp-up-end-rps must be specified"
-            )
+                "--ramp-up-end-rps must be specified")
         if args.ramp_up_start_rps < 0 or args.ramp_up_end_rps < 0:
             raise ValueError("Ramp-up start and end RPS must be non-negative")
         if args.ramp_up_start_rps > args.ramp_up_end_rps:
             raise ValueError("Ramp-up start RPS must be less than end RPS")
         if args.ramp_up_strategy == "exponential" and args.ramp_up_start_rps == 0:
-            raise ValueError("For exponential ramp-up, the start RPS cannot be 0.")
+            raise ValueError(
+                "For exponential ramp-up, the start RPS cannot be 0.")
 
     if args.base_url is not None:
         api_url = f"{args.base_url}{args.endpoint}"
@@ -857,8 +816,7 @@ def main(args: argparse.Namespace):
     if args.dataset_name is None:
         raise ValueError(
             "Please specify '--dataset-name' and the corresponding "
-            "'--dataset-path' if required."
-        )
+            "'--dataset-path' if required.")
 
     if args.dataset_name == "custom":
         dataset = CustomDataset(dataset_path=args.dataset_path)
@@ -871,9 +829,8 @@ def main(args: argparse.Namespace):
 
     elif args.dataset_name == "custom-token":
         dataset = CustomTokenDataset(dataset_path=args.dataset_path)
-        input_requests = dataset.sample(
-            tokenizer=tokenizer, num_requests=args.num_prompts
-        )
+        input_requests = dataset.sample(tokenizer=tokenizer,
+                                        num_requests=args.num_prompts)
 
     elif args.dataset_name == "mmlu":
         dataset = MMLUDataset(
@@ -888,9 +845,7 @@ def main(args: argparse.Namespace):
         )
 
     elif args.dataset_name == "mlperf":
-        dataset = MLPerfDataset(
-            dataset_path=args.dataset_path,
-        )
+        dataset = MLPerfDataset(dataset_path=args.dataset_path, )
         input_requests = dataset.sample(
             tokenizer=tokenizer,
             num_requests=args.num_prompts,
@@ -912,8 +867,7 @@ def main(args: argparse.Namespace):
             )
         else:
             assert tokenizer.chat_template or tokenizer.default_chat_template, (
-                "Tokenizer/model must have chat template for sonnet dataset."
-            )
+                "Tokenizer/model must have chat template for sonnet dataset.")
             input_requests = dataset.sample(
                 num_requests=args.num_prompts,
                 input_len=args.sonnet_input_len,
@@ -948,30 +902,25 @@ def main(args: argparse.Namespace):
             dataset_class = ASRDataset
             args.hf_split = "train"
         else:
-            supported_datasets = set(
-                [
-                    dataset_name
-                    for cls in HuggingFaceDataset.__subclasses__()
-                    for dataset_name in cls.SUPPORTED_DATASET_PATHS
-                ]
-            )
+            supported_datasets = set([
+                dataset_name for cls in HuggingFaceDataset.__subclasses__()
+                for dataset_name in cls.SUPPORTED_DATASET_PATHS
+            ])
             raise ValueError(
                 f"Unsupported dataset path: {args.dataset_path}. "
                 "Huggingface dataset only supports dataset_path"
                 f" from one of following: {supported_datasets}. "
                 "Please consider contributing if you would "
-                "like to add support for additional dataset formats."
-            )
+                "like to add support for additional dataset formats.")
 
         if dataset_class.IS_MULTIMODAL and backend not in [
-            "openai-chat",
-            "openai-audio",
+                "openai-chat",
+                "openai-audio",
         ]:
             # multi-modal benchmark is only available on OpenAI Chat backend.
             raise ValueError(
                 "Multi-modal content is only supported on 'openai-chat' and "
-                "'openai-audio' backend."
-            )
+                "'openai-audio' backend.")
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
@@ -987,17 +936,19 @@ def main(args: argparse.Namespace):
     else:
         # For datasets that follow a similar structure, use a mapping.
         dataset_mapping = {
-            "sharegpt": lambda: ShareGPTDataset(
-                random_seed=args.seed, dataset_path=args.dataset_path
-            ).sample(
-                tokenizer=tokenizer,
-                num_requests=args.num_prompts,
-                output_len=args.sharegpt_output_len,
-            ),
-            "burstgpt": lambda: BurstGPTDataset(
-                random_seed=args.seed, dataset_path=args.dataset_path
-            ).sample(tokenizer=tokenizer, num_requests=args.num_prompts),
-            "random": lambda: RandomDataset(dataset_path=args.dataset_path).sample(
+            "sharegpt":
+            lambda: ShareGPTDataset(random_seed=args.seed,
+                                    dataset_path=args.dataset_path).sample(
+                                        tokenizer=tokenizer,
+                                        num_requests=args.num_prompts,
+                                        output_len=args.sharegpt_output_len,
+                                    ),
+            "burstgpt":
+            lambda: BurstGPTDataset(random_seed=args.seed,
+                                    dataset_path=args.dataset_path).
+            sample(tokenizer=tokenizer, num_requests=args.num_prompts),
+            "random":
+            lambda: RandomDataset(dataset_path=args.dataset_path).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
                 prefix_len=args.random_prefix_len,
@@ -1021,8 +972,7 @@ def main(args: argparse.Namespace):
             "top_k": args.top_k,
             "min_p": args.min_p,
             "temperature": args.temperature,
-        }.items()
-        if v is not None
+        }.items() if v is not None
     }
 
     # Sampling parameters are only supported by openai-compatible backend.
@@ -1057,7 +1007,9 @@ def main(args: argparse.Namespace):
             disable_tqdm=args.disable_tqdm,
             profile=args.profile,
             selected_percentile_metrics=args.percentile_metrics.split(","),
-            selected_percentiles=[float(p) for p in args.metric_percentiles.split(",")],
+            selected_percentiles=[
+                float(p) for p in args.metric_percentiles.split(",")
+            ],
             ignore_eos=args.ignore_eos,
             goodput_config_dict=goodput_config_dict,
             max_concurrency=args.max_concurrency,
@@ -1067,8 +1019,7 @@ def main(args: argparse.Namespace):
             ramp_up_strategy=args.ramp_up_strategy,
             ramp_up_start_rps=args.ramp_up_start_rps,
             ramp_up_end_rps=args.ramp_up_end_rps,
-        )
-    )
+        ))
 
     # Save config and results to json
     if args.save_result or args.append_result:
@@ -1093,9 +1044,8 @@ def main(args: argparse.Namespace):
                         "Invalid metadata format. Please use KEY=VALUE format."
                     )
         # Traffic
-        result_json["request_rate"] = (
-            args.request_rate if args.request_rate < float("inf") else "inf"
-        )
+        result_json["request_rate"] = (args.request_rate if args.request_rate
+                                       < float("inf") else "inf")
         result_json["burstiness"] = args.burstiness
         result_json["max_concurrency"] = args.max_concurrency
 
@@ -1110,12 +1060,12 @@ def main(args: argparse.Namespace):
         if not args.save_detailed:
             # Remove fields with too many data points
             for field in [
-                "input_lens",
-                "output_lens",
-                "ttfts",
-                "itls",
-                "generated_texts",
-                "errors",
+                    "input_lens",
+                    "output_lens",
+                    "ttfts",
+                    "itls",
+                    "generated_texts",
+                    "errors",
             ]:
                 if field in result_json:
                     del result_json[field]
@@ -1124,11 +1074,8 @@ def main(args: argparse.Namespace):
 
         # Save to file
         base_model_id = model_id.split("/")[-1]
-        max_concurrency_str = (
-            f"-concurrency{args.max_concurrency}"
-            if args.max_concurrency is not None
-            else ""
-        )
+        max_concurrency_str = (f"-concurrency{args.max_concurrency}"
+                               if args.max_concurrency is not None else "")
         if args.ramp_up_strategy is not None:
             file_name = f"{backend}-ramp-up-{args.ramp_up_strategy}-{args.ramp_up_start_rps}qps-{args.ramp_up_end_rps}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
         else:
@@ -1138,9 +1085,9 @@ def main(args: argparse.Namespace):
         if args.result_dir:
             os.makedirs(args.result_dir, exist_ok=True)
             file_name = os.path.join(args.result_dir, file_name)
-        with open(
-            file_name, mode="a+" if args.append_result else "w", encoding="utf-8"
-        ) as outfile:
+        with open(file_name,
+                  mode="a+" if args.append_result else "w",
+                  encoding="utf-8") as outfile:
             # Append a newline.
             if args.append_result and outfile.tell() != 0:
                 outfile.write("\n")
@@ -1150,8 +1097,7 @@ def main(args: argparse.Namespace):
 
 def create_argument_parser():
     parser = FlexibleArgumentParser(
-        description="Benchmark the online serving throughput."
-    )
+        description="Benchmark the online serving throughput.")
     parser.add_argument(
         "--backend",
         type=str,
@@ -1226,7 +1172,8 @@ def create_argument_parser():
     parser.add_argument(
         "--tokenizer",
         type=str,
-        help="Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
+        help=
+        "Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
     )
     parser.add_argument("--use-beam-search", action="store_true")
     parser.add_argument(
@@ -1239,13 +1186,11 @@ def create_argument_parser():
         "--logprobs",
         type=int,
         default=None,
-        help=(
-            "Number of logprobs-per-token to compute & return as part of "
-            "the request. If unspecified, then either (1) if beam search "
-            "is disabled, no logprobs are computed & a single dummy "
-            "logprob is returned for each token; or (2) if beam search "
-            "is enabled 1 logprob per token is computed"
-        ),
+        help=("Number of logprobs-per-token to compute & return as part of "
+              "the request. If unspecified, then either (1) if beam search "
+              "is disabled, no logprobs are computed & a single dummy "
+              "logprob is returned for each token; or (2) if beam search "
+              "is enabled 1 logprob per token is computed"),
     )
     parser.add_argument(
         "--request-rate",
@@ -1368,12 +1313,14 @@ def create_argument_parser():
         "--custom-output-len",
         type=int,
         default=256,
-        help="Number of output tokens per request, used only for custom dataset.",
+        help=
+        "Number of output tokens per request, used only for custom dataset.",
     )
     custom_group.add_argument(
         "--custom-skip-chat-template",
         action="store_true",
-        help="Skip applying chat template to prompt, used only for custom dataset.",
+        help=
+        "Skip applying chat template to prompt, used only for custom dataset.",
     )
 
     mmlu_group = parser.add_argument_group("mmlu dataset options")
@@ -1396,7 +1343,8 @@ def create_argument_parser():
         "--mlperf-input-len",
         type=int,
         default=1024,
-        help="Number of input tokens per request, used only for mlperf dataset.",
+        help=
+        "Number of input tokens per request, used only for mlperf dataset.",
     )
     mlperf_group.add_argument(
         "--max-model-len",
@@ -1410,19 +1358,22 @@ def create_argument_parser():
         "--sonnet-input-len",
         type=int,
         default=550,
-        help="Number of input tokens per request, used only for sonnet dataset.",
+        help=
+        "Number of input tokens per request, used only for sonnet dataset.",
     )
     sonnet_group.add_argument(
         "--sonnet-output-len",
         type=int,
         default=150,
-        help="Number of output tokens per request, used only for sonnet dataset.",
+        help=
+        "Number of output tokens per request, used only for sonnet dataset.",
     )
     sonnet_group.add_argument(
         "--sonnet-prefix-len",
         type=int,
         default=200,
-        help="Number of prefix tokens per request, used only for sonnet dataset.",
+        help=
+        "Number of prefix tokens per request, used only for sonnet dataset.",
     )
 
     sharegpt_group = parser.add_argument_group("sharegpt dataset options")
@@ -1439,13 +1390,15 @@ def create_argument_parser():
         "--random-input-len",
         type=int,
         default=1024,
-        help="Number of input tokens per request, used only for random sampling.",
+        help=
+        "Number of input tokens per request, used only for random sampling.",
     )
     random_group.add_argument(
         "--random-output-len",
         type=int,
         default=128,
-        help="Number of output tokens per request, used only for random sampling.",
+        help=
+        "Number of output tokens per request, used only for random sampling.",
     )
     random_group.add_argument(
         "--random-range-ratio",
@@ -1460,23 +1413,23 @@ def create_argument_parser():
         "--random-prefix-len",
         type=int,
         default=0,
-        help=(
-            "Number of fixed prefix tokens before the random context "
-            "in a request. "
-            "The total input length is the sum of `random-prefix-len` and "
-            "a random "
-            "context length sampled from [input_len * (1 - range_ratio), "
-            "input_len * (1 + range_ratio)]."
-        ),
+        help=("Number of fixed prefix tokens before the random context "
+              "in a request. "
+              "The total input length is the sum of `random-prefix-len` and "
+              "a random "
+              "context length sampled from [input_len * (1 - range_ratio), "
+              "input_len * (1 + range_ratio)]."),
     )
 
     hf_group = parser.add_argument_group("hf dataset options")
-    hf_group.add_argument(
-        "--hf-subset", type=str, default=None, help="Subset of the HF dataset."
-    )
-    hf_group.add_argument(
-        "--hf-split", type=str, default=None, help="Split of the HF dataset."
-    )
+    hf_group.add_argument("--hf-subset",
+                          type=str,
+                          default=None,
+                          help="Subset of the HF dataset.")
+    hf_group.add_argument("--hf-split",
+                          type=str,
+                          default=None,
+                          help="Split of the HF dataset.")
     hf_group.add_argument(
         "--hf-output-len",
         type=int,
@@ -1490,19 +1443,22 @@ def create_argument_parser():
         "--top-p",
         type=float,
         default=None,
-        help="Top-p sampling parameter. Only has effect on openai-compatible backends.",
+        help=
+        "Top-p sampling parameter. Only has effect on openai-compatible backends.",
     )
     sampling_group.add_argument(
         "--top-k",
         type=int,
         default=None,
-        help="Top-k sampling parameter. Only has effect on openai-compatible backends.",
+        help=
+        "Top-k sampling parameter. Only has effect on openai-compatible backends.",
     )
     sampling_group.add_argument(
         "--min-p",
         type=float,
         default=None,
-        help="Min-p sampling parameter. Only has effect on openai-compatible backends.",
+        help=
+        "Min-p sampling parameter. Only has effect on openai-compatible backends.",
     )
     sampling_group.add_argument(
         "--temperature",

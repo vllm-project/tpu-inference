@@ -18,9 +18,6 @@ set -euo pipefail
 readonly EXIT_SUCCESS=0
 readonly EXIT_FAILURE=1
 
-# Record the exact start time in a format journalctl understands.
-SCRIPT_START_TIME=$(date +"%Y-%m-%d %H:%M:%S")
-
 #
 # Check input argument
 #
@@ -35,8 +32,8 @@ echo "Record ID: $RECORD_ID"
 # Note: Removed the failure log upload feature. These logs are now accessible directly via the Buildkite interface.
 
 if [ -z "$RECORD_ID" ] || [ "$RECORD_ID" == "null" ]; then
-  echo "Invalid or missing record_id. Skipping message without ack."
-  continue
+  echo "Invalid or missing record_id."
+  exit 1
 fi
 
 echo "--- Verifying Submodule Commit"
@@ -83,6 +80,7 @@ echo "Creating running config..."
 ENV_FILE="artifacts/${RECORD_ID}.env"
 if [ -f "$ENV_FILE" ]; then
   set -a
+  # shellcheck source=/dev/null
   source "$ENV_FILE"
   set +a
 else

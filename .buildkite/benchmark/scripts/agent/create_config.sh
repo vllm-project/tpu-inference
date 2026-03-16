@@ -68,7 +68,7 @@ echo "$JSON_OUTPUT" | jq -r '
 ' > "$ENV_FILE_TMP"
 
 echo "Temp Environment file: "
-cat $ENV_FILE_TMP
+cat "$ENV_FILE_TMP"
 
 # Process EXTRA_ENVS line
 EXTRA_ENVS_LINE=$(grep '^EXTRA_ENVS=' "$ENV_FILE_TMP")
