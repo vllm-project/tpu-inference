@@ -50,7 +50,7 @@ if [ -z "${BUILDKITE_COMMIT:-}" ]; then
     exit 1
 fi
 
-git add .test_durations
+git add .buildkite/.test_durations
 
 # --- Check for changes before committing ---
 if git diff --quiet --cached; then
