@@ -46,7 +46,7 @@ steps:
     soft_fail: true
     env:
       TEST_MODEL: Qwen/Qwen3-32B
-      TENSOR_PARALLEL_SIZE: ${TENSOR_PARALLEL_SIZE_MULTI:-8}
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
       MINIMUM_ACCURACY_THRESHOLD: 0.74
     commands:
       - |
@@ -73,7 +73,7 @@ steps:
     soft_fail: true
     env:
       TEST_MODEL: Qwen/Qwen3-32B
-      TENSOR_PARALLEL_SIZE: ${TENSOR_PARALLEL_SIZE_MULTI:-8}
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
       MINIMUM_THROUGHPUT_THRESHOLD: 12.46
       INPUT_LEN: 1800
       OUTPUT_LEN: 128

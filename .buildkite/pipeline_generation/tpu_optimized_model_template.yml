@@ -45,9 +45,9 @@ steps:
     env:
       TEST_MODEL: {MODEL_NAME}
       # TODO: If you change the queue to multi-host, update TENSOR_PARALLEL_SIZE to use TENSOR_PARALLEL_SIZE_MULTI.
-      # e.g., TENSOR_PARALLEL_SIZE: ${{TENSOR_PARALLEL_SIZE_MULTI:-8}}
+      # e.g., TENSOR_PARALLEL_SIZE: "${{TENSOR_PARALLEL_SIZE_MULTI:-8}}"
       # The default values are for tpu6e. For tpu7x, set: export TENSOR_PARALLEL_SIZE_SINGLE=2, export TENSOR_PARALLEL_SIZE_MULTI=8
-      TENSOR_PARALLEL_SIZE: ${{TENSOR_PARALLEL_SIZE_SINGLE:-1}}
+      TENSOR_PARALLEL_SIZE: "${{TENSOR_PARALLEL_SIZE_SINGLE:-1}}"
       MINIMUM_ACCURACY_THRESHOLD: 0  # TODO : replace 0 with your accuracy threshold
     commands:
       - |
@@ -75,9 +75,9 @@ steps:
     env:
       TEST_MODEL: {MODEL_NAME}
       # TODO: If you change the queue to multi-host, update TENSOR_PARALLEL_SIZE to use TENSOR_PARALLEL_SIZE_MULTI.
-      # e.g., TENSOR_PARALLEL_SIZE: ${{TENSOR_PARALLEL_SIZE_MULTI:-8}}
+      # e.g., TENSOR_PARALLEL_SIZE: "${{TENSOR_PARALLEL_SIZE_MULTI:-8}}"
       # The default values are for tpu6e. For tpu7x, set: export TENSOR_PARALLEL_SIZE_SINGLE=2, export TENSOR_PARALLEL_SIZE_MULTI=8
-      TENSOR_PARALLEL_SIZE: ${{TENSOR_PARALLEL_SIZE_SINGLE:-1}}
+      TENSOR_PARALLEL_SIZE: "${{TENSOR_PARALLEL_SIZE_SINGLE:-1}}"
       MINIMUM_THROUGHPUT_THRESHOLD: 0  # TODO : replace 0 with your performance threshold
     commands:
       - |
