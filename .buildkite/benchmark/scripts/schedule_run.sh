@@ -161,7 +161,7 @@ while read -r line || [ -n "${line}" ]; do
   # Publishing to Buildkite step (main parameter: $RECORD_ID)
   # For each line in csv file, generate a command step
   pipeline_yaml=$(cat <<EOF
-- label: "Benchmark - ${MODEL}-${DATASET}-i_${INPUT_LEN}-o_${OUTPUT_LEN} RecordId: ${RECORD_ID}"
+- label: "Benchmark - ${MODEL}-datset_${DATASET}-inlen_${INPUT_LEN}-outlen_${OUTPUT_LEN} RecordId: ${RECORD_ID}"
   depends_on: "build-vllm-tpu-image"
   env:
     BUILDKITE_GIT_SUBMODULES: "true"
