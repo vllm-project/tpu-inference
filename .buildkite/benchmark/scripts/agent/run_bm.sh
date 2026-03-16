@@ -54,12 +54,12 @@ if [ -n "$TARGET_COMMIT" ]; then
   resolved_target=$(git rev-parse "$TARGET_COMMIT" 2>/dev/null)
 
   if [ -z "$resolved_target" ]; then
-    echo "Error: target commit '$TARGET_COMMIT' is not a valid Git object" | tee -a $VLLM_LOG
+    echo "Error: target commit '$TARGET_COMMIT' is not a valid Git object" | tee -a "$VLLM_LOG"
     exit 1
   fi
 
   if [ "$resolved_target" != "$head_hash" ]; then
-    echo "Error: target commit '$TARGET_COMMIT' does not match HEAD: $head_hash" | tee -a $VLLM_LOG
+    echo "Error: target commit '$TARGET_COMMIT' does not match HEAD: $head_hash" | tee -a "$VLLM_LOG"
     exit 1
   fi
 fi
@@ -78,10 +78,12 @@ contains_element () {
 # Run accuracy benchmark via lm_eval
 if contains_element "$DATASET" "${LM_EVAL_DATASETS[@]}"; then
   echo "DATASET ($DATASET) is an accuracy benchmark. Running lm_eval path."
-  /workspace/lm_eval/$DATASET/run.sh >> /workspace/bm_log.txt
-  printf "AccuracyMetrics: " >> /workspace/bm_log.txt
-  cat "/workspace/${DATASET}_accuracy.json" | tr -d '\n' >> /workspace/bm_log.txt
-  echo "" >> /workspace/bm_log.txt
+  {
+    "/workspace/lm_eval/$DATASET/run.sh"
+    printf "AccuracyMetrics: "
+    tr -d '\n' < "/workspace/${DATASET}_accuracy.json"
+    echo ""
+  } >> /workspace/bm_log.txt
   echo "Finished running $DATASET benchmark."
   exit 0
 fi
@@ -157,7 +159,7 @@ eval "$VLLM_ENVS vllm serve $MODEL \
 
 echo "wait for 60 minutes.."
 echo
-for i in {1..360}; do
+for _ in {1..360}; do
     # TODO: detect other type of errors.
     if grep -Fq "raise RuntimeError" "$VLLM_LOG"; then
         echo "Detected RuntimeError, exiting."
@@ -175,10 +177,10 @@ EXPECTED_ETEL=${EXPECTED_ETEL:-3600000}
 NUM_PROMPTS=${NUM_PROMPTS:-1000}
 PREFIX_LEN=${PREFIX_LEN:-0}
 
-PROFILE_FLAG=""
+PROFILE_FLAG=()
 # Check if the PROFILE variable is numerically equal to 1
 if [[ "${PROFILE:-0}" -eq 1 ]]; then
-  PROFILE_FLAG="--profile"
+  PROFILE_FLAG=("--profile")
 fi
 
 run_benchmark(){
@@ -205,7 +207,7 @@ run_benchmark(){
     --num-prompts "$NUM_PROMPTS"
     --percentile-metrics "ttft,tpot,itl,e2el"
     --ignore-eos
-    $PROFILE_FLAG
+    "${PROFILE_FLAG[@]}"
   )
 
   # Dataset-specific arguments
@@ -238,7 +240,8 @@ run_benchmark(){
       ;;
     bench-custom-mm)
       DATA_DIR="$WORKSPACE/dataset/${MODEL##*/}"
-      local dataset_files=($(find "$DATA_DIR" -name "inlen${INPUT_LEN}_outlen${OUTPUT_LEN}_prefixlen${PREFIX_LEN}*.jsonl"))
+      local dataset_files=()
+      mapfile -d $'\0' dataset_files < <(find "$DATA_DIR" -name "inlen${INPUT_LEN}_outlen${OUTPUT_LEN}_prefixlen${PREFIX_LEN}*.jsonl" -print0)
       if [ ${#dataset_files[@]} -ne 1 ]; then
         echo "Error: Found ${#dataset_files[@]} matching datasets in $DATA_DIR, but expected 1."
         echo "Matching files:"
@@ -286,7 +289,7 @@ run_benchmark(){
   echo "$throughput $p99_e2el"
 }
 
-read throughput p99_e2el < <(run_benchmark "inf" | tail -n 1)
+read -r throughput p99_e2el < <(run_benchmark "inf" | tail -n 1)
 
 echo "throughput:$throughput"
 echo "p99_e2el:$p99_e2el"
@@ -319,7 +322,7 @@ while (( high - low > 0 )); do
   mid=$(( (low + high + 1) / 2 ))
   echo "Trying request_rate=$mid"
 
-  read throughput p99_e2el < <(run_benchmark "$mid" | tail -n 1)
+  read -r throughput p99_e2el < <(run_benchmark "$mid" | tail -n 1)
 
   # Convert p99_e2el to integer
   p99_int=$(printf "%.0f" "$p99_e2el")

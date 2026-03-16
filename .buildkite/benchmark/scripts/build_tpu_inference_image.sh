@@ -20,7 +20,7 @@ CODE_HASH=$2
 
 IMAGE_TAG="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$ARTIFACT_REPO/vllm-tpu:$CODE_HASH"
 
-gcloud auth configure-docker $GCP_REGION-docker.pkg.dev --quiet
+gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 echo "Image tag: $IMAGE_TAG"
 
 # Check if image exists remotely
@@ -41,7 +41,7 @@ cleanup_image() {
 VLLM_TARGET_DEVICE=tpu DOCKER_BUILDKIT=1 docker build \
 --build-arg BASE_IMAGE="python:3.12-slim-bookworm" \
 --build-arg VLLM_COMMIT_HASH="$VLLM_COMMIT_HASH" \
---tag $IMAGE_TAG \
+--tag "$IMAGE_TAG" \
 --no-cache -f "docker/Dockerfile" .
 
 trap cleanup_image EXIT

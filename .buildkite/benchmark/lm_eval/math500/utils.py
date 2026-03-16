@@ -17,7 +17,6 @@ from typing import Dict, List
 
 import datasets
 
-
 try:
     import re
     import signal
@@ -30,7 +29,6 @@ except ModuleNotFoundError:
         "`math-verify`, `sympy>=1.12`, and antlr4-python3-runtime==4.11 is required for generating translation task prompt templates. \nplease install via pip install lm-eval[math] or pip install -e .[math]",
     )
 
-
 INVALID_ANSWER = "[invalidanswer]"
 
 
@@ -41,6 +39,7 @@ def doc_to_text(doc: dict) -> str:
 
 
 def process_docs(dataset: datasets.Dataset) -> datasets.Dataset:
+
     def _process_doc(doc: dict) -> dict:
         out_doc = {
             "problem": doc["problem"],
@@ -57,23 +56,29 @@ def process_docs(dataset: datasets.Dataset) -> datasets.Dataset:
 def list_fewshot_samples() -> list[dict]:
     return [
         {
-            "problem": r"""Find the domain of the expression  $\frac{\sqrt{x-2}}{\sqrt{5-x}}$
+            "problem":
+            r"""Find the domain of the expression  $\frac{\sqrt{x-2}}{\sqrt{5-x}}$
 .}""",
-            "solution": r"""The expressions inside each square root must be non-negative. Therefore, $x-2 \ge 0$, so $x\ge2$, and $5 - x \ge 0$, so $x \le 5$. Also, the denominator cannot be equal to zero, so $5-x>0$, which gives $x<5$. Therefore, the domain of the expression is $\boxed{[2,5)}$.
+            "solution":
+            r"""The expressions inside each square root must be non-negative. Therefore, $x-2 \ge 0$, so $x\ge2$, and $5 - x \ge 0$, so $x \le 5$. Also, the denominator cannot be equal to zero, so $5-x>0$, which gives $x<5$. Therefore, the domain of the expression is $\boxed{[2,5)}$.
 Final Answer: The final answer is $[2,5)$. I hope it is correct.""",
             "few_shot": "1",
             "level": "Level 5",
         },
         {
-            "problem": r"""If $\det \mathbf{A} = 2$ and $\det \mathbf{B} = 12,$ then find $\det (\mathbf{A} \mathbf{B}).$""",
-            "solution": r"""We have that $\det (\mathbf{A} \mathbf{B}) = (\det \mathbf{A})(\det \mathbf{B}) = (2)(12) = \boxed{24}.$
+            "problem":
+            r"""If $\det \mathbf{A} = 2$ and $\det \mathbf{B} = 12,$ then find $\det (\mathbf{A} \mathbf{B}).$""",
+            "solution":
+            r"""We have that $\det (\mathbf{A} \mathbf{B}) = (\det \mathbf{A})(\det \mathbf{B}) = (2)(12) = \boxed{24}.$
 Final Answer: The final answer is $24$. I hope it is correct.""",
             "few_shot": "1",
             "level": "Level 5",
         },
         {
-            "problem": r"""Terrell usually lifts two 20-pound weights 12 times. If he uses two 15-pound weights instead, how many times must Terrell lift them in order to lift the same total weight?""",
-            "solution": r"""If Terrell lifts two 20-pound weights 12 times, he lifts a total of $2\cdot 12\cdot20=480$ pounds of weight.  If he lifts two 15-pound weights instead for $n$ times, he will lift a total of $2\cdot15\cdot n=30n$ pounds of weight.  Equating this to 480 pounds, we can solve for $n$: 
+            "problem":
+            r"""Terrell usually lifts two 20-pound weights 12 times. If he uses two 15-pound weights instead, how many times must Terrell lift them in order to lift the same total weight?""",
+            "solution":
+            r"""If Terrell lifts two 20-pound weights 12 times, he lifts a total of $2\cdot 12\cdot20=480$ pounds of weight.  If he lifts two 15-pound weights instead for $n$ times, he will lift a total of $2\cdot15\cdot n=30n$ pounds of weight.  Equating this to 480 pounds, we can solve for $n$: 
 \begin{align*}
 30n&=480\\ \Rightarrow\qquad n&=480/30=\boxed{16}
 \end{align*}
@@ -90,7 +95,8 @@ Final Answer: The final answer is $16$. I hope it is correct.""",
 \end{align*}
 has a solution $(x, y)$ where $x$ and $y$ are both nonzero,
 find $\frac{a}{b},$ assuming $b$ is nonzero.""",
-            "solution": r"""If we multiply the first equation by $-\frac{3}{2}$, we obtain
+            "solution":
+            r"""If we multiply the first equation by $-\frac{3}{2}$, we obtain
 
 $$6y-9x=-\frac{3}{2}a.$$
 Since we also know that $6y-9x=b$, we have
@@ -106,7 +112,8 @@ Final Answer: The final answer is $-\frac{2}{3}$. I hope it is correct.""",
 def process_results(doc: dict, results: List[str]) -> Dict[str, int]:
     candidates = results[0]
     parsed_candidate = parse(candidates)
-    parsed_answer = parse(doc["solution"], extraction_config=[LatexExtractionConfig()])
+    parsed_answer = parse(doc["solution"],
+                          extraction_config=[LatexExtractionConfig()])
     if verify(parsed_answer, parsed_candidate):
         retval = 1
     else:
@@ -131,7 +138,8 @@ def process_result_v1(doc: dict, candidates: str) -> int:
     normalized_gold = normalize_final_answer(doc["answer"])
     if answer == INVALID_ANSWER:
         return 0
-    if answer.strip() == normalized_gold.strip() or is_equiv(answer, normalized_gold):
+    if answer.strip() == normalized_gold.strip() or is_equiv(
+            answer, normalized_gold):
         retval = 1
     else:
         retval = 0
@@ -163,7 +171,7 @@ def last_boxed_only_string(string: str) -> str:
     if right_brace_idx is None:
         retval = INVALID_ANSWER
     else:
-        retval = string[idx : right_brace_idx + 1]
+        retval = string[idx:right_brace_idx + 1]
 
     return retval
 
@@ -172,19 +180,20 @@ def remove_boxed(s: str) -> str:
     try:
         if "\\boxed " in s:
             left = "\\boxed "
-            assert s[: len(left)] == left
-            return s[len(left) :]
+            assert s[:len(left)] == left
+            return s[len(left):]
 
         left = "\\boxed{"
 
-        assert s[: len(left)] == left
+        assert s[:len(left)] == left
         assert s[-1] == "}"
-        return s[len(left) : -1]
+        return s[len(left):-1]
     except AssertionError:
         return INVALID_ANSWER
 
 
 class timeout:
+
     def __init__(self, seconds=1, error_message="Timeout"):
         self.seconds = seconds
         self.error_message = error_message
@@ -211,9 +220,9 @@ def is_equiv(x1: str, x2: str) -> bool:
                 parsed_x1 = parse_latex(x1)
                 parsed_x2 = parse_latex(x2)
             except (
-                sympy.parsing.latex.errors.LaTeXParsingError,
-                sympy.SympifyError,
-                TypeError,
+                    sympy.parsing.latex.errors.LaTeXParsingError,
+                    sympy.SympifyError,
+                    TypeError,
             ):
                 eval_logger.debug(f"couldn't parse one of {x1} or {x2}")
                 return False
@@ -242,6 +251,7 @@ def is_equiv(x1: str, x2: str) -> bool:
     except Exception as e:
         eval_logger.debug(f"Failed comparing {x1} and {x2} with {e}")
         return False
+
 
 def get_unnormalized_answer(text: str) -> str:
     end_seq = "I hope it is correct."
@@ -351,4 +361,3 @@ def normalize_final_answer(final_answer: str) -> str:
         final_answer = final_answer.replace(",", "")
 
     return final_answer
-    
