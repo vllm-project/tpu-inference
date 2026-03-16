@@ -93,7 +93,6 @@ steps:
    - label: "Upload pytest duration artifact"
      if: build.env("NIGHTLY") == "1"     
      key: unit_test_duration
-     artifact_paths: .test_durations
      agents:
        queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
      secrets:
