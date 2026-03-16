@@ -42,7 +42,7 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_Accuracy"
     depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen2_5-VL-7B-Instruct_UnitTest"
     agents:
-      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     soft_fail: true
     env:
       TEST_MODEL: Qwen/Qwen2.5-VL-7B-Instruct
