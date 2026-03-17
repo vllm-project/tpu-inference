@@ -199,6 +199,21 @@ docker cp "$CONTAINER_NAME:/workspace/bm_log.txt" "$BM_LOG"
 docker cp "$CONTAINER_NAME:/workspace/profile/plugins/profile" "$PROFILE_FOLDER"
 docker cp "$CONTAINER_NAME:/workspace/failed_output.json" "$LOG_ROOT/failed_output.json" || true
 
+# Upload vllm and bm log to Buildkite aritfact
+ARTIFACT_VLLM="${RECORD_ID}_vllm_log.txt"
+ARTIFACT_BM="${RECORD_ID}_bm_log.txt"
+
+echo "Preparing Buildkite artifacts..."
+cp "$VLLM_LOG" "$ARTIFACT_VLLM"
+cp "$BM_LOG" "$ARTIFACT_BM"
+
+echo "Uploading artifacts to Buildkite..."
+buildkite-agent artifact upload "$ARTIFACT_VLLM"
+buildkite-agent artifact upload "$ARTIFACT_BM"
+
+echo "Cleaning up temporary artifact files..."
+rm -f "$ARTIFACT_VLLM" "$ARTIFACT_BM"
+
 echo "gsutil cp $LOG_ROOT/* $REMOTE_LOG_ROOT"
 gsutil cp -r "$LOG_ROOT"/* "$REMOTE_LOG_ROOT"
 
