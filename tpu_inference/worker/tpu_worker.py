@@ -383,7 +383,8 @@ class TPUWorker(WorkerBase):
         # violates the pure abstract contract of the base class. This is a
         # deliberate, temporary compromise for the same reasons outlined in
         # the `get_kv_cache_spec` method.
-
+        if self.step_counter == 1:
+           self.profile(is_start=True)
         if self.parallel_config.pipeline_parallel_size == 1 or self.rank == 0:
             intermediate_tensors = None
         else:
@@ -412,6 +413,8 @@ class TPUWorker(WorkerBase):
             return None
         else:
             self.step_counter += 1
+            if self.step_counter == 10:
+               self.profile(is_start=False)
             # With a connector, the scheduler expects output from all workers
             # TODO(mrjunwan): Figure out if this is ok after https://github.com/vllm-project/vllm/pull/26866
             if has_kv_transfer_group():
@@ -432,7 +435,7 @@ class TPUWorker(WorkerBase):
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
             options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
-            options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 1)
+            options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 2)
             jax.profiler.start_trace(self.profile_dir,
                                      profiler_options=options)
         else:
