@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     USE_UNFUSED_MEGABLOCKS: bool = False
     USE_DENSE_MOE: bool = False
     NUM_SLICES: int = 1
-    RAY_USAGE_STATS_ENABLED: str = "0"
+    RAY_USAGE_STATS_ENABLED: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "shm"
     ENABLE_QUANTIZED_MATMUL_KERNEL: bool = False
     REQUANTIZE_BLOCK_SIZE: int | None = None
@@ -32,6 +32,8 @@ if TYPE_CHECKING:
     MOE_REQUANTIZE_BLOCK_SIZE: int | None = None
     MOE_REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
     LAYOUT_Q_PROJ_AS_NDH: bool = False
+    USE_JAX_PROFILER_SERVER: bool = False
+    JAX_PROFILER_SERVER_PORT: int = 9999
 
 
 def env_with_choices(
@@ -108,7 +110,7 @@ def env_bool(env_name: str, default: bool = False) -> Callable[[], bool]:
 environment_variables: dict[str, Callable[[], Any]] = {
     # JAX platform selection (e.g., "tpu", "cpu", "proxy")
     "JAX_PLATFORMS":
-    lambda: os.getenv("JAX_PLATFORMS", "").lower(),
+    env_with_choices("JAX_PLATFORMS", "", ["", "tpu", "cpu", "proxy"]),
     # TPU accelerator type (e.g., "v5litepod-16", "v4-8")
     "TPU_ACCELERATOR_TYPE":
     lambda: os.getenv("TPU_ACCELERATOR_TYPE", None),
@@ -165,12 +167,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("NUM_SLICES") or "1"),
     # Enable/disable Ray usage statistics collection
     "RAY_USAGE_STATS_ENABLED":
-    lambda: os.getenv("RAY_USAGE_STATS_ENABLED", "0"),
+    env_bool("RAY_USAGE_STATS_ENABLED"),
     # Ray compiled DAG channel type for TPU
     "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE":
     env_with_choices("VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "shm", ["shm"]),
     "ENABLE_QUANTIZED_MATMUL_KERNEL":
-    lambda: bool(int(os.getenv("ENABLE_QUANTIZED_MATMUL_KERNEL") or "0")),
+    env_bool("ENABLE_QUANTIZED_MATMUL_KERNEL"),
     # Specify block quantization size
     "REQUANTIZE_BLOCK_SIZE":
     lambda: int(block_size) if
@@ -188,7 +190,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # dictates whether to layout q-proj as NDH (q-heads, model dim, head dim)
     # or DNH (model dim, q-heads, head dim), which is the default (False)
     "LAYOUT_Q_PROJ_AS_NDH":
-    lambda: bool(int(os.getenv("LAYOUT_Q_PROJ_AS_NDH") or "0")),
+    env_bool("LAYOUT_Q_PROJ_AS_NDH"),
+    "USE_JAX_PROFILER_SERVER":
+    env_bool("USE_JAX_PROFILER_SERVER"),
+    "JAX_PROFILER_SERVER_PORT":
+    lambda: int(os.getenv("JAX_PROFILER_SERVER_PORT") or "9999"),
 }
 
 
