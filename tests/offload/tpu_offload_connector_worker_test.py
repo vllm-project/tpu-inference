@@ -575,3 +575,120 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
             self.assertListEqual(
                 dst_chunks,
                 worker.offload_stats.data["finished_load_chunks"][req_id])
+
+    def test_tpu_connector_save_async(self):
+        """
+        Verify that the worker can handle an asynchronous save request
+        and is_ready check for CPU backend chunks
+        """
+        # 1. Setup
+        connector = self._create_connector(swap_op_type="jax")
+        worker = connector.connector_worker
+
+        # 2. Induce a mock latency
+        @jax.jit
+        def _busy_tpu_delay_kernel(cache, iterations=5000000):
+
+            def body_fun(_, val):
+                return val + 1
+
+            # jax.lax.fori_loop is compiled to a hardware loop on the TPU.
+            delay_val = jax.lax.fori_loop(0, iterations, body_fun, 0)
+
+            # This 'anchor' (x + (delay_val - delay_val)) creates a physical
+            # hardware dependency. The TPU cannot mark 'cache' as ready until
+            # the 'delay_val' math is finished, forcing any subsequent tasks
+            # (like our Save) to wait in the hardware queue.
+            return jax.tree.map(lambda x: x + (delay_val - delay_val), cache)
+
+        def busy_tpu_delay(cache, iterations=5000000):
+            logger.info(
+                f"Dispatching busy_tpu_delay with {iterations} iterations...")
+            start_dispatch = time.time()
+            result = _busy_tpu_delay_kernel(cache, iterations)
+            duration = time.time() - start_dispatch
+            logger.info(f"Dispatch finished in {duration:.6f}s (Python-side).")
+            return result
+
+        # Capture baseline ground truth on host before any modifications.
+        src_kv_cache_baseline = [np.array(c) for c in worker.runner.kv_caches]
+
+        # Dispatch the latency loop. Note: This is ASYNCHRONOUS. Python returns
+        # immediately, but the TPU starts grinding through the loop in the background.
+        worker.runner.kv_caches = busy_tpu_delay(worker.runner.kv_caches)
+
+        # 3. Submit Save Request
+        req_id = "real_async_req"
+        src_blocks = [0]
+        dst_chunks = [20]
+        save_spec = SaveSpec(
+            num_skip_leading_tokens=0,
+            num_total_tokens=self.block_size,
+            is_final_save=False,
+            skip_save=False,
+            src_blocks=src_blocks,
+            dst_chunks=dst_chunks,
+        )
+        req_meta = TPUReqMeta(
+            req_id=req_id,
+            token_ids=list(range(self.block_size)),
+            local_block_ids=src_blocks,
+            save_spec=save_spec,
+        )
+        metadata = TPUOffloadConnectorMetadata(requests_meta=[req_meta])
+        connector.bind_connector_metadata(metadata)
+
+        logger.info("Starting worker start_save_kv")
+        worker.start_save_kv()
+
+        # 5. First Poll (Testing the "Still Busy" state)
+        # _process_completed_saves() performs a non-blocking check:
+        # a) future.done(): Is the background Python thread finished dispatching?
+        # b) is_ready(): Is the TPU hardware finished moving the bytes?
+        # In this first poll, the save should NOT be finalized because it is
+        # still busy with the latency loop.
+        worker._process_completed_saves()
+        self.assertEmpty(worker.offload_stats.data["finished_save_chunks"])
+
+        # 6. Wait for Hardware and Thread Completion
+        # jax.block_until_ready(cache) forces the CPU (this test thread) to
+        # stop and wait until the TPU finishes the 'busy_tpu_delay' loop.
+        logger.info(
+            "Blocking until latency loop and DMA are ready on hardware...")
+        sync_start = time.time()
+        jax.block_until_ready(worker.runner.kv_caches)
+        sync_duration = time.time() - sync_start
+        logger.info(f"Hardware sync took {sync_duration:.4f} seconds.")
+
+        # 7. Final Polling Loop
+        # We poll until _process_completed_saves identifies that:
+        # 1. The background thread finished (future.done() == True)
+        # 2. The DMA transfer is complete (is_ready() == True)
+        max_retries = 100
+        while len(worker._pending_save_futures) > 0 and max_retries > 0:
+            worker._process_completed_saves()
+            if len(worker._pending_save_futures) > 0:
+                logger.info(
+                    f"Save not completed yet, pending futures: {len(worker._pending_save_futures)}. Retrying..."
+                )
+                time.sleep(0.01)
+            max_retries -= 1
+
+        if max_retries == 0:
+            self.fail(
+                f"Test timed out waiting for async save '{req_id}' to complete. "
+                f"Pending futures: {len(worker._pending_save_futures)}")
+
+        self.assertIn(req_id,
+                      worker.offload_stats.data["finished_save_chunks"])
+        self.assertEqual(len(worker._pending_save_futures), 0)
+
+        # 8. CPU KV Chunk content verification
+        for src_block_id, cpu_chunk_id in zip(src_blocks, dst_chunks):
+            cpu_val = np.array(worker.cpu_backend.get(cpu_chunk_id))
+            if len(cpu_val.shape) == 6:
+                cpu_val = np.squeeze(cpu_val, axis=0)
+
+            for layer in range(self.num_layers):
+                self.assertArraysEqual(
+                    src_kv_cache_baseline[layer][src_block_id], cpu_val[layer])
