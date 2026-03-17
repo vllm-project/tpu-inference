@@ -20,9 +20,7 @@ from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference.kernels.megablox.gmm import gmm
-from tpu_inference.kernels.megablox.gmm_v2 import (gmm_v2,
-                                                   is_supported_by_gmm_v2)
+from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
 
@@ -42,6 +40,8 @@ def apply_act_fn(activation: str, x1: jax.Array, x2: jax.Array) -> jax.Array:
     match activation:
         case "silu":
             return jax.nn.silu(x1) * x2
+        case "gelu":
+            return jax.nn.gelu(x1) * x2
         case "swigluoai":
             return _swigluoai(x1, x2)
         case _:
@@ -63,30 +63,17 @@ def _swigluoai(x1: jax.Array,
 
 def gmm_wrapper(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset,
                 last_gmm):
-    if is_supported_by_gmm_v2(rhs_scale):
-        gmm_res = gmm_v2(
-            lhs=lhs,
-            rhs=rhs,
-            rhs_scale=rhs_scale,
-            rhs_bias=rhs_bias,
-            group_sizes=group_sizes,
-            group_offset=group_offset[0],
-            # If it's last gmm, we need to zero out unvisited rows because it would
-            # cause numeric error during final reduce if the rows are unitialized.
-            zero_initialize=last_gmm,
-        )
-    else:
-        gmm_res = gmm(
-            lhs=lhs,
-            rhs=rhs,
-            rhs_scale=rhs_scale,
-            rhs_bias=rhs_bias,
-            group_sizes=group_sizes,
-            preferred_element_type=lhs.dtype,
-            tiling=None,
-            group_offset=group_offset[0],
-        )
-
+    gmm_res = gmm_v2(
+        lhs=lhs,
+        rhs=rhs,
+        rhs_scale=rhs_scale,
+        rhs_bias=rhs_bias,
+        group_sizes=group_sizes,
+        group_offset=group_offset[0],
+        # If it's last gmm, we need to zero out unvisited rows because it would
+        # cause numeric error during final reduce if the rows are unitialized.
+        zero_initialize=last_gmm,
+    )
     return gmm_res
 
 
@@ -193,7 +180,7 @@ def tensor_parallel_gmm(
             w2_scale_spec,
             w2_bias_spec,
             data_p_spec,
-            data_p_spec,
+            P(),
             data_p_spec,
             data_p_spec,
         ),

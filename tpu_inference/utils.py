@@ -20,6 +20,7 @@ from vllm import envs as vllm_envs
 from vllm import utils
 
 from tpu_inference import envs
+from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.logger import init_logger
 
 GBYTES = 1024 * 1024 * 1024
@@ -269,7 +270,11 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
     # for non-power-of-two device counts (e.g., DP=6) to bypass strict
     # hardware topology constraints that would otherwise cause an AssertionError.
     try:
-        return jax.make_mesh(axis_shapes, axis_names, devices=devices)
+        axis_types = (mesh_lib.AxisType.Auto, ) * len(axis_shapes)
+        return jax.make_mesh(axis_shapes,
+                             axis_names,
+                             axis_types,
+                             devices=devices)
     except (AssertionError, ValueError, RuntimeError) as e:
         logger.warning(
             "jax.make_mesh failed due to topology constraints. Falling back to manual mesh: %s",
@@ -284,16 +289,16 @@ def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
 
     Args:
         mesh: The JAX mesh to use for device placement
-        *args: Positional arguments to pass to jax.device_put
+        *args: Positional arguments to pass to general_device_put
         sharding: Optional sharding specification. If None, uses PartitionSpec(None)
-        **kwargs: Keyword arguments to pass to jax.device_put
+        **kwargs: Keyword arguments to pass to general_device_put
 
     Returns:
         A JAX array placed on the specified devices
     """
     if sharding is None:
         sharding = NamedSharding(mesh, PartitionSpec(None))
-    return jax.device_put(*args, device=sharding, **kwargs)
+    return general_device_put(*args, sharding=sharding, **kwargs)
 
 
 def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:

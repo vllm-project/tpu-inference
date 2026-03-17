@@ -17,48 +17,83 @@ import sys
 from enum import Enum
 from pathlib import Path
 
-from constant import QUEUE_TO_TENSOR_PARALLEL_SIZE_MAP
-
 SCRIPT_DIR = Path(__file__).resolve().parent
-TEMPLATE_PATH = SCRIPT_DIR / "feature_template.yml"
-OUTPUT_DIR = SCRIPT_DIR.parent / "features"
 
 
 class FeatureCategory(str, Enum):
-    FEATURE_SUPPORT = "feature support matrix"
-    KERNEL_SUPPORT = "kernel support matrix"
-    KERNEL_SUPPORT_MICROBENCHMARKS = "kernel support matrix (microbenchmarks)"
+    FEATURE = "feature support matrix"
+    KERNEL = "kernel support matrix"
+    PARALLELISM = "parallelism support matrix"
+    QUANTIZATION = "quantization support matrix"
+    KERNEL_MICROBENCHMARKS = "kernel support matrix microbenchmarks"
 
 
-def generate_from_template(feature_name: str, feature_category: str,
-                           queue: str) -> None:
+# Map categories to templates
+CATEGORY_TO_TEMPLATE = {
+    FeatureCategory.FEATURE.value: "feature_template.yml",
+    FeatureCategory.KERNEL.value: "feature_template.yml",
+    FeatureCategory.QUANTIZATION.value: "feature_template.yml",
+    FeatureCategory.KERNEL_MICROBENCHMARKS.value: "feature_template.yml",
+    FeatureCategory.PARALLELISM.value: "parallelism_template.yml",
+}
+
+# Map feature categories to their respective output directories.
+CATEGORY_TO_DIR = {
+    FeatureCategory.FEATURE.value: "features",
+    FeatureCategory.KERNEL.value: "features",
+    FeatureCategory.PARALLELISM.value: "parallelism",
+    FeatureCategory.QUANTIZATION.value: "quantization",
+    FeatureCategory.KERNEL_MICROBENCHMARKS.value: "kernel_microbenchmarks",
+}
+
+
+def generate_from_template(feature_name: str,
+                           feature_category: str,
+                           group: str | None = None) -> None:
     """
     Generates a buildkite yml file from feature template.
     Args:
         feature_name (str): The name of the feature.
-        queue (str): The buildkite queue to run tests for this feature on.
+        feature_category (str): The category of the feature.
+        group (str, optional): The group for kernel microbenchmarks. Defaults to None.
     """
-    if queue not in QUEUE_TO_TENSOR_PARALLEL_SIZE_MAP:
-        print(
-            f"Queue {queue} not previously registered on Buildkite. If you added a queue, please add it to QUEUE_TO_TENSOR_PARALLEL_SIZE_MAP"
-        )
-        sys.exit(1)
-
     print(f"--- Starting to generate for Feature '{feature_name}' ---")
 
+    # Determine template path based on category
+    template_filename = CATEGORY_TO_TEMPLATE.get(feature_category)
+    if not template_filename:
+        print(f"Error: No template found for category '{feature_category}'.")
+        sys.exit(1)
+    template_path = SCRIPT_DIR / template_filename
+
     # Check if the template file exists.
-    if not TEMPLATE_PATH.is_file():
+    if not template_path.is_file():
         print(
-            f"Error: Template file '{TEMPLATE_PATH}' invalid. Did you remove it by accident?"
+            f"Error: Template file '{template_path}' invalid. Did you remove it by accident?"
         )
         sys.exit(1)
 
+    # Determine output directory based on category
+    base_output_dir_name = CATEGORY_TO_DIR.get(feature_category)
+    if not base_output_dir_name:
+        print(f"Error: Invalid feature category '{feature_category}'.")
+        sys.exit(1)
+
+    output_dir = SCRIPT_DIR.parent / base_output_dir_name
+    if feature_category == FeatureCategory.KERNEL_MICROBENCHMARKS.value:
+        if not group:
+            print(
+                "Error: --group must be specified for 'kernel support matrix microbenchmarks' category."
+            )
+            sys.exit(1)
+        output_dir = output_dir / group
+
     # Ensure the output directory exists. If not, create it.
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Read the content of the template file.
     try:
-        with open(TEMPLATE_PATH, 'r', encoding='utf-8') as f:
+        with open(template_path, 'r', encoding='utf-8') as f:
             template_content = f.read()
         print("Read template file successfully.")
     except Exception as e:
@@ -70,13 +105,13 @@ def generate_from_template(feature_name: str, feature_category: str,
         ".", "_").replace(" ", "_").replace(":", "-")
 
     # Substitute the placeholders with the provided arguments.
+    format_args = {
+        "FEATURE_NAME": feature_name,
+        "CATEGORY": feature_category,
+        "SANITIZED_FEATURE_NAME": sanitized_feature_name,
+    }
     try:
-        generated_content = template_content.format(
-            FEATURE_NAME=feature_name,
-            CATEGORY=feature_category,
-            SANITIZED_FEATURE_NAME=sanitized_feature_name,
-            QUEUE=queue,
-        )
+        generated_content = template_content.format(**format_args)
         print("File content generated.")
     except KeyError as e:
         print(
@@ -87,7 +122,7 @@ def generate_from_template(feature_name: str, feature_category: str,
         )
         sys.exit(1)
 
-    generated_filepath = OUTPUT_DIR / f"{sanitized_feature_name}.yml"
+    generated_filepath = output_dir / f"{sanitized_feature_name}.yml"
 
     # Write the generated content to the file.
     try:
@@ -109,24 +144,36 @@ def main():
                         required=True,
                         help="The name of the feature.")
     parser.add_argument(
-        "--queue",
-        type=str,
-        required=True,
-        help="The name of the agent queue to use (ex: 'tpu_v6e_queue')")
-    parser.add_argument(
         '--category',
         choices=[
-            FeatureCategory.FEATURE_SUPPORT.value,
-            FeatureCategory.KERNEL_SUPPORT.value,
-            FeatureCategory.KERNEL_SUPPORT_MICROBENCHMARKS.value
+            FeatureCategory.FEATURE.value,
+            FeatureCategory.KERNEL.value,
+            FeatureCategory.PARALLELISM.value,
+            FeatureCategory.QUANTIZATION.value,
+            FeatureCategory.KERNEL_MICROBENCHMARKS.value,
         ],
-        default='feature support matrix',
-        help='[OPTIONAL] Category of feature. (Default: feature support matrix)'
+        default=FeatureCategory.FEATURE.value,
+        help=
+        f'[OPTIONAL] Category of feature. (Default: {FeatureCategory.FEATURE.value})'
+    )
+    parser.add_argument(
+        '--group',
+        type=str,
+        help=
+        "[OPTIONAL] For 'kernel support matrix microbenchmarks' category, specify the group name (subdirectory name)."
     )
     args = parser.parse_args()
-    generate_from_template(feature_name=args.feature_name,
-                           feature_category=args.category,
-                           queue=args.queue)
+
+    if args.category == FeatureCategory.KERNEL_MICROBENCHMARKS.value and not args.group:
+        parser.error(
+            "--group is required when category is 'kernel support matrix microbenchmarks'"
+        )
+
+    generate_from_template(
+        feature_name=args.feature_name,
+        feature_category=args.category,
+        group=args.group,
+    )
 
 
 if __name__ == "__main__":

@@ -8,7 +8,8 @@ The GitHub webhook is configured to trigger the Buildkite pipeline. The current 
 steps:
   - label: ":pipeline: Upload Pipeline"
     agents:
-      queue: tpu_v6e_queue
+      queue: cpu
+    priority: 200
     command: "bash .buildkite/scripts/bootstrap.sh"
 ```
 
@@ -16,6 +17,10 @@ steps:
 Besides continuous integration and continuous delivery, a major goal of our pipeline is to generate support matrices for our users for each release:
 - model support matrix (intended to replace [this](https://github.com/vllm-project/vllm/blob/f552d5e578077574276aa9d83139b91e1d5ae163/docs/models/hardware_supported_models/tpu.md) from the vllm upstream)
 - feature support matrix (intended to replace [this](https://github.com/vllm-project/vllm/blob/f552d5e578077574276aa9d83139b91e1d5ae163/docs/features/README.md) from the vllm upstream)
+- kernel support matrix
+- kernel support matrix (microbenchmarks)
+- parallelism support matrix
+- quantization support matrix
 
 To support this requirement, each model and feature will go through a series of stages of testing, and the test results will be used to generate the support matrices automatically.
 
@@ -50,16 +55,29 @@ In the generated yml file, there are two TODOs that will need your input:
 2. The accuracy target for your model
 
 # Adding a new feature to CI
-To add a new feature to CI, feature owners can use the prepared [add_feature_to_ci.py](pipeline_generation/add_feature_to_ci.py) script. The script will populate a buildkite yaml config file in the `.buildkite/features` directory; config files under this directory will be integrated to our pipeline automatically. The python script takes 2 arguments:
+To add a new feature to CI, feature owners can use the prepared [`add_feature_to_ci.py`](pipeline_generation/add_feature_to_ci.py) script. The script will populate a buildkite yaml config file in the appropriate subdirectory (e.g., `.buildkite/features`, `.buildkite/parallelism`, etc.). These files will be integrated into our pipeline automatically.
+
+The python script takes the following arguments:
 - **--feature-name**: this is the name of your feature
-- **--queue**: this is the queue you want to run on (ex: `tpu_v6e_queue`)
-- **--category**: this parameter allows you to set the feature category, with the following options available: "feature support matrix" or "kernel support matrix". (default: "feature support matrix")
+- **--category**: This parameter sets the feature category and determines where the generated YAML file is placed. Available options:
+  - `"feature support matrix"` (default)
+  - `"kernel support matrix"`
+  - `"parallelism support matrix"`
+  - `"quantization support matrix"`
+  - `"kernel support matrix microbenchmarks"`
+- **--group**: [OPTIONAL] This argument is **required** only when the category is `"kernel support matrix microbenchmarks"`. The group name should be the name of the kernel you are testing (e.g., `all_gather_matmul`). Its purpose is to organize all related microbenchmark tests for that specific kernel into a single directory.
+
+  For example, if you are adding multiple tests for the `all_gather_matmul` kernel (e.g., one for `w4a4` quantization and another for `w8a8`), you would use `--group "all_gather_matmul"` for all of them. The script will then create a directory at `.buildkite/kernel_microbenchmarks/all_gather_matmul/` and place the generated YAML test files inside. In this scenario, the `--feature-name` would describe the specific configuration being tested, like `'w4a4'` or `'w8a8'`.
 
 ```bash
-python add_feature_to_ci.py --feature-name <FEATURE_NAME> --queue <QUEUE_NAME>
+# General feature example
+python .buildkite/pipeline_generation/add_feature_to_ci.py --feature-name <FEATURE_NAME> --category <CATEGORY_NAME>
 
 # If your feature name contains spaces, please wrap it in quotes
-# ex: python add_feature_to_ci.py --feature-name 'my feature name' --queue <QUEUE_NAME>
+# ex: python .buildkite/pipeline_generation/add_feature_to_ci.py --feature-name 'my feature name' --category "feature support matrix"
+
+# Example for kernel microbenchmarks
+python .buildkite/pipeline_generation/add_feature_to_ci.py --feature-name 'w4a4' --category "kernel support matrix microbenchmarks" --group "all_gather_matmul"
 ```
 
 In the generated yml file, there are two TODOs that will need your input:

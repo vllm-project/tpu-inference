@@ -142,12 +142,11 @@ class TPUWorker(WorkerBase):
             )
             os.makedirs(self.profile_dir, exist_ok=True)
 
-        use_jax_profiler_server = os.getenv("USE_JAX_PROFILER_SERVER", False)
+        use_jax_profiler_server = envs.USE_JAX_PROFILER_SERVER
         # Only one instance of profiler is allowed
         if use_jax_profiler_server and self.rank < 1:
             if not self.devices or 0 in self.device_ranks:
-                jax_profiler_server_port = int(
-                    os.getenv("JAX_PROFILER_SERVER_PORT", 9999))
+                jax_profiler_server_port = envs.JAX_PROFILER_SERVER_PORT
                 logger.info(
                     f"Starting JAX profiler server on port {jax_profiler_server_port}"
                 )
@@ -166,7 +165,7 @@ class TPUWorker(WorkerBase):
                     tpu_chips_per_process_bounds="",
                     tpu_visible_chips=""):
         # set tpu visible devices for Jax runtime in single host PP.
-        multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
+        multihost_backend = envs.TPU_MULTIHOST_BACKEND
         if multihost_backend != "ray" and self.parallel_config.pipeline_parallel_size > 1:
             tpu_ports = [
                 jax_parallel_state.BASE_JAX_PORT + i
