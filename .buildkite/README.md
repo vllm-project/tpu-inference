@@ -65,7 +65,9 @@ The python script takes the following arguments:
   - `"parallelism support matrix"`
   - `"quantization support matrix"`
   - `"kernel support matrix microbenchmarks"`
-- **--group**: [OPTIONAL] This is **required** only when the category is `"kernel support matrix microbenchmarks"`. It specifies the subdirectory within `.buildkite/kernel_microbenchmarks` where the YAML file will be created.
+- **--group**: [OPTIONAL] This argument is **required** only when the category is `"kernel support matrix microbenchmarks"`. The group name should be the name of the kernel you are testing (e.g., `all_gather_matmul`). Its purpose is to organize all related microbenchmark tests for that specific kernel into a single directory.
+
+  For example, if you are adding multiple tests for the `all_gather_matmul` kernel (e.g., one for `w4a4` quantization and another for `w8a8`), you would use `--group "all_gather_matmul"` for all of them. The script will then create a directory at `.buildkite/kernel_microbenchmarks/all_gather_matmul/` and place the generated YAML test files inside. In this scenario, the `--feature-name` would describe the specific configuration being tested, like `'w4a4'` or `'w8a8'`.
 
 ```bash
 # General feature example
@@ -75,7 +77,7 @@ python .buildkite/pipeline_generation/add_feature_to_ci.py --feature-name <FEATU
 # ex: python .buildkite/pipeline_generation/add_feature_to_ci.py --feature-name 'my feature name' --category "feature support matrix"
 
 # Example for kernel microbenchmarks
-python .buildkite/pipeline_generation/add_feature_to_ci.py --feature-name 'my-kernel-w4a8' --category "kernel support matrix microbenchmarks" --group "my-kernel"
+python .buildkite/pipeline_generation/add_feature_to_ci.py --feature-name 'w4a4' --category "kernel support matrix microbenchmarks" --group "all_gather_matmul"
 ```
 
 In the generated yml file, there are two TODOs that will need your input:
