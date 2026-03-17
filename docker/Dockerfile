@@ -58,7 +58,6 @@ RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install \
     pytest-asyncio \
     "lm-eval[api]==0.4.9.2" \
     pytest-cov \
-    pytest-split \
     tblib
 
 # Install tpu_inference

@@ -19,7 +19,7 @@ set -e
 REPO_URL="https://github.com/vllm-project/tpu-inference.git"
 TARGET_BRANCH="main"
 
-COMMIT_MESSAGE="Update verified commit hashes"
+COMMIT_MESSAGE="Update .test_durations file for unit test"
 # Construct the repository URL with the access token for authentication.
 AUTHENTICATED_REPO_URL="https://x-access-token:${GITHUB_PAT}@${REPO_URL#https://}"
 
