@@ -62,6 +62,35 @@ from tpu_inference.runner.lora_utils import replace_lora_metadata
 logger = init_logger(__name__)
 
 
+def apply_tpu_custom_ops_patch():
+    # Attempt to load vLLM ops so they register in the torch.ops.vllm namespace
+    try:
+        import vllm.model_executor.models.qwen3_next  # noqa: F401
+    except ImportError:
+        pass
+
+    # Ensure the op exists in the namespace, which initializes the OpOverloadPacket
+    if hasattr(torch.ops, "vllm") and hasattr(torch.ops.vllm,
+                                              "gdn_attention_core"):
+        # Overwrite the C++ operator with our Python bridge function!
+        # This completely bypasses the C++ dispatch layer.
+        def gdn_attention_core_tpu(
+            mixed_qkv: torch.Tensor,
+            b: torch.Tensor,
+            a: torch.Tensor,
+            core_attn_out: torch.Tensor,
+            layer_name: str,
+        ) -> None:
+            """
+            Custom op for the core attention computation.
+            Only handles the convolution + recurrent attention part.
+            Input/output projections are handled outside this op.
+            """
+            pass
+
+        torch.ops.vllm.gdn_attention_core = gdn_attention_core_tpu
+
+
 class _VllmRunner(torch.nn.Module):
 
     def __init__(self, vllm_model: torch.nn.Module):
@@ -112,6 +141,8 @@ class VllmModelWrapper:
         self.vllm_config.quant_config = get_tpu_quantization_config(
             self.vllm_config, self.mesh)
         self._apply_pp_patch()
+
+        apply_tpu_custom_ops_patch()
 
         MultiHeadLatentAttentionWrapper.register_oot(
             VllmTPUMultiHeadLatentAttentionWrapper)
@@ -171,6 +202,7 @@ class VllmModelWrapper:
         # The DummyModelLoader in vLLM calls torch._sync for torch_xla path when
         # it detects the tpu platform, but we don't need it and it causes crash
         # without proper setup.
+
         load_context = patch(
             "torch._sync",
             return_value=None) if use_random_weights else nullcontext()
