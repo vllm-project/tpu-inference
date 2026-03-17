@@ -76,8 +76,7 @@ class PPConfig:
             chips_per_stage = math.ceil(total_cores_per_stage / cores_per_chip)
 
             if chips_per_stage > 0:
-                multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND",
-                                                   "").lower()
+                multihost_backend = envs.TPU_MULTIHOST_BACKEND
                 # For multi-host PP, each host is an independent JAX cluster,
                 # so chips always start from index 0 on each host.
                 start_chip = 0 if multihost_backend == "ray" else self.rank * chips_per_stage
