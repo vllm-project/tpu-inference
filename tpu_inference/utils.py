@@ -79,7 +79,7 @@ def t2j(t, use_dlpack=False):
     # https://github.com/google/torchax/blob/main/torchax/ops/mappings.py#L55
     # Here, we do a bit cast instead.
     # TODO(gxd3): upstream this improvement to the torchax library.
-    if t.dtype in _NUMPY_UNSUPPORTED_DTYPES:
+    if t.dtype in _NUMPY_UNSUPPORTED_DTYPES and t.is_contiguous():
         bytes = t.cpu().view(torch.uint8).detach().numpy()
         return jnp.array(bytes).view(_NUMPY_UNSUPPORTED_DTYPES[t.dtype])
     return torchax_t2j(t, use_dlpack=use_dlpack)
