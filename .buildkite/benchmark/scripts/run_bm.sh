@@ -123,6 +123,7 @@ elif [[ "$MODEL" == "Qwen/Qwen2.5-VL-7B-Instruct" || "$MODEL" == "Qwen/Qwen2.5-V
   EXTRA_ARGS+="--limit-mm-per-prompt {\"image\":1} --mm-processor-kwargs {\"max_pixels\":1024000}"
 elif [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
   echo "deepseek-ai/DeepSeek-R1"
+  EXTRA_ARGS+=" --generation-config /workspace/generation_configs/DeepSeek-R1"
 fi
 
 if [[ -n "${ADDITIONAL_CONFIG:-}" ]]; then
@@ -134,7 +135,7 @@ fi
 VLLM_ENVS="VLLM_USE_V1=1 VLLM_TORCH_PROFILER_DIR=\"$PROFILE_FOLDER\""
 
 if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
-  VLLM_ENVS+=" VLLM_MLA_DISABLE=1 MODEL_IMPL_TYPE=vllm"
+  VLLM_ENVS+=" NEW_MODEL_DESIGN=1  TPU_BACKEND_TYPE=jax MODEL_IMPL_TYPE=vllm VLLM_MLA_DISABLE=0 MOE_REQUANTIZE_BLOCK_SIZE=512 MOE_REQUANTIZE_WEIGHT_DTYPE=fp4"
 fi
 
 echo "Printing the vllm serve command used to start the server:"
@@ -192,7 +193,7 @@ run_benchmark(){
   local command_to_run
   local ARGS=()
 
-  if [[ "$MODEL" == "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8" || "$MODEL" == "BCCard/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic" ]]; then
+  if [[ "$MODEL" == "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8" || "$MODEL" == "BCCard/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic" || "${USE_BENCHMARK_SERVING:-0}" == "1" ]]; then
     command_to_run=("python3" "scripts/bench_serving/benchmark_serving.py")
   else
     command_to_run=("vllm" "bench" "serve")
@@ -219,6 +220,13 @@ run_benchmark(){
       ARGS+=(--random-input-len "$INPUT_LEN" --random-output-len "$OUTPUT_LEN")
       if [[ "$MODEL" == "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8" || "$MODEL" == "BCCard/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic" ]]; then
         ARGS+=(--random-range-ratio 0.8 --max-concurrency 64)
+      fi
+      if [[ "$MODEL" == "Qwen/Qwen3-32B" && "${USE_BENCHMARK_SERVING:-0}" == "1" ]]; then
+        if [[ -z "${MAX_CONCURRENCY:-}" ]]; then
+          echo "Error: MAX_CONCURRENCY must be set for Qwen/Qwen3-32B with USE_BENCHMARK_SERVING=1" >&2
+          exit 1
+        fi
+        ARGS+=(--random-range-ratio 0.8 --max-concurrency "$MAX_CONCURRENCY")
       fi
       ;;
     mmlu)
