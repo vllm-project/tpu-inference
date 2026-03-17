@@ -191,6 +191,7 @@ class TPUWorker(WorkerBase):
                 port = os.environ.get("TPU_PROCESS_PORT", "8476")
                 os.environ["TPU_PROCESS_ADDRESSES"] = f"localhost:{port}"
                 os.environ["TPU_PROCESS_PORT"] = port
+                os.environ["CLOUD_TPU_TASK_ID"] = "0"
             else:
                 # Single host PP logic
                 tpu_ports = [
