@@ -92,7 +92,13 @@ setup(
         "Programming Language :: Python :: 3.12",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
+    extras_require={
+        "tuning": ["click", "rich"],
+    },
     entry_points={
+        "console_scripts": [
+            "tpu-tune=tpu_inference.tools.autotune.v1.cli:main",
+        ],
         "vllm.general_plugins": [
             "tpu_quantization_configs = tpu_inference.layers.vllm.quantization:register_tpu_quantization_configs",
         ],

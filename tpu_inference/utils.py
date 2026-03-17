@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import re
 import time
 from collections import defaultdict
 from collections.abc import Sequence
@@ -98,18 +99,13 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
         # Assume all the devices have similar memory usage for now.
         # TODO(ranlihao): find a proper way to get the memory usage of each device.
         for device in devices:
-            try:
-                hbm_used = device.memory_stats()["bytes_in_use"]
-                hbm_limit = device.memory_stats()["bytes_limit"]
-                logger.info(
-                    "Get memory stats for device %s. Assuming all devices have the same usage.",
-                    device)
-                usage.extend([(hbm_used, hbm_limit)] * len(devices))
-                break
-            except Exception as e:
-                logger.warning(
-                    "Failed to get memory stats for device %s: %s. ", device,
-                    e)
+            hbm_used = device.memory_stats()["bytes_in_use"]
+            hbm_limit = device.memory_stats()["bytes_limit"]
+            logger.info(
+                "Get memory stats for device %s. Assuming all devices have the same usage.",
+                device)
+            usage.extend([(hbm_used, hbm_limit)] * len(devices))
+            break
     else:
         for device in devices:
             hbm_used = device.memory_stats()["bytes_in_use"]
@@ -140,6 +136,25 @@ def get_device_name(num_devices: int | None = None):
     if num_devices is not None:
         kind += f'-{num_devices}'
     return kind
+
+
+def get_tpu_generation() -> int:
+    """Returns the numeric generation of the TPU (e.g. 5, 6, 7)."""
+    name = get_device_name()
+
+    # format is "TPU v{gen}{suffix}"
+    # e.g. "TPU v5e", "TPU v7", "TPU v6e", "TPU v10"
+    match = re.search(r'TPU v(\d+)', name)
+    if match:
+        return int(match.group(1))
+
+    return -1
+
+
+def get_tpu_name_slug() -> str:
+    """Returns the normalized TPU name slug for filenames (e.g. 'tpu_v5e', 'tpu_v7')."""
+    name = get_device_name()
+    return name.lower().replace(" ", "_")
 
 
 def get_device_hbm_limit() -> int:
