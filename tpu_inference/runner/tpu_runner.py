@@ -831,7 +831,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
                 return ModelRunnerOutput(
                     req_ids=self.input_batch.req_ids,
-                    req_id_to_index=self.input_batch.req_id_to_index,
+                    req_id_to_index=self.input_batch.req_id_to_index.copy(),
                     sampled_token_ids=[],
                     logprobs=None,
                     prompt_logprobs_dict={},
@@ -992,8 +992,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Return Model output to executor
             model_runner_output = ModelRunnerOutput(
                 req_ids=req_ids,
-                req_id_to_index=copy.deepcopy(
-                    self.input_batch.req_id_to_index),
+                # req_id_to_index=copy.deepcopy(
+                #     self.input_batch.req_id_to_index),
+                req_id_to_index=self.input_batch.req_id_to_index.copy(),
                 sampled_token_ids=[],  # Fill in async get
                 logprobs=logprobs_lists,
                 prompt_logprobs_dict=prompt_logprobs_dict,
@@ -1061,7 +1062,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
-            req_id_to_index=self.input_batch.req_id_to_index,
+            req_id_to_index=self.input_batch.req_id_to_index.copy(),
             sampled_token_ids=valid_sampled_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
