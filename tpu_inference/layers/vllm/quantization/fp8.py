@@ -132,7 +132,11 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
             weight_scale,
             bias=bias,
             weight_block_size=tuple(self.weight_block_size),
-            linear_config=self.linear_config)
+            requant_block_size=self.linear_config.requant_block_size,
+            output_sizes=tuple(self.output_sizes),
+            requant_weight_dtype=self.requant_weight_dtype,
+            fuse_matmuls=self.fuse_matmuls,
+            n_shards=self.n_shards)
         if self.linear_config.enable_quantized_matmul_kernel:
             # The quantized_matmul_kernel expects weight scales shaped (n_out_features, 1, n_blocks) for blockwisze quantization.
             weights.weight_scale = jnp.expand_dims(
