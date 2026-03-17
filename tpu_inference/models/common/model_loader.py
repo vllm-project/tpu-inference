@@ -50,7 +50,7 @@ _VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset(
 
 # List of architectures that don't have pipeline parallelism support in jax yet.
 _PP_DISABLED_MODELS: frozenset[str] = frozenset(
-    {"DeepseekV3ForCausalLM", "Eagle3LlamaForCausalLM", "GptOssForCausalLM"})
+    {"Eagle3LlamaForCausalLM", "GptOssForCausalLM"})
 
 
 class UnsupportedArchitectureError(ValueError):

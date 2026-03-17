@@ -1379,6 +1379,13 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
         else:
             self.lm_head = PPMissingLayer()
 
+        pp_missing_layers = []
+        for path, module in nnx.iter_graph(self):
+            if isinstance(module, PPMissingLayer):
+                layer_name = ".".join([str(s) for s in path])
+                pp_missing_layers.append(layer_name)
+        self.pp_missing_layers = tuple(pp_missing_layers)
+
     def __call__(
         self,
         kv_caches: List[jax.Array],
@@ -1389,12 +1396,12 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
         _layer_name_to_kv_cache=None,
         _lora_metadata=None,
         intermediate_tensors: JaxIntermediateTensors | None = None,
-        is_first_rank: bool = True,
-        is_last_rank: bool = True,
+        _is_first_rank: bool = True,
+        _is_last_rank: bool = True,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
                List[jax.Array]]:
-        if not is_first_rank:
+        if not _is_first_rank:
             assert intermediate_tensors is not None
             inputs_embeds = intermediate_tensors["hidden_states"]
 
@@ -1405,7 +1412,7 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
             inputs_embeds,
         )
 
-        if not is_last_rank:
+        if not _is_last_rank:
             x = JaxIntermediateTensors(tensors={"hidden_states": x}, )
 
         return kv_caches, x, []
