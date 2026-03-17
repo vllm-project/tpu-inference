@@ -24,6 +24,16 @@ echo "Benchmark pipeline prioirty: $JOB_PRIORITY"
 echo "./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_qwen_llama_tpu7x_2.csv $CODE_HASH $TAG DAILY $JOB_PRIORITY"
 ./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_qwen_llama_tpu7x_2.csv "$CODE_HASH" "$TAG" DAILY "$JOB_PRIORITY"
 
+# Qwen3-32B random benchmarks (Using benchmark_serving)
+echo "./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_qwen3_32B_random_tpu7x_2.csv $CODE_HASH $TAG DAILY $JOB_PRIORITY \"USE_BENCHMARK_SERVING=1;MAX_CONCURRENCY=64;\""
+./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_qwen3_32B_random_tpu7x_2.csv "$CODE_HASH" "$TAG" DAILY "$JOB_PRIORITY" "USE_BENCHMARK_SERVING=1;MAX_CONCURRENCY=64;"
+echo "./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_qwen3_32B_random_tpu7x_2.csv $CODE_HASH $TAG DAILY $JOB_PRIORITY \"USE_BENCHMARK_SERVING=1;MAX_CONCURRENCY=320;\""
+./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_qwen3_32B_random_tpu7x_2.csv "$CODE_HASH" "$TAG" DAILY "$JOB_PRIORITY" "USE_BENCHMARK_SERVING=1;MAX_CONCURRENCY=320;"
+
+# Ironwood Deepseek DP Attention
+echo "./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_deepseek_dp_attention_tpu7x_8.csv $CODE_HASH $TAG DAILY $JOB_PRIORITY \"VLLM_MLA_DISABLE=0;NEW_MODEL_DESIGN=1;MOE_REQUANTIZE_BLOCK_SIZE=512;MOE_REQUANTIZE_WEIGHT_DTYPE=fp4;TPU_BACKEND_TYPE=jax;MODEL_IMPL_TYPE=vllm;\""
+./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_deepseek_dp_attention_tpu7x_8.csv "$CODE_HASH" "$TAG" DAILY "$JOB_PRIORITY" "VLLM_MLA_DISABLE=0;NEW_MODEL_DESIGN=1;MOE_REQUANTIZE_BLOCK_SIZE=512;MOE_REQUANTIZE_WEIGHT_DTYPE=fp4;TPU_BACKEND_TYPE=jax;MODEL_IMPL_TYPE=vllm;"
+
 # Ironwood Deepseek
 echo "./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_deepseek_tpu7x_8.csv $CODE_HASH $TAG DAILY $JOB_PRIORITY \"VLLM_MLA_DISABLE=1;TPU_BACKEND_TYPE=vllm\""
 ./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_deepseek_tpu7x_8.csv "$CODE_HASH" "$TAG" DAILY "$JOB_PRIORITY" "VLLM_MLA_DISABLE=1;TPU_BACKEND_TYPE=vllm"

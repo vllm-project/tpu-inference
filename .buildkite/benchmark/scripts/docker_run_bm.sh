@@ -161,6 +161,14 @@ fi
 
 
 # =============== temp solution end ===============
+# Download deepseek generation configs into the container if the model is DeepSeek-R1
+if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
+  echo "Downloading deepseek generation_configs..."
+  mkdir -p ./artifacts/generation_configs
+  gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/* ./artifacts/generation_configs/
+  docker exec "$CONTAINER_NAME" mkdir -p /workspace/generation_configs/
+  docker cp ./artifacts/generation_configs/. "$CONTAINER_NAME:/workspace/generation_configs/"
+fi
 
 # TODO(patemotter): split these into functions
 if [ "$DATASET" = "sharegpt" ]; then
