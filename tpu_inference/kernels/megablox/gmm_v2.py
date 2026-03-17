@@ -61,6 +61,60 @@ class Dimensions:
   size_n: int
   size_group: int
   size_lhs_group: int
+  # xw32 NB: Compared with v1, v2 introduces 'size_lhs_sublane' — the TPU sublane tiling size (hardware-dependent). LHS and output are reshaped to '(-1, size_lhs_sublane, ...)' so DMA sizes are dynamic and aligned to sublane boundaries. This avoids loading/storing unnecessary rows. The 'BoundedSlice' mechanism (line 151) enables variable-size DMA.
+  # xw32q: but why does it avoid loading/storing unnecessary rows?
+  # A: Using a concrete example:
+  # v1: fixed-size tiles
+
+  # In v1, tiles are always '(tm, tn)' — say 'tm=128'. If a group only has 20 rows within a tile, v1 still loads all 128 rows
+  # via DMA, does the matmul on all 128 rows, then uses '_get_store_mask' to write back only the 20 valid rows. The other 108
+  # rows are wasted work.
+
+  # v2: sublane-aligned variable-size DMA
+
+  # In v2, lhs and output are reshaped to '(-1, size_lhs_sublane, ...)'. The 'BoundedSlice' (gmm_v2.py:151-152) combined with
+  # dynamic index maps allows variable-size DMA transfers.
+
+  # Look at 'lhs_index_map' (gmm_v2.py:103-111):
+
+  # m_start = metadata_ref.gm_id_to_m_offset[gm_id]
+  # m_end   = metadata_ref.gm_id_to_m_offset[gm_id + 1]
+
+  # row_start = m_start // size_lhs_sublane
+  # row_end   = cdiv(m_end, size_lhs_sublane)
+  # row_size  = row_end - row_start
+
+  # return (pl.ds(row_start, row_size), 0, k_id)
+
+  # The 'pl.ds(row_start, row_size)' is a dynamic slice — the DMA only transfers 'row_size' sublane-rows, not a fixed 'tile_m'
+  # rows.
+
+  # Concrete example
+
+  # Say 'size_lhs_sublane=8', 'tile_m=128', and a group has 20 rows starting at row 0:
+
+  # - v1: Loads 128 rows, computes on 128, masks to keep 20. Wastes 108 rows of DMA + compute.
+  # - v2: 'row_size = cdiv(20, 8) = 3' sublane-rows = 24 rows loaded. Only 4 extra rows, and the masking inside the kernel
+  # (gmm_v2.py:360-362) handles those.
+
+  # The savings compound when you have many small groups — v1 always pays the full 'tile_m' cost per group tile, while v2
+  # scales with actual group size (rounded up to the nearest sublane boundary).
+  # xw32q: But it sounds it's a benefit of using dynamic slice instead of the sublane tiling?
+  # A: Yeah. the core benefit comes from dynamic slicing ('pl.ds' with variable 'row_size'), not from sublane tiling
+  # itself.
+
+  # Sublane tiling is a hardware constraint, not the optimization. On TPU, DMA transfers must be aligned to sublane boundaries
+  # (the smallest addressable unit along the row dimension). That's why v2 reshapes to '(-1, size_lhs_sublane, ...)' — it makes
+  #  the first dimension count in units of sublane rows, so that 'pl.ds(row_start, row_size)' produces DMA addresses that are
+  # always sublane-aligned.
+
+  # So the relationship is:
+
+  # 1. Dynamic slice is what avoids unnecessary rows — the actual optimization.
+  # 2. Sublane-aware reshaping is what makes dynamic slicing legal on TPU hardware — it ensures alignment.
+
+  # Without the reshape, a dynamic slice of arbitrary row counts could produce misaligned DMA requests that the hardware
+  # doesn't support. Without dynamic slicing, the sublane reshape alone wouldn't help.
   size_lhs_sublane: int
 
 
@@ -664,7 +718,11 @@ def kernel_main(
     )
     rhs_ref = dataclasses.replace(rhs_ref, weight=rhs_weight)
 
-  # Fill metadata buffer and return number of group & m interations.
+  # xw32 NB: Compared with v1, 'fill_metadata' runs inside the Pallas kernel. It uses 'lax.fori_loop' to dynamically compute 'gm_id_to_group_id' and 'gm_id_to_m_offset' in SMEM. The inner grid size ('num_gm') is also computed dynamically and passed to 'emit_pipeline'. Fill metadata buffer and return number of group & m interations. Note 'gm_id_to_group_id' are directly allocated in smem: 
+  # MetadataRef(
+  #         gm_id_to_group_id=pltpu.SMEM((max_num_gm, ), jnp.int32),
+  #         gm_id_to_m_offset=pltpu.SMEM((max_num_gm + 1, ), jnp.int32),
+  #     ),
   num_gm = fill_metadata(
       lhs_group_sizes_ref,
       group_offset_ref,

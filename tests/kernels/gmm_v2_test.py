@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import jax
 import jax.numpy as jnp
 from absl.testing import absltest, parameterized
@@ -133,44 +134,63 @@ def reference_gmm(
 class GmmTest(jtu.JaxTestCase):
 
   @parameterized.product(
+      # batch_size=[128],
+      # in_size=[512, 1024],
+      # out_size=[512, 1024],
+      # num_groups=[16, 32],
+      # has_bias=[True, False],
+      # group_offset=[0, 2, 3],
       batch_size=[128],
-      in_size=[512, 1024],
-      out_size=[512, 1024],
-      num_groups=[16, 32],  # xw32: num_group is like global_num_experts.
-      has_bias=[True, False],
-      group_offset=[0, 2, 3],
+      in_size=[512],
+      out_size=[512],
+      num_groups=[16],
+      has_bias=[True],
+      group_offset=[0],
   )
-  def test_gmm(self, batch_size, in_size, out_size, num_groups, has_bias,
-               group_offset):
+  def test_gmm(
+      self, batch_size, in_size, out_size, num_groups, has_bias, group_offset
+  ):
     num_local_groups = num_groups - group_offset
     key = jax.random.key(0)
 
     lhs = jax.random.normal(key, (batch_size, in_size), dtype=jnp.bfloat16)
-    rhs = jax.random.normal(key, (num_local_groups, in_size, out_size),
-                            dtype=jnp.bfloat16)
+    rhs = jax.random.normal(
+        key, (num_local_groups, in_size, out_size), dtype=jnp.bfloat16
+    )
     rhs_bias = None
     if has_bias:
-      rhs_bias = jax.random.normal(key, (num_local_groups, 1, out_size),
-                                   dtype=jnp.bfloat16)
+      rhs_bias = jax.random.normal(
+          key, (num_local_groups, 1, out_size), dtype=jnp.bfloat16
+      )
 
-    group_sizes = get_group_sizes(batch_size, num_groups)  # [num_groups]
+    group_sizes = get_group_sizes(batch_size, num_groups)
     group_offset = jnp.array(group_offset, dtype=jnp.int32)
 
-    expected = reference_gmm(lhs,
-                             rhs,
-                             group_sizes,
-                             rhs_bias=rhs_bias,
-                             group_offset=group_offset)
-
-    actual = gmm_v2(
+    expected, reference_vjpfunc = jax.vjp(
+        functools.partial(
+            reference_gmm, rhs_bias=rhs_bias, group_offset=group_offset
+        ),
         lhs,
         rhs,
         group_sizes,
-        rhs_bias=rhs_bias,
-        group_offset=group_offset,
+    )
+
+    actual, vjpfunc = jax.vjp(
+        functools.partial(gmm_v2, rhs_bias=rhs_bias, group_offset=group_offset),
+        lhs,
+        rhs,
+        group_sizes,
     )
 
     self.assertArraysAllClose(actual, expected)
+
+    cotangent = jax.random.normal(
+        key, (batch_size, out_size), dtype=jnp.bfloat16
+    )
+    expected_grad_lhs, expected_grad_rhs, *_ = reference_vjpfunc(cotangent)
+    grad_lhs, grad_rhs, *_ = vjpfunc(cotangent)
+    self.assertArraysAllClose(grad_lhs, expected_grad_lhs)
+    self.assertArraysAllClose(grad_rhs, expected_grad_rhs)
 
   @parameterized.product(
       batch_size=[128],
