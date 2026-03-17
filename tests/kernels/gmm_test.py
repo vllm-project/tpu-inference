@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import collections
+
 import jax
 import jax.numpy as jnp
 from absl.testing import absltest, parameterized
@@ -20,6 +22,9 @@ from jax._src import test_util as jtu
 from tpu_inference.kernels.megablox.gmm_v2 import TileSizes, gmm_v2
 
 jax.config.parse_flags_with_absl()
+
+_GroupConfig = collections.namedtuple(
+    "_GroupConfig", ["num_groups", "group_offset", "num_local_groups"])
 
 
 def get_group_sizes(batch_size: int, num_groups: int) -> jax.Array:
@@ -514,6 +519,56 @@ class GmmTest(jtu.JaxTestCase):
 
         self.assertEqual(actual.shape, (batch_size, out_size))
         self.assertArraysAllClose(actual, expected, atol=3e-1, rtol=3e-1)
+
+    @parameterized.product(
+        batch_size=[128],
+        in_size=[512],
+        out_size=[512],
+        # group_config: (num_groups, group_offset, num_local_groups)
+        group_config=[
+            # groups 0-1: group<0, groups 2-5: local and active,
+            # groups 6-15: group>=num_local_groups
+            _GroupConfig(num_groups=16, group_offset=2, num_local_groups=4),
+            # no negative groups, groups 0-7: local and active,
+            # groups 8-15: group>=num_local_groups
+            _GroupConfig(num_groups=16, group_offset=0, num_local_groups=8),
+            # groups 0-3: group<0, groups 4-7: local and active,
+            # groups 8-31: group>=num_local_groups
+            _GroupConfig(num_groups=32, group_offset=4, num_local_groups=4),
+        ],
+    )
+    def test_gmm_nonlocal_groups_produce_zeros(self, batch_size, in_size,
+                                               out_size, group_config):
+        num_groups, group_offset, num_local_groups = group_config
+        key = jax.random.key(0)
+
+        lhs = jax.random.normal(key, (batch_size, in_size), dtype=jnp.bfloat16)
+        rhs = jax.random.normal(key, (num_local_groups, in_size, out_size),
+                                dtype=jnp.bfloat16)
+        rhs_bias = jax.random.normal(key, (num_local_groups, 1, out_size),
+                                     dtype=jnp.bfloat16)
+
+        group_sizes = get_group_sizes(batch_size, num_groups)
+        group_offset = jnp.array(group_offset, dtype=jnp.int32)
+
+        expected = reference_gmm(
+            lhs,
+            rhs,
+            group_sizes,
+            rhs_bias=rhs_bias,
+            group_offset=group_offset,
+        )
+
+        actual = gmm_v2(
+            lhs,
+            rhs,
+            group_sizes,
+            rhs_bias=rhs_bias,
+            group_offset=group_offset,
+        )
+
+        self.assertEqual(actual.shape, (batch_size, out_size))
+        self.assertArraysAllClose(actual, expected)
 
 
 if __name__ == "__main__":
