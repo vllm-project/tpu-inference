@@ -78,6 +78,7 @@ def t2j(t, use_dlpack=False):
     # float32. For large tensor, that could be expensive.
     # https://github.com/google/torchax/blob/main/torchax/ops/mappings.py#L55
     # Here, we do a bit cast instead.
+    # TODO(gxd3): upstream this improvement to the torchax library.
     if t.dtype in _NUMPY_UNSUPPORTED_DTYPES:
         bytes = t.cpu().view(torch.uint8).detach().numpy()
         return jnp.array(bytes).view(_NUMPY_UNSUPPORTED_DTYPES[t.dtype])
