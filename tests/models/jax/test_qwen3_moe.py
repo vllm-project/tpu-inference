@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest.mock import MagicMock
+
 import jax
 import pytest
 from jax import numpy as jnp
+from vllm.config import set_current_vllm_config
 from vllm.model_executor.model_loader import get_model_loader
 
 from tpu_inference.distributed.jax_parallel_state import \
@@ -54,6 +57,8 @@ class TestQwen3MoeForCausalLM:
         vllm_config.model_config.hf_config.num_hidden_layers = 4
         vllm_config.load_config.load_format = load_format
         vllm_config.load_config.num_layers_to_load_for_test = 4
+        vllm_config.parallel_config = MagicMock()
+        vllm_config.parallel_config.enable_expert_parallel = False
 
         init_pp_distributed_environment(
             ip="",
@@ -85,7 +90,7 @@ class TestQwen3MoeForCausalLM:
                     model,
                     description=f"load_weights({model_name})",
                     threshold_multiplier=0.3,
-            ):
+            ), set_current_vllm_config(vllm_config):
                 loader.load_weights(model, model_config)
 
         layer_idx = model.model.start_layer
