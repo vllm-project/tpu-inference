@@ -349,7 +349,7 @@ class Gemma4Attention(JaxModule):
 class Gemma4DecoderLayer(JaxModule):
 
     def __init__(self,
-                 config: Gemma4TextConfig,
+                 config,
                  layer_idx: int,
                  dtype: jnp.dtype,
                  rng: nnx.Rngs,
@@ -357,14 +357,15 @@ class Gemma4DecoderLayer(JaxModule):
                  kv_cache_dtype: str,
                  quant_config: VllmQuantConfig,
                  prefix: str = ""):
-        rms_norm_eps = config.rms_norm_eps
-        hidden_size = config.hidden_size
+        text_config: Gemma4TextConfig = config.hf_config.text_config
+        rms_norm_eps = text_config.rms_norm_eps
+        hidden_size = text_config.hidden_size
 
         # Same as Gemma3: use layer_idx to handle GLOBAL/LOCAL layer
         self.layer_type = "full_attention"
-        if hasattr(config, "layer_types") and layer_idx < len(
-                config.layer_types):
-            self.layer_type = config.layer_types[layer_idx]
+        if hasattr(text_config, "layer_types") and layer_idx < len(
+                text_config.layer_types):
+            self.layer_type = text_config.layer_types[layer_idx]
 
         self.is_sliding = self.layer_type == "sliding_attention"
 
@@ -379,7 +380,7 @@ class Gemma4DecoderLayer(JaxModule):
             quant_config=quant_config,
             prefix=prefix + ".input_layernorm",
         )
-        self.self_attn = Gemma4Attention(config=config,
+        self.self_attn = Gemma4Attention(config=text_config,
                                          layer_idx=layer_idx,
                                          dtype=dtype,
                                          rng=rng,
@@ -390,6 +391,7 @@ class Gemma4DecoderLayer(JaxModule):
         self.post_attention_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
+            dtype=dtype,
             param_dtype=dtype,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
@@ -399,6 +401,7 @@ class Gemma4DecoderLayer(JaxModule):
         self.pre_feedforward_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
+            dtype=dtype,
             param_dtype=dtype,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
@@ -406,7 +409,7 @@ class Gemma4DecoderLayer(JaxModule):
             prefix=prefix + ".pre_feedforward_layernorm",
         )
         self.mlp = Gemma4MLP(
-            config=config,
+            config=text_config,
             dtype=dtype,
             rng=rng,
             quant_config=quant_config,
@@ -415,12 +418,53 @@ class Gemma4DecoderLayer(JaxModule):
         self.post_feedforward_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
+            dtype=dtype,
             param_dtype=dtype,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
             prefix=prefix + ".post_feedforward_layernorm",
         )
+
+        # MoE (Mixture of Experts) — router + expert block parallel to MLP
+        self.enable_moe_block = getattr(text_config, "enable_moe_block", False)
+        if self.enable_moe_block:
+            from .gemma4_moe import Gemma4MoeSparseMoeBlock
+            self.moe = Gemma4MoeSparseMoeBlock(model_config=config,
+                                               rng=rng,
+                                               mesh=mesh,
+                                               quant_config=quant_config,
+                                               prefix=prefix + ".moe")
+            self.post_feedforward_layernorm_1 = JaxRmsNorm(
+                text_config.hidden_size,
+                epsilon=text_config.rms_norm_eps,
+                dtype=dtype,
+                param_dtype=dtype,
+                rngs=rng,
+                quant_config=quant_config,
+                prefix=prefix + ".post_feedforward_layernorm_1")
+            self.post_feedforward_layernorm_2 = JaxRmsNorm(
+                text_config.hidden_size,
+                epsilon=text_config.rms_norm_eps,
+                dtype=dtype,
+                param_dtype=dtype,
+                rngs=rng,
+                quant_config=quant_config,
+                prefix=prefix + ".post_feedforward_layernorm_2")
+            self.pre_feedforward_layernorm_2 = JaxRmsNorm(
+                text_config.hidden_size,
+                epsilon=text_config.rms_norm_eps,
+                dtype=dtype,
+                param_dtype=dtype,
+                rngs=rng,
+                quant_config=quant_config,
+                prefix=prefix + ".pre_feedforward_layernorm_2")
+        else:
+            self.router = None
+            self.moe = None
+            self.post_feedforward_layernorm_1 = None
+            self.post_feedforward_layernorm_2 = None
+            self.pre_feedforward_layernorm_2 = None
 
     def __call__(
         self,
@@ -438,8 +482,28 @@ class Gemma4DecoderLayer(JaxModule):
         attn_output = self.post_attention_layernorm(attn_output)
         residual = residual + attn_output
 
-        hidden_states = self.pre_feedforward_layernorm(residual)
-        mlp_output = self.mlp(hidden_states)
+        if self.enable_moe_block:
+            # Dense MLP branch
+            hidden_states_1 = self.pre_feedforward_layernorm(hidden_states)
+            hidden_states_1 = self.mlp(hidden_states_1)
+            hidden_states_1 = self.post_feedforward_layernorm_1(
+                hidden_states_1)
+
+            # MoE branch: router sees raw hidden_states (applies its own
+            # norm + scale internally); experts see separately normed input
+            router_logits = self.router(hidden_states)
+            hidden_states_2 = self.pre_feedforward_layernorm_2(hidden_states)
+            hidden_states_2 = self.moe(hidden_states_2, router_logits)
+            hidden_states_2 = self.post_feedforward_layernorm_2(
+                hidden_states_2)
+
+            # Combine branches
+            hidden_states = hidden_states_1 + hidden_states_2
+        else:
+            # Dense MLP
+            hidden_states = self.pre_feedforward_layernorm(residual)
+            mlp_output = self.mlp(hidden_states)
+
         mlp_output = self.post_feedforward_layernorm(mlp_output)
         outputs = residual + mlp_output
 
@@ -486,7 +550,7 @@ class Gemma4Model(JaxModule):
         self.start_layer, self.end_layer, self.layers = make_layers(
             text_config.num_hidden_layers,
             lambda layer_index: Gemma4DecoderLayer(
-                config=text_config,
+                config=model_config,
                 layer_idx=layer_index,
                 dtype=dtype,
                 rng=rng,

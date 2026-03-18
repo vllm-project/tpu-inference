@@ -21,7 +21,8 @@ from flax import nnx
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from transformers import Gemma4TextConfig
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
+from vllm.model_executor.models.utils import WeightsMapper
 
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -39,7 +40,8 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.gemma4 import Gemma4Attention
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
-from tpu_inference.models.jax.utils.weight_utils import LoadableWithIterator
+from tpu_inference.models.jax.utils.weight_utils import (JaxAutoWeightsLoader,
+                                                         LoadableWithIterator)
 
 logger = init_logger(__name__)
 
@@ -49,13 +51,13 @@ init_fn = nnx.initializers.uniform()
 class Gemma4MoeSparseMoeBlock(JaxModule):
 
     def __init__(self,
-                 vllm_config: VllmConfig,
+                 model_config: ModelConfig,
                  rng: nnx.Rngs,
                  mesh: Mesh,
+                 quant_config,
                  prefix: str = ""):
-        config = vllm_config.model_config.hf_config.text_config
-        dtype = vllm_config.model_config.dtype
-        quant_config = vllm_config.quant_config
+        config: Gemma4TextConfig = model_config.hf_config.text_config
+        dtype = model_config.dtype
 
         # --- Sharding Config ---
         edf_sharding = (None, None, None)
@@ -73,7 +75,7 @@ class Gemma4MoeSparseMoeBlock(JaxModule):
             quant_config=quant_config,
             prefix=prefix + ".gate",
         )
-        self.gate.num_experts_per_tok = config.num_experts_per_tok
+        self.gate.num_experts_per_tok = config.num_experts
 
         # Gemma4: (flax moe module does not have shared expert, keep for modification if e2e code has)
         shared_expert_intermediate_size = getattr(
@@ -93,7 +95,7 @@ class Gemma4MoeSparseMoeBlock(JaxModule):
             intermediate_size_moe=getattr(config, "moe_intermediate_size",
                                           config.intermediate_size),
             hidden_act=config.
-            hidden_act,  # gelu, need to check if this is supported
+            hidden_activation,  # gelu, need to check if this is supported
             rngs=rng,
             router=self.gate,
             mesh=mesh,
@@ -371,13 +373,17 @@ class Gemma4MoeForCausalLM(JaxModule, LoadableWithIterator):
                 self.lm_head = PPMissingLayer()
 
     def load_weights(self, weights: Iterable[Tuple[str, Any]]):
-        stripped_weights = (
-            (clean_name, 1.0 + tensor if "norm" in clean_name else tensor)
-            for name, tensor in weights
-            if (clean_name := name.replace("language_model.", "")).startswith((
-                "model.", "lm_head")))
+        stripped_weights = ((name, 1.0 + tensor if "norm" in name else tensor)
+                            for name, tensor in weights)
 
-        return super().load_weights(stripped_weights)
+        hf_to_vllm_mapper = WeightsMapper(
+            orig_to_new_substr={".language_model.": "."})
+        loader = JaxAutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head"]
+                           if not hasattr(self, 'lm_head') else None),
+            skip_substrs=["vision"])
+        return loader.load_weights(stripped_weights, mapper=hf_to_vllm_mapper)
 
     def __call__(
         self,
