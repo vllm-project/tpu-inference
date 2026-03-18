@@ -44,19 +44,19 @@ message=""
 
 case $OUTCOME in
   "passed")
-    message="✅"
+    message="✅ Passing"
     ;;
   "skipped")
-    message="N/A"
+    message="❓ Untested"
     ;;
   "unverified")
-    message="unverified"
+    message="❓ Untested"
     ;;
   "not enough HBM")
     message="not enough HBM"
     ;;
   *)
-    message="❌"
+    message="❌ Failing"
     ;;
 esac
 
