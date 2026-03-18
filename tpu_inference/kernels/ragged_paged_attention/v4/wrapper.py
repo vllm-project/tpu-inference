@@ -609,7 +609,7 @@ def ragged_paged_attention(
 
     o_hbm, kv_cache = run_rpa_kernel(schedule.RpaCase.DECODE, q_hbm, o_hbm,
                                      kv_cache)
-    o_hbm, kv_cache = run_rpa_kernel(schedule.RpaCase.PREFILL, q_hbm, o_hbm,
+    o_hbm, kv_cache = run_rpa_kernel(schedule.RpaCase.MIXED, q_hbm, o_hbm,
                                      kv_cache)
 
     # o_hbm: [kv_heads, max_tokens, q_per_kv // q_packing, q_packing, d]
