@@ -15,7 +15,6 @@
 import einshape
 import jax.numpy as jnp
 from jax import lax
-from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.ragged_paged_attention.experimental.batched_rpa import \
     schedule as rpa_schedule
@@ -50,11 +49,14 @@ def flash_attention(
     m_prev,  # [B, KV, TQ, 128]
     l_prev,  # [B, KV, TQ, 128]
     *,
-    mask,
+    processed_q_len,  # [B]
+    processed_kv_len,  # [B]
+    effective_kv_len,  # [B]
     config: rpa_schedule.RPAConfig,
 ):
     """Flash attention kernel."""
     b, k_heads, tq, h = q.shape
+    s = k.shape[2]
 
     if config.q_scale is not None:
         q = q / config.q_scale
@@ -66,13 +68,12 @@ def flash_attention(
         q = q.astype(k.dtype)
 
     qk = lax.dot(
-        einshape.jax_einshape("bkth->(bk)th", q),
-        einshape.jax_einshape("bksh->(bk)sh", k),
+        einshape.jax_einshape('bkth->(bk)th', q),
+        einshape.jax_einshape('bksh->(bk)sh', k),
         dimension_numbers=(([2], [2]), ([0], [0])),
         preferred_element_type=jnp.float32,
     )
-    qk = einshape.jax_einshape("(bk)ts->bkts", qk, b=b,
-                               k=k_heads).astype(config.out_dtype)
+    qk = einshape.jax_einshape('(bk)ts->bkts', qk, b=b, k=k_heads)
 
     qk *= config.sm_scale
     if config.k_scale is not None:
@@ -83,28 +84,34 @@ def flash_attention(
     if config.soft_cap is not None:
         qk = config.soft_cap * jnp.tanh(qk / config.soft_cap)
 
-    t = config.bq_sz
-    dim_q = tq // t
-    qk_masked = []
+    qk_seq_masks: list[jnp.ndarray] = []
     for i in range(b):
-        qk_mask_one = mask[i].astype(jnp.int32)
-        qk_mask_one = pltpu.repeat(qk_mask_one, dim_q, axis=0)
-        qk_masked.append(
-            jnp.where(qk_mask_one[None, ...], qk[i], config.mask_value))
-    qk = jnp.stack(qk_masked, axis=0)
+        kv_idx_i = processed_kv_len[i] + lax.broadcasted_iota(
+            jnp.int32, (k_heads, tq, s), 2)
+        q_idx_i = (processed_q_len[i] +
+                   lax.broadcasted_iota(jnp.int32, (k_heads, tq, s), 1) //
+                   config.num_q_heads_per_kv_head)
+        mask_i = kv_idx_i < effective_kv_len[i]
+        mask_i &= q_idx_i < effective_kv_len[i]
+        mask_i &= q_idx_i >= kv_idx_i
+        if config.sliding_window is not None:
+            mask_i &= q_idx_i < kv_idx_i + config.sliding_window
+        qk_seq_masks.append(mask_i)
+    mask = jnp.stack(qk_seq_masks, axis=0)
+
+    qk = jnp.where(mask, qk, config.mask_value)
 
     m_curr = jnp.max(qk, axis=-1, keepdims=True)
     m_next = jnp.maximum(m_prev, m_curr)
     p = jnp.exp(qk - broadcast_minor(m_next, qk.shape))
 
     pv = lax.dot(
-        einshape.jax_einshape("bkts->(bk)ts", p),
-        einshape.jax_einshape("bksh->(bk)sh", v),
+        einshape.jax_einshape('bkts->(bk)ts', p),
+        einshape.jax_einshape('bksh->(bk)sh', v),
         dimension_numbers=(([2], [1]), ([0], [0])),
         preferred_element_type=jnp.float32,
     )
-    pv = einshape.jax_einshape("(bk)th->bkth", pv, b=b,
-                               k=k_heads).astype(config.out_dtype)
+    pv = einshape.jax_einshape('(bk)th->bkth', pv, b=b, k=k_heads)
 
     if config.v_scale is not None:
         pv *= config.v_scale
@@ -115,4 +122,4 @@ def flash_attention(
 
     o_next = broadcast_minor(alpha, o_prev.shape) * o_prev + pv
 
-    return m_next, l_next, o_next
+    return m_next, l_next, o_next.astype(o_prev.dtype)

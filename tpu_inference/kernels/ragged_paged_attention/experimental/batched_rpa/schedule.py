@@ -27,10 +27,10 @@ from jax.experimental.pallas import tpu as pltpu
 class RpaCase(Enum):
     """Represents the different cases for Ragged Paged Attention.
 
-    - DECODE: Sequences are in decode-only mode (q_len = 1).
-    - PREFILL: Sequences are in prefill-only mode (q_len > 1, static).
-    - MIXED: Sequences can be a mix of prefill and decode (q_len > 1, dynamic).
-    """
+  - DECODE: Sequences are in decode-only mode (q_len = 1).
+  - PREFILL: Sequences are in prefill-only mode (q_len > 1, static).
+  - MIXED: Sequences can be a mix of prefill and decode (q_len > 1, dynamic).
+  """
 
     DECODE = 0
     PREFILL = 1
@@ -84,7 +84,6 @@ class RPAConfig:
     vmem_limit_bytes: int | None = 60 * 1024 * 1024
     case: RpaCase = RpaCase.MIXED
     n_buffer: int = 2
-    out_dtype: Any = jnp.bfloat16
 
     @property
     def bkv_p_cache(self) -> int:
@@ -177,7 +176,8 @@ class RPASchedule:
         # Stride is 3: src_hbm, dst_vmem, size
         cache_step_stride = self.batch_size * self.bkv_p_cache * 3
         cache_batch_stride = self.bkv_p_cache * 3
-        idx = step * cache_step_stride + batch_idx * cache_batch_stride + page_idx * 3
+        idx = (step * cache_step_stride + batch_idx * cache_batch_stride +
+               page_idx * 3)
         # 0: src_hbm, 1: dst_vmem, 2: size
         src_off = self.dma_kv_cache[idx + 0]
         dst_off = self.dma_kv_cache[idx + 1]
@@ -340,10 +340,8 @@ def rpa_metadata_schedule_kernel(
                     3) + target_lane * (config.bkv_p_cache * 3)
                 for i in range(config.bkv_p_cache):
                     sz = jnp.clip(
-                        kv_left_frm_cache - (i << config.page_size_log2),
-                        0,
-                        config.page_size,
-                    )
+                        kv_left_frm_cache - (i << config.page_size_log2), 0,
+                        config.page_size)
                     p_idx = jnp.minimum(p_offset + i,
                                         config.num_page_indices - 1)
 
@@ -381,7 +379,7 @@ def rpa_metadata_schedule_kernel(
                     global_p_idx = s_idx * config.pages_per_seq + p_idx
 
                     schedule.dma_kv_new[kv_new_base + 0] = (
-                        global_p_idx << config.page_size_log2) | p_off
+                        (global_p_idx << config.page_size_log2) | p_off)
                     schedule.dma_kv_new[kv_new_base +
                                         1] = q_end - kv_left_frm_new
                     schedule.dma_kv_new[kv_new_base + 2] = start_in_slot
@@ -405,7 +403,7 @@ def rpa_metadata_schedule_kernel(
 
                         base_i = kv_new_base + i * 4
                         schedule.dma_kv_new[base_i + 0] = (
-                            global_p_idx << config.page_size_log2) | p_off
+                            (global_p_idx << config.page_size_log2) | p_off)
                         schedule.dma_kv_new[base_i +
                                             1] = q_end - kv_left_frm_new
                         schedule.dma_kv_new[base_i + 2] = start_in_slot
@@ -426,9 +424,6 @@ def rpa_metadata_schedule_kernel(
         max_steps = jnp.where(lane_lengths_ref[b] > max_steps,
                               lane_lengths_ref[b], max_steps)
     schedule.actual_steps[0] = max_steps
-
-    safe_max_steps = jnp.minimum(max_steps + config.n_buffer + 1,
-                                 config.max_steps_ub)
 
     def mask_lane(b, _):
         start_step = lane_lengths_ref[b]
@@ -465,7 +460,7 @@ def rpa_metadata_schedule_kernel(
                 schedule.dma_kv_new[base_i + 2] = 0
                 schedule.dma_kv_new[base_i + 3] = 0
 
-        jax.lax.fori_loop(start_step, safe_max_steps, mask_step, None)
+        jax.lax.fori_loop(start_step, max_steps, mask_step, None)
 
     jax.lax.fori_loop(0, config.batch_size, mask_lane, None)
 
