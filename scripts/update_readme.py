@@ -10,27 +10,36 @@ CSV_MAP = {
         "support_matrices/combined_model_support_matrix.csv"
     ],
     "core_features": {
-        "v6_flax": "support_matrices/nightly/flax_nnx/v6/feature_support_matrix.csv",
-        "v6_pytorch": "support_matrices/nightly/vllm/v6/feature_support_matrix.csv",
-        "v6_default": "support_matrices/nightly/default/v6/feature_support_matrix.csv",
-        "v7_flax": "support_matrices/nightly/flax_nnx/v7/feature_support_matrix.csv",
-        "v7_pytorch": "support_matrices/nightly/vllm/v7/feature_support_matrix.csv",
-        "v7_default": "support_matrices/nightly/default/v7/feature_support_matrix.csv"
+        "v6_flax": "support_matrices/nightly/v6e/flax_nnx/feature_support_matrix.csv",
+        "v6_pytorch": "support_matrices/nightly/v6e/vllm/feature_support_matrix.csv",
+        "v6_default": "support_matrices/nightly/v6e/default/feature_support_matrix.csv",
+        "v7_flax": "support_matrices/nightly/v7x/flax_nnx/feature_support_matrix.csv",
+        "v7_pytorch": "support_matrices/nightly/v7x/vllm/feature_support_matrix.csv",
+        "v7_default": "support_matrices/nightly/v7x/default/feature_support_matrix.csv"
     },
-    "parallelism": "support_matrices/parallelism_support_matrix.csv",
+    "parallelism": {
+        "v6_flax": "support_matrices/nightly/v6e/flax_nnx/parallelism_support_matrix.csv",
+        "v6_pytorch": "support_matrices/nightly/v6e/vllm/parallelism_support_matrix.csv",
+        "v7_flax": "support_matrices/nightly/v7x/flax_nnx/parallelism_support_matrix.csv",
+        "v7_pytorch": "support_matrices/nightly/v7x/vllm/parallelism_support_matrix.csv",
+        "v6_flax_feat": "support_matrices/nightly/v6e/flax_nnx/feature_support_matrix.csv",
+        "v6_pytorch_feat": "support_matrices/nightly/v6e/vllm/feature_support_matrix.csv",
+        "v7_flax_feat": "support_matrices/nightly/v7x/flax_nnx/feature_support_matrix.csv",
+        "v7_pytorch_feat": "support_matrices/nightly/v7x/vllm/feature_support_matrix.csv"
+    },
     "quantization": {
         "static": "support_matrices/quantization_support_matrix.csv",
-        "v6_flax": "support_matrices/nightly/flax_nnx/v6/quantization_support_matrix.csv",
-        "v6_pytorch": "support_matrices/nightly/vllm/v6/quantization_support_matrix.csv",
-        "v6_default": "support_matrices/nightly/default/v6/quantization_support_matrix.csv",
-        "v7_flax": "support_matrices/nightly/flax_nnx/v7/quantization_support_matrix.csv",
-        "v7_pytorch": "support_matrices/nightly/vllm/v7/quantization_support_matrix.csv",
-        "v7_default": "support_matrices/nightly/default/v7/quantization_support_matrix.csv"
+        "v6_flax": "support_matrices/nightly/v6e/flax_nnx/quantization_support_matrix.csv",
+        "v6_pytorch": "support_matrices/nightly/v6e/vllm/quantization_support_matrix.csv",
+        "v6_default": "support_matrices/nightly/v6e/default/quantization_support_matrix.csv",
+        "v7_flax": "support_matrices/nightly/v7x/flax_nnx/quantization_support_matrix.csv",
+        "v7_pytorch": "support_matrices/nightly/v7x/vllm/quantization_support_matrix.csv",
+        "v7_default": "support_matrices/nightly/v7x/default/quantization_support_matrix.csv"
     },
     "kernel_support": "support_matrices/kernel_support_matrix.csv",
     "microbenchmarks": {
-        "v6": "support_matrices/nightly/vllm/v6/kernel_support_matrix-microbenchmarks.csv",
-        "v7": "support_matrices/nightly/vllm/v7/kernel_support_matrix-microbenchmarks.csv"
+        "v6": "support_matrices/nightly/v6e/vllm/kernel_support_matrix-microbenchmarks.csv",
+        "v7": "support_matrices/nightly/v7x/vllm/kernel_support_matrix-microbenchmarks.csv"
     }
 }
 
@@ -296,6 +305,43 @@ def generate_html_microbenchmark_table(headers, data):
     html.append("</table>")
     return "\n".join(html)
 
+def generate_html_parallelism_table(headers, data):
+    """Generates an HTML table specifically for the parallelism matrix, with merged correctness and performance."""
+    if not headers:
+        return ""
+    
+    html = []
+    html.append("<table>")
+    html.append("  <thead>")
+    html.append("    <tr>")
+    html.append("      <th>Features</th>")
+    html.append("      <th>flax</th>")
+    html.append("      <th>torchax</th>")
+    html.append("    </tr>")
+    html.append("  </thead>")
+    html.append("  <tbody>")
+
+    for row in data:
+        html.append("    <tr>")
+        feature_name = row[0]
+        if feature_name.strip() == "SP":
+            feature_html = '<strong>SP</strong> (<a href="https://github.com/vllm-project/tpu-inference/issues/1749">vote to prioritize</a>)'
+        else:
+            feature_html = f"<strong>{feature_name}</strong>"
+        
+        html.append(f"      <td>{feature_html}</td>")
+        
+        merged_flax = _merge_hw_status(row[1], row[3])
+        merged_pytorch = _merge_hw_status(row[2], row[4])
+        
+        html.append(f"      <td>{merged_flax}</td>")
+        html.append(f"      <td>{merged_pytorch}</td>")
+        html.append("    </tr>")
+        
+    html.append("  </tbody>")
+    html.append("</table>")
+    return "\n".join(html)
+
 def update_readme():
     """Finds markers in README.md and replaces content with fresh tables."""
     with open(README_PATH, "r", encoding="utf-8") as f:
@@ -304,7 +350,7 @@ def update_readme():
     for section_key, file_sources in CSV_MAP.items():
         headers, all_data = [], []
         
-        if section_key == "core_features":
+        if section_key in ("core_features", "parallelism"):
             merged_features = {}
             for col_key, fpath in file_sources.items():
                 h, d = read_csv_data(fpath)
@@ -313,27 +359,47 @@ def update_readme():
                         if not r:
                             continue
                         feature = r[0].strip()
+                        
+                        if section_key == "parallelism" and "feat" in col_key:
+                            if feature not in ["multi-host", "Single-Host-P-D-disaggregation"]:
+                                continue
+                                
                         if feature not in merged_features:
                             merged_features[feature] = {"v6_flax": "", "v6_pytorch": "", "v6_default": "", "v7_flax": "", "v7_pytorch": "", "v7_default": ""}
+                        
                         c = r[1] if len(r) > 1 else ""
                         p = r[2] if len(r) > 2 else ""
-                        merged_features[feature][col_key] = merge_metrics(c, p)
+                        
+                        base_col_key = col_key.replace("_feat", "")
+                        merged_features[feature][base_col_key] = merge_metrics(c, p)
 
             for feature in sorted(merged_features.keys(), key=lambda x: x.lower()):
                 metrics = merged_features[feature]
-                row = [
-                    feature,
-                    metrics["v6_flax"],
-                    metrics["v6_pytorch"],
-                    metrics["v6_default"],
-                    metrics["v7_flax"],
-                    metrics["v7_pytorch"],
-                    metrics["v7_default"]
-                ]
+                if section_key == "core_features":
+                    row = [
+                        feature,
+                        metrics["v6_flax"],
+                        metrics["v6_pytorch"],
+                        metrics["v6_default"],
+                        metrics["v7_flax"],
+                        metrics["v7_pytorch"],
+                        metrics["v7_default"]
+                    ]
+                else:
+                    row = [
+                        feature,
+                        metrics["v6_flax"],
+                        metrics["v6_pytorch"],
+                        metrics["v7_flax"],
+                        metrics["v7_pytorch"]
+                    ]
                 all_data.append(row)
                 
             headers = ["Feature"]
-            new_table = generate_html_feature_table(headers, all_data)
+            if section_key == "core_features":
+                new_table = generate_html_feature_table(headers, all_data)
+            else:
+                new_table = generate_html_parallelism_table(headers, all_data)
             
         elif section_key == "microbenchmarks":
             # Custom merge logic for microbenchmarks (Horizontal Join of v6 and v7)

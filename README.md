@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-03-06 08:55 PM UTC*
+*Last Updated: 2026-03-18 07:06 PM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -102,22 +102,6 @@ Below is the live status of our supported models, features, and kernels. Click o
 <summary><b> ✅ Tested Models </b></summary>
 
 <!-- START: model_support -->
-| Model | Type | Unit&nbsp;Test | Correctness&nbsp;Test | Benchmark |
-| --- | --- | --- | --- | --- |
-| [`meta-llama/Llama-4-Maverick-17B-128E-Instruct`](https://huggingface.co/meta-llama/Llama-4-Maverick-17B-128E-Instruct) | Multimodal | ❓&nbsp;Untested | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| [`Qwen/Qwen2.5-VL-7B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) | Multimodal | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| [`Qwen/Qwen3-Omni-30B-A3B-Instruct`](https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct) | Multimodal | ❓&nbsp;Untested | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| [`moonshotai/Kimi-K2-Thinking`](https://huggingface.co/moonshotai/Kimi-K2-Thinking) | Text | ❓&nbsp;Untested | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| [`Qwen/Qwen3-Coder-480B-A35B-Instruct`](https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct) | Text | ❓&nbsp;Untested | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| [`meta-llama/Llama-3.3-70B-Instruct`](https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct) | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| [`Qwen/Qwen3-4B`](https://huggingface.co/Qwen/Qwen3-4B) | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| [`google/gemma-3-27b-it`](https://huggingface.co/google/gemma-3-27b-it) | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| [`Qwen/Qwen3-32B`](https://huggingface.co/Qwen/Qwen3-32B) | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| [`deepseek-ai/DeepSeek-V3.1`](https://huggingface.co/deepseek-ai/DeepSeek-V3.1) | Text | ❓&nbsp;Untested | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| [`meta-llama/Llama-Guard-4-12B`](https://huggingface.co/meta-llama/Llama-Guard-4-12B) | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| [`openai/gpt-oss-120b`](https://huggingface.co/openai/gpt-oss-120b) | Text | ❓&nbsp;Untested | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| [`meta-llama/Llama-3.1-8B-Instruct`](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| [`Qwen/Qwen3-30B-A3B`](https://huggingface.co/Qwen/Qwen3-30B-A3B) | Text | ✅&nbsp;Passing | ✅&nbsp;Passing | ✅&nbsp;Passing |
 
 <!-- END: model_support -->
 
@@ -144,20 +128,20 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td><strong>async scheduler</strong></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅">✅</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
     </tr>
     <tr>
       <td><strong>Chunked Prefill</strong></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅">✅</span></td>
+      <td><span title="✅">✅</span></td>
+      <td><span title="✅">✅</span></td>
     </tr>
     <tr>
       <td><strong>DCN-based P/D disaggregation</strong></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅">✅</span></td>
+      <td><span title="✅">✅</span></td>
+      <td><span title="✅">✅</span></td>
     </tr>
     <tr>
       <td><strong>hybrid kv cache</strong></td>
@@ -167,21 +151,21 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td><strong>KV cache host offloading</strong></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
     </tr>
     <tr>
       <td><strong>LoRA_Torch</strong></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅">✅</span></td>
+      <td><span title="✅">✅</span></td>
+      <td><span title="✅">✅</span></td>
     </tr>
     <tr>
       <td><strong>multi-host</strong></td>
-      <td><span title="v6e ⚪&nbsp;N/A">⚪&nbsp;v6e</span><br><span title="v7x ❓&nbsp;Untested">❓&nbsp;v7x</span></td>
-      <td><span title="v6e ⚪&nbsp;N/A">⚪&nbsp;v6e</span><br><span title="v7x ❓&nbsp;Untested">❓&nbsp;v7x</span></td>
-      <td><span title="v6e ⚪&nbsp;N/A">⚪&nbsp;v6e</span><br><span title="v7x ❓&nbsp;Untested">❓&nbsp;v7x</span></td>
+      <td><span title="v6e N/A">N/A&nbsp;v6e</span><br><span title="v7x ❓&nbsp;Untested">❓&nbsp;v7x</span></td>
+      <td><span title="v6e N/A">N/A&nbsp;v6e</span><br><span title="v7x ❓&nbsp;Untested">❓&nbsp;v7x</span></td>
+      <td><span title="v6e N/A">N/A&nbsp;v6e</span><br><span title="v7x ❓&nbsp;Untested">❓&nbsp;v7x</span></td>
     </tr>
     <tr>
       <td><strong>Multimodal Inputs</strong></td>
@@ -191,19 +175,19 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td><strong>Out-of-tree model support</strong></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅">✅</span></td>
+      <td><span title="✅">✅</span></td>
+      <td><span title="✅">✅</span></td>
     </tr>
     <tr>
       <td><strong>Prefix Caching</strong></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅">✅</span></td>
+      <td><span title="✅">✅</span></td>
+      <td><span title="✅">✅</span></td>
     </tr>
     <tr>
       <td><strong>runai_model_streamer_loader</strong></td>
-      <td><span title="v6e ❓&nbsp;Untested">❓&nbsp;v6e</span><br><span title="v7x ❌&nbsp;Failing">❌&nbsp;v7x</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
@@ -215,9 +199,9 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td><strong>Single Program Multi Data</strong></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅">✅</span></td>
+      <td><span title="✅">✅</span></td>
+      <td><span title="✅">✅</span></td>
     </tr>
     <tr>
       <td><strong>Single-Host-P-D-disaggregation</strong></td>
@@ -227,15 +211,15 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td><strong>Speculative Decoding: Eagle3</strong></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅">✅</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅">✅</span></td>
     </tr>
     <tr>
       <td><strong>Speculative Decoding: Ngram</strong></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="v6e ❌&nbsp;Failing">❌&nbsp;v6e</span><br><span title="v7x ✅&nbsp;Passing">✅&nbsp;v7x</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅">✅</span></td>
+      <td><span title="v6e ❌&nbsp;Failing">❌&nbsp;v6e</span><br><span title="v7x ✅">✅&nbsp;v7x</span></td>
+      <td><span title="✅">✅</span></td>
     </tr>
     <tr>
       <td><strong>structured_decoding</strong></td>
@@ -254,15 +238,57 @@ Below is the live status of our supported models, features, and kernels. Click o
 <summary>Parallelism Techniques</summary>
 
 <!-- START: parallelism -->
-| Feature | CorrectnessTest | PerformanceTest |
-| --- | --- | --- |
-| CP | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| DP | ✅&nbsp;Passing | ❓&nbsp;Untested |
-| EP | ✅&nbsp;Passing | ❓&nbsp;Untested |
-| PP | ✅&nbsp;Passing | ✅&nbsp;Passing |
-| SP | ❓&nbsp;Untested | ❓&nbsp;Untested |
-| TP | ✅&nbsp;Passing | ❓&nbsp;Untested |
-
+<table>
+  <thead>
+    <tr>
+      <th>Features</th>
+      <th>flax</th>
+      <th>torchax</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>CP</strong></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
+    </tr>
+    <tr>
+      <td><strong>DP</strong></td>
+      <td><span title="✅">✅</span></td>
+      <td><span title="✅">✅</span></td>
+    </tr>
+    <tr>
+      <td><strong>EP</strong></td>
+      <td><span title="v6e ✅">✅&nbsp;v6e</span><br><span title="v7x ❌&nbsp;Failing">❌&nbsp;v7x</span></td>
+      <td><span title="✅">✅</span></td>
+    </tr>
+    <tr>
+      <td><strong>multi-host</strong></td>
+      <td><span title="v6e N/A">N/A&nbsp;v6e</span><br><span title="v7x ❓&nbsp;Untested">❓&nbsp;v7x</span></td>
+      <td><span title="v6e N/A">N/A&nbsp;v6e</span><br><span title="v7x ❓&nbsp;Untested">❓&nbsp;v7x</span></td>
+    </tr>
+    <tr>
+      <td><strong>PP</strong></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
+    </tr>
+    <tr>
+      <td><strong>Single-Host-P-D-disaggregation</strong></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+    </tr>
+    <tr>
+      <td><strong>SP</strong> (<a href="https://github.com/vllm-project/tpu-inference/issues/1749">vote to prioritize</a>)</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+    </tr>
+    <tr>
+      <td><strong>TP</strong></td>
+      <td><span title="v6e ❌&nbsp;Failing">❌&nbsp;v6e</span><br><span title="v7x ✅">✅&nbsp;v7x</span></td>
+      <td><span title="v6e ✅">✅&nbsp;v6e</span><br><span title="v7x ❌&nbsp;Failing">❌&nbsp;v7x</span></td>
+    </tr>
+  </tbody>
+</table>
 <!-- END: parallelism -->
 
 </details>
@@ -284,39 +310,46 @@ Below is the live status of our supported models, features, and kernels. Click o
   </thead>
   <tbody>
     <tr>
-      <td>Int4</td>
-      <td>awq</td>
+      <td>AWQ INT4</td>
       <td>v5, v6</td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
+      <td>unverified</td>
+      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓ Untested">❓</span></td>
     </tr>
     <tr>
-      <td>fp4</td>
-      <td>mxfp4</td>
+      <td>FP4 W4A16</td>
       <td>v7</td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
+      <td>unverified</td>
+      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓ Untested">❓</span></td>
     </tr>
     <tr>
-      <td>fp8</td>
-      <td>fp8</td>
+      <td>FP8 W8A8</td>
       <td>v7</td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
+      <td>unverified</td>
+      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓ Untested">❓</span></td>
     </tr>
     <tr>
-      <td>fp8</td>
-      <td>compressed-tensors</td>
+      <td>FP8 W8A16</td>
       <td>v7</td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
+      <td>unverified</td>
+      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓ Untested">❓</span></td>
     </tr>
     <tr>
-      <td>int8</td>
-      <td>compressed-tensors</td>
+      <td>INT4 W4A16</td>
       <td>v5, v6</td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
+      <td>unverified</td>
+      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓ Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>INT8 W8A8</td>
+      <td>v5, v6</td>
+      <td>unverified</td>
+      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓ Untested">❓</span></td>
     </tr>
   </tbody>
 </table>
@@ -364,19 +397,19 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td rowspan="2"><b>Moe</b></td>
       <td>Fused&nbsp;MoE</td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
       <td><span title=""></span></td>
       <td><span title=""></span></td>
     </tr>
     <tr>
       <td>gmm</td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
       <td><span title=""></span></td>
       <td><span title=""></span></td>
     </tr>
@@ -385,10 +418,10 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td rowspan="1"><b>Dense</b></td>
       <td>All&#8209;gather&nbsp;matmul</td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
       <td><span title=""></span></td>
       <td><span title=""></span></td>
     </tr>
@@ -397,28 +430,28 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td rowspan="3"><b>Attention</b></td>
       <td>Generic&nbsp;Ragged<br>Paged<Br>Attention<br>V3*</td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
       <td><span title=""></span></td>
       <td><span title=""></span></td>
     </tr>
     <tr>
       <td>MLA</td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
       <td><span title=""></span></td>
       <td><span title=""></span></td>
     </tr>
     <tr>
       <td>Ragged&nbsp;Paged<br>Attention<br>V3<Br>Head_Dim<br>64*</td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
-      <td><span title="❓">❓</span></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
+      <td><span title="unverified">unverified</span></td>
       <td><span title=""></span></td>
       <td><span title=""></span></td>
     </tr>
