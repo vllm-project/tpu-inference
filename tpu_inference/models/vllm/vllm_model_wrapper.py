@@ -46,6 +46,8 @@ from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.vllm.gdn_attention import \
+    apply_gated_delta_net_torch_ops_patch
 from tpu_inference.layers.vllm.mla_attention import \
     VllmTPUMultiHeadLatentAttentionWrapper
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
@@ -60,35 +62,6 @@ from tpu_inference.models.vllm.vllm_model_wrapper_context import (
 from tpu_inference.runner.lora_utils import replace_lora_metadata
 
 logger = init_logger(__name__)
-
-
-def apply_tpu_custom_ops_patch():
-    # Attempt to load vLLM ops so they register in the torch.ops.vllm namespace
-    try:
-        import vllm.model_executor.models.qwen3_next  # noqa: F401
-    except ImportError:
-        pass
-
-    # Ensure the op exists in the namespace, which initializes the OpOverloadPacket
-    if hasattr(torch.ops, "vllm") and hasattr(torch.ops.vllm,
-                                              "gdn_attention_core"):
-        # Overwrite the C++ operator with our Python bridge function!
-        # This completely bypasses the C++ dispatch layer.
-        def gdn_attention_core_tpu(
-            mixed_qkv: torch.Tensor,
-            b: torch.Tensor,
-            a: torch.Tensor,
-            core_attn_out: torch.Tensor,
-            layer_name: str,
-        ) -> None:
-            """
-            Custom op for the core attention computation.
-            Only handles the convolution + recurrent attention part.
-            Input/output projections are handled outside this op.
-            """
-            pass
-
-        torch.ops.vllm.gdn_attention_core = gdn_attention_core_tpu
 
 
 class _VllmRunner(torch.nn.Module):
@@ -142,7 +115,7 @@ class VllmModelWrapper:
             self.vllm_config, self.mesh)
         self._apply_pp_patch()
 
-        apply_tpu_custom_ops_patch()
+        apply_gated_delta_net_torch_ops_patch()
 
         MultiHeadLatentAttentionWrapper.register_oot(
             VllmTPUMultiHeadLatentAttentionWrapper)

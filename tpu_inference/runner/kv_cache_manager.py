@@ -176,7 +176,8 @@ class KVCacheManager:
         else:
             # Else propagate attention modules from compilation config.
             layers = {}
-            attention_types = [Attention, MLAAttention]
+            from vllm.model_executor.layers.mamba.abstract import MambaBase
+            attention_types = [Attention, MLAAttention, MambaBase]
 
             for attn_cls in attention_types:
                 # Get the layers for the current class
@@ -195,15 +196,26 @@ class KVCacheManager:
             # and actual dims. Disable sliding window for workaround.
             head_size_set = set()
             for layer_name, attn_module in layers.items():
+                if isinstance(attn_module, MambaBase):
+                    continue
                 head_size_set.add(
                     common_utils.get_padded_head_dim(attn_module.head_size))
 
             if len(head_size_set) > 1:
                 for layer_name, attn_module in layers.items():
+                    if isinstance(attn_module, MambaBase):
+                        continue
                     attn_module.sliding_window = None
 
             logger.warning(f"Compilation num_layers = {len(layers.items())}")
             for layer_name, attn_module in layers.items():
+                if isinstance(attn_module, MambaBase):
+                    spec = attn_module.get_kv_cache_spec(
+                        self.runner.vllm_config)
+                    if spec is not None:
+                        kv_cache_spec[layer_name] = spec
+                    continue
+
                 if (kv_tgt_layer :=
                         attn_module.kv_sharing_target_layer_name) is not None:
                     # The layer doesn't need its own KV cache and will use that of
@@ -300,6 +312,38 @@ class KVCacheManager:
             layer_name = kv_cache_tensor.shared_by[0]
             layer_spec = layer_name_to_spec[layer_name]
 
+            from vllm.v1.kv_cache_interface import MambaSpec
+            if isinstance(layer_spec, MambaSpec):
+                page_size_bytes = layer_spec.page_size_bytes
+                assert kv_cache_tensor.size % page_size_bytes == 0
+                num_blocks = kv_cache_tensor.size // page_size_bytes
+                dp_size = self.runner.vllm_config.sharding_config.total_dp_size
+                num_blocks = (num_blocks // dp_size) * dp_size
+
+                mamba_states = []
+                for shape, dtype in zip(layer_spec.shapes, layer_spec.dtypes):
+                    jax_dtype = t2j_dtype(dtype)
+                    cache_shape = (num_blocks, *shape)
+                    sharding = NamedSharding(
+                        self.runner.mesh,
+                        PartitionSpec(ShardingAxisName.ATTN_DATA,
+                                      *([None] * (len(cache_shape) - 1))))
+
+                    # Use static shapes in the inner function to avoid Tracer errors.
+                    def _allocate_mamba(c_shape=cache_shape,
+                                        c_dtype=jax_dtype):
+                        return jnp.empty(shape=c_shape, dtype=c_dtype)
+
+                    mamba_allocate = jax.jit(_allocate_mamba,
+                                             out_shardings=sharding)
+                    mamba_states.append(mamba_allocate())
+
+                kv_caches.append(tuple(mamba_states))
+                num_blocks_list.append(num_blocks)
+                for layer_name in kv_cache_tensor.shared_by:
+                    self.runner.layer_name_to_kvcache_index[layer_name] = i
+                continue
+
             page_size_bytes = layer_spec.page_size_bytes
             assert kv_cache_tensor.size % page_size_bytes == 0
             num_blocks = kv_cache_tensor.size // page_size_bytes
@@ -334,13 +378,14 @@ class KVCacheManager:
                     layer_name] = self.runner.layer_name_to_kvcache_index[
                         target_layer_name]
 
+        # TODO: update for Mamba
         logger.info(
             f"Init kv-cache | "
             f"num_layers={len(kv_caches)} | "
-            f"shape=(num_blocks, {kv_caches[0].shape[1:]}) | "
+            # f"shape=(num_blocks, {kv_caches[0].shape[1:]}) | "
             f"num_blocks={num_blocks_list} | "
-            f"sharding={kv_caches[0].sharding} | "
-            f"dtype={kv_caches[0].dtype} | "
+            # f"sharding={kv_caches[0].sharding} | "
+            # f"dtype={kv_caches[0].dtype} | "
             f"hbm={utils.hbm_usage_gb(self.runner.mesh.devices.flatten())}Gb")
 
     def delete_kv_cache(self) -> None:
