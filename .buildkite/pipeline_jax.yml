@@ -15,13 +15,28 @@
 steps:
   - group: "${TESTS_GROUP_LABEL:-[jax] TPU6e Tests Group}"
     steps:
+
+      # -----------------------------------------------------------------
+      # Centralized Build Step (Runs on the CPU queue)
+      # -----------------------------------------------------------------
+      - label: ":docker: Build and Push Base Image (${TPU_VERSION:-tpu6e})"
+        key: "${TPU_VERSION:-tpu6e}_build_docker"
+        agents:
+          queue: cpu_64_core
+        env:
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+        commands:
+          - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+
       # -----------------------------------------------------------------
       # TEST STEPS - Calling wrapper
       # -----------------------------------------------------------------
       - label: "${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX models"
         key: "${TPU_VERSION:-tpu6e}_test_0"
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
         env:
+          USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
@@ -54,8 +69,10 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX + vLLM models on single chip"
         key: ${TPU_VERSION:-tpu6e}_test_3
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
         env:
+          USE_PREBUILT_IMAGE: "1"
           MODEL_IMPL_TYPE: "vllm"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
@@ -78,8 +95,10 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E speculative decoding test"
         key: ${TPU_VERSION:-tpu6e}_test_6
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
         env:
+          USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
@@ -90,8 +109,12 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests part1"
         key: ${TPU_VERSION:-tpu6e}_test_7_1
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
         artifact_paths: ".coverage.part1.${TPU_VERSION:-tpu6e}"
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
@@ -102,8 +125,12 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests part2"
         key: ${TPU_VERSION:-tpu6e}_test_7_2
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
         artifact_paths: ".coverage.part2.${TPU_VERSION:-tpu6e}"
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
@@ -139,7 +166,10 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests - kernels"
         key: ${TPU_VERSION:-tpu6e}_test_8
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
+        env:
+          USE_PREBUILT_IMAGE: "1"
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
@@ -161,7 +191,10 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests - collective kernels"
         key: ${TPU_VERSION:-tpu6e}_test_9
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
+        env:
+          USE_PREBUILT_IMAGE: "1"
         agents:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
         commands:
@@ -217,8 +250,10 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} lora e2e tests for JAX + vLLM models multi chips"
         key: ${TPU_VERSION:-tpu6e}_test_13
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
         env:
+          USE_PREBUILT_IMAGE: "1"
           TEST_LORA_TP: "True"
           VLLM_LOG_LEVEL: "INFO"
         agents:
@@ -228,7 +263,11 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} lora unit tests on single chip"
         key: ${TPU_VERSION:-tpu6e}_test_15
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
@@ -239,8 +278,10 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} lora unit tests on multi chips"
         key: ${TPU_VERSION:-tpu6e}_test_16
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
         env:
+          USE_PREBUILT_IMAGE: "1"
           USE_V6E8_QUEUE: "True"
           VLLM_LOG_LEVEL: "INFO"
         agents:
@@ -250,8 +291,10 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E lm_eval accuracy check qwen3 coder with fused moe."
         key: ${TPU_VERSION:-tpu6e}_test_17
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
         env:
+          USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
@@ -266,8 +309,10 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E lm_eval accuracy check qwen3 coder with gmm kernel."
         key: ${TPU_VERSION:-tpu6e}_test_18
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
         env:
+          USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
@@ -282,8 +327,10 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E lm_eval accuracy check gpt oss."
         key: ${TPU_VERSION:-tpu6e}_test_19
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
         env:
+          USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
@@ -312,8 +359,10 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Perf regression test for qwen3 coder 8k 1k with fused moe kernel."
         key: ${TPU_VERSION:-tpu6e}_test_21
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
         env:
+          USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
@@ -339,8 +388,10 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Perf regression test for qwen3 coder 8k 1k with gmm kernel."
         key: ${TPU_VERSION:-tpu6e}_test_23
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
         env:
+          USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
@@ -352,8 +403,10 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Test EP recompilation."
         key: ${TPU_VERSION:-tpu6e}_test_24
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
         env:
+          USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
@@ -365,8 +418,10 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E test for DCN-based P/D disaggregation"
         key: ${TPU_VERSION:-tpu6e}_test_25
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
         env:
+          USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
           MODEL: "Qwen/Qwen3-0.6B"
           INPUT_LEN: 1024
@@ -413,7 +468,11 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer JAX UniProcExecutor"
         key: "${TPU_VERSION:-tpu6e}_test_27"
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
         commands:
@@ -421,7 +480,11 @@ steps:
       
       - label: "${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer Torchax UniProcExecutor"
         key: "${TPU_VERSION:-tpu6e}_test_28"
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
         commands:
@@ -429,7 +492,10 @@ steps:
       
       - label: "${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer Torchax RayDistributedExecutor"
         key: "${TPU_VERSION:-tpu6e}_test_29"
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
+        env:
+          USE_PREBUILT_IMAGE: "1"
         agents:
           queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}" # Using a queue with more devices for distributed tests
         commands:
