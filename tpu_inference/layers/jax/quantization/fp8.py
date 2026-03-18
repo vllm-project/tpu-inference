@@ -284,7 +284,11 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 weight_scale_inv,
                 bias=bias,
                 weight_block_size=tuple(self.quant_config.weight_block_size),
-                linear_config=self.linear_config)
+                requant_block_size=self.linear_config.requant_block_size,
+                output_sizes=tuple(self.linear_config.output_sizes),
+                requant_weight_dtype=self.linear_config.requant_weight_dtype,
+                fuse_matmuls=self.linear_config.fuse_matmuls,
+                n_shards=self.linear_config.n_shards)
             delattr(layer, 'weight')
             delattr(layer, 'weight_scale_inv')
             delattr(layer, 'bias')
