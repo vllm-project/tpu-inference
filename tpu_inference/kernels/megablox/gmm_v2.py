@@ -22,6 +22,10 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
+
 # Util.
 
 
@@ -923,10 +927,16 @@ def make_gmm_configs(
         # scale value. Since this operation is very memory intensive, we use a
         # block size that is small enough to minimize memory overhead but large
         # enough to minimize compute overhead of quantization.
+        # NOTE(catswe):
         quant_block_size=rhs_cfgs.quant_block_size
         if rhs_cfgs.has_scale else 512,
         dtype=lhs.dtype,
     )
+
+    if lhs_cfgs.quant_block_size != 512:
+        logger.warning_once(
+            f'[GMM V2] Using quant_block_size {lhs_cfgs.quant_block_size}. '
+            f'It is recommended to set MOE_REQUANTIZE_BLOCK_SIZE=512.')
 
     if out_dtype is None:
         out_dtype = lhs.dtype
