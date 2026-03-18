@@ -1186,9 +1186,15 @@ def _tgmm_v2_impl(
     lhs: jax.Array,  # [size_k, size_m]
     rhs: jax.Array,  # [size_m, size_n]
     group_sizes: jax.Array,
-    preferred_element_type: jnp.dtype = jnp.float32,
-    tile_info: TileSizes | TileFn = calculate_tiling,
     group_offset: jax.Array | None = None,
+    *,
+    tile_info: TileSizes | TileFn = calculate_tiling,
+    vmem_limit_bytes: int | None = None,
+    precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
+    preferred_element_type: jnp.dtype | None = None,
+    acc_dtype: jnp.dtype | None = None,
+    maybe_quantize_lhs: bool = True,
+    zero_initialize: bool = True,
 ):
   num_groups = group_sizes.shape[0]
   size_k, size_m = lhs.shape
@@ -1278,9 +1284,14 @@ def _gmm_v2_bwd(
     lhs.swapaxes(0, 1),  # [k, m]
     grad,  # [m, n]
     group_sizes,
-    rhs.dtype,
-    tile_info,
     group_offset,
+    tile_info=tile_info, 
+    vmem_limit_bytes=vmem_limit_bytes, 
+    precision=precision, 
+    preferred_element_type=preferred_element_type, 
+    acc_dtype=acc_dtype, 
+    maybe_quantize_lhs=maybe_quantize_lhs, 
+    zero_initialize=zero_initialize
   )
   # Return a gradient per each differentiable argument except for the nondiff_argnames.
   # TODO(xw32): how should we calculate the gradient of rhs_bias?
