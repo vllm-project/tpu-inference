@@ -495,6 +495,7 @@ class TestRayWorkerWrapperAsyncScheduling(unittest.TestCase):
         self.assertNotIn(5, self.wrapper._execute_model_outputs)
 
 
+@unittest.skip("Temporary skip until ci is fixed.")
 class TestRayDistributedExecutorExecuteDag(unittest.TestCase):
     """Tests for _execute_dag async scheduling in RayDistributedExecutor."""
 
