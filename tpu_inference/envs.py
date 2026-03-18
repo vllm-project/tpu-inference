@@ -41,6 +41,7 @@ def env_with_choices(
     default: str | None,
     choices: list[str] | Callable[[], list[str]],
     case_sensitive: bool = True,
+    allow_csv: bool = False,
 ) -> Callable[[], str | None]:
     """
     Create a lambda that validates environment variable against allowed choices
@@ -50,6 +51,8 @@ def env_with_choices(
         default: Default value if not set (can be None)
         choices: List of valid string options or callable that returns list
         case_sensitive: Whether validation should be case sensitive
+        allow_csv: Whether to allow comma-separated values, validating each
+            part individually against the choices
 
     Returns:
         Lambda function for environment_variables dict
@@ -64,15 +67,16 @@ def env_with_choices(
         actual_choices = choices() if callable(choices) else choices
 
         if not case_sensitive:
-            check_value = value.lower()
             check_choices = [choice.lower() for choice in actual_choices]
         else:
-            check_value = value
             check_choices = actual_choices
 
-        if check_value not in check_choices:
-            raise ValueError(f"Invalid value '{value}' for {env_name}. "
-                             f"Valid options: {actual_choices}.")
+        parts = value.split(",") if allow_csv else [value]
+        for part in parts:
+            check_part = part.lower() if not case_sensitive else part
+            if check_part not in check_choices:
+                raise ValueError(f"Invalid value '{part}' for {env_name}. "
+                                 f"Valid options: {actual_choices}.")
 
         return value
 
@@ -108,9 +112,11 @@ def env_bool(env_name: str, default: bool = False) -> Callable[[], bool]:
 
 
 environment_variables: dict[str, Callable[[], Any]] = {
-    # JAX platform selection (e.g., "tpu", "cpu", "proxy")
+    # JAX platform selection (e.g., "tpu", "cpu", "proxy", "proxy,cpu")
     "JAX_PLATFORMS":
-    env_with_choices("JAX_PLATFORMS", "", ["", "tpu", "cpu", "proxy"]),
+    env_with_choices("JAX_PLATFORMS",
+                     "", ["", "tpu", "cpu", "proxy"],
+                     allow_csv=True),
     # TPU accelerator type (e.g., "v5litepod-16", "v4-8")
     "TPU_ACCELERATOR_TYPE":
     lambda: os.getenv("TPU_ACCELERATOR_TYPE", None),

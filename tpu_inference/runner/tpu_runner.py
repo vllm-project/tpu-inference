@@ -407,6 +407,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _init_mm(self) -> None:
         self.is_multimodal_model = None
         self.uses_mrope = self.model_config.uses_mrope
+        self.supports_mm_inputs = True
 
     def _init_speculative_decoding(self) -> None:
         self.drafter = None
