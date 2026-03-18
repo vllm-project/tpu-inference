@@ -22,7 +22,6 @@ import jax.numpy as jnp
 import torch
 from flax import nnx
 from jax.sharding import PartitionSpec as P
-from torchax.ops.mappings import t2j
 
 from tpu_inference.layers.common.linear import sharded_quantized_batched_matmul
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
@@ -45,6 +44,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
     jax_array_from_reshaped_torch, load_nnx_param_from_reshaped_torch,
     shard_put)
+from tpu_inference.utils import t2j
 
 logger = init_logger(__name__)
 

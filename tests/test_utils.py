@@ -3,13 +3,17 @@ import os
 from unittest.mock import MagicMock, patch
 
 import jax.numpy as jnp
+import numpy as np
 import pytest
+import torch
+from torchax.ops.mappings import t2j as ref_t2j
 
 # Import the functions to be tested
 from tpu_inference.utils import (GBYTES, enable_megacore,
                                  get_jax_dtype_from_str_dtype, get_megacore,
                                  get_padded_head_dim, hbm_usage_bytes,
                                  hbm_usage_gb)
+from tpu_inference.utils import t2j as t2j
 
 
 def test_enable_and_get_megacore():
@@ -191,3 +195,28 @@ def test_get_jax_dtype_from_str_dtype():
     assert get_jax_dtype_from_str_dtype("fp8") == jnp.float8_e4m3fn
     assert get_jax_dtype_from_str_dtype("fp8_e4m3") == jnp.float8_e4m3fn
     assert get_jax_dtype_from_str_dtype("fp8_e5m2") == jnp.float8_e5m2
+
+
+# --- t2j tests ---
+
+
+# Special dtypes: our t2j uses a bit-cast via uint8 view instead of going
+# through float32, so we compare byte representations to the torchax reference.
+@pytest.mark.parametrize("torch_dtype,jax_dtype", [
+    (torch.bfloat16, jnp.bfloat16),
+    (torch.float8_e4m3fn, jnp.float8_e4m3fn),
+    (torch.float8_e4m3fnuz, jnp.float8_e4m3fnuz),
+    (torch.float8_e5m2, jnp.float8_e5m2),
+    (torch.float8_e5m2fnuz, jnp.float8_e5m2fnuz),
+])
+def test_t2j_numpy_unsupported_dtypes(torch_dtype, jax_dtype):
+    # Generate random values via float32, then cast to the target dtype.
+    t = torch.randn(50000, dtype=torch.float32)
+    info = torch.finfo(torch_dtype)
+    t = torch.clamp(t, min=info.min, max=info.max)
+    t = t.to(torch_dtype)
+
+    result = t2j(t)
+    reference = ref_t2j(t)
+    assert result.dtype == jax_dtype
+    np.testing.assert_array_equal(result, reference)

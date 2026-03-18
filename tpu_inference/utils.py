@@ -15,7 +15,9 @@ from jax._src import xla_bridge as xb
 from jax._src.lib import xla_client as xc
 from jax._src.numpy.scalar_types import _ScalarMeta
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from torchax.ops.mappings import j2t_dtype, t2j_dtype
+from torchax.ops.mappings import j2t_dtype
+from torchax.ops.mappings import t2j as torchax_t2j
+from torchax.ops.mappings import t2j_dtype
 from vllm import envs as vllm_envs
 from vllm import utils
 
@@ -59,6 +61,28 @@ def to_torch_dtype(dtype: str | jnp.dtype | torch.dtype) -> torch.dtype:
     # into torch dtype.
     dtype = to_jax_dtype(dtype)
     return j2t_dtype(dtype)
+
+
+_NUMPY_UNSUPPORTED_DTYPES = {
+    torch.bfloat16: jnp.bfloat16,
+    torch.float8_e4m3fn: jnp.float8_e4m3fn,
+    torch.float8_e4m3fnuz: jnp.float8_e4m3fnuz,
+    torch.float8_e5m2: jnp.float8_e5m2,
+    torch.float8_e5m2fnuz: jnp.float8_e5m2fnuz,
+}
+
+
+def t2j(t, use_dlpack=False):
+    # torchax's t2j is not efficient to handle types in
+    # _NUMPY_UNSUPPORTED_DTYPES, it need to convert to
+    # float32. For large tensor, that could be expensive.
+    # https://github.com/google/torchax/blob/main/torchax/ops/mappings.py#L55
+    # Here, we do a bit cast instead.
+    # TODO(gxd3): upstream this improvement to the torchax library.
+    if t.dtype in _NUMPY_UNSUPPORTED_DTYPES and t.is_contiguous():
+        bytes = t.cpu().view(torch.uint8).detach().numpy()
+        return jnp.array(bytes).view(_NUMPY_UNSUPPORTED_DTYPES[t.dtype])
+    return torchax_t2j(t, use_dlpack=use_dlpack)
 
 
 _megacore = False
