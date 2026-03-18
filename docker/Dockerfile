@@ -64,7 +64,8 @@ RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install \
 WORKDIR /workspace/tpu_inference
 # Install requirements first and cache so we don't need to re-install on code change.
 COPY requirements.txt .
-RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt --retries 3
+# TODO: remove `--no-deps` once we have stable version of jax/jaxlib/libtpu.
+RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt --no-deps --retries 3
 COPY requirements_benchmarking.txt .
 # These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh)
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements_benchmarking.txt --retries 3
@@ -74,7 +75,8 @@ RUN  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then
         pip install -r requirements_test.txt --retries 3; \
     fi
 COPY . .
-RUN --mount=type=cache,target=/root/.cache/pip pip install -e .
+# TODO: remove `--no-deps` once we have stable version of jax/jaxlib/libtpu.
+RUN --mount=type=cache,target=/root/.cache/pip pip install -e . --no-deps
 
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

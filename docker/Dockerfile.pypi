@@ -36,7 +36,8 @@ RUN apt-get update && apt-get install -y \
 # Install tpu_inference
 WORKDIR /workspace/tpu_inference
 COPY requirements.txt .
-RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt --retries 3
+# TODO: remove `--no-deps` once we have stable version of jax/jaxlib/libtpu.
+RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt --no-deps --retries 3
 COPY requirements_benchmarking.txt .
 # These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh)
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements_benchmarking.txt --retries 3
@@ -48,7 +49,8 @@ RUN  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then
 
 COPY . .
 # Build tpu_inference
-RUN python3 -m pip install build
+# TODO: remove `--no-deps` once we have stable version of jax/jaxlib/libtpu.
+RUN python3 -m pip install build --no-deps
 RUN python3 -m build
 
 # Build vllm-tpu wheel

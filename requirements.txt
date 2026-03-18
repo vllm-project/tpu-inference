@@ -5,9 +5,6 @@ pytest-mock
 absl-py
 numpy
 google-cloud-storage
-jax[tpu]==0.8.3
-jaxlib==0.8.3
-libtpu==0.0.32
 jaxtyping
 flax==0.12.4
 torchax==0.0.11
@@ -20,3 +17,10 @@ runai-model-streamer[s3,gcs]==0.15.4
 gcsfs==2026.1.0
 hypothesis==6.151.9
 sortedcontainers==2.4.0
+
+--find-links https://us-python.pkg.dev/ml-oss-artifacts-published/jax-public-nightly-artifacts-registry/simple/jax
+--find-links https://us-python.pkg.dev/ml-oss-artifacts-published/jax-public-nightly-artifacts-registry/simple/jaxlib
+--find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
+jax[tpu]==0.9.2.dev20260316
+jaxlib==0.9.2.dev20260316
+libtpu==0.0.38.dev20260315
