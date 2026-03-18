@@ -199,7 +199,8 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             # Weight stays in FP8 and is used with sharded_quantized_batched_matmul.
             param_dtype = jnp.float8_e4m3
             layer.weight = nnx.Param(
-                kernel_init(rngs.params(), self.kernel_shape, param_dtype),
+                nnx.initializers.uniform()(rngs.params(), self.kernel_shape,
+                                           param_dtype),
                 weight_loader=partial(load_nnx_param_from_reshaped_torch,
                                       permute_dims=None,
                                       param_name=layer.prefix + ".weight"),
