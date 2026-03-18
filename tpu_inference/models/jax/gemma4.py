@@ -368,10 +368,7 @@ class Gemma4DecoderLayer(JaxModule):
 
         self.is_sliding = self.layer_type == "sliding_attention"
 
-        if not self.is_sliding:
-            self.layer_scalar = nnx.Param(jnp.ones((1, ), dtype=dtype))
-        else:
-            self.layer_scalar = None
+        self.layer_scalar = nnx.Param(jnp.ones((1, ), dtype=dtype))
 
         self.input_layernorm = JaxRmsNorm(
             hidden_size,
@@ -446,8 +443,7 @@ class Gemma4DecoderLayer(JaxModule):
         mlp_output = self.post_feedforward_layernorm(mlp_output)
         outputs = residual + mlp_output
 
-        if self.layer_scalar is not None:
-            outputs = outputs * self.layer_scalar.value
+        outputs = outputs * self.layer_scalar.value
 
         return kv_cache, outputs
 
@@ -595,8 +591,9 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
             (clean_name, 1.0 + tensor if "norm" in clean_name else tensor)
             for name, tensor in weights
             if (clean_name := name.replace("language_model.", "")).startswith((
-                "model.", "lm_head")))
-
+                "model.", "lm_head")) and
+            "vision" not in clean_name  # Exclude vision tower weights for now
+        )
         return super().load_weights(stripped_weights)
 
     def __call__(
