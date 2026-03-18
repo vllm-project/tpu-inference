@@ -147,7 +147,7 @@ class GmmTest(jtu.JaxTestCase):
       has_bias=[True],
       group_offset=[0],
   )
-  def test_gmm(
+  def test_gmm_basic(
       self, batch_size, in_size, out_size, num_groups, has_bias, group_offset
   ):
     num_local_groups = num_groups - group_offset

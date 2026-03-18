@@ -1033,7 +1033,7 @@ def get_metadata(cfgs: GmmConfigs):
     "maybe_quantize_lhs",
     "zero_initialize",
 ])
-def gmm_v2(
+def _gmm_v2_impl(
     lhs: jax.Array,  # [size_m, size_k]
     rhs: jax.Array,  # [size_group, size_k, size_n]
     group_sizes: jax.Array,  # int32[size_lhs_group]
@@ -1181,3 +1181,107 @@ def gmm_v2(
       cost_estimate=get_cost_estimate(cfgs),
       metadata=get_metadata(cfgs),
   )(group_sizes, group_offset, lhs, rhs_weights)[:, :dims.size_n]
+
+def _tgmm_v2_impl(
+    lhs: jax.Array,  # [size_k, size_m]
+    rhs: jax.Array,  # [size_m, size_n]
+    group_sizes: jax.Array,
+    preferred_element_type: jnp.dtype = jnp.float32,
+    tile_info: TileSizes | TileFn = calculate_tiling,
+    group_offset: jax.Array | None = None,
+):
+  num_groups = group_sizes.shape[0]
+  size_k, size_m = lhs.shape
+  _, size_n = rhs.shape
+
+  return jnp.zeros((num_groups, size_k, size_n))
+
+@functools.partial(jax.custom_vjp, nondiff_argnames=("tile_info", "vmem_limit_bytes", "precision", "preferred_element_type", "acc_dtype", "maybe_quantize_lhs", "zero_initialize"))
+def gmm_v2(
+    lhs: jax.Array,  # [size_m, size_k]
+    rhs: jax.Array,  # [size_group, size_k, size_n]
+    group_sizes: jax.Array,  # int32[size_lhs_group]
+    rhs_scale: jax.Array
+    | None = None,  # [size_group, num_blocks, 1, out_size]
+    rhs_bias: jax.Array | None = None,  # [size_group, 1, out_size]
+    group_offset: jax.Array | None = None,  # int32[1]
+    *,
+    tile_info: TileSizes | TileFn = calculate_tiling,
+    vmem_limit_bytes: int | None = None,
+    precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
+    preferred_element_type: jnp.dtype | None = None,
+    acc_dtype: jnp.dtype | None = None,
+    maybe_quantize_lhs: bool = True,
+    zero_initialize: bool = True,
+):
+  return _gmm_v2_impl(lhs, rhs, group_sizes, rhs_scale, rhs_bias, group_offset, tile_info=tile_info, vmem_limit_bytes=vmem_limit_bytes, precision=precision, preferred_element_type=preferred_element_type, acc_dtype=acc_dtype, maybe_quantize_lhs=maybe_quantize_lhs, zero_initialize=zero_initialize)
+
+def _gmm_v2_fwd(
+    lhs: jax.Array,  # [size_m, size_k]
+    rhs: jax.Array,  # [size_group, size_k, size_n]
+    group_sizes: jax.Array,  # int32[size_lhs_group]
+    rhs_scale: jax.Array
+    | None = None,  # [size_group, num_blocks, 1, out_size]
+    rhs_bias: jax.Array | None = None,  # [size_group, 1, out_size]
+    group_offset: jax.Array | None = None,  # int32[1]
+    *,
+    tile_info: TileSizes | TileFn = calculate_tiling,
+    vmem_limit_bytes: int | None = None,
+    precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
+    preferred_element_type: jnp.dtype | None = None,
+    acc_dtype: jnp.dtype | None = None,
+    maybe_quantize_lhs: bool = True,
+    zero_initialize: bool = True,
+):
+  out = _gmm_v2_impl(lhs, rhs, group_sizes, rhs_scale, rhs_bias, group_offset, tile_info=tile_info, vmem_limit_bytes=vmem_limit_bytes, precision=precision, preferred_element_type=preferred_element_type, acc_dtype=acc_dtype, maybe_quantize_lhs=maybe_quantize_lhs, zero_initialize=zero_initialize)
+  return out, (lhs, rhs, group_sizes, rhs_scale, rhs_bias, group_offset)
+
+def _gmm_v2_bwd(
+    # non-diff
+    tile_info: TileSizes | TileFn,
+    vmem_limit_bytes: int | None,
+    precision: jax.lax.Precision,
+    preferred_element_type: jnp.dtype,
+    acc_dtype: jnp.dtype | None,
+    maybe_quantize_lhs: bool,
+    zero_initialize: bool,
+    # residual
+    residuals: tuple[
+      jnp.ndarray,
+      jnp.ndarray,
+      jnp.ndarray,
+      jnp.ndarray,
+      jnp.ndarray,
+      jnp.ndarray,
+    ],
+    grad: jnp.ndarray,
+):
+  lhs, rhs, group_sizes, rhs_scale, rhs_bias, group_offset = residuals
+  grad_lhs = _gmm_v2_impl(
+    grad, 
+    rhs, 
+    group_sizes,
+    rhs_scale,
+    rhs_bias,
+    group_offset, 
+    tile_info=tile_info, 
+    vmem_limit_bytes=vmem_limit_bytes, 
+    precision=precision, 
+    preferred_element_type=preferred_element_type, 
+    acc_dtype=acc_dtype, 
+    maybe_quantize_lhs=maybe_quantize_lhs, 
+    zero_initialize=zero_initialize
+  )
+  grad_rhs = _tgmm_v2_impl(
+    lhs.swapaxes(0, 1),  # [k, m]
+    grad,  # [m, n]
+    group_sizes,
+    rhs.dtype,
+    tile_info,
+    group_offset,
+  )
+  # Return a gradient per each differentiable argument except for the nondiff_argnames.
+  # xw32q: how should we calculate the gradient of rhs_bias?
+  return grad_lhs, grad_rhs, None, None, None, None
+
+gmm_v2.defvjp(_gmm_v2_fwd, _gmm_v2_bwd)
