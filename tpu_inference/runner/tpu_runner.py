@@ -30,7 +30,7 @@ from jax._src import mesh as mesh_lib
 from jax._src.pallas.utils import next_power_of_2
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
@@ -538,11 +538,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                             dtype=np.int64)
 
     def load_model(self):
-        self.model_fn, self.compute_logits_fn, self.pooler_fn, self.combine_hidden_states_fn, multimodal_fns, self.state, self.lora_manager, self.model = get_model(
-            self.vllm_config,
-            self.rng_key,
-            self.mesh,
-        )
+        with set_current_vllm_config(self.vllm_config):
+            self.model_fn, self.compute_logits_fn, self.pooler_fn, self.combine_hidden_states_fn, multimodal_fns, self.state, self.lora_manager, self.model = get_model(
+                self.vllm_config,
+                self.rng_key,
+                self.mesh,
+            )
 
         multimodal_fns = multimodal_fns or {}
         self.precompile_vision_encoder_fn = multimodal_fns.get(
