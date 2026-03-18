@@ -1,7 +1,7 @@
 Feature,Single-Host CorrectnessTest,Single-Host PerformanceTest,Multi-Host CorrectnessTest,Multi-Host PerformanceTest
 "CP",unverified,unverified,unverified,unverified
-"DP",✅,✅,unverified,unverified
+"DP",✅,❌,unverified,unverified
 "EP",✅,✅,unverified,unverified
 "PP",unverified,unverified,unverified,unverified
 "SP",❌,N/A,unverified,unverified
-"TP",✅,✅,unverified,unverified
+"TP",✅,❌,unverified,unverified
