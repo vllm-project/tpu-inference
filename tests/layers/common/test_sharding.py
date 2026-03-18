@@ -15,7 +15,10 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from tpu_inference.layers.common.sharding import ShardingConfigManager
+from tpu_inference.layers.common.sharding import (LazyShardingAxisName,
+                                                  ShardingAxisName2D,
+                                                  ShardingAxisNameBase,
+                                                  ShardingConfigManager)
 
 
 class TestShardingConfigManager(unittest.TestCase):
@@ -152,6 +155,63 @@ class TestShardingConfigManager(unittest.TestCase):
         manager = ShardingConfigManager.from_vllm_config(vllm_config)
         # Should use ss_tensor_parallelism (4)
         self.assertEqual(manager.tp_size, 4)
+
+
+class TestLazyShardingAxisName(unittest.TestCase):
+
+    def test_initial_state_is_uninitialized(self):
+        lazy = LazyShardingAxisName()
+        self.assertIsNone(lazy._cls)
+
+    @patch("tpu_inference.layers.common.sharding.envs.USE_2D_TP", True)
+    @patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN", False)
+    def test_use_2d_tp_selects_base(self):
+        lazy = LazyShardingAxisName()
+        _ = lazy.SEQUENCE
+        self.assertIs(lazy._cls, ShardingAxisNameBase)
+
+    @patch("tpu_inference.layers.common.sharding.envs.USE_2D_TP", False)
+    @patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN", False)
+    def test_both_false_selects_2d(self):
+        lazy = LazyShardingAxisName()
+        _ = lazy.SEQUENCE
+        self.assertIs(lazy._cls, ShardingAxisName2D)
+
+    def test_cls_cached_after_first_access(self):
+        lazy = LazyShardingAxisName()
+        with patch("tpu_inference.layers.common.sharding.envs.USE_2D_TP",
+                   False), \
+             patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN",
+                   False):
+            _ = lazy.SEQUENCE
+            first_cls = lazy._cls
+
+        # Even with different env vars, _cls should not change
+        with patch("tpu_inference.layers.common.sharding.envs.USE_2D_TP",
+                   True), \
+             patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN",
+                   True):
+            _ = lazy.SEQUENCE
+            self.assertIs(lazy._cls, first_cls)
+
+    def test_initialized_after_env_change_uses_new_value(self):
+        # LazyShardingAxisName is created while USE_2D_TP=False,
+        # then USE_2D_TP changes to True before the first attribute access.
+        # It should pick up the value at initialization time (first access),
+        # not at construction time.
+        with patch("tpu_inference.layers.common.sharding.envs.USE_2D_TP",
+                   False), \
+             patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN",
+                   False):
+            lazy = LazyShardingAxisName()
+            self.assertIsNone(lazy._cls)  # not yet initialized
+
+        with patch("tpu_inference.layers.common.sharding.envs.USE_2D_TP",
+                   True), \
+             patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN",
+                   False):
+            _ = lazy.SEQUENCE  # initialized here, after env changed
+            self.assertIs(lazy._cls, ShardingAxisNameBase)
 
 
 if __name__ == "__main__":

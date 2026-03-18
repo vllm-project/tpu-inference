@@ -511,8 +511,7 @@ class CompilationManager:
         for num_reqs in self.runner.num_reqs_paddings:
             logits_sharding = NamedSharding(
                 self.runner.mesh,
-                PartitionSpec(ShardingAxisName.MLP_DATA,
-                              ShardingAxisName.MLP_TENSOR))
+                PartitionSpec(ShardingAxisName.ATTN_DATA, None))
             dp_size = self.runner.vllm_config.sharding_config.total_dp_size
             sampling_metadata_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(
@@ -535,10 +534,20 @@ class CompilationManager:
                         top_k = None
                         top_p = None
 
+                    # Use a dummy tensor with a unique shape for each logprobs config.
+                    # This avoids persistent cache collisions.
+                    dummy_shape = (1 if logprobs else 2, )
+                    _cache_collision_dummy = jnp.zeros(dummy_shape,
+                                                       dtype=jnp.int32)
+                    _cache_collision_dummy = jax.device_put(
+                        _cache_collision_dummy,
+                        NamedSharding(self.runner.mesh, PartitionSpec(None)))
+
                     sampling_metadata = TPUSupportedSamplingMetadata(
                         temperature=temperature,
                         top_k=top_k,
                         top_p=top_p,
+                        _cache_collision_dummy=_cache_collision_dummy,
                         do_sampling=do_sampling,
                         logprobs=logprobs)
                     self._run_compilation(
@@ -630,6 +639,16 @@ class CompilationManager:
 
                 for do_sampling in (False, True):
                     draft_probs = None
+                    # Use a dummy tensor with a unique shape for each logprobs config.
+                    # Currently logprobs=False for rejection_sampler.
+                    logprobs_dummy = False
+                    dummy_shape = (1 if logprobs_dummy else 2, )
+                    _cache_collision_dummy = jnp.zeros(dummy_shape,
+                                                       dtype=jnp.int32)
+                    _cache_collision_dummy = jax.device_put(
+                        _cache_collision_dummy,
+                        NamedSharding(self.runner.mesh, PartitionSpec(None)))
+
                     if do_sampling:
                         compilation_name = "random_rejection_sampler"
                         temperature = self._create_dummy_tensor((num_reqs, ),
@@ -642,10 +661,12 @@ class CompilationManager:
                             temperature=temperature,
                             top_k=top_k,
                             top_p=top_p,
+                            _cache_collision_dummy=_cache_collision_dummy,
                             do_sampling=do_sampling)
                     else:
                         compilation_name = "greedy_rejection_sampler"
                         sampling_metadata = TPUSupportedSamplingMetadata(
+                            _cache_collision_dummy=_cache_collision_dummy,
                             do_sampling=do_sampling)
 
                     self._run_compilation(

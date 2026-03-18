@@ -28,6 +28,7 @@ MODEL_STAGES=("Type" "UnitTest" "Accuracy/Correctness" "Benchmark")
 FEATURE_STAGES=("CorrectnessTest" "PerformanceTest")
 FEATURE_STAGES_QUANTIZATION=("QuantizationMethods" "RecommendedTPUGenerations" "CorrectnessTest" "PerformanceTest")
 FEATURE_STAGES_MICROBENCHMARKS=("CorrectnessTest" "PerformanceTest")
+PARALLELISM_STAGES=("Single-Host CorrectnessTest" "Single-Host PerformanceTest" "Multi-Host CorrectnessTest" "Multi-Host PerformanceTest")
 
 get_tpu_generation() {
     local key="$1"
@@ -60,10 +61,10 @@ declare -a default_feature_names=()
 
 # Determine sub-directory based on TPU_VERSION
 if [[ "${TPU_VERSION:-tpu6e}" == "v7"* ]]; then
-    TPU_DIR="v7"
+    TPU_DIR="v7x"
     TPU_METADATA_PREFIX="v7"
 else
-    TPU_DIR="v6"
+    TPU_DIR="v6e"
     TPU_METADATA_PREFIX="v6"
 fi
 
@@ -123,7 +124,9 @@ process_models() {
                 result=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${model}:${stage}" --default "❓ Untested")
             fi
             row="$row,$result"
-            if [ "$stage" != "Type" ] && [ "${result}" != "✅ Passing" ] && [ "${result}" != "⚪ N/A" ] && [ "${result}" != "❓ Untested" ]; then
+
+            if [ "$stage" != "Type" ] && [ "${result}" != "✅ Passing" ] && [ "${result}" != "⚪ N/A" ] && [ "${result}" != "❓ Untested" ] && [ "${result}" != "not enough HBM" ]; then
+
                 ANY_FAILED=true
             fi
         done
@@ -159,6 +162,9 @@ process_features() {
         elif [ "$category" == "kernel support matrix microbenchmarks" ]; then
             stages_to_use=("${FEATURE_STAGES_MICROBENCHMARKS[@]}")
             header="kernels,CorrectnessTest,PerformanceTest"
+        elif [ "$category" == "parallelism support matrix" ]; then
+            stages_to_use=("${PARALLELISM_STAGES[@]}")
+            header="Feature,Single-Host CorrectnessTest,Single-Host PerformanceTest,Multi-Host CorrectnessTest,Multi-Host PerformanceTest"
         fi
 
         if [ ! -f "$category_csv" ]; then

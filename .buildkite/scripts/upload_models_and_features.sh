@@ -25,6 +25,7 @@ declare -a TARGET_FOLDERS=(
     "parallelism"
     "models"
     "features"
+    "RL"
 )
 
 
@@ -77,8 +78,11 @@ for folder_path in "${TARGET_FOLDERS[@]}"; do
         "models")
           model_list+=("$subject_name")
           ;;
-        "features" | "parallelism" | "quantization" | "kernel_microbenchmarks"/*)
-          feature_list+=("${subject_name}")
+        "features" | "parallelism" | "quantization" | "kernel_microbenchmarks"/* | "RL")
+          # When MODEL_IMPL_TYPE is 'auto', do not add quantization tests to the list for reporting.
+          if ! [[ "$folder_path" == "quantization" && "${MODEL_IMPL_TYPE:-auto}" == "auto" ]]; then
+            feature_list+=("${subject_name}")
+          fi
           ;;
       esac
     fi
@@ -87,11 +91,16 @@ for folder_path in "${TARGET_FOLDERS[@]}"; do
     # This is required because we wrap them inside a 'group' later
     yml_content=$(grep -v "^steps:" "${yml_file}")
 
-    # Store the content for both hardware types
-    if [[ "$subject_name" != "multi-host" ]]; then
-      pipeline_v6e_fragments+=("${yml_content}")
+    # When MODEL_IMPL_TYPE is 'auto', quantization tests are not uploaded or reported.
+    if [[ "$folder_path" == "quantization" && "${MODEL_IMPL_TYPE:-auto}" == "auto" ]]; then
+      echo "Skipping upload and reporting of quantization test '${yml_file}' because MODEL_IMPL_TYPE is 'auto'."
+    else
+      # Store the content for both hardware types
+      if [[ "$subject_name" != "multi-host" ]]; then
+        pipeline_v6e_fragments+=("${yml_content}")
+      fi
+      pipeline_v7x_fragments+=("${yml_content}")
     fi
-    pipeline_v7x_fragments+=("${yml_content}")
 
   done < <(find "$folder" -maxdepth 1 -type f \( -name "*.yml" -o -name "*.yaml" \) -print0)
 done

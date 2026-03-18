@@ -18,6 +18,7 @@ import glob
 import math
 import os
 import re
+import time
 from collections import defaultdict
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
@@ -33,17 +34,19 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jax.sharding import SingleDeviceSharding, get_mesh
 from safetensors import safe_open
-from torchax.ops.mappings import t2j
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
+from vllm.model_executor.model_loader import register_model_loader
+from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from tpu_inference import envs, utils
 from tpu_inference.layers.common.utils import (cpu_mesh_context,
                                                general_device_put)
-from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax import JaxModule, JaxModuleList
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
+from tpu_inference.utils import t2j
 
 logger = init_logger(__name__)
 
@@ -753,6 +756,32 @@ def jax_array_from_reshaped_torch(
         return t2j(torch_weight, use_dlpack=False)
 
 
+def assign_and_shard_param(jax_param: nnx.Param,
+                           jax_weight: jax.Array,
+                           param_name: str = "Unknown") -> None:
+    """Distributes a JAX array across devices according to the `nnx.Param`'s sharding metadata, assigns it to the parameter, and marks it as loaded.
+
+    Args:
+        jax_param: The target nnx.Param to assign the weight to.
+        jax_weight: The JAX array containing the weight data.
+        param_name: The name of the parameter, used for error logging.
+    """
+    spec = jax_param.get_metadata().get("sharding", ())
+    if isinstance(spec, NamedSharding):
+        spec = spec.spec
+    elif isinstance(spec, SingleDeviceSharding):
+        spec = ()
+    mesh = jax_param.get_metadata().get("mesh", None)
+
+    try:
+        jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
+        jax_param.set_metadata("_is_loaded", True)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to load weight '{param_name}' with shape {jax_weight.shape} into param with shape {jax_param.value.shape}"
+        ) from e
+
+
 def load_nnx_param_from_reshaped_torch(
         jax_param: nnx.Param,
         torch_weight: torch.Tensor,
@@ -779,20 +808,7 @@ def load_nnx_param_from_reshaped_torch(
     assert tuple(jax_weight.shape) == jax_param.value.shape, \
         f"Shape mismatch when loading weight '{param_name}': torch {jax_weight.shape} vs jax {jax_param.value.shape}"
 
-    spec = jax_param.get_metadata().get('sharding', ())
-    if isinstance(spec, NamedSharding):
-        spec = spec.spec
-    elif isinstance(spec, SingleDeviceSharding):
-        spec = ()
-    mesh = jax_param.get_metadata().get('mesh', None)
-
-    try:
-        jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
-        jax_param.set_metadata('_is_loaded', True)
-    except Exception as e:
-        raise RuntimeError(
-            f"Failed to load weight '{param_name}' with shape {jax_weight.shape} into param with shape {jax_param.value.shape}"
-        ) from e
+    assign_and_shard_param(jax_param, jax_weight, param_name)
 
 
 class JaxAutoWeightsLoader(AutoWeightsLoader):
@@ -880,3 +896,64 @@ class LoadableWithIterator:
             skip_prefixes=(["lm_head"]
                            if not hasattr(self, 'lm_head') else None))
         return loader.load_weights(weights)
+
+
+@register_model_loader("jax_dummy")
+class JaxDummyModelLoader(DummyModelLoader):
+    """A dummy weights loader for flax_nnx models.
+
+    The upstream DummyModelLoader relies on many torch-specific APIs, this
+    implementation overrides the load_weights method to support flax_nnx models.
+    """
+
+    def load_weights(self, model: JaxModule,
+                     model_config: ModelConfig) -> None:
+        weight_loading_start_counter = time.perf_counter()
+        for param_name, param in model.named_parameters():
+            with cpu_mesh_context():
+                is_moe = hasattr(param, "_weights_to_load")
+                param_shape = param.value.shape
+
+                if is_moe:
+                    # For MoE parameters, the normal loading flow reads PyTorch
+                    # weights which are transposed (out_features, in_features)
+                    # compared to JAX. The downstream post-loading fusion methods
+                    # expect this transposed shape (E, F, D) instead of (E, D, F).
+                    # E = number of experts, D = input dimension, F = feed forward dimension
+                    num_experts, input_dim, intermediate_dim = param_shape
+                    param_shape = (num_experts, intermediate_dim, input_dim)
+
+                dummy_weight = jax.random.uniform(
+                    key=jax.random.PRNGKey(0),
+                    shape=param_shape,
+                    dtype=param.value.dtype,
+                    # upstream claims this range works well
+                    # https://github.com/vllm-project/vllm/blob/7291d1b288558d48508e1a17c37b0aa170332264/vllm/model_executor/model_loader/weight_utils.py#L1088
+                    minval=-1e-3,
+                    maxval=1e-3,
+                )
+
+                if is_moe:
+                    param._weights_to_load[:] = jnp.vsplit(
+                        dummy_weight, indices_or_sections=num_experts)
+
+            assign_and_shard_param(param, dummy_weight, param_name)
+
+        self._process_weights_after_loading(model)
+        logger.info_once(
+            f"Loading dummy weights took {time.perf_counter() - weight_loading_start_counter:.2f} seconds."
+        )
+
+    def _process_weights_after_loading(
+            self, module: JaxModule | JaxModuleList) -> None:
+        """Recursively call process_weights_after_loading if any."""
+        if (quant_method := getattr(module, 'quant_method', None)) is not None:
+            assert isinstance(quant_method, QuantizeMethodBase)
+            quant_method.process_weights_after_loading(module)
+            return
+        if isinstance(module, JaxModuleList):
+            for sub_module in module:
+                self._process_weights_after_loading(sub_module)
+        else:
+            for name, sub_module in module.named_children():
+                self._process_weights_after_loading(sub_module)

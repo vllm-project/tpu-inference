@@ -15,12 +15,17 @@ from jax._src import xla_bridge as xb
 from jax._src.lib import xla_client as xc
 from jax._src.numpy.scalar_types import _ScalarMeta
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from torchax.ops.mappings import j2t_dtype, t2j_dtype
+from torchax.ops.mappings import j2t_dtype
+from torchax.ops.mappings import t2j as torchax_t2j
+from torchax.ops.mappings import t2j_dtype
 from vllm import envs as vllm_envs
 from vllm import utils
 
 from tpu_inference import envs
+from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
 
 GBYTES = 1024 * 1024 * 1024
 TPU_HEAD_SIZE_ALIGNMENT = 128
@@ -60,8 +65,36 @@ def to_torch_dtype(dtype: str | jnp.dtype | torch.dtype) -> torch.dtype:
     return j2t_dtype(dtype)
 
 
+_NUMPY_UNSUPPORTED_DTYPES = {
+    torch.bfloat16: jnp.bfloat16,
+    torch.float8_e4m3fn: jnp.float8_e4m3fn,
+    torch.float8_e4m3fnuz: jnp.float8_e4m3fnuz,
+    torch.float8_e5m2: jnp.float8_e5m2,
+    torch.float8_e5m2fnuz: jnp.float8_e5m2fnuz,
+}
+
+
+def t2j(t: torch.Tensor, use_dlpack=False):
+    # torchax's t2j is not efficient to handle types in
+    # _NUMPY_UNSUPPORTED_DTYPES, it need to convert to
+    # float32. For large tensor, that could be expensive.
+    # https://github.com/google/torchax/blob/main/torchax/ops/mappings.py#L55
+    # Here, we do a bit cast instead.
+    # TODO(gxd3): upstream this improvement to the torchax library.
+    try:
+        if t.dtype in _NUMPY_UNSUPPORTED_DTYPES:
+            # This bit cast require t to be continguous and more than 1 dimension.
+            if t.is_contiguous() and t.dim():
+                bytes = t.cpu().view(torch.uint8).detach().numpy()
+                return jnp.array(bytes).view(
+                    _NUMPY_UNSUPPORTED_DTYPES[t.dtype])
+    except Exception as e:  # pylint: disable=broad-except
+        logger.warning("t2j bit cast failed, falling back to torchax t2j: %s",
+                       e)
+    return torchax_t2j(t, use_dlpack=use_dlpack)
+
+
 _megacore = False
-logger = init_logger(__name__)
 
 
 def align_to(unpadded_dim, pad_multiple):
@@ -269,7 +302,11 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
     # for non-power-of-two device counts (e.g., DP=6) to bypass strict
     # hardware topology constraints that would otherwise cause an AssertionError.
     try:
-        return jax.make_mesh(axis_shapes, axis_names, devices=devices)
+        axis_types = (mesh_lib.AxisType.Auto, ) * len(axis_shapes)
+        return jax.make_mesh(axis_shapes,
+                             axis_names,
+                             axis_types,
+                             devices=devices)
     except (AssertionError, ValueError, RuntimeError) as e:
         logger.warning(
             "jax.make_mesh failed due to topology constraints. Falling back to manual mesh: %s",
@@ -284,16 +321,16 @@ def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
 
     Args:
         mesh: The JAX mesh to use for device placement
-        *args: Positional arguments to pass to jax.device_put
+        *args: Positional arguments to pass to general_device_put
         sharding: Optional sharding specification. If None, uses PartitionSpec(None)
-        **kwargs: Keyword arguments to pass to jax.device_put
+        **kwargs: Keyword arguments to pass to general_device_put
 
     Returns:
         A JAX array placed on the specified devices
     """
     if sharding is None:
         sharding = NamedSharding(mesh, PartitionSpec(None))
-    return jax.device_put(*args, device=sharding, **kwargs)
+    return general_device_put(*args, sharding=sharding, **kwargs)
 
 
 def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:

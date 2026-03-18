@@ -586,9 +586,16 @@ class TPUConnectorWorker:
             if req_meta.remote_block_ids is not None:
                 # The request requires to pull KV from P, build the connection and pull
                 # the data asyncly.
+
+                # We execute device_array here so JAX sees the exact same sequence
+                # of local_block_ids across all TPU nodes simultaneously.
+                # TODO(xiang): pad block_ids to avoid recompilation
+                indices = device_array(self.mesh,
+                                       np.array(req_meta.local_block_ids))
                 conn = self._maybe_build_kv_connection(req_meta)
+
                 self.reqs_pulling[req_id] = self.pull_executor.submit(
-                    self._pull_kv, req_id, conn, req_meta)
+                    self._pull_kv, req_id, conn, req_meta, indices)
             else:
                 # The request has finished pulling the KV from remote, or it has full local
                 # prefix cache, need to notify P to let it free blocks.
@@ -626,7 +633,8 @@ class TPUConnectorWorker:
             )
         return conn
 
-    def _pull_kv(self, req_id: str, conn: Any, req_meta: LoadMeta):
+    def _pull_kv(self, req_id: str, conn: Any, req_meta: LoadMeta,
+                 indices: jax.Array):
         # The local allocated blocks which don't hit prefix caching.
         local_block_ids = req_meta.local_block_ids
         # The remote computed blocks which need to pull from P.
@@ -636,8 +644,6 @@ class TPUConnectorWorker:
         assert len(local_block_ids) == len(remote_block_ids)
 
         kv_spec = self._get_kv_spec(len(remote_block_ids))
-        # TODO(xiang): pad block_ids to avoid recompilation
-        indices = device_array(self.mesh, np.array(local_block_ids))
         logger.info(
             f"Worker {self.node_id} --> kv transfer | start pull req_id={req_id} | uuid={req_meta.uuid}"
         )
@@ -690,16 +696,40 @@ class TPUConnectorWorker:
         if not self.reqs_wait_pull and not self.reqs_pulling:
             return done_sending, done_recving
 
-        # Mark a req as done recieving after its pulling thread returns.
-        # This req can then be scheduled for decoding in the next scheduler step.
+        # 1. Create lists to hold all the finished data
+        ready_req_ids = []
+        ready_kvs = []
+        ready_indices = []
+
+        # 2. Gather all completed futures WITHOUT blocking
         for req_id in list(self.reqs_pulling.keys()):
             future = self.reqs_pulling[req_id]
             if future.done():
-                # NOTE(xiang): we do the scatter in main thread to avoid data racing.
-                # The data racing is not for the kv_caches buffer, it's for the runner.kv_caches ref.
                 kv, indices = future.result()
-                self.runner.kv_caches = scatter_kv_slices(
-                    self.runner.kv_caches, kv, indices)
+                ready_kvs.append(kv)
+                ready_indices.append(indices)
+                ready_req_ids.append(req_id)
+
+        # 3. If we have data, merge and scatter it ALL AT ONCE
+        if ready_req_ids:
+            # Concatenate the indices
+            merged_indices = jnp.concatenate(ready_indices, axis=0)
+
+            # Concatenate the KV slices per layer
+            merged_kvs = []
+            for i in range(self.num_layers):
+                # Pull the i-th layer from every finished request and concatenate
+                merged_layer = jnp.concatenate(
+                    [req_kv[i] for req_kv in ready_kvs], axis=0)
+                merged_kvs.append(merged_layer)
+
+            # Fire the JIT function ONCE
+            self.runner.kv_caches = scatter_kv_slices(self.runner.kv_caches,
+                                                      merged_kvs,
+                                                      merged_indices)
+
+            # Cleanup
+            for req_id in ready_req_ids:
                 del self.reqs_pulling[req_id]
                 done_recving.add(req_id)
 
