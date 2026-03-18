@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # pipeline-name: RL_Integration
-# pipeline-type: feature support matrix
+# pipeline-type: RL support matrix
 # RL (Reinforcement Learning) integration tests verify features critical for
 # training-inference pipelines: HBM KV-cache delete/reinitialise, log-prob
 # correctness without recompilation, log-prob latency overhead, and group
@@ -36,7 +36,7 @@ steps:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "RL_Integration"
       CI_STAGE: "CorrectnessTest"
-      CI_CATEGORY: "feature support matrix"
+      CI_CATEGORY: "RL support matrix"
     agents:
       queue: cpu
     commands:
@@ -61,7 +61,7 @@ steps:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "RL_Integration"
       CI_STAGE: "PerformanceTest"
-      CI_CATEGORY: "feature support matrix"
+      CI_CATEGORY: "RL support matrix"
     agents:
       queue: cpu
     commands:

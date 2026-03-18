@@ -26,6 +26,7 @@ class FeatureCategory(str, Enum):
     PARALLELISM = "parallelism support matrix"
     QUANTIZATION = "quantization support matrix"
     KERNEL_MICROBENCHMARKS = "kernel support matrix microbenchmarks"
+    RL = "RL support matrix"
 
 
 # Map categories to templates
@@ -35,6 +36,7 @@ CATEGORY_TO_TEMPLATE = {
     FeatureCategory.QUANTIZATION.value: "feature_template.yml",
     FeatureCategory.KERNEL_MICROBENCHMARKS.value: "feature_template.yml",
     FeatureCategory.PARALLELISM.value: "parallelism_template.yml",
+    FeatureCategory.RL.value: "feature_template.yml",
 }
 
 # Map feature categories to their respective output directories.
@@ -44,6 +46,7 @@ CATEGORY_TO_DIR = {
     FeatureCategory.PARALLELISM.value: "parallelism",
     FeatureCategory.QUANTIZATION.value: "quantization",
     FeatureCategory.KERNEL_MICROBENCHMARKS.value: "kernel_microbenchmarks",
+    FeatureCategory.RL.value: "RL",
 }
 
 
@@ -151,6 +154,7 @@ def main():
             FeatureCategory.PARALLELISM.value,
             FeatureCategory.QUANTIZATION.value,
             FeatureCategory.KERNEL_MICROBENCHMARKS.value,
+            FeatureCategory.RL.value,
         ],
         default=FeatureCategory.FEATURE.value,
         help=
