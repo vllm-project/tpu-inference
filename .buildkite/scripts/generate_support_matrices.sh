@@ -115,7 +115,7 @@ process_models() {
                 result=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${model}:${stage}" --default "N/A")
             fi
             row="$row,$result"
-            if [ "$stage" != "Type" ] && [ "${result}" != "✅" ] && [ "${result}" != "N/A" ] && [ "${result}" != "unverified" ]; then
+            if [ "$stage" != "Type" ] && [ "${result}" != "✅" ] && [ "${result}" != "N/A" ] && [ "${result}" != "unverified" ] && [ "${result}" != "not enough HBM" ]; then
                 ANY_FAILED=true
             fi
         done

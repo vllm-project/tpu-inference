@@ -52,6 +52,9 @@ case $OUTCOME in
   "unverified")
     message="unverified"
     ;;
+  "not enough HBM")
+    message="not enough HBM"
+    ;;
   *)
     message="❌"
     ;;
@@ -61,6 +64,6 @@ esac
 buildkite-agent meta-data set "${TPU_METADATA_PREFIX}${CI_TARGET}_category" "${CI_CATEGORY}"
 buildkite-agent meta-data set "${TPU_METADATA_PREFIX}${CI_TARGET}:${CI_STAGE}" "${message}"
 
-if [ "${OUTCOME}" != "passed" ] && [ "${OUTCOME}" != "skipped" ] && [ "${OUTCOME}" != "unverified" ]; then
+if [ "${OUTCOME}" != "passed" ] && [ "${OUTCOME}" != "skipped" ] && [ "${OUTCOME}" != "unverified" ] && [ "${OUTCOME}" != "not enough HBM" ]; then
     exit 1
 fi
