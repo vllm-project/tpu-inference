@@ -1237,14 +1237,6 @@ def _gmm_v2_fwd(
   return out, (lhs, rhs, group_sizes, rhs_scale, rhs_bias, group_offset)
 
 def _gmm_v2_bwd(
-    # non-diff
-    tile_info: TileSizes | TileFn,
-    vmem_limit_bytes: int | None,
-    precision: jax.lax.Precision,
-    preferred_element_type: jnp.dtype,
-    acc_dtype: jnp.dtype | None,
-    maybe_quantize_lhs: bool,
-    zero_initialize: bool,
     # residual
     residuals: tuple[
       jnp.ndarray,
@@ -1255,6 +1247,16 @@ def _gmm_v2_bwd(
       jnp.ndarray,
     ],
     grad: jnp.ndarray,
+    *,
+    # non-diff argnames
+    # NB: if you use nondiff_argnums in jax.custom_vjp, the arguments below should be args instead of kwargs.
+    tile_info: TileSizes | TileFn = calculate_tiling,
+    vmem_limit_bytes: int | None = None,
+    precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
+    preferred_element_type: jnp.dtype | None = None,
+    acc_dtype: jnp.dtype | None = None,
+    maybe_quantize_lhs: bool = True,
+    zero_initialize: bool = True,
 ):
   lhs, rhs, group_sizes, rhs_scale, rhs_bias, group_offset = residuals
   grad_lhs = _gmm_v2_impl(
@@ -1281,7 +1283,7 @@ def _gmm_v2_bwd(
     group_offset,
   )
   # Return a gradient per each differentiable argument except for the nondiff_argnames.
-  # xw32q: how should we calculate the gradient of rhs_bias?
+  # TODO(xw32): how should we calculate the gradient of rhs_bias?
   return grad_lhs, grad_rhs, None, None, None, None
 
 gmm_v2.defvjp(_gmm_v2_fwd, _gmm_v2_bwd)
