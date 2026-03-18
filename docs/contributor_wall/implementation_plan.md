@@ -10,7 +10,7 @@ Yes, **you are on your own new branch** called `parallelism-techniques-update`. 
 We have modified `scripts/update_readme.py` with the following new logic:
 
 ### 1. Data Mapping Update
-We removed `multi-host` and `Single-Host-P-D-disaggregation` entirely from the rows computation because the table is purely organized by the features `CP, DP, EP, PP, SP, TP`. Instead of merging `CorrectnessTest` and `PerformanceTest` into a single status token, the script now cleanly separates them and maps them respectively into the **Single-host** and **Multi-host** fields for each framework!
+We retained the `CP, DP, EP, PP, SP, TP` rows and successfully re-attached the "multi-host" and "Single-Host-P-D-disaggregation" features as their own individual rows at the bottom! Instead of merging `CorrectnessTest` and `PerformanceTest` into a single status token, the script now cleanly separates them and maps them respectively into the **Single-host** and **Multi-host** fields for each framework!
 
 ### 2. New Table Generator (`generate_html_parallelism_table`)
 We explicitly structured the custom HTML table to exactly mirror the headers you provided in your screenshot.
@@ -54,11 +54,25 @@ Table layout preview showing how it maps over the data:
       <td>✅</td>
     </tr>
     <tr>
+      <td><strong>multi-host</strong></td>
+      <td>N/A v6e<br>✅ v7x</td>
+      <td>N/A v6e<br>unverified v7x</td>
+      <td>N/A v6e<br>✅ v7x</td>
+      <td>N/A v6e<br>unverified v7x</td>
+    </tr>
+    <tr>
       <td><strong>PP</strong></td>
       <td>unverified</td>
       <td>unverified</td>
       <td>unverified</td>
       <td>unverified</td>
+    </tr>
+    <tr>
+      <td><strong>Single-Host-P-D-disaggregation</strong></td>
+      <td>✅</td>
+      <td>N/A</td>
+      <td>❌</td>
+      <td>N/A</td>
     </tr>
     <tr>
       <td><strong>SP</strong></td>

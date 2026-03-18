@@ -7,7 +7,7 @@ import re
 # This MUST match your file structure exactly.
 CSV_MAP = {
     "model_support": [
-        "support_matrices/combined_model_support_matrix.csv"
+        "support_matrices/model_support_matrix.csv"
     ],
     "core_features": {
         "v6_flax": "support_matrices/nightly/v6e/flax_nnx/feature_support_matrix.csv",
