@@ -284,8 +284,10 @@ class MMLUDataset(BenchmarkDataset):
 
             if self.use_chat_template:
                 messages = [{
-                    "role": "system",
-                    "content": "Reasoning effort: high"
+                    "role":
+                    "system",
+                    "content":
+                    "Reasoning effort: low. Skip thinking process and must only give short answer in something like A, B, C, D."
                 }, {
                     "role": "user",
                     "content": prompt
