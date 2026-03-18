@@ -20,7 +20,6 @@ import torch
 from jax.sharding import Mesh, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
-from torchax.ops.mappings import t2j
 from vllm.model_executor.layers import linear as vllm_linear
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
@@ -46,6 +45,7 @@ from tpu_inference.layers.vllm.quantization.configs import (
 from tpu_inference.layers.vllm.quantization.unquantized import (
     VllmUnquantizedFusedMoEMethod, VllmUnquantizedLinearMethod)
 from tpu_inference.logger import init_logger
+from tpu_inference.utils import t2j
 
 P = PartitionSpec
 
@@ -132,7 +132,11 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
             weight_scale,
             bias=bias,
             weight_block_size=tuple(self.weight_block_size),
-            linear_config=self.linear_config)
+            requant_block_size=self.linear_config.requant_block_size,
+            output_sizes=tuple(self.linear_config.output_sizes),
+            requant_weight_dtype=self.linear_config.requant_weight_dtype,
+            fuse_matmuls=self.linear_config.fuse_matmuls,
+            n_shards=self.linear_config.n_shards)
         if self.linear_config.enable_quantized_matmul_kernel:
             # The quantized_matmul_kernel expects weight scales shaped (n_out_features, 1, n_blocks) for blockwisze quantization.
             weights.weight_scale = jnp.expand_dims(

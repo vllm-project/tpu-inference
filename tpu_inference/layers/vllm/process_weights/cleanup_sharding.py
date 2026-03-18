@@ -19,7 +19,6 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn import Parameter
 from torch.utils import _pytree as pytree
 from torchax.interop import jax_view, torch_view
-from torchax.ops.mappings import t2j
 from vllm import envs as vllm_envs
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
@@ -34,7 +33,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import to_jax_dtype
+from tpu_inference.utils import t2j, to_jax_dtype
 
 P = PartitionSpec
 

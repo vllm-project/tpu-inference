@@ -18,3 +18,5 @@ parameterized
 numba==0.62.1
 runai-model-streamer[s3,gcs]==0.15.4
 gcsfs==2026.1.0
+hypothesis==6.151.9
+sortedcontainers==2.4.0
