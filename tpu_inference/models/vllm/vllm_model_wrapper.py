@@ -29,7 +29,7 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
@@ -185,7 +185,9 @@ class VllmModelWrapper:
             [0]) if not vllm_envs.VLLM_TPU_USING_PATHWAYS else nullcontext()
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
-        with load_context, jax_context:
+
+        with load_context, jax_context, set_current_vllm_config(
+                self.vllm_config):
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:
