@@ -25,6 +25,8 @@ from tpu_inference import envs
 from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.logger import init_logger
 
+logger = init_logger(__name__)
+
 GBYTES = 1024 * 1024 * 1024
 TPU_HEAD_SIZE_ALIGNMENT = 128
 TPU_SECOND_LAST_MINOR = 8
@@ -79,14 +81,20 @@ def t2j(t: torch.Tensor, use_dlpack=False):
     # https://github.com/google/torchax/blob/main/torchax/ops/mappings.py#L55
     # Here, we do a bit cast instead.
     # TODO(gxd3): upstream this improvement to the torchax library.
-    if t.dtype in _NUMPY_UNSUPPORTED_DTYPES and t.is_contiguous() and t.dim():
-        bytes = t.cpu().view(torch.uint8).detach().numpy()
-        return jnp.array(bytes).view(_NUMPY_UNSUPPORTED_DTYPES[t.dtype])
+    try:
+        if t.dtype in _NUMPY_UNSUPPORTED_DTYPES:
+            # This bit cast require t to be continguous and more than 1 dimension.
+            if t.is_contiguous() and t.dim():
+                bytes = t.cpu().view(torch.uint8).detach().numpy()
+                return jnp.array(bytes).view(
+                    _NUMPY_UNSUPPORTED_DTYPES[t.dtype])
+    except Exception as e:  # pylint: disable=broad-except
+        logger.warning("t2j bit cast failed, falling back to torchax t2j: %s",
+                       e)
     return torchax_t2j(t, use_dlpack=use_dlpack)
 
 
 _megacore = False
-logger = init_logger(__name__)
 
 
 def align_to(unpadded_dim, pad_multiple):
