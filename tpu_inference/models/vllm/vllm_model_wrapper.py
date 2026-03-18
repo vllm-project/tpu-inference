@@ -113,8 +113,10 @@ class VllmModelWrapper:
             self.vllm_config, self.mesh)
         self._apply_pp_patch()
 
-        MultiHeadLatentAttentionWrapper.register_oot(
-            VllmTPUMultiHeadLatentAttentionWrapper)
+        from vllm.model_executor.custom_op import op_registry_oot
+        if MultiHeadLatentAttentionWrapper.__name__ not in op_registry_oot:
+            MultiHeadLatentAttentionWrapper.register_oot(
+                VllmTPUMultiHeadLatentAttentionWrapper)
 
     def _apply_pp_patch(self):
         # patch `get_pp_group` in vLLM to jax's get_pp_group.
