@@ -799,6 +799,11 @@ class DPScheduler(SchedulerInterface):
 
     def finish_requests(self, request_ids, finished_status) -> None:
         """Forward request finish signals to the appropriate DP rank schedulers."""
+        if request_ids is None:
+            # None means "all requests" (e.g., abort-all from pause_scheduler).
+            request_ids = list(self.assigned_dp_rank.keys())
+            if not request_ids:
+                return
         if isinstance(request_ids, str):
             request_ids = [request_ids]
 
