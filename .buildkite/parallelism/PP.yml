@@ -23,7 +23,7 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
-          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
+          python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
   - label: "${TPU_VERSION:-tpu6e} Record correctness test result for PP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_record_PP_CorrectnessTest_Single_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Single_Host"
@@ -47,7 +47,7 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
-          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
+          python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
   - label: "${TPU_VERSION:-tpu6e} Record performance test result for PP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_record_PP_PerformanceTest_Single_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_PP_PerformanceTest_Single_Host"
@@ -70,7 +70,7 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
-          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
+          python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
   - label: "${TPU_VERSION:-tpu6e} Record correctness test result for PP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_record_PP_CorrectnessTest_Multi_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Multi_Host"
@@ -93,7 +93,7 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
-          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
+          python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
   - label: "${TPU_VERSION:-tpu6e} Record performance test result for PP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_record_PP_PerformanceTest_Multi_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_PP_PerformanceTest_Multi_Host"
