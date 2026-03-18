@@ -21,7 +21,11 @@ CSV_MAP = {
         "v6_flax": "support_matrices/nightly/v6e/flax_nnx/parallelism_support_matrix.csv",
         "v6_pytorch": "support_matrices/nightly/v6e/vllm/parallelism_support_matrix.csv",
         "v7_flax": "support_matrices/nightly/v7x/flax_nnx/parallelism_support_matrix.csv",
-        "v7_pytorch": "support_matrices/nightly/v7x/vllm/parallelism_support_matrix.csv"
+        "v7_pytorch": "support_matrices/nightly/v7x/vllm/parallelism_support_matrix.csv",
+        "v6_flax_feat": "support_matrices/nightly/v6e/flax_nnx/feature_support_matrix.csv",
+        "v6_pytorch_feat": "support_matrices/nightly/v6e/vllm/feature_support_matrix.csv",
+        "v7_flax_feat": "support_matrices/nightly/v7x/flax_nnx/feature_support_matrix.csv",
+        "v7_pytorch_feat": "support_matrices/nightly/v7x/vllm/feature_support_matrix.csv"
     },
     "quantization": {
         "static": "support_matrices/quantization_support_matrix.csv",
@@ -366,6 +370,10 @@ def update_readme():
                             continue
                         feature = r[0].strip()
                         
+                        if section_key == "parallelism" and "feat" in col_key:
+                            if feature not in ["multi-host", "Single-Host-P-D-disaggregation"]:
+                                continue
+
                         if feature not in merged_features:
                             if section_key == "parallelism":
                                 merged_features[feature] = {
@@ -382,11 +390,13 @@ def update_readme():
                         c = r[1] if len(r) > 1 else ""
                         p = r[2] if len(r) > 2 else ""
                         
+                        base_col_key = col_key.replace("_feat", "")
+                        
                         if section_key == "parallelism":
-                            merged_features[feature][col_key]["s"] = c
-                            merged_features[feature][col_key]["m"] = p
+                            merged_features[feature][base_col_key]["s"] = c
+                            merged_features[feature][base_col_key]["m"] = p
                         else:
-                            merged_features[feature][col_key] = merge_metrics(c, p)
+                            merged_features[feature][base_col_key] = merge_metrics(c, p)
 
             for feature in sorted(merged_features.keys(), key=lambda x: x.lower()):
                 metrics = merged_features[feature]

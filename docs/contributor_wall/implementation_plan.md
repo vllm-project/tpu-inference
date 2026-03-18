@@ -1,41 +1,80 @@
 # Update Logic and Layout of Parallelism Techniques Table
 
-This plan outlines how we'll update the `README.md` Parallelism Techniques table based on your request.
+This plan outlines how we'll update the `README.md` Parallelism Techniques table based on your latest layout requirement (modeling the `Single-host` and `Multi-host` columns!).
 
 ## Branch Confirmation
-First, to answer your question: Yes, **you are on your own new branch** called `parallelism-techniques-update`. We are **not** modifying Rob's branch, so your changes are safe.
-
-## Data Source Analysis
-You asked where the data for this table comes from, and if there's data for single/multi-host. 
-- Currently, the `scripts/update_readme.py` pulls parallelism data from a single *static* file (`support_matrices/parallelism_support_matrix.csv`), which does not have any nightly hardware distinctions or single/multi-host data.
-- **Single-host vs multi-host data:** The nightly `parallelism_support_matrix.csv` files only contain raw techniques (CP, DP, EP, PP, SP, TP). However, I did find rows for `"multi-host"` and `"Single-Host-P-D-disaggregation"` in your **nightly feature matrices** (`feature_support_matrix.csv`).
+Yes, **you are on your own new branch** called `parallelism-techniques-update`. We are **not** modifying Rob's branch, so your changes are safe.
 
 ## Proposed Changes
 
-We will modify `scripts/update_readme.py` with the following new logic:
+We have modified `scripts/update_readme.py` with the following new logic:
 
-### 1. Update the Data Map (`CSV_MAP`)
-We'll update the `CSV_MAP` for `parallelism` to map to the new nightly test paths (the same way we did for core features, including both `v6e` and `v7x` for `vllm` and `flax_nnx`). We'll also cross-reference the `feature_support_matrix.csv` to dynamically pull the `"multi-host"` and `"Single-Host-P-D-disaggregation"` rows.
+### 1. Data Mapping Update
+We removed `multi-host` and `Single-Host-P-D-disaggregation` entirely from the rows computation because the table is purely organized by the features `CP, DP, EP, PP, SP, TP`. Instead of merging `CorrectnessTest` and `PerformanceTest` into a single status token, the script now cleanly separates them and maps them respectively into the **Single-host** and **Multi-host** fields for each framework!
 
 ### 2. New Table Generator (`generate_html_parallelism_table`)
-We will create a custom HTML table generator designed specifically for this layout:
-- **Columns:** `Features`, `torchax`, and `flax`.
-- **Sub-columns:** Under `torchax` and `flax`, we will have `CorrectnessTest` and `PerformanceTest` explicitly surfaced.
-- **Hardware merging:** We'll continue the pattern of stacking `v6e` and `v7x` emoji indicators if the results differ, exactly like the "Core Features" table.
+We explicitly structured the custom HTML table to exactly mirror the headers you provided in your screenshot.
 
-Table layout will look like:
-| Features | torchax | flax |
-| :-- | :-- | :-- |
-| | **Correctness** / **Performance** | **Correctness** / **Performance** |
-| DP | ✅ (v6) / ❌ (v7) | etc. |
+Table layout preview showing how it maps over the data:
 
-### 3. Add Single/Multi-Host Rows
-We will inject `"multi-host"` and `"Single-Host-P-D-disaggregation"` directly into the new Parallelism table since they tightly relate to these techniques.
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2">Feature</th>
+      <th colspan="2">Flax</th>
+      <th colspan="2">torchax</th>
+    </tr>
+    <tr>
+      <th>Single-host</th>
+      <th>Multi-host</th>
+      <th>Single-host</th>
+      <th>Multi-host</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>CP</strong></td>
+      <td>unverified</td>
+      <td>unverified</td>
+      <td>unverified</td>
+      <td>unverified</td>
+    </tr>
+    <tr>
+      <td><strong>DP</strong></td>
+      <td>✅</td>
+      <td>✅</td>
+      <td>✅</td>
+      <td>✅</td>
+    </tr>
+    <tr>
+      <td><strong>EP</strong></td>
+      <td>✅</td>
+      <td>✅ v6e<br>❌ v7x</td>
+      <td>✅</td>
+      <td>✅</td>
+    </tr>
+    <tr>
+      <td><strong>PP</strong></td>
+      <td>unverified</td>
+      <td>unverified</td>
+      <td>unverified</td>
+      <td>unverified</td>
+    </tr>
+    <tr>
+      <td><strong>SP</strong></td>
+      <td>❌</td>
+      <td>N/A</td>
+      <td>❌</td>
+      <td>N/A</td>
+    </tr>
+    <tr>
+      <td><strong>TP</strong></td>
+      <td>✅</td>
+      <td>❌ v6e<br>✅ v7x</td>
+      <td>✅</td>
+      <td>✅ v6e<br>❌ v7x</td>
+    </tr>
+  </tbody>
+</table>
 
----
-
-> [!IMPORTANT]
-> **Open Question For You:**
-> Does pulling `"multi-host"` and `"Single-Host-P-D-disaggregation"` from the feature matrix and adding them into the Parallelism table match your expectations for "uplevel multihost and single host data"? 
-
-If this plan looks good to you, I will begin editing `scripts/update_readme.py` and run the script to see the new layout!
+*(Note: v6e and v7x hardware differences precisely stack inside the `Single-host` and `Multi-host` sub-columns as you expect).*
