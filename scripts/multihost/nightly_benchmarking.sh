@@ -137,7 +137,7 @@ vllm serve \
   --no-enable-prefix-caching \
   --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \
   --kv_cache_dtype=\"fp8\" \
-  --no-async-scheduling \
+  --async-scheduling \
   --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION} \
   ${ENABLE_EXPERT_PARALLEL} \
   ${ADDITIONAL_CONFIG} \
