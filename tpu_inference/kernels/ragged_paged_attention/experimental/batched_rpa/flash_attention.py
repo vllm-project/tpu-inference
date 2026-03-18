@@ -17,7 +17,7 @@ import jax.numpy as jnp
 from jax import lax
 from jax.experimental.pallas import tpu as pltpu
 
-from tpu_inference.kernels.ragged_paged_attention.experimental.rpa_batched import \
+from tpu_inference.kernels.ragged_paged_attention.experimental.batched_rpa import \
     schedule as rpa_schedule
 
 _NUM_LANES = 128
