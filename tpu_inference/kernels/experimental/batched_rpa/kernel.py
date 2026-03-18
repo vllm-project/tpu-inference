@@ -19,9 +19,9 @@ import jax.lax as lax
 import jax.numpy as jnp
 from jax._src.pallas.mosaic import pipeline
 
-from tpu_inference.kernels.ragged_paged_attention.experimental.batched_rpa import (
-    bref_override, flash_attention)
-from tpu_inference.kernels.ragged_paged_attention.experimental.batched_rpa import \
+from tpu_inference.kernels.experimental.batched_rpa import (bref_override,
+                                                            flash_attention)
+from tpu_inference.kernels.experimental.batched_rpa import \
     schedule as schedule_lib
 
 # Copyright 2026 Google LLC

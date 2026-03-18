@@ -16,7 +16,7 @@ import einshape
 import jax.numpy as jnp
 from jax import lax
 
-from tpu_inference.kernels.ragged_paged_attention.experimental.batched_rpa import \
+from tpu_inference.kernels.experimental.batched_rpa import \
     schedule as rpa_schedule
 
 _NUM_LANES = 128

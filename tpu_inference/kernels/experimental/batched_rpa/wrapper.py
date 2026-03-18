@@ -20,8 +20,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tpu_inference.kernels.ragged_paged_attention.experimental.batched_rpa import (
-    kernel, schedule)
+from tpu_inference.kernels.experimental.batched_rpa import kernel, schedule
 
 DEFAULT_MASK_VALUE = -float(jnp.finfo(jnp.dtype("float32")).max)
 DEFAULT_VMEM_LIMIT_BYTES = 64 * 1024 * 1024

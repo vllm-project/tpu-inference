@@ -45,7 +45,7 @@ MAX_ALLOWED_PAGE_INDICES_N = (
 )  # Based on experiments on v5e, 256x1024 results in smem oom but 128x1024 not. TODO: Adjust this based on TPU version.
 
 if envs.USE_BATCHED_RPA_KERNEL:
-    import tpu_inference.kernels.ragged_paged_attention.experimental.batched_rpa.wrapper as rpa
+    import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa
     logger.info_once("Using experimental batched RPA kernel")
 else:
     import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa

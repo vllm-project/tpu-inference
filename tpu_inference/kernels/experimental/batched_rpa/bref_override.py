@@ -22,7 +22,7 @@ from jax._src.pallas.mosaic import pipeline
 from jax._src.pallas.mosaic import primitives as tpu_primitives
 from jax.experimental import pallas as pl
 
-from tpu_inference.kernels.ragged_paged_attention.experimental.batched_rpa import \
+from tpu_inference.kernels.experimental.batched_rpa import \
     schedule as rpa_schedule
 
 
