@@ -365,6 +365,13 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         )
         weights = torch_view(
             shard_moe_weights(weights, self.moe_backend, self.mesh))
+
+        logger.info(
+            f"[MoE process_weights] AFTER sharding: "
+            f"w13_weight shape={weights.w13_weight.shape}, "
+            f"w2_weight shape={weights.w2_weight.shape}"
+        )
+
         layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
         layer.w2_weight = Parameter(weights.w2_weight, requires_grad=False)
 

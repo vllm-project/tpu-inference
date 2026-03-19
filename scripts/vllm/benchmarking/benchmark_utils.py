@@ -132,16 +132,24 @@ def postprocess_text_mmlu(preds: List[str],
             return match.group(1).upper()
 
         # To match: ... so/thus answer A
-        re_str_fallback = r"(?:thus|so)\s+answer:?\s*\b([A-D])\b"
+        re_str_fallback = r"(?:thus|so)\s+answer:?\s*\(?([A-D])\)?"
         match = re.search(re_str_fallback, output, re.IGNORECASE | re.DOTALL)
         if match:
             return match.group(1).upper()
 
-        # To match: (A)
-        re_str_fallback = r"\s*\(([A-D])\)?\s*\w*"
-        match = re.search(re_str_fallback, output, re.IGNORECASE)
-        if match:
-            return match.group(1).upper()
+        # To match: "Answer: (A)" or "answer: A" or "Answer (D)" etc.
+        # Uses findall to get the LAST occurrence (model's final answer).
+        re_str_fallback = r"[Aa]nswer[:\s]+\(?([A-D])\)?"
+        matches = re.findall(re_str_fallback, output)
+        if matches:
+            return matches[-1].upper()
+
+        # To match: (A) — use findall to get the LAST occurrence,
+        # since chain-of-thought reasoning may mention earlier options.
+        re_str_fallback = r"\(([A-D])\)"
+        matches = re.findall(re_str_fallback, output)
+        if matches:
+            return matches[-1].upper()
 
         return None
 
@@ -163,13 +171,65 @@ def eval_accuracy_mmlu(request_outputs: List[RequestFuncOutput]) -> dict:
     metric = evaluate.load("accuracy")
     nltk.download("punkt")
     nltk.download("punkt_tab")
-    preds = []
-    targets = []
+    raw_preds = []
+    raw_targets = []
 
     for output in request_outputs:
-        preds.append(output.generated_text)
-        targets.append(output.input_request.completion)
-    preds, targets = postprocess_text_mmlu(preds, targets)
+        raw_preds.append(output.generated_text)
+        raw_targets.append(output.input_request.completion)
+    preds, targets = postprocess_text_mmlu(raw_preds, raw_targets)
+
+    # Print wrong answers for debugging
+    choices = ["A", "B", "C", "D", None]
+    wrong_answers = []
+    parse_failures = []
+    for i, (p, t) in enumerate(zip(preds, targets)):
+        pred_letter = choices[p] if p < len(choices) else None
+        target_letter = choices[t] if t < len(choices) else None
+        if pred_letter is None:
+            parse_failures.append(i)
+        elif p != t:
+            wrong_answers.append(i)
+
+    if parse_failures:
+        print(f"\n{'='*60}")
+        print(f"PARSE FAILURES ({len(parse_failures)} requests could not be parsed):")
+        print(f"{'='*60}")
+        for idx in parse_failures[:20]:  # Show first 20
+            target_letter = choices[targets[idx]] if targets[idx] < len(choices) else "?"
+            gen_text = raw_preds[idx]
+            prompt_text = request_outputs[idx].input_request.prompt
+            print(f"\n--- Request #{idx} ---")
+            print(f"  Expected answer: {target_letter}")
+            print(f"  Parsed answer:   None (failed to parse)")
+            print(f"  Question:\n{prompt_text}")
+            print(f"  Generated text:\n{gen_text}")
+        if len(parse_failures) > 20:
+            print(f"\n... and {len(parse_failures) - 20} more parse failures.")
+
+    if wrong_answers:
+        print(f"\n{'='*60}")
+        print(f"WRONG ANSWERS ({len(wrong_answers)} out of {len(preds)}):")
+        print(f"{'='*60}")
+        for idx in wrong_answers[:50]:  # Show first 50
+            pred_letter = choices[preds[idx]]
+            target_letter = choices[targets[idx]] if targets[idx] < len(choices) else "?"
+            gen_text = raw_preds[idx]
+            prompt_text = request_outputs[idx].input_request.prompt
+            print(f"\n--- Request #{idx} ---")
+            print(f"  Expected: {target_letter} | Predicted: {pred_letter}")
+            print(f"  Question:\n{prompt_text}")
+            print(f"  Generated text:\n{gen_text}")
+        if len(wrong_answers) > 50:
+            print(f"\n... and {len(wrong_answers) - 50} more wrong answers.")
+
+    print(f"\n{'='*60}")
+    print(f"SUMMARY: {len(preds)} total, "
+          f"{len(preds) - len(wrong_answers) - len(parse_failures)} correct, "
+          f"{len(wrong_answers)} wrong, "
+          f"{len(parse_failures)} parse failures")
+    print(f"{'='*60}")
+
     result = metric.compute(
         predictions=preds,
         references=targets,
