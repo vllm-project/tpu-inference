@@ -219,7 +219,7 @@ class TPUConnector(KVConnectorBase_V1):
         """TPU connector doesn't support layer wise load."""
         pass
 
-    def save_kv_layer(self, **kwargs) -> None:
+    def save_kv_layer(self, *args, **kwargs) -> None:
         """TPU connector doesn't support layer wise save."""
         pass
 
