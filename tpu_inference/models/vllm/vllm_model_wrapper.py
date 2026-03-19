@@ -684,7 +684,7 @@ class VllmModelWrapper:
                     if isinstance(mm_embeds, list):
                         torch_mm_embeds = [torch_view(x) for x in mm_embeds]
                     else:
-                        torch_mm_embeds = [torch_view(mm_embeds)] # Fix: always pass a list of length 1
+                        torch_mm_embeds = [torch_view(mm_embeds)] # Always pass a list of length 1
                     call_args = (torch_view(input_ids), torch_mm_embeds)
                 else:
                     call_args = (torch_view(input_ids), )
