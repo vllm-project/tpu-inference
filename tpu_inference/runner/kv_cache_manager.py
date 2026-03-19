@@ -312,6 +312,7 @@ class KVCacheManager:
         kv_caches = self.runner.kv_caches
         num_blocks_list = []
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
+            # ['language_model.model.layers.3.self_attn.attn', 'language_model.model.layers.0.linear_attn'
             layer_name = kv_cache_tensor.shared_by[0]
             layer_spec = layer_name_to_spec[layer_name]
 
@@ -324,6 +325,7 @@ class KVCacheManager:
                 num_blocks = (num_blocks // dp_size) * dp_size
 
                 mamba_states = []
+                # ((14212, 3, 12288), (14212, 64, 128, 128))
                 for shape, dtype in zip(layer_spec.shapes, layer_spec.dtypes):
                     jax_dtype = t2j_dtype(dtype)
                     cache_shape = (num_blocks, *shape)
@@ -340,6 +342,7 @@ class KVCacheManager:
                     mamba_allocate = jax.jit(_allocate_mamba,
                                              out_shardings=sharding)
                     mamba_states.append(mamba_allocate())
+                # (14212, 3, 12288), (14212, 64, 128, 128))
 
                 kv_caches.append(tuple(mamba_states))
                 num_blocks_list.append(num_blocks)
@@ -369,6 +372,7 @@ class KVCacheManager:
                 cache_dtype=t2j_dtype(layer_spec.dtype),
                 use_mla=self.use_mla,
             )[0]
+            # (14212, 2096, 2, 2, 256)
             kv_caches.append(kv_cache)
             num_blocks_list.append(num_blocks)
             for layer_name in kv_cache_tensor.shared_by:
