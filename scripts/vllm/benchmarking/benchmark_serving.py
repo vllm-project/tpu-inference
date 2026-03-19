@@ -656,6 +656,23 @@ def main(args: argparse.Namespace):
             "Sampling parameters are only supported by openai-compatible backends."
         )
 
+    # Load defaults from the model's generation_config.json when not
+    # explicitly provided via CLI args.
+    try:
+        from transformers import GenerationConfig
+        gen_config = GenerationConfig.from_pretrained(tokenizer_id)
+        if "temperature" not in sampling_params and gen_config.temperature is not None:
+            sampling_params["temperature"] = gen_config.temperature
+        if "top_p" not in sampling_params and gen_config.top_p is not None:
+            sampling_params["top_p"] = gen_config.top_p
+        if "top_k" not in sampling_params and gen_config.top_k is not None and gen_config.top_k > 0:
+            sampling_params["top_k"] = gen_config.top_k
+        print(f"Loaded generation config from model: temperature={gen_config.temperature}, "
+              f"top_p={gen_config.top_p}, top_k={gen_config.top_k}")
+    except Exception as e:
+        print(f"Could not load generation_config.json from model, "
+              f"using defaults: {e}")
+
     if "temperature" not in sampling_params:
         sampling_params["temperature"] = 0.0  # Default to greedy decoding.
 

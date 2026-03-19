@@ -583,6 +583,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                     and self.embed_multimodal_fn is not None
                                     and hasattr(self.model_config.hf_config,
                                                 "architectures"))
+        # Block until all model weight transfers to HBM are complete.
+        # This ensures all async device_put operations from incremental
+        # weight loading have finished before we report HBM usage or
+        # start compilation, giving an accurate picture of weight memory.
+        logger.info("Waiting for all model weights to be ready on device...")
+        jax.tree.map(lambda x: x.block_until_ready()
+                      if hasattr(x, 'block_until_ready') else x, self.state)
+
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
