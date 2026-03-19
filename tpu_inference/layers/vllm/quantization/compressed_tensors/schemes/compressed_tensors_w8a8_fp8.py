@@ -114,13 +114,14 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                 weight, weight_scale = quantize_tensor(jnp.float8_e4m3fn,
                                                        weight, None)
             else:
-                if len(weight_scale.shape) == 2 and weight_scale.shape[-1] > 1:
-                    is_block = True
-                    assert self.weight_block_size is not None
-                    block_m = self.weight_block_size[0]
-                    weight_scale = jnp.repeat(weight_scale, block_m, axis=0)
-                else:
-                    weight_scale = jnp.squeeze(weight_scale, -1)
+                if len(weight_scale.shape) == 2:
+                    if weight_scale.shape[-1] > 1:
+                        is_block = True
+                        assert self.weight_block_size is not None
+                        block_m = self.weight_block_size[0]
+                        weight_scale = jnp.repeat(weight_scale, block_m, axis=0)
+                    else:
+                        weight_scale = jnp.squeeze(weight_scale, -1)
 
             processed_weights = process_linear_weights(
                 LinearWeights(
@@ -150,14 +151,17 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
             return processed_weights
 
         weights = process_fp8_linear_weights(weight, weight_scale, bias)
-        weights = torch_view(
-            shard_linear_weights(
-                weights,
-                mesh=self.linear_config.mesh,
-                weight_p_spec=self.linear_config.weight_sharding,
-                bias_p_spec=self.linear_config.bias_sharding,
-                per_tensor=per_tensor,
-            ))
+        weights_jax = shard_linear_weights(
+            weights,
+            mesh=self.linear_config.mesh,
+            weight_p_spec=self.linear_config.weight_sharding,
+            bias_p_spec=self.linear_config.bias_sharding,
+            per_tensor=per_tensor,
+        )
+        # Block until ready to prevent asynchronous memory build-up on Device 0
+        jax.tree.map(lambda x: x.block_until_ready(), weights_jax.weight)
+        
+        weights = torch_view(weights_jax)
 
         if self.linear_config.fuse_matmuls:
             layer.weight = Parameter(weights.weight, requires_grad=False)

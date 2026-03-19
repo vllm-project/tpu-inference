@@ -154,13 +154,14 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
                 jnp.transpose(weights.weight_scale),
                 axis=1,
             )
-        weights = torch_view(
-            shard_linear_weights(
-                weights,
-                mesh=self.linear_config.mesh,
-                weight_p_spec=self.linear_config.weight_sharding,
-                bias_p_spec=self.linear_config.bias_sharding,
-            ))
+        weights_jax = shard_linear_weights(
+            weights,
+            mesh=self.linear_config.mesh,
+            weight_p_spec=self.linear_config.weight_sharding,
+            bias_p_spec=self.linear_config.bias_sharding,
+        )
+        jax.tree.map(lambda x: x.block_until_ready() if x is not None else None, weights_jax.weight)
+        weights = torch_view(weights_jax)
 
         if self.linear_config.fuse_matmuls:
             layer.weight = Parameter(weights.weight, requires_grad=False)
@@ -266,8 +267,10 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
             # Convert to tuple so jax jit can hash it
             weight_block_size=weight_block_size,
         )
-        weights = torch_view(
-            shard_moe_weights(weights, self.moe_backend, self.mesh))
+        weights_jax = shard_moe_weights(weights, self.moe_backend, self.mesh)
+        jax.tree.map(lambda x: x.block_until_ready() if x is not None else None, weights_jax.w13_weight)
+        jax.tree.map(lambda x: x.block_until_ready() if x is not None else None, weights_jax.w2_weight)
+        weights = torch_view(weights_jax)
 
         layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
         layer.w2_weight = Parameter(weights.w2_weight, requires_grad=False)
