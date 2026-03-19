@@ -579,10 +579,12 @@ class CompilationManager:
             # Prevent the slices from getting freed by insert before finishing this operation
             for layer_cache in kv_cache_slices:
                 layer_cache.block_until_ready()
-            self.runner.kv_caches = self.runner.kv_cache_manager._jitted_insert_continuous_kv_cache(
+            self.runner.kv_caches = self.runner.kv_cache_manager._jitted_insert_continuous_kv_cache_from_slice(
                 block_size,
+                num_blocks,
                 self.runner.kv_caches,
                 kv_cache_slices,
+                0,
                 block_numbers[0],
             )
             for layer_cache in self.runner.kv_caches:
