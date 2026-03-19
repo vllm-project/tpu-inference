@@ -65,6 +65,9 @@ export MOE_REQUANTIZE_WEIGHT_DTYPE_ENV=""
 export PHASED_PROFILING_DIR=""
 export PHASED_PROFILING_DIR_ENV=""
 export SKIP_DB_UPLOAD="false"
+export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=vllm"
+export USE_UNFUSED_MEGABLOCKS_ENV=""
+export HF_CONFIG=""
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -95,6 +98,9 @@ while [[ $# -gt 0 ]]; do
     --moe-requantize-weight-dtype) export MOE_REQUANTIZE_WEIGHT_DTYPE="$2"; MOE_REQUANTIZE_WEIGHT_DTYPE_ENV="MOE_REQUANTIZE_WEIGHT_DTYPE=$2"; shift 2 ;;
     --phased-profiling-dir) export PHASED_PROFILING_DIR="$2"; PHASED_PROFILING_DIR_ENV="PHASED_PROFILING_DIR=$2"; shift 2 ;;
     --skip-db-upload) export SKIP_DB_UPLOAD="true"; shift 1 ;;
+    --model-impl-type) export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=$2"; shift 2 ;;
+    --use-unfused-megablocks) export USE_UNFUSED_MEGABLOCKS_ENV="USE_UNFUSED_MEGABLOCKS=$2"; shift 2 ;;
+    --hf-config) export HF_CONFIG="$2"; shift 2 ;;
     *) echo "Unknown parameter passed: $1"; exit 1 ;;
   esac
 done
@@ -117,6 +123,10 @@ if [[ -n "${GENERATION_CONFIG}" ]]; then
   EXTRA_SERVER_ARGS="--generation-config /workspace/${CONFIG_DIR_NAME}/${CONFIG_FILE_NAME}"
 fi
 
+if [[ -n "${HF_CONFIG}" ]]; then
+  EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS} --hf-config=${HF_CONFIG}"
+fi
+
 # Define the commands utilizing the unified parameters
 SERVER_CMD="${PRE_SERVER_CMD}VLLM_DISABLE_SHARED_EXPERTS_STREAM=${DISABLE_SHARED_EXPERTS_STREAM} \
 NEW_MODEL_DESIGN=${NEW_MODEL_DESIGN} \
@@ -124,8 +134,9 @@ ${VLLM_MLA_DISABLE_ENV} \
 ${MOE_REQUANTIZE_BLOCK_SIZE_ENV} \
 ${MOE_REQUANTIZE_WEIGHT_DTYPE_ENV} \
 ${PHASED_PROFILING_DIR_ENV} \
+${USE_UNFUSED_MEGABLOCKS_ENV} \
 TPU_BACKEND_TYPE=jax \
-MODEL_IMPL_TYPE=vllm \
+${MODEL_IMPL_TYPE_ENV} \
 vllm serve \
   --seed 42 \
   --model ${TARGET_MODEL_PATH} \
