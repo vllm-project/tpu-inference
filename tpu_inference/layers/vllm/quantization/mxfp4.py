@@ -20,6 +20,7 @@ import torch
 from jax.sharding import Mesh, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
+from torchax.ops.mappings import t2j
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -50,7 +51,7 @@ from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedLinearMethod
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_mesh_shape_product, t2j
+from tpu_inference.utils import get_mesh_shape_product
 
 REQUANTIZED_BLOCK_SIZE = 512
 
@@ -83,7 +84,8 @@ class VllmMxfp4Config(Mxfp4Config, VllmQuantConfig):
             return VllmUnquantizedLinearMethod(linear_config)
         elif isinstance(layer, FusedMoE):
             moe_config = self.get_moe_config(layer)
-            return VllmMxfp4MoEMethod(moe_config, self.mesh)
+            enable_hybrid_moe = getattr(self.vllm_config.sharding_config, "enable_hybrid_moe", False)
+            return VllmMxfp4MoEMethod(moe_config, self.mesh, enable_hybrid_moe=enable_hybrid_moe)
         elif isinstance(layer, Attention):
             logger.warning_once("MXFP4 attention layer is not implemented. "
                                 "Skipping quantization for this layer.")
@@ -96,6 +98,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         self,
         moe: FusedMoEConfig,
         mesh: Mesh,
+        enable_hybrid_moe: bool = False,
         ep_axis_name: str = "model",
     ):
         FusedMoEMethodBase.__init__(self, moe)
@@ -105,7 +108,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         self.mxfp4_backend = Mxfp4Backend.TRITON
 
         self.mesh = mesh
-        self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
+        self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe, enable_hybrid_moe=enable_hybrid_moe)
 
         self.extra_backend_kwargs = {}
         if self.moe_backend == MoEBackend.FUSED_MOE:

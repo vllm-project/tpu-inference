@@ -33,7 +33,7 @@ from flax import nnx
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from transformers import Qwen3Config
-from vllm.config import VllmConfig
+from tpu_inference.mock.vllm_config_utils import VllmConfig
 
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -47,7 +47,7 @@ from tpu_inference.layers.jax.moe.utils import (get_expert_parallelism,
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
-from tpu_inference.logger import init_logger
+from tpu_inference.mock.vllm_logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.qwen3 import Qwen3Attention
@@ -74,14 +74,13 @@ class Qwen3MoeSparseMoeBlock(JaxModule):
         expert_axis_name = edf_sharding[0]
         num_expert_parallelism = get_expert_parallelism(expert_axis_name, mesh)
         use_ep = num_expert_parallelism > 1
-        moe_backend = select_moe_backend(use_ep)
+        use_hybrid = getattr(vllm_config.sharding_config, "enable_hybrid_moe", False)
+        moe_backend = select_moe_backend(use_ep, use_hybrid=use_hybrid)
 
         # Router
         self.gate = JaxLinear(
             config.hidden_size,
             config.num_experts,
-            dtype=dtype,
-            param_dtype=dtype,
             rngs=rng,
             use_bias=False,
             quant_config=quant_config,
@@ -145,7 +144,6 @@ class Qwen3MoeDecoderLayer(JaxModule):
         self.input_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
-            dtype=dtype,
             param_dtype=dtype,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
@@ -165,7 +163,6 @@ class Qwen3MoeDecoderLayer(JaxModule):
             hidden_size,
             epsilon=rms_norm_eps,
             param_dtype=dtype,
-            dtype=dtype,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
@@ -228,7 +225,6 @@ class Qwen3MoeModel(JaxModule):
             self.embed_tokens = JaxEmbed(
                 num_embeddings=vocab_size,
                 features=hidden_size,
-                dtype=dtype,
                 param_dtype=dtype,
                 embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
                 rngs=rng,
@@ -256,7 +252,6 @@ class Qwen3MoeModel(JaxModule):
             self.norm = JaxRmsNorm(
                 hidden_size,
                 epsilon=rms_norm_eps,
-                dtype=dtype,
                 param_dtype=dtype,
                 scale_init=nnx.with_partitioning(init_fn, (None, )),
                 rngs=rng,
@@ -329,7 +324,6 @@ class Qwen3MoeForCausalLM(JaxModule, LoadableWithIterator):
                     einsum_str="TD,DV->TV",
                     kernel_shape=(hidden_size, vocab_size),
                     dtype=model_config.dtype,
-                    param_dtype=model_config.dtype,
                     rngs=rng,
                     quant_config=vllm_config.quant_config,
                     prefix="lm_head",

@@ -85,7 +85,8 @@ class VllmUnquantizedConfig(QuantizationConfig, VllmQuantConfig):
             return VllmUnquantizedLinearMethod(linear_config)
         if isinstance(layer, FusedMoE):
             moe_config = self.get_moe_config(layer)
-            return VllmUnquantizedFusedMoEMethod(moe_config, self.mesh)
+            enable_hybrid_moe = getattr(self.vllm_config.sharding_config, "enable_hybrid_moe", False)
+            return VllmUnquantizedFusedMoEMethod(moe_config, self.mesh, enable_hybrid_moe=enable_hybrid_moe)
         if isinstance(layer, Attention):
             return None
         return None
@@ -105,10 +106,6 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             assert len(args) == 1, "Expecting shard_id as the only argument"
             shard_id = args[0]
             # Keep track of loaded weights for QKVLinear, e.g. (('weight', 'q'), ('bias', 'q'), ('weight', 'k'), ('bias', 'k'), ...)
-            layer._loaded_weights.add((param_name, shard_id))
-        elif isinstance(layer, vllm_linear.MergedColumnParallelLinear):
-            assert len(args) == 1, "Expecting shard_id as the only argument"
-            shard_id = args[0]
             layer._loaded_weights.add((param_name, shard_id))
         else:
             # Keep track of loaded weights for other linear layers, e.g. ('weight', 'bias')
@@ -213,11 +210,12 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         self,
         moe: FusedMoEConfig,
         mesh: Mesh,
+        enable_hybrid_moe: bool = False,
         ep_axis_name: str = "model",
     ):
         super().__init__(moe)
         self.mesh = mesh
-        self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
+        self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe, enable_hybrid_moe=enable_hybrid_moe)
 
         self.extra_backend_kwargs = {}
         if self.moe_backend == MoEBackend.FUSED_MOE:

@@ -26,7 +26,7 @@ from tpu_inference.kernels.megablox.tuned_block_sizes import \
     round_up_to_multiple_of_128_within_limit
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.jax.layers import FlaxUtils
-from tpu_inference.logger import init_logger
+from tpu_inference.mock.vllm_logger import init_logger
 
 logger = init_logger(__name__)
 modeling_flax_utils = FlaxUtils()
@@ -256,16 +256,21 @@ def get_expert_parallelism(expert_axis_name: str, mesh: Mesh) -> int:
             return math.prod(mesh.shape[axis] for axis in expert_axis_name)
 
 
-def select_moe_backend(use_ep: bool) -> MoEBackend:
+def select_moe_backend(use_ep: bool, use_hybrid: bool = False) -> MoEBackend:
     """
     Selects the MoE backend for the JAX path.
 
     Args:
         use_ep: Whether to use expert parallelism.
+        use_hybrid: Whether to use hybrid MoE parallelism.
 
     Returns:
         The selected MoE backend.
     """
+    if use_hybrid:
+        logger.info_once("[MoE]: Using Hybrid MoE EP/TP kernel")
+        return MoEBackend.GMM_HYBRID
+
     if envs.USE_MOE_EP_KERNEL:
         if use_ep:
             logger.info_once("[MoE]: Using fused MoE EP kernel")

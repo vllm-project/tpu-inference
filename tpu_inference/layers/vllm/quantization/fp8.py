@@ -20,6 +20,7 @@ import torch
 from jax.sharding import Mesh, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
+from torchax.ops.mappings import t2j
 from vllm.model_executor.layers import linear as vllm_linear
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
@@ -45,7 +46,6 @@ from tpu_inference.layers.vllm.quantization.configs import (
 from tpu_inference.layers.vllm.quantization.unquantized import (
     VllmUnquantizedFusedMoEMethod, VllmUnquantizedLinearMethod)
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import t2j
 
 P = PartitionSpec
 
@@ -72,15 +72,16 @@ class VllmFp8Config(vllm_fp8.Fp8Config, VllmQuantConfig):
                 return VllmUnquantizedLinearMethod(linear_config)
             return VllmFp8LinearMethod(self, linear_config)
         elif isinstance(layer, FusedMoE):
+            enable_hybrid_moe = getattr(self.vllm_config.sharding_config, "enable_hybrid_moe", False)
             if is_layer_skipped(
                     prefix=prefix,
                     ignored_layers=self.ignored_layers,
                     fused_mapping=self.packed_modules_mapping,
             ):
-                return VllmUnquantizedFusedMoEMethod(layer.moe_config)
+                return VllmUnquantizedFusedMoEMethod(layer.moe_config, self.mesh, enable_hybrid_moe=enable_hybrid_moe)
             if self.is_checkpoint_fp8_serialized:
                 layer.moe_config = self.get_moe_config(layer)
-                return VllmFp8MoEMethod(self, layer, self.mesh)
+                return VllmFp8MoEMethod(self, layer, self.mesh, enable_hybrid_moe=enable_hybrid_moe)
             else:
                 raise NotImplementedError(
                     "FP8OnelineMoEMethod is not supported.")
@@ -132,11 +133,7 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
             weight_scale,
             bias=bias,
             weight_block_size=tuple(self.weight_block_size),
-            requant_block_size=self.linear_config.requant_block_size,
-            output_sizes=tuple(self.linear_config.output_sizes),
-            requant_weight_dtype=self.linear_config.requant_weight_dtype,
-            fuse_matmuls=self.linear_config.fuse_matmuls,
-            n_shards=self.linear_config.n_shards)
+            linear_config=self.linear_config)
         if self.linear_config.enable_quantized_matmul_kernel:
             # The quantized_matmul_kernel expects weight scales shaped (n_out_features, 1, n_blocks) for blockwisze quantization.
             weights.weight_scale = jnp.expand_dims(
@@ -201,6 +198,7 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
                  quant_config: vllm_fp8.Fp8Config,
                  layer: torch.nn.Module,
                  mesh: Mesh,
+                 enable_hybrid_moe: bool = False,
                  ep_axis_name: str = "model"):
         FusedMoEMethodBase.__init__(self, layer.moe_config)
         self.quant_config = quant_config
@@ -211,7 +209,7 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         self.fp8_backend = None
 
         self.mesh = mesh
-        self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
+        self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe, enable_hybrid_moe=enable_hybrid_moe)
 
         self.extra_backend_kwargs = {}
         if self.moe_backend == MoEBackend.FUSED_MOE:
