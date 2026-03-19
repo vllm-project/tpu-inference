@@ -44,6 +44,9 @@ MAX_ALLOWED_PAGE_INDICES_N = (
     128 * 1024
 )  # Based on experiments on v5e, 256x1024 results in smem oom but 128x1024 not. TODO: Adjust this based on TPU version.
 
+# NOTE: this kernel is experimental and not fully tested.  See
+# tpu-inference/tpu_inference/kernels/experimental/batched_rpa/wrapper.py
+# for details
 if envs.USE_BATCHED_RPA_KERNEL:
     import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa
     logger.info_once("Using experimental batched RPA kernel")
