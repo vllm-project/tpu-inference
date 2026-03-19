@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
 import functools
 import logging
 import random
@@ -30,7 +29,7 @@ from jax._src import mesh as mesh_lib
 from jax._src.pallas.utils import next_power_of_2
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
@@ -538,11 +537,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                             dtype=np.int64)
 
     def load_model(self):
-        self.model_fn, self.compute_logits_fn, self.pooler_fn, self.combine_hidden_states_fn, multimodal_fns, self.state, self.lora_manager, self.model = get_model(
-            self.vllm_config,
-            self.rng_key,
-            self.mesh,
-        )
+        with set_current_vllm_config(self.vllm_config):
+            self.model_fn, self.compute_logits_fn, self.pooler_fn, self.combine_hidden_states_fn, multimodal_fns, self.state, self.lora_manager, self.model = get_model(
+                self.vllm_config,
+                self.rng_key,
+                self.mesh,
+            )
 
         multimodal_fns = multimodal_fns or {}
         self.precompile_vision_encoder_fn = multimodal_fns.get(
@@ -889,13 +889,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             step_rng = self.rng_params_for_sampling
 
         if spec_decode_metadata is None:
-            next_tokens = sample(
-                step_rng,
-                self.mesh,
-                logits,
-                tpu_sampling_metadata,
-            )
+            with self.maybe_forbid_compile:
+                next_tokens = sample(
+                    step_rng,
+                    self.mesh,
+                    logits,
+                    tpu_sampling_metadata,
+                )
         else:
+            # TODO(gxd3): wrap the spec decode sampling code block
+            # under maybe_forbid_compile as well.
+            # Currently when spec-decoding is enabled, serving-time
+            # jit-recompile might still happen.
             if tpu_sampling_metadata.do_sampling:
                 bonus_rng, rejection_rng = jax.random.split(step_rng)
             else:
@@ -921,11 +926,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 key=rejection_rng,
             )
 
-        if tpu_sampling_metadata.logprobs:
-            logprobs = self._compute_and_gather_logprobs(
-                logits, next_tokens, self.model_config.max_logprobs)
-        else:
-            logprobs = None
+        with self.maybe_forbid_compile:
+            if tpu_sampling_metadata.logprobs:
+                logprobs = self._compute_and_gather_logprobs(
+                    logits, next_tokens, self.model_config.max_logprobs)
+            else:
+                logprobs = None
 
         num_reqs = self.input_batch.num_reqs
 
@@ -996,7 +1002,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Return Model output to executor
             model_runner_output = ModelRunnerOutput(
                 req_ids=req_ids,
-                req_id_to_index=copy.copy(self.input_batch.req_id_to_index),
+                req_id_to_index=self.input_batch.req_id_to_index.copy(),
                 sampled_token_ids=[],  # Fill in async get
                 logprobs=logprobs_lists,
                 prompt_logprobs_dict=prompt_logprobs_dict,
