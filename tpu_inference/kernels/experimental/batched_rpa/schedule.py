@@ -311,11 +311,6 @@ def rpa_metadata_schedule_kernel(
             end_k_idx = jnp.minimum(n_k, end_k_idx_causal)
 
             def k_loop(k_idx, curr_ptr):
-                # pl.debug_check(
-                #     curr_ptr < config.max_steps_ub,
-                #     f"ERROR: rpa_metadata_schedule_kernel overflow: curr_ptr ({curr_ptr}) "
-                #     f"exceeds max_steps_ub ({config.max_steps_ub})"
-                # )
 
                 idx = curr_ptr * config.batch_size + target_lane
                 schedule.s_idx[idx] = s_idx
@@ -438,7 +433,6 @@ def rpa_metadata_schedule_kernel(
             schedule.is_last_k[idx] = 0
             schedule.do_writeback[idx] = 0
 
-            # TODO: theoretically we just need to zero out the size, check later
             q_base = step * config.batch_size * 2 + b * 2
             schedule.dma_q[q_base + 0] = 0
             schedule.dma_q[q_base + 1] = 0

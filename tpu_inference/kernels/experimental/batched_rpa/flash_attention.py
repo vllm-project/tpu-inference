@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import einshape
 import jax.numpy as jnp
 from jax import lax
 
@@ -67,13 +66,13 @@ def flash_attention(
             q = jnp.clip(q, min=minval, max=maxval)
         q = q.astype(k.dtype)
 
-    qk = lax.dot(
-        einshape.jax_einshape('bkth->(bk)th', q),
-        einshape.jax_einshape('bksh->(bk)sh', k),
+    qk = lax.dot_general(
+        q.reshape((b * k_heads, tq, h)),
+        k.reshape((b * k_heads, s, h)),
         dimension_numbers=(([2], [2]), ([0], [0])),
         preferred_element_type=jnp.float32,
     )
-    qk = einshape.jax_einshape('(bk)ts->bkts', qk, b=b, k=k_heads)
+    qk = qk.reshape((b, k_heads, tq, s))
 
     qk *= config.sm_scale
     if config.k_scale is not None:
@@ -105,13 +104,13 @@ def flash_attention(
     m_next = jnp.maximum(m_prev, m_curr)
     p = jnp.exp(qk - broadcast_minor(m_next, qk.shape))
 
-    pv = lax.dot(
-        einshape.jax_einshape('bkts->(bk)ts', p),
-        einshape.jax_einshape('bksh->(bk)sh', v),
+    pv = lax.dot_general(
+        p.reshape((b * k_heads, tq, s)),
+        v.reshape((b * k_heads, s, h)),
         dimension_numbers=(([2], [1]), ([0], [0])),
         preferred_element_type=jnp.float32,
     )
-    pv = einshape.jax_einshape('(bk)th->bkth', pv, b=b, k=k_heads)
+    pv = pv.reshape((b, k_heads, tq, h))
 
     if config.v_scale is not None:
         pv *= config.v_scale

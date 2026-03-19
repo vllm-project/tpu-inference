@@ -113,12 +113,6 @@ class KVBufferedRef(pipeline.BufferedRef):
             page_size_mask=page_size_mask,
         )
 
-    # def init_slots(self):
-    #   super().init_slots()
-    #   # Initialize all slots at once using a vectorized operation
-    #   kv_ref_vec = self.window_ref.bitcast(jnp.uint32)  # type: ignore
-    #   kv_ref_vec[...] = jnp.zeros_like(kv_ref_vec)
-
     def copy_in(
         self,
         src_ref: tuple[jax.Array, jax.Array, rpa_schedule.RPASchedule,
