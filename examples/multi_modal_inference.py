@@ -70,6 +70,8 @@ def run_qwen2_5_vl(questions: list[str], modality: str,
 
 model_example_map = {
     "qwen2_5_vl": run_qwen2_5_vl,
+    "qwen3_vl": run_qwen2_5_vl,  # Reusing for Qwen3-VL
+    "Qwen/Qwen3-VL-8B-Instruct": run_qwen2_5_vl,
 }
 
 
@@ -190,11 +192,7 @@ def parse_args():
         default=None,
         help="Set the seed when initializing `vllm.LLM`.",
     )
-    parser.add_argument(
-        "--disable-mm-preprocessor-cache",
-        action="store_true",
-        help="If True, disables caching of multi-modal preprocessor/mapper.",
-    )
+
 
     parser.add_argument(
         "--time-generate",
@@ -220,7 +218,13 @@ def main(args):
     questions = mm_input["questions"]
 
     # NOTE: Currently, only Qwen2.5-VL is supported. If later we want to support a model with new chat template, we may need to change this
-    req_data = model_example_map["qwen2_5_vl"](questions, modality, args)
+    model_key = "qwen2_5_vl"
+    if args.model in model_example_map:
+        model_key = args.model
+    elif "qwen3-vl" in args.model.lower():
+        model_key = "qwen3_vl"
+        
+    req_data = model_example_map[model_key](questions, modality, args)
 
     # Disable other modalities to save memory
     # Initial all modalities to be 0s and add the specifc modality limit later accordingly
@@ -228,10 +232,9 @@ def main(args):
     req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
         req_data.engine_args.limit_mm_per_prompt or {})
 
-    engine_args = asdict(req_data.engine_args) | {
-        "seed": args.seed,
-        "disable_mm_preprocessor_cache": args.disable_mm_preprocessor_cache,
-    }
+    engine_args = asdict(req_data.engine_args)
+    if args.seed is not None:
+        engine_args["seed"] = args.seed
     llm = LLM(**engine_args)
 
     # Don't want to check the flag multiple times, so just hijack `prompts`.
