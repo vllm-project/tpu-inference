@@ -47,7 +47,7 @@ def run_qwen2_5_vl(questions: list[str], modality: str,
             },
             "fps": 1,
         },
-        limit_mm_per_prompt={modality: 1},
+        limit_mm_per_prompt={modality: 2 if args.test_multi_image else 1},
     )
 
     if modality == "image":
@@ -55,9 +55,13 @@ def run_qwen2_5_vl(questions: list[str], modality: str,
     elif modality == "video":
         placeholder = "<|video_pad|>"
 
+    placeholder_full = f"<|vision_start|>{placeholder}<|vision_end|>"
+    if args.test_multi_image:
+        placeholder_full += f"<|vision_start|>{placeholder}<|vision_end|>"
+
     prompts = [
         ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-         f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
+         f"<|im_start|>user\n{placeholder_full}"
          f"{question}<|im_end|>\n"
          "<|im_start|>assistant\n") for question in questions
     ]
@@ -95,6 +99,27 @@ def get_multi_modal_input(args):
 
         return {
             "data": image,
+            "questions": img_questions,
+        }
+
+def get_multi_modal_input_multi(args):
+    """
+    Returns multiple images for testing compare.
+    """
+    if args.modality == "image":
+        image1 = convert_image_mode(
+            ImageAsset("cherry_blossom").pil_image, "RGB")
+        image2 = convert_image_mode(
+            ImageAsset("stop_sign").pil_image, "RGB")
+        images = [image1, image2]
+        img_questions = [
+            "What are shown in these two images? Compare them.",
+            "Describe the content of both images and how they differ.",
+            "What's in the first image vs the second image?",
+        ]
+
+        return {
+            "data": images,
             "questions": img_questions,
         }
 
@@ -195,6 +220,12 @@ def parse_args():
 
 
     parser.add_argument(
+        "--test-multi-image",
+        action="store_true",
+        help="If set, run the multiple images test (Option B).",
+    )
+
+    parser.add_argument(
         "--time-generate",
         action="store_true",
         help="If True, then print the total generate() call time",
@@ -213,7 +244,10 @@ def parse_args():
 def main(args):
 
     modality = args.modality
-    mm_input = get_multi_modal_input(args)
+    if args.test_multi_image:
+        mm_input = get_multi_modal_input_multi(args)
+    else:
+        mm_input = get_multi_modal_input(args)
     data = mm_input["data"]
     questions = mm_input["questions"]
 
