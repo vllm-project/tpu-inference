@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-03-19 08:25 AM UTC*
+*Last Updated: 2026-03-19 08:46 AM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -257,15 +257,9 @@ Below is the live status of our supported models, features, and kernels. Click o
 <table>
   <thead>
     <tr>
-      <th rowspan="2">Feature</th>
-      <th colspan="2">Flax</th>
-      <th colspan="2">torchax</th>
-    </tr>
-    <tr>
-      <th>Single-host</th>
-      <th>Multi-host</th>
-      <th>Single-host</th>
-      <th>Multi-host</th>
+      <th width="150" style="text-align:left">Feature</th>
+      <th>Flax</th>
+      <th>torchax</th>
     </tr>
   </thead>
   <tbody>
@@ -273,43 +267,31 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td><strong>CP</strong></td>
       <td><span title="unverified">unverified</span></td>
       <td><span title="unverified">unverified</span></td>
-      <td><span title="unverified">unverified</span></td>
-      <td><span title="unverified">unverified</span></td>
     </tr>
     <tr>
       <td><strong>DP</strong></td>
       <td><span title="✅">✅</span></td>
       <td><span title="✅">✅</span></td>
-      <td><span title="✅">✅</span></td>
-      <td><span title="✅">✅</span></td>
     </tr>
     <tr>
       <td><strong>EP</strong></td>
-      <td><span title="✅">✅</span></td>
-      <td><span title="v6e ✅">✅&nbsp;v6e</span><br><span title="v7x ❌">❌&nbsp;v7x</span></td>
-      <td><span title="✅">✅</span></td>
+      <td><span title="v6e ✅">✅&nbsp;v6e</span><br><span title="v7x ❌&nbsp;Failing">❌&nbsp;v7x</span></td>
       <td><span title="✅">✅</span></td>
     </tr>
     <tr>
       <td><strong>PP</strong></td>
       <td><span title="unverified">unverified</span></td>
       <td><span title="unverified">unverified</span></td>
-      <td><span title="unverified">unverified</span></td>
-      <td><span title="unverified">unverified</span></td>
     </tr>
     <tr>
       <td><strong>SP</strong> (<a href="https://github.com/vllm-project/tpu-inference/issues/1749">vote to prioritize</a>)</td>
-      <td><span title="❌">❌</span></td>
-      <td><span title="N/A">N/A</span></td>
-      <td><span title="❌">❌</span></td>
-      <td><span title="N/A">N/A</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
     </tr>
     <tr>
       <td><strong>TP</strong></td>
-      <td><span title="✅">✅</span></td>
-      <td><span title="v6e ❌">❌&nbsp;v6e</span><br><span title="v7x ✅">✅&nbsp;v7x</span></td>
-      <td><span title="✅">✅</span></td>
-      <td><span title="v6e ✅">✅&nbsp;v6e</span><br><span title="v7x ❌">❌&nbsp;v7x</span></td>
+      <td><span title="v6e ❌&nbsp;Failing">❌&nbsp;v6e</span><br><span title="v7x ✅">✅&nbsp;v7x</span></td>
+      <td><span title="v6e ✅">✅&nbsp;v6e</span><br><span title="v7x ❌&nbsp;Failing">❌&nbsp;v7x</span></td>
     </tr>
   </tbody>
 </table>

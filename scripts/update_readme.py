@@ -310,15 +310,9 @@ def generate_html_parallelism_table(headers, data):
     html.append("<table>")
     html.append("  <thead>")
     html.append("    <tr>")
-    html.append("      <th rowspan=\"2\">Feature</th>")
-    html.append("      <th colspan=\"2\">Flax</th>")
-    html.append("      <th colspan=\"2\">torchax</th>")
-    html.append("    </tr>")
-    html.append("    <tr>")
-    html.append("      <th>Single-host</th>")
-    html.append("      <th>Multi-host</th>")
-    html.append("      <th>Single-host</th>")
-    html.append("      <th>Multi-host</th>")
+    html.append("      <th width=\"150\" style=\"text-align:left\">Feature</th>")
+    html.append("      <th>Flax</th>")
+    html.append("      <th>torchax</th>")
     html.append("    </tr>")
     html.append("  </thead>")
     html.append("  <tbody>")
@@ -333,15 +327,11 @@ def generate_html_parallelism_table(headers, data):
         
         html.append(f"      <td>{feature_html}</td>")
         
-        flax_single = _merge_hw_status(row[1], row[5])
-        flax_multi  = _merge_hw_status(row[2], row[6])
-        torchax_single = _merge_hw_status(row[3], row[7])
-        torchax_multi = _merge_hw_status(row[4], row[8])
+        flax_merged = _merge_hw_status(row[1], row[3])
+        torchax_merged = _merge_hw_status(row[2], row[4])
         
-        html.append(f"      <td>{flax_single}</td>")
-        html.append(f"      <td>{flax_multi}</td>")
-        html.append(f"      <td>{torchax_single}</td>")
-        html.append(f"      <td>{torchax_multi}</td>")
+        html.append(f"      <td>{flax_merged}</td>")
+        html.append(f"      <td>{torchax_merged}</td>")
         html.append("    </tr>")
         
     html.append("  </tbody>")
@@ -369,12 +359,10 @@ def update_readme():
                         if feature not in merged_features:
                             if section_key == "parallelism":
                                 merged_features[feature] = {
-                                    "v6_flax": {"s": "", "m": ""}, 
-                                    "v6_pytorch": {"s": "", "m": ""}, 
-                                    "v6_default": {"s": "", "m": ""}, 
-                                    "v7_flax": {"s": "", "m": ""}, 
-                                    "v7_pytorch": {"s": "", "m": ""}, 
-                                    "v7_default": {"s": "", "m": ""}
+                                    "v6_flax": "", 
+                                    "v6_pytorch": "", 
+                                    "v7_flax": "", 
+                                    "v7_pytorch": ""
                                 }
                             else:
                                 merged_features[feature] = {"v6_flax": "", "v6_pytorch": "", "v6_default": "", "v7_flax": "", "v7_pytorch": "", "v7_default": ""}
@@ -382,11 +370,7 @@ def update_readme():
                         c = r[1] if len(r) > 1 else ""
                         p = r[2] if len(r) > 2 else ""
                         
-                        if section_key == "parallelism":
-                            merged_features[feature][col_key]["s"] = c
-                            merged_features[feature][col_key]["m"] = p
-                        else:
-                            merged_features[feature][col_key] = merge_metrics(c, p)
+                        merged_features[feature][col_key] = merge_metrics(c, p)
 
             for feature in sorted(merged_features.keys(), key=lambda x: x.lower()):
                 metrics = merged_features[feature]
@@ -403,14 +387,10 @@ def update_readme():
                 else:
                     row = [
                         feature,
-                        metrics["v6_flax"]["s"],
-                        metrics["v6_flax"]["m"],
-                        metrics["v6_pytorch"]["s"],
-                        metrics["v6_pytorch"]["m"],
-                        metrics["v7_flax"]["s"],
-                        metrics["v7_flax"]["m"],
-                        metrics["v7_pytorch"]["s"],
-                        metrics["v7_pytorch"]["m"]
+                        metrics.get("v6_flax", "❓"),
+                        metrics.get("v6_pytorch", "❓"),
+                        metrics.get("v7_flax", "❓"),
+                        metrics.get("v7_pytorch", "❓")
                     ]
                 all_data.append(row)
                 
