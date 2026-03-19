@@ -85,42 +85,85 @@ def _run_inference_with_config(model_name: str,
 
 
 @pytest.mark.parametrize(
-    "model, tp, pp, dp, ep, impl, additional_config",
+    "case",
     [
-        # test_pipeline_parallelism_jax_model
-        (None, 1, 2, 1, False, "jax", {}),
-        # test_pipeline_parallelism_vllm_model
-        (None, 1, 2, 1, False, "vllm", {}),
-        # test_pipeline_parallel_ep
-        ("Qwen/Qwen1.5-MoE-A2.7B", 1, 2, 1, True, "vllm", {
-            "sharding": {
-                "sharding_strategy": {
-                    "expert_parallelism": 2
+        {
+            "id": "jax_model",
+            "model": None,
+            "tp": 1,
+            "pp": 2,
+            "dp": 1,
+            "ep": False,
+            "impl": "jax",
+            "additional_config": {}
+        },
+        {
+            "id": "vllm_model",
+            "model": None,
+            "tp": 1,
+            "pp": 2,
+            "dp": 1,
+            "ep": False,
+            "impl": "vllm",
+            "additional_config": {}
+        },
+        {
+            "id": "ep",
+            "model": "Qwen/Qwen1.5-MoE-A2.7B",
+            "tp": 1,
+            "pp": 2,
+            "dp": 1,
+            "ep": True,
+            "impl": "vllm",
+            "additional_config": {
+                "sharding": {
+                    "sharding_strategy": {
+                        "expert_parallelism": 2
+                    }
                 }
             }
-        }),
-        # test_pipeline_parallel_dp
-        (None, 1, 2, 2, False, "jax", {}),
-        # test_pipeline_parallel_tp
-        (None, 2, 2, 1, False, "jax", {}),
-        # test_pipeline_parallel_ep_tp
-        ("Qwen/Qwen1.5-MoE-A2.7B", 2, 2, 1, True, "vllm", {
-            "sharding": {
-                "sharding_strategy": {
-                    "expert_parallelism": 2,
+        },
+        {
+            "id": "dp",
+            "model": None,
+            "tp": 1,
+            "pp": 2,
+            "dp": 2,
+            "ep": False,
+            "impl": "jax",
+            "additional_config": {}
+        },
+        {
+            "id": "tp",
+            "model": None,
+            "tp": 2,
+            "pp": 2,
+            "dp": 1,
+            "ep": False,
+            "impl": "jax",
+            "additional_config": {}
+        },
+        {
+            "id": "ep_tp",
+            "model": "Qwen/Qwen1.5-MoE-A2.7B",
+            "tp": 2,
+            "pp": 2,
+            "dp": 1,
+            "ep": True,
+            "impl": "vllm",
+            "additional_config": {
+                "sharding": {
+                    "sharding_strategy": {
+                        "expert_parallelism": 2,
+                    }
                 }
             }
-        }),
+        },
     ],
+    ids=lambda x: x["id"],
 )
 def test_pipeline_parallel_configs(
-    model,
-    tp,
-    pp,
-    dp,
-    ep,
-    impl,
-    additional_config,
+    case,
     model_name: str,
     test_prompts: list,
     sampling_params: SamplingParams,
@@ -128,22 +171,24 @@ def test_pipeline_parallel_configs(
     """
     Test various pipeline parallel configurations.
     """
+    impl = case["impl"]
     if impl == 'vllm':
         os.environ['MODEL_IMPL_TYPE'] = 'vllm'
     else:
         os.environ.pop('MODEL_IMPL_TYPE', None)
 
+    model = case["model"]
     actual_model = model if model is not None else model_name
 
     outputs = _run_inference_with_config(
         model_name=actual_model,
         test_prompts=test_prompts,
         sampling_params=sampling_params,
-        tensor_parallel_size=tp,
-        pipeline_parallel_size=pp,
-        data_parallel_size=dp,
-        enable_expert_parallel=ep > 1,
-        additional_config=additional_config,
+        tensor_parallel_size=case["tp"],
+        pipeline_parallel_size=case["pp"],
+        data_parallel_size=case["dp"],
+        enable_expert_parallel=case["ep"],
+        additional_config=case["additional_config"],
     )
 
     assert len(outputs) == len(test_prompts)
