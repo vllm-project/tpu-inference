@@ -35,5 +35,5 @@ bash "${NIGHTLY_SCRIPT}" \
   --model-impl-type "flax_nnx" \
   --use-unfused-megablocks "0" \
   --hf-config "deepseek-ai/DeepSeek-R1" \
-  --phased-profiling-dir "gs://tpu-commons-ci/xprof/deepseek-r1-jax/1k-8k" \
+  --phased-profiling-dir "gs://tpu-commons-ci/xprof/deepseek-r1/jax/1k-8k" \
   --skip-db-upload

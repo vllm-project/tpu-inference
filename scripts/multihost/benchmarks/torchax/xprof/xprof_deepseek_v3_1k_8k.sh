@@ -32,5 +32,5 @@ bash "${NIGHTLY_SCRIPT}" \
   --vllm-mla-disable "0" \
   --moe-requantize-block-size "512" \
   --moe-requantize-weight-dtype "fp4" \
-  --phased-profiling-dir "gs://tpu-commons-ci/xprof/deepseek-r1/1k-8k" \
+  --phased-profiling-dir "gs://tpu-commons-ci/xprof/deepseek-r1/torchax/1k-8k" \
   --skip-db-upload
