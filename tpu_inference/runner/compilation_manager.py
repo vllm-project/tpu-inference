@@ -52,6 +52,9 @@ class CompilationManager:
             logger.info("Enabling JAX compile cache.")
             jax.config.update("jax_compilation_cache_dir",
                               vllm_envs.VLLM_XLA_CACHE_PATH)
+            # Ensure small compiled function are cached as well.
+            jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+            jax.config.update("jax_persistent_cache_min_compile_time_secs", -1)
 
     def _create_dummy_tensor(self,
                              shape: Tuple[int, ...],
@@ -267,11 +270,8 @@ class CompilationManager:
                 dp_sharding = NamedSharding(
                     self.runner.mesh,
                     PartitionSpec(ShardingAxisName.ATTN_DATA, ))
-                next_tokens_sharding = dp_sharding
             else:
                 dp_sharding = None
-                next_tokens_sharding = NamedSharding(self.runner.mesh,
-                                                     PartitionSpec())
 
             for num_reqs in self.runner.num_reqs_paddings:
                 padded_token_in_tpu_cur_input_indices = np.zeros(
@@ -290,7 +290,7 @@ class CompilationManager:
                 next_tokens = self._create_dummy_tensor(
                     (num_reqs, ),
                     jnp.int32,
-                    sharding=next_tokens_sharding,
+                    sharding=NamedSharding(self.runner.mesh, PartitionSpec()),
                 )
                 placeholder_num = 1
                 self._run_compilation(
@@ -509,13 +509,20 @@ class CompilationManager:
         logger.info("Compiling sampling with different input shapes.")
         hsize = self.runner.model_config.get_vocab_size()
         for num_reqs in self.runner.num_reqs_paddings:
+            # `logits_sharding` need to be consistent with
+            # compute_logits_fn's output sharding to avoid serving
+            # time re-compilation.
             logits_sharding = NamedSharding(
                 self.runner.mesh,
-                PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+                PartitionSpec(ShardingAxisName.MLP_DATA,
+                              ShardingAxisName.MLP_TENSOR))
+            # Similarly, `sampling_metadata_sharding` need to consistent
+            # with runtime sampling_metadata sharding to the sample
+            # function.
             dp_size = self.runner.vllm_config.sharding_config.total_dp_size
             sampling_metadata_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(
-                    ShardingAxisName.MLP_DATA)) if dp_size > 1 else None
+                    ShardingAxisName.ATTN_DATA)) if dp_size > 1 else None
             logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
                                                logits_sharding)
             for do_sampling in (True, False):
