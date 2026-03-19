@@ -1753,7 +1753,7 @@ def ragged_paged_attention(
         if get_tpu_version() >= 7:
             # jit to color the memory since the q, kv are just preprocessed.
             @jax.jit
-            def run(*scalar_prefetches, q, kv, kv_cache):
+            def run(scalar_prefetches, q, kv, kv_cache):
                 return kernel(
                     *scalar_prefetches,
                     pltpu.with_memory_space_constraint(q, pltpu.HBM),
@@ -1762,9 +1762,10 @@ def ragged_paged_attention(
                 )
         else:
             # TODO(b/494285697): v6 has issues with pinning aliased memory.
-            run = kernel
+            def run(scalar_prefetches, q, kv, kv_cache):
+                return kernel(*scalar_prefetches, q, kv, kv_cache)
 
-        return run(*scalar_prefetches, q, kv, kv_cache)
+        return run(scalar_prefetches, q, kv, kv_cache)
 
     def _prepare_block_sizes(block_sizes, case):
         if block_sizes is None:
