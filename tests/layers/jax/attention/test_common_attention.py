@@ -68,7 +68,8 @@ class TestAttention(unittest.TestCase):
             x = jnp.ones((seq_len, hidden_size), dtype=jnp.bfloat16)
 
             block_size = 16
-            num_blocks = 8
+            # Small KV cahe will be prefetched by XLA and we can not pin on HBM since it is created eagerly here.
+            num_blocks = 1000
             kv_dtype = jnp.float8_e4m3fn if kv_cache_str == "fp8" else jnp.bfloat16
             cache_shape = get_kv_cache_shape(num_blocks, block_size,
                                              num_attention_heads, head_dim,
