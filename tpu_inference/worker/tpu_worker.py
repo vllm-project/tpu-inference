@@ -344,10 +344,12 @@ class TPUWorker(WorkerBase):
                 staging_buffer_pages = envs.TPU_OFFLOAD_NUM_STAGING_BLOCKS
 
                 # TODO(jcgu): verify page_size_bytes
-                kv_cache_specs = self.model_runner.get_kv_cache_spec()
+                kv_cache_specs = self.get_kv_cache_spec()
                 num_layers = len(kv_cache_specs)
                 assert len(kv_cache_specs) >= 1
-                vllm_page_size_bytes = kv_cache_specs[0].page_size_bytes
+                # TODO(jcgu): hybrid-kv is not supported yet.
+                _layer_name, _layer_spec = next(iter(kv_cache_specs.items()))
+                vllm_page_size_bytes = _layer_spec.page_size_bytes
                 # rpa_page_size_bytes = get_rpa_page_size_bytes(self.model_runner.mesh,
                 #                                             kv_cache_specs)
                 stage_buffer_size_bytes = staging_buffer_pages * num_layers * vllm_page_size_bytes
