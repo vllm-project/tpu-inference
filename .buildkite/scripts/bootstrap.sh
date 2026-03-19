@@ -16,14 +16,12 @@
 # Exit on error, exit on unset variable, fail on pipe errors.
 set -euo pipefail
 
-# --- Configuration Constants ---
-# Priority: Post-merge > Pre-merge > Integration pipeline > Benchmark > Other/Default > Nightly
-readonly PRIORITY_POST_MERGE=10
-readonly PRIORITY_PRE_MERGE=5
-readonly PRIORITY_INTEGRATION=3
-readonly PRIORITY_BENCHMARK=2
-readonly PRIORITY_DEFAULT=1
-readonly PRIORITY_NIGHTLY=0
+# Resolve the absolute directory path of the current script.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source the shared pipeline config file.
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/configs/pipeline_config.sh"
 
 determine_job_priority() {
   local priority=""
@@ -32,10 +30,6 @@ determine_job_priority() {
     # Nightly build (Lowest priority)
     priority="$PRIORITY_NIGHTLY"
     echo "Build type: Nightly - Priority: $priority" >&2
-  elif [[ "${BENCHMARK_SCHEDULE:-0}" == "1" ]]; then
-    # Benchmark pipeline
-    priority="$PRIORITY_BENCHMARK"
-    echo "Build type: Benchmark - Priority: $priority" >&2
   elif [[ "$BUILDKITE_PIPELINE_SLUG" == "tpu-vllm-integration" ]]; then
     # Integration pipeline
     priority="$PRIORITY_INTEGRATION"
@@ -60,50 +54,6 @@ determine_job_priority() {
 JOB_PRIORITY=$(determine_job_priority)
 export JOB_PRIORITY
 buildkite-agent meta-data set "JOB_PRIORITY" "$JOB_PRIORITY"
-
-# Implemented dynamic job prioritization by injecting integers during upload
-upload_with_priority() {
-  local yaml_file=$1
-  echo "--- :pipeline: Uploading $yaml_file with priority ${JOB_PRIORITY:-1}"
-  { 
-    echo "priority: ${JOB_PRIORITY:-1}"; 
-    cat "$yaml_file"; 
-  } | buildkite-agent pipeline upload
-}
-
-get_vllm_commit_hash() {
-  # load vllm commit hash from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo
-  local commit_hash=""
-  local version_file=".buildkite/vllm_lkg.version"
-
-  if [ -f "$version_file" ]; then
-    commit_hash="$(cat "$version_file")"
-  fi
-  if [ -z "${commit_hash:-}" ]; then
-    commit_hash=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
-  fi
-
-  echo "$commit_hash"
-}
-
-upload_benchmark_pipeline() {
-    VLLM_COMMIT_HASH=$(get_vllm_commit_hash)
-    buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
-    TPU_COMMIT_HASH=$(git rev-parse HEAD)
-    CODE_HASH="${VLLM_COMMIT_HASH}-${TPU_COMMIT_HASH}-"
-    buildkite-agent meta-data set "CODE_HASH" "${CODE_HASH}"
-    echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
-    echo "Using vllm-tpu commit hash: $(buildkite-agent meta-data get "CODE_HASH")"
-
-    upload_with_priority .buildkite/pipeline_benchmark.yml
-}
-
-# When BENCHMARK_SCHEDULE is set to 1, execute the benchmark
-if [[ "${BENCHMARK_SCHEDULE:-0}" == "1" ]]; then
-    upload_benchmark_pipeline
-    # Exit here; only schedule the benchmark and do nothing else
-    exit 0
-fi
 
 # --- Skip build if only docs/icons changed ---
 echo "--- :git: Checking changed files"
@@ -160,7 +110,7 @@ echo "$FILES_CHANGED" | tr '\n' ',' | buildkite-agent meta-data set "changed_fil
 upload_pipeline() {
     if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
       # Upload JAX pipeline for v6 (default)
-      upload_with_priority .buildkite/pipeline_jax.yml
+      upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
 
       # Upload JAX pipeline for v7
       export TESTS_GROUP_LABEL="[jax] TPU7x Tests Group"
@@ -168,15 +118,15 @@ upload_pipeline() {
       export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
       export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
       export COV_FAIL_UNDER="67"
-      upload_with_priority .buildkite/pipeline_jax.yml
+      upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
       unset TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI COV_FAIL_UNDER
 
       # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
-      upload_with_priority .buildkite/nightly_releases.yml
+      upload_with_priority .buildkite/nightly_releases.yml "$JOB_PRIORITY"
     fi
 
-    upload_with_priority .buildkite/nightly_verify.yml
-    upload_with_priority .buildkite/pipeline_pypi.yml
+    upload_with_priority .buildkite/nightly_verify.yml "$JOB_PRIORITY"
+    upload_with_priority .buildkite/pipeline_pypi.yml "$JOB_PRIORITY"
 }
 
 echo "--- Starting Buildkite Bootstrap"
@@ -212,7 +162,7 @@ EOF
 
 fi
 
-upload_with_priority "$NOTIFY_FILE"
+upload_with_priority "$NOTIFY_FILE" "$JOB_PRIORITY"
 rm "$NOTIFY_FILE"
 
 echo "Configure testing logic"
@@ -222,7 +172,7 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     # Note: upload are inserted in reverse order, so promote LKG should upload before tests
-    upload_with_priority .buildkite/integration_promote.yml
+    upload_with_priority .buildkite/integration_promote.yml "$JOB_PRIORITY"
   
     # Upload JAX pipeline for v7
     export TESTS_GROUP_LABEL="[jax] TPU7x Tests Group"
@@ -230,11 +180,11 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
     export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
     export COV_FAIL_UNDER="67"
-    upload_with_priority .buildkite/pipeline_jax.yml
+    upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
     unset TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI COV_FAIL_UNDER
 
     # Upload JAX pipeline for v6 (default)
-    upload_with_priority .buildkite/pipeline_jax.yml
+    upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
 
 else
   # Note: PR and Nightly pipelines will load VLLM_COMMIT_HASH from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo
