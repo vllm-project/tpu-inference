@@ -351,6 +351,30 @@ class VllmModelWrapper:
                         vllm_model._deepstack_tensors[key] = v
             vllm_model._set_deepstack_input_embeds = patched_set_deepstack
 
+        orig_get_deepstack = getattr(vllm_model, "_get_deepstack_input_embeds", None)
+        if orig_get_deepstack is not None:
+            from vllm.sequence import IntermediateTensors
+            
+            def patched_get_deepstack(num_tokens: int):
+                orig_output = orig_get_deepstack(num_tokens)
+                converted = {}
+                for k, v in orig_output.items():
+                    if not v.__class__.__module__.startswith("torchax"):
+                        try:
+                            # If it's a standard PyTorch Tensor (static), convert it via numpy
+                            # to a JAX array, then wrap in torch_view for JAX compatibility.
+                            import jax
+                            val_f32 = v.detach().cpu().float().numpy()
+                            jax_arr = jax.device_put(val_f32).astype(jax.numpy.bfloat16)
+                            v = torch_view(jax_arr)
+                        except Exception:
+                            # If it fails, it might be dynamic/tracer, we fall back to jax_view 
+                            # (which will fail if it's not torchax but at least it fails loudly if it's an unsupported case).
+                            v = torch_view(jax_view(v))
+                    converted[k] = v
+                return IntermediateTensors(converted)
+            vllm_model._get_deepstack_input_embeds = patched_get_deepstack
+
         # 2. Patch embed_input_ids to pack state
         orig_embed_input_ids = getattr(vllm_model, "embed_input_ids", None)
         if orig_embed_input_ids is not None:
