@@ -38,11 +38,11 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.experimental.batched_rpa import kernel, schedule
 
 DEFAULT_MASK_VALUE = -float(jnp.finfo(jnp.dtype("float32")).max)
-DEFAULT_VMEM_LIMIT_BYTES = 64 * 1024 * 1024
 
 
 def cdiv(a, b):
@@ -138,7 +138,7 @@ def _get_max_steps_ub(
     # data-dependent shapes which can cause host-device syncs.
     # The schedule is stored in SMEM along with kv_lens, cu_q_lens, page_indices,
     # distribution, lane_lengths, and actual_steps.
-    smem_limit_bytes = (1024 - 32) * 1024
+    smem_limit_bytes = pltpu.get_tpu_info().smem_capacity_bytes - 32 * 1024
     word_size_bytes = 4
     fixed_bytes = (
         max_num_seqs * word_size_bytes  # kv_lens
@@ -592,8 +592,8 @@ def ragged_paged_attention(
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
-            vmem_limit_bytes=vmem_limit_bytes
-            if vmem_limit_bytes is not None else DEFAULT_VMEM_LIMIT_BYTES,
+            vmem_limit_bytes=vmem_limit_bytes if vmem_limit_bytes is not None
+            else pltpu.get_tpu_info().vmem_capacity_bytes,
             total_num_pages=total_num_pages,
             case=case,
             n_buffer=n_buffer,

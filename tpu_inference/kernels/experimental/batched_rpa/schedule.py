@@ -81,7 +81,7 @@ class RPAConfig:
     q_scale: Any = None
     k_scale: Any = None
     v_scale: Any = None
-    vmem_limit_bytes: int | None = 60 * 1024 * 1024
+    vmem_limit_bytes: int | None = None
     case: RpaCase = RpaCase.MIXED
     n_buffer: int = 2
 
