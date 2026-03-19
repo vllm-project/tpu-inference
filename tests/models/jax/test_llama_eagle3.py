@@ -149,7 +149,7 @@ class TestEagleLlama3ForCausalLM:
         input_ids, hidden_states, attention_metadata = mock_model_inputs
 
         kv_caches = create_kv_caches(
-            num_blocks=4,
+            num_blocks=1000,
             block_size=16,
             num_kv_heads=hf_config.num_key_value_heads,
             head_size=hf_config.hidden_size // hf_config.num_attention_heads,

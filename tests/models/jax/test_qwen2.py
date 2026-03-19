@@ -171,7 +171,7 @@ class TestQwen2ForCausalLM:
 
         # Test model forward
         kv_caches = create_kv_caches(
-            num_blocks=4,
+            num_blocks=1000,
             block_size=32,
             num_kv_heads=num_kv_heads,
             head_size=head_dim,
