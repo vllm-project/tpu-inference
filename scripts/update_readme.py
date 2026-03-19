@@ -64,8 +64,13 @@ def generate_markdown_table(headers, data):
     def _format_markdown_cell(text):
         if not text:
             return ""
-        text_str = _nbsp(str(text))
-        return text_str
+        
+        text_str = str(text)
+        # If the cell is a status cell (contains our standard emojis), format it as an icon tooltip
+        if any(emoji in text_str for emoji in ["✅", "❌", "❓", "⚠️"]):
+            return _format_cell(text_str)
+            
+        return _nbsp(text_str)
 
     header_line = "| " + " | ".join([_nbsp(h) for h in headers]) + " |\n"
     separator_line = "| " + " | ".join(["---"] * len(headers)) + " |\n"
