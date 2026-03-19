@@ -97,11 +97,6 @@ if (( BM_JOB_STATUS == EXIT_SUCCESS )); then
   echo "Code_Hash: $CODE_HASH"
   # shellcheck disable=SC2034
   IFS='-' read -r VLLM_HASH TPU_INFERENCE_HASH _ <<< "$CODE_HASH"
-  # add
-  # LOG_ROOT=$(mktemp -d)
-  # Temp write to another bucket
-  # add
-  # REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
 
   # Prepare Dataset (Temp solution)
   DATASETS=("custom-token" "mmlu" "mlperf" "bench-custom-token" "math500" "bench-custom-mm")
