@@ -341,11 +341,14 @@ class VllmModelWrapper:
         orig_set_deepstack = getattr(vllm_model, "_set_deepstack_input_embeds", None)
         if orig_set_deepstack is not None:
             def patched_set_deepstack(deepstack_input_embeds):
-                vllm_model._deepstack_tensors = {}
+                indexes = getattr(vllm_model.config.vision_config, "deepstack_visual_indexes", [])
+                
+                if not hasattr(vllm_model, "_deepstack_tensors"):
+                    vllm_model._deepstack_tensors = {}
+
                 if isinstance(deepstack_input_embeds, dict):
                     vllm_model._deepstack_tensors.update(deepstack_input_embeds)
                 elif isinstance(deepstack_input_embeds, (list, tuple)):
-                    indexes = getattr(vllm_model.config.vision_config, "deepstack_visual_indexes", [])
                     for idx, v in enumerate(deepstack_input_embeds):
                         key = f"deepstack_input_embeds_{indexes[idx]}" if idx < len(indexes) else f"deepstack_input_embeds_{idx}"
                         vllm_model._deepstack_tensors[key] = v
@@ -356,20 +359,21 @@ class VllmModelWrapper:
             from vllm.sequence import IntermediateTensors
             
             def patched_get_deepstack(num_tokens: int):
+                # 1. Try to use cached JAX tensors if available
+                if getattr(vllm_model, "_deepstack_tensors", None):
+                    return IntermediateTensors(vllm_model._deepstack_tensors)
+                
+                # 2. Fallback to native retrieval and conversion
                 orig_output = orig_get_deepstack(num_tokens)
                 converted = {}
                 for k, v in orig_output.items():
                     if not v.__class__.__module__.startswith("torchax"):
                         try:
-                            # If it's a standard PyTorch Tensor (static), convert it via numpy
-                            # to a JAX array, then wrap in torch_view for JAX compatibility.
                             import jax
                             val_f32 = v.detach().cpu().float().numpy()
                             jax_arr = jax.device_put(val_f32).astype(jax.numpy.bfloat16)
                             v = torch_view(jax_arr)
                         except Exception:
-                            # If it fails, it might be dynamic/tracer, we fall back to jax_view 
-                            # (which will fail if it's not torchax but at least it fails loudly if it's an unsupported case).
                             v = torch_view(jax_view(v))
                     converted[k] = v
                 return IntermediateTensors(converted)
