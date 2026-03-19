@@ -889,13 +889,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             step_rng = self.rng_params_for_sampling
 
         if spec_decode_metadata is None:
-            next_tokens = sample(
-                step_rng,
-                self.mesh,
-                logits,
-                tpu_sampling_metadata,
-            )
+            with self.maybe_forbid_compile:
+                next_tokens = sample(
+                    step_rng,
+                    self.mesh,
+                    logits,
+                    tpu_sampling_metadata,
+                )
         else:
+            # TODO(gxd3): wrap the spec decode sampling code block
+            # under maybe_forbid_compile as well.
+            # Currently when spec-decoding is enabled, serving-time
+            # jit-recompile might still happen.
             if tpu_sampling_metadata.do_sampling:
                 bonus_rng, rejection_rng = jax.random.split(step_rng)
             else:
@@ -921,11 +926,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 key=rejection_rng,
             )
 
-        if tpu_sampling_metadata.logprobs:
-            logprobs = self._compute_and_gather_logprobs(
-                logits, next_tokens, self.model_config.max_logprobs)
-        else:
-            logprobs = None
+        with self.maybe_forbid_compile:
+            if tpu_sampling_metadata.logprobs:
+                logprobs = self._compute_and_gather_logprobs(
+                    logits, next_tokens, self.model_config.max_logprobs)
+            else:
+                logprobs = None
 
         num_reqs = self.input_batch.num_reqs
 
