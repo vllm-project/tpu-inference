@@ -1475,7 +1475,7 @@ def get_default_block_sizes(
                 bq_sz = min(2048 // num_q_heads_per_kv_head, max_q // 2)
                 bkv_sz = min(2048, max_kv)
                 bq_csz = min(1024 // num_q_heads_per_kv_head, max_q // 2)
-                bkv_csz = min(1024, align_to(max_kv // 2, page_size))
+                bkv_csz = min(512, align_to(max_kv // 2, page_size))
         case _:
             raise NotImplementedError(f"Unsupported {tpu_version=}.")
 
