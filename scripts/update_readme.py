@@ -111,13 +111,33 @@ def _format_cell(status_string, hw_prefix=None):
     return f'<span title="{tooltip}">{display_text}</span>'
 
 def _merge_hw_status(status_v6, status_v7):
-    """Merges v6 and v7 statuses. If identical, returns one. If different, stacks them."""
-    s6 = status_v6.strip()
-    s7 = status_v7.strip()
-    if s6 == s7:
-        return _format_cell(s6)
+    """Globally condenses v6 and v7 component statuses into a single cell outcome."""
+    s6 = str(status_v6).lower()
+    s7 = str(status_v7).lower()
     
-    return _format_cell(s6, "v6e") + "<br>" + _format_cell(s7, "v7x")
+    # Failing takes ultimate priority: if any fails, the whole box fails.
+    if "❌" in s6 or "fail" in s6 or "❌" in s7 or "fail" in s7:
+        return _format_cell("❌&nbsp;Failing")
+        
+    # If both pass natively
+    if ("✅" in s6 or "pass" in s6) and ("✅" in s7 or "pass" in s7):
+        return _format_cell("✅&nbsp;Passing")
+        
+    # Handling N/A edge cases
+    s6_na = "n/a" in s6
+    s7_na = "n/a" in s7
+    s6_pass = "✅" in s6 or "pass" in s6
+    s7_pass = "✅" in s7 or "pass" in s7
+    
+    if s6_pass and s7_na:
+        return _format_cell("✅&nbsp;Passing")
+    if s7_pass and s6_na:
+        return _format_cell("✅&nbsp;Passing")
+    if s6_na and s7_na:
+        return _format_cell("N/A")
+        
+    # Any residual state (unverified, untested, missing) goes to untested.
+    return _format_cell("❓&nbsp;Untested")
 
 def generate_html_feature_table(headers, data):
     """Generates an HTML table specifically for the core feature matrix, merging v6e and v7x."""
