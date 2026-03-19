@@ -30,7 +30,7 @@ from jax.sharding import Sharding
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
 from tpu_inference import envs
 from tpu_inference.kernels.flash_attention.kernel import flash_attention
-from tpu_inference.kernels.mla.v1.kernel import mla_ragged_paged_attention
+from tpu_inference.kernels.mla.v2.kernel import mla_ragged_paged_attention
 from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
     get_tuned_block_sizes
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
