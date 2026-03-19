@@ -888,40 +888,45 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         else:
             step_rng = self.rng_params_for_sampling
 
-        with self.maybe_forbid_compile:
-            if spec_decode_metadata is None:
+        if spec_decode_metadata is None:
+            with self.maybe_forbid_compile:
                 next_tokens = sample(
                     step_rng,
                     self.mesh,
                     logits,
                     tpu_sampling_metadata,
                 )
+        else:
+            # TODO(gxd3): wrap the spec decode sampling code block
+            # under maybe_forbid_compile as well.
+            # Currently when spec-decoding is enabled, serving-time
+            # jit-recompile might still happen.
+            if tpu_sampling_metadata.do_sampling:
+                bonus_rng, rejection_rng = jax.random.split(step_rng)
             else:
-                if tpu_sampling_metadata.do_sampling:
-                    bonus_rng, rejection_rng = jax.random.split(step_rng)
-                else:
-                    bonus_rng = step_rng
-                    rejection_rng = step_rng
-                bonus_logits = self._select_from_array_fn(
-                    logits, spec_decode_metadata.bonus_logits_indices)
-                bonus_token_ids = sample(
-                    bonus_rng,
-                    self.mesh,
-                    bonus_logits,
-                    tpu_sampling_metadata,
-                )
-                target_logits = self._select_from_array_fn(
-                    logits, spec_decode_metadata.target_logits_indices)
-                next_tokens = self.rejection_sampler(
-                    draft_token_ids=spec_decode_metadata.draft_token_ids,
-                    num_draft_tokens=spec_decode_metadata.draft_lengths,
-                    draft_probs=None,
-                    target_logits=target_logits,
-                    bonus_token_ids=bonus_token_ids,
-                    sampling_metadata=tpu_sampling_metadata,
-                    key=rejection_rng,
-                )
+                bonus_rng = step_rng
+                rejection_rng = step_rng
+            bonus_logits = self._select_from_array_fn(
+                logits, spec_decode_metadata.bonus_logits_indices)
+            bonus_token_ids = sample(
+                bonus_rng,
+                self.mesh,
+                bonus_logits,
+                tpu_sampling_metadata,
+            )
+            target_logits = self._select_from_array_fn(
+                logits, spec_decode_metadata.target_logits_indices)
+            next_tokens = self.rejection_sampler(
+                draft_token_ids=spec_decode_metadata.draft_token_ids,
+                num_draft_tokens=spec_decode_metadata.draft_lengths,
+                draft_probs=None,
+                target_logits=target_logits,
+                bonus_token_ids=bonus_token_ids,
+                sampling_metadata=tpu_sampling_metadata,
+                key=rejection_rng,
+            )
 
+        with self.maybe_forbid_compile:
             if tpu_sampling_metadata.logprobs:
                 logprobs = self._compute_and_gather_logprobs(
                     logits, next_tokens, self.model_config.max_logprobs)
