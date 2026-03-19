@@ -11,7 +11,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Wrapper for RPA kernel to match expected interface."""
+"""Wrapper for RPA kernel to match expected interface.
+
+NOTE: all of the code in this directory is experimental and not fully tested!
+To enable usage of this kernel in full run, you can pass the USE_BATCHED_RPA_KERNEL=1
+environment variable.
+
+Compared to the default RPA kernel, this kernel does the following:
+
+1. Batches multiple sequences together to replace per-request flash_attention loops
+
+2. Enables triple-buffering via Pallas emit_pipeline, significantly reducing communication stalls
+
+3. Precomputes expensive metadata upfront (e.g., page locations and bounds clipping)
+
+4. Improves decode pipelining by interleaving sequences to unblock serial q@k and p@v multiplications
+
+5. Amortizes MXU stall costs (~200 cycles) across multiple sequences
+
+6. Uses more granular block sizes (bkv_sz) to minimize wasted padding and boost prefill performance
+"""
 
 import functools
 from typing import Any
