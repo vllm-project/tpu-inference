@@ -12,6 +12,12 @@ python examples/multi_modal_inference.py \
   --model Qwen/Qwen2.5-VL-3B-Instruct \
   --tensor-parallel-size 1 \
   --num-prompts 1
+
+Example command to test multiple images  
+python examples/multi_modal_inference.py \
+  --model Qwen/Qwen3-VL-8B-Instruct \
+  --test-multi-image \
+  --max-model-len 8192
 """
 
 from contextlib import contextmanager
@@ -30,9 +36,8 @@ class ModelRequestData(NamedTuple):
     stop_token_ids: Optional[list[int]] = None
 
 
-# Currently Qwen2.5-VL is the only supported multi-modal
-# Qwen2.5-VL
-def run_qwen2_5_vl(questions: list[str], modality: str,
+# Currently Qwen2.5-VL and Qwen3-VL are supported
+def run_qwen_vl(questions: list[str], modality: str,
                    args) -> ModelRequestData:
     engine_args = EngineArgs(
         model=args.model,
@@ -73,9 +78,8 @@ def run_qwen2_5_vl(questions: list[str], modality: str,
 
 
 model_example_map = {
-    "qwen2_5_vl": run_qwen2_5_vl,
-    "qwen3_vl": run_qwen2_5_vl,  # Reusing for Qwen3-VL
-    "Qwen/Qwen3-VL-8B-Instruct": run_qwen2_5_vl,
+    "Qwen/Qwen2.5-VL-3B-Instruct": run_qwen_vl,
+    "Qwen/Qwen3-VL-8B-Instruct": run_qwen_vl,
 }
 
 
@@ -251,12 +255,9 @@ def main(args):
     data = mm_input["data"]
     questions = mm_input["questions"]
 
-    # NOTE: Currently, only Qwen2.5-VL is supported. If later we want to support a model with new chat template, we may need to change this
-    model_key = "qwen2_5_vl"
-    if args.model in model_example_map:
-        model_key = args.model
-    elif "qwen3-vl" in args.model.lower():
-        model_key = "qwen3_vl"
+    # NOTE: Currently, only Qwen2.5-VL and Qwen3-VL is supported. If later we want to support a model with new chat template, we may need to change this
+    model_key = args.model
+
         
     req_data = model_example_map[model_key](questions, modality, args)
 
