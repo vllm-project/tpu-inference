@@ -1750,14 +1750,19 @@ def ragged_paged_attention(
             name=scope_name,
         )
 
-        @jax.jit
-        def run(scalar_prefetches, q, kv, kv_cache):
-            return kernel(
-                *scalar_prefetches,
-                pltpu.with_memory_space_constraint(q, pltpu.HBM),
-                pltpu.with_memory_space_constraint(kv, pltpu.HBM),
-                pltpu.with_memory_space_constraint(kv_cache, pltpu.HBM),
-            )
+        if get_tpu_version() >= 7:
+
+            @jax.jit
+            def run(scalar_prefetches, q, kv, kv_cache):
+                return kernel(
+                    *scalar_prefetches,
+                    pltpu.with_memory_space_constraint(q, pltpu.HBM),
+                    pltpu.with_memory_space_constraint(kv, pltpu.HBM),
+                    pltpu.with_memory_space_constraint(kv_cache, pltpu.HBM),
+                )
+        else:
+            # TODO(b/494285697): v6 has issues with pinning aliased memory.
+            run = kernel
 
         return run(scalar_prefetches, q, kv, kv_cache)
 
