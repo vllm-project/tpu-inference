@@ -44,6 +44,7 @@ def run_qwen_vl(questions: list[str], modality: str,
         max_model_len=args.max_model_len,
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        enable_chunked_prefill=False,
         max_num_seqs=5,
         mm_processor_kwargs={
             "size": {
