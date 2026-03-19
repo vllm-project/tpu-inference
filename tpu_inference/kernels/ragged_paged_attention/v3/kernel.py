@@ -1440,122 +1440,50 @@ def get_default_block_sizes(
   """
     tpu_version = get_tpu_version()
 
-    q_packing = get_dtype_packing(q_dtype)
     kv_packing = get_dtype_packing(kv_dtype)
-    num_q_heads = next_power_of_2(actual_num_q_heads)
-    # num_kv_heads = next_power_of_2(actual_num_kv_heads)
     num_kv_heads_x2 = next_power_of_2(
         align_to(actual_num_kv_heads * 2, kv_packing))
-    head_dim_align_factor = cdiv(head_dim, 128)
+    head_dim = align_to(head_dim, 128)
+    num_q_heads_per_kv_head = next_power_of_2(actual_num_q_heads //
+                                              actual_num_kv_heads)
 
     max_q = next_power_of_2(max_num_tokens)
     max_kv = pages_per_seq * page_size
+
+    min_bkv_sz_to_peak = (16 * 1024 * 1024 * kv_packing // 4 // head_dim //
+                          num_kv_heads_x2)
 
     match tpu_version:
         case 5 | 6:
             if case == RpaCase.DECODE:
                 bq_sz = 1
-                bkv_sz = max(
-                    page_size,
-                    min(
-                        8192 * 8 * kv_packing // head_dim_align_factor //
-                        num_kv_heads_x2,
-                        max_kv,
-                    ),
-                )
+                bkv_sz = min(min_bkv_sz_to_peak, max_kv)
                 bq_csz = 1
-                bkv_csz = max(
-                    page_size,
-                    min(
-                        8192 * 8 * kv_packing // head_dim_align_factor //
-                        num_kv_heads_x2,
-                        max_kv,
-                    ),
-                )
+                bkv_csz = min(min_bkv_sz_to_peak, max_kv)
             else:
-                bq_sz = min(
-                    128 * 16 * q_packing // head_dim_align_factor //
-                    num_q_heads,
-                    max_q,
-                )
-                bkv_sz = max(
-                    page_size,
-                    min(
-                        4096 * 8 * kv_packing // head_dim_align_factor //
-                        num_kv_heads_x2,
-                        max_kv,
-                    ),
-                )
-                bq_csz = min(
-                    128 * 16 * q_packing // head_dim_align_factor //
-                    num_q_heads,
-                    max_q,
-                )
-                bkv_csz = max(
-                    page_size,
-                    min(
-                        1024 * 8 * kv_packing // head_dim_align_factor //
-                        num_kv_heads_x2,
-                        max_kv // 4,
-                    ),
-                )
+                bq_sz = min(1024 // num_q_heads_per_kv_head, max_q // 2)
+                bkv_sz = min(1024, max_kv)
+                bq_csz = min(512 // num_q_heads_per_kv_head, max_q)
+                bkv_csz = min(512, align_to(max_kv // 2, page_size))
         case 7:
             if case == RpaCase.DECODE:
                 bq_sz = 1
-                bkv_sz = max(
-                    page_size,
-                    min(
-                        5120 * 8 * kv_packing // head_dim_align_factor //
-                        num_kv_heads_x2,
-                        max_kv,
-                    ),
-                )
+                bkv_sz = min(min_bkv_sz_to_peak, max_kv)
                 bq_csz = 1
-                bkv_csz = max(
-                    page_size,
-                    min(
-                        5120 * 8 * kv_packing // head_dim_align_factor //
-                        num_kv_heads_x2,
-                        max_kv,
-                    ),
-                )
+                bkv_csz = min(min_bkv_sz_to_peak, max_kv)
             else:
-                bq_sz = min(
-                    128 * 16 * q_packing // head_dim_align_factor //
-                    num_q_heads,
-                    max_q,
-                )
-                bkv_sz = max(
-                    page_size,
-                    min(
-                        2048 * 8 * kv_packing // head_dim_align_factor //
-                        num_kv_heads_x2,
-                        max_kv // 2,
-                    ),
-                )
-                bq_csz = min(
-                    128 * 16 * q_packing // head_dim_align_factor //
-                    num_q_heads,
-                    max_q,
-                )
-                bkv_csz = max(
-                    page_size,
-                    min(
-                        512 * 8 * kv_packing // head_dim_align_factor //
-                        num_kv_heads_x2,
-                        max_kv // 8,
-                    ),
-                )
+                bq_sz = min(2048 // num_q_heads_per_kv_head, max_q // 2)
+                bkv_sz = min(2048, max_kv)
+                bq_csz = min(1024 // num_q_heads_per_kv_head, max_q // 2)
+                bkv_csz = min(1024, align_to(max_kv // 2, page_size))
         case _:
             raise NotImplementedError(f"Unsupported {tpu_version=}.")
 
-    # TODO(jevinjiang): the 8192 is a temporary cap to avoid OOM. It might cause regression.
-    # We should define a better heuristic to cap bkv.
     return {
-        "bq_sz": bq_sz,
-        "bkv_sz": min(bkv_sz, 8192),
-        "bq_csz": bq_csz,
-        "bkv_csz": min(bkv_csz, 8192),
+        "bq_sz": max(1, bq_sz),
+        "bkv_sz": max(page_size, bkv_sz),
+        "bq_csz": max(1, bq_csz),
+        "bkv_csz": max(page_size, bkv_csz),
     }
 
 
