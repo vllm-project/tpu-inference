@@ -330,11 +330,9 @@ def gdn_attention_core_tpu(
     fc = get_forward_context()
     attn_metadata = fc.attn_metadata
 
-    # Get the PyTorch module instance for this specific layer
     layer_module = fc.no_compile_layers[layer_name]
     vllm_context = get_vllm_model_wrapper_context()
 
-    # 1. Resolve dimensions (Accounting for Tensor Parallelism)
     tp_size = layer_module.tp_size
     n_kq = layer_module.num_k_heads // tp_size
     n_v = layer_module.num_v_heads // tp_size
@@ -342,8 +340,8 @@ def gdn_attention_core_tpu(
     d_v = layer_module.head_v_dim
     kernel_size = layer_module.conv_kernel_size
 
-    # In vLLM, inputs are flattened to [num_tokens, dim].
-    # We must unflatten to[B, T, dim] for JAX convolutions.
+    attn_metadata = attn_metadata[layer_name]
+
     num_tokens = mixed_qkv.shape[0]
     is_prefill = getattr(attn_metadata, "num_prefills", 0) > 0
 
@@ -364,29 +362,58 @@ def gdn_attention_core_tpu(
     j_A_log = jax_view(layer_module.A_log)
     j_dt_bias = jax_view(layer_module.dt_bias)
 
-    # 3. Retrieve KV Caches
+    # NOTE: since we sharing the same KV cache for all layers, we need to
+    # reshape for the conv/recurrent state (from the paged traditional KV cache
+    # shape).
     layer_idx = vllm_context.layer_name_to_kvcache_index[layer_name]
-    conv_state, recurrent_state = vllm_context.kv_caches[layer_idx]
+    kv_cache_entry = vllm_context.kv_caches[layer_idx]
 
-    # PyTorch vLLM keeps conv_state as (B, C, kernel_size-1)
-    # The JAX op expects (B, kernel_size-1, C), so we transpose it
-    j_conv_state = jnp.transpose(conv_state, (0, 2, 1))
+    C = j_mixed_qkv.shape[-1]
+    conv_size = C * (kernel_size - 1)
+    rec_size = n_v * d_k * d_v
 
-    # 4. Run Pure JAX Logic
-    j_output, j_new_conv_state, j_new_recurrent_state = _jax_gdn_attention_core(
-        j_mixed_qkv, j_b, j_a, j_conv_state, recurrent_state, j_conv_weight,
-        j_conv_bias, j_A_log, j_dt_bias, is_prefill, n_kq, n_v, d_k, d_v,
-        kernel_size)
+    flat_block_tables = jax_view(attn_metadata.block_tables)
+    max_reqs = attn_metadata.seq_lens.shape[0]
+    max_blocks_per_req = flat_block_tables.shape[0] // max_reqs
+    block_tables_2d = jnp.reshape(flat_block_tables,
+                                  (max_reqs, max_blocks_per_req))
 
-    # Transpose the conv state back to PyTorch's expected alignment
-    j_new_conv_state = jnp.transpose(j_new_conv_state, (0, 2, 1))
+    # Get indices for active sequences
+    state_indices = block_tables_2d[:B, 0].astype(jnp.int32)
 
-    # 5. Update KV Caches in the TPU context
-    vllm_context.kv_caches[layer_idx] = (j_new_conv_state,
-                                         j_new_recurrent_state)
+    active_blocks = kv_cache_entry[state_indices]
 
-    # 6. Write output back to PyTorch out-tensor
-    # Reshape JAX output back to [num_tokens, n_v, d_v] and copy into `core_attn_out`
+    flat_active_blocks = jnp.reshape(active_blocks, (B, -1))
+
+    j_conv_state_active = jnp.reshape(flat_active_blocks[:, :conv_size],
+                                      (B, C, kernel_size - 1))
+    j_recurrent_state_active = jnp.reshape(
+        flat_active_blocks[:, conv_size:conv_size + rec_size],
+        (B, n_v, d_k, d_v))
+
+    j_conv_state_active = jnp.transpose(j_conv_state_active, (0, 2, 1))
+
+    j_output, j_new_conv_active, j_new_rec_active = _jax_gdn_attention_core(
+        j_mixed_qkv, j_b, j_a, j_conv_state_active, j_recurrent_state_active,
+        j_conv_weight, j_conv_bias, j_A_log, j_dt_bias, is_prefill, n_kq, n_v,
+        d_k, d_v, kernel_size)
+
+    j_new_conv_active = jnp.transpose(j_new_conv_active, (0, 2, 1))
+
+    flat_new_conv = jnp.reshape(j_new_conv_active, (B, -1))
+    flat_new_rec = jnp.reshape(j_new_rec_active, (B, -1))
+
+    flat_active_blocks = flat_active_blocks.at[:, :conv_size].set(
+        flat_new_conv)
+    flat_active_blocks = flat_active_blocks.at[:, conv_size:conv_size +
+                                               rec_size].set(flat_new_rec)
+
+    updated_active_blocks = jnp.reshape(flat_active_blocks,
+                                        active_blocks.shape)
+
+    vllm_context.kv_caches[layer_idx] = kv_cache_entry.at[state_indices].set(
+        updated_active_blocks)
+
     j_output_flat = j_output.reshape(core_attn_out.shape)
     core_attn_out.copy_(torch_view(j_output_flat))
 
