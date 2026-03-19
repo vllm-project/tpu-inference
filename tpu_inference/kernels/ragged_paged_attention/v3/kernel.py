@@ -1453,125 +1453,110 @@ def get_default_block_sizes(
 
     match tpu_version:
         case 5 | 6:
-            decode_block_sizes = {
-                "bq_sz":
-                1,
-                "bkv_sz":
-                max(
+            if case == RpaCase.DECODE:
+                bq_sz = 1
+                bkv_sz = max(
                     page_size,
                     min(
                         8192 * 8 * kv_packing // head_dim_align_factor //
                         num_kv_heads_x2,
                         max_kv,
                     ),
-                ),
-                "bq_csz":
-                1,
-                "bkv_csz":
-                max(
+                )
+                bq_csz = 1
+                bkv_csz = max(
                     page_size,
                     min(
                         8192 * 8 * kv_packing // head_dim_align_factor //
                         num_kv_heads_x2,
                         max_kv,
                     ),
-                ),
-            }
-            prefill_block_sizes = {
-                "bq_sz":
-                min(
+                )
+            else:
+                bq_sz = min(
                     128 * 16 * q_packing // head_dim_align_factor //
                     num_q_heads,
                     max_q,
-                ),
-                "bkv_sz":
-                max(
+                )
+                bkv_sz = max(
                     page_size,
                     min(
                         4096 * 8 * kv_packing // head_dim_align_factor //
                         num_kv_heads_x2,
                         max_kv,
                     ),
-                ),
-                "bq_csz":
-                min(
+                )
+                bq_csz = min(
                     128 * 16 * q_packing // head_dim_align_factor //
                     num_q_heads,
                     max_q,
-                ),
-                "bkv_csz":
-                max(
+                )
+                bkv_csz = max(
                     page_size,
                     min(
                         1024 * 8 * kv_packing // head_dim_align_factor //
                         num_kv_heads_x2,
                         max_kv // 4,
                     ),
-                ),
-            }
+                )
         case 7:
-            decode_block_sizes = {
-                "bq_sz":
-                1,
-                "bkv_sz":
-                max(
+            if case == RpaCase.DECODE:
+                bq_sz = 1
+                bkv_sz = max(
                     page_size,
                     min(
                         5120 * 8 * kv_packing // head_dim_align_factor //
                         num_kv_heads_x2,
                         max_kv,
                     ),
-                ),
-                "bq_csz":
-                1,
-                "bkv_csz":
-                max(
+                )
+                bq_csz = 1
+                bkv_csz = max(
                     page_size,
                     min(
                         5120 * 8 * kv_packing // head_dim_align_factor //
                         num_kv_heads_x2,
                         max_kv,
                     ),
-                ),
-            }
-            prefill_block_sizes = {
-                "bq_sz":
-                min(
+                )
+            else:
+                bq_sz = min(
                     128 * 16 * q_packing // head_dim_align_factor //
                     num_q_heads,
                     max_q,
-                ),
-                "bkv_sz":
-                max(
+                )
+                bkv_sz = max(
                     page_size,
                     min(
                         2048 * 8 * kv_packing // head_dim_align_factor //
                         num_kv_heads_x2,
                         max_kv // 2,
                     ),
-                ),
-                "bq_csz":
-                min(
+                )
+                bq_csz = min(
                     128 * 16 * q_packing // head_dim_align_factor //
                     num_q_heads,
                     max_q,
-                ),
-                "bkv_csz":
-                max(
+                )
+                bkv_csz = max(
                     page_size,
                     min(
                         512 * 8 * kv_packing // head_dim_align_factor //
                         num_kv_heads_x2,
                         max_kv // 8,
                     ),
-                ),
-            }
+                )
         case _:
             raise NotImplementedError(f"Unsupported {tpu_version=}.")
 
-    if case == RpaCase.DECODE:
-        return decode_block_sizes
-    return prefill_block_sizes
+    # TODO(jevinjiang): the 8192 is a temporary cap to avoid OOM. It might cause regression.
+    # We should define a better heuristic to cap bkv.
+    return {
+        "bq_sz": bq_sz,
+        "bkv_sz": min(bkv_sz, 8192),
+        "bq_csz": bq_csz,
+        "bkv_csz": min(bkv_csz, 8192),
+    }
 
 
 @jax.jit(
