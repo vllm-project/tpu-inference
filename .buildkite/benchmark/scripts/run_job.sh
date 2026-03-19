@@ -74,6 +74,8 @@ echo "Creating running config..."
   BM_JOB_STATUS=$EXIT_FAILURE
 }
 
+: "${DATASET:=}"
+
 #
 # This makes GCS_BUCKET and other vars available to the whole script.
 #
@@ -89,20 +91,55 @@ else
 fi
 
 #
-# Cleanup Docker images and containers
-#
-# shellcheck disable=SC1091
-source ".buildkite/scripts/setup_docker_env.sh"
-cleanup_docker_resource "vllm-tpu"
-
-#
 # Run job in docker
 #
 if (( BM_JOB_STATUS == EXIT_SUCCESS )); then
-  echo "Running job in docker..."
-  .buildkite/benchmark/scripts/docker_run_bm.sh "artifacts/${RECORD_ID}.env" || {
-    echo "Error running benchmark job in docker."
-    BM_JOB_STATUS=$EXIT_FAILURE
+  echo "Code_Hash: $CODE_HASH"
+  # shellcheck disable=SC2034
+  IFS='-' read -r VLLM_HASH TPU_INFERENCE_HASH _ <<< "$CODE_HASH"
+  # add
+  # LOG_ROOT=$(mktemp -d)
+  # Temp write to another bucket
+  # add
+  # REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
+
+  # Prepare Dataset (Temp solution)
+  DATASETS=("custom-token" "mmlu" "mlperf" "bench-custom-token" "math500" "bench-custom-mm")
+  if [[ " ${DATASETS[*]} " == *" $DATASET "* ]]; then
+    echo "--- Syncing dataset for $DATASET"
+    DATASET_DIR="./artifacts/dataset"
+    mkdir -p "$DATASET_DIR"
+    case "$DATASET" in
+      "custom-token") gsutil -m cp gs://"$GCS_BUCKET"/dataset/*.* "$DATASET_DIR/" ;;
+      "mmlu")         gsutil -m cp -r gs://"$GCS_BUCKET"/dataset/mmlu/* "$DATASET_DIR/" ;;
+      "mlperf")       gsutil -m cp gs://vllm-cb-storage2/dataset/mlperf/mlperf_shuffled.jsonl "$DATASET_DIR/mlperf.jsonl" ;;
+      "math500")      gsutil -m cp -r gs://"$GCS_BUCKET"/dataset/math500/math500.jsonl "$DATASET_DIR/" ;;
+      "bench-custom-token"|"bench-custom-mm") gsutil -m cp -r gs://"$GCS_BUCKET"/bench-dataset/* "$DATASET_DIR/" ;;
+    esac
+  fi
+
+  # Prep specialized configurations (DeepSeek)
+  if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
+    mkdir -p ./generation_configs
+    gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/* ./generation_configs/
+  fi
+
+  echo "Running job in docker via run_in_docker.sh..."
+
+  # Trigger the mount and specify the benchmark command
+  # Note: datasets synced to host ./artifacts/dataset are visible at /workspace/artifacts/dataset
+  export DOCKER_WORKDIR="/workspace"
+  export BUILDKITE_COMMIT="$CODE_HASH"
+
+  # Restore the SKIP_JAX_PRECOMPILE logic
+  [ -n "${SKIP_JAX_PRECOMPILE:-}" ] && export SKIP_JAX_PRECOMPILE
+
+  .buildkite/scripts/run_in_docker.sh bash -c "
+    echo always > /sys/kernel/mm/transparent_hugepage/enabled && \
+    chmod +x .buildkite/benchmark/scripts/run_bm.sh && \
+    .buildkite/benchmark/scripts/run_bm.sh" || {
+      echo "Error running benchmark job in docker."
+      BM_JOB_STATUS=$EXIT_FAILURE
   }
 else
   echo "Skipping benchmark job because BM_JOB_STATUS is non-zero ($BM_JOB_STATUS)."

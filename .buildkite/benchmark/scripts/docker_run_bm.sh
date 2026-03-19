@@ -30,41 +30,10 @@ echo "--- Cat Env start"
 cat "$ENV_FILE"
 echo "--- Cat Env end"
 
-remove_docker_container() {
-    echo "Removing Docker container: $CONTAINER_NAME"
-    docker rm -f tpu-test || true;
-    docker rm -f vllm-tpu || true;
-    docker rm -f "$CONTAINER_NAME" || true;
-}
-
-cleanup_docker_image() {
-    if [[ -n "$IMAGE_TAG" ]]; then
-        echo "Removing Docker image: $IMAGE_TAG"
-        docker rmi "$IMAGE_TAG" 2>/dev/null || true
-    else
-        echo "IMAGE_TAG not found"
-    fi
-}
-trap "remove_docker_container; cleanup_docker_image" EXIT
-
-# Remove the container that might not be cleaned up in the previous run.
-remove_docker_container
-
 echo "Code_Hash: $CODE_HASH"
-
-IMAGE_TAG="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$ARTIFACT_REPO/vllm-tpu:$CODE_HASH"
 
 # shellcheck disable=SC2034
 IFS='-' read -r VLLM_HASH TPU_INFERENCE_HASH _ <<< "$CODE_HASH"
-
-echo "image tag: $IMAGE_TAG"
-
-gcloud auth configure-docker "$GCP_REGION"-docker.pkg.dev --quiet
-
-if ! docker pull "$IMAGE_TAG"; then
-  echo "Failed to pull the Docker image: $IMAGE_TAG"
-  exit 1
-fi
 
 LOG_ROOT=$(mktemp -d)
 # Temp write to another bucket
@@ -73,26 +42,6 @@ REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
 
 # If mktemp fails, set -e will cause the script to exit.
 echo "Results will be stored in: $LOG_ROOT"
-
-if [ -z "$HF_TOKEN" ]; then
-  echo "Error: HF_TOKEN is not set or is empty."
-  exit 1
-fi
-
-# Make sure HF_HOME dir exists
-if [ ! -d "$LOCAL_HF_HOME" ]; then
-    echo "Error: Folder $LOCAL_HF_HOME does not exist..."
-    exit 1
-fi
-
-# Check and trim
-# Example value
-# TARGET_COMMIT="bb81182d3_de509ae8e"
-# TARGET_COMMIT="bb81182d3"
-TARGET_COMMIT=$VLLM_HASH
-if [[ "$TARGET_COMMIT" == *_* ]]; then
-  TARGET_COMMIT="${TARGET_COMMIT%%_*}"
-fi
 
 echo "Run model $MODEL"
 echo
