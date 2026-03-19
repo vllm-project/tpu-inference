@@ -1573,6 +1573,7 @@ def ragged_paged_attention(
     The output of the attention.
   """
     q, k, v = queries, keys, values
+    tpu_version = get_tpu_version()
     static_validate_inputs(
         q,
         k,
@@ -1742,6 +1743,10 @@ def ragged_paged_attention(
             out_shape=[
                 pltpu.HBM(shape=q.shape, dtype=q.dtype),
                 pltpu.HBM(shape=kv_cache.shape, dtype=kv_cache.dtype),
+            ] if tpu_version >= 7 else [
+                jax.ShapeDtypeStruct(shape=q.shape, dtype=q.dtype),
+                jax.ShapeDtypeStruct(shape=kv_cache.shape,
+                                     dtype=kv_cache.dtype),
             ],
             input_output_aliases={
                 7: 0,
@@ -1750,7 +1755,7 @@ def ragged_paged_attention(
             name=scope_name,
         )
 
-        if get_tpu_version() >= 7:
+        if tpu_version >= 7:
             # jit to color the memory since the q, kv are just preprocessed.
             @jax.jit
             def run(scalar_prefetches, q, kv, kv_cache):
