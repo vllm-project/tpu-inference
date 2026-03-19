@@ -4,7 +4,7 @@
 # Nightly benchmark wrapper for Qwen3 Coder 480B (1k input, 8k output).
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
-NIGHTLY_SCRIPT="${SCRIPT_DIR}/../nightly_benchmarking.sh"
+NIGHTLY_SCRIPT="${SCRIPT_DIR}/../../nightly_benchmarking.sh"
 
 bash "${NIGHTLY_SCRIPT}" \
   --model-path "gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-Coder-480B-A35B-Instruct/snapshots/9d90cf8fca1bf7b7acca42d3fc9ae694a2194069" \

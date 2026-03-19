@@ -4,7 +4,7 @@
 # Nightly benchmark wrapper for DeepSeek V3 (1k input, 8k output).
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
-NIGHTLY_SCRIPT="${SCRIPT_DIR}/../../nightly_benchmarking.sh"
+NIGHTLY_SCRIPT="${SCRIPT_DIR}/../../../nightly_benchmarking.sh"
 
 # Adjust model-path, max-seqs, and code-hash below when officially serving DeepSeek.
 bash "${NIGHTLY_SCRIPT}" \
