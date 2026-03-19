@@ -62,6 +62,8 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
         self.weight_block_size = self.weight_quant.block_structure
 
         if self.weight_block_size is not None:
+            self.cutlass_block_fp8_supported = False
+            self.use_aiter_and_is_supported = False
             assert not self.is_static_input_scheme
             self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
             self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
@@ -95,6 +97,7 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
             weight_scale: jax.Array,
             bias: jax.Array | None,
         ) -> LinearWeights:
+            is_block = False
             if per_tensor:
                 weights = []
                 start = 0
@@ -111,9 +114,15 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                 weight, weight_scale = quantize_tensor(jnp.float8_e4m3fn,
                                                        weight, None)
             else:
-                weight_scale = jnp.squeeze(weight_scale, -1)
+                if len(weight_scale.shape) == 2 and weight_scale.shape[-1] > 1:
+                    is_block = True
+                    assert self.weight_block_size is not None
+                    block_m = self.weight_block_size[0]
+                    weight_scale = jnp.repeat(weight_scale, block_m, axis=0)
+                else:
+                    weight_scale = jnp.squeeze(weight_scale, -1)
 
-            return process_linear_weights(
+            processed_weights = process_linear_weights(
                 LinearWeights(
                     weight=weight,
                     weight_scale=weight_scale,
@@ -125,6 +134,20 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                 reorder_size=self.linear_config.n_shards,
                 per_tensor=per_tensor,
             )
+
+            if is_block:
+                if isinstance(processed_weights.weight_scale, list):
+                    new_weight_scale = [jnp.expand_dims(ws.T, 1) for ws in processed_weights.weight_scale]
+                else:
+                    new_weight_scale = jnp.expand_dims(processed_weights.weight_scale.T, 1)
+                processed_weights = LinearWeights(
+                    weight=processed_weights.weight,
+                    weight_scale=new_weight_scale,
+                    zero_point=processed_weights.zero_point,
+                    bias=processed_weights.bias,
+                )
+
+            return processed_weights
 
         weights = process_fp8_linear_weights(weight, weight_scale, bias)
         weights = torch_view(
