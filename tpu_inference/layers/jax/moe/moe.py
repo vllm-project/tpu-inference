@@ -155,7 +155,7 @@ class JaxMoE(JaxModule):
     num_expert_parallelism: int
     random_init: bool = False
     moe_backend: MoEBackend = MoEBackend.DENSE_MAT
-    scoring_func = "softmax"
+    scoring_func: str = "softmax"
 
     # --- Sparse MoE Specific Attributes ---
     num_experts_per_tok: int = 1  # Required for Sparse, optional/derived for Dense
