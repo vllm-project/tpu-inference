@@ -16,40 +16,44 @@
 CODE_HASH=$1
 TIMEZONE="America/Los_Angeles"
 TAG="$(TZ="$TIMEZONE" date +%Y%m%d_%H%M%S)"
-JOB_PRIORITY=$(buildkite-agent meta-data get "JOB_PRIORITY")
+JOB_PRIORITY=$(buildkite-agent meta-data get "JOB_PRIORITY" || echo "1")
 
-echo "Benchmark pipeline prioirty: $JOB_PRIORITY"
+echo "Benchmark pipeline priority: $JOB_PRIORITY"
+
+# Export these so they are available to run_job_from_env.sh later on
+export RUN_TYPE="DAILY"
+export CODE_HASH="$CODE_HASH"
+export JOB_REFERENCE="$TAG"
+
+# A small helper to upload YMLs with dynamic priority interpolation
+upload_benchmark_yml() {
+  local YML_FILE="$1"
+  echo "--- Uploading $YML_FILE"
+  # Prepend the priority to the YAML file before uploading
+  (echo "priority: ${JOB_PRIORITY}"; cat "$YML_FILE") | buildkite-agent pipeline upload
+}
 
 # Upload Only one test case for Dev
 echo "./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/benchmark_dev_test_v7x.csv $CODE_HASH $TAG DAILY $JOB_PRIORITY"
 ./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/benchmark_dev_test_v7x.csv "$CODE_HASH" "$TAG" DAILY "$JOB_PRIORITY"
 
-# # Ironwood qwen & Llama
-# echo "./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_qwen_llama_tpu7x_2.csv $CODE_HASH $TAG DAILY $JOB_PRIORITY"
-# ./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_qwen_llama_tpu7x_2.csv "$CODE_HASH" "$TAG" DAILY "$JOB_PRIORITY"
+# 1. Ironwood qwen & Llama
+upload_benchmark_yml .buildkite/benchmark/cases/daily_qwen_llama_tpu7x_2.yml
 
-# # Qwen3-32B random benchmarks (Using benchmark_serving)
-# echo "./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_qwen3_32B_random_tpu7x_2.csv $CODE_HASH $TAG DAILY $JOB_PRIORITY \"USE_BENCHMARK_SERVING=1;MAX_CONCURRENCY=64;\""
-# ./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_qwen3_32B_random_tpu7x_2.csv "$CODE_HASH" "$TAG" DAILY "$JOB_PRIORITY" "USE_BENCHMARK_SERVING=1;MAX_CONCURRENCY=64;"
-# echo "./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_qwen3_32B_random_tpu7x_2.csv $CODE_HASH $TAG DAILY $JOB_PRIORITY \"USE_BENCHMARK_SERVING=1;MAX_CONCURRENCY=320;\""
-# ./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_qwen3_32B_random_tpu7x_2.csv "$CODE_HASH" "$TAG" DAILY "$JOB_PRIORITY" "USE_BENCHMARK_SERVING=1;MAX_CONCURRENCY=320;"
+# 2. Qwen3-32B random benchmarks
+upload_benchmark_yml .buildkite/benchmark/cases/daily_qwen3_32B_random_tpu7x_2.yml
 
-# # Ironwood Deepseek DP Attention
-# echo "./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_deepseek_dp_attention_tpu7x_8.csv $CODE_HASH $TAG DAILY $JOB_PRIORITY \"VLLM_MLA_DISABLE=0;NEW_MODEL_DESIGN=1;MOE_REQUANTIZE_BLOCK_SIZE=512;MOE_REQUANTIZE_WEIGHT_DTYPE=fp4;TPU_BACKEND_TYPE=jax;MODEL_IMPL_TYPE=vllm;\""
-# ./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_deepseek_dp_attention_tpu7x_8.csv "$CODE_HASH" "$TAG" DAILY "$JOB_PRIORITY" "VLLM_MLA_DISABLE=0;NEW_MODEL_DESIGN=1;MOE_REQUANTIZE_BLOCK_SIZE=512;MOE_REQUANTIZE_WEIGHT_DTYPE=fp4;TPU_BACKEND_TYPE=jax;MODEL_IMPL_TYPE=vllm;"
+# 3. Ironwood Deepseek DP Attention
+upload_benchmark_yml .buildkite/benchmark/cases/daily_deepseek_dp_attention_tpu7x_8.yml
 
-# # Ironwood Deepseek
-# echo "./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_deepseek_tpu7x_8.csv $CODE_HASH $TAG DAILY $JOB_PRIORITY \"VLLM_MLA_DISABLE=1;TPU_BACKEND_TYPE=vllm\""
-# ./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_deepseek_tpu7x_8.csv "$CODE_HASH" "$TAG" DAILY "$JOB_PRIORITY" "VLLM_MLA_DISABLE=1;TPU_BACKEND_TYPE=vllm"
+# 4. Ironwood Deepseek
+upload_benchmark_yml .buildkite/benchmark/cases/daily_deepseek_tpu7x_8.yml
 
-# # Ironwood Deepseek Accuracy
-# echo "./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/accuracy_jax_v7x.csv $CODE_HASH $TAG JAX_ACCURACY $JOB_PRIORITY \"VLLM_MLA_DISABLE=1;NEW_MODEL_DESIGN=True;TPU_BACKEND_TYPE=jax;\""
-# ./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/accuracy_jax_v7x.csv "$CODE_HASH" "$TAG" JAX_ACCURACY "$JOB_PRIORITY" "VLLM_MLA_DISABLE=1;NEW_MODEL_DESIGN=True;TPU_BACKEND_TYPE=jax;"
+# 5. Ironwood Deepseek Accuracy
+upload_benchmark_yml .buildkite/benchmark/cases/accuracy_jax_v7x.yml
 
-# # GPT OSS
-# echo "./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_gpt_oss_120b_tpu7x.csv $CODE_HASH $TAG DAILY $JOB_PRIORITY \"USE_MOE_EP_KERNEL=0;MODEL_IMPL_TYPE=vllm\""
-# ./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_gpt_oss_120b_tpu7x.csv "$CODE_HASH" "$TAG" DAILY "$JOB_PRIORITY" "USE_MOE_EP_KERNEL=0;MODEL_IMPL_TYPE=vllm"
+# 6. GPT OSS
+upload_benchmark_yml .buildkite/benchmark/cases/daily_gpt_oss_120b_tpu7x.yml
 
-# # Qwen 3-480B
-# echo "./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_qwen3_480B_FP8_tpu7x_8.csv $CODE_HASH $TAG DAILY $JOB_PRIORITY"
-# ./.buildkite/benchmark/scripts/schedule_run.sh ./.buildkite/benchmark/cases/daily_qwen3_480B_FP8_tpu7x_8.csv "$CODE_HASH" "$TAG" DAILY "$JOB_PRIORITY"
+# 7. Qwen 3-480B
+upload_benchmark_yml .buildkite/benchmark/cases/daily_qwen3_480B_FP8_tpu7x_8.yml

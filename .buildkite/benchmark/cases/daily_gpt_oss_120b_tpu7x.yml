@@ -1,0 +1,172 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+env:
+  GCP_PROJECT_ID: "cloud-tpu-inference-test"
+  GCP_REGION: "southamerica-west1"
+  GCS_BUCKET: "vllm-cb-storage2"
+  ARTIFACT_REPO: "vllm-tpu-bm-bk"
+  GCP_INSTANCE_ID: "vllm-bm-inst"
+  GCP_DATABASE_ID: "vllm-bm-bk-runs"
+
+definitions:
+  base_cfg_0: &base_cfg_0
+    depends_on: "build-vllm-tpu-image"
+    agents:
+      queue: "tpu_v7x_8_queue"
+    command: ".buildkite/benchmark/scripts/run_job_from_env.sh"
+    env:
+      DEVICE: "tpu7x-8"
+      MODEL: "unsloth/gpt-oss-120b-BF16"
+      MAX_NUM_SEQS: "500"
+      MAX_NUM_BATCHED_TOKENS: "16384"
+      TENSOR_PARALLEL_SIZE: "4"
+      DATASET: "random"
+      EXPECTED_ETEL: "43200000"
+      NUM_PROMPTS: "1000"
+      MODELTAG: "NEW"
+      USE_MOE_EP_KERNEL: "0"
+      MODEL_IMPL_TYPE: "vllm"
+      EXTRA_ARGS: '--data-parallel-size=2 --gpu-memory-utilization=0.98'
+
+  base_cfg_1: &base_cfg_1
+    depends_on: "build-vllm-tpu-image"
+    agents:
+      queue: "tpu_v7x_2_queue"
+    command: ".buildkite/benchmark/scripts/run_job_from_env.sh"
+    env:
+      DEVICE: "tpu7x-2"
+      MODEL: "openai/gpt-oss-120b"
+      MAX_NUM_SEQS: "1024"
+      MAX_NUM_BATCHED_TOKENS: "16384"
+      TENSOR_PARALLEL_SIZE: "2"
+      DATASET: "random"
+      EXPECTED_ETEL: "43200000"
+      NUM_PROMPTS: "1024"
+      MODELTAG: "NEW"
+      USE_MOE_EP_KERNEL: "0"
+      MODEL_IMPL_TYPE: "vllm"
+      EXTRA_ARGS: '--kv-cache-dtype=fp8 --gpu-memory-utilization=0.97'
+
+  base_cfg_2: &base_cfg_2
+    depends_on: "build-vllm-tpu-image"
+    agents:
+      queue: "tpu_v7x_2_queue"
+    command: ".buildkite/benchmark/scripts/run_job_from_env.sh"
+    env:
+      DEVICE: "tpu7x-2"
+      MODEL: "openai/gpt-oss-120b"
+      MAX_NUM_SEQS: "1024"
+      MAX_NUM_BATCHED_TOKENS: "8192"
+      TENSOR_PARALLEL_SIZE: "2"
+      DATASET: "random"
+      EXPECTED_ETEL: "43200000"
+      NUM_PROMPTS: "1024"
+      MODELTAG: "NEW"
+      USE_MOE_EP_KERNEL: "0"
+      MODEL_IMPL_TYPE: "vllm"
+      EXTRA_ARGS: '--kv-cache-dtype=fp8 --gpu-memory-utilization=0.95'
+
+  base_cfg_3: &base_cfg_3
+    depends_on: "build-vllm-tpu-image"
+    agents:
+      queue: "tpu_v7x_8_queue"
+    command: ".buildkite/benchmark/scripts/run_job_from_env.sh"
+    env:
+      DEVICE: "tpu7x-8"
+      MODEL: "openai/gpt-oss-120b"
+      MAX_NUM_SEQS: "1024"
+      MAX_NUM_BATCHED_TOKENS: "16384"
+      TENSOR_PARALLEL_SIZE: "2"
+      DATASET: "random"
+      EXPECTED_ETEL: "43200000"
+      NUM_PROMPTS: "4096"
+      MODELTAG: "NEW"
+      USE_MOE_EP_KERNEL: "0"
+      MODEL_IMPL_TYPE: "vllm"
+      EXTRA_ARGS: '--data-parallel-size=4 --kv-cache-dtype=fp8 --gpu-memory-utilization=0.97'
+
+  base_cfg_4: &base_cfg_4
+    depends_on: "build-vllm-tpu-image"
+    agents:
+      queue: "tpu_v7x_8_queue"
+    command: ".buildkite/benchmark/scripts/run_job_from_env.sh"
+    env:
+      DEVICE: "tpu7x-8"
+      MODEL: "openai/gpt-oss-120b"
+      MAX_NUM_SEQS: "1024"
+      MAX_NUM_BATCHED_TOKENS: "8192"
+      TENSOR_PARALLEL_SIZE: "2"
+      DATASET: "random"
+      EXPECTED_ETEL: "43200000"
+      NUM_PROMPTS: "4096"
+      MODELTAG: "NEW"
+      USE_MOE_EP_KERNEL: "0"
+      MODEL_IMPL_TYPE: "vllm"
+      EXTRA_ARGS: '--data-parallel-size=4 --kv-cache-dtype=fp8 --gpu-memory-utilization=0.95'
+
+steps:
+  - label: "Benchmark - openai/gpt-oss-120b-datset_random-inlen_2048-outlen_6144 RecordId: bk-${BUILDKITE_STEP_ID}"
+    <<: *base_cfg_0
+    env:
+      INPUT_LEN: "2048"
+      OUTPUT_LEN: "6144"
+      MAX_MODEL_LEN: "8192"
+      PREFIX_LEN: "0"
+
+  - label: "Benchmark - openai/gpt-oss-120b-datset_random-inlen_1024-outlen_8192 RecordId: bk-${BUILDKITE_STEP_ID}"
+    <<: *base_cfg_1
+    env:
+      INPUT_LEN: "1024"
+      OUTPUT_LEN: "8192"
+      MAX_MODEL_LEN: "9216"
+      PREFIX_LEN: "0"
+
+  - label: "Benchmark - openai/gpt-oss-120b-datset_random-inlen_8192-outlen_1024 RecordId: bk-${BUILDKITE_STEP_ID}"
+    <<: *base_cfg_2
+    env:
+      INPUT_LEN: "8192"
+      OUTPUT_LEN: "1024"
+      MAX_MODEL_LEN: "9216"
+      PREFIX_LEN: "0"
+
+  - label: "Benchmark - openai/gpt-oss-120b-datset_random-inlen_1024-outlen_8192 RecordId: bk-${BUILDKITE_STEP_ID}"
+    <<: *base_cfg_3
+    env:
+      INPUT_LEN: "1024"
+      OUTPUT_LEN: "8192"
+      MAX_MODEL_LEN: "9216"
+      PREFIX_LEN: "0"
+
+  - label: "Benchmark - openai/gpt-oss-120b-datset_random-inlen_8192-outlen_1024 RecordId: bk-${BUILDKITE_STEP_ID}"
+    <<: *base_cfg_4
+    env:
+      INPUT_LEN: "8192"
+      OUTPUT_LEN: "1024"
+      MAX_MODEL_LEN: "9216"
+      PREFIX_LEN: "0"

@@ -1,0 +1,109 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+env:
+  GCP_PROJECT_ID: "cloud-tpu-inference-test"
+  GCP_REGION: "southamerica-west1"
+  GCS_BUCKET: "vllm-cb-storage2"
+  ARTIFACT_REPO: "vllm-tpu-bm-bk"
+  GCP_INSTANCE_ID: "vllm-bm-inst"
+  GCP_DATABASE_ID: "vllm-bm-bk-runs"
+
+definitions:
+  base_cfg_0: &base_cfg_0
+    depends_on: "build-vllm-tpu-image"
+    agents:
+      queue: "tpu_v7x_8_queue"
+    command: ".buildkite/benchmark/scripts/run_job_from_env.sh"
+    env:
+      DEVICE: "tpu7x-8"
+      MODEL: "deepseek-ai/DeepSeek-R1"
+      MAX_NUM_SEQS: "64"
+      MAX_NUM_BATCHED_TOKENS: "1024"
+      TENSOR_PARALLEL_SIZE: "8"
+      DATASET: "random"
+      EXPECTED_ETEL: "43200000"
+      NUM_PROMPTS: "512"
+      MODELTAG: "DP_ATTENTION"
+      VLLM_MLA_DISABLE: "0"
+      NEW_MODEL_DESIGN: "1"
+      MOE_REQUANTIZE_BLOCK_SIZE: "512"
+      MOE_REQUANTIZE_WEIGHT_DTYPE: "fp4"
+      TPU_BACKEND_TYPE: "jax"
+      MODEL_IMPL_TYPE: "vllm"
+      ADDITIONAL_CONFIG: '{"sharding": {"sharding_strategy": {"enable_dp_attention": true}}}'
+      EXTRA_ARGS: '--kv-cache-dtype=fp8 --enable-expert-parallel --gpu-memory-utilization=0.95'
+
+  base_cfg_1: &base_cfg_1
+    depends_on: "build-vllm-tpu-image"
+    agents:
+      queue: "tpu_v7x_8_queue"
+    command: ".buildkite/benchmark/scripts/run_job_from_env.sh"
+    env:
+      DEVICE: "tpu7x-8"
+      MODEL: "deepseek-ai/DeepSeek-R1"
+      MAX_NUM_SEQS: "448"
+      MAX_NUM_BATCHED_TOKENS: "1024"
+      TENSOR_PARALLEL_SIZE: "8"
+      DATASET: "random"
+      EXPECTED_ETEL: "43200000"
+      NUM_PROMPTS: "3584"
+      MODELTAG: "DP_ATTENTION"
+      VLLM_MLA_DISABLE: "0"
+      NEW_MODEL_DESIGN: "1"
+      MOE_REQUANTIZE_BLOCK_SIZE: "512"
+      MOE_REQUANTIZE_WEIGHT_DTYPE: "fp4"
+      TPU_BACKEND_TYPE: "jax"
+      MODEL_IMPL_TYPE: "vllm"
+      ADDITIONAL_CONFIG: '{"sharding": {"sharding_strategy": {"enable_dp_attention": true}}}'
+      EXTRA_ARGS: '--kv-cache-dtype=fp8 --enable-expert-parallel --gpu-memory-utilization=0.95'
+
+steps:
+  - label: "Benchmark - deepseek-ai/DeepSeek-R1-datset_random-inlen_1024-outlen_8192 RecordId: bk-${BUILDKITE_STEP_ID}"
+    <<: *base_cfg_0
+    env:
+      INPUT_LEN: "1024"
+      OUTPUT_LEN: "8192"
+      MAX_MODEL_LEN: "9216"
+      PREFIX_LEN: "0"
+
+  - label: "Benchmark - deepseek-ai/DeepSeek-R1-datset_random-inlen_8192-outlen_1024 RecordId: bk-${BUILDKITE_STEP_ID}"
+    <<: *base_cfg_0
+    env:
+      INPUT_LEN: "8192"
+      OUTPUT_LEN: "1024"
+      MAX_MODEL_LEN: "9216"
+      PREFIX_LEN: "0"
+
+  - label: "Benchmark - deepseek-ai/DeepSeek-R1-datset_random-inlen_1024-outlen_1024 RecordId: bk-${BUILDKITE_STEP_ID}"
+    <<: *base_cfg_1
+    env:
+      INPUT_LEN: "1024"
+      OUTPUT_LEN: "1024"
+      MAX_MODEL_LEN: "2048"
+      PREFIX_LEN: "0"
