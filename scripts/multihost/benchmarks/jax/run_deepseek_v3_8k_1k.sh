@@ -24,7 +24,7 @@ bash "${NIGHTLY_SCRIPT}" \
   --code-hash "deepseek-hash-placeholder" \
   --created-by "bm-scheduler" \
   --new-model-design "1" \
-  --gpu-memory-utilization "0.95" \
+  --gpu-memory-utilization "0.92" \
   --enable-expert-parallel \
   --additional-config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true, "expert_parallelism": 16, "tensor_parallelism": 1}}, "replicate_attn_weights": "True", "sparse_matmul": "True"}' \
   --disable-shared-experts-stream "0" \

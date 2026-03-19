@@ -238,6 +238,7 @@ NumPrompts=${NUM_PROMPTS}
 CodeHash=${CODE_HASH}
 Model=${MODEL_NAME}
 JobReference=${JOB_REFERENCE}
+ExtraArgs=${MODEL_IMPL_TYPE_ENV#*=}
 EOF
 
 fi
