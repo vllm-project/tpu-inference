@@ -25,6 +25,15 @@ if [ "$#" -eq 0 ]; then
   exit 1
 fi
 
+# Optional: Set a custom working directory and mount current host dir
+DOCKER_MOUNT_ARGS=()
+if [ -n "${DOCKER_WORKDIR:-}" ]; then
+  DOCKER_MOUNT_ARGS=(
+    -v "$(pwd)":"${DOCKER_WORKDIR}"
+    -w "${DOCKER_WORKDIR}"
+  )
+fi
+
 # TODO(Qiliang Cui): This is temp solution to mitigate the docker image
 #     not cleaned issue when migrating benchmark to buildkite.
 docker rm -f vllm-tpu || true
@@ -41,6 +50,10 @@ ENV_VARS=(
   -e MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
   -e MAX_NUM_SEQS="${MAX_NUM_SEQS:-}"
   -e MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
+  # Benchmark specific environment variables
+  ${MODEL:+-e MODEL="$MODEL"}
+  ${DATASET:+-e DATASET="$DATASET"}
+  ${SKIP_JAX_PRECOMPILE:+-e SKIP_JAX_PRECOMPILE="$SKIP_JAX_PRECOMPILE"}
 )
 
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
@@ -48,6 +61,7 @@ if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
 fi
 
 IMAGE_NAME='vllm-tpu'
+FULL_IMAGE_TAG="${IMAGE_NAME}:${BUILDKITE_COMMIT}"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 # Source the environment setup script
 # shellcheck disable=SC1091
@@ -86,6 +100,7 @@ exec docker run \
   --shm-size=16G \
   --rm \
   -v "$LOCAL_HF_HOME":"$DOCKER_HF_HOME" \
+  -v /dev/shm:/dev/shm \
   "${ENV_VARS[@]}" \
   "${TEST_SUITE_VARS[@]}" \
   -e HF_HOME="$DOCKER_HF_HOME" \
@@ -99,5 +114,6 @@ exec docker run \
   ${TPU_VERSION:+-e TPU_VERSION="$TPU_VERSION"} \
   ${SKIP_ACCURACY_TESTS:+-e SKIP_ACCURACY_TESTS="$SKIP_ACCURACY_TESTS"} \
   ${VLLM_MLA_DISABLE:+-e VLLM_MLA_DISABLE="$VLLM_MLA_DISABLE"} \
-  "${IMAGE_NAME}:${BUILDKITE_COMMIT}" \
+  "${DOCKER_MOUNT_ARGS[@]}" \
+  "$FULL_IMAGE_TAG" \
   "$@" # Pass all script arguments as the command to run in the container
