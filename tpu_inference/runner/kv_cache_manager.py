@@ -309,6 +309,12 @@ class KVCacheManager:
             dp_size = self.runner.vllm_config.sharding_config.total_dp_size
             # num_blocks must be a multiple of dp_size
             num_blocks = (num_blocks // dp_size) * dp_size
+            
+            if self.use_mla:
+                # MLA shards cache blocks across all devices
+                mesh_size = self.runner.mesh.size
+                num_blocks = (num_blocks // mesh_size) * mesh_size
+            
             # NOTE: we'll multiply the num_kv_heads by 2 in the function
             if self.use_mla:
                 config = getattr(self.runner.model_config, "hf_text_config", self.runner.model_config.hf_config)
