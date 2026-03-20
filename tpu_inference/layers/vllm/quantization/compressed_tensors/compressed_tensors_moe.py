@@ -104,6 +104,9 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         return True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if getattr(layer, "_tpu_processed", False):
+            return
+            
         """
         Docstring for process_weights_after_loading
 
@@ -190,6 +193,8 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         if self.moe.has_bias:
             layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
             layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
+            
+        layer._tpu_processed = True
 
     def apply_monolithic(
         self,
