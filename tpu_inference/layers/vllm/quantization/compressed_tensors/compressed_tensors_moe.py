@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import jax
+import jax.numpy as jnp
 import torch
 from compressed_tensors.quantization import QuantizationArgs
 from jax.sharding import Mesh
@@ -135,6 +136,12 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         w13_weight_scale = t2j(layer.w13_weight_scale, use_dlpack=False)
         w2_weight = t2j(layer.w2_weight, use_dlpack=False)
         w2_weight_scale = t2j(layer.w2_weight_scale, use_dlpack=False)
+
+        # Convert from PyTorch uint8 serialization format to actual JAX float8 types
+        if w13_weight.dtype == jnp.uint8:
+            w13_weight = jax.lax.bitcast_convert_type(w13_weight, jnp.float8_e4m3fn)
+        if w2_weight.dtype == jnp.uint8:
+            w2_weight = jax.lax.bitcast_convert_type(w2_weight, jnp.float8_e4m3fn)
 
         if self.moe.has_bias:
             w13_bias = t2j(layer.w13_bias, use_dlpack=False)

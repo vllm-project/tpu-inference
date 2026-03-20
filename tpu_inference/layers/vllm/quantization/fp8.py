@@ -245,6 +245,12 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         w2_weight = t2j(layer.w2_weight, use_dlpack=False)
         w2_weight_scale = t2j(layer.w2_weight_scale_inv, use_dlpack=False)
 
+        # Convert from PyTorch uint8 serialization format to actual JAX float8 types
+        if w13_weight.dtype == jnp.uint8:
+            w13_weight = jax.lax.bitcast_convert_type(w13_weight, jnp.float8_e4m3fn)
+        if w2_weight.dtype == jnp.uint8:
+            w2_weight = jax.lax.bitcast_convert_type(w2_weight, jnp.float8_e4m3fn)
+
         # TODO: do we need to support bias?
         input_weights = FusedMoEWeights(
             w13_weight=w13_weight,
