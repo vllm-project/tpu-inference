@@ -84,7 +84,7 @@ def update_kv_cache(
             token_idx_in_seq = kv_len - q_len + j
             page_num_in_seq = token_idx_in_seq // page_size
             page_indices_start = i * pages_per_seq
-            page_idx = page_indices[page_indices_start + page_num_in_seq]
+            page_idx = jnp.maximum(0, page_indices[page_indices_start + page_num_in_seq])
             row = (token_idx_in_seq % page_size) // kv_packing
             col = (token_idx_in_seq % page_size) % kv_packing
 
@@ -708,7 +708,7 @@ def _mla_ragged_paged_attention_kernel(
             )
             _async_copy(
                 reshaped_cache_hbm_ref.at[pl.ds(
-                    page_indices_ref[page_indices_offset + i] *
+                    jnp.maximum(0, page_indices_ref[page_indices_offset + i]) *
                     page_size_per_kv_packing,
                     sz_per_kv_packing,
                 ), ..., :nope_dim],
@@ -719,7 +719,7 @@ def _mla_ragged_paged_attention_kernel(
             )
             _async_copy(
                 reshaped_cache_hbm_ref.at[pl.ds(
-                    page_indices_ref[page_indices_offset + i] *
+                    jnp.maximum(0, page_indices_ref[page_indices_offset + i]) *
                     page_size_per_kv_packing,
                     sz_per_kv_packing,
                 ), ..., nope_dim:],
@@ -750,7 +750,7 @@ def _mla_ragged_paged_attention_kernel(
 
         q_len_start = cu_q_lens_ref[seq_idx] + bq_idx * bq_sz
         q_end = cu_q_lens_ref[seq_idx + 1]
-        sz = jnp.minimum(bq_sz, q_end - q_len_start)
+        sz = jnp.maximum(0, jnp.minimum(bq_sz, q_end - q_len_start))
 
         debug_print(
             "[RPA debug]"
@@ -762,26 +762,28 @@ def _mla_ragged_paged_attention_kernel(
         debug_print("[RPA debug] q_end={}", q_end)
         debug_print("[RPA debug] sz={}", sz)
 
-        _async_copy(
-            ql_nope_hbm_ref.at[pl.ds(q_len_start, sz)],
-            bq_nope_vmem_ref.at[pl.ds(0, sz)],
-            sem,
-            wait,
-        )
+        @pl.when(sz > 0)
+        def do_copy():
+            _async_copy(
+                ql_nope_hbm_ref.at[pl.ds(q_len_start, sz)],
+                bq_nope_vmem_ref.at[pl.ds(0, sz)],
+                sem,
+                wait,
+            )
 
-        _async_copy(
-            q_pe_hbm_ref.at[pl.ds(q_len_start, sz)],
-            bq_rope_vmem_ref.at[pl.ds(0, sz)],
-            sem,
-            wait,
-        )
+            _async_copy(
+                q_pe_hbm_ref.at[pl.ds(q_len_start, sz)],
+                bq_rope_vmem_ref.at[pl.ds(0, sz)],
+                sem,
+                wait,
+            )
 
     def _send_bo(seq_idx, bo_idx, bo_sem_idx, *, wait=False):
         sem = sems.at[2, bo_sem_idx]
         vmem_ref = bo_x2_ref.at[bo_sem_idx]
         q_len_start = cu_q_lens_ref[seq_idx] + bo_idx * bq_sz
         q_end = cu_q_lens_ref[seq_idx + 1]
-        sz = jnp.minimum(bq_sz, q_end - q_len_start)
+        sz = jnp.maximum(0, jnp.minimum(bq_sz, q_end - q_len_start))
 
         debug_print(
             "[RPA debug]"
@@ -793,12 +795,14 @@ def _mla_ragged_paged_attention_kernel(
         debug_print("[RPA debug] q_end={}", q_end)
         debug_print("[RPA debug] sz={}", sz)
 
-        _async_copy(
-            vmem_ref.at[pl.ds(0, sz)],
-            o_hbm_ref.at[pl.ds(q_len_start, sz)],
-            sem,
-            wait,
-        )
+        @pl.when(sz > 0)
+        def do_copy():
+            _async_copy(
+                vmem_ref.at[pl.ds(0, sz)],
+                o_hbm_ref.at[pl.ds(q_len_start, sz)],
+                sem,
+                wait,
+            )
 
     def start_fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx):
         return _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx)

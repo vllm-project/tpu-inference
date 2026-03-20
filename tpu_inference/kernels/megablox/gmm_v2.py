@@ -404,11 +404,18 @@ def inner_kernel(
 
     def _matmul(is_first_k_step: bool, is_last_k_step: bool):
         tiled_lhs = tiled_lhs_ref.reshape(-1, cfgs.tiles.tile_k)[...]
+        tiled_rhs = tiled_rhs_ref.weight[...]
+        if len(tiled_rhs.shape) == 3:
+            tiled_rhs = jnp.squeeze(tiled_rhs, axis=0)
+
         num_quant_blocks_per_tile_k = cfgs.num_quant_blocks_per_tile_k
         # When rhs is packed (quantized dtype packed into uint32), unpack it
-        # back to the original dtype using pltpu.bitcast which operates on K
-        # axis. This expands the K dimension back to tile_k.
-        tiled_rhs = tiled_rhs_ref.get_weight(cfgs.rhs_cfgs.quant_dtype)
+        # back to the original dtype using pltpu.bitcast which operates on the last
+        # axis. We must temporarily swap K and N so the packed K axis is last.
+        if cfgs.rhs_cfgs.packing > 1:
+            tiled_rhs = jnp.swapaxes(tiled_rhs, 0, 1)
+            tiled_rhs = pltpu.bitcast(tiled_rhs, cfgs.rhs_cfgs.quant_dtype)
+            tiled_rhs = jnp.swapaxes(tiled_rhs, 0, 1)
 
         valid_k = cfgs.dims.size_k % cfgs.tiles.tile_k
         if is_last_k_step and valid_k != 0:
@@ -563,10 +570,15 @@ def inner_kernel(
             # since it completely fills the size_lhs_sublane rows, we need to zero out
             # partial_out_ref to avoid numeric error for group 3.
             last_row = m_end_local // cfgs.dims.size_lhs_sublane
+            # Clamp last_row to prevent out-of-bounds VMEM access during jnp.where evaluation
+            # since JAX evaluates both branches unconditionally.
+            max_row_idx = (cfgs.tiles.tile_m // cfgs.dims.size_lhs_sublane) - 1
+            safe_last_row = jnp.minimum(last_row, max_row_idx)
+
             partial_out_ref[...] = jnp.where(
                 m_end_local % cfgs.dims.size_lhs_sublane == 0,
                 partial_out_zeros,
-                tiled_out_ref[last_row],
+                tiled_out_ref[safe_last_row],
             )
         else:
             acc_ref[...] = acc
@@ -775,11 +787,14 @@ def zero_out_end(
     dims: Dimensions,
 ):
     out_dma = out_ref.reshape(-1, dims.size_lhs_sublane, out_ref.shape[-1])
-    pltpu.make_async_copy(
-        src_ref=out_dma.at[pl.ds(0, zero_size)],
-        dst_ref=out_dma.at[pl.ds(0, zero_size)],
-        sem=semaphore_ref.at[0],
-    ).wait()
+
+    @pl.when(zero_size > 0)
+    def do_copy():
+        pltpu.make_async_copy(
+            src_ref=out_dma.at[pl.ds(0, zero_size)],
+            dst_ref=out_dma.at[pl.ds(0, zero_size)],
+            sem=semaphore_ref.at[0],
+        ).wait()
 
 
 def kernel_main(

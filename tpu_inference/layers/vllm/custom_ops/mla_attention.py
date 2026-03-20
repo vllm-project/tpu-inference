@@ -81,62 +81,36 @@ class VllmMLAAttention(MLAAttention):
             # Compute W_UK_T and W_UV manually in JAX
             import jax.numpy as jnp
             from torchax.interop import jax_view, torch_view
-            
+
             weights = jax_view(self.kv_b_proj.weight).astype(jnp.bfloat16)
             if hasattr(self.kv_b_proj, "weight_scale"):
                 weight_scale = jnp.squeeze(jax_view(self.kv_b_proj.weight_scale))
-                
+
                 # Handle block quantization broadcasting dynamically
                 if weight_scale.shape[0] != weights.shape[0] and weight_scale.shape[1] == weights.shape[0]:
                     weight_scale = weight_scale.T
-                
+
                 if weight_scale.shape[1] < weights.shape[1]:
                     block_size = weights.shape[1] // weight_scale.shape[1]
                     weight_scale = jnp.repeat(weight_scale, block_size, axis=1)
-                    
+
                 weights = weights * weight_scale
-                
+
             # Transpose to match vLLM's .T
             weights = weights.T
             weights = weights.reshape((self.kv_lora_rank, self.num_heads, self.qk_nope_head_dim + self.v_head_dim))
-            
+
             W_UK, W_UV = jnp.split(weights, [self.qk_nope_head_dim], axis=-1)
-            
+
             # vLLM: self.W_UV = W_UV.transpose(0, 1)
             self.W_UV = jnp.transpose(W_UV, (1, 0, 2))
-            
+
             # vLLM: self.W_UK_T = W_UK.permute(1, 2, 0)
             self.W_UK_T = jnp.transpose(W_UK, (1, 2, 0))
-            
-            self.W_UV = torch_view(self.W_UV)
-            self.W_UK_T = torch_view(self.W_UK_T)
 
-            # NOTE: vLLM dequantizes kv_b_proj weights which causes more memory
-            # usage than expected.
-
-            # quantize W_UK_T, W_UV back to cache type and transfer
-            # `W_UK_T`, `W_UV` to TPUs
-            mesh = self.kv_b_proj.quant_method.linear_config.mesh
-            sharding = NamedSharding(mesh, P(ShardingAxisName.ATTN_HEAD, ))
-            self.W_UK_T, self.W_UK_T_scale = quantize_tensor(
-                self.kv_cache_quantized_dtype, jax_view(self.W_UK_T), axis=1)
-            self.W_UK_T = torch_view(general_device_put(self.W_UK_T, sharding))
-            self.W_UK_T_scale = torch_view(
-                general_device_put(jnp.expand_dims(self.W_UK_T_scale, 0),
-                                   sharding))
-
-            self.W_UV, self.W_UV_scale = quantize_tensor(
-                self.kv_cache_quantized_dtype, jax_view(self.W_UV), axis=1)
-            self.W_UV = torch_view(general_device_put(self.W_UV, sharding))
-            self.W_UV_scale = torch_view(
-                general_device_put(jnp.expand_dims(self.W_UV_scale, 0),
-                                   sharding))
-
-            self.W_UK_T = Parameter(self.W_UK_T, requires_grad=False)
-            self.W_UK_T_scale = Parameter(self.W_UK_T_scale,
-                                          requires_grad=False)
-            self.W_UV = Parameter(self.W_UV, requires_grad=False)
-            self.W_UV_scale = Parameter(self.W_UV_scale, requires_grad=False)
+            import numpy as np
+            self.W_UV = np.array(jnp.transpose(W_UV, (1, 0, 2)))
+            self.W_UK_T = np.array(jnp.transpose(W_UK, (1, 2, 0)))
 
             # Delete kv_b_proj_params as the dequantized weights are now stored
             # in self.W_UK_T and self.W_UV.
