@@ -1228,7 +1228,7 @@ def gmm_v2(
         fuse_act: Activation function to fuse with GMM, None if no fusion.
         
     Returns:
-      Output of shape [size_m, size_n].
+        Output of shape [size_m, size_n].
     """
 
     del precision
