@@ -8,38 +8,36 @@ from dataclasses import asdict, dataclass
 import pytest
 from vllm import LLM, EngineArgs, SamplingParams
 
+# Hardcoded baseline times (seconds) for 512 prompts on TPU v7x-8.
+# Measured on 2026-03-20 with vllm LKG aa84e43c + tpu-inference main.
+# Tests pass if EP time is within REGRESSION_THRESHOLD of these baselines.
+EP_FUSED_BASELINE_TIME = 3.40
+EP_GMM_BASELINE_TIME = 2.07
+REGRESSION_THRESHOLD = 0.15  # 15% regression tolerance
+
 
 @dataclass
 class TestConfig:
     """Configuration for EP test runs."""
     max_model_len: int = 512
-    max_num_batched_tokens: int = 128
-    max_num_seqs: int = 16
-    num_prompts: int = 16
-
-    @classmethod
-    def for_performance(cls) -> "TestConfig":
-        return cls(
-            max_model_len=512,
-            max_num_batched_tokens=512,
-            max_num_seqs=512,
-            num_prompts=512,
-        )
+    max_num_batched_tokens: int = 512
+    max_num_seqs: int = 512
+    num_prompts: int = 512
 
 
 @dataclass
 class InferenceConfig:
     """Configuration for a single inference run."""
     model_name: str
-    tensor_parallel_size: int = 1
-    enable_expert_parallel: bool = False
+    tensor_parallel_size: int = 4
+    enable_expert_parallel: bool = True
     max_model_len: int = 512
-    max_num_batched_tokens: int = 128
-    max_num_seqs: int = 16
+    max_num_batched_tokens: int = 512
+    max_num_seqs: int = 512
     gpu_memory_utilization: float = 0.95
 
 
-def generate_test_prompts(num_prompts: int = 256) -> list[str]:
+def generate_test_prompts(num_prompts: int = 512) -> list[str]:
     base_text = (
         "The rapid advancement of artificial intelligence has transformed "
         "numerous industries and continues to reshape our understanding of "
@@ -87,6 +85,9 @@ def _run_inference(
     engine_args_dict = asdict(engine_args)
     llm = LLM(**engine_args_dict)
 
+    # Warmup
+    llm.generate(test_prompts[:8], sampling_params)
+
     start_time = time.time()
     outputs = llm.generate(test_prompts, sampling_params)
     elapsed_time = time.time() - start_time
@@ -96,92 +97,63 @@ def _run_inference(
     return outputs, elapsed_time
 
 
-def _check_performance(
+def _check_no_regression(
     test_name: str,
     baseline_time: float,
-    ep_time: float,
+    actual_time: float,
     num_prompts: int,
-    min_speedup: float,
+    threshold: float = REGRESSION_THRESHOLD,
 ):
-    """Verify expert parallelism provides expected speedup."""
-    speedup = baseline_time / ep_time if ep_time > 0 else 0
+    """Verify EP time has not regressed beyond threshold vs hardcoded baseline."""
+    max_allowed = baseline_time * (1 + threshold)
+    regression_pct = ((actual_time - baseline_time) / baseline_time) * 100
 
-    print(f"✓ {test_name} performance test results:")
+    print(f"\n{test_name} performance results:")
     print(f"  Number of prompts: {num_prompts}")
     print(f"  Baseline time: {baseline_time:.2f}s")
-    print(f"  Expert parallel time: {ep_time:.2f}s")
-    print(f"  Speedup: {speedup:.2f}x")
-    print(f"  Baseline throughput: {num_prompts/baseline_time:.2f} prompts/s")
-    print(f"  Expert parallel throughput: {num_prompts/ep_time:.2f} prompts/s")
+    print(f"  Actual time:   {actual_time:.2f}s")
+    print(
+        f"  Max allowed:   {max_allowed:.2f}s (baseline + {threshold*100:.0f}%)"
+    )
+    print(f"  Delta:         {regression_pct:+.1f}%")
+    print(f"  Throughput:    {num_prompts/actual_time:.2f} prompts/s")
 
-    assert speedup >= min_speedup, (
-        f"Expert parallelism did not provide expected speedup "
-        f"({min_speedup:.2f}x): {speedup:.2f}x")
+    assert actual_time <= max_allowed, (
+        f"{test_name} regressed by {regression_pct:.1f}% "
+        f"(actual {actual_time:.2f}s > allowed {max_allowed:.2f}s)")
 
 
-def _test_expert_parallelism_performance(
-    sampling_params: SamplingParams,
-    use_fused_kernel: bool,
-    model_name: str | None = None,
-):
-    """Performance test for expert parallelism."""
-    if model_name is None:
-        model_name = os.environ.get("EP_MODEL_NAME", "Qwen/Qwen1.5-MoE-A2.7B")
+def test_ep_fused_performance(sampling_params: SamplingParams):
+    """Test EP with fused MoE kernel does not regress vs hardcoded baseline."""
+    os.environ['SKIP_JAX_PRECOMPILE'] = '0'
+    os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '1'
+    os.environ['USE_MOE_EP_KERNEL'] = '1'
 
-    cfg = TestConfig.for_performance()
+    model_name = os.environ.get("EP_MODEL_NAME", "Qwen/Qwen1.5-MoE-A2.7B")
+    cfg = TestConfig()
     test_prompts = generate_test_prompts(cfg.num_prompts)
 
-    if use_fused_kernel:
-        os.environ['USE_MOE_EP_KERNEL'] = '1'
-
     try:
-        # Run EP (TP=4 + EP)
         ep_config = InferenceConfig(
             model_name=model_name,
-            tensor_parallel_size=4,
-            enable_expert_parallel=True,
             max_model_len=cfg.max_model_len,
             max_num_batched_tokens=cfg.max_num_batched_tokens,
             max_num_seqs=cfg.max_num_seqs,
         )
         _, ep_time = _run_inference(ep_config, test_prompts, sampling_params)
 
-        # Run baseline (TP=1)
-        baseline_config = InferenceConfig(
-            model_name=model_name,
-            tensor_parallel_size=1,
-            enable_expert_parallel=False,
-            max_model_len=cfg.max_model_len,
-            max_num_batched_tokens=cfg.max_num_batched_tokens,
-            max_num_seqs=cfg.max_num_seqs,
-        )
-        _, baseline_time = _run_inference(baseline_config, test_prompts,
-                                          sampling_params)
-
-        kernel_name = "EP Fused" if use_fused_kernel else "EP GMM"
-        _check_performance(
-            f"Expert parallelism ({kernel_name})",
-            baseline_time,
+        _check_no_regression(
+            "EP Fused",
+            EP_FUSED_BASELINE_TIME,
             ep_time,
-            len(test_prompts),
-            min_speedup=0.6,
+            cfg.num_prompts,
         )
     finally:
-        if use_fused_kernel:
-            del os.environ['USE_MOE_EP_KERNEL']
-
-
-def test_ep_fused_performance(sampling_params: SamplingParams):
-    """Test expert parallelism performance with fused MoE EP kernel."""
-    os.environ['SKIP_JAX_PRECOMPILE'] = '0'
-    os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '1'
-
-    _test_expert_parallelism_performance(sampling_params,
-                                         use_fused_kernel=True)
+        del os.environ['USE_MOE_EP_KERNEL']
 
 
 def test_ep_gmm_performance(sampling_params: SamplingParams):
-    """Test expert parallelism performance with GMM kernel.
+    """Test EP with GMM kernel does not regress vs hardcoded baseline.
 
     Uses OLMoE-1B-7B (64 experts, power-of-2) instead of Qwen2MoE
     (60 experts) because the GMM EP kernel requires num_tokens*topk
@@ -191,7 +163,22 @@ def test_ep_gmm_performance(sampling_params: SamplingParams):
     os.environ['SKIP_JAX_PRECOMPILE'] = '0'
     os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '1'
 
-    gmm_model = os.environ.get("EP_GMM_MODEL_NAME", "allenai/OLMoE-1B-7B-0924")
-    _test_expert_parallelism_performance(sampling_params,
-                                         use_fused_kernel=False,
-                                         model_name=gmm_model)
+    model_name = os.environ.get("EP_GMM_MODEL_NAME",
+                                "allenai/OLMoE-1B-7B-0924")
+    cfg = TestConfig()
+    test_prompts = generate_test_prompts(cfg.num_prompts)
+
+    ep_config = InferenceConfig(
+        model_name=model_name,
+        max_model_len=cfg.max_model_len,
+        max_num_batched_tokens=cfg.max_num_batched_tokens,
+        max_num_seqs=cfg.max_num_seqs,
+    )
+    _, ep_time = _run_inference(ep_config, test_prompts, sampling_params)
+
+    _check_no_regression(
+        "EP GMM",
+        EP_GMM_BASELINE_TIME,
+        ep_time,
+        cfg.num_prompts,
+    )
