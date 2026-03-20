@@ -29,6 +29,7 @@ LOG_FOLDER=${LOG_FOLDER:-"artifacts/temp_logs"}
 REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
 
 (
+  printf "[DEBUG] pwd=%s\n\nls=%s" "$(pwd)" "$(ls)"
   printf "[INFO] LOG_FOLDER=%s\n" "$LOG_FOLDER"
 
   # Handle log file
