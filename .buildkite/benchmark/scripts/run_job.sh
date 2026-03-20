@@ -18,6 +18,18 @@ set -euo pipefail
 readonly EXIT_SUCCESS=0
 readonly EXIT_FAILURE=1
 
+ARTIFACT_FOLDER="artifacts"
+LOG_FOLDER="artifacts/temp_logs"
+export ARTIFACT_FOLDER
+export LOG_FOLDER
+
+cleanup_artifact_log() {
+  echo "deleting artifacts: $ARTIFACT_FOLDER"
+  rm -rf "$ARTIFACT_FOLDER"
+}
+
+trap cleanup_artifact_log EXIT
+
 #
 # Check input argument
 #
@@ -60,9 +72,13 @@ gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
   --instance="$GCP_INSTANCE_ID" \
   --sql="UPDATE RunRecord SET Status='RUNNING', LastUpdate=CURRENT_TIMESTAMP(), TryCount=$NEW_TRY_COUNT, RunBy='${BUILDKITE_AGENT_NAME}' WHERE RecordId='$RECORD_ID'"
 
+# Do cleanup before create config
+cleanup_artifact_log
 
-echo "deleting artifacts".
-rm -rf artifacts
+#
+# Prepare artifacts folder to save log and another need shared file, mount to docker container
+#
+mkdir -p "$ARTIFACT_FOLDER"
 
 #
 # Create running config
@@ -115,16 +131,22 @@ if (( BM_JOB_STATUS == EXIT_SUCCESS )); then
 
   # Prep specialized configurations (DeepSeek)
   if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
-    mkdir -p ./generation_configs
-    gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/* ./generation_configs/
+    GENERATION_CONFIG_FOLDER="$ARTIFACT_FOLDER/generation_configs"
+    export GENERATION_CONFIG_FOLDER
+    mkdir -p "$GENERATION_CONFIG_FOLDER"
+    gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/* "$GENERATION_CONFIG_FOLDER"
   fi
 
   echo "Running job in docker via run_in_docker.sh..."
 
-  # Trigger the mount and specify the benchmark command
-  # Note: datasets synced to host ./artifacts/dataset are visible at /workspace/artifacts/dataset
-  export DOCKER_WORKDIR="/workspace"
-  export BUILDKITE_COMMIT="$CODE_HASH"
+  # Configuration docker parameter for execute benchmark
+  declare -a BENCHMARK_DOCKER_ARGS=(
+    "-v" "$ARTIFACT_FOLDER:/workspace/artifacts"
+    "-e" "DOCKER_ARTIFACT_FOLDER=/workspace/artifacts"
+    "-e" "LOG_FOLDER=/workspace/$LOG_FOLDER"
+    "--env-file" "$ENV_FILE"
+  )
+  export BENCHMARK_DOCKER_ARGS
 
   # Restore the SKIP_JAX_PRECOMPILE logic
   [ -n "${SKIP_JAX_PRECOMPILE:-}" ] && export SKIP_JAX_PRECOMPILE
