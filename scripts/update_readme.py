@@ -85,7 +85,7 @@ def generate_markdown_table(headers, data):
         for c in row:
             formatted_cell = _format_markdown_cell(c)
             if is_sp_row and "Experimental" in c:
-                formatted_row.append(formatted_cell + " ([vote to prioritize](https://github.com/vllm-project/tpu-inference/issues/1749))")
+                formatted_row.append(formatted_cell + " ([vote&nbsp;to&nbsp;prioritize](https://github.com/vllm-project/tpu-inference/issues/1749))")
             else:
                 formatted_row.append(formatted_cell)
                 
