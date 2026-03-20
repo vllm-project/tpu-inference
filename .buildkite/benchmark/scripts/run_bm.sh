@@ -227,7 +227,7 @@ run_benchmark(){
       ;;
     bench-custom-token)
       local dataset_path="$DOCKER_ARTIFACT_FOLDER/dataset/${MODEL##*/}/inlen${INPUT_LEN}_outlen${OUTPUT_LEN}_prefixlen${PREFIX_LEN}.jsonl"
-      echo "dataset_path: $dataset_path"
+      echo "dataset_path: $dataset_path" >&2
       # The original script set dataset-name to 'custom' for this case
       ARGS[7]="custom" # This replaces the --dataset-name value in the array
       ARGS+=(--dataset-path "$dataset_path" --custom-output-len "$OUTPUT_LEN" --skip-chat-template)
@@ -243,7 +243,7 @@ run_benchmark(){
         exit 1
       fi
       local dataset_path="${dataset_files[0]}"
-      echo "multimodal dataset_path: $dataset_path"
+      echo "multimodal dataset_path: $dataset_path" >&2
       ARGS[1]="openai-chat" # Replaces --backend value
       ARGS[7]="custom"      # Replaces --dataset-name value
       ARGS+=(--dataset-path "$dataset_path" --custom-output-len "$OUTPUT_LEN" --custom-skip-chat-template --endpoint /v1/chat/completions)
