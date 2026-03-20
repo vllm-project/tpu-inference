@@ -82,7 +82,11 @@ class VllmMLAAttention(MLAAttention):
             import jax.numpy as jnp
             from torchax.interop import jax_view, torch_view
             
-            weights = jax_view(self.kv_b_proj.weight)
+            weights = jax_view(self.kv_b_proj.weight).astype(jnp.bfloat16)
+            if hasattr(self.kv_b_proj, "weight_scale"):
+                weight_scale = jnp.squeeze(jax_view(self.kv_b_proj.weight_scale))
+                weights = weights * weight_scale
+                
             # Transpose to match vLLM's .T
             weights = weights.T
             weights = weights.reshape((self.kv_lora_rank, self.num_heads, self.qk_nope_head_dim + self.v_head_dim))
