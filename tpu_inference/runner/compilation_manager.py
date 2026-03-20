@@ -52,9 +52,12 @@ class CompilationManager:
             logger.info("Enabling JAX compile cache.")
             jax.config.update("jax_compilation_cache_dir",
                               vllm_envs.VLLM_XLA_CACHE_PATH)
-            # Ensure small compiled function are cached as well.
-            jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
-            jax.config.update("jax_persistent_cache_min_compile_time_secs", -1)
+            if vllm_envs.VLLM_XLA_CHECK_RECOMPILATION:
+                # Ensure small compiled function are cached as well.
+                jax.config.update("jax_persistent_cache_min_entry_size_bytes",
+                                  -1)
+                jax.config.update("jax_persistent_cache_min_compile_time_secs",
+                                  -1)
 
     def _create_dummy_tensor(self,
                              shape: Tuple[int, ...],
