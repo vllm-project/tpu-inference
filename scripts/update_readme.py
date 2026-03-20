@@ -85,7 +85,7 @@ def generate_markdown_table(headers, data):
         for c in row:
             formatted_cell = _format_markdown_cell(c)
             if is_sp_row and "Experimental" in c:
-                formatted_row.append(formatted_cell + " ([vote&nbsp;to&nbsp;prioritize](https://github.com/vllm-project/tpu-inference/issues/1749))")
+                formatted_row.append(formatted_cell + "&nbsp;([vote&nbsp;to&nbsp;prioritize](https://github.com/vllm-project/tpu-inference/issues/1749))")
             else:
                 formatted_row.append(formatted_cell)
                 
@@ -348,7 +348,7 @@ def generate_html_parallelism_table(headers, data):
         html.append("    <tr>")
         feature_name = row[0]
         if feature_name.strip() == "SP":
-            feature_html = '<strong>SP</strong> (<a href="https://github.com/vllm-project/tpu-inference/issues/1749">vote&nbsp;to&nbsp;prioritize</a>)'
+            feature_html = '<span style="white-space: nowrap;"><strong>SP</strong> (<a href="https://github.com/vllm-project/tpu-inference/issues/1749">vote to prioritize</a>)</span>'
         else:
             feature_html = f"<strong>{feature_name}</strong>"
         
