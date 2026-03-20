@@ -15,4 +15,4 @@ Feature,CorrectnessTest,PerformanceTest
 "multi-host",❓ Untested,❓ Untested
 "runai_model_streamer_loader",✅ Passing,❓ Untested
 "sampling_params",✅ Passing,❓ Untested
-"structured_decoding",✅ Passing,❓ Untested
+"structured_decoding",❌ Failing,❓ Untested
