@@ -52,6 +52,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         q_scale: float | None = None,
         k_scale: float | None = None,
         v_scale: float | None = None,
+        use_causal_mask: bool = True,
     ):
         rng = np.random.default_rng(1234)
 
@@ -160,6 +161,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         )
 
         kwargs = {
+            "use_causal_mask": use_causal_mask,
             "sliding_window": sliding_window,
             "soft_cap": soft_cap,
             "q_scale": q_scale,
@@ -200,8 +202,10 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             (64, 256, 32, 128),
             (60, 48, 30, 48),
         ],
+        use_causal_mask=[True, False],
     )
-    def test_ragged_paged_attention_basic(self, dtype, block_sizes):
+    def test_ragged_paged_attention_basic(self, dtype, block_sizes,
+                                          use_causal_mask):
         seq_lens = [(192, 328), (128, 180), (64, 255)]
         num_heads = (32, 8)
         head_dim = 128
@@ -222,6 +226,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             bkv_sz=bkv_sz,
             bq_csz=bq_csz,
             bkv_csz=bkv_csz,
+            use_causal_mask=use_causal_mask,
         )
 
     # TODO: support integer (int8, int4) and fp4 kv cache
