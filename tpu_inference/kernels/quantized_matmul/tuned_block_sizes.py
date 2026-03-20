@@ -618,10 +618,15 @@ TUNED_BLOCK_SIZES_RAW = {
     # go/keep-sorted end
 }
 
-TUNED_BLOCK_SIZES: dict[TunedKey, TunedValue] = {
-    TunedKey(*key): TunedValue(*value)
-    for key, value in TUNED_BLOCK_SIZES_RAW.items()
-}
+TUNED_BLOCK_SIZES: dict[TunedKey, TunedValue] = {}
+for key, value in TUNED_BLOCK_SIZES_RAW.items():
+    tv = TunedValue(*value)
+    # Patch to prevent CompileTimeScopedVmemOom on large chunks
+    new_batch = min(tv.batch_block_size, 512)
+    new_out = min(tv.out_block_size, 2048)
+    # The last element is n_lane_multiplier if len == 4
+    n_lane = tv.n_lane_multiplier
+    TUNED_BLOCK_SIZES[TunedKey(*key)] = TunedValue(new_batch, new_out, tv.in_block_size, n_lane)
 
 DEVICE_VMEM_LIMIT = {6: 96 * 1024 * 1024, 7: 48 * 1024 * 1024}
 
