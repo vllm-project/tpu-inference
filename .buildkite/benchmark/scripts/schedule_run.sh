@@ -162,7 +162,6 @@ while read -r line || [ -n "${line}" ]; do
   # For each line in csv file, generate a command step
   pipeline_yaml=$(cat <<EOF
 - label: "Benchmark - ${MODEL}-datset_${DATASET}-inlen_${INPUT_LEN}-outlen_${OUTPUT_LEN} RecordId: ${RECORD_ID}"
-  depends_on: "build-vllm-tpu-image"
   env:
     BUILDKITE_GIT_SUBMODULES: "true"
     GCP_PROJECT_ID: "cloud-tpu-inference-test"

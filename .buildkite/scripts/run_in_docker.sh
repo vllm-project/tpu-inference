@@ -25,8 +25,12 @@ if [ "$#" -eq 0 ]; then
   exit 1
 fi
 
-# Verify if BENCHMARK_DOCKER_ARGS is declared; initialize as an empty array if undefined
-declare -p BENCHMARK_DOCKER_ARGS >/dev/null 2>&1 || declare -a BENCHMARK_DOCKER_ARGS=()
+declare -a BENCHMARK_DOCKER_ARGS=()
+
+# Check if the serialized string exists and is not empty.
+if [ -n "${BENCHMARK_DOCKER_ARGS_STR:-}" ]; then
+  mapfile -t BENCHMARK_DOCKER_ARGS <<< "${BENCHMARK_DOCKER_ARGS_STR}"
+fi
 printf "[INFO] %s = %s\n" "BENCHMARK_DOCKER_ARGS" "${BENCHMARK_DOCKER_ARGS[*]}"
 
 # TODO(Qiliang Cui): This is temp solution to mitigate the docker image
