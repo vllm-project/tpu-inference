@@ -14,6 +14,7 @@
 
 import functools
 import logging
+import os
 import random
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -761,16 +762,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             return EMPTY_MODEL_RUNNER_OUTPUT
 
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
-        (
-            input_ids,
-            input_positions,
-            attn_metadata,
-            sampling_metadata,
-            logits_indices,
-            spec_decode_metadata,
-            logits_indices_selector,
-            padded_num_reqs,
-        ) = self._prepare_inputs(scheduler_output)
+        (input_ids, input_positions, attn_metadata, sampling_metadata,
+         logits_indices, spec_decode_metadata, logits_indices_selector,
+         padded_num_reqs, batch_comp) = self._prepare_inputs(scheduler_output)
 
         # multi-modal support
         if self.is_multimodal_model:
@@ -803,20 +797,77 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
+                dynamic_args = (
+                    self.state,
+                    self.kv_caches,
+                    input_ids,
+                    attn_metadata,
+                    inputs_embeds,
+                    input_positions,
+                    tuple(self.layer_name_to_kvcache_index.items()),
+                    lora_metadata,
+                    intermediate_tensors,
+                    self.is_first_rank,
+                    self.is_last_rank,
+                )
+
+                original_jit_fn = self.model_fn.func
+                all_args_for_lowering = self.model_fn.args + dynamic_args
+
+                lowered_computation = original_jit_fn.lower(
+                    *all_args_for_lowering)
+
+                # {'total_num_scheduled_tokens': 512, 'num_prefill_tokens': 512, 'num_decode_tokens': 0, 'padded_total_num_scheduled_tokens': 512, 'num_reqs': 1}
+                # {'total_num_scheduled_tokens': 256, 'num_prefill_tokens': 0, 'num_decode_tokens': 256, 'padded_total_num_scheduled_tokens': 256, 'num_reqs': 256}
+                num_prefill_tokens = batch_comp["num_prefill_tokens"]
+                num_decode_tokens = batch_comp["num_decode_tokens"]
+                num_total_tokens = batch_comp["total_num_scheduled_tokens"]
+                num_reqs = batch_comp["num_reqs"]
+
+                expected_decode_tokens = int(
+                    os.getenv("EXPECTED_DECODE_TOKENS", 0))
+                expected_prefill_tokens = int(
+                    os.getenv("EXPECTED_PREFILL_TOKENS", 0))
+
+                # batch size for prefill is really the num_reqs
+                expected_prefill_bsz = 1
+                # batch size for decode is really the num_decode_tokens, since we each request only has
+                # 1 token to decode
+                expected_decode_bsz = expected_decode_tokens
+
+                phase_str = "prefill" if num_prefill_tokens > 0 else "decode"
+                hlo_parent_dir = "hlo_dumps"
+                dump_location = f"{hlo_parent_dir}/hlo_dump_pure_{phase_str}_{num_reqs}_reqs_{num_prefill_tokens}_prefill_tokens_{num_decode_tokens}_decode_tokens_{len(self.devices)}_devices"
+                os.makedirs(hlo_parent_dir, exist_ok=True)
+
+                if expected_decode_tokens > 0 and expected_prefill_tokens > 0:
+                    raise ValueError(
+                        "Expected only pure decode or pure prefill")
+
+                # Pure decode setup is num_reqs of expected_decode_tokens
+                if expected_decode_tokens > 0 and num_decode_tokens == expected_decode_tokens and num_decode_tokens == num_total_tokens and num_reqs == expected_decode_bsz:
+                    print(
+                        f"Dumping pure decode HLO to {dump_location} for batch with composition: {batch_comp}"
+                    )
+                    hlo_module = lowered_computation.compiler_ir(dialect="hlo")
+                    with open(dump_location + ".txt", "w") as f:
+                        f.write(hlo_module.as_hlo_text())
+                    # quit early since we're done!
+                    raise ValueError("Done with HLO dump!")
+
+                # Pure prefill setup is 1 request of expected_prefill_tokens
+                if expected_prefill_tokens > 0 and num_prefill_tokens == expected_prefill_tokens and num_prefill_tokens == num_total_tokens and num_reqs == expected_prefill_bsz:
+                    print(
+                        f"Dumping pure prefill HLO to {dump_location} for batch with composition: {batch_comp}"
+                    )
+                    hlo_module = lowered_computation.compiler_ir(dialect="hlo")
+                    with open(dump_location + ".txt", "w") as f:
+                        f.write(hlo_module.as_hlo_text())
+                    # quit early since we're done!
+                    raise ValueError("Done with HLO dump!")
+
                 (self.kv_caches, hidden_states,
-                 aux_hidden_states) = self.model_fn(
-                     self.state,
-                     self.kv_caches,
-                     input_ids,
-                     attn_metadata,
-                     inputs_embeds,
-                     input_positions,
-                     tuple(self.layer_name_to_kvcache_index.items()),
-                     lora_metadata,
-                     intermediate_tensors,
-                     self.is_first_rank,
-                     self.is_last_rank,
-                 )
+                 aux_hidden_states) = self.model_fn(*dynamic_args)
             if not self.is_last_rank:
                 assert isinstance(hidden_states, JaxIntermediateTensors)
                 hidden_states.kv_connector_output = kv_connector_output
@@ -1634,12 +1685,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
 
         # Please see runner_utils.PhasedBasedProfiler for details
-        if self.phase_based_profiler:
-            batch_composition_stats = runner_utils.get_batch_composition_stats(
-                self.input_batch, total_num_scheduled_tokens, num_reqs,
-                padded_total_num_scheduled_tokens, scheduler_output)
+        # if self.phase_based_profiler:
+        batch_composition_stats = runner_utils.get_batch_composition_stats(
+            self.input_batch, total_num_scheduled_tokens, num_reqs,
+            padded_total_num_scheduled_tokens, scheduler_output)
 
-            self.phase_based_profiler.step(batch_composition_stats)
+        #    self.phase_based_profiler.step(batch_composition_stats)
 
         # Inputs
         input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
@@ -1734,7 +1785,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         return (input_ids, positions, attention_metadata, sampling_metadata,
                 logits_indices, spec_decode_metadata, logits_indices_selector,
-                padded_num_reqs)
+                padded_num_reqs, batch_composition_stats)
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
                               mm_embeds: list[jax.Array]):
