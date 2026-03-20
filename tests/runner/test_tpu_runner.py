@@ -82,6 +82,7 @@ class TestTPUJaxRunner:
         # 1. ===== Setup =====
         dummy_input_ids = jnp.array([1, 2, 3])
         dummy_mm_embeds = jnp.ones((10, 128))
+        dummy_is_mm_embed = jnp.array([False, True, True], dtype=jnp.bool_)
         dummy_final_embeds = jnp.ones((3, 128))
 
         # Mock the embedding function
@@ -94,20 +95,23 @@ class TestTPUJaxRunner:
         self.runner.is_multimodal_model = True
 
         input_ids_res, inputs_embeds_res = self.runner._get_input_ids_embeds(
-            dummy_input_ids, dummy_mm_embeds)
+            dummy_input_ids, dummy_mm_embeds, dummy_is_mm_embed)
 
         assert input_ids_res is None
         np.testing.assert_array_equal(np.asarray(inputs_embeds_res),
                                       np.asarray(dummy_final_embeds))
         self.mock_get_input_embed_fn.assert_called_once_with(
-            self.runner.state, dummy_input_ids, dummy_mm_embeds)
+            self.runner.state,
+            dummy_input_ids,
+            dummy_mm_embeds,
+            is_multimodal=dummy_is_mm_embed)
 
         # 3. ===== Act & Assert (Text-only) =====
         self.mock_get_input_embed_fn.reset_mock()
         self.runner.is_multimodal_model = False
 
         input_ids_res, inputs_embeds_res = self.runner._get_input_ids_embeds(
-            dummy_input_ids, dummy_mm_embeds)
+            dummy_input_ids, dummy_mm_embeds, dummy_is_mm_embed)
 
         assert inputs_embeds_res is None
         np.testing.assert_array_equal(np.asarray(input_ids_res),
@@ -254,5 +258,7 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
         self.runner.embed_input_ids_fn = MagicMock()
         dummy_input_ids = jnp.array([1, 2, 3])
         dummy_mm_embeds = jnp.ones((10, 128))
-        _ = self.runner._get_input_ids_embeds(dummy_input_ids, dummy_mm_embeds)
+        dummy_is_mm_embed = jnp.array([False, True, True], dtype=jnp.bool_)
+        _ = self.runner._get_input_ids_embeds(dummy_input_ids, dummy_mm_embeds,
+                                              dummy_is_mm_embed)
         self.runner.embed_input_ids_fn.assert_not_called()

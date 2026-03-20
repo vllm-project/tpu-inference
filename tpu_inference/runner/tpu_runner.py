@@ -777,10 +777,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Run the multimodal encoder if any.
             # We have the modality embeds at this time.
             self.mm_manager.execute_mm_encoder(scheduler_output)
-            mm_embeds = self.mm_manager.gather_mm_embeddings(
+            mm_embeds, is_mm_embed = self.mm_manager.gather_mm_embeddings(
                 scheduler_output, input_ids.shape[0])
         else:
-            mm_embeds = []
+            mm_embeds, is_mm_embed = None, None
 
         # NOTE(Wenlong): For multi-modal model,
         # it will embed the text tokens and merge with the existing modality embeds
@@ -788,7 +788,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # For text-only model, this does nothing. It will input the input_ids and
         # leave the mebedding job inside the forward pass
         input_ids, inputs_embeds = self._get_input_ids_embeds(
-            input_ids, mm_embeds)
+            input_ids, mm_embeds, is_mm_embed)
 
         lora_metadata = self.lora_utils.extract_lora_metadata()
         # TODO: make _get_input_ids_embeds within this context
@@ -1737,12 +1737,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 padded_num_reqs)
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
-                              mm_embeds: list[jax.Array]):
+                              mm_embeds: jax.Array | None,
+                              is_mm_embed: jax.Array | None):
         if self.is_multimodal_model:
+            assert self.embed_input_ids_fn is not None
             inputs_embeds = self.embed_input_ids_fn(
                 self.state,
                 input_ids,
                 mm_embeds,
+                is_multimodal=is_mm_embed,
             )
             return None, inputs_embeds
         else:
