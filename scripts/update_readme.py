@@ -239,10 +239,12 @@ def merge_metrics(c, p):
         
     return "❓&nbsp;Untested"
 
+import re
+
 def format_kernel_name(name):
     """Formats kernel names to wrap cleanly in max 2-3 lines by using non-breaking spaces and hyphens."""
     name = str(name).replace("-", "&#8209;")
-    name = name.replace("<br>", " ") # Clean up any existing manual tags
+    name = re.sub(r'(?i)<br\s*/?>', ' ', name) # Clean up any existing manual tags, case-insensitive
     words = name.split(" ")
     lines = []
     current_line = []
@@ -251,8 +253,8 @@ def format_kernel_name(name):
     for w in words:
         if not w:
             continue
-        # If adding this word exceeds ~15 chars and we already have words on this line, break it
-        if current_len + len(w) > 15 and current_line:
+        # If adding this word exceeds ~20 chars and we already have words on this line, break it
+        if current_len + len(w) > 20 and current_line:
             lines.append("&nbsp;".join(current_line))
             current_line = [w]
             current_len = len(w)

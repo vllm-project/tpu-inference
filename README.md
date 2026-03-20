@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-03-19 10:43 PM UTC*
+*Last Updated: 2026-03-20 12:16 AM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -435,7 +435,7 @@ Below is the live status of our supported models, features, and kernels. Click o
   <tbody>
     <tr>
       <td rowspan="3"><b>Attention</b></td>
-      <td>Generic&nbsp;Ragged<br>Paged<Br>Attention<br>V3*</td>
+      <td>Generic&nbsp;Ragged&nbsp;Paged<br>Attention&nbsp;V3*</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -453,7 +453,7 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
-      <td>Ragged&nbsp;Paged<br>Attention<br>V3<Br>Head_Dim<br>64*</td>
+      <td>Ragged&nbsp;Paged<br>Attention&nbsp;V3&nbsp;Head_Dim<br>64*</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
