@@ -262,10 +262,32 @@ def process_moe_weights(
 
     if w13_weight_scale is not None:
         w13_weight_scale = w13_weight_scale.astype(jnp.float32)
+        
+        # Determine if the scale is (num_experts, out_channels, in_blocks) or (num_experts, out_blocks, in_blocks)
+        # We need it to be (num_experts, in_blocks, 1, out_channels) for the GMM kernel
+        out_dim = w13_weight.shape[2]
+        
+        if w13_weight_scale.shape[1] != out_dim:
+            # Output dim is block quantized, repeat it to match full out_channels
+            out_blocks = w13_weight_scale.shape[1]
+            if out_dim % out_blocks == 0:
+                block_size = out_dim // out_blocks
+                w13_weight_scale = jnp.repeat(w13_weight_scale, block_size, axis=1)
+                
+        # Now shape is (num_experts, out_channels, in_blocks)
         w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
         w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
+
     if w2_weight_scale is not None:
         w2_weight_scale = w2_weight_scale.astype(jnp.float32)
+        out_dim = w2_weight.shape[2]
+        
+        if w2_weight_scale.shape[1] != out_dim:
+            out_blocks = w2_weight_scale.shape[1]
+            if out_dim % out_blocks == 0:
+                block_size = out_dim // out_blocks
+                w2_weight_scale = jnp.repeat(w2_weight_scale, block_size, axis=1)
+                
         w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
         w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
     if w13_bias is not None:
