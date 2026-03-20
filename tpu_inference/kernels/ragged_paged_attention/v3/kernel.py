@@ -20,6 +20,7 @@ during inference.
 """
 import functools
 from enum import Enum
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -30,8 +31,6 @@ from jax.experimental.pallas import tpu as pltpu
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, cdiv, get_dtype_packing, get_tpu_version, next_power_of_2)
 
-# We do not set to -inf directly because (-inf) - (-inf) is nan.
-DEFAULT_MASK_VALUE = -float(jnp.finfo(jnp.dtype("float32")).max)
 DEFAULT_VMEM_LIMIT_BYTES = 120 * 1024 * 1024
 
 
@@ -79,17 +78,23 @@ def ref_ragged_paged_attention(
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
     *,
+    use_causal_mask: bool = True,
+    skip_kv_mask: bool = False,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
-    mask_value: float | None = DEFAULT_MASK_VALUE,
+    out_dtype: Any = None,
+    mask_value: float | None = None,
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
 ):
-    if mask_value is None:
-        mask_value = DEFAULT_MASK_VALUE
+    if out_dtype is None:
+        out_dtype = jnp.float32 if queries.dtype == jnp.float32 else jnp.bfloat16
 
+    if mask_value is None:
+        # We do not set to -inf directly because (-inf) - (-inf) is nan.
+        mask_value = -float(jnp.finfo(out_dtype).max)
     dynamic_validate_inputs(
         queries,
         keys,
@@ -99,9 +104,12 @@ def ref_ragged_paged_attention(
         page_indices,
         cu_q_lens,
         distribution,
+        use_causal_mask=use_causal_mask,
+        skip_kv_mask=skip_kv_mask,
         sm_scale=sm_scale,
         sliding_window=sliding_window,
         soft_cap=soft_cap,
+        out_dtype=out_dtype,
         mask_value=mask_value,
         q_scale=q_scale,
         k_scale=k_scale,
@@ -170,25 +178,26 @@ def ref_ragged_paged_attention(
         attn = jnp.einsum("qhd,khd->hqk",
                           q,
                           k,
-                          preferred_element_type=jnp.float32)
+                          preferred_element_type=jnp.float32).astype(out_dtype)
         attn *= sm_scale
         if k_scale is not None:
             attn *= k_scale
         if q_scale is not None:
             attn *= q_scale
-
-        q_span = (kv_len - q_len) + jax.lax.broadcasted_iota(
-            jnp.int32, attn.shape, 1)
-        kv_span = jax.lax.broadcasted_iota(jnp.int32, attn.shape, 2)
-        mask = q_span >= kv_span
-        if sliding_window is not None:
-            mask = jnp.logical_and(mask, q_span < kv_span + sliding_window)
         if soft_cap is not None:
             attn = soft_cap * jnp.tanh(attn / soft_cap)
-        attn = jnp.where(mask, attn, mask_value)
+
+        if use_causal_mask:
+            q_span = (kv_len - q_len) + jax.lax.broadcasted_iota(
+                jnp.int32, attn.shape, 1)
+            kv_span = jax.lax.broadcasted_iota(jnp.int32, attn.shape, 2)
+            mask = q_span >= kv_span
+            if sliding_window is not None:
+                mask = jnp.logical_and(mask, q_span < kv_span + sliding_window)
+            attn = jnp.where(mask, attn, mask_value)
         attn = jax.nn.softmax(attn, axis=-1).astype(v.dtype)
 
-        out = jnp.einsum("hqk,khd->qhd", attn, v).astype(queries.dtype)
+        out = jnp.einsum("hqk,khd->qhd", attn, v).astype(out_dtype)
         if v_scale is not None:
             out *= v_scale
 
@@ -272,14 +281,13 @@ def _ragged_paged_attention_kernel(*args, **kwargs):
     distribution_ref = args[3]
     start_seq_idx, end_seq_idx = kwargs["case"].get_range(distribution_ref)
 
-    def loop_body(seq_idx, _):
+    @pl.loop(start_seq_idx, end_seq_idx)
+    def _(seq_idx):
         return _ragged_paged_attention_kernel_loop(
             seq_idx,
             *args,
             **kwargs,
         )
-
-    lax.fori_loop(start_seq_idx, end_seq_idx, loop_body, None)
 
 
 def _ragged_paged_attention_kernel_loop(
@@ -310,10 +318,12 @@ def _ragged_paged_attention_kernel_loop(
     m_ref,  # [actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128],
     acc_ref,  # [actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, head_dim],
     *,
+    use_causal_mask: bool = True,
+    skip_kv_mask: bool = False,
     sm_scale: float,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
-    mask_value: float = DEFAULT_MASK_VALUE,
+    mask_value: float | None = None,
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
@@ -327,6 +337,11 @@ def _ragged_paged_attention_kernel_loop(
 ):
     assert q_hbm_ref.shape == o_hbm_ref.shape
     assert q_hbm_ref.shape[-1] == kv_cache_hbm_ref.shape[-1]
+
+    if case == RpaCase.DECODE:
+        use_causal_mask = False
+
+    out_dtype = acc_ref.dtype
     (
         actual_num_kv_heads,
         max_num_tokens,
@@ -439,7 +454,8 @@ def _ragged_paged_attention_kernel_loop(
                 q = jnp.clip(q, min=minval, max=maxval)
             q = q.astype(k.dtype)
 
-        s = jnp.matmul(q, k.T, preferred_element_type=jnp.float32)
+        s = jnp.matmul(q, k.T,
+                       preferred_element_type=jnp.float32).astype(out_dtype)
         s *= sm_scale
         if k_scale is not None:
             s *= k_scale
@@ -451,29 +467,38 @@ def _ragged_paged_attention_kernel_loop(
         int_ty = jnp.int32
         if get_dtype_packing(q_dtype) != 1 and get_tpu_version() >= 6:
             int_ty = jnp.int16
+        processed_q_len_int = processed_q_len.astype(int_ty)
+        processed_kv_len_int = processed_kv_len.astype(int_ty)
+        effective_kv_len_int = effective_kv_len.astype(int_ty)
+        q_span = processed_q_len_int + (lax.broadcasted_iota(
+            jnp.int32, s.shape, 0) // num_q_heads_per_kv_head).astype(int_ty)
+        k_span = processed_kv_len_int + lax.broadcasted_iota(
+            int_ty, s.shape, 1)
+        v_span = processed_kv_len_int + lax.broadcasted_iota(
+            int_ty, v.shape, 0)
 
-        processed_kv_len = processed_kv_len.astype(int_ty)
-        effective_kv_len = effective_kv_len.astype(int_ty)
-        q_span = (processed_q_len +
-                  lax.broadcasted_iota(jnp.int32, s.shape, 0) //
-                  num_q_heads_per_kv_head).astype(int_ty)
-        k_span = processed_kv_len + lax.broadcasted_iota(int_ty, s.shape, 1)
-        v_span = processed_kv_len + lax.broadcasted_iota(int_ty, v.shape, 0)
-        v = jnp.where(v_span < effective_kv_len, v, 0.0)
-        mask = jnp.logical_and(q_span < effective_kv_len, k_span
-                               < effective_kv_len)
-        mask = jnp.logical_and(mask, q_span >= k_span)
+        mask = None
+        if use_causal_mask:
+            assert not skip_kv_mask
+            mask = mask_and(mask, q_span >= k_span)
+
+        if not skip_kv_mask:
+            mask = mask_and(mask, k_span < effective_kv_len_int)
+            v = jnp.where(v_span < effective_kv_len_int, v, 0.0)
+
         if sliding_window is not None:
-            mask = jnp.logical_and(mask, q_span < k_span + sliding_window)
+            mask = mask_and(mask, q_span < k_span + sliding_window)
 
-        s = jnp.where(mask, s, mask_value)
+        if mask is not None:
+            s = jnp.where(mask, s, mask_value)
+
         s_rowmax = jnp.max(s, axis=1, keepdims=True)
         m_prev = m_ref[...]
         m_curr = jnp.maximum(m_prev, s_rowmax)
         m_ref[...] = m_curr
         p = jnp.exp(s - broadcast_minor(m_curr, s.shape))
 
-        p_rowsum = jnp.sum(p, axis=1, keepdims=True)
+        p_rowsum = jnp.sum(p, axis=1, keepdims=True, dtype=out_dtype)
         exp_m_diff = jnp.exp(m_prev - m_curr)
         l_prev = l_ref[...]
         l_ref[...] = exp_m_diff * l_prev + p_rowsum
@@ -495,7 +520,8 @@ def _ragged_paged_attention_kernel_loop(
                                     128)
         assert o_ref.shape == (actual_bq_csz * num_q_heads_per_kv_head,
                                head_dim)
-        pv = jnp.matmul(p, v, preferred_element_type=jnp.float32)
+        pv = jnp.matmul(p, v,
+                        preferred_element_type=jnp.float32).astype(out_dtype)
         if v_scale is not None:
             pv *= v_scale
         o_prev = o_ref[...]
@@ -754,14 +780,6 @@ def _ragged_paged_attention_kernel_loop(
                              update_sz,
                              wait=True)
 
-    def load_bq(bq_sem_idx, kv_head_idx, start, sz):
-        q_ref = (bq_x2_ref.bitcast(
-            jnp.uint32).at[bq_sem_idx, kv_head_idx].reshape(
-                bq_sz * num_q_heads_per_kv_head_per_packing, head_dim))
-        start *= num_q_heads_per_kv_head_per_packing
-        sz *= num_q_heads_per_kv_head_per_packing
-        return pltpu.bitcast(q_ref[pl.ds(start, sz)], q_dtype)
-
     def strided_load(ref, start, sz, step, *, dtype=None):
         assert get_dtype_packing(ref.dtype) == 1
         assert len(ref.shape) == 2
@@ -779,6 +797,31 @@ def _ragged_paged_attention_kernel_loop(
         if dtype is not None:
             vec = pltpu.bitcast(vec, dtype)
         return vec
+
+    def strided_store(ref, start, sz, step, val):
+        assert get_dtype_packing(ref.dtype) == 1
+        assert ref.dtype == val.dtype
+        assert ref.shape == val.shape
+        assert len(ref.shape) == 2
+        r, l = ref.shape  # noqa
+        assert l % 128 == 0
+        folds = l // 128
+        ref = ref.reshape(r * folds, 128)
+        start *= folds
+        sz *= folds
+        step *= folds
+        assert sz % step == 0
+        for i in range(folds):
+            ref[pl.ds(start + i, sz // step,
+                      step)] = val[:, i * 128:(i + 1) * 128]
+
+    def load_bq(bq_sem_idx, kv_head_idx, start, sz):
+        q_ref = (bq_x2_ref.bitcast(
+            jnp.uint32).at[bq_sem_idx, kv_head_idx].reshape(
+                bq_sz * num_q_heads_per_kv_head_per_packing, head_dim))
+        start *= num_q_heads_per_kv_head_per_packing
+        sz *= num_q_heads_per_kv_head_per_packing
+        return strided_load(q_ref, start, sz, 1, dtype=q_dtype)
 
     def load_bkv(bkv_sem_idx, kv_head_idx, start, sz):
         start *= bkv_stride
@@ -817,6 +860,11 @@ def _ragged_paged_attention_kernel_loop(
         return jnp.concatenate(
             [src for _ in range(target_minor // src.shape[-1])],
             axis=-1)[..., :shape[-1]]
+
+    def mask_and(mask, new_mask):
+        if mask is None:
+            return new_mask
+        return jnp.logical_and(mask, new_mask)
 
     def process(static_q_len=None):
         if static_q_len is None:
@@ -857,7 +905,8 @@ def _ragged_paged_attention_kernel_loop(
                                       next_bkv_idx)
             return next_seq_idx, next_bq_idx, next_bkv_idx, next_bkv_sem_idx
 
-        def compute_with_bq(bq_idx, _):
+        @pl.loop(0, num_bq, unroll=False)
+        def compute_with_bq(bq_idx):
             # Re-initialize l, m, acc to 0 before bkv loop.
             l_ref[...] = jnp.full_like(l_ref, 0.0)
             m_ref[...] = jnp.full_like(m_ref, -jnp.inf)
@@ -873,8 +922,11 @@ def _ragged_paged_attention_kernel_loop(
                 # Recalculate the start_bkv_idx based on the processed_q_len.
                 start_bkv_idx = (
                     jnp.maximum(processed_q_len - sliding_window, 0) // bkv_sz)
-            effective_kv_len = jnp.minimum(kv_len,
-                                           processed_q_len + actual_bq_sz)
+            if use_causal_mask:
+                effective_kv_len = jnp.minimum(kv_len,
+                                               processed_q_len + actual_bq_sz)
+            else:
+                effective_kv_len = kv_len
             end_bkv_idx = cdiv(effective_kv_len, bkv_sz)
 
             # Prefetch next bq
@@ -883,7 +935,8 @@ def _ragged_paged_attention_kernel_loop(
                 sem_ids_ref[0] = next_bq_sem_idx
                 start_fetch_bq(next_seq_idx, next_bq_idx, next_bq_sem_idx)
 
-            def compute_with_bkv(bkv_idx, _):
+            @pl.loop(start_bkv_idx, end_bkv_idx, unroll=False)
+            def compute_with_bkv(bkv_idx):
                 assert bkv_sz % kv_packing == 0
 
                 # Get next bkv ids.
@@ -931,7 +984,8 @@ def _ragged_paged_attention_kernel_loop(
 
                 num_loops = cdiv(effective_bkv_sz, bkv_csz)
 
-                def attention_loop(idx, _):
+                @pl.loop(0, num_loops, unroll=False)
+                def attention_loop(idx):
                     prev_lm_slice = None
                     prev_p = None
                     prev_v = None
@@ -990,25 +1044,12 @@ def _ragged_paged_attention_kernel_loop(
                         acc_ref.at[*prev_lm_slice],
                     )
 
-                lax.fori_loop(
-                    0,
-                    num_loops,
-                    attention_loop,
-                    None,
-                    unroll=False,
-                )
-
-            lax.fori_loop(start_bkv_idx,
-                          end_bkv_idx,
-                          compute_with_bkv,
-                          None,
-                          unroll=False)
-
             # Load acc and calculate final output.
             acc = acc_ref[...]
             l = broadcast_minor(l_ref[...], acc.shape)  # noqa
-            out = (lax.div(acc, l) if q_dtype == jnp.float32 else
-                   (acc * pl.reciprocal(l, approx=True)).astype(q_dtype))
+            out = (acc * pl.reciprocal(l, approx=True) if
+                   (l.dtype == jnp.float32 and out_dtype != jnp.float32) else
+                   lax.div(acc, l)).astype(out_dtype)
 
             # Wait for previous bo to be fully sent before storing new bo.
             bo_sem_idx = sem_ids_ref[2]
@@ -1016,16 +1057,16 @@ def _ragged_paged_attention_kernel_loop(
             wait_send_bo(bo_sem_idx)
 
             # Store output from acc to bo.
-            bo_x2_ref.at[bo_sem_idx].bitcast(jnp.int32).reshape(
-                actual_num_kv_heads,
-                bq_sz * num_q_heads_per_kv_head_per_packing,
+            out_ref = (bo_x2_ref.at[bo_sem_idx].bitcast(jnp.int32).reshape(
+                actual_num_kv_heads * bq_sz *
+                num_q_heads_per_kv_head_per_packing,
                 head_dim,
-            )[...] = pltpu.bitcast(out, jnp.int32)
+            ))
+            out = pltpu.bitcast(out, out_ref.dtype).reshape(out_ref.shape)
+            strided_store(out_ref, 0, out_ref.shape[0], 1, out)
 
             # Send cur bo
             start_send_bo(seq_idx, bq_idx, bo_sem_idx)
-
-        lax.fori_loop(0, num_bq, compute_with_bq, None, unroll=False)
 
     ### ------- Kernel start ------- ###
 
@@ -1172,10 +1213,13 @@ def dynamic_validate_inputs(
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
     *,
+    use_causal_mask: bool = True,
+    skip_kv_mask: bool = False,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
-    mask_value: float | None = DEFAULT_MASK_VALUE,
+    out_dtype: Any = None,
+    mask_value: float | None = None,
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
@@ -1186,8 +1230,6 @@ def dynamic_validate_inputs(
     p_block_sizes: tuple[int, int, int, int] | None = None,
     m_block_sizes: tuple[int, int, int, int] | None = None,
     vmem_limit_bytes: int | None = None,
-    # Debug params.
-    debug_mode: bool = False,
 ):
     q, k, v = queries, keys, values
     static_validate_inputs(
@@ -1199,9 +1241,12 @@ def dynamic_validate_inputs(
         page_indices,
         cu_q_lens,
         distribution,
+        use_causal_mask=use_causal_mask,
+        skip_kv_mask=skip_kv_mask,
         sm_scale=sm_scale,
         sliding_window=sliding_window,
         soft_cap=soft_cap,
+        out_dtype=out_dtype,
         mask_value=mask_value,
         q_scale=q_scale,
         k_scale=k_scale,
@@ -1211,7 +1256,6 @@ def dynamic_validate_inputs(
         p_block_sizes=p_block_sizes,
         m_block_sizes=m_block_sizes,
         vmem_limit_bytes=vmem_limit_bytes,
-        debug_mode=debug_mode,
     )
     max_num_tokens = q.shape[0]
     total_num_pages = kv_cache.shape[0]
@@ -1264,10 +1308,13 @@ def static_validate_inputs(
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
     *,
+    use_causal_mask: bool = True,
+    skip_kv_mask: bool = False,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
-    mask_value: float | None = DEFAULT_MASK_VALUE,
+    out_dtype: Any = None,
+    mask_value: float | None = None,
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
@@ -1278,10 +1325,12 @@ def static_validate_inputs(
     p_block_sizes: tuple[int, int, int, int] | None = None,
     m_block_sizes: tuple[int, int, int, int] | None = None,
     vmem_limit_bytes: int | None = None,
-    # Debug params.
-    debug_mode: bool = False,
 ):
     """Validate inputs to the RPA kernel statically."""
+    if use_causal_mask:
+        if skip_kv_mask:
+            raise ValueError("Can not skip kv mask when using causal mask.")
+
     q, k, v = queries, keys, values
     if not (len(q.shape) == len(k.shape) == len(v.shape) == 3):
         raise ValueError(
@@ -1415,10 +1464,10 @@ def static_validate_inputs(
     # No constraints for the following inputs.
     del sm_scale
     del mask_value
+    del out_dtype
     del q_scale
     del k_scale
     del v_scale
-    del debug_mode
 
 
 def get_default_block_sizes(
@@ -1436,8 +1485,8 @@ def get_default_block_sizes(
 ):
     """Get (bq, bkv_sz, bq_csz, bkv_csz) by some heuristic formulas.
 
-  Note the default block sizes are not necessarily optimal.
-  """
+    Note the default block sizes are not necessarily optimal.
+    """
     tpu_version = get_tpu_version()
 
     kv_packing = get_dtype_packing(kv_dtype)
@@ -1487,11 +1536,15 @@ def get_default_block_sizes(
     }
 
 
-@jax.jit(
+@functools.partial(
+    jax.jit,
     static_argnames=(
+        "use_causal_mask",
+        "skip_kv_mask",
         "sm_scale",
         "sliding_window",
         "soft_cap",
+        "out_dtype",
         "mask_value",
         "q_scale",
         "k_scale",
@@ -1502,6 +1555,8 @@ def get_default_block_sizes(
         "m_block_sizes",
         "vmem_limit_bytes",
         "debug_mode",
+        "disable_bounds_checks",
+        "disable_semaphore_checks",
     ),
     donate_argnames=("queries", "keys", "values", "kv_cache"),
 )
@@ -1518,10 +1573,13 @@ def ragged_paged_attention(
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
     *,
+    use_causal_mask: bool = True,
+    skip_kv_mask: bool = False,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
-    mask_value: float | None = DEFAULT_MASK_VALUE,
+    out_dtype: Any = None,
+    mask_value: float | None = None,
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
@@ -1539,6 +1597,8 @@ def ragged_paged_attention(
     vmem_limit_bytes: int | None = None,
     # Debug params.
     debug_mode: bool = False,
+    disable_bounds_checks: bool = True,
+    disable_semaphore_checks: bool = True,
 ):
     """Ragged paged attention that supports mixed prefill and decode.
 
@@ -1554,9 +1614,15 @@ def ragged_paged_attention(
     distribution: (i, j, k) represents that sequences[0:i] are decode-only,
       sequences[i:j] are chunked-prefill-only, and sequences[j:k] are mixed. The
       k is also the total number of sequences.
+    use_causal_mask: if true, use causal mask.
+    skip_kv_mask: only set to true if use_causal_mask=False and each dynamic
+      kv_len % bkv_csz == 0. Set to true can improve performance.
     sm_scale: the softmax scale which will be applied to the Q@K^T.
     sliding_window: the sliding window size for the attention.
     soft_cap: the logit soft cap for the attention.
+    out_dtype: the dtype of the output and the accumulator for matmul. Set
+      lower for better performance, set higher for better accuracy. If None, it
+      uses q.dtype.
     mask_value: mask value for causal mask.
     q_scale: the scale for the query.
     k_scale: the scale for the key.
@@ -1568,12 +1634,27 @@ def ragged_paged_attention(
     vmem_limit_bytes: the vmem limit for the pallas kernel.
     debug_mode: if true, RPA does not issue any DMAs or run flash attention but
       print debug info. Need to compile with `--xla_tpu_enable_log_recorder`.
+    disable_bounds_checks: if true, disable bounds checks.
+    disable_semaphore_checks: if true, disable semaphore checks.
 
   Returns:
     The output of the attention.
   """
     q, k, v = queries, keys, values
     tpu_version = get_tpu_version()
+
+    if out_dtype is None:
+        out_dtype = jnp.float32 if q.dtype == jnp.float32 else jnp.bfloat16
+
+    if mask_value is None:
+        # We do not set to -inf directly because (-inf) - (-inf) is nan.
+        mask_value = -float(jnp.finfo(out_dtype).max)
+
+    if vmem_limit_bytes is None:
+        # TODO(jevinjiang, jacobplatin): change this to use
+        # `get_vmem_estimate_bytes` when VREG spilling is fixed.
+        vmem_limit_bytes = DEFAULT_VMEM_LIMIT_BYTES
+
     static_validate_inputs(
         q,
         k,
@@ -1583,9 +1664,12 @@ def ragged_paged_attention(
         page_indices,
         cu_q_lens,
         distribution,
+        use_causal_mask=use_causal_mask,
+        skip_kv_mask=skip_kv_mask,
         sm_scale=sm_scale,
         sliding_window=sliding_window,
         soft_cap=soft_cap,
+        out_dtype=out_dtype,
         mask_value=mask_value,
         q_scale=q_scale,
         k_scale=k_scale,
@@ -1670,13 +1754,13 @@ def ragged_paged_attention(
 
         l_scratch = pltpu.VMEM(
             (actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128),
-            jnp.float32,
+            out_dtype,
         )
         m_scratch = l_scratch
 
         acc_scratch = pltpu.VMEM(
             (actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, head_dim),
-            jnp.float32,
+            out_dtype,
         )
 
         scratch_shapes = [
@@ -1708,6 +1792,8 @@ def ragged_paged_attention(
         kernel = pl.pallas_call(
             functools.partial(
                 _ragged_paged_attention_kernel,
+                use_causal_mask=use_causal_mask,
+                skip_kv_mask=skip_kv_mask,
                 sm_scale=sm_scale,
                 sliding_window=sliding_window,
                 soft_cap=soft_cap,
@@ -1738,7 +1824,9 @@ def ragged_paged_attention(
                 # Paged attention invokes multiple small DMAs for each pages
                 # instead of a single large DMA. Therefore, the overhead of bounds
                 # checking becomes too significant so we disable it.
-                disable_bounds_checks=True,
+                disable_bounds_checks=disable_bounds_checks,
+                # Only set to true if you gurantee there is no race condition.
+                disable_semaphore_checks=disable_semaphore_checks,
             ),
             out_shape=[
                 pltpu.HBM(shape=q.shape, dtype=q.dtype),
