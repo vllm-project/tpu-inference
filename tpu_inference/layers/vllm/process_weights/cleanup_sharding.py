@@ -26,6 +26,10 @@ from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA)
 from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
+from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead, VocabParallelEmbedding)
+from tpu_inference.layers.vllm.mla_attention import VllmTPUMLAAttention, VllmTPUMultiHeadLatentAttentionWrapper
 
 from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.logger import init_logger
@@ -167,6 +171,17 @@ def _shard_row_parallel_linear_lora(layer: RowParallelLinearWithLoRA,
 
 
 # NOTE: Ordering is important as it calls first matched type of a given module
+
+
+
+def _shard_fused_moe(layer, mesh: Mesh) -> None:
+    if hasattr(layer, "quant_method") and hasattr(layer.quant_method, "process_weights_after_loading"):
+        layer.quant_method.process_weights_after_loading(layer)
+
+def _shard_mla_attention(layer, mesh: Mesh) -> None:
+    if hasattr(layer, "process_weights_after_loading"):
+        layer.process_weights_after_loading(torch.bfloat16)
+
 MODULE_TYPE_TO_SHARDING_FUNC = [
     # Shard LoRA layers
     (ColumnParallelLinearWithLoRA, _shard_column_linear_lora),
@@ -176,6 +191,10 @@ MODULE_TYPE_TO_SHARDING_FUNC = [
     (MergedQKVParallelLinearWithLoRA, _shard_merged_qkv_parallel_linear_lora),
     (RowParallelLinearWithLoRA, _shard_row_parallel_linear_lora),
     (ReplicatedLinearWithLoRA, _shard_base_linear_lora_replicated),
+    (FusedMoE, _shard_fused_moe),
+    (SharedFusedMoE, _shard_fused_moe),
+    (VllmTPUMLAAttention, _shard_mla_attention),
+    (VllmTPUMultiHeadLatentAttentionWrapper, _shard_mla_attention),
 ]
 
 
