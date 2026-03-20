@@ -22,7 +22,7 @@ fi
 
 RECORD_ID="$1"
 RESULT_FILE="artifacts/${RECORD_ID}.result"
-printf "[INFO] LOG_FOLDER=%s\n" "$LOG_FOLDER"
+printf "[INFO] Pre-check LOG_FOLDER=%s\n" "$LOG_FOLDER"
 LOG_FOLDER=${LOG_FOLDER:-"artifacts/temp_logs"}
 # Temp write to another bucket
 # REMOTE_LOG_ROOT="gs://$GCS_BUCKET/job_logs/$RECORD_ID/"
@@ -71,7 +71,7 @@ REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
   else
     # Performance run logic
     throughput=$(grep -i "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
-    echo "throughput for $TEST_NAME at $VLLM_HASH: $throughput"
+    echo "throughput: $throughput"
 
     output_token_throughput=$(grep -i "Output token throughput (tok/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
     total_token_throughput=$(grep -i "Total Token throughput (tok/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
