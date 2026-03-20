@@ -810,9 +810,14 @@ def load_nnx_param_from_reshaped_torch(
         reshape_dims: Optional tuple specifying the shape to reshape the torch weight to before permutation. If None, no reshaping is applied.
         permute_dims: Optional tuple specifying the permutation of dimensions. If None, no-op for 1D tensors and transpose for 2D tensors is applied.
     """
-    jax_weight = jax_array_from_reshaped_torch(torch_weight,
-                                               reshape_dims=reshape_dims,
-                                               permute_dims=permute_dims)
+    try:
+        jax_weight = jax_array_from_reshaped_torch(torch_weight,
+                                                   reshape_dims=reshape_dims,
+                                                   permute_dims=permute_dims)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to convert torch weight for '{param_name}' ({torch_weight.shape}) to JAX array, with reshape_dims={reshape_dims} and permute_dims={permute_dims}"
+        ) from e
 
     assert tuple(jax_weight.shape) == jax_param.value.shape, \
         f"Shape mismatch when loading weight '{param_name}': torch {jax_weight.shape} vs jax {jax_param.value.shape}"

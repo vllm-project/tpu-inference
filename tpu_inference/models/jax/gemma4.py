@@ -27,10 +27,13 @@ from tpu_inference import utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization import quantize_kv
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
+from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
@@ -38,8 +41,9 @@ from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
-from tpu_inference.models.jax.utils.weight_utils import (LoadableWithIterator,
-                                                         StandardWeightLoader)
+from tpu_inference.models.jax.utils.weight_utils import (
+    LoadableWithIterator, StandardWeightLoader,
+    load_nnx_param_from_reshaped_torch)
 
 logger = init_logger(__name__)
 
@@ -98,6 +102,178 @@ class Gemma4MLP(JaxModule):
         return result
 
 
+class Gemma4Router(JaxModule):
+    """Router for Gemma4 MoE that preprocesses input before projection.
+
+    Applies RMSNorm (no learned weight), root_size scaling
+    (hidden_size^{-0.5}), then a learned per-dimension scale before
+    projecting to expert logits.
+
+    This preprocessing is applied ONLY to the router's input, not to
+    the expert MLPs' input.
+    """
+
+    def __init__(
+        self,
+        config: Gemma4TextConfig,
+        dtype,
+        rngs: nnx.Rngs,
+        quant_config,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.hidden_size: int = config.hidden_size
+
+        # RMSNorm without learned weight — pure normalization only
+        self.norm = JaxRmsNorm(self.hidden_size,
+                               epsilon=config.rms_norm_eps,
+                               use_scale=False,
+                               rngs=rngs,
+                               quant_config=quant_config,
+                               prefix=prefix + ".norm")
+        # Per-dimension learned scale, applied after norm + root_size
+        self.scale = nnx.Param(init_fn(rngs.params(), (self.hidden_size, ),
+                                       dtype),
+                               eager_sharding=False)
+        # Constant 1/sqrt(hidden_size) scaling factor
+        self.root_size = self.hidden_size**-0.5
+        # Project to expert logits; replicated across TP for consistent routing
+        self.proj = JaxLinear(
+            self.hidden_size,
+            config.num_experts,
+            rngs=rngs,
+            use_bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.proj",
+        )
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        """Returns raw router logits [T, E]."""
+        x = self.norm(x)
+        x = x * self.root_size
+        x = x * self.scale.value.astype(x.dtype)
+        router_logits = self.proj(x)
+        return router_logits
+
+
+class Gemma4MoE(JaxMoE):
+    """Mixture of Experts for Gemma4 using FusedMoE.
+
+    Wraps FusedMoE with custom routing. The router projection is
+    external (Gemma4Router) — this class only handles expert dispatch.
+
+    Gemma4 routing: softmax over ALL experts → top-k → renormalize.
+    per_expert_scale is folded into routing weights for mathematical
+    correctness with FusedMoE's fused kernel.
+    """
+
+    def __init__(
+        self,
+        config,
+        dtype,
+        mesh,
+        rngs: nnx.Rngs,
+        quant_config,
+        prefix: str = "",
+    ) -> None:
+        # Per-expert output scale folded into routing weights so that
+        # FusedMoE's fused kernel computes: Σ_e (expert_e * w_e * scale_e)
+        kernel_key = rngs.params()
+        self.per_expert_scale = nnx.Param(init_fn(kernel_key,
+                                                  (config.num_experts, ),
+                                                  dtype),
+                                          eager_sharding=False)
+
+        noop_router = JaxModule()
+        noop_router.num_experts_per_tok = config.num_experts
+
+        # FusedMoE experts with custom Gemma4 routing
+        JaxMoE.__init__(
+            self,
+            dtype=dtype,
+            num_local_experts=config.num_experts,
+            hidden_size=config.hidden_size,
+            intermediate_size_moe=config.expert_intermediate_size,
+            hidden_act="gelu",
+            rngs=rngs,
+            router=noop_router,
+            mesh=mesh,
+            activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
+            activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
+            edf_sharding=(None, None, None),
+            efd_sharding=(None, None, None),
+            apply_expert_weight_before_computation=False,
+            expert_axis_name=None,
+            # Disable EP for MVP, can enable later if needed
+            # TODO: Enable EP
+            num_expert_parallelism=1,
+            moe_backend=MoEBackend.GMM_TP,
+            scoring_func=
+            "softmax",  # vLLM implementation has a custom routing function, here we just use "softmax" for MVP
+            quant_config=quant_config,
+            prefix=prefix + ".experts")
+
+    def __call__(self, x_TD: jax.Array, router_logits: jax.Array):
+        """Performs the forward pass of the MoE layer.
+
+        Args:
+            x_TD: Input array of shape (sequence_length, d_model).
+            router_logits: Router logits.
+
+        Returns:
+            Output array of shape (sequence_length, d_model) after passing through MoE.
+        """
+        if self.quant_method is not None:
+            return self.quant_method.apply_jax(self,
+                                               x_TD,
+                                               router_logits=router_logits)
+        raise ValueError("Expected quant_method to be set!")
+
+    def load_weights(self, weights: Iterable):
+        """Load weights for Gemma4 MoE layer.
+        
+        Unlike other MoE, Gemma4 didn't provide per-expert weights, but already fuse projection weight in the checkpoint.
+        """
+        loaded = set()
+        for name, tensor in weights:
+            if name.endswith("down_proj"):
+                load_nnx_param_from_reshaped_torch(self.kernel_down_proj_EFD,
+                                                   tensor,
+                                                   param_name=name)
+                loaded.add("kernel_down_proj_EFD")
+                self.kernel_down_proj_EFD._weights_to_load.clear()
+                # Other MoE models store expert weights in shape (D, F) and permute in *FusedMoEMethod.process_weights_after_loading.
+                # For compatibility, we permute here then expect another permute in process_weights_after_loading.
+                self.kernel_down_proj_EFD.value = jnp.swapaxes(
+                    self.kernel_down_proj_EFD.value, 1, 2)
+            elif name.endswith("up_proj"):
+                load_nnx_param_from_reshaped_torch(self.kernel_up_proj_EDF,
+                                                   tensor,
+                                                   param_name=name)
+                loaded.add("kernel_up_proj_EDF")
+                self.kernel_up_proj_EDF._weights_to_load.clear()
+                # Other MoE models store expert weights in shape (F, D) and permute in *FusedMoEMethod.process_weights_after_loading.
+                # For compatibility, we permute here then expect another permute in process_weights_after_loading.
+                self.kernel_up_proj_EDF.value = jnp.swapaxes(
+                    self.kernel_up_proj_EDF.value, 1, 2)
+            elif name.endswith("gate_proj"):
+                load_nnx_param_from_reshaped_torch(self.kernel_gating_EDF,
+                                                   tensor,
+                                                   param_name=name)
+                loaded.add("kernel_gating_EDF")
+                self.kernel_gating_EDF._weights_to_load.clear()
+                # Other MoE models store expert weights in shape (F, D) and permute in *FusedMoEMethod.process_weights_after_loading.
+                # For compatibility, we permute here then expect another permute in process_weights_after_loading.
+                self.kernel_gating_EDF.value = jnp.swapaxes(
+                    self.kernel_gating_EDF.value, 1, 2)
+            elif name.endswith("per_expert_scale"):
+                load_nnx_param_from_reshaped_torch(self.per_expert_scale,
+                                                   tensor,
+                                                   param_name=name)
+                loaded.add("per_expert_scale")
+        return loaded
+
+
 class Gemma4Attention(JaxModule):
 
     def __init__(self,
@@ -153,20 +329,20 @@ class Gemma4Attention(JaxModule):
         # Gemma4: use different num_kv_heads and head_dim in GLOBAL/LOCAL layers
         if not self.is_sliding:
             # GLOBAL layers
-            self.num_kv_heads = config.num_global_key_value_heads
             self.head_dim_original = config.global_head_dim
         else:
             # LOCAL layers
-            self.num_kv_heads = config.num_key_value_heads
             self.head_dim_original = config.head_dim
 
-        self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
+        # Determine if this full-attention layer uses k_eq_v
+        use_k_eq_v = ((not self.is_sliding)
+                      and getattr(config, "attention_k_eq_v", False))
+        if use_k_eq_v:
+            self.num_kv_heads = config.num_global_key_value_heads
+        else:
+            self.num_kv_heads = config.num_key_value_heads
 
-        sharding_size = mesh.shape["model"]
-        self.num_heads = utils.get_padded_num_heads(self.num_heads,
-                                                    sharding_size)
-        self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads,
-                                                       sharding_size)
+        self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
 
         self.mesh = mesh
 
@@ -202,8 +378,8 @@ class Gemma4Attention(JaxModule):
                             self.head_dim) if config.attention_bias else None,
                 param_dtype=dtype,
                 kernel_init=nnx.with_partitioning(init_fn,
-                                                  (None, "model", None)),
-                bias_init=nnx.with_partitioning(init_fn, ("model", None))
+                                                  (None, None, "model")),
+                bias_init=nnx.with_partitioning(init_fn, (None, "model"))
                 if config.attention_bias else None,
                 rngs=rng,
                 quant_config=quant_config,
@@ -219,8 +395,8 @@ class Gemma4Attention(JaxModule):
                             self.head_dim) if config.attention_bias else None,
                 param_dtype=dtype,
                 kernel_init=nnx.with_partitioning(init_fn,
-                                                  (None, "model", None)),
-                bias_init=nnx.with_partitioning(init_fn, ("model", None))
+                                                  (None, None, "model")),
+                bias_init=nnx.with_partitioning(init_fn, (None, "model"))
                 if config.attention_bias else None,
                 rngs=rng,
                 quant_config=quant_config,
@@ -233,8 +409,8 @@ class Gemma4Attention(JaxModule):
                             self.head_dim) if config.attention_bias else None,
                 param_dtype=dtype,
                 kernel_init=nnx.with_partitioning(init_fn,
-                                                  (None, "model", None)),
-                bias_init=nnx.with_partitioning(init_fn, ("model", None))
+                                                  (None, None, "model")),
+                bias_init=nnx.with_partitioning(init_fn, (None, "model"))
                 if config.attention_bias else None,
                 rngs=rng,
                 quant_config=quant_config,
@@ -266,7 +442,7 @@ class Gemma4Attention(JaxModule):
             (self.num_heads, self.head_dim, self.hidden_size),
             bias_shape=(self.hidden_size, ) if config.attention_bias else None,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
             bias_init=nnx.with_partitioning(init_fn, (None, ))
             if config.attention_bias else None,
             rngs=rng,
@@ -429,12 +605,19 @@ class Gemma4DecoderLayer(JaxModule):
         # MoE (Mixture of Experts) — router + expert block parallel to MLP
         self.enable_moe_block = getattr(text_config, "enable_moe_block", False)
         if self.enable_moe_block:
-            from .gemma4_moe import Gemma4MoeSparseMoeBlock
-            self.moe = Gemma4MoeSparseMoeBlock(model_config=config,
-                                               rng=rng,
-                                               mesh=mesh,
-                                               quant_config=quant_config,
-                                               prefix=prefix + ".moe")
+            self.router = Gemma4Router(
+                config=text_config,
+                dtype=dtype,
+                rngs=rng,
+                quant_config=quant_config,
+                prefix=prefix + ".router",
+            )
+            self.moe = Gemma4MoE(config=text_config,
+                                 dtype=dtype,
+                                 mesh=mesh,
+                                 rngs=rng,
+                                 quant_config=quant_config,
+                                 prefix=prefix + ".moe")
             self.post_feedforward_layernorm_1 = JaxRmsNorm(
                 text_config.hidden_size,
                 epsilon=text_config.rms_norm_eps,
@@ -502,9 +685,9 @@ class Gemma4DecoderLayer(JaxModule):
         else:
             # Dense MLP
             hidden_states = self.pre_feedforward_layernorm(residual)
-            mlp_output = self.mlp(hidden_states)
+            hidden_states = self.mlp(hidden_states)
 
-        mlp_output = self.post_feedforward_layernorm(mlp_output)
+        mlp_output = self.post_feedforward_layernorm(hidden_states)
         outputs = residual + mlp_output
 
         outputs = outputs * self.layer_scalar.value
