@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-03-20 12:43 AM UTC*
+*Last Updated: 2026-03-20 07:58 PM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -142,103 +142,103 @@ Below is the live status of our supported models, features, and kernels. Click o
   </thead>
   <tbody>
     <tr>
-      <td><strong>async scheduler</strong></td>
+      <td>async scheduler</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
     </tr>
     <tr>
-      <td><strong>Chunked Prefill</strong></td>
+      <td>Chunked Prefill</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
-      <td><strong>DCN-based P/D disaggregation</strong></td>
+      <td>DCN-based P/D disaggregation</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
-      <td><strong>hybrid kv cache</strong></td>
+      <td>hybrid kv cache</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
-      <td><strong>KV cache host offloading</strong></td>
+      <td>KV cache host offloading</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
-      <td><strong>LoRA_Torch</strong></td>
+      <td>LoRA_Torch</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
-      <td><strong>multi-host</strong></td>
+      <td>multi-host</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
-      <td><strong>Multimodal Inputs</strong></td>
+      <td>Multimodal Inputs</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
     </tr>
     <tr>
-      <td><strong>Out-of-tree model support</strong></td>
+      <td>Out-of-tree model support</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
-      <td><strong>Prefix Caching</strong></td>
+      <td>Prefix Caching</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
-      <td><strong>runai_model_streamer_loader</strong></td>
+      <td>runai_model_streamer_loader</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
-      <td><strong>sampling_params</strong></td>
+      <td>sampling_params</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
-      <td><strong>Single Program Multi Data</strong></td>
+      <td>Single Program Multi Data</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
-      <td><strong>Single-Host-P-D-disaggregation</strong></td>
+      <td>Single-Host-P-D-disaggregation</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
-      <td><strong>Speculative Decoding: Eagle3</strong></td>
+      <td>Speculative Decoding: Eagle3</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
-      <td><strong>Speculative Decoding: Ngram</strong></td>
+      <td>Speculative Decoding: Ngram</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
-      <td><strong>structured_decoding</strong></td>
+      <td>structured_decoding</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -264,32 +264,32 @@ Below is the live status of our supported models, features, and kernels. Click o
   </thead>
   <tbody>
     <tr>
-      <td><strong>CP</strong></td>
+      <td>CP</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
-      <td><strong>DP</strong></td>
+      <td>DP</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
-      <td><strong>EP</strong></td>
+      <td>EP</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
-      <td><strong>PP</strong></td>
+      <td>PP</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
-      <td><span style="white-space: nowrap;"><strong>SP</strong> (<a href="https://github.com/vllm-project/tpu-inference/issues/1749">vote to prioritize</a>)</span></td>
+      <td><span style="white-space: nowrap;">SP (<a href="https://github.com/vllm-project/tpu-inference/issues/1749">vote to prioritize</a>)</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
     </tr>
     <tr>
-      <td><strong>TP</strong></td>
+      <td>TP</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
     </tr>

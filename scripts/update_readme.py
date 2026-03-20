@@ -163,7 +163,7 @@ def generate_html_feature_table(headers, data):
 
     for row in data:
         html.append("    <tr>")
-        html.append(f"      <td><strong>{row[0]}</strong></td>")  # Feature name, bolded for style
+        html.append(f"      <td>{row[0]}</td>")  # Feature name, bolded for style
         
         merged_flax = _merge_hw_status(row[1], row[4])
         merged_pytorch = _merge_hw_status(row[2], row[5])
@@ -348,9 +348,9 @@ def generate_html_parallelism_table(headers, data):
         html.append("    <tr>")
         feature_name = row[0]
         if feature_name.strip() == "SP":
-            feature_html = '<span style="white-space: nowrap;"><strong>SP</strong> (<a href="https://github.com/vllm-project/tpu-inference/issues/1749">vote to prioritize</a>)</span>'
+            feature_html = '<span style="white-space: nowrap;">SP (<a href="https://github.com/vllm-project/tpu-inference/issues/1749">vote to prioritize</a>)</span>'
         else:
-            feature_html = f"<strong>{feature_name}</strong>"
+            feature_html = f"{feature_name}"
         
         html.append(f"      <td>{feature_html}</td>")
         
