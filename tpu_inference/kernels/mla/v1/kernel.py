@@ -1044,7 +1044,12 @@ def prepare_kv_inputs(
 ):
     max_num_tokens, actual_head_dim = kv.shape
     kv_packing = get_dtype_packing(kv.dtype)
-    assert max_num_tokens % kv_packing == 0
+    
+    pad_len = (kv_packing - (max_num_tokens % kv_packing)) % kv_packing
+    if pad_len > 0:
+        kv = jnp.pad(kv, ((0, pad_len), (0, 0)), constant_values=0)
+        max_num_tokens += pad_len
+        
     head_dim = align_to(actual_head_dim, 128)
 
     kv = kv.reshape(max_num_tokens // kv_packing, kv_packing, actual_head_dim)
