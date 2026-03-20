@@ -28,6 +28,33 @@ export RECORD_ID
 fi
 echo "Record ID: $RECORD_ID"
 
+# shellcheck disable=SC2317
+function defer_cleanup_and_report() {
+  # Capture the exit code of the last command executed before the trap was triggered.
+  local exit_code=$?
+  echo "--- Running defer (cleanup and report)"
+  
+  # Attempt to report the benchmark results to the database.
+  # If the reporting script fails (returns non-zero), we log an error.
+  if ! .buildkite/benchmark/scripts/report_result.sh "$RECORD_ID"; then
+    echo "Error: report_result.sh failed!"
+    
+    # If the main job was successful (exit_code 0) but reporting failed,
+    # we override the exit code to 1 so the Buildkite job is marked as failed.
+    if [ "$exit_code" -eq 0 ]; then
+      exit_code=1
+    fi
+  fi
+  
+  # Best-effort cleanup of Docker resources.
+  # We use '|| true' to ensure that a cleanup failure doesn't overwrite our final exit code.
+  .buildkite/benchmark/scripts/cleanup_docker.sh || true
+  
+  # Exit with the final determined status code.
+  exit "$exit_code"
+}
+trap defer_cleanup_and_report EXIT
+
 echo "--- Verifying Submodule Commit"
 git submodule status
 
@@ -107,7 +134,7 @@ if [ "$TRY_COUNT" == "null" ] || [ -z "$TRY_COUNT" ]; then
       ExpectedETEL, NumPrompts, ModelTag, PrefixLen, ExtraEnvs,
       AdditionalConfig, ExtraArgs, TryCount
     ) VALUES (
-      '$RECORD_ID', 'RUNNING', PENDING_COMMIT_TIMESTAMP(), PENDING_COMMIT_TIMESTAMP(), '$USER', '$JOB_REFERENCE', '${BUILDKITE_AGENT_NAME:-}',
+      '$RECORD_ID', 'RUNNING', PENDING_COMMIT_TIMESTAMP(), PENDING_COMMIT_TIMESTAMP(), '${USER:-buildkite-agent}', '$JOB_REFERENCE', '${BUILDKITE_AGENT_NAME:-}',
       '$DEVICE', '$MODEL', '$RUN_TYPE', '$CODE_HASH',
       $MAX_NUM_SEQS,
       $MAX_NUM_BATCHED_TOKENS,
@@ -140,8 +167,20 @@ fi
 
 echo "--- Preparing Config Environment"
 mkdir -p artifacts
+
 # We dump all current environment variables so docker_run_bm.sh can use them
 env > "artifacts/${RECORD_ID}.env"
+
+# Inject static configurations required by docker_run_bm.sh that are missing from env
+cat <<EOF >> "artifacts/${RECORD_ID}.env"
+TEST_NAME=static
+CONTAINER_NAME=vllm-tpu
+LOCAL_HF_HOME="/mnt/disks/persist/models"
+DOCKER_HF_HOME="/tmp/hf_home"
+IMAGE_TAG="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPO}/vllm-tpu:${CODE_HASH}"
+EOF
+
+gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 
 echo "--- Cleanup Docker images and containers"
 # shellcheck disable=SC1091
@@ -154,11 +193,5 @@ BM_JOB_STATUS=$EXIT_SUCCESS
   echo "Error running benchmark job in docker."
   BM_JOB_STATUS=$EXIT_FAILURE
 }
-
-echo "--- Reporting result"
-.buildkite/benchmark/scripts/report_result.sh "$RECORD_ID"
-
-echo "--- Cleanup docker"
-.buildkite/benchmark/scripts/cleanup_docker.sh
 
 exit $BM_JOB_STATUS
