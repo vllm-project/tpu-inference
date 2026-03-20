@@ -114,13 +114,17 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                 weight, weight_scale = quantize_tensor(jnp.float8_e4m3fn,
                                                        weight, None)
             else:
-                if len(weight_scale.shape) == 2:
-                    if self.weight_block_size is not None:
-                        is_block = True
-                        block_m = self.weight_block_size[0]
-                        weight_scale = jnp.repeat(weight_scale, block_m, axis=0)
-                    else:
-                        weight_scale = jnp.squeeze(weight_scale, -1)
+                if self.weight_block_size is not None:
+                    is_block = True
+                    block_m = self.weight_block_size[0]
+                    # If weight_scale is already 3D (from vLLM loader), squeeze it first to match expected 2D shape (4, 32768)
+                    if len(weight_scale.shape) > 2:
+                        weight_scale = jnp.squeeze(weight_scale)
+                        
+                    # Repeat along the block dimension
+                    weight_scale = jnp.repeat(weight_scale, block_m, axis=0)
+                elif len(weight_scale.shape) == 2:
+                    weight_scale = jnp.squeeze(weight_scale, -1)
 
             processed_weights = process_linear_weights(
                 LinearWeights(
