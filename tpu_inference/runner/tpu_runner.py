@@ -133,9 +133,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         if self._logprobs_tensors is not None:
             # Use materialize to ensure logprobs are ready on host when we return async results
             self._model_runner_output.logprobs = _jax_logprobs_materialize(
-                self._logprobs_tensors, 
-                self.logits_indices_selector
-            )
+                self._logprobs_tensors, self.logits_indices_selector)
 
         return self._model_runner_output
 
@@ -202,21 +200,29 @@ def _substitute_placeholder_token(
     update_values = jnp.where(mask, new_token_values, original_values)
     return input_ids.at[token_in_tpu_cur_input_indices].set(update_values)
 
-def _jax_logprobs_copy_to_host_async(logprobs_tensors: LogprobsTensors) -> LogprobsTensors:
+
+def _jax_logprobs_copy_to_host_async(
+        logprobs_tensors: LogprobsTensors) -> LogprobsTensors:
     """Initiate non-blocking TPU-to-host copies for all logprobs arrays."""
     return LogprobsTensors(
-        logprob_token_ids=jax.copy_to_host_async(logprobs_tensors.logprob_token_ids),
+        logprob_token_ids=jax.copy_to_host_async(
+            logprobs_tensors.logprob_token_ids),
         logprobs=jax.copy_to_host_async(logprobs_tensors.logprobs),
-        selected_token_ranks=jax.copy_to_host_async(logprobs_tensors.selected_token_ranks),
+        selected_token_ranks=jax.copy_to_host_async(
+            logprobs_tensors.selected_token_ranks),
     )
 
-def _jax_logprobs_materialize(logprobs_tensors: LogprobsTensors,
-                             logits_indices_selector: Optional[List[int]] = None,
-                             cu_num_generated_tokens: Optional[Any] = None) -> LogprobsLists:
+
+def _jax_logprobs_materialize(
+        logprobs_tensors: LogprobsTensors,
+        logits_indices_selector: Optional[List[int]] = None,
+        cu_num_generated_tokens: Optional[Any] = None) -> LogprobsLists:
     """Materializes logprobs from JAX arrays into NumPy-backed LogprobsLists."""
-    log_token_ids = np.asarray(jax.device_get(logprobs_tensors.logprob_token_ids))
+    log_token_ids = np.asarray(
+        jax.device_get(logprobs_tensors.logprob_token_ids))
     logprobs_arr = np.asarray(jax.device_get(logprobs_tensors.logprobs))
-    selected_token_ranks = np.asarray(jax.device_get(logprobs_tensors.selected_token_ranks))
+    selected_token_ranks = np.asarray(
+        jax.device_get(logprobs_tensors.selected_token_ranks))
 
     if logits_indices_selector is not None:
         log_token_ids = log_token_ids[logits_indices_selector]
@@ -1017,8 +1023,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             )
             # Return async_model_runner_output
             async_model_runner_output = AsyncTPUModelRunnerOutput(
-                model_runner_output, next_tokens, num_reqs,
-                discard_sampled_tokens_req_indices, logits_indices_selector,
+                model_runner_output,
+                next_tokens,
+                num_reqs,
+                discard_sampled_tokens_req_indices,
+                logits_indices_selector,
                 logprobs_tensors=logprobs)
             return async_model_runner_output
 
