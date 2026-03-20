@@ -283,8 +283,8 @@ run_benchmark(){
   echo "$throughput $p99_e2el"
 }
 
-printf "[DEBUG] pwd=%s\n\nls $DOCKER_ARTIFACT_FOLDER=%s" "$(pwd)" "$(ls "$DOCKER_ARTIFACT_FOLDER")" || true
-printf "[DEBUG] ls $DOCKER_ARTIFACT_FOLDER/temp_logs=%s" "$(pwd)" "$(ls "$DOCKER_ARTIFACT_FOLDER"/temp_logs)" || true
+printf "[DEBUG] pwd=%s\n\nls $DOCKER_ARTIFACT_FOLDER=%s\n" "$(pwd)" "$(ls "$DOCKER_ARTIFACT_FOLDER")" || true
+printf "[DEBUG] ls $DOCKER_ARTIFACT_FOLDER/temp_logs=%s\n" "$(ls "$DOCKER_ARTIFACT_FOLDER"/temp_logs)" || true
 
 read -r throughput p99_e2el < <(run_benchmark "inf" | tail -n 1)
 
