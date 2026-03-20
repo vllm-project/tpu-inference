@@ -348,7 +348,7 @@ def generate_html_parallelism_table(headers, data):
         html.append("    <tr>")
         feature_name = row[0]
         if feature_name.strip() == "SP":
-            feature_html = '<span style="white-space: nowrap;">SP (<a href="https://github.com/vllm-project/tpu-inference/issues/1749">vote to prioritize</a>)</span>'
+            feature_html = 'SP&nbsp;(<a href="https://github.com/vllm-project/tpu-inference/issues/1749">vote&nbsp;to&nbsp;prioritize</a>)'
         else:
             feature_html = f"{feature_name}"
         
