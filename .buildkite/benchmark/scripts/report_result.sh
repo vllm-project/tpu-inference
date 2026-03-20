@@ -22,35 +22,37 @@ fi
 
 RECORD_ID="$1"
 RESULT_FILE="artifacts/${RECORD_ID}.result"
+printf "[INFO] LOG_FOLDER=%s\n" "$LOG_FOLDER"
 LOG_FOLDER=${LOG_FOLDER:-"artifacts/temp_logs"}
 # Temp write to another bucket
 # REMOTE_LOG_ROOT="gs://$GCS_BUCKET/job_logs/$RECORD_ID/"
 REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
 
-printf "[INFO] LOG_FOLDER=%s\n" "$LOG_FOLDER"
-
-# Handle log file
-VLLM_LOG="$LOG_FOLDER/vllm_log.txt"
-BM_LOG="$LOG_FOLDER/bm_log.txt"
-# PROFILE_FOLDER="$LOG_ROOT/$TEST_NAME"_profile
-echo "gsutil cp $LOG_FOLDER/* $REMOTE_LOG_ROOT"
-gsutil cp -r "$LOG_FOLDER"/* "$REMOTE_LOG_ROOT"
-
-# Upload vllm and bm log to Buildkite aritfact
-ARTIFACT_VLLM="${RECORD_ID}_vllm_log.txt"
-ARTIFACT_BM="${RECORD_ID}_bm_log.txt"
-
-echo "Preparing Buildkite artifacts..."
-cp "$VLLM_LOG" "$ARTIFACT_VLLM"
-cp "$BM_LOG" "$ARTIFACT_BM"
-echo "Uploading artifacts to Buildkite..."
-buildkite-agent artifact upload "$ARTIFACT_VLLM"
-buildkite-agent artifact upload "$ARTIFACT_BM"
-echo "Cleaning up temporary artifact files..."
-rm -f "$ARTIFACT_VLLM" "$ARTIFACT_BM"
-
-# Metric data extraction from log file
 (
+  printf "[INFO] LOG_FOLDER=%s\n" "$LOG_FOLDER"
+
+  # Handle log file
+  VLLM_LOG="$LOG_FOLDER/vllm_log.txt"
+  BM_LOG="$LOG_FOLDER/bm_log.txt"
+  # PROFILE_FOLDER="$LOG_ROOT/$TEST_NAME"_profile
+  echo "gsutil cp $LOG_FOLDER/* $REMOTE_LOG_ROOT"
+  gsutil cp -r "$LOG_FOLDER"/* "$REMOTE_LOG_ROOT"
+
+  # Upload vllm and bm log to Buildkite aritfact
+  ARTIFACT_VLLM="${RECORD_ID}_vllm_log.txt"
+  ARTIFACT_BM="${RECORD_ID}_bm_log.txt"
+
+  echo "Preparing Buildkite artifacts..."
+  cp "$VLLM_LOG" "$ARTIFACT_VLLM"
+  cp "$BM_LOG" "$ARTIFACT_BM"
+  echo "Uploading artifacts to Buildkite..."
+  buildkite-agent artifact upload "$ARTIFACT_VLLM"
+  buildkite-agent artifact upload "$ARTIFACT_BM"
+  echo "Cleaning up temporary artifact files..."
+  rm -f "$ARTIFACT_VLLM" "$ARTIFACT_BM"
+
+  # Metric data extraction from log file
+
   # Set internal error handling for this scope
   set -e
 
