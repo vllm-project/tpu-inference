@@ -390,15 +390,15 @@ def inner_kernel(
     invalid data and needs to be masked out.
 
     Args:
-      tiled_lhs_ref: Contains value lhs[m_start:m_end, k_start:k_end]
-      tiled_rhs_ref: Contains value rhs[g_id, k_start:k_end, n_start:n_end]. where
-        g_id is the group associated with lhs[m_start:m_end, :]
-      tiled_out_ref: Contains value out[m_start:m_end, n_start:n_end]
-      partial_out_ref: Contains last size_lhs_sublane rows of the previous output.
-        Will be initialized to zero if this is first tile for grid[n_id, :, :].
-      acc_ref: Reference to the accumulator.
-      metadata_ref: Reference to the metadata.
-      cfgs: GmmConfigs.
+        tiled_lhs_ref: Contains value lhs[m_start:m_end, k_start:k_end]
+        tiled_rhs_ref: Contains value rhs[g_id, k_start:k_end, n_start:n_end]. where
+            g_id is the group associated with lhs[m_start:m_end, :]
+        tiled_out_ref: Contains value out[m_start:m_end, n_start:n_end]
+        partial_out_ref: Contains last size_lhs_sublane rows of the previous output.
+            Will be initialized to zero if this is first tile for grid[n_id, :, :].
+        acc_ref: Reference to the accumulator.
+        metadata_ref: Reference to the metadata.
+        cfgs: GmmConfigs.
     """
 
     def _matmul(is_first_k_step: bool, is_last_k_step: bool):
@@ -622,11 +622,11 @@ def fill_metadata(
     (gm_id_to_group_id) for each gm tile.
 
     Args:
-      lhs_group_sizes_ref: The group sizes of lhs.
-      group_offset_ref: Offset of the first group to process.
-      metadata_ref: Metadata that is used to determine the group id and m offsets
-        for each gmm tile.
-      cfgs: GmmConfigs.
+        lhs_group_sizes_ref: The group sizes of lhs.
+        group_offset_ref: Offset of the first group to process.
+        metadata_ref: Metadata that is used to determine the group id and m offsets
+            for each gmm tile.
+        cfgs: GmmConfigs.
 
     Returns:
         The number of gm tiles to process lhs with given group offset.
@@ -802,26 +802,26 @@ def kernel_main(
     Computes metadata to determine which rows of lhs needs processing and how
     they will be tiled. And then, invoke inner kernel using metadata.
 
-    Uses the following notation:
+     Uses the following notation:
     - g: rhs group dimension
     - m: Batch dimension
     - gm: Batch tiling dimension. Aligned to size_lhs_sublane and has tile size
-      of tile_m. Skips over empty groups and accounts for revisited tiles.
+        of tile_m. Skips over empty groups and accounts for revisited tiles.
     - k: in dimension
     - n: out dimension
 
     Args:
-      lhs_group_sizes_ref: Reference to the group sizes of lhs.
-      group_offset_ref: Reference to the group offset.
-      lhs_ref: Reference to the lhs.
-      rhs_ref: Reference to the rhs.
-      out_ref: Reference to the out.
-      partial_out_ref: Reference to the partial output.
-      acc_ref: Reference to the accumulator.
-      metadata_ref: Reference to the metadata.
-      zero_ref: Scratch memory for storing zero values used in initialization.
-      semaphore_ref: Semaphore for zero initialization DMAs.
-      cfgs: GmmConfigs.
+        lhs_group_sizes_ref: Reference to the group sizes of lhs.
+        group_offset_ref: Reference to the group offset.
+        lhs_ref: Reference to the lhs.
+        rhs_ref: Reference to the rhs.
+        out_ref: Reference to the out.
+        partial_out_ref: Reference to the partial output.
+        acc_ref: Reference to the accumulator.
+        metadata_ref: Reference to the metadata.
+        zero_ref: Scratch memory for storing zero values used in initialization.
+        semaphore_ref: Semaphore for zero initialization DMAs.
+        cfgs: GmmConfigs.
     """
 
     if cfgs.fuse_act is not None:
@@ -1212,20 +1212,21 @@ def gmm_v2(
     triple buffering on weights to better utilize memory.
 
     Args:
-      lhs: lhs with shape [size_m, size_k].
-      rhs: rhs with shape [size_group, size_k, size_n].
-      group_sizes: The group sizes of lhs rows of shape [size_lhs_group,].
-      rhs_scale: The rhs scale of shape [size_group, num_blocks, 1, out_size].
-      rhs_bias: The rhs bias of shape [size_group, 1, out_size].
-      group_offset: Optional. The group offset of shape [1,].
-      tile_info: The tile sizes or tile function to use.
-      vmem_limit_bytes: Optional vmem limit in bytes.
-      precision: Unused. Exists for compatibility reasons.
-      preferred_element_type: Optional jnp.dtype for the output matrix.
-      acc_dtype: Optional jnp.dtype for the accumulator.
-      maybe_quantize_lhs: Quantize lhs if set to True and rhs is quantized.
-      zero_initialize: Whether to initialize unvisited output elements to zero.
-      fuse_act: Activation function to fuse with GMM, None if no fusion.
+        lhs: lhs with shape [size_m, size_k].
+        rhs: rhs with shape [size_group, size_k, size_n].
+        group_sizes: The group sizes of lhs rows of shape [size_lhs_group,].
+        rhs_scale: The rhs scale of shape [size_group, num_blocks, 1, out_size].
+        rhs_bias: The rhs bias of shape [size_group, 1, out_size].
+        group_offset: Optional. The group offset of shape [1,].
+        tile_info: The tile sizes or tile function to use.
+        vmem_limit_bytes: Optional vmem limit in bytes.
+        precision: Unused. Exists for compatibility reasons.
+        preferred_element_type: Optional jnp.dtype for the output matrix.
+        acc_dtype: Optional jnp.dtype for the accumulator.
+        maybe_quantize_lhs: Quantize lhs if set to True and rhs is quantized.
+        zero_initialize: Whether to initialize unvisited output elements to zero.
+        fuse_act: Activation function to fuse with GMM, None if no fusion.
+        
     Returns:
       Output of shape [size_m, size_n].
     """
