@@ -888,8 +888,7 @@ def kernel_main(
     out_in = out_ref.reshape(-1, cfgs.dims.size_lhs_sublane, out_ref.shape[-1])
     scratches = [partial_out_ref, acc_ref, metadata_ref]
     if cfgs.fuse_act is not None:
-        rhs_up = rhs_ref
-        rhs_inner_ref = FusedWeightsRef(gate=rhs_ref, up=rhs_up)
+        rhs_inner_ref = FusedWeightsRef(gate=rhs_ref, up=rhs_ref)
     else:
         rhs_inner_ref = rhs_ref
     pipeline_fn(lhs_in, rhs_inner_ref, out_in, scratches=scratches)
