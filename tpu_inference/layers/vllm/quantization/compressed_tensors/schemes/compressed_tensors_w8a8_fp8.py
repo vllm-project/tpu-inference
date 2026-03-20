@@ -115,9 +115,8 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                                                        weight, None)
             else:
                 if len(weight_scale.shape) == 2:
-                    if weight_scale.shape[-1] > 1:
+                    if self.weight_block_size is not None:
                         is_block = True
-                        assert self.weight_block_size is not None
                         block_m = self.weight_block_size[0]
                         weight_scale = jnp.repeat(weight_scale, block_m, axis=0)
                     else:
