@@ -168,8 +168,38 @@ fi
 echo "--- Preparing Config Environment"
 mkdir -p artifacts
 
-# We dump all current environment variables so docker_run_bm.sh can use them
-env > "artifacts/${RECORD_ID}.env"
+# We safely dump the specific environment variables so docker_run_bm.sh can use them
+cat <<EOF > "artifacts/${RECORD_ID}.env"
+DEVICE='${DEVICE:-}'
+MODEL='${MODEL:-}'
+MAX_NUM_SEQS='${MAX_NUM_SEQS:-}'
+MAX_NUM_BATCHED_TOKENS='${MAX_NUM_BATCHED_TOKENS:-}'
+TENSOR_PARALLEL_SIZE='${TENSOR_PARALLEL_SIZE:-}'
+MAX_MODEL_LEN='${MAX_MODEL_LEN:-}'
+DATASET='${DATASET:-}'
+INPUT_LEN='${INPUT_LEN:-}'
+OUTPUT_LEN='${OUTPUT_LEN:-}'
+EXPECTED_ETEL='${EXPECTED_ETEL:-}'
+NUM_PROMPTS='${NUM_PROMPTS:-}'
+MODELTAG='${MODELTAG:-}'
+PREFIX_LEN='${PREFIX_LEN:-}'
+ADDITIONAL_CONFIG='${ADDITIONAL_CONFIG:-}'
+EXTRA_ARGS='${EXTRA_ARGS:-}'
+CODE_HASH='${CODE_HASH:-}'
+RECORD_ID='${RECORD_ID:-}'
+GCP_REGION='${GCP_REGION:-}'
+GCP_PROJECT_ID='${GCP_PROJECT_ID:-}'
+ARTIFACT_REPO='${ARTIFACT_REPO:-}'
+GCS_BUCKET='${GCS_BUCKET:-}'
+SKIP_JAX_PRECOMPILE='${SKIP_JAX_PRECOMPILE:-}'
+EOF
+
+# Inject dynamic EXTRA_ENVS generated ones
+for key in "${EXTRA_ENV_KEYS[@]}"; do
+  if [ -n "${!key:-}" ]; then
+    echo "${key}='${!key}'" >> "artifacts/${RECORD_ID}.env"
+  fi
+done
 
 # Inject static configurations required by docker_run_bm.sh that are missing from env
 cat <<EOF >> "artifacts/${RECORD_ID}.env"
