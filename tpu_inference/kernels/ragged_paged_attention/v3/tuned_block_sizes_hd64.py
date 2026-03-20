@@ -465,9 +465,9 @@ def get_tuned_block_sizes(
                 # TPUv4 has much smaller VMEM size so we pick fixed block sizes.
                 bkv_p, bq = (512 // page_size, 32)
             case 7:
-                bkv_p, bq = (4096 // page_size, 32)
+                bkv_p, bq = (512 // page_size, 16)
             case _:
-                bkv_p, bq = (2048 // page_size, 32)
+                bkv_p, bq = (512 // page_size, 16)
 
     # We should consider the actual page_per_seq and max_num_tokens.
     # If page_per_seq < bkv_p or max_num_tokens < bq, using the bkv_p or bq may
