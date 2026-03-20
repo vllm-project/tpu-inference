@@ -527,7 +527,7 @@ class MLAEinsum(JaxEinsum):
                 self.weight,
                 self.weight_scale_inv,
                 (0, 1),
-                block_size=self.quant_config.weight_block_size,
+                block_size=None,
             ).T
             A, N, qk_nope_head_dim, v_head_dim = self.mla_layer.kv_lora_rank, self.mla_layer.N, self.mla_layer.qk_nope_head_dim, self.mla_layer.v_head_dim
             if dequantized_weight.shape != (A, N *
@@ -819,6 +819,7 @@ class SharedFusedMoe(JaxMoE):
     def __call__(self, x_TD: jax.Array) -> jax.Array:
         # Compute Routed Experts
         final_hidden_states = super().__call__(x_TD)
+        final_hidden_states *= self.routed_scaling_factor
 
         # (Maybe) Compute Shared Experts
         if self.shared_experts is not None:
@@ -841,6 +842,7 @@ class DeepseekV2Moe(JaxModule):
                  num_expert_parallelism,
                  moe_backend,
                  quant_config,
+                 scoring_func,
                  rng,
                  prefix: str = ""):
 
@@ -858,6 +860,7 @@ class DeepseekV2Moe(JaxModule):
             activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
             ed_sharding=P(None, None),
             e_sharding=P(None, ),
+            scoring_func=scoring_func,
             quant_config=quant_config)
 
         # shared experts
@@ -914,6 +917,7 @@ class DeepseekV2Moe(JaxModule):
             prefix=f"{prefix}.experts",
             router=self.gate,
             shared_experts=self.shared_experts,
+            scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor)
 
     def __call__(self, x_TD: jax.Array):
@@ -986,6 +990,7 @@ class DeepSeekV3Router(JaxEinsum):
             random_init: bool = False,
             quant_config: Optional[QuantizationConfig] = None,
             router_bias_dtype: jnp.dtype = jnp.float32,
+            scoring_func: str = "sigmoid",
             moe_backend: MoEBackend = MoEBackend.DENSE_MAT):
         self.hidden_size = hidden_size
         self.num_experts = num_experts
@@ -1001,6 +1006,7 @@ class DeepSeekV3Router(JaxEinsum):
         self.random_init = random_init
         self.quant_config = quant_config
         self.router_bias_dtype = router_bias_dtype
+        self.scoring_func = scoring_func
         self.moe_backend = moe_backend
         """Generates the router kernel (weights and bias) for routing."""
         D = self.hidden_size
@@ -1040,14 +1046,18 @@ class DeepSeekV3Router(JaxEinsum):
                 scores_TE, (-1, self.n_groups, experts_per_group))
             group_scores_TG2 = jax.lax.top_k(group_scores_TGM, k=2)[0]
             group_scores_TG = jnp.sum(group_scores_TG2, axis=-1)
-            indices = jax.lax.top_k(group_scores_TG, k=self.topk_groups)[1]
+            group_indices = jax.lax.top_k(group_scores_TG,
+                                          k=self.topk_groups)[1]
 
-            mask_TG = jnp.any(jnp.arange(
-                self.n_groups)[:, None] == indices[..., None, :],
-                              axis=-1)
-            mask_TE = jnp.repeat(mask_TG,
-                                 scores_TE.shape[-1] // mask_TG.shape[-1], -1)
-            scores_TE = jnp.where(mask_TE, scores_TE, 0.0)
+            # Apply mask at the group level before flattening
+            mask_TG1 = jax.nn.one_hot(
+                group_indices,
+                self.n_groups).sum(axis=1)[..., None].astype(jnp.bool_)
+
+            # Apply mask to each group of experts
+            group_scores_TGM = jnp.where(mask_TG1, group_scores_TGM, -jnp.inf)
+
+            scores_TE = jnp.reshape(group_scores_TGM, (-1, self.num_experts))
 
         indices_TX = jax.lax.top_k(scores_TE, k=self.num_experts_per_tok)[1]
 
@@ -1067,24 +1077,32 @@ class DeepSeekV3Router(JaxEinsum):
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = lax.with_sharding_constraint(x_TD, self.activation_ffw_td)
 
-        scores_TE = super().__call__(x_TD)
-        scores_TE = nnx.sigmoid(scores_TE)
+        # Expert assignments are accumulated in high precision to preserve accuracy.
+        # See: https://github.com/vllm-project/vllm/blob/e89a91d9275cd8ac086fe04476b41675a9ebbd5c/vllm/model_executor/layers/fused_moe/cpu_fused_moe.py#L59
+        logits_TE = super().__call__(x_TD).astype(jnp.float32)
 
+        # TODO(gpolovets): add back support for DeepSeek routing.
         if self.moe_backend in MoEBackend.fused_moe_backends():
-            return scores_TE
+            return logits_TE
 
-        original_scores_TE = scores_TE
-        topk_indices_TX = self.get_topk_indices(scores_TE)
-        weights_TX = jnp.take_along_axis(original_scores_TE,
-                                         topk_indices_TX,
-                                         axis=-1)
+        # Apply scoring function (Sigmoid/Softmax) to get probabilities
+        if self.scoring_func == "sigmoid":
+            probs_TE = jax.nn.sigmoid(logits_TE)
+        elif self.scoring_func == "softmax":
+            probs_TE = jax.nn.softmax(logits_TE, axis=-1)
+        else:
+            probs_TE = logits_TE
+
+        # Add Aux-Loss-Free bias to the activation outputs during topk selection.
+        topk_indices_TX = self.get_topk_indices(probs_TE)
+
+        # The actual weights do not include the bias terms.
+        weights_TX = jnp.take_along_axis(probs_TE, topk_indices_TX, axis=-1)
 
         if self.norm_topk_prob:
             weights_TX /= jnp.sum(weights_TX, axis=-1)[..., None] + 1e-20
 
-        weights_TX *= self.routed_scaling_factor
-
-        return weights_TX, topk_indices_TX
+        return weights_TX.astype(self.dtype), topk_indices_TX
 
 
 @dataclass
@@ -1122,6 +1140,7 @@ class DeepSeekV3(JaxModule):
         self.is_last_rank = get_pp_group().is_last_rank
         hf_config = vllm_config.model_config.hf_config
         dtype = vllm_config.model_config.dtype
+        scoring_func = getattr(hf_config, "scoring_func", "sigmoid")
 
         if self.is_first_rank:
             self.embed_tokens = JaxEmbed(
@@ -1270,6 +1289,7 @@ class DeepSeekV3(JaxModule):
                     num_expert_parallelism=self.num_expert_parallelism,
                     moe_backend=self.moe_backend,
                     quant_config=quant_config,
+                    scoring_func=scoring_func,
                     rng=rng,
                     prefix=f"{prefix}.layers.{layer_index}.mlp")
 

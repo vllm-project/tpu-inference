@@ -274,7 +274,8 @@ def test_loading_model(model, mesh):
     vllm_config.quant_config = get_tpu_quantization_config(vllm_config, mesh)
     vllm_config.device_config.device = "cpu"
 
-    vllm_model = vllm_get_model(vllm_config=vllm_config)
+    with set_current_vllm_config(vllm_config):
+        vllm_model = vllm_get_model(vllm_config=vllm_config)
     layers = test_utils.find_all_layer_type(vllm_model, LinearBase)
     for layer in layers:
         assert isinstance(layer.quant_config, VllmAWQConfig)

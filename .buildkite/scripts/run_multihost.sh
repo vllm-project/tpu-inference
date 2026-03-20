@@ -261,7 +261,7 @@ VLLM_SERVE_CMD="vllm serve ${MODEL} \
   --trust-remote-code \
   --no-enable-prefix-caching \
   --kv_cache_dtype=fp8 \
-  --no-async-scheduling \
+  --async-scheduling \
   --load-format=runai_streamer \
   --max-model-len 1024"
 

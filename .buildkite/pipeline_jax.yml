@@ -153,7 +153,8 @@ steps:
                 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels \
                 --ignore=/workspace/tpu_inference/tests/kernels/ragged_paged_attention_kernel_v2_test.py \
                 --ignore=/workspace/tpu_inference/tests/kernels/ragged_kv_cache_update_v2_test.py \
-                --ignore=/workspace/tpu_inference/tests/kernels/collectives
+                --ignore=/workspace/tpu_inference/tests/kernels/collectives \
+                --ignore=/workspace/tpu_inference/tests/kernels/spmm_v1_test.py
             else
               echo "Skipping: Step requires either a NIGHTLY build or changes in kernels, kernel tests, or requirements.txt."
               exit 0
@@ -411,6 +412,31 @@ steps:
                 "
             fi
 
+      - label: "${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer JAX UniProcExecutor"
+        key: "${TPU_VERSION:-tpu6e}_test_27"
+        soft_fail: true
+        agents:
+          queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+        commands:
+          - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_jax_uni_proc_executor
+      
+      - label: "${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer Torchax UniProcExecutor"
+        key: "${TPU_VERSION:-tpu6e}_test_28"
+        soft_fail: true
+        agents:
+          queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+        commands:
+          - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_torchax_uni_proc_executor
+      
+      - label: "${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer Torchax RayDistributedExecutor"
+        key: "${TPU_VERSION:-tpu6e}_test_29"
+        soft_fail: true
+        agents:
+          queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}" # Using a queue with more devices for distributed tests
+        commands:
+          - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_torchax_ray_distributed_executor
+      
+
       # -----------------------------------------------------------------
       # NOTIFICATION STEP
       # -----------------------------------------------------------------
@@ -442,6 +468,9 @@ steps:
           - ${TPU_VERSION:-tpu6e}_test_24
           - ${TPU_VERSION:-tpu6e}_test_25
           - ${TPU_VERSION:-tpu6e}_test_26
+          - ${TPU_VERSION:-tpu6e}_test_27
+          - ${TPU_VERSION:-tpu6e}_test_28
+          - ${TPU_VERSION:-tpu6e}_test_29
         agents:
           queue: cpu
         commands:

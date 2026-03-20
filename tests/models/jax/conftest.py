@@ -70,6 +70,7 @@ def mock_vllm_config():
             self.cache_config = MagicMock(cache_dtype=kv_cache_dtype)
             self.quant_config = None
             self.additional_config = {}
+            self.parallel_config = None
 
     return MockVllmConfig
 

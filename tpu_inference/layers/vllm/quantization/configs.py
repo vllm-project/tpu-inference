@@ -81,6 +81,8 @@ class VllmQuantLinearConfig(QuantLinearConfig):
 
         if isinstance(layer, QKVParallelLinear):
             self.num_proj = 3
+        elif isinstance(layer, MergedColumnParallelLinear):
+            self.num_proj = len(layer.output_sizes)
         else:
             self.num_proj = 1
 

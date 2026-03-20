@@ -40,6 +40,8 @@ def apply_act_fn(activation: str, x1: jax.Array, x2: jax.Array) -> jax.Array:
     match activation:
         case "silu":
             return jax.nn.silu(x1) * x2
+        case "gelu":
+            return jax.nn.gelu(x1) * x2
         case "swigluoai":
             return _swigluoai(x1, x2)
         case _:
@@ -178,7 +180,7 @@ def tensor_parallel_gmm(
             w2_scale_spec,
             w2_bias_spec,
             data_p_spec,
-            data_p_spec,
+            P(),
             data_p_spec,
             data_p_spec,
         ),

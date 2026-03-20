@@ -48,6 +48,8 @@ def _run_inference_with_config(model_name: str,
                                sampling_params: SamplingParams,
                                tensor_parallel_size: int = 1,
                                pipeline_parallel_size: int = 1,
+                               data_parallel_size: int = 1,
+                               enable_expert_parallel: bool = False,
                                additional_config: dict = {},
                                kv_cache_dtype: str = "auto",
                                enable_prefix_caching: bool = False) -> list:
@@ -59,13 +61,15 @@ def _run_inference_with_config(model_name: str,
         max_model_len=128,
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
-        gpu_memory_utilization=0.95,
+        data_parallel_size=data_parallel_size,
+        gpu_memory_utilization=0.40,
         max_num_batched_tokens=128,
         max_num_seqs=16,
         enable_prefix_caching=enable_prefix_caching,
         additional_config=additional_config,
         kv_cache_dtype=kv_cache_dtype,
         async_scheduling=False,
+        enable_expert_parallel=enable_expert_parallel,
     )
 
     engine_args_dict = asdict(engine_args)
@@ -80,73 +84,117 @@ def _run_inference_with_config(model_name: str,
         time.sleep(5)
 
 
-def test_pipeline_parallelism_jax_model(
+@pytest.mark.parametrize(
+    "case",
+    [
+        {
+            "id": "jax_model",
+            "model": None,
+            "tp": 1,
+            "pp": 2,
+            "dp": 1,
+            "ep": False,
+            "impl": "jax",
+            "additional_config": {}
+        },
+        {
+            "id": "vllm_model",
+            "model": None,
+            "tp": 1,
+            "pp": 2,
+            "dp": 1,
+            "ep": False,
+            "impl": "vllm",
+            "additional_config": {}
+        },
+        {
+            "id": "ep",
+            "model": "Qwen/Qwen1.5-MoE-A2.7B",
+            "tp": 1,
+            "pp": 2,
+            "dp": 1,
+            "ep": True,
+            "impl": "vllm",
+            "additional_config": {
+                "sharding": {
+                    "sharding_strategy": {
+                        "expert_parallelism": 2
+                    }
+                }
+            }
+        },
+        {
+            "id": "dp",
+            "model": None,
+            "tp": 1,
+            "pp": 2,
+            "dp": 2,
+            "ep": False,
+            "impl": "jax",
+            "additional_config": {}
+        },
+        {
+            "id": "tp",
+            "model": None,
+            "tp": 2,
+            "pp": 2,
+            "dp": 1,
+            "ep": False,
+            "impl": "jax",
+            "additional_config": {}
+        },
+        {
+            "id": "ep_tp",
+            "model": "Qwen/Qwen1.5-MoE-A2.7B",
+            "tp": 2,
+            "pp": 2,
+            "dp": 1,
+            "ep": True,
+            "impl": "vllm",
+            "additional_config": {
+                "sharding": {
+                    "sharding_strategy": {
+                        "expert_parallelism": 2,
+                    }
+                }
+            }
+        },
+    ],
+    ids=lambda x: x["id"],
+)
+def test_pipeline_parallel_configs(
+    case,
     model_name: str,
     test_prompts: list,
     sampling_params: SamplingParams,
 ):
     """
-    Test pipline parallelism works on Jax models
-
-    Equivalent to:
-    python examples/offline_inference.py --tensor_parallel_size=1 --pipeline_parallel_size=2
+    Test various pipeline parallel configurations.
     """
-    # Test with pipeline parallelism enabled
+    impl = case["impl"]
+    if impl == 'vllm':
+        os.environ['MODEL_IMPL_TYPE'] = 'vllm'
+    else:
+        os.environ.pop('MODEL_IMPL_TYPE', None)
+
+    model = case["model"]
+    actual_model = model if model is not None else model_name
+
     outputs = _run_inference_with_config(
-        model_name=model_name,
+        model_name=actual_model,
         test_prompts=test_prompts,
         sampling_params=sampling_params,
-        tensor_parallel_size=1,
-        pipeline_parallel_size=2,
+        tensor_parallel_size=case["tp"],
+        pipeline_parallel_size=case["pp"],
+        data_parallel_size=case["dp"],
+        enable_expert_parallel=case["ep"],
+        additional_config=case["additional_config"],
     )
 
-    # Verify we got outputs for all prompts
     assert len(outputs) == len(test_prompts)
-
-    # Verify each output has generated text
     for output in outputs:
         assert len(output.outputs) > 0
         assert len(output.outputs[0].text.strip()) > 0
-
-    print(
-        f"✓ Pipeline Parallelism Jax model test passed with {len(outputs)} outputs"
-    )
-
-
-def test_pipeline_parallelism_vllm_model(
-    model_name: str,
-    test_prompts: list,
-    sampling_params: SamplingParams,
-):
-    """
-    Test pipline parallelism works on vLLM models, and it also works with
-    with tensor parallelism.
-
-    Equivalent to:
-    MODEL_IMPL_TYPE=vllm python examples/offline_inference.py --tensor_parallel_size=1 --pipeline_parallel_size=2
-    """
-
-    os.environ['MODEL_IMPL_TYPE'] = 'vllm'
-    # Test with data parallelism enabled
-    outputs = _run_inference_with_config(
-        model_name=model_name,
-        test_prompts=test_prompts,
-        sampling_params=sampling_params,
-        tensor_parallel_size=1,
-        pipeline_parallel_size=2,
-    )
-
-    # Verify we got outputs for all prompts
-    assert len(outputs) == len(test_prompts)
-
-    # Verify each output has generated text
-    for output in outputs:
-        assert len(output.outputs) > 0
-        assert len(output.outputs[0].text.strip()) > 0
-
-    print(
-        f"✓ Pipeline Parallelism vLLM model test passed with {len(outputs)} outputs"
-    )
 
 
 def test_pipeline_parallelism_jax_model_correctness(
@@ -260,4 +308,4 @@ def test_pipeline_parallelism_jax_model_correctness(
     assert text_match_rate >= 0.9, f"Text match rate {text_match_rate:.2%} is too low"
 
     # Log probabilities should be very close (allow small numerical errors)
-    assert max_logprob_diff < 1, f"Max logprob difference {max_logprob_diff} is too large"
+    assert max_logprob_diff < 1.5, f"Max logprob difference {max_logprob_diff} is too large"

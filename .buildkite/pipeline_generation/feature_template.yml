@@ -19,7 +19,7 @@ steps:
     key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: {QUEUE}
+      queue: "${{TPU_QUEUE_SINGLE:-tpu_v6e_queue}}"
     commands:
       - echo "placeholder"  # TODO : replace with your correctness test command
   - label: "${{TPU_VERSION:-tpu6e}} Record correctness test result for {FEATURE_NAME}"
@@ -41,7 +41,7 @@ steps:
     depends_on: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_FEATURE_NAME}_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: {QUEUE}
+      queue: "${{TPU_QUEUE_SINGLE:-tpu_v6e_queue}}"
     commands:
       - echo "placeholder"  # TODO : replace with your performance test command
   - label: "${{TPU_VERSION:-tpu6e}} Record performance test result for {FEATURE_NAME}"

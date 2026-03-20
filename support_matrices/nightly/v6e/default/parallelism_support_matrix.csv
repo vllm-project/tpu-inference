@@ -1,7 +1,7 @@
-Feature,CorrectnessTest,PerformanceTest
-"CP",unverified,unverified
-"DP",✅,✅
-"EP",✅,✅
-"PP",unverified,unverified
-"SP",❌,N/A
-"TP",✅,✅
+Feature,Single-Host CorrectnessTest,Single-Host PerformanceTest,Multi-Host CorrectnessTest,Multi-Host PerformanceTest
+"CP",❓ Untested,❓ Untested,❓ Untested,❓ Untested
+"DP",✅ Passing,❌ Failing,❓ Untested,❓ Untested
+"EP",✅ Passing,✅ Passing,❓ Untested,❓ Untested
+"PP",❓ Untested,❓ Untested,❓ Untested,❓ Untested
+"SP",❌ Failing,❓ Untested,❓ Untested,❓ Untested
+"TP",✅ Passing,✅ Passing,❓ Untested,❌ Failing

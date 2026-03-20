@@ -1,18 +1,18 @@
 #!/bin/bash
 # Copyright 2026 Google LLC
 #
-# Nightly benchmark wrapper for DeepSeek V3 (1k input, 8k output).
+# Nightly benchmark wrapper for DeepSeek V3 (8k input, 1k output).
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
-NIGHTLY_SCRIPT="${SCRIPT_DIR}/../nightly_benchmarking.sh"
+NIGHTLY_SCRIPT="${SCRIPT_DIR}/../../nightly_benchmarking.sh"
 
 # Adjust model-path, max-seqs, and code-hash below when officially serving DeepSeek.
 bash "${NIGHTLY_SCRIPT}" \
   --model-path "gs://tpu-commons-ci/deepseek/r1" \
   --model-name "DeepSeek-R1" \
   --tokenizer "deepseek-ai/DeepSeek-R1" \
-  --input-len 1024 \
-  --output-len 8192 \
+  --input-len 8192 \
+  --output-len 1024 \
   --tp-size 16 \
   --max-seqs 128 \
   --max-model-len 9216 \
