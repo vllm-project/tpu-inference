@@ -146,7 +146,13 @@ if (( BM_JOB_STATUS == EXIT_SUCCESS )); then
     "-e" "LOG_FOLDER=/workspace/$LOG_FOLDER"
     "--env-file" "$ENV_FILE"
   )
-  export BENCHMARK_DOCKER_ARGS
+  # Join the array elements using newline as the delimiter and export as a single string.
+  if [ ${#BENCHMARK_DOCKER_ARGS[@]} -gt 0 ]; then
+    BENCHMARK_DOCKER_ARGS_STR="$(printf '%s\n' "${BENCHMARK_DOCKER_ARGS[@]}")"
+    export BENCHMARK_DOCKER_ARGS_STR
+  else
+    export BENCHMARK_DOCKER_ARGS_STR=""
+  fi
 
   # Restore the SKIP_JAX_PRECOMPILE logic
   [ -n "${SKIP_JAX_PRECOMPILE:-}" ] && export SKIP_JAX_PRECOMPILE
