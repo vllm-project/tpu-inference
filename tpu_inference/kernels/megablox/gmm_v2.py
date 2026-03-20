@@ -1,3 +1,4 @@
+from functools import partial
 import dataclasses
 import functools
 from typing import Any, Callable, Tuple
@@ -21,15 +22,40 @@ def swigluoai(
   return (up + 1.0) * glu
 
 
-def apply_act_fn(acc1: jax.Array, acc3, act_fn):
-  if act_fn == "silu":
-    return jax.nn.silu(acc1.astype(jnp.float32)).astype(acc1.dtype) * acc3
-  elif act_fn == "gelu":
-    return jax.nn.gelu(acc1.astype(jnp.float32)).astype(acc1.dtype) * acc3
-  elif act_fn == "swigluoai":
-    return swigluoai(acc1, acc3)
-  else:
-    raise NotImplementedError(f"Unsupported activation function: {act_fn}")
+def apply_act_fn(acc: jax.Array, tile_n: int, fuse_act: str | None):
+  """Applies a fused activation function to the accumulator.
+
+  This function is used when an activation function is fused with the matrix
+  multiplication. The input accumulator `acc` is expected to contain
+  concatenated results for both the 'gate' and 'up' projections.
+
+  Args:
+    acc: The accumulator array, with the last dimension being 2 * tile_n.
+    tile_n: The size of the 'n' dimension for a single projection (gate or up).
+    fuse_act: The name of the activation function to apply. Supported values are
+      "silu", "gelu", and "swigluoai". If None, no activation is applied.
+
+  Returns:
+    The result of applying the activation function.
+
+  Raises:
+    NotImplementedError: If an unsupported `fuse_act` is provided.
+  """
+  if fuse_act is None:
+    return acc
+
+  acc_gate = acc[..., : tile_n]
+  acc_up = acc[..., tile_n :]
+  match fuse_act:
+    case "silu":
+      return jax.nn.silu(acc_gate) * acc_up
+    case "gelu":
+      return jax.nn.gelu(acc_gate) * acc_up
+    case "swigluoai":
+      return swigluoai(acc_gate, acc_up)
+    case _:
+      raise NotImplementedError(f"Unsupported activation function: {fuse_act}")
+
 
 
 def align_to(x, a):
@@ -53,10 +79,24 @@ class WeightsRef:
   scale: Any | None
   bias: Any | None
 
+  def get_weight(self, packing_dtype: jnp.dtype | None = None):
+    w = self.weight[...]
+    if packing_dtype is not None:
+      w = pltpu.bitcast(w, packing_dtype)
+    return w
+
+  def get_scale(self, b_id: int):
+    # Quantization subchannel scale per quant block
+    s = self.scale[..., b_id, :, :]
+    return s
+
+  def get_bias(self):
+    b = self.bias[...]
+    return b
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
-class FusedWeightsRef:
+class FusedWeightsRef():
   """Dataclass for weights used in fused activation operations.
 
   This class holds references to the 'gate' and 'up' projection weights,
@@ -64,7 +104,7 @@ class FusedWeightsRef:
   matrix multiplication.
   """
   gate: WeightsRef
-  up: WeightsRef | None = None
+  up: WeightsRef
 
   def has_scale(self) -> bool:
     """Returns true if the gate weights have a scale component."""
@@ -73,77 +113,12 @@ class FusedWeightsRef:
   def has_bias(self) -> bool:
     return self.gate.bias is not None
 
-  @classmethod
-  def create_spec(
-      cls, index_map: "IndexMaps", cfgs: "GmmConfigs"
-  ) -> "FusedWeightsRef":
-    """Creates a FusedWeightsRef with BlockSpecs for Pallas.
-
-    Args:
-      index_map: An instance of IndexMaps containing index mapping functions.
-      cfgs: An instance of GmmConfigs.
-
-    Returns:
-      A FusedWeightsRef instance with BlockSpec objects for gate and up weights,
-      scales, and biases, configured based on the provided GmmConfigs.
-    """
-    rhs_weight_spec = pl.BlockSpec(
-        (None, cfgs.tiles.tile_k // cfgs.rhs_cfgs.packing, cfgs.tiles.tile_n),
-        index_map.rhs_weight_index_map,
-        pipeline_mode=pl.Buffered(buffer_count=3),
-    )
-
-    rhs_scale_spec = rhs_bias_spec = None
-    if cfgs.rhs_cfgs.has_bias:
-      rhs_bias_spec = pl.BlockSpec(
-          (None, 1, cfgs.tiles.tile_n),
-          index_map.rhs_bias_index_map,
-      )
-    if cfgs.rhs_cfgs.has_scale:
-      rhs_scale_spec = pl.BlockSpec(
-          (None, cfgs.num_quant_blocks_per_tile_k, 1, cfgs.tiles.tile_n),
-          index_map.rhs_scale_index_map,
-      )
-    gate_spec = WeightsRef(
-        weight=rhs_weight_spec, scale=rhs_scale_spec, bias=rhs_bias_spec
-    )
-
-    up_spec = None
-    if cfgs.fuse_act is not None:
-      rhs_weight_up_spec = pl.BlockSpec(
-          (None, cfgs.tiles.tile_k // cfgs.rhs_cfgs.packing, cfgs.tiles.tile_n),
-          index_map.rhs_up_weight_index_map,
-          pipeline_mode=pl.Buffered(buffer_count=3),
-      )
-
-      rhs_scale_up_spec = rhs_bias_up_spec = None
-      if cfgs.rhs_cfgs.has_bias:
-        rhs_bias_up_spec = pl.BlockSpec(
-            (None, 1, cfgs.tiles.tile_n),
-            index_map.rhs_up_bias_index_map,
-        )
-      if cfgs.rhs_cfgs.has_scale:
-        rhs_scale_up_spec = pl.BlockSpec(
-            (None, cfgs.num_quant_blocks_per_tile_k, 1, cfgs.tiles.tile_n),
-            index_map.rhs_up_scale_index_map,
-        )
-      up_spec = WeightsRef(
-          weight=rhs_weight_up_spec,
-          scale=rhs_scale_up_spec,
-          bias=rhs_bias_up_spec,
-      )
-
-    return cls(gate=gate_spec, up=up_spec)
-
   def get_weight(self, packing_dtype: jnp.dtype | None = None):
     w = self.gate.weight[...]
+    w_up = self.up.weight[...]
     if packing_dtype is not None:
       w = pltpu.bitcast(w, packing_dtype)
-
-    if self.up is not None:
-      w_up = self.up.weight[...]
-      if packing_dtype is not None:
-        w_up = pltpu.bitcast(w_up, packing_dtype)
+      w_up = pltpu.bitcast(w_up, packing_dtype)
       w = jnp.concatenate([w, w_up], axis=1)
 
     return w
@@ -151,26 +126,17 @@ class FusedWeightsRef:
   def get_scale(self, b_id: int):
     # Quantization subchannel scale per quant block
     s = self.gate.scale[..., b_id, :, :]
-    if self.up is not None:
-      s_up = self.up.scale[..., b_id, :, :]
-      s = jnp.concatenate([s, s_up], axis=1)
+    s_up = self.up.scale[..., b_id, :, :]
+    s = jnp.concatenate([s, s_up], axis=1)
     return s
 
   def get_bias(self):
     b = self.gate.bias[...]
-    if self.up is not None:
-      b_up = self.up.bias[...]
-      b = jnp.concatenate([b, b_up], axis=1)
+    b_up = self.up.bias[...]
+    b = jnp.concatenate([b, b_up], axis=1)
     return b
 
-  def apply_activation(self, acc: jax.Array, tile_n: int, fuse_act: str | None):
-
-    if fuse_act is None:
-      return acc
-
-    acc_gate = acc[..., : tile_n]
-    acc_up = acc[..., tile_n :]
-    return apply_act_fn(acc_gate, acc_up, fuse_act).astype(acc.dtype)
+RhsRef = WeightsRef | FusedWeightsRef
 
 @dataclasses.dataclass(frozen=True)
 class TileSizes:
@@ -227,7 +193,6 @@ class IndexMaps:
   def __init__(self, metadata_ref: MetadataRef, cfgs: GmmConfigs):
     self.metadata_ref = metadata_ref
     self.cfgs = cfgs
-    self.offset = pl.cdiv(self.cfgs.dims.size_n, self.cfgs.tiles.tile_n)
 
   def lhs_index_map(self, _: jax.Array, gm_id: jax.Array, k_id: jax.Array):
     m_start = self.metadata_ref.gm_id_to_m_offset[gm_id]
@@ -240,44 +205,36 @@ class IndexMaps:
     return (pl.ds(row_start, row_size), 0, k_id)
 
   def rhs_weight_index_map(
-      self, n_id: jax.Array, gm_id: jax.Array, k_id: jax.Array
+      self,
+      n_id: jax.Array,
+      gm_id: jax.Array,
+      k_id: jax.Array,
+      *,
+      offset: int = 0,
   ):
     group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
-    return (group_id, k_id, n_id)
+    return (group_id, k_id, offset + n_id)
 
-  def rhs_up_weight_index_map(
-      self, n_id: jax.Array, gm_id: jax.Array, k_id: jax.Array
+  def rhs_bias_index_map(
+      self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array, *, offset: int = 0
   ):
     group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
-    return (group_id, k_id, self.offset + n_id)
-
-  def rhs_bias_index_map(self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array):
-    group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
-    return (group_id, 0, n_id)
-
-  def rhs_up_bias_index_map(
-      self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array
-  ):
-    group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
-    return (group_id, 0, self.offset + n_id)
+    return (group_id, 0, offset + n_id)
 
   def rhs_scale_index_map(
-      self, n_id: jax.Array, gm_id: jax.Array, k_id: jax.Array
+      self,
+      n_id: jax.Array,
+      gm_id: jax.Array,
+      k_id: jax.Array,
+      *,
+      offset: int = 0,
   ):
     group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
     b_id = (
         k_id * self.cfgs.tiles.tile_k
     ) // self.cfgs.rhs_cfgs.quant_block_size
-    return (group_id, b_id, 0, n_id)
-
-  def rhs_up_scale_index_map(
-      self, n_id: jax.Array, gm_id: jax.Array, k_id: jax.Array
-  ):
-    group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
-    b_id = (
-        k_id * self.cfgs.tiles.tile_k
-    ) // self.cfgs.rhs_cfgs.quant_block_size
-    return (group_id, b_id, 0, self.offset + n_id)
+    b_tile_id = b_id // self.cfgs.num_quant_blocks_per_tile_k
+    return (group_id, b_tile_id, 0, offset + n_id)
 
   def out_index_map(self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array):
     is_last_gm = gm_id == (pl.num_programs(1) - 1)
@@ -293,9 +250,71 @@ class IndexMaps:
     return (pl.ds(row_start, row_size), 0, n_id)
 
 
+def create_rhs_spec(index_map: IndexMaps, cfgs: GmmConfigs) -> RhsRef:
+  """Creates a RhsRef with BlockSpecs for Pallas.
+
+  Args:
+    index_map: An instance of IndexMaps containing index mapping functions.
+    cfgs: An instance of GmmConfigs.
+
+  Returns:
+    A RhsRef instance with BlockSpec objects for gate and up weights,
+    scales, and biases, configured based on the provided GmmConfigs.
+  """
+  rhs_weight_spec = pl.BlockSpec(
+      (None, cfgs.tiles.tile_k // cfgs.rhs_cfgs.packing, cfgs.tiles.tile_n),
+      index_map.rhs_weight_index_map,
+      pipeline_mode=pl.Buffered(buffer_count=3),
+  )
+
+  rhs_scale_spec = rhs_bias_spec = None
+  if cfgs.rhs_cfgs.has_bias:
+    rhs_bias_spec = pl.BlockSpec(
+        (None, 1, cfgs.tiles.tile_n),
+        index_map.rhs_bias_index_map,
+    )
+  if cfgs.rhs_cfgs.has_scale:
+    rhs_scale_spec = pl.BlockSpec(
+        (None, cfgs.num_quant_blocks_per_tile_k, 1, cfgs.tiles.tile_n),
+        index_map.rhs_scale_index_map,
+    )
+  gate_spec = WeightsRef(
+      weight=rhs_weight_spec, scale=rhs_scale_spec, bias=rhs_bias_spec
+  )
+
+  up_spec = None
+  if cfgs.fuse_act is not None:
+    offset = pl.cdiv(cfgs.dims.size_n, cfgs.tiles.tile_n)
+    rhs_weight_up_spec = pl.BlockSpec(
+        (None, cfgs.tiles.tile_k // cfgs.rhs_cfgs.packing, cfgs.tiles.tile_n),
+        functools.partial(index_map.rhs_weight_index_map, offset=offset),
+        pipeline_mode=pl.Buffered(buffer_count=3),
+    )
+
+    rhs_scale_up_spec = rhs_bias_up_spec = None
+    if cfgs.rhs_cfgs.has_bias:
+      rhs_bias_up_spec = pl.BlockSpec(
+          (None, 1, cfgs.tiles.tile_n),
+          functools.partial(index_map.rhs_bias_index_map, offset=offset),
+      )
+    if cfgs.rhs_cfgs.has_scale:
+      rhs_scale_up_spec = pl.BlockSpec(
+          (None, cfgs.num_quant_blocks_per_tile_k, 1, cfgs.tiles.tile_n),
+          functools.partial(index_map.rhs_scale_index_map, offset=offset),
+      )
+    up_spec = WeightsRef(
+        weight=rhs_weight_up_spec,
+        scale=rhs_scale_up_spec,
+        bias=rhs_bias_up_spec,
+    )
+  if up_spec is None:
+    return gate_spec
+  return FusedWeightsRef(gate=gate_spec, up=up_spec)
+
+
 def generate_block_specs(
     metadata_ref: MetadataRef, cfgs: GmmConfigs
-) -> Tuple[Tuple[pl.BlockSpec, FusedWeightsRef], pl.BlockSpec]:
+) -> Tuple[Tuple[pl.BlockSpec, RhsRef], pl.BlockSpec]:
   """Generates block specs for the given lhs, rhs, and out refs."""
 
   index_map = IndexMaps(metadata_ref, cfgs)
@@ -308,14 +327,14 @@ def generate_block_specs(
       index_map.lhs_index_map,
   )
 
-  fused_rhs_spec = FusedWeightsRef.create_spec(index_map, cfgs)
+  rhs_block_spec = create_rhs_spec(index_map, cfgs)
 
   out_block_spec = pl.BlockSpec(
       (bounded_slice_gm, cfgs.dims.size_lhs_sublane, cfgs.tiles.tile_n),
       index_map.out_index_map,
   )
 
-  in_specs = (lhs_block_spec, fused_rhs_spec)
+  in_specs = (lhs_block_spec, rhs_block_spec)
   return in_specs, out_block_spec
 
 
@@ -326,7 +345,7 @@ def inner_kernel(
     # In
     tiled_lhs_ref: jax.Array,
     # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_k]
-    tiled_rhs_ref: FusedWeightsRef,  # [tile_k, tile_n]
+    tiled_rhs_ref: RhsRef,  # [tile_k, tile_n]
     # Out
     tiled_out_ref: jax.Array,
     # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_n]
@@ -359,7 +378,9 @@ def inner_kernel(
   def _matmul(is_first_k_step: bool, is_last_k_step: bool):
     tiled_lhs = tiled_lhs_ref.reshape(-1, cfgs.tiles.tile_k)[...]
     num_quant_blocks_per_tile_k = cfgs.num_quant_blocks_per_tile_k
-
+    # When rhs is packed (quantized dtype packed into uint32), unpack it
+    # back to the original dtype using pltpu.bitcast which operates on K
+    # axis. This expands the K dimension back to tile_k.
     packing_dtype = (
         cfgs.rhs_cfgs.quant_dtype if cfgs.rhs_cfgs.packing > 1 else None
     )
@@ -421,7 +442,6 @@ def inner_kernel(
         col_size = end_n - start_n
 
         acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size), dtype=acc_ref.dtype)
-        rhs_qbs = cfgs.rhs_cfgs.quant_block_size
         for start_k in range(0, cfgs.tiles.tile_k, q_block_size):
           end_k = min(cfgs.tiles.tile_k, start_k + q_block_size)
           block_lhs = tiled_lhs[:, start_k:end_k]
@@ -479,16 +499,12 @@ def inner_kernel(
       m_start_local = m_start - m_offset
       m_end_local = m_end - m_offset
 
+      acc = apply_act_fn(
+          acc, cfgs.tiles.tile_n, cfgs.fuse_act
+      )
       iota = lax.broadcasted_iota(jnp.int32, acc.shape, 0)
       mask = jnp.logical_and(m_start_local <= iota, iota < m_end_local)
-      acc_masked = jnp.where(mask, acc, 0).reshape(
-          tiled_out_ref.shape[0], tiled_out_ref.shape[1], acc.shape[1]
-      )
-
-      acc_masked = tiled_rhs_ref.apply_activation(
-          acc_masked, cfgs.tiles.tile_n, cfgs.fuse_act
-      )
-
+      acc_masked = jnp.where(mask, acc, 0).reshape(tiled_out_ref.shape)
       assert acc_masked.shape == tiled_out_ref.shape, (
           f"acc_masked shape {acc_masked.shape} does not match tiled_out_ref"
           f" shape {tiled_out_ref.shape}"
@@ -842,11 +858,14 @@ def kernel_main(
   lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, lhs_ref.shape[-1])
   out_in = out_ref.reshape(-1, cfgs.dims.size_lhs_sublane, out_ref.shape[-1])
   scratches = [partial_out_ref, acc_ref, metadata_ref]
-  rhs_up = rhs_ref if cfgs.fuse_act is not None else None
-  fused_rhs_ref = FusedWeightsRef(
-      gate=rhs_ref, up=rhs_up
-  )
-  pipeline_fn(lhs_in, fused_rhs_ref, out_in, scratches=scratches)
+  if cfgs.fuse_act is not None:
+    rhs_up = rhs_ref
+    rhs_inner_ref = FusedWeightsRef(
+        gate=rhs_ref, up=rhs_up
+    )
+  else:
+    rhs_inner_ref = rhs_ref
+  pipeline_fn(lhs_in, rhs_inner_ref, out_in, scratches=scratches)
 
   if cfgs.zero_init:
     zero_out_end(out_ref, semaphore_ref, zero_size, dims=cfgs.dims)
@@ -912,7 +931,7 @@ def calculate_tiling(
 
   # Decrease tile_n until rhs fits in vmem target.
   while (
-      pl.cdiv(base_rhs_size_bytes, num_n_tiles) >= rhs_vmem_target
+      pl.cdiv(base_rhs_size_bytes, num_n_tiles) > rhs_vmem_target
       and tile_n > tile_n_limit
   ):
     num_n_tiles += 1
@@ -923,12 +942,11 @@ def calculate_tiling(
     num_n_tiles -= 1
     tile_n = align_to(dims.size_n, num_n_tiles * num_lanes) // num_n_tiles
 
-    # Decrease tile_k until rhs fits in vmem target.
-    base_rhs_size_bytes = tile_n * dims.size_k * rhs_bits // 8
-    while (
-        pl.cdiv(base_rhs_size_bytes, num_k_tiles) >= rhs_vmem_target
-        or not _is_tile_k_quant_block_compatible(tile_k)
-    ) and tile_k > 0:
+    # Decrease tile_k until rhs fits in vmem target and tile_k is valid.
+    base_rhs_size_bytes = pl.cdiv(base_rhs_size_bytes, num_n_tiles)
+    while pl.cdiv(
+        base_rhs_size_bytes, num_k_tiles
+    ) > rhs_vmem_target or not _is_tile_k_quant_block_compatible(tile_k):
       num_k_tiles += 1
       tile_k = align_to(dims.size_k, num_k_tiles * num_lanes) // num_k_tiles
 
@@ -978,11 +996,12 @@ def validate_inputs(
         f"Unsupported fuse_act {fuse_act}. Supported values are 'gelu', 'silu',"
         " and 'swigluoi'."
     )
+    size_n //= 2
 
   return Dimensions(
       size_m=size_m,
       size_k=size_k,
-      size_n=size_n// (2 if fuse_act is not None else 1),
+      size_n=size_n,
       size_group=size_group,
       size_lhs_group=size_lhs_group,
       size_lhs_sublane=size_lhs_sublane,
@@ -1210,7 +1229,7 @@ def gmm_v2(
       group_offset = group_offset[None]
 
   if vmem_limit_bytes is None:
-    vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.90)
+    vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9)
 
   cfgs = make_gmm_configs(
       lhs,

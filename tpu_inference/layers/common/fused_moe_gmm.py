@@ -113,7 +113,6 @@ def moe_gmm_local(
         else None
     )
     
-    print(f"Running moe_gmm_local with parallelism={parallelism} and fuse_act={fuse_act}")
     
     # GMM1 computes x @ (W_up | W_gate) together and then splits out to apply
     # activation to the gate result.
