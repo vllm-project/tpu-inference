@@ -85,6 +85,15 @@ class VllmMLAAttention(MLAAttention):
             weights = jax_view(self.kv_b_proj.weight).astype(jnp.bfloat16)
             if hasattr(self.kv_b_proj, "weight_scale"):
                 weight_scale = jnp.squeeze(jax_view(self.kv_b_proj.weight_scale))
+                
+                # Handle block quantization broadcasting dynamically
+                if weight_scale.shape[0] != weights.shape[0] and weight_scale.shape[1] == weights.shape[0]:
+                    weight_scale = weight_scale.T
+                
+                if weight_scale.shape[1] < weights.shape[1]:
+                    block_size = weights.shape[1] // weight_scale.shape[1]
+                    weight_scale = jnp.repeat(weight_scale, block_size, axis=1)
+                    
                 weights = weights * weight_scale
                 
             # Transpose to match vLLM's .T
