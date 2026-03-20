@@ -103,14 +103,14 @@ def moe_gmm_local(
     topk: int,
     parallelism: Literal["tp", "ep"],
 ) -> jax.Array:
-    """Main MoE logic on a local shard can run in TP or EP mode.
+    """ Main MoE logic on a local shard can run in TP or EP mode.
+
     Set parallelism for "tp" or "ep"
     """
 
     assert parallelism in ["tp", "ep"]
 
-    # GMM1 computes x @ (W_up | W_gate) together and then splits out to apply
-    # activation to the gate result.
+    # GMM1 computes x @ (W_up | W_gate) together and activation, output is [tokens,padded_intermediate_size]
     gmm1_res = gmm_wrapper(
         x,
         w1,
