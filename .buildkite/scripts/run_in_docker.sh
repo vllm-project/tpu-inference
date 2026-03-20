@@ -25,14 +25,9 @@ if [ "$#" -eq 0 ]; then
   exit 1
 fi
 
-# Optional: Set a custom working directory and mount current host dir
-DOCKER_MOUNT_ARGS=()
-if [ -n "${DOCKER_WORKDIR:-}" ]; then
-  DOCKER_MOUNT_ARGS=(
-    -v "$(pwd)":"${DOCKER_WORKDIR}"
-    -w "${DOCKER_WORKDIR}"
-  )
-fi
+# Verify if BENCHMARK_DOCKER_ARGS is declared; initialize as an empty array if undefined
+declare -p BENCHMARK_DOCKER_ARGS >/dev/null 2>&1 || declare -a BENCHMARK_DOCKER_ARGS=()
+printf "[INFO] %s = %s\n" "BENCHMARK_DOCKER_ARGS" "${BENCHMARK_DOCKER_ARGS[*]}"
 
 # TODO(Qiliang Cui): This is temp solution to mitigate the docker image
 #     not cleaned issue when migrating benchmark to buildkite.
@@ -114,6 +109,6 @@ exec docker run \
   ${TPU_VERSION:+-e TPU_VERSION="$TPU_VERSION"} \
   ${SKIP_ACCURACY_TESTS:+-e SKIP_ACCURACY_TESTS="$SKIP_ACCURACY_TESTS"} \
   ${VLLM_MLA_DISABLE:+-e VLLM_MLA_DISABLE="$VLLM_MLA_DISABLE"} \
-  "${DOCKER_MOUNT_ARGS[@]}" \
+  "${BENCHMARK_DOCKER_ARGS[@]}" \
   "$FULL_IMAGE_TAG" \
   "$@" # Pass all script arguments as the command to run in the container
