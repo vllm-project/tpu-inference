@@ -299,11 +299,9 @@ def process_moe_weights(
                                            intermediate_size)
             pad_width_hidden_size = align_to(hidden_size, 256) - hidden_size
 
-            w13_weight = jnp.pad(
-                w13_weight,
-                ((0, 0), (0, 0), (0, pad_width_hidden_size),
-                 (0, pad_width_intermediate_size)),
-            )
+            w13_weight = jnp.pad(w13_weight,
+                                 ((0, 0), (0, 0), (0, pad_width_hidden_size),
+                                  (0, pad_width_intermediate_size)))
 
             w2_weight = jnp.pad(
                 w2_weight,
