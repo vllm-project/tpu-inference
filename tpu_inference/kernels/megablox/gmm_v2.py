@@ -932,6 +932,19 @@ def make_gmm_configs(
         dtype=lhs.dtype,
     )
 
+    # NOTE(catswe): when lhs quant_block_size > rhs quant_block_size,
+    # a single lhs block spans multiple rhs quant blocks. the quantized
+    # matmul path iterates at lhs block granularity and applies one rhs
+    # scale per lhs block, so the additional rhs scales within each
+    # iteration will be silently ignored.
+    if (rhs_cfgs.has_scale and lhs_cfgs.quant_block_size is not None
+            and rhs_cfgs.quant_block_size is not None
+            and lhs_cfgs.quant_block_size > rhs_cfgs.quant_block_size):
+        raise NotImplementedError(
+            f"lhs quant_block_size ({lhs_cfgs.quant_block_size}) > "
+            f"rhs quant_block_size ({rhs_cfgs.quant_block_size}) is not supported."
+        )
+
     if lhs_cfgs.quant_block_size != 512:
         logger.warning_once(
             f'[GMM V2] Using quant_block_size {lhs_cfgs.quant_block_size}. '
