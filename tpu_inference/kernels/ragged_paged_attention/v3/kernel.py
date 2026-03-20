@@ -92,7 +92,7 @@ def ref_ragged_paged_attention(
 
     if mask_value is None:
         # We do not set to -inf directly because (-inf) - (-inf) is nan.
-        mask_value = -float(jnp.finfo(out_dtype).max)
+        mask_value = jnp.finfo(out_dtype).min
     dynamic_validate_inputs(
         queries,
         keys,
@@ -1534,8 +1534,7 @@ def get_default_block_sizes(
     }
 
 
-@functools.partial(
-    jax.jit,
+@jax.jit(
     static_argnames=(
         "use_causal_mask",
         "skip_kv_mask",
