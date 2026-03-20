@@ -21,29 +21,30 @@ env:
   GCP_DATABASE_ID: "vllm-bm-bk-runs"
 
 definitions:
+  base_env_0: &base_env_0
+    DEVICE: "tpu7x-8"
+    MODEL: "deepseek-ai/DeepSeek-R1"
+    MAX_NUM_SEQS: "16"
+    MAX_NUM_BATCHED_TOKENS: "1024"
+    TENSOR_PARALLEL_SIZE: "8"
+    DATASET: "bench-custom-token"
+    EXPECTED_ETEL: "43200000"
+    NUM_PROMPTS: "64"
+    MODELTAG: "NEW"
+    VLLM_MLA_DISABLE: "1"
+    TPU_BACKEND_TYPE: "vllm"
+    EXTRA_ARGS: '--kv-cache-dtype=fp8 --enable-expert-parallel --gpu-memory-utilization 0.95'
+
   base_cfg_0: &base_cfg_0
     depends_on: "build-vllm-tpu-image"
     agents:
       queue: "tpu_v7x_8_queue"
     command: ".buildkite/benchmark/scripts/run_job_from_env.sh"
-    env:
-      DEVICE: "tpu7x-8"
-      MODEL: "deepseek-ai/DeepSeek-R1"
-      MAX_NUM_SEQS: "16"
-      MAX_NUM_BATCHED_TOKENS: "1024"
-      TENSOR_PARALLEL_SIZE: "8"
-      DATASET: "bench-custom-token"
-      EXPECTED_ETEL: "43200000"
-      NUM_PROMPTS: "64"
-      MODELTAG: "NEW"
-      VLLM_MLA_DISABLE: "1"
-      TPU_BACKEND_TYPE: "vllm"
-      EXTRA_ARGS: '--kv-cache-dtype=fp8 --enable-expert-parallel --gpu-memory-utilization 0.95'
-
 steps:
   - label: "Benchmark - deepseek-ai/DeepSeek-R1-datset_bench-custom-token-inlen_1024-outlen_4096 RecordId: bk-${BUILDKITE_STEP_ID}"
     <<: *base_cfg_0
     env:
+      <<: *base_env_0
       INPUT_LEN: "1024"
       OUTPUT_LEN: "4096"
       MAX_MODEL_LEN: "5120"
