@@ -31,8 +31,6 @@ from jax.experimental.pallas import tpu as pltpu
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, cdiv, get_dtype_packing, get_tpu_version, next_power_of_2)
 
-DEFAULT_VMEM_LIMIT_BYTES = 120 * 1024 * 1024
-
 
 class RpaCase(Enum):
     """Represents the different cases for Ragged Paged Attention.
@@ -1648,12 +1646,12 @@ def ragged_paged_attention(
 
     if mask_value is None:
         # We do not set to -inf directly because (-inf) - (-inf) is nan.
-        mask_value = -float(jnp.finfo(out_dtype).max)
+        mask_value = jnp.finfo(out_dtype).min
 
     if vmem_limit_bytes is None:
         # TODO(jevinjiang, jacobplatin): change this to use
         # `get_vmem_estimate_bytes` when VREG spilling is fixed.
-        vmem_limit_bytes = DEFAULT_VMEM_LIMIT_BYTES
+        vmem_limit_bytes = pltpu.get_tpu_info().vmem_capacity_bytes
 
     static_validate_inputs(
         q,
@@ -1701,11 +1699,6 @@ def ragged_paged_attention(
     assert num_page_indices % max_num_seqs == 0
     pages_per_seq = num_page_indices // max_num_seqs
     num_q_heads_per_kv_head = num_q_heads_per_kv_head_per_q_packing * q_packing
-
-    if vmem_limit_bytes is None:
-        # TODO(jevinjiang, jacobplatin): change this to use
-        # `get_vmem_estimate_bytes` when VREG spilling is fixed.
-        vmem_limit_bytes = DEFAULT_VMEM_LIMIT_BYTES
 
     # (bq_sem_idx, bkv_sem_idx, bo_sem_idx)
     init_sem_ids = jnp.zeros((3, ), jnp.int32)
