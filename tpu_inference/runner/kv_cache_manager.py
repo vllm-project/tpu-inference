@@ -311,8 +311,8 @@ class KVCacheManager:
             num_blocks = (num_blocks // dp_size) * dp_size
             # NOTE: we'll multiply the num_kv_heads by 2 in the function
             if self.use_mla:
-                head_size = self.runner.model_config.hf_config.kv_lora_rank + \
-                    self.runner.model_config.hf_config.qk_rope_head_dim
+                config = getattr(self.runner.model_config, "hf_text_config", self.runner.model_config.hf_config)
+                head_size = config.kv_lora_rank + config.qk_rope_head_dim
             else:
                 head_size = layer_spec.head_size
             kv_cache = create_kv_caches(
