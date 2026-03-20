@@ -43,11 +43,14 @@ pip install rouge-score==0.1.2 || true
 pip install "lm-eval[api,math]>=0.4.9.2" || true
 
 
-VLLM_LOG="$WORKSPACE/vllm_log.txt"
-BM_LOG="$WORKSPACE/bm_log.txt"
-BEST_BM_LOG="$WORKSPACE/best_bm_log.txt"
-PROFILE_FOLDER="$WORKSPACE/profile"
-
+VLLM_LOG="$LOG_FOLDER/vllm_log.txt"
+BM_LOG="$LOG_FOLDER/bm_log.txt"
+BEST_BM_LOG="$LOG_FOLDER/best_bm_log.txt"
+PROFILE_FOLDER="$LOG_FOLDER/profile"
+DOCKER_ARTIFACT_FOLDER=${DOCKER_ARTIFACT_FOLDER:-"/workspace/artifacts"}
+printf "[INFO] %-25s = %s\n" "VLLM_LOG" "$VLLM_LOG"
+printf "[INFO] %-25s = %s\n" "BM_LOG" "$BM_LOG"
+printf "[INFO] %-25s = %s\n" "DOCKER_ARTIFACT_FOLDER" "$DOCKER_ARTIFACT_FOLDER"
 
 if [ -n "$TARGET_COMMIT" ]; then
   head_hash=$(git rev-parse HEAD)
@@ -79,18 +82,17 @@ contains_element () {
 if contains_element "$DATASET" "${LM_EVAL_DATASETS[@]}"; then
   echo "DATASET ($DATASET) is an accuracy benchmark. Running lm_eval path."
   {
-    "/workspace/lm_eval/$DATASET/run.sh"
+    ".buildkite/benchmark/lm_eval/$DATASET/run.sh"
     printf "AccuracyMetrics: "
     tr -d '\n' < "/workspace/${DATASET}_accuracy.json"
     echo ""
-  } >> /workspace/bm_log.txt
+  } >> "$BM_LOG"
   echo "Finished running $DATASET benchmark."
   exit 0
 fi
 
 
 # create a log and profile folder
-mkdir -p "$WORKSPACE/log"
 mkdir -p "$PROFILE_FOLDER"
 
 if [ "$DATASET" = "sonnet" ]; then
@@ -123,7 +125,7 @@ elif [[ "$MODEL" == "Qwen/Qwen2.5-VL-7B-Instruct" || "$MODEL" == "Qwen/Qwen2.5-V
   EXTRA_ARGS+="--limit-mm-per-prompt {\"image\":1} --mm-processor-kwargs {\"max_pixels\":1024000}"
 elif [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
   echo "deepseek-ai/DeepSeek-R1"
-  EXTRA_ARGS+=" --generation-config /workspace/generation_configs/DeepSeek-R1"
+  EXTRA_ARGS+=" --generation-config $DOCKER_ARTIFACT_FOLDER/generation_configs/DeepSeek-R1"
 fi
 
 if [[ -n "${ADDITIONAL_CONFIG:-}" ]]; then
@@ -230,24 +232,24 @@ run_benchmark(){
       fi
       ;;
     mmlu)
-      ARGS+=(--dataset-path "/workspace/dataset" --mmlu-num-shots 0 --mmlu-method "HELM")
+      ARGS+=(--dataset-path "$DOCKER_ARTIFACT_FOLDER/dataset" --mmlu-num-shots 0 --mmlu-method "HELM")
       ;;
     mlperf)
-      ARGS+=(--dataset-path "/workspace/dataset/processed-data.pkl" --mlperf-input-len "$INPUT_LEN" --max-model-len "$MAX_MODEL_LEN")
+      ARGS+=(--dataset-path "$DOCKER_ARTIFACT_FOLDER/dataset/processed-data.pkl" --mlperf-input-len "$INPUT_LEN" --max-model-len "$MAX_MODEL_LEN")
       ;;
     custom-token)
-      local dataset_path="$WORKSPACE/dataset/${MODEL##*/}_${INPUT_LEN}_${OUTPUT_LEN}_tp${TENSOR_PARALLEL_SIZE}.json"
+      local dataset_path="$DOCKER_ARTIFACT_FOLDER/dataset/${MODEL##*/}_${INPUT_LEN}_${OUTPUT_LEN}_tp${TENSOR_PARALLEL_SIZE}.json"
       ARGS+=(--dataset-path "$dataset_path")
       ;;
     bench-custom-token)
-      local dataset_path="$WORKSPACE/dataset/${MODEL##*/}/inlen${INPUT_LEN}_outlen${OUTPUT_LEN}_prefixlen${PREFIX_LEN}.jsonl"
+      local dataset_path="$DOCKER_ARTIFACT_FOLDER/dataset/${MODEL##*/}/inlen${INPUT_LEN}_outlen${OUTPUT_LEN}_prefixlen${PREFIX_LEN}.jsonl"
       echo "dataset_path: $dataset_path"
       # The original script set dataset-name to 'custom' for this case
       ARGS[7]="custom" # This replaces the --dataset-name value in the array
       ARGS+=(--dataset-path "$dataset_path" --custom-output-len "$OUTPUT_LEN" --skip-chat-template)
       ;;
     bench-custom-mm)
-      DATA_DIR="$WORKSPACE/dataset/${MODEL##*/}"
+      DATA_DIR="$DOCKER_ARTIFACT_FOLDER/dataset/${MODEL##*/}"
       local dataset_files=()
       mapfile -d $'\0' dataset_files < <(find "$DATA_DIR" -name "inlen${INPUT_LEN}_outlen${OUTPUT_LEN}_prefixlen${PREFIX_LEN}*.jsonl" -print0)
       if [ ${#dataset_files[@]} -ne 1 ]; then
@@ -263,7 +265,7 @@ run_benchmark(){
       ARGS+=(--dataset-path "$dataset_path" --custom-output-len "$OUTPUT_LEN" --custom-skip-chat-template --endpoint /v1/chat/completions)
       ;;
     sharegpt)
-      local dataset_path="$WORKSPACE/dataset/ShareGPT_V3_unfiltered_cleaned_split.json"
+      local dataset_path="$DOCKER_ARTIFACT_FOLDER/dataset/ShareGPT_V3_unfiltered_cleaned_split.json"
       if [ "$INPUT_LEN" -gt 0 ]; then
         echo "Please set INPUT_LEN to 0 for sharegpt dataset because it is not used." > "$BM_LOG" 2>&1
         exit 1
