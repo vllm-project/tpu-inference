@@ -984,14 +984,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     discard_sampled_tokens_req_indices, request_seq_lens,
                     logits_indices_selector)
 
-            if logprobs is not None:
-                # Use materialize to ensure logprobs are ready on host when we return async results
-                logprobs_lists = _jax_logprobs_materialize(
-                    logprobs, logits_indices_selector)
-
-            else:
-                logprobs_lists = None
-
             # Save the previous results
             next_tokens = jax.copy_to_host_async(next_tokens)
             self._pre_async_results = AsyncPreResults(
