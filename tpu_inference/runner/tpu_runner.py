@@ -1769,7 +1769,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _get_input_ids_embeds(self, input_ids: jax.Array,
                               mm_embeds: jax.Array | None,
                               is_mm_embed: jax.Array | None):
-        if self.is_multimodal_model:
+        # Prevent the cost of calling additional function.
+        if self.is_multimodal_model and mm_embeds is not None:
             assert self.embed_input_ids_fn is not None
             inputs_embeds = self.embed_input_ids_fn(
                 self.state,
