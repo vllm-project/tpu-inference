@@ -270,19 +270,18 @@ run_benchmark(){
       ;;
   esac
 
+  printf "[DEBUG] Executing: %s %s\n" "${command_to_run[*]}" "${ARGS[*]}" >&2
+
   # Execute the command
   "${command_to_run[@]}" "${ARGS[@]}" > "$BM_LOG" 2>&1
-
-  echo "completed..."
-  echo
 
   throughput=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
   p99_e2el=$(grep "P99 E2EL (ms):" "$BM_LOG" | awk '{print $NF}')
   echo "throughput: $throughput, P99 E2EL:$p99_e2el"
-  echo
   echo "$throughput $p99_e2el"
 }
 
+printf "[DEBUG] Checking folder structure in container..."
 printf "[DEBUG] pwd=%s\n\nls $DOCKER_ARTIFACT_FOLDER=%s\n" "$(pwd)" "$(ls "$DOCKER_ARTIFACT_FOLDER")" || true
 printf "[DEBUG] ls $DOCKER_ARTIFACT_FOLDER/temp_logs=%s\n" "$(ls "$DOCKER_ARTIFACT_FOLDER"/temp_logs)" || true
 
