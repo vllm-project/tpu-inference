@@ -72,8 +72,31 @@ class VllmMLAAttention(MLAAttention):
                 self.kv_cache_dtype)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
+        if not hasattr(self.kv_b_proj, "weight"):
+            # Already processed (called multiple times by vLLM and TPU inference loops)
+            return
+
         with torchax.default_env():
-            super().process_weights_after_loading(act_dtype)
+            # Bypass vLLM's process_weights_after_loading which crashes on quantized TPU weights
+            # Compute W_UK_T and W_UV manually in JAX
+            import jax.numpy as jnp
+            from torchax.interop import jax_view, torch_view
+            
+            weights = jax_view(self.kv_b_proj.weight)
+            # Transpose to match vLLM's .T
+            weights = weights.T
+            weights = weights.reshape((self.kv_lora_rank, self.num_heads, self.qk_nope_head_dim + self.v_head_dim))
+            
+            W_UK, W_UV = jnp.split(weights, [self.qk_nope_head_dim], axis=-1)
+            
+            # vLLM: self.W_UV = W_UV.transpose(0, 1)
+            self.W_UV = jnp.transpose(W_UV, (1, 0, 2))
+            
+            # vLLM: self.W_UK_T = W_UK.permute(1, 2, 0)
+            self.W_UK_T = jnp.transpose(W_UK, (1, 2, 0))
+            
+            self.W_UV = torch_view(self.W_UV)
+            self.W_UK_T = torch_view(self.W_UK_T)
 
             # NOTE: vLLM dequantizes kv_b_proj weights which causes more memory
             # usage than expected.
