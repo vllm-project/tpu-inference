@@ -40,22 +40,22 @@ def swigluoai(gate: jax.Array,
 def apply_act_fn(acc: jax.Array, tile_n: int, fuse_act: str | None):
     """Applies a fused activation function to the accumulator.
 
-  This function is used when an activation function is fused with the matrix
-  multiplication. The input accumulator `acc` is expected to contain
-  concatenated results for both the 'gate' and 'up' projections.
+    This function is used when an activation function is fused with the matrix
+    multiplication. The input accumulator `acc` is expected to contain
+    concatenated results for both the 'gate' and 'up' projections.
 
-  Args:
-    acc: The accumulator array, with the last dimension being 2 * tile_n.
-    tile_n: The size of the 'n' dimension for a single projection (gate or up).
-    fuse_act: The name of the activation function to apply. Supported values are
-      "silu", "gelu", and "swigluoai". If None, no activation is applied.
+    Args:
+      acc: The accumulator array, with the last dimension being 2 * tile_n.
+      tile_n: The size of the 'n' dimension for a single projection (gate or up).
+      fuse_act: The name of the activation function to apply. Supported values are
+        "silu", "gelu", and "swigluoai". If None, no activation is applied.
 
-  Returns:
-    The result of applying the activation function.
+    Returns:
+      The result of applying the activation function.
 
-  Raises:
-    NotImplementedError: If an unsupported `fuse_act` is provided.
-  """
+    Raises:
+      NotImplementedError: If an unsupported `fuse_act` is provided.
+    """
     if fuse_act is None:
         return acc
 
@@ -112,13 +112,13 @@ class WeightsRef:
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
-class FusedWeightsRef():
+class FusedWeightsRef:
     """Dataclass for weights used in fused activation operations.
+    This class holds references to the 'gate' and 'up' projection weights,
+    which are used together when an activation function is fused into the
+    matrix multiplication.
+    """
 
-  This class holds references to the 'gate' and 'up' projection weights,
-  which are used together when an activation function is fused into the
-  matrix multiplication.
-  """
     gate: WeightsRef
     up: WeightsRef
 
@@ -232,12 +232,14 @@ class IndexMaps:
         group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
         return (group_id, k_id, offset + n_id)
 
-    def rhs_bias_index_map(self,
-                           n_id: jax.Array,
-                           gm_id: jax.Array,
-                           _: jax.Array,
-                           *,
-                           offset: int = 0):
+    def rhs_bias_index_map(
+        self,
+        n_id: jax.Array,
+        gm_id: jax.Array,
+        _: jax.Array,
+        *,
+        offset: int = 0,
+    ):
         group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
         return (group_id, 0, offset + n_id)
 
@@ -272,14 +274,14 @@ class IndexMaps:
 def create_rhs_spec(index_map: IndexMaps, cfgs: GmmConfigs) -> RhsRef:
     """Creates a RhsRef with BlockSpecs for Pallas.
 
-  Args:
-    index_map: An instance of IndexMaps containing index mapping functions.
-    cfgs: An instance of GmmConfigs.
+    Args:
+      index_map: An instance of IndexMaps containing index mapping functions.
+      cfgs: An instance of GmmConfigs.
 
-  Returns:
-    A RhsRef instance with BlockSpec objects for gate and up weights,
-    scales, and biases, configured based on the provided GmmConfigs.
-  """
+    Returns:
+      A RhsRef instance with BlockSpec objects for gate and up weights,
+      scales, and biases, configured based on the provided GmmConfigs.
+    """
     rhs_weight_spec = pl.BlockSpec(
         (None, cfgs.tiles.tile_k // cfgs.rhs_cfgs.packing, cfgs.tiles.tile_n),
         index_map.rhs_weight_index_map,
@@ -297,9 +299,6 @@ def create_rhs_spec(index_map: IndexMaps, cfgs: GmmConfigs) -> RhsRef:
             (None, cfgs.num_quant_blocks_per_tile_k, 1, cfgs.tiles.tile_n),
             index_map.rhs_scale_index_map,
         )
-    gate_spec = WeightsRef(weight=rhs_weight_spec,
-                           scale=rhs_scale_spec,
-                           bias=rhs_bias_spec)
 
     up_spec = None
     if cfgs.fuse_act is not None:
@@ -329,8 +328,14 @@ def create_rhs_spec(index_map: IndexMaps, cfgs: GmmConfigs) -> RhsRef:
             bias=rhs_bias_up_spec,
         )
     if up_spec is None:
-        return gate_spec
-    return FusedWeightsRef(gate=gate_spec, up=up_spec)
+        return WeightsRef(weight=rhs_weight_spec,
+                          scale=rhs_scale_spec,
+                          bias=rhs_bias_spec)
+
+    return FusedWeightsRef(gate=WeightsRef(weight=rhs_weight_spec,
+                                           scale=rhs_scale_spec,
+                                           bias=rhs_bias_spec),
+                           up=up_spec)
 
 
 def generate_block_specs(
@@ -378,23 +383,23 @@ def inner_kernel(
 ):
     """Inner kernel invoked by emit_pipeline to perform matmul.
 
-  tiled_lhs_ref and tiled_out_ref points to rows [m_start:m_end] of lhs and out.
-  Additionally, m_start and m_end does not have to align with tile boundaries
-  [m_offset:m_offset+tile_m]. Therefore, rows [m_offset:m_start] and
-  [m_end:m_offset+tile_m] of tiled_lhs_ref and tiled_out_ref will contain
-  invalid data and needs to be masked out.
+    tiled_lhs_ref and tiled_out_ref points to rows [m_start:m_end] of lhs and out.
+    Additionally, m_start and m_end does not have to align with tile boundaries
+    [m_offset:m_offset+tile_m]. Therefore, rows [m_offset:m_start] and
+    [m_end:m_offset+tile_m] of tiled_lhs_ref and tiled_out_ref will contain
+    invalid data and needs to be masked out.
 
-  Args:
-    tiled_lhs_ref: Contains value lhs[m_start:m_end, k_start:k_end]
-    tiled_rhs_ref: Contains value rhs[g_id, k_start:k_end, n_start:n_end]. where
-      g_id is the group associated with lhs[m_start:m_end, :]
-    tiled_out_ref: Contains value out[m_start:m_end, n_start:n_end]
-    partial_out_ref: Contains last size_lhs_sublane rows of the previous output.
-      Will be initialized to zero if this is first tile for grid[n_id, :, :].
-    acc_ref: Reference to the accumulator.
-    metadata_ref: Reference to the metadata.
-    cfgs: GmmConfigs.
-  """
+    Args:
+      tiled_lhs_ref: Contains value lhs[m_start:m_end, k_start:k_end]
+      tiled_rhs_ref: Contains value rhs[g_id, k_start:k_end, n_start:n_end]. where
+        g_id is the group associated with lhs[m_start:m_end, :]
+      tiled_out_ref: Contains value out[m_start:m_end, n_start:n_end]
+      partial_out_ref: Contains last size_lhs_sublane rows of the previous output.
+        Will be initialized to zero if this is first tile for grid[n_id, :, :].
+      acc_ref: Reference to the accumulator.
+      metadata_ref: Reference to the metadata.
+      cfgs: GmmConfigs.
+    """
 
     def _matmul(is_first_k_step: bool, is_last_k_step: bool):
         tiled_lhs = tiled_lhs_ref.reshape(-1, cfgs.tiles.tile_k)[...]
@@ -402,8 +407,7 @@ def inner_kernel(
         # When rhs is packed (quantized dtype packed into uint32), unpack it
         # back to the original dtype using pltpu.bitcast which operates on K
         # axis. This expands the K dimension back to tile_k.
-        packing_dtype = (cfgs.rhs_cfgs.quant_dtype
-                         if cfgs.rhs_cfgs.packing > 1 else None)
+        packing_dtype = cfgs.rhs_cfgs.quant_dtype if cfgs.rhs_cfgs.packing > 1 else None
         tiled_rhs = tiled_rhs_ref.get_weight(packing_dtype)
 
         valid_k = cfgs.dims.size_k % cfgs.tiles.tile_k
@@ -612,21 +616,21 @@ def fill_metadata(
 ) -> jax.Array:
     """Fills the metadata for the given lhs group sizes and group offset.
 
-  Iterates over the lhs group sizes and if the group id is valid, determines
-  the number of gm tiles that are needed to process the current group. Then,
-  it fills starting and ending offset (gm_id_to_m_offset), and the group id
-  (gm_id_to_group_id) for each gm tile.
+    Iterates over the lhs group sizes and if the group id is valid, determines
+    the number of gm tiles that are needed to process the current group. Then,
+    it fills starting and ending offset (gm_id_to_m_offset), and the group id
+    (gm_id_to_group_id) for each gm tile.
 
-  Args:
-    lhs_group_sizes_ref: The group sizes of lhs.
-    group_offset_ref: Offset of the first group to process.
-    metadata_ref: Metadata that is used to determine the group id and m offsets
-      for each gmm tile.
-    cfgs: GmmConfigs.
+    Args:
+      lhs_group_sizes_ref: The group sizes of lhs.
+      group_offset_ref: Offset of the first group to process.
+      metadata_ref: Metadata that is used to determine the group id and m offsets
+        for each gmm tile.
+      cfgs: GmmConfigs.
 
-  Returns:
-      The number of gm tiles to process lhs with given group offset.
-  """
+    Returns:
+        The number of gm tiles to process lhs with given group offset.
+    """
 
     group_offset = group_offset_ref[0]
     max_num_group = group_offset + cfgs.dims.size_group
@@ -795,30 +799,30 @@ def kernel_main(
 ):
     """Entry point for GMM kernel.
 
-  Computes metadata to determine which rows of lhs needs processing and how
-  they will be tiled. And then, invoke inner kernel using metadata.
+    Computes metadata to determine which rows of lhs needs processing and how
+    they will be tiled. And then, invoke inner kernel using metadata.
 
-  Uses the following notation:
-  - g: rhs group dimension
-  - m: Batch dimension
-  - gm: Batch tiling dimension. Aligned to size_lhs_sublane and has tile size
-    of tile_m. Skips over empty groups and accounts for revisited tiles.
-  - k: in dimension
-  - n: out dimension
+    Uses the following notation:
+    - g: rhs group dimension
+    - m: Batch dimension
+    - gm: Batch tiling dimension. Aligned to size_lhs_sublane and has tile size
+      of tile_m. Skips over empty groups and accounts for revisited tiles.
+    - k: in dimension
+    - n: out dimension
 
-  Args:
-    lhs_group_sizes_ref: Reference to the group sizes of lhs.
-    group_offset_ref: Reference to the group offset.
-    lhs_ref: Reference to the lhs.
-    rhs_ref: Reference to the rhs.
-    out_ref: Reference to the out.
-    partial_out_ref: Reference to the partial output.
-    acc_ref: Reference to the accumulator.
-    metadata_ref: Reference to the metadata.
-    zero_ref: Scratch memory for storing zero values used in initialization.
-    semaphore_ref: Semaphore for zero initialization DMAs.
-    cfgs: GmmConfigs.
-  """
+    Args:
+      lhs_group_sizes_ref: Reference to the group sizes of lhs.
+      group_offset_ref: Reference to the group offset.
+      lhs_ref: Reference to the lhs.
+      rhs_ref: Reference to the rhs.
+      out_ref: Reference to the out.
+      partial_out_ref: Reference to the partial output.
+      acc_ref: Reference to the accumulator.
+      metadata_ref: Reference to the metadata.
+      zero_ref: Scratch memory for storing zero values used in initialization.
+      semaphore_ref: Semaphore for zero initialization DMAs.
+      cfgs: GmmConfigs.
+    """
 
     if cfgs.fuse_act is not None:
         assert acc_ref.shape[1] == 2 * cfgs.tiles.tile_n, (
@@ -935,8 +939,7 @@ def calculate_tiling(
     tile_n_limit = min(tile_n_limit, dims.size_n)
 
     def _is_tile_k_quant_block_compatible(tk: int) -> bool:
-        if (tk % rhs_cfgs.quant_block_size != 0
-                and rhs_cfgs.quant_block_size % tk != 0):
+        if tk % rhs_cfgs.quant_block_size != 0 and rhs_cfgs.quant_block_size % tk != 0:
             return False
         return True
 
@@ -1205,28 +1208,28 @@ def gmm_v2(
 ) -> jax.Array:
     """GMM kernel implemented with emit_pipeline.
 
-  Dynamically calculate offset lhs/out tiles to reduce redundant computations.
-  Additionally, it adjusts dma size based on number of valid rows and utilize
-  triple buffering on weights to better utilize memory.
+    Dynamically calculate offset lhs/out tiles to reduce redundant computations.
+    Additionally, it adjusts dma size based on number of valid rows and utilize
+    triple buffering on weights to better utilize memory.
 
-  Args:
-    lhs: lhs with shape [size_m, size_k].
-    rhs: rhs with shape [size_group, size_k, size_n].
-    group_sizes: The group sizes of lhs rows of shape [size_lhs_group,].
-    rhs_scale: The rhs scale of shape [size_group, num_blocks, 1, out_size].
-    rhs_bias: The rhs bias of shape [size_group, 1, out_size].
-    group_offset: Optional. The group offset of shape [1,].
-    tile_info: The tile sizes or tile function to use.
-    vmem_limit_bytes: Optional vmem limit in bytes.
-    precision: Unused. Exists for compatibility reasons.
-    preferred_element_type: Optional jnp.dtype for the output matrix.
-    acc_dtype: Optional jnp.dtype for the accumulator.
-    maybe_quantize_lhs: Quantize lhs if set to True and rhs is quantized.
-    zero_initialize: Whether to initialize unvisited output elements to zero.
-    fuse_act: Activation function to fuse with GMM, None if no fusion.
-  Returns:
-    Output of shape [size_m, size_n].
-  """
+    Args:
+      lhs: lhs with shape [size_m, size_k].
+      rhs: rhs with shape [size_group, size_k, size_n].
+      group_sizes: The group sizes of lhs rows of shape [size_lhs_group,].
+      rhs_scale: The rhs scale of shape [size_group, num_blocks, 1, out_size].
+      rhs_bias: The rhs bias of shape [size_group, 1, out_size].
+      group_offset: Optional. The group offset of shape [1,].
+      tile_info: The tile sizes or tile function to use.
+      vmem_limit_bytes: Optional vmem limit in bytes.
+      precision: Unused. Exists for compatibility reasons.
+      preferred_element_type: Optional jnp.dtype for the output matrix.
+      acc_dtype: Optional jnp.dtype for the accumulator.
+      maybe_quantize_lhs: Quantize lhs if set to True and rhs is quantized.
+      zero_initialize: Whether to initialize unvisited output elements to zero.
+      fuse_act: Activation function to fuse with GMM, None if no fusion.
+    Returns:
+      Output of shape [size_m, size_n].
+    """
 
     del precision
 

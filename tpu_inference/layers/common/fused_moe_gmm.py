@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import functools
-from typing import Callable, Literal
+from typing import Literal
 
 import jax
 from jax import numpy as jnp
@@ -23,8 +23,6 @@ from jax.sharding import PartitionSpec as P
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
-
-ActFn = Callable[[jax.Array, jax.Array], jax.Array]
 
 
 def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
@@ -63,15 +61,16 @@ def _swigluoai(x1: jax.Array,
     return gated_activation * (x2 + 1)
 
 
-def gmm_wrapper(lhs,
-                rhs,
-                rhs_scale,
-                rhs_bias,
-                group_sizes,
-                group_offset,
-                last_gmm,
-                fuse_act=None):
-    # if (not last_gmm or lhs.shape[0] < 1024):
+def gmm_wrapper(
+    lhs,
+    rhs,
+    rhs_scale,
+    rhs_bias,
+    group_sizes,
+    group_offset,
+    last_gmm,
+    fuse_act=None,
+):
     gmm_res = gmm_v2(
         lhs=lhs,
         rhs=rhs,
@@ -104,13 +103,11 @@ def moe_gmm_local(
     topk: int,
     parallelism: Literal["tp", "ep"],
 ) -> jax.Array:
-    """ Main MoE logic on a local shard can run in TP or EP mode.
+    """Main MoE logic on a local shard can run in TP or EP mode.
     Set parallelism for "tp" or "ep"
     """
 
     assert parallelism in ["tp", "ep"]
-    fuse_act = (activation if isinstance(activation, str)
-                and activation in ["silu", "swigluoai"] else None)
 
     # GMM1 computes x @ (W_up | W_gate) together and then splits out to apply
     # activation to the gate result.
@@ -122,14 +119,8 @@ def moe_gmm_local(
         group_sizes,
         group_offset,
         False,
-        fuse_act=fuse_act,
+        fuse_act=activation,
     )
-    if fuse_act is None:
-        gmm1_res_gate, gmm1_res_up = jnp.split(gmm1_res, 2, -1)
-        if isinstance(activation, str):
-            gmm1_res = apply_act_fn(activation, gmm1_res_gate, gmm1_res_up)
-        else:
-            gmm1_res = activation(gmm1_res_gate, gmm1_res_up)
 
     # When the parallelism is TP since w2_bias is not sharded, we should only apply bias
     # once, not applying to every shard. So we set w2_bias to 0 to all shards other than
@@ -166,7 +157,7 @@ def tensor_parallel_gmm(
     topk_argsort_revert_indices: jax.Array,
     topk_weights: jax.Array,
     *,
-    activation: str | ActFn,
+    activation: str,
     topk: int,
     mesh: Mesh,
 ) -> jax.Array:
@@ -203,7 +194,7 @@ def tensor_parallel_gmm(
             w2_scale_spec,
             w2_bias_spec,
             data_p_spec,
-            data_p_spec,
+            P(),
             data_p_spec,
             data_p_spec,
         ),
@@ -236,7 +227,7 @@ def expert_parallel_gmm(
     topk_argsort_revert_indices: jax.Array,
     topk_weights: jax.Array,
     *,
-    activation: str | ActFn,
+    activation: str,
     topk: int,
     mesh: Mesh,
 ) -> jax.Array:
@@ -311,30 +302,30 @@ def fused_moe_func(
     renormalize: bool,
     mesh: Mesh,
     use_ep: bool,
-    activation: str | ActFn,
+    activation: str,
     scoring_fn: str,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
-  Args:
-      hidden_states: [num_tokens, hidden_size]
-      w1: first moe weights [num_experts, hidden_size, intermediate_size * 2]
-      w2: second moe weights [num_experts, intermediate_size, hidden_size]
-      w1_scale: w1 scale [num_experts, num_blocks, 1, intermediate_size * 2]
-      w2_scale: w2 scale [num_experts, num_blocks, 1, hidden_size]
-      w1_bias: optional bias of w1 [num_experts, 1, intermediate_size * 2]
-      w2_bias: optional bias of w2 [num_experts, 1, hidden_size]
-      gating_output: routing information of tokens [num_tokens, num_experts]
-      topk: number of experts to choose per token.
-      renormalize: normalize gating_output.
-      mesh: mesh to perform moe.
-      use_ep: use expert parallelism.
-      activation: activation function to perform on the output of w1.
-      scoring_fn: scoring function to apply on gating_output.
+    Args:
+        hidden_states: [num_tokens, hidden_size]
+        w1: first moe weights [num_experts, hidden_size, intermediate_size * 2]
+        w2: second moe weights [num_experts, intermediate_size, hidden_size]
+        w1_scale: w1 scale [num_experts, num_blocks, 1, intermediate_size * 2]
+        w2_scale: w2 scale [num_experts, num_blocks, 1, hidden_size]
+        w1_bias: optional bias of w1 [num_experts, 1, intermediate_size * 2]
+        w2_bias: optional bias of w2 [num_experts, 1, hidden_size]
+        gating_output: routing information of tokens [num_tokens, num_experts]
+        topk: number of experts to choose per token.
+        renormalize: normalize gating_output.
+        mesh: mesh to perform moe.
+        use_ep: use expert parallelism.
+        activation: activation function to perform on the output of w1.
+        scoring_fn: scoring function to apply on gating_output.
 
-  Returns:
-      Output of moe operation [num_tokens, hidden_size]
-  """
+    Returns:
+        Output of moe operation [num_tokens, hidden_size]
+    """
     num_tokens, hidden_size = hidden_states.shape
     global_num_experts, padded_hidden_size, _ = w1.shape
     dtype = hidden_states.dtype

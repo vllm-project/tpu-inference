@@ -138,9 +138,6 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
             w2_bias = t2j(layer.w2_bias, use_dlpack=False)
         else:
             w13_bias = w2_bias = None
-        logger.info(
-            f"Processing MoE weights for layer {layer._get_name()} with activation {layer.activation}"
-        )
 
         @jax.jit
         def process_fp8_moe_weights(

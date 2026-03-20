@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass, fields
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -38,6 +39,7 @@ logger = init_logger(__name__)
 @dataclass
 class FusedMoEWeights:
     """Fused moe weights. weights can be either jax or torchax array."""
+
     w13_weight: jax.Array | Tensor
     w13_weight_scale: jax.Array | Tensor | None
     w13_bias: jax.Array | Tensor | None
@@ -50,6 +52,7 @@ class FusedMoEWeights:
 @dataclass
 class UnfusedMoEWeights:
     """Unfused moe weights. weights can be either jax or torchax array."""
+
     w1_weight: jax.Array | Tensor
     w1_weight_scale: jax.Array | Tensor | None
     w1_bias: jax.Array | Tensor | None
@@ -126,6 +129,56 @@ def quantize_moe_weights(
     weights.w2_weight_scale = w2_weight_scale
 
     return weights
+
+
+def process_w13_for_tp(tensor,
+                       concat_dim,
+                       intermediate_size,
+                       w13_reorder_size,
+                       local_intermediate_size,
+                       pad_amount,
+                       padded_intermediate_size,
+                       padded_output_sizes,
+                       name="w13"):
+    """helper to split, pad, concatenate, and reorder w13 tensors."""
+
+    # 1. Split into gate
+    gate = tensor[..., :intermediate_size]
+    up = tensor[..., intermediate_size:]
+
+    logger.info(f"{name}_gate shape before padding: {gate.shape}")
+
+    # 2. Pad the intermediate dimension
+    def _pad_tensor(t):
+        dims = t.shape[:-1]
+        # Reshape to expose local_intermediate_size
+        t = t.reshape(*dims, w13_reorder_size, local_intermediate_size)
+
+        # Dynamically create pad widths based on the reshaped tensor's rank
+        pad_widths = [(0, 0)] * t.ndim
+        # Padding for the last dimension
+        pad_widths[-1] = (0, pad_amount)
+        t = jnp.pad(t, pad_widths)
+
+        # Reshape back
+        return t.reshape(*dims, padded_intermediate_size)
+
+    # Apply padding
+    padded_gate = _pad_tensor(gate)
+    padded_up = _pad_tensor(up)
+
+    logger.info(f"{name}_gate shape after padding: {padded_gate.shape}")
+    logger.info(f"{name}_up shape after padding: {padded_up.shape}")
+
+    # 3. Concatenate and Reorder for avoiding TP sharding comms
+    concatenated = jnp.concatenate([padded_gate, padded_up], axis=concat_dim)
+
+    return reorder_concatenated_tensor_for_sharding(
+        concatenated,
+        padded_output_sizes,
+        w13_reorder_size,
+        dim=concat_dim,
+    )
 
 
 def process_moe_weights(
@@ -219,14 +272,18 @@ def process_moe_weights(
                 (0, 1, 2, 3)))
 
             # Fused moe kernel expects dims to be multiple of 256.
-            pad_width_intermediate_size = align_to(intermediate_size,
-                                                   256) - intermediate_size
+            pad_width_intermediate_size = (align_to(intermediate_size, 256) -
+                                           intermediate_size)
             pad_width_hidden_size = align_to(hidden_size, 256) - hidden_size
 
             w13_weight = jnp.pad(
                 w13_weight,
-                ((0, 0), (0, 0), (0, pad_width_hidden_size),
-                 (0, pad_width_intermediate_size)),
+                (
+                    (0, 0),
+                    (0, 0),
+                    (0, pad_width_hidden_size),
+                    (0, pad_width_intermediate_size),
+                ),
             )
 
             w2_weight = jnp.pad(
@@ -241,14 +298,23 @@ def process_moe_weights(
                 w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
                 w13_weight_scale = jnp.pad(
                     w13_weight_scale,
-                    ((0, 0), (0, 0), (0, pad_width_hidden_size), (0, 0),
-                     (0, pad_width_intermediate_size)),
+                    (
+                        (0, 0),
+                        (0, 0),
+                        (0, pad_width_hidden_size),
+                        (0, 0),
+                        (0, pad_width_intermediate_size),
+                    ),
                 )
             if w2_weight_scale is not None:
                 w2_weight_scale = jnp.pad(
                     w2_weight_scale,
-                    ((0, 0), (0, pad_width_intermediate_size), (0, 0),
-                     (0, pad_width_hidden_size)),
+                    (
+                        (0, 0),
+                        (0, pad_width_intermediate_size),
+                        (0, 0),
+                        (0, pad_width_hidden_size),
+                    ),
                 )
 
             if w13_bias is not None:
@@ -267,117 +333,42 @@ def process_moe_weights(
         case MoEBackend.GMM_TP:
             assert w13_reorder_size is not None
             assert intermediate_size % w13_reorder_size == 0
+
             local_intermediate_size = intermediate_size // w13_reorder_size
             padded_local_intermediate_size = align_to(local_intermediate_size,
                                                       128)
             padded_intermediate_size = padded_local_intermediate_size * w13_reorder_size
-            pad_amt = padded_local_intermediate_size - local_intermediate_size
-            logger.info(
-                f"w13 shape{w13_weight.shape}, local intermediate size {local_intermediate_size}, padded local intermediate size {padded_local_intermediate_size}, padded intermediate size {padded_intermediate_size}"
-            )
-            w13_gate = w13_weight[..., :intermediate_size]
-            w13_up = w13_weight[..., intermediate_size:]
-            w13_gate = w13_gate.reshape(num_experts, hidden_size,
-                                        w13_reorder_size,
-                                        local_intermediate_size)
-            w13_gate = jnp.pad(w13_gate,
-                               ((0, 0), (0, 0), (0, 0), (0, pad_amt)))
-            w13_gate = w13_gate.reshape(num_experts, hidden_size,
-                                        padded_intermediate_size)
-            w13_up = w13_up.reshape(num_experts, hidden_size, w13_reorder_size,
-                                    local_intermediate_size)
-            w13_up = jnp.pad(w13_up, ((0, 0), (0, 0), (0, 0), (0, pad_amt)))
-            w13_up = w13_up.reshape(num_experts, hidden_size,
-                                    padded_intermediate_size)
-            logger.info(f"w13_gate shape after padding: {w13_gate.shape}")
-            logger.info(f"w13_up shape after padding: {w13_up.shape}")
+            pad_amount = padded_local_intermediate_size - local_intermediate_size
+
             padded_output_sizes = [
                 padded_intermediate_size, padded_intermediate_size
             ]
-            w13_weight = jnp.concatenate([w13_gate, w13_up], axis=2)
-            w13_weight = reorder_concatenated_tensor_for_sharding(
-                w13_weight,
-                # output_sizes,
-                padded_output_sizes,
-                w13_reorder_size,
-                dim=2,
-            )
+
+            # Bind the common configuration variables to the stateless function
+            process_w13 = partial(
+                process_w13_for_tp,
+                intermediate_size=intermediate_size,
+                w13_reorder_size=w13_reorder_size,
+                local_intermediate_size=local_intermediate_size,
+                pad_amount=pad_amount,
+                padded_intermediate_size=padded_intermediate_size,
+                padded_output_sizes=padded_output_sizes)
+
+            # Apply to weights
+            w13_weight = process_w13(tensor=w13_weight,
+                                     concat_dim=2,
+                                     name="w13_weight")
+
             if w13_weight_scale is not None:
-                w13_weight_scale_gate = w13_weight_scale[
-                    ..., :intermediate_size]
-                w13_weight_scale_up = w13_weight_scale[..., intermediate_size:]
-                logger.info(
-                    f"w13_weight_scale_gate shape before padding: {w13_weight_scale_gate.shape}"
-                )
-                dims = w13_weight_scale_gate.shape[:3]
-                w13_weight_scale_gate = w13_weight_scale_gate.reshape(
-                    *dims, w13_reorder_size, local_intermediate_size)
-                w13_weight_scale_gate = jnp.pad(
-                    w13_weight_scale_gate,
-                    ((0, 0), (0, 0), (0, 0), (0, 0), (0, pad_amt)),
-                )
-                w13_weight_scale_gate = w13_weight_scale_gate.reshape(
-                    *dims, padded_intermediate_size)
-                w13_weight_scale_up = w13_weight_scale_up.reshape(
-                    *dims, w13_reorder_size, local_intermediate_size)
-                w13_weight_scale_up = jnp.pad(
-                    w13_weight_scale_up,
-                    ((0, 0), (0, 0), (0, 0), (0, 0), (0, pad_amt)),
-                )
-                w13_weight_scale_up = w13_weight_scale_up.reshape(
-                    *dims, padded_intermediate_size)
-                logger.info(
-                    f"w13_weight_scale_gate shape after padding: {w13_weight_scale_gate.shape}"
-                )
-                logger.info(
-                    f"w13_weight_scale_up shape after padding: {w13_weight_scale_up.shape}"
-                )
-                w13_weight_scale = jnp.concatenate(
-                    [w13_weight_scale_gate, w13_weight_scale_up], axis=3)
-                w13_weight_scale = reorder_concatenated_tensor_for_sharding(
-                    w13_weight_scale,
-                    # output_sizes,
-                    padded_output_sizes,
-                    w13_reorder_size,
-                    dim=3,
-                )
+                w13_weight_scale = process_w13(tensor=w13_weight_scale,
+                                               concat_dim=3,
+                                               name="w13_weight_scale")
+
             if w13_bias is not None:
-                w13_bias_gate = w13_bias[..., :intermediate_size]
-                w13_bias_up = w13_bias[..., intermediate_size:]
-                logger.info(
-                    f"w13_bias_gate shape before padding: {w13_bias_gate.shape}"
-                )
-                dims = w13_bias_gate.shape[:2]
-                w13_bias_gate = w13_bias_gate.reshape(*dims, w13_reorder_size,
-                                                      local_intermediate_size)
-                w13_bias_gate = jnp.pad(
-                    w13_bias_gate,
-                    ((0, 0), (0, 0), (0, 0), (0, pad_amt)),
-                )
-                w13_bias_gate = w13_bias_gate.reshape(
-                    *dims, padded_intermediate_size)
-                w13_bias_up = w13_bias_up.reshape(*dims, w13_reorder_size,
-                                                  local_intermediate_size)
-                w13_bias_up = jnp.pad(
-                    w13_bias_up,
-                    ((0, 0), (0, 0), (0, 0), (0, pad_amt)),
-                )
-                w13_bias_up = w13_bias_up.reshape(*dims,
-                                                  padded_intermediate_size)
-                logger.info(
-                    f"w13_bias_gate shape after padding: {w13_bias_gate.shape}"
-                )
-                logger.info(
-                    f"w13_bias_up shape after padding: {w13_bias_up.shape}")
-                w13_bias = jnp.concatenate([w13_bias_gate, w13_bias_up],
-                                           axis=2)
-                w13_bias = reorder_concatenated_tensor_for_sharding(
-                    w13_bias,
-                    # output_sizes,
-                    padded_output_sizes,
-                    w13_reorder_size,
-                    dim=2,
-                )
+                w13_bias = process_w13(tensor=w13_bias,
+                                       concat_dim=2,
+                                       name="w13_bias")
+
         case MoEBackend.GMM_EP:
             # No additional processing is needed for GMM_EP.
             pass
@@ -408,7 +399,6 @@ def shard_moe_weights(
     moe_backend: MoEBackend,
     mesh: Mesh,
 ) -> FusedMoEWeights:
-
     match moe_backend:
         case MoEBackend.FUSED_MOE | MoEBackend.GMM_EP:
             ep_sharding = NamedSharding(mesh, P(ShardingAxisName.EXPERT))
@@ -502,7 +492,6 @@ def process_fp8_moe_weights(
     w13_weight_scale = weights.w13_weight_scale
     w2_weight = weights.w2_weight
     w2_weight_scale = weights.w2_weight_scale
-    logger.info(f"Processing MoE weights with activation {activation}")
     if desired_quant_dtype_from_env := envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
         desired_quant_dtype = to_jax_dtype(desired_quant_dtype_from_env)
     else:
@@ -516,7 +505,9 @@ def process_fp8_moe_weights(
         requant_block_size = (int(requant_block_size_from_env)
                               if requant_block_size_from_env else None)
 
-    moe_logging_str = f"[MoE requantization]: re-quantizing MoE weights to {desired_quant_dtype}"
+    moe_logging_str = (
+        f"[MoE requantization]: re-quantizing MoE weights to {desired_quant_dtype}"
+    )
     if requant_block_size is not None:
         moe_logging_str += f" with block size {requant_block_size}"
     logger.info(moe_logging_str)
@@ -534,9 +525,6 @@ def process_fp8_moe_weights(
     w13_interleave = activation == "swigluoai"
     w13_reorder_size = get_mesh_shape_product(mesh,
                                               ShardingAxisName.MLP_TENSOR)
-    logger.info(
-        f"Reordering MoE weights for backend {moe_backend}, w13_interleave: {w13_interleave}, w13_reorder_size: {w13_reorder_size} w13 shape: {w13_weight.shape} w2 shape: {w2_weight.shape}"
-    )
     weights = quantize_moe_weights(
         FusedMoEWeights(
             w13_weight=w13_weight,
