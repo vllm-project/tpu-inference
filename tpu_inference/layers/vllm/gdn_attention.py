@@ -259,7 +259,13 @@ def _jax_gdn_attention_core(
 
     # 1. Causal Conv1D
     if is_prefill:
-        new_conv_state = mixed_qkv[:, -(kernel_size - 1):, :]
+        # new_conv_state = mixed_qkv[:, -(kernel_size - 1):, :]
+        T_conv = kernel_size - 1
+        new_conv_state = mixed_qkv[:, -T_conv:, :]
+        if new_conv_state.shape[1] < T_conv:
+            pad_len = T_conv - new_conv_state.shape[1]
+            new_conv_state = jnp.pad(new_conv_state,
+                                     ((0, 0), (pad_len, 0), (0, 0)))
         mixed_qkv = _causal_conv1d(mixed_qkv, conv_weight, conv_bias,
                                    kernel_size)
     else:
@@ -325,10 +331,11 @@ def gdn_attention_core_tpu(
 ) -> None:
     """
     JAX Bridge for the GDN core attention.
-    Intercepts the torch.ops.vllm call, fetches JAX state, and executes.
+    Uses a robust, token-by-token scan to inherently handle any mix of
+    ragged prefill and decode sequences without dynamic shape compilation errors.
     """
     fc = get_forward_context()
-    attn_metadata = fc.attn_metadata
+    attn_metadata = fc.attn_metadata[layer_name]
 
     layer_module = fc.no_compile_layers[layer_name]
     vllm_context = get_vllm_model_wrapper_context()
@@ -340,21 +347,9 @@ def gdn_attention_core_tpu(
     d_v = layer_module.head_v_dim
     kernel_size = layer_module.conv_kernel_size
 
-    attn_metadata = attn_metadata[layer_name]
-
-    num_tokens = mixed_qkv.shape[0]
-    is_prefill = getattr(attn_metadata, "num_prefills", 0) > 0
-
-    if is_prefill:
-        B = attn_metadata.num_prefills
-        T = num_tokens // B
-    else:
-        B = num_tokens
-        T = 1
-
-    j_mixed_qkv = jax_view(mixed_qkv).reshape(B, T, -1)
-    j_b = jax_view(b).reshape(B, T, -1)
-    j_a = jax_view(a).reshape(B, T, -1)
+    j_mixed_qkv = jax_view(mixed_qkv)  # [num_tokens, dim]
+    j_b = jax_view(b)
+    j_a = jax_view(a)
 
     j_conv_weight = jax_view(layer_module.conv1d.weight)
     j_conv_bias = jax_view(layer_module.conv1d.bias
@@ -362,57 +357,77 @@ def gdn_attention_core_tpu(
     j_A_log = jax_view(layer_module.A_log)
     j_dt_bias = jax_view(layer_module.dt_bias)
 
-    # NOTE: since we sharing the same KV cache for all layers, we need to
-    # reshape for the conv/recurrent state (from the paged traditional KV cache
-    # shape).
     layer_idx = vllm_context.layer_name_to_kvcache_index[layer_name]
-    kv_cache_entry = vllm_context.kv_caches[layer_idx]
+    conv_state, recurrent_state = vllm_context.kv_caches[layer_idx]
 
-    C = j_mixed_qkv.shape[-1]
-    conv_size = C * (kernel_size - 1)
-    rec_size = n_v * d_k * d_v
-
+    # Map physical cache blocks
     flat_block_tables = jax_view(attn_metadata.block_tables)
     max_reqs = attn_metadata.seq_lens.shape[0]
     max_blocks_per_req = flat_block_tables.shape[0] // max_reqs
     block_tables_2d = jnp.reshape(flat_block_tables,
                                   (max_reqs, max_blocks_per_req))
+    state_indices = block_tables_2d[:, 0].astype(jnp.int32)
 
-    # Get indices for active sequences
-    state_indices = block_tables_2d[:B, 0].astype(jnp.int32)
+    # Map tokens to their respective requests
+    q_loc = jax_view(attn_metadata.query_start_loc)
+    num_tokens = j_mixed_qkv.shape[0]
 
-    active_blocks = kv_cache_entry[state_indices]
+    token_idx = jnp.arange(num_tokens)
+    req_indices = jnp.sum(token_idx[:, None] >= q_loc[None, :], axis=1) - 1
+    req_indices = jnp.clip(req_indices, 0, max_reqs - 1)
 
-    flat_active_blocks = jnp.reshape(active_blocks, (B, -1))
+    # Exclude trailing padding indices from mutating cache
+    valid_mask = token_idx < q_loc[-1]
 
-    j_conv_state_active = jnp.reshape(flat_active_blocks[:, :conv_size],
-                                      (B, C, kernel_size - 1))
-    j_recurrent_state_active = jnp.reshape(
-        flat_active_blocks[:, conv_size:conv_size + rec_size],
-        (B, n_v, d_k, d_v))
+    def scan_fn(carry, xs):
+        c_state_all, r_state_all = carry
+        curr_qkv, curr_b, curr_a, req_idx, is_valid = xs
 
-    j_conv_state_active = jnp.transpose(j_conv_state_active, (0, 2, 1))
+        # Reshape for single step computation: (B=1, T=1, D)
+        curr_qkv = curr_qkv[None, None, :]
+        curr_b = curr_b[None, None, :]
+        curr_a = curr_a[None, None, :]
 
-    j_output, j_new_conv_active, j_new_rec_active = _jax_gdn_attention_core(
-        j_mixed_qkv, j_b, j_a, j_conv_state_active, j_recurrent_state_active,
-        j_conv_weight, j_conv_bias, j_A_log, j_dt_bias, is_prefill, n_kq, n_v,
-        d_k, d_v, kernel_size)
+        # Fetch the current state for this specific request
+        state_idx = state_indices[req_idx]
+        c_state = c_state_all[state_idx][None, ...]
+        r_state = r_state_all[state_idx][None, ...]
 
-    j_new_conv_active = jnp.transpose(j_new_conv_active, (0, 2, 1))
+        # Run 1 recurrence step (works seamlessly for prefill or decode)
+        out, new_c, new_r = _jax_gdn_attention_core(curr_qkv,
+                                                    curr_b,
+                                                    curr_a,
+                                                    c_state,
+                                                    r_state,
+                                                    j_conv_weight,
+                                                    j_conv_bias,
+                                                    j_A_log,
+                                                    j_dt_bias,
+                                                    is_prefill=False,
+                                                    n_kq=n_kq,
+                                                    n_v=n_v,
+                                                    d_k=d_k,
+                                                    d_v=d_v,
+                                                    kernel_size=kernel_size)
 
-    flat_new_conv = jnp.reshape(j_new_conv_active, (B, -1))
-    flat_new_rec = jnp.reshape(j_new_rec_active, (B, -1))
+        # Conditionally update the global cache maps
+        c_state_all = jnp.where(is_valid,
+                                c_state_all.at[state_idx].set(new_c[0]),
+                                c_state_all)
+        r_state_all = jnp.where(is_valid,
+                                r_state_all.at[state_idx].set(new_r[0]),
+                                r_state_all)
 
-    flat_active_blocks = flat_active_blocks.at[:, :conv_size].set(
-        flat_new_conv)
-    flat_active_blocks = flat_active_blocks.at[:, conv_size:conv_size +
-                                               rec_size].set(flat_new_rec)
+        return (c_state_all, r_state_all), out[0, 0]
 
-    updated_active_blocks = jnp.reshape(flat_active_blocks,
-                                        active_blocks.shape)
+    carry_init = (conv_state, recurrent_state)
+    xs = (j_mixed_qkv, j_b, j_a, req_indices, valid_mask)
 
-    vllm_context.kv_caches[layer_idx] = kv_cache_entry.at[state_indices].set(
-        updated_active_blocks)
+    # XLA optimizes this loop natively via in-place updates.
+    (new_conv_state,
+     new_recurrent_state), j_output = jax.lax.scan(scan_fn, carry_init, xs)
+
+    vllm_context.kv_caches[layer_idx] = (new_conv_state, new_recurrent_state)
 
     j_output_flat = j_output.reshape(core_attn_out.shape)
     core_attn_out.copy_(torch_view(j_output_flat))
@@ -427,4 +442,5 @@ def apply_gated_delta_net_torch_ops_patch():
     # Ensure the op exists in the namespace, which initializes the OpOverloadPacket
     if hasattr(torch.ops, "vllm") and hasattr(torch.ops.vllm,
                                               "gdn_attention_core"):
+        # dummy call to ensure the op is registered
         torch.ops.vllm.gdn_attention_core = gdn_attention_core_tpu
