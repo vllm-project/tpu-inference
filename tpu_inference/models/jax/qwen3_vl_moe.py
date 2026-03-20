@@ -1,35 +1,37 @@
-# Qwen3 VL MoE - Vision components are identical to Qwen3 VL dense
-# Import all vision-related classes and helper functions from qwen3_vl
+# Qwen3 VL MoE - Text model inherits from Qwen3 MoE with MRoPE attention
+# and DeepStack support. Vision components are identical to Qwen3 VL dense.
 
-from dataclasses import InitVar, dataclass
-
-from tpu_inference.layers.jax.rope_interface import apply_rope
-from tpu_inference.layers.jax.norm import JaxRmsNorm
-from tpu_inference.models.jax.qwen3_vl import (
-    build_mrope_input_positions,
-    _ModelConfigAdapter,
-    Qwen3VLImagePixelInputs,
-    Qwen3VLImageInputs,
-    Qwen3VLVisionTransformer,
-)
-
+import re
+from itertools import islice
 from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from flax.typing import Sharding
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
 
-from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.jax.base import create_param
-from tpu_inference.layers.jax.layers import FlaxUtils
-from tpu_inference import utils
-from tpu_inference.layers.common.attention_interface import attention
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.common.quantization import quantize_kv
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
+from tpu_inference.layers.jax.linear import JaxEinsum
+from tpu_inference.layers.jax.norm import JaxRmsNorm
+from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
+from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.qwen3_moe import (
+    Qwen3MoeDecoderLayer,
+    Qwen3MoeModel,
+    Qwen3MoeSparseMoeBlock,
+)
+from tpu_inference.models.jax.qwen2 import Qwen2MLP as Qwen3MoeDenseMLP
+from tpu_inference.models.jax.qwen3_vl import (
+    build_mrope_input_positions,
+    _ModelConfigAdapter,
+    _VllmConfigAdapter,
+    Qwen3VLImagePixelInputs,
+    Qwen3VLImageInputs,
+    Qwen3VLTextAttention,
+    Qwen3VLVisionTransformer,
+)
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     merge_multimodal_embeddings,
     normalize_mm_grid_thw,
@@ -43,444 +45,156 @@ from tpu_inference.models.jax.utils.weight_utils import (
 
 init_fn = nnx.initializers.uniform()
 
-modeling_flax_utils = FlaxUtils()
-
 logger = init_logger(__name__)
 
-@dataclass(kw_only=True)
-class Qwen3VLMoeTextExperts(nnx.Module):
-    num_experts: int
-    intermediate_size: int
-    hidden_size: int
-    dtype: jnp.dtype = jnp.bfloat16
-    rngs: InitVar[nnx.Rngs] = None
-    edf_sharding: Sharding = (ShardingAxisName.MLP_TENSOR, None, None)
-    efd_sharding: Sharding = (ShardingAxisName.MLP_TENSOR, None, None)
-    random_init: bool = False
 
-    def __post_init__(self, rngs: nnx.Rngs):
-        self.expert_dim = self.intermediate_size
-        self.gate_up_proj = create_param(
-            rngs,
-            shape=(self.num_experts, self.hidden_size, 2 * self.expert_dim),
-            sharding=self.edf_sharding,
-            dtype=self.dtype,
-            random_init=self.random_init
-        )
-        self.down_proj = create_param(
-            rngs,
-            shape=(self.num_experts, self.expert_dim, self.hidden_size),
-            sharding=self.efd_sharding,
-            dtype=self.dtype,
-            random_init=self.random_init
-        )
+class Qwen3VLMoeDecoderLayer(Qwen3MoeDecoderLayer):
+    """MoE decoder layer with MRoPE-aware attention and dense MLP fallback.
 
-    def __call__(
-            self, hidden_states: jax.Array, routing_weights: jax.Array, router_indices: jax.Array
-        ) -> jax.Array:
-        """
-        Inference-only forward pass for MoE experts.
+    Overrides __init__ to:
+    - Use Qwen3VLTextAttention (MRoPE-aware) instead of Qwen3Attention
+    - Support dense MLP fallback for non-MoE layers
+    Inherits __call__ from Qwen3MoeDecoderLayer unchanged.
+    """
 
-        Args:
-            hidden_states: (batch_size, seq_len, hidden_size) or (total_tokens, hidden_size)
-            routing_weights: (batch_size * seq_len, num_experts) - full routing weights after scatter
-            router_indices: (batch_size * seq_len, top_k) - indices of selected experts
-
-        Returns:
-            Output tensor with the same shape as the input.
-        """
-        original_shape = hidden_states.shape
-        hidden_states = hidden_states.reshape(-1, self.hidden_size)  # (T, D)
-
-        # Compute gate_up for all experts: (T, D) @ (E, D, 2F) -> (T, E, 2F)
-        gate_up = jnp.einsum('TD,EDF -> TEF', hidden_states, self.gate_up_proj.value)
-
-        # Split into gate and up projections
-        gate, up = jnp.split(gate_up, 2, axis=-1)  # (T, E, F) each
-
-        # Apply activation and compute expert outputs
-        gated_output = up * jax.nn.silu(gate)  # (T, E, F)
-
-        # Down projection: (T, E, F) @ (E, F, D) -> (T, E, D)
-        next_states = jnp.einsum('TEF,EFD -> TED', gated_output, self.down_proj.value)
-
-        # Apply routing weights: (T, E, D) * (T, E, 1) -> (T, E, D)
-        next_states = next_states * routing_weights[..., None]
-
-        # Sum across experts: (T, E, D) -> (T, D)
-        next_states = next_states.sum(axis=1)
-
-        # Reshape back to the original input layout (2D or 3D).
-        next_states = next_states.reshape(original_shape)
-
-        return next_states
-
-@dataclass(kw_only=True)
-class Qwen3VLMoeTextSparseMoeBlock(nnx.Module):
-    hidden_size: int
-    num_experts: int
-    top_k: int
-    intermediate_size: int
-    dtype: jnp.dtype = jnp.bfloat16
-    rngs: InitVar[nnx.Rngs] = None
-    gate_sharding: Sharding = (ShardingAxisName.MLP_TENSOR, None)
-    edf_sharding: Sharding = (ShardingAxisName.MLP_TENSOR, None, None)
-    efd_sharding: Sharding = (ShardingAxisName.MLP_TENSOR, None, None)
-    random_init: bool = False
-
-    def __post_init__(self, rngs: nnx.Rngs):
-        self.gate = create_param(
-            rngs,
-            shape=(self.hidden_size, self.num_experts),
-            sharding=self.gate_sharding,
-            dtype=self.dtype,
-            random_init=self.random_init
-        )
-        self.experts = Qwen3VLMoeTextExperts(
-            num_experts=self.num_experts,
-            intermediate_size=self.intermediate_size,
-            hidden_size=self.hidden_size,
-            dtype=self.dtype,
-            rngs=rngs,
-            edf_sharding=self.edf_sharding,
-            efd_sharding=self.efd_sharding,
-            random_init=self.random_init
-        )
-
-    def __call__(self, hidden_states: jax.Array) -> jax.Array:
-        """
-        Forward pass for Sparse MoE block.
-
-        Args:
-            hidden_states: (batch_size, seq_len, hidden_size) or (total_tokens, hidden_size)
-
-        Returns:
-            Output tensor with the same shape as the input.
-        """
-        hidden_states_flat = hidden_states.reshape(-1, self.hidden_size)  # (T, D)
-
-        # Compute router logits: (T, D) @ (D, E) -> (T, E)
-        router_logits = jnp.einsum('TD,DE -> TE', hidden_states_flat, self.gate.value)
-
-        # Softmax to get routing probabilities (in float32 for numerical stability)
-        routing_weights = jax.nn.softmax(router_logits.astype(jnp.float32), axis=-1)
-
-        # Get top-k experts
-        top_k_weights, top_k_indices = jax.lax.top_k(routing_weights, self.top_k)
-
-        # Normalize top-k weights (sum to 1)
-        top_k_weights = top_k_weights / top_k_weights.sum(axis=-1, keepdims=True)
-        top_k_weights = top_k_weights.astype(self.dtype)
-
-        # Scatter normalized weights back to full expert dimension
-        # router_weights shape: (T, E)
-        num_tokens = hidden_states_flat.shape[0]
-        router_weights = jnp.zeros((num_tokens, self.num_experts), dtype=self.dtype)
-
-        # Create indices for scatter
-        token_indices = jnp.arange(num_tokens)[:, None]  # (T, 1)
-        token_indices = jnp.broadcast_to(token_indices, top_k_indices.shape)  # (T, top_k)
-
-        # Scatter the top_k weights into the full routing weights matrix
-        router_weights = router_weights.at[token_indices, top_k_indices].set(top_k_weights)
-
-        routed_out = self.experts(hidden_states, router_weights, top_k_indices)
-
-        return routed_out
-
-
-class Qwen3VLMoeTextAttention(nnx.Module):
-    def __init__(
-        self,
-        config,
-        dtype: jnp.dtype,
-        rngs: nnx.Rngs,
-        mesh: Mesh,
-        kv_cache_dtype: str = "auto",
-    ):
-        self.hidden_size = config.hidden_size
-        self.num_heads = config.num_attention_heads
-        self.num_kv_heads = config.num_key_value_heads
-        self.rope_theta = getattr(config, "rope_theta", 1000000.0)
-        self.rope_scaling = getattr(config, "rope_scaling", None)
-        self.rms_norm_eps = config.rms_norm_eps
-
-        self.head_dim_original = getattr(config, "head_dim",
-                                         self.hidden_size // self.num_heads)
-        self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
-
-        sharding_size = mesh.shape["model"]
-        self.num_heads = utils.get_padded_num_heads(self.num_heads, sharding_size)
-        self.num_kv_heads = utils.get_padded_num_heads(self.num_kv_heads, sharding_size)
-
-        self.mesh = mesh
-
-        self.q_proj = nnx.Einsum(
-            "TD,DNH->TNH",
-            (self.hidden_size, self.num_heads, self.head_dim),
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
-            rngs=rngs,
-        )
-        self.q_norm = JaxRmsNorm(self.head_dim, epsilon=self.rms_norm_eps, param_dtype=dtype, rngs=rngs)
-
-        self.k_proj = nnx.Einsum(
-            "TD,DKH->TKH",
-            (self.hidden_size, self.num_kv_heads, self.head_dim),
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
-            rngs=rngs,
-        )
-        self.k_norm = JaxRmsNorm(self.head_dim, epsilon=self.rms_norm_eps, param_dtype=dtype, rngs=rngs)
-
-        self.v_proj = nnx.Einsum(
-            "TD,DKH->TKH",
-            (self.hidden_size, self.num_kv_heads, self.head_dim),
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
-            rngs=rngs,
-        )
-        self.o_proj = nnx.Einsum(
-            "TNH,NHD->TD",
-            (self.num_heads, self.head_dim, self.hidden_size),
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
-            rngs=rngs,
-        )
-
-        self._q_scale = 1.0
-        self._k_scale = 1.0
-        self._v_scale = 1.0
-        self.kv_cache_quantized_dtype = None
-        if kv_cache_dtype != "auto":
-            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(kv_cache_dtype)
-
-    def __call__(
-        self,
-        kv_cache: Optional[jax.Array],
-        hidden_states: jax.Array,
-        attention_metadata: AttentionMetadata,
-        input_positions: jax.Array,
-    ) -> Tuple[jax.Array, jax.Array]:
-        q = self.q_proj(hidden_states)
-        q = self.q_norm(q)
-
-        k = self.k_proj(hidden_states)
-        k = self.k_norm(k)
-
-        if input_positions.ndim == 1:
-            input_positions = jnp.broadcast_to(input_positions[None, :],
-                                               (3, input_positions.shape[0]))
-
-        q = apply_rope(q, input_positions, self.head_dim_original,
-                       self.rope_theta, self.rope_scaling,
-                       rope_input_ordering="interleaved")
-        k = apply_rope(k, input_positions, self.head_dim_original,
-                       self.rope_theta, self.rope_scaling,
-                       rope_input_ordering="interleaved")
-
-        v = self.v_proj(hidden_states)
-        q_scale = k_scale = v_scale = None
-        if self.kv_cache_quantized_dtype:
-            k_scale = self._k_scale
-            v_scale = self._v_scale
-            k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
-                               v_scale)
-
-        new_kv_cache, outputs = attention(
-            kv_cache,
-            q,
-            k,
-            v,
-            attention_metadata,
-            self.mesh,
-            self.head_dim_original,
-            q_scale=q_scale,
-            k_scale=k_scale,
-            v_scale=v_scale,
-        )
-        o = self.o_proj(outputs)
-        return new_kv_cache, o
-
-class Qwen3VLMoeTextMLP(nnx.Module):
-    """Dense SwiGLU MLP for non-MoE layers."""
-
-    def __init__(
-        self,
-        hidden_size: int,
-        intermediate_size: int,
-        rngs: nnx.Rngs,
-        hidden_act: str = "silu",
-        dtype: jnp.dtype = jnp.bfloat16,
-    ):
-        self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size
-
-        self.gate_proj = nnx.Linear(
-            hidden_size, intermediate_size, use_bias=False, param_dtype=dtype, rngs=rngs
-        )
-        self.up_proj = nnx.Linear(
-            hidden_size, intermediate_size, use_bias=False, param_dtype=dtype, rngs=rngs
-        )
-        self.down_proj = nnx.Linear(
-            intermediate_size, hidden_size, use_bias=False, param_dtype=dtype, rngs=rngs
-        )
-
-        if hidden_act == "silu":
-            self.act_fn = jax.nn.silu
-        else:
-            raise NotImplementedError(f"Activation function '{hidden_act}' not implemented")
-
-    def __call__(self, x: jax.Array) -> jax.Array:
-        gate_output = self.act_fn(self.gate_proj(x))
-        up_output = self.up_proj(x)
-        down_proj = self.down_proj(gate_output * up_output)
-        return down_proj
-
-
-class Qwen3VLMoeTextDecoderLayer(nnx.Module):
-    """Decoder layer that conditionally uses MoE or dense MLP based on layer index."""
-
-    def __init__(
-        self,
-        config,
-        layer_idx: int,
-        dtype: jnp.dtype,
-        rngs: nnx.Rngs,
-        mesh: Mesh,
-        kv_cache_dtype: str = "auto",
-    ):
-        hidden_size = config.hidden_size
+    def __init__(self,
+                 config,
+                 dtype: jnp.dtype,
+                 rng: nnx.Rngs,
+                 mesh: Mesh,
+                 kv_cache_dtype: str,
+                 quant_config,
+                 layer_idx: int,
+                 vllm_config: VllmConfig,
+                 prefix: str = ""):
+        # Skip Qwen3MoeDecoderLayer.__init__ — we set up all attributes here
+        # but inherit __call__ which uses self.input_layernorm, self.self_attn,
+        # self.post_attention_layernorm, self.mlp
         rms_norm_eps = config.rms_norm_eps
+        hidden_size = config.hidden_size
 
-        self.self_attn = Qwen3VLMoeTextAttention(
+        self.input_layernorm = JaxRmsNorm(
+            hidden_size,
+            epsilon=rms_norm_eps,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=rng,
+            quant_config=quant_config,
+            prefix=prefix + ".input_layernorm",
+        )
+        # MRoPE-aware attention for VL (handles 3D position IDs)
+        self.self_attn = Qwen3VLTextAttention(
             config=config,
             dtype=dtype,
-            rngs=rngs,
+            rng=rng,
             mesh=mesh,
             kv_cache_dtype=kv_cache_dtype,
+            quant_config=quant_config,
+            prefix=prefix + ".self_attn",
+        )
+        self.post_attention_layernorm = JaxRmsNorm(
+            hidden_size,
+            epsilon=rms_norm_eps,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=rng,
+            quant_config=quant_config,
+            prefix=prefix + ".post_attention_layernorm",
         )
 
-        # Determine if this layer uses MoE or dense MLP
+        # MoE or dense MLP based on layer index
         mlp_only_layers = getattr(config, "mlp_only_layers", [])
         num_experts = getattr(config, "num_experts", 0)
         decoder_sparse_step = getattr(config, "decoder_sparse_step", 1)
-
         use_moe = (
             layer_idx not in mlp_only_layers
             and num_experts > 0
             and (layer_idx + 1) % decoder_sparse_step == 0
         )
-
         if use_moe:
-            moe_intermediate_size = getattr(config, "moe_intermediate_size", config.intermediate_size)
-            top_k = getattr(config, "num_experts_per_tok", 2)
-            self.mlp = Qwen3VLMoeTextSparseMoeBlock(
-                hidden_size=hidden_size,
-                num_experts=num_experts,
-                top_k=top_k,
-                intermediate_size=moe_intermediate_size,
-                dtype=dtype,
-                rngs=rngs,
+            self.mlp = Qwen3MoeSparseMoeBlock(
+                vllm_config=vllm_config,
+                rng=rng,
+                mesh=mesh,
+                prefix=prefix + ".mlp",
             )
         else:
-            self.mlp = Qwen3VLMoeTextMLP(
-                hidden_size=hidden_size,
-                intermediate_size=config.intermediate_size,
-                rngs=rngs,
-                hidden_act=getattr(config, "hidden_act", "silu"),
+            self.mlp = Qwen3MoeDenseMLP(
+                config=config,
                 dtype=dtype,
+                rng=rng,
+                quant_config=quant_config,
+                prefix=prefix + ".mlp",
             )
 
-        self.input_layernorm = JaxRmsNorm(
-            hidden_size, epsilon=rms_norm_eps, param_dtype=dtype, rngs=rngs
-        )
-        self.post_attention_layernorm = JaxRmsNorm(
-            hidden_size, epsilon=rms_norm_eps, param_dtype=dtype, rngs=rngs
-        )
 
-    def __call__(
-        self,
-        kv_cache: jax.Array,
-        hidden_states: jax.Array,
-        attention_metadata: AttentionMetadata,
-        input_positions: jax.Array,
-    ) -> Tuple[jax.Array, jax.Array]:
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-        kv_cache, hidden_states = self.self_attn(
-            kv_cache=kv_cache,
-            hidden_states=hidden_states,
-            attention_metadata=attention_metadata,
-            input_positions=input_positions,
-        )
-        hidden_states = residual + hidden_states
+class Qwen3VLMoeTextModel(Qwen3MoeModel):
+    """Text model for Qwen3VL MoE with MRoPE and DeepStack support.
 
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-
-        return kv_cache, hidden_states
-
-
-class Qwen3VLMoeTextModel(nnx.Module):
-    """Text model for Qwen3VL MoE with MRoPE and DeepStack support."""
+    Overrides __init__ to use Qwen3VLMoeDecoderLayer (with MRoPE attention).
+    Overrides __call__ to add DeepStack visual feature injection.
+    """
 
     def __init__(
         self,
-        config,
-        dtype: jnp.dtype,
-        rngs: nnx.Rngs,
+        vllm_config: VllmConfig,
+        rng: nnx.Rngs,
         mesh: Mesh,
-        kv_cache_dtype: str = "auto",
     ):
-        hidden_size = config.hidden_size
-        vocab_size = config.vocab_size
-        rms_norm_eps = config.rms_norm_eps
-        num_hidden_layers = config.num_hidden_layers
+        # Adapt the VL config so text_config attributes are accessible
+        # directly on hf_config (same pattern as Qwen3VLModel).
+        adapted = _VllmConfigAdapter(vllm_config)
+        model_config = adapted.model_config
+        hf_config = model_config.hf_config
+        vocab_size = model_config.get_vocab_size()
+        dtype = model_config.dtype
+        rms_norm_eps = hf_config.rms_norm_eps
+        hidden_size = hf_config.hidden_size
+        prefix = "model.language_model"
 
-        self.hidden_size = hidden_size
-        self.config = config
+        self.is_first_rank = get_pp_group().is_first_rank
+        self.is_last_rank = get_pp_group().is_last_rank
 
-        self.embed_tokens = nnx.Embed(
-            num_embeddings=vocab_size,
-            features=hidden_size,
-            param_dtype=dtype,
-            embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
-            rngs=rngs,
-        )
-
-        # layer idx govern layer type
-        self.layers = nnx.List([
-            Qwen3VLMoeTextDecoderLayer(
-                config=config,
-                layer_idx=layer_idx,
-                dtype=dtype,
-                rngs=rngs,
-                mesh=mesh,
-                kv_cache_dtype=kv_cache_dtype,
+        if self.is_first_rank or (hf_config.tie_word_embeddings
+                                  and self.is_last_rank):
+            self.embed_tokens = JaxEmbed(
+                num_embeddings=vocab_size,
+                features=hidden_size,
+                param_dtype=dtype,
+                embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
+                rngs=rng,
+                quant_config=adapted.quant_config,
+                prefix=prefix + ".embed_tokens",
             )
-            for layer_idx in range(num_hidden_layers)
-        ])
-
-        self.norm = JaxRmsNorm(
-            hidden_size,
-            epsilon=rms_norm_eps,
-            param_dtype=dtype,
-            rngs=rngs,
-        )
-
-        # LM head
-        tie_word_embeddings = getattr(config, "tie_word_embeddings", True)
-        if tie_word_embeddings:
-            self.lm_head = self.embed_tokens.embedding
         else:
-            self.lm_head = nnx.Param(
-                init_fn(rngs.params(), (hidden_size, vocab_size), dtype),
-                sharding=(None, "model"),
+            self.embed_tokens = PPMissingLayer()
+
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            hf_config.num_hidden_layers,
+            lambda layer_index: Qwen3VLMoeDecoderLayer(
+                config=hf_config,
+                dtype=dtype,
+                rng=rng,
+                mesh=mesh,
+                kv_cache_dtype=adapted.cache_config.cache_dtype,
+                quant_config=adapted.quant_config,
+                layer_idx=layer_index,
+                vllm_config=adapted,
+                prefix=f"{prefix}.layers.{layer_index}",
+            ))
+
+        if self.is_last_rank:
+            self.norm = JaxRmsNorm(
+                hidden_size,
+                epsilon=rms_norm_eps,
+                param_dtype=dtype,
+                scale_init=nnx.with_partitioning(init_fn, (None, )),
+                rngs=rng,
+                quant_config=adapted.quant_config,
+                prefix=prefix + ".final_layernorm",
             )
-        self.tie_word_embeddings = tie_word_embeddings
+        else:
+            self.norm = PPMissingLayer()
 
     def _inject_visual_features(
         self,
@@ -518,7 +232,7 @@ class Qwen3VLMoeTextModel(nnx.Module):
         self,
         kv_caches: List[jax.Array],
         input_ids: Optional[jax.Array],
-        attention_metadata: AttentionMetadata,
+        attention_metadata,
         inputs_embeds: Optional[jax.Array] = None,
         visual_pos_mask: Optional[jax.Array] = None,
         deepstack_visual_embeds: Optional[List[jax.Array]] = None,
@@ -529,37 +243,32 @@ class Qwen3VLMoeTextModel(nnx.Module):
         else:
             x = self.embed_tokens(input_ids)
 
-        input_positions = attention_metadata.input_positions
+        new_kv_caches = []
+        for i, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer)
+        ):
+            if isinstance(layer, PPMissingLayer):
+                new_kv_caches.append(kv_caches[i])
+                continue
 
-        for i, layer in enumerate(self.layers):
+            global_i = self.start_layer + i
             kv_cache = kv_caches[i]
-            kv_cache, x = layer(
-                kv_cache=kv_cache,
-                hidden_states=x,
-                attention_metadata=attention_metadata,
-                input_positions=input_positions,
-            )
-            kv_caches[i] = kv_cache
+            kv_cache, x = layer(kv_cache, x, attention_metadata)
+            new_kv_caches.append(kv_cache)
 
             if (
                 deepstack_visual_embeds is not None
-                and i < len(deepstack_visual_embeds)
+                and global_i < len(deepstack_visual_embeds)
                 and visual_pos_mask is not None
             ):
                 x = self._inject_visual_features(
-                    x, visual_pos_mask, deepstack_visual_embeds[i]
+                    x, visual_pos_mask, deepstack_visual_embeds[global_i]
                 )
 
-        x = self.norm(x)
+        if self.is_last_rank:
+            x = self.norm(x)
 
-        return kv_caches, x
-
-    def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        if self.tie_word_embeddings:
-            logits = jnp.dot(hidden_states, self.lm_head.value.T)
-        else:
-            logits = jnp.dot(hidden_states, self.lm_head.value)
-        return logits
+        return new_kv_caches, x
 
 
 class Qwen3VLMoeForConditionalGeneration(nnx.Module):
@@ -585,12 +294,23 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
         )
 
         self.language_model = Qwen3VLMoeTextModel(
-            config=text_config,
-            dtype=vllm_config.model_config.dtype,
-            rngs=self.rng,
+            vllm_config=vllm_config,
+            rng=self.rng,
             mesh=mesh,
-            kv_cache_dtype=vllm_config.cache_config.cache_dtype,
         )
+
+        model_config = vllm_config.model_config
+        if not config.tie_word_embeddings:
+            vocab_size = model_config.get_vocab_size()
+            hidden_size = text_config.hidden_size
+            self.lm_head = JaxEinsum(
+                einsum_str="TD,DV->TV",
+                kernel_shape=(hidden_size, vocab_size),
+                dtype=model_config.dtype,
+                rngs=self.rng,
+                quant_config=vllm_config.quant_config,
+                kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            )
 
         self.image_token_id = config.image_token_id
         self.video_token_id = config.video_token_id
@@ -602,15 +322,6 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
         input_ids: jax.Array,
         multimodal_embeddings: Optional[jax.Array],
     ) -> jax.Array:
-        """Get input embeddings with multimodal content merged.
-
-        Args:
-            input_ids: Input token IDs
-            multimodal_embeddings: Flattened multimodal embeddings
-
-        Returns:
-            Input embeddings with multimodal content merged
-        """
         inputs_embeds = self.language_model.embed_tokens(input_ids)
 
         if multimodal_embeddings is not None and multimodal_embeddings.shape[0] != 0:
@@ -628,7 +339,6 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
         input_ids: jax.Array,
         multimodal_embeddings: Optional[jax.Array] = None,
     ) -> jax.Array:
-        """Compute input embeddings and merge multimodal embeddings if present."""
         return self.get_input_embeddings(input_ids, multimodal_embeddings)
 
     def _parse_and_validate_image_input(
@@ -653,17 +363,6 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
                 type="pixel_values",
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw)
-
-        # NOTE: Not supporting image embeddings precomputed. Matches Qwen2.5VL.
-        # if image_embeds is not None:
-        #     image_embeds = reshape_mm_tensor(image_embeds, "image embeds")
-        #     if not isinstance(image_embeds, jax.Array):
-        #         raise ValueError("Incorrect type of image embeddings. "
-        #                          f"Got type: {type(image_embeds)}")
-        #     return Qwen3VLImageEmbeddingInputs(
-        #         type="image_embeds",
-        #         image_embeds=image_embeds,
-        #         image_grid_thw=image_grid_thw)
 
     def _parse_and_validate_multimodal_inputs(self,
                                               image_grid_thw: Tuple[Tuple[int,
@@ -704,20 +403,6 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
         image_grid_thw: Tuple[Tuple[int, int, int], ...],
         **kwargs,
     ) -> dict:
-        """Get multimodal embeddings from pixel values.
-
-        This method is called by the serving infrastructure (multimodal_manager).
-        DeepStack embeddings are returned alongside visual embeddings for caching.
-
-        Args:
-            image_grid_thw: Grid dimensions (T, H, W) for each image
-            **kwargs: Contains 'pixel_values' for vision encoder
-
-        Returns:
-            A dict with:
-              - "embeds": Tuple of embeddings, one per image (Qwen 2.5 VL format)
-              - "deepstack": Optional list of per-image DeepStack embeddings
-        """
         image_grid_thw = normalize_mm_grid_thw(image_grid_thw)
         if not image_grid_thw:
             image_grid_thw = normalize_mm_grid_thw(
@@ -749,7 +434,7 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
         self,
         kv_caches: List[jax.Array],
         input_ids: Optional[jax.Array],
-        attention_metadata: AttentionMetadata,
+        attention_metadata,
         inputs_embeds: Optional[jax.Array] = None,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
@@ -777,7 +462,9 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
         return kv_caches, hidden_states, []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        return self.language_model.compute_logits(hidden_states)
+        if hasattr(self, 'lm_head'):
+            return self.lm_head(hidden_states)
+        return self.language_model.embed_tokens.decode(hidden_states)
 
     def get_mrope_input_positions(
         self,
@@ -791,24 +478,6 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
         audio_feature_lengths=None,
         use_audio_in_video: bool = False,
     ) -> Tuple[jax.Array, int]:
-        """Compute MRoPE 3D position IDs for input sequence.
-
-        This is a wrapper around the module-level
-        build_mrope_input_positions function
-        that uses the model's configuration.
-
-        Args:
-            input_tokens: List of token IDs for the sequence
-            hf_config: Optional HF config (defaults to self.config)
-            image_grid_thw: List of (T, H, W) tuples for each image
-            video_grid_thw: List of (T, H, W) tuples for each video
-            context_len: Context length for slicing positions
-            seq_len: Sequence length for slicing positions
-
-        Returns:
-            llm_positions: (3, sliced_seq_len) position IDs for [T, H, W]
-            mrope_position_delta: Delta for rope calculation
-        """
         del second_per_grid_ts, audio_feature_lengths, use_audio_in_video
 
         if hf_config is None:
@@ -839,12 +508,6 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
         self,
         run_compilation_fn,
     ) -> None:
-        """Precompile vision encoder for warmup.
-
-        Args:
-            run_compilation_fn: Function to run compilation with signature
-                (name, fn, *args, **kwargs)
-        """
         vc = self.config.vision_config
         patch_input_dim = (
             vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size
@@ -882,26 +545,64 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
                 image_shape=input_hw,
             )
 
+    def _load_moe_expert_weights(self):
+        """Load per-expert MoE weights using JaxMoE._load_weights."""
+        from tpu_inference.models.jax.utils.weight_utils import (
+            get_model_weights_files,
+            model_weights_single_file_generator,
+        )
+
+        model_path = self.vllm_config.model_config.model
+        download_dir = self.vllm_config.load_config.download_dir
+        weights_files = get_model_weights_files(model_path, download_dir)
+
+        for weights_file in weights_files:
+            for hf_key, hf_weight in model_weights_single_file_generator(
+                weights_file, framework="pt",
+                filter_regex=r".*\.experts\.\d+\.",
+            ):
+                match = re.match(
+                    r".*layers\.(\d+)\.mlp\.experts\.(.+)", hf_key
+                )
+                if not match:
+                    continue
+                layer_idx = int(match.group(1))
+                expert_suffix = match.group(2)  # e.g. "0.gate_proj.weight"
+                layer = self.language_model.layers[layer_idx]
+                if isinstance(layer, PPMissingLayer):
+                    continue
+                if hasattr(layer.mlp, 'experts'):
+                    layer.mlp.experts._load_weights(
+                        [(expert_suffix, hf_weight)]
+                    )
+
     def load_weights(self, rng_key: jax.Array) -> None:
         self.rng = nnx.Rngs(rng_key)
 
+        # Step 1: Load MoE expert weights first (via JaxMoE._load_weights)
+        self._load_moe_expert_weights()
+
+        # Step 2: Load all other weights via load_hf_weights
+        # (filter out per-expert weights which are already loaded)
         mappings = {
-            "model.language_model.embed_tokens": "language_model.embed_tokens.embedding",
+            # Language model weights (framework layer names use .weight)
+            "model.language_model.embed_tokens": "language_model.embed_tokens.weight",
             "model.language_model.layers.*.input_layernorm": "language_model.layers.*.input_layernorm.weight",
-            "model.language_model.layers.*.mlp.down_proj": "language_model.layers.*.mlp.down_proj.kernel",
-            "model.language_model.layers.*.mlp.gate_proj": "language_model.layers.*.mlp.gate_proj.kernel",
-            "model.language_model.layers.*.mlp.up_proj": "language_model.layers.*.mlp.up_proj.kernel",
-            "model.language_model.layers.*.mlp.gate": "language_model.layers.*.mlp.gate",
-            "model.language_model.layers.*.mlp.experts.gate_up_proj": "language_model.layers.*.mlp.experts.gate_up_proj",
-            "model.language_model.layers.*.mlp.experts.down_proj": "language_model.layers.*.mlp.experts.down_proj",
             "model.language_model.layers.*.post_attention_layernorm": "language_model.layers.*.post_attention_layernorm.weight",
-            "model.language_model.layers.*.self_attn.k_proj": "language_model.layers.*.self_attn.k_proj.kernel",
-            "model.language_model.layers.*.self_attn.o_proj": "language_model.layers.*.self_attn.o_proj.kernel",
-            "model.language_model.layers.*.self_attn.q_proj": "language_model.layers.*.self_attn.q_proj.kernel",
-            "model.language_model.layers.*.self_attn.v_proj": "language_model.layers.*.self_attn.v_proj.kernel",
+            "model.language_model.layers.*.self_attn.q_proj": "language_model.layers.*.self_attn.q_proj.weight",
+            "model.language_model.layers.*.self_attn.k_proj": "language_model.layers.*.self_attn.k_proj.weight",
+            "model.language_model.layers.*.self_attn.v_proj": "language_model.layers.*.self_attn.v_proj.weight",
+            "model.language_model.layers.*.self_attn.o_proj": "language_model.layers.*.self_attn.o_proj.weight",
             "model.language_model.layers.*.self_attn.q_norm": "language_model.layers.*.self_attn.q_norm.weight",
             "model.language_model.layers.*.self_attn.k_norm": "language_model.layers.*.self_attn.k_norm.weight",
             "model.language_model.norm": "language_model.norm.weight",
+            # MoE router gate
+            "model.language_model.layers.*.mlp.gate": "language_model.layers.*.mlp.gate.weight",
+            # Dense MLP layers (for non-MoE layers if any)
+            "model.language_model.layers.*.mlp.gate_proj": "language_model.layers.*.mlp.gate_proj.weight",
+            "model.language_model.layers.*.mlp.up_proj": "language_model.layers.*.mlp.up_proj.weight",
+            "model.language_model.layers.*.mlp.down_proj": "language_model.layers.*.mlp.down_proj.weight",
+            # Vision encoder weights
             "model.visual.patch_embed.proj": "visual.patch_embed.proj.kernel",
             "model.visual.patch_embed.proj.bias": "visual.patch_embed.proj.bias",
             "model.visual.pos_embed": "visual.pos_embed.embedding",
@@ -927,7 +628,7 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
 
         hf_config = self.vllm_config.model_config.hf_config
         if not hf_config.tie_word_embeddings:
-            mappings["lm_head"] = "language_model.lm_head"
+            mappings["lm_head"] = "lm_head.weight"
 
         vision_config = hf_config.vision_config
         deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", [8, 16, 24])
@@ -944,17 +645,13 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
             adapted_model_config, self.mesh, mappings
         )
 
-        transpose_map = {
-            "experts.gate_up_proj": (0, 1, 2),
-            "experts.down_proj": (0, 1, 2),
-        }
-        transpose_map.update(metadata_map.transpose_map)
-        transpose_map["mlp.gate"] = (1, 0)
-        metadata_map.transpose_map = transpose_map
+        # Add transpose for MoE router gate: HF stores (E, D), JaxLinear expects (D, E)
+        metadata_map.transpose_map["mlp.gate"] = (1, 0)
 
         load_hf_weights(
             vllm_config=self.vllm_config,
             model=self,
             metadata_map=metadata_map,
             mesh=self.mesh,
+            filter_regex=r"(?!.*\.experts\.\d+\.)",
         )

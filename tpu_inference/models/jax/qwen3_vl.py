@@ -11,11 +11,19 @@ from vllm.config import VllmConfig
 
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import (
+    attention,
     sharded_flash_attention,
 )
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.logger import init_logger
+from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.jax.linear import JaxEinsum
+from tpu_inference.layers.jax.embed import JaxEmbed
+from tpu_inference.layers.jax.norm import JaxRmsNorm
+from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
+from tpu_inference.layers.jax.rope_interface import apply_rope
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
+from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.qwen2 import Qwen2MLP as Qwen3MLP
 from tpu_inference.models.jax.qwen3 import (
     Qwen3Attention,
     Qwen3DecoderLayer,
@@ -330,17 +338,91 @@ def build_mrope_input_positions(
 
 
 class Qwen3VLTextAttention(Qwen3Attention):
-    rope_input_ordering = "interleaved"
+    """Qwen3 attention with MRoPE (3D position) and interleaved RoPE ordering."""
 
-    def _apply_rope(self, x: jax.Array, positions: jax.Array) -> jax.Array:
+    def __call__(
+        self,
+        kv_cache,
+        x: jax.Array,
+        attention_metadata,
+    ):
+        md = attention_metadata
+        q = self.q_proj(x)
+        q = self.q_norm(q)
+
+        k = self.k_proj(x)
+        k = self.k_norm(k)
+
+        # Broadcast 1D positions to 3D for MRoPE
+        positions = md.input_positions
         if positions.ndim == 1:
             positions = jnp.broadcast_to(positions[None, :],
                                          (3, positions.shape[0]))
-        return super()._apply_rope(x, positions)
+
+        q = apply_rope(q, positions, self.head_dim_original,
+                       self.rope_theta, self.rope_scaling,
+                       rope_input_ordering="interleaved")
+        k = apply_rope(k, positions, self.head_dim_original,
+                       self.rope_theta, self.rope_scaling,
+                       rope_input_ordering="interleaved")
+
+        v = self.v_proj(x)
+        q_scale = k_scale = v_scale = None
+        if self.kv_cache_quantized_dtype:
+            k_scale = self._k_scale
+            v_scale = self._v_scale
+            k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
+                               v_scale)
+
+        new_kv_cache, outputs = attention(
+            kv_cache, q, k, v,
+            attention_metadata,
+            self.mesh,
+            self.head_dim_original,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
+        )
+        o = self.o_proj(outputs)
+        return new_kv_cache, o
 
 
 class Qwen3VLTextDecoderLayer(Qwen3DecoderLayer):
-    attention_cls = Qwen3VLTextAttention
+    """Decoder layer with MRoPE-aware attention for VL.
+
+    Overrides __init__ to swap Qwen3Attention with Qwen3VLTextAttention.
+    Inherits __call__ from Qwen2DecoderLayer unchanged.
+    """
+
+    def __init__(self, config, dtype, rng, mesh, kv_cache_dtype,
+                 quant_config, prefix=""):
+        # Set up all attributes expected by inherited __call__
+        rms_norm_eps = config.rms_norm_eps
+        hidden_size = config.hidden_size
+
+        self.input_layernorm = JaxRmsNorm(
+            hidden_size, epsilon=rms_norm_eps, dtype=dtype,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=rng, quant_config=quant_config,
+            prefix=prefix + ".input_layernorm",
+        )
+        self.self_attn = Qwen3VLTextAttention(
+            config=config, dtype=dtype, rng=rng, mesh=mesh,
+            kv_cache_dtype=kv_cache_dtype, quant_config=quant_config,
+            prefix=prefix + ".self_attn",
+        )
+        self.post_attention_layernorm = JaxRmsNorm(
+            hidden_size, epsilon=rms_norm_eps, dtype=dtype,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=rng, quant_config=quant_config,
+            prefix=prefix + ".post_attention_layernorm",
+        )
+        self.mlp = Qwen3MLP(
+            config=config, dtype=dtype, rng=rng,
+            quant_config=quant_config, prefix=prefix + ".mlp",
+        )
 
 
 def apply_rotary_pos_emb_vision(
@@ -1117,8 +1199,11 @@ class Qwen3VLVisionTransformer(nnx.Module):
 
 
 class Qwen3VLModel(Qwen3Model):
-    """Text model for Qwen3VL with MRoPE and DeepStack support."""
-    decoder_layer_cls = Qwen3VLTextDecoderLayer
+    """Text model for Qwen3VL with MRoPE and DeepStack support.
+
+    Overrides __init__ to use Qwen3VLTextDecoderLayer (with MRoPE attention).
+    Overrides __call__ to add DeepStack visual feature injection.
+    """
 
     def __init__(
         self,
@@ -1126,7 +1211,56 @@ class Qwen3VLModel(Qwen3Model):
         rng: nnx.Rngs,
         mesh: Mesh,
     ):
-        super().__init__(_VllmConfigAdapter(vllm_config), rng, mesh)
+        adapted = _VllmConfigAdapter(vllm_config)
+        model_config = adapted.model_config
+        hf_config = model_config.hf_config
+        vocab_size = model_config.get_vocab_size()
+        dtype = model_config.dtype
+        rms_norm_eps = hf_config.rms_norm_eps
+        hidden_size = hf_config.hidden_size
+        prefix = "model"
+
+        self.is_first_rank = get_pp_group().is_first_rank
+        self.is_last_rank = get_pp_group().is_last_rank
+
+        if self.is_first_rank or (hf_config.tie_word_embeddings
+                                  and self.is_last_rank):
+            self.embed_tokens = JaxEmbed(
+                num_embeddings=vocab_size,
+                features=hidden_size,
+                param_dtype=dtype,
+                embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
+                rngs=rng,
+                quant_config=adapted.quant_config,
+                prefix=prefix + ".embed_tokens",
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
+
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            hf_config.num_hidden_layers,
+            lambda layer_index: Qwen3VLTextDecoderLayer(
+                config=hf_config,
+                dtype=dtype,
+                rng=rng,
+                mesh=mesh,
+                kv_cache_dtype=adapted.cache_config.cache_dtype,
+                quant_config=adapted.quant_config,
+                prefix=f"{prefix}.layers.{layer_index}",
+            ))
+
+        if self.is_last_rank:
+            self.norm = JaxRmsNorm(
+                hidden_size,
+                epsilon=rms_norm_eps,
+                param_dtype=dtype,
+                scale_init=nnx.with_partitioning(init_fn, (None, )),
+                rngs=rng,
+                quant_config=adapted.quant_config,
+                prefix=prefix + ".norm",
+            )
+        else:
+            self.norm = PPMissingLayer()
 
     def _inject_visual_features(
         self,
