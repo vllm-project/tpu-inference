@@ -45,6 +45,7 @@ VLLM_LOG="$LOG_FOLDER/vllm_log.txt"
 BM_LOG="$LOG_FOLDER/bm_log.txt"
 BEST_BM_LOG="$LOG_FOLDER/best_bm_log.txt"
 PROFILE_FOLDER="$LOG_FOLDER/profile"
+printf "[INFO] Pre-check %-25s = %s\n" "DOCKER_ARTIFACT_FOLDER" "$DOCKER_ARTIFACT_FOLDER" || true
 DOCKER_ARTIFACT_FOLDER=${DOCKER_ARTIFACT_FOLDER:-"/workspace/artifacts"}
 printf "[INFO] %-25s = %s\n" "VLLM_LOG" "$VLLM_LOG"
 printf "[INFO] %-25s = %s\n" "BM_LOG" "$BM_LOG"
@@ -281,6 +282,9 @@ run_benchmark(){
   echo
   echo "$throughput $p99_e2el"
 }
+
+printf "[DEBUG] pwd=%s\n\nls $DOCKER_ARTIFACT_FOLDER=%s" "$(pwd)" "$(ls "$DOCKER_ARTIFACT_FOLDER")" || true
+printf "[DEBUG] ls $DOCKER_ARTIFACT_FOLDER/temp_logs=%s" "$(pwd)" "$(ls "$DOCKER_ARTIFACT_FOLDER"/temp_logs)" || true
 
 read -r throughput p99_e2el < <(run_benchmark "inf" | tail -n 1)
 
