@@ -35,8 +35,6 @@ LM_EVAL_DATASETS=("math500" "mmlu" "mlperf")
 
 # TODO: Move to image building.
 # Ingore the error because in case of using uv, the packages are installed outside this script.
-pip install pandas || true
-pip install datasets || true
 pip install evaluate==0.4.5 || true
 pip install rouge-score==0.1.2 || true
 # Install lm_eval with dependencies, version is same as https://github.com/vllm-project/vllm/blob/main/.buildkite/scripts/hardware_ci/run-tpu-v1-test.sh#L64
@@ -51,21 +49,6 @@ DOCKER_ARTIFACT_FOLDER=${DOCKER_ARTIFACT_FOLDER:-"/workspace/artifacts"}
 printf "[INFO] %-25s = %s\n" "VLLM_LOG" "$VLLM_LOG"
 printf "[INFO] %-25s = %s\n" "BM_LOG" "$BM_LOG"
 printf "[INFO] %-25s = %s\n" "DOCKER_ARTIFACT_FOLDER" "$DOCKER_ARTIFACT_FOLDER"
-
-if [ -n "$TARGET_COMMIT" ]; then
-  head_hash=$(git rev-parse HEAD)
-  resolved_target=$(git rev-parse "$TARGET_COMMIT" 2>/dev/null)
-
-  if [ -z "$resolved_target" ]; then
-    echo "Error: target commit '$TARGET_COMMIT' is not a valid Git object" | tee -a "$VLLM_LOG"
-    exit 1
-  fi
-
-  if [ "$resolved_target" != "$head_hash" ]; then
-    echo "Error: target commit '$TARGET_COMMIT' does not match HEAD: $head_hash" | tee -a "$VLLM_LOG"
-    exit 1
-  fi
-fi
 
 echo "model: $MODEL"
 echo
