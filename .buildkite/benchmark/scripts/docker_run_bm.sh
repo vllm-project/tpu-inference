@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set -euo pipefail
+
 if [ ! -f "$1" ]; then
   echo "Error: The env file '$1' does not exist."
   exit 1  # Exit the script with a non-zero status to indicate an error
@@ -47,8 +49,8 @@ echo "Run model $MODEL"
 echo
 
 EXTRA_DOCKER_ARGS=()
-if [ -n "$SKIP_JAX_PRECOMPILE" ]; then
-  EXTRA_DOCKER_ARGS+=("-e SKIP_JAX_PRECOMPILE=$SKIP_JAX_PRECOMPILE")
+if [ -n "${SKIP_JAX_PRECOMPILE:-}" ]; then
+  EXTRA_DOCKER_ARGS+=("-e SKIP_JAX_PRECOMPILE=${SKIP_JAX_PRECOMPILE}")
 fi
 
 echo "starting docker...$CONTAINER_NAME"
@@ -200,7 +202,7 @@ else
     fi
 
     if (( $(echo "$throughput < ${EXPECTED_THROUGHPUT:-0}" | bc -l) )); then
-        echo "Error: throughput($throughput) is less than expected($EXPECTED_THROUGHPUT)"
+        echo "Error: throughput($throughput) is less than expected(${EXPECTED_THROUGHPUT:-0})"
     fi
     echo "Throughput=$throughput" > "artifacts/$RECORD_ID.result"
 
