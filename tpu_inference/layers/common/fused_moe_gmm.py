@@ -131,19 +131,20 @@ def moe_gmm_local(
     gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
                            group_offset, True)
     # TODO(wyzhang): hack
-    enforce_layout = True
+    enforce_layout = False
     with jax.named_scope("RestoreOriginalTokenOrder"):
-        if True: # One-Hot dense scatter reconstruct
+        if gmm2_res.shape[0] <= 1024: # One-Hot dense scatter reconstruct if sequence is small
             one_hot_selector = jax.nn.one_hot(
                 topk_argsort_revert_indices,
                 num_classes=gmm2_res.shape[0],
                 dtype=gmm2_res.dtype)
             token_topk_hidden = jnp.matmul(one_hot_selector, gmm2_res)
         elif enforce_layout:
-            token_topk_hidden = gmm2_res[topk_argsort_revert_indices]
+            gmm2_res = jax.lax.optimization_barrier(gmm2_res)
             from jax.experimental import layout as jax_layout
-            token_topk_hidden = jax_layout.with_layout_constraint(
-                token_topk_hidden, jax_layout.Layout(major_to_minor=(0, 1), tiling=((16, 128),)))
+            gmm2_res = jax_layout.with_layout_constraint(
+                gmm2_res, jax_layout.Layout(major_to_minor=(0, 1), tiling=((16, 128),)))
+            token_topk_hidden = gmm2_res[topk_argsort_revert_indices]
         else:
             token_topk_hidden = gmm2_res[topk_argsort_revert_indices]
     token_topk_hidden = token_topk_hidden.reshape(
@@ -406,13 +407,6 @@ def fused_moe_func(
 
     x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
     
-    # TODO(wyzhang): hack
-    enforce_layout = False
-    if enforce_layout:
-        dummy_weights = jnp.eye(padded_hidden_size, dtype=x.dtype) + 1e-4
-        x = jnp.matmul(x, dummy_weights)
-        x = jax.lax.optimization_barrier(x)
-
     if use_ep:
         x = expert_parallel_gmm(
             x,
