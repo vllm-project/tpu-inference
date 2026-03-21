@@ -627,6 +627,166 @@ class RandomDataset(BenchmarkDataset):
 
 
 # -----------------------------------------------------------------------------
+# MMMU-Pro Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class MMMUProDataset(BenchmarkDataset):
+    """
+    Implements the MMMU-Pro dataset for multimodal benchmarking.
+    Dataset: https://huggingface.co/datasets/MMMU/MMMU_Pro
+
+    Subsets:
+      - 'vision': Questions are visually encoded in images (requires images).
+      - 'standard (10 options)': Text questions with associated images and
+        10 answer options.
+    """
+
+    IS_MULTIMODAL = True
+
+    OPTION_LETTERS = "ABCDEFGHIJ"
+
+    QUERY_TEMPLATE_VISION = """{options_text}
+
+Express your final answer as the corresponding option letter."""
+
+    QUERY_TEMPLATE_STANDARD = """{question}
+
+{options_text}
+
+Express your final answer as the corresponding option letter."""
+
+    def __init__(
+        self,
+        subset: str = "vision",
+        use_chat_template: bool = True,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.subset = subset
+        self.use_chat_template = use_chat_template
+        self.load_data()
+
+    def load_data(self) -> None:
+        try:
+            from datasets import load_dataset
+        except ImportError as err:
+            raise ImportError(
+                "The 'datasets' package is required for MMMUProDataset. "
+                "Install it with: pip install datasets") from err
+
+        dataset_path = self.dataset_path or "MMMU/MMMU_Pro"
+        hf_dataset = load_dataset(dataset_path, self.subset, split="test")
+
+        mmmu_pro_data = []
+        for row in hf_dataset:
+            options = row.get("options", [])
+            if isinstance(options, str):
+                import ast
+                options = ast.literal_eval(options)
+
+            option_letters = self.OPTION_LETTERS[:len(options)]
+            options_text = "\n".join(
+                f"({letter}) {opt}"
+                for letter, opt in zip(option_letters, options))
+
+            answer = row.get("answer", "A")
+
+            # Collect images (image_1 through image_7).
+            images = []
+            for i in range(1, 8):
+                img = row.get(f"image_{i}")
+                if img is not None:
+                    images.append(img)
+
+            if self.subset == "vision":
+                question_text = self.QUERY_TEMPLATE_VISION.format(
+                    options_text=options_text)
+            else:
+                question_text = self.QUERY_TEMPLATE_STANDARD.format(
+                    question=row.get("question", ""),
+                    options_text=options_text)
+
+            mmmu_pro_data.append((question_text, answer, images))
+
+        self.data = mmmu_pro_data
+        print(f"Loaded {len(self.data)} examples from MMMU-Pro "
+              f"({self.subset}) dataset")
+
+    def _images_to_mm_content(self, images: list) -> list[dict]:
+        """Convert PIL images to OpenAI-style image_url content blocks."""
+        import base64
+        import io
+
+        content = []
+        for img in images:
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/png;base64,{b64}"
+                },
+            })
+        return content
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        **kwargs,
+    ) -> list:
+        samples: list = []
+        for question_text, answer, images in self.data:
+            if len(samples) >= num_requests:
+                break
+
+            mm_content = self._images_to_mm_content(images or [])
+
+            if self.use_chat_template:
+                # Build message content: images first, then question text.
+                content: list = mm_content
+                content.append({"type": "text", "text": question_text})
+                messages = [{
+                    "role":
+                    "system",
+                    "content":
+                    "Reasoning effort: low. Keep reasoning steps as short as possible and directly give the answer like A, B, C, D, etc."
+                }, {
+                    "role": "user",
+                    "content": content
+                }]
+                try:
+                    prompt = tokenizer.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True)
+                except Exception as e:
+                    logger.error(
+                        "Could not apply chat template: %s. "
+                        "Falling back to raw prompt.", e)
+                    prompt = question_text
+            else:
+                prompt = question_text
+
+            prompt_ids = tokenizer(prompt).input_ids
+            prompt_len = len(prompt_ids)
+            new_output_len = output_len if output_len is not None else 16
+
+            samples.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=new_output_len,
+                    multi_modal_data=mm_content,
+                    completion=answer,
+                ))
+
+        self.maybe_oversample_requests(samples, num_requests)
+        return samples
+
+
+# -----------------------------------------------------------------------------
 # Sonnet Dataset Implementation
 # -----------------------------------------------------------------------------
 
