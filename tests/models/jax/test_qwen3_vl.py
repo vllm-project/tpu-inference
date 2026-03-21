@@ -155,6 +155,7 @@ class MockVllmConfig:
         self.load_config = MagicMock()
         self.extra_configs = {}
         self.additional_config = {"enable_dynamic_image_sizes": False}
+        self.quant_config = None
 
 
 def _num_placeholders_for_grid(
@@ -670,7 +671,7 @@ class TestQwen3VLForConditionalGeneration:
     def model(self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh):
         """Creates a model with mocked vision and language components."""
         with patch('tpu_inference.models.jax.qwen3_vl.Qwen3VLVisionTransformer', autospec=True) as MockVision, \
-             patch('tpu_inference.models.jax.qwen3_vl.Qwen3ForCausalLM', autospec=True) as MockLM:
+             patch('tpu_inference.models.jax.qwen3_vl.Qwen3VLModel', autospec=True) as MockLM:
             mock_visual = MockVision.return_value
             mock_visual.dtype = mock_vllm_config.model_config.dtype
             mock_visual.config = mock_vllm_config.model_config.hf_config.vision_config
@@ -783,7 +784,7 @@ class TestQwen3VLForConditionalGeneration:
         kv_caches = [MagicMock()]
         input_ids = jax.random.randint(rng, (10,), 0, model.config.vocab_size)
         attn_meta = MagicMock(spec=AttentionMetadata)
-        mock_lm_output = ([MagicMock()], jnp.ones((10, model.config.hidden_size)), [])
+        mock_lm_output = ([MagicMock()], jnp.ones((10, model.config.hidden_size)))
         model.language_model.return_value = mock_lm_output
 
         new_kvs, x, aux_hidden_states = model(kv_caches, input_ids, attn_meta)
@@ -803,9 +804,11 @@ class TestQwen3VLForConditionalGeneration:
         np.testing.assert_array_equal(np.array(logits), np.array(mock_logits))
         model.lm_head.assert_called_once_with(hidden_states)
 
+    @patch('tpu_inference.models.jax.qwen3_vl.get_default_maps')
     @patch('tpu_inference.models.jax.qwen3_vl.load_hf_weights')
     def test_load_weights(
-        self, mock_load_weights: MagicMock, model: Qwen3VLForConditionalGeneration,
+        self, mock_load_weights: MagicMock, mock_get_default_maps: MagicMock,
+        model: Qwen3VLForConditionalGeneration,
         mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
         """load_weights should call load_hf_weights with proper args."""
