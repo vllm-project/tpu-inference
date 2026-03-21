@@ -243,7 +243,7 @@ for i, line in enumerate(lines):
             try:
                 acc_dict = ast.literal_eval(lines[i+j].strip())
                 if isinstance(acc_dict, dict) and "accuracy" in acc_dict:
-                    results["AccuracyMetrics"] = acc_dict["accuracy"]
+                    results["AccuracyMetrics"] = json.dumps({"accuracy": acc_dict["accuracy"]})
                     break
             except Exception:
                 pass
