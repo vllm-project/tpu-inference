@@ -40,7 +40,7 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, KVConnectorOutput, LogprobsLists,
-                             ModelRunnerOutput)
+                             LogprobsTensors, ModelRunnerOutput)
 from vllm.v1.request import Request
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.kv_connector_model_runner_mixin import \
@@ -110,12 +110,14 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         num_reqs: int,
         discard_sampled_tokens_req_indices: list[int],
         logits_indices_selector: Optional[List[int]] = None,
+        logprobs_tensors: Optional[LogprobsTensors] = None,
     ):
         self._model_runner_output = model_runner_output
         self._next_tokens = next_tokens
         self._num_reqs = num_reqs
         self._discard_sampled_tokens_req_indices = discard_sampled_tokens_req_indices
         self.logits_indices_selector: list[int] = logits_indices_selector
+        self._logprobs_tensors = logprobs_tensors
 
     def get_output(self) -> ModelRunnerOutput:
         next_tokens_cpu = np.asarray(jax.device_get(self._next_tokens))
@@ -127,6 +129,12 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         for i in self._discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
         self._model_runner_output.sampled_token_ids = valid_sampled_token_ids
+
+        if self._logprobs_tensors is not None:
+            # Use materialize to ensure logprobs are ready on host when we return async results
+            self._model_runner_output.logprobs = _jax_logprobs_materialize(
+                self._logprobs_tensors, self.logits_indices_selector)
+
         return self._model_runner_output
 
 
@@ -193,27 +201,38 @@ def _substitute_placeholder_token(
     return input_ids.at[token_in_tpu_cur_input_indices].set(update_values)
 
 
-def _jax_logprobs_to_lists(logprobs_tensors,
-                           logits_indices_selector=None,
-                           cu_num_generated_tokens=None):
-    """Convert JAX LogprobsTensors to LogprobsLists by converting JAX arrays to numpy."""
-    log_token_ids_list = logprobs_tensors.logprob_token_ids.tolist()
-    logprobs_list = logprobs_tensors.logprobs.tolist()
-    selected_token_ranks_list = logprobs_tensors.selected_token_ranks.tolist()
+def _jax_logprobs_copy_to_host_async(
+        logprobs_tensors: LogprobsTensors) -> LogprobsTensors:
+    """Initiate non-blocking TPU-to-host copies for all logprobs arrays."""
+    return LogprobsTensors(
+        logprob_token_ids=jax.copy_to_host_async(
+            logprobs_tensors.logprob_token_ids),
+        logprobs=jax.copy_to_host_async(logprobs_tensors.logprobs),
+        selected_token_ranks=jax.copy_to_host_async(
+            logprobs_tensors.selected_token_ranks),
+    )
+
+
+def _jax_logprobs_materialize(
+        logprobs_tensors: LogprobsTensors,
+        logits_indices_selector: Optional[List[int]] = None,
+        cu_num_generated_tokens: Optional[Any] = None) -> LogprobsLists:
+    """Materializes logprobs from JAX arrays into NumPy-backed LogprobsLists."""
+    log_token_ids = np.asarray(
+        jax.device_get(logprobs_tensors.logprob_token_ids))
+    logprobs_arr = np.asarray(jax.device_get(logprobs_tensors.logprobs))
+    selected_token_ranks = np.asarray(
+        jax.device_get(logprobs_tensors.selected_token_ranks))
 
     if logits_indices_selector is not None:
-        log_token_ids_list = [
-            log_token_ids_list[i] for i in logits_indices_selector
-        ]
-        logprobs_list = [logprobs_list[i] for i in logits_indices_selector]
-        selected_token_ranks_list = [
-            selected_token_ranks_list[i] for i in logits_indices_selector
-        ]
+        log_token_ids = log_token_ids[logits_indices_selector]
+        logprobs_arr = logprobs_arr[logits_indices_selector]
+        selected_token_ranks = selected_token_ranks[logits_indices_selector]
 
     return LogprobsLists(
-        logprob_token_ids=np.asarray(log_token_ids_list),
-        logprobs=np.asarray(logprobs_list),
-        sampled_token_ranks=np.asarray(selected_token_ranks_list),
+        logprob_token_ids=np.array(log_token_ids.tolist()),
+        logprobs=np.array(logprobs_arr.tolist()),
+        sampled_token_ranks=np.array(selected_token_ranks.tolist()),
         cu_num_generated_tokens=cu_num_generated_tokens,
     )
 
@@ -930,6 +949,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             if tpu_sampling_metadata.logprobs:
                 logprobs = self._compute_and_gather_logprobs(
                     logits, next_tokens, self.model_config.max_logprobs)
+                logprobs = _jax_logprobs_copy_to_host_async(logprobs)
             else:
                 logprobs = None
 
@@ -980,14 +1000,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     discard_sampled_tokens_req_indices, request_seq_lens,
                     logits_indices_selector)
 
-            if logprobs is not None:
-                # Map logprobs back to the pre-dp shuffling order
-                logprobs_lists = _jax_logprobs_to_lists(
-                    logprobs, logits_indices_selector)
-
-            else:
-                logprobs_lists = None
-
             # Save the previous results
             next_tokens = jax.copy_to_host_async(next_tokens)
             self._pre_async_results = AsyncPreResults(
@@ -1004,15 +1016,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 req_ids=req_ids,
                 req_id_to_index=self.input_batch.req_id_to_index.copy(),
                 sampled_token_ids=[],  # Fill in async get
-                logprobs=logprobs_lists,
+                logprobs=None,
                 prompt_logprobs_dict=prompt_logprobs_dict,
                 pooler_output=[],
                 kv_connector_output=kv_connector_output,
             )
             # Return async_model_runner_output
             async_model_runner_output = AsyncTPUModelRunnerOutput(
-                model_runner_output, next_tokens, num_reqs,
-                discard_sampled_tokens_req_indices, logits_indices_selector)
+                model_runner_output,
+                next_tokens,
+                num_reqs,
+                discard_sampled_tokens_req_indices,
+                logits_indices_selector,
+                logprobs_tensors=logprobs)
             return async_model_runner_output
 
         if spec_decode_metadata is None:
@@ -1051,9 +1067,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             req_state.output_token_ids.extend(sampled_ids)
 
         if logprobs is not None:
-            # Map logprobs back to the pre-dp shuffling order
-            logprobs_lists = _jax_logprobs_to_lists(logprobs,
-                                                    logits_indices_selector)
+            # Use materialize to ensure logprobs are ready on host when we return async results
+            logprobs_lists = _jax_logprobs_materialize(
+                logprobs, logits_indices_selector)
         else:
             logprobs_lists = None
 
