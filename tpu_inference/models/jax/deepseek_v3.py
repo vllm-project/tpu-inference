@@ -17,7 +17,7 @@ import os
 from abc import abstractmethod
 from dataclasses import InitVar, dataclass
 from itertools import islice
-from typing import Any, Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -27,17 +27,20 @@ from jax import lax
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Float
-from tpu_inference.mock.vllm_config_utils import VllmConfig
+from vllm.config import VllmConfig
 
 from tpu_inference import utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
+from tpu_inference.kernels.quantized_matmul.util import quantize_tensor
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
 from tpu_inference.layers.common.attention_interface import mla_attention
 from tpu_inference.layers.common.moe import MoEBackend
-from tpu_inference.layers.common.quantization import quantize_kv
+from tpu_inference.layers.common.quantization import (dequantize_tensor,
+                                                      quantize_kv)
 from tpu_inference.layers.common.sharding import \
     ShardingAxisNameBase as ShardingAxisName
+from tpu_inference.layers.common.utils import cpu_mesh_context
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.attention.attention import AttentionMetadata
 from tpu_inference.layers.jax.base import _init_fn as init_fn
@@ -52,11 +55,12 @@ from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.layers.jax.rope import DeepseekScalingRotaryEmbedding
-from tpu_inference.mock.vllm_logger import init_logger
+from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (JaxAutoWeightsLoader,
-                                                         LoadableWithIterator)
+                                                         LoadableWithIterator,
+                                                         shard_put)
 
 KVCache = Tuple[jax.Array, jax.Array]
 
@@ -115,8 +119,7 @@ class DeepseekV3BaseAttention(JaxModule):
     num_attention_heads: int
     num_key_value_heads: int
     head_dim: int
-    rope_theta: float
-    rope_scaling: dict[str, Any]
+    rope: DeepseekScalingRotaryEmbedding
     dtype: jnp.dtype
     kv_cache_dtype: str
     mesh: Mesh
@@ -148,7 +151,6 @@ class DeepseekV3BaseAttention(JaxModule):
     rngs: InitVar[nnx.Rngs]
 
     quant_config: Optional[QuantizationConfig] = None
-    prefix: str = ''
 
     # Scales for Q/KV quantization (per-tensor)
     _q_scale: float = 1
@@ -163,25 +165,13 @@ class DeepseekV3BaseAttention(JaxModule):
         self.D = self.hidden_size
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
-        if self.rope_scaling["factor"] <= 1.0:
+        if self.rope.scaling_factor <= 1.0:
             yarn_mscale = 1.0
         else:
             yarn_mscale = 0.1 * self.rope_mscale_all_dim * math.log(
-                self.rope_scaling["factor"]) + 1.0
-        self.scale = self.qk_head_dim**-0.5 * yarn_mscale**2
+                self.rope.scaling_factor) + 1.0
 
-        self.rope = DeepseekScalingRotaryEmbedding(
-            rotary_dim=self.qk_rope_head_dim,
-            rope_theta=self.rope_theta,
-            original_max_position_embeddings=self.
-            rope_scaling["original_max_position_embeddings"],
-            scaling_factor=self.rope_scaling["factor"],
-            dtype=self.dtype,
-            beta_fast=self.rope_scaling["beta_fast"],
-            beta_slow=self.rope_scaling["beta_slow"],
-            mscale_value=self.rope_scaling["mscale"],
-            mscale_all_dim=self.rope_scaling["mscale_all_dim"],
-        )
+        self.scale = self.qk_head_dim**-0.5 * yarn_mscale**2
 
         weight_init = _weight_init(self.random_init)
 
@@ -248,10 +238,16 @@ class DeepseekV3BaseAttention(JaxModule):
             self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
                 self.kv_cache_dtype)
 
-        self.setup_specific_layers(rngs)
-
-    def setup_specific_layers(self, *args) -> None:
-        pass
+        self.kv_b_proj = JaxEinsum(
+            einsum_str="SA,AL->SL",
+            kernel_shape=(self.kv_lora_rank,
+                          self.N * (self.qk_nope_head_dim + self.v_head_dim)),
+            rngs=rngs,
+            quant_config=self.quant_config,
+            param_dtype=self.dtype,
+            kernel_init=nnx.with_partitioning(init_fn, self.ap_sharding),
+            prefix=self.prefix + ".kv_b_proj",
+        )
 
     @abstractmethod
     def compute_q_projection(self, *args) -> jax.Array:
@@ -320,7 +316,9 @@ class DeepseekV3BaseAttention(JaxModule):
 class DeepseekV3Attention(DeepseekV3BaseAttention):
     """Standard Multi-Head Attention (MHA) for DeepSeek models."""
 
-    def setup_specific_layers(self, rngs: nnx.Rngs) -> None:
+    def __post_init__(self, rngs: nnx.Rngs):
+        super().__post_init__(rngs)
+
         weight_init = _weight_init(self.random_init)
         self.kv_b_proj = JaxEinsum(
             einsum_str="SA,AL->SL",
@@ -477,31 +475,131 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
         return kv_cache, output_TNH
 
 
+class MLAEinsum(JaxEinsum):
+    """Extending JaxEinsum to handle MLA.
+    
+    This class is used for MLA, where:
+    1) the weight is split into k/v parts after loading, and
+    2) modify the MLA layer to set k/v weights
+    """
+
+    def __init__(self,
+                 mla_layer,
+                 einsum_str: str,
+                 kernel_shape: tuple[int, ...],
+                 rngs,
+                 bias_shape: Optional[tuple[int, ...]] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "",
+                 **kwargs):
+        super().__init__(einsum_str,
+                         kernel_shape,
+                         rngs,
+                         bias_shape=bias_shape,
+                         quant_config=quant_config,
+                         prefix=prefix,
+                         **kwargs)
+        self.loaded = set()
+        self.mla_layer = mla_layer
+        self.quant_config = quant_config
+
+    def named_children(self):
+        # Override, otherwise "mla_layer" will be visited, causing infinite recursion.
+        yield from []
+
+    def load_weights(self, weights):
+        named_params = dict(self.named_parameters())
+        if len(self.loaded) >= 2:
+            raise ValueError(
+                f"Expect at most 2 params to load for kv_b_proj, already got {self.loaded}, still have {[name for name, _ in weights]} coming."
+            )
+        for name, weight in weights:
+            param = named_params[name]
+            weight_loader = getattr(param, "weight_loader")
+            weight_loader(param, weight)
+            self.loaded.add(name)
+        if len(self.loaded) != len(named_params):
+            return
+        assert self.quant_config is not None
+        # After loading, split the weights into k/v
+        with cpu_mesh_context():
+            dequantized_weight = dequantize_tensor(
+                self.weight,
+                self.weight_scale_inv,
+                (0, 1),
+                block_size=None,
+            ).T
+            A, N, qk_nope_head_dim, v_head_dim = self.mla_layer.kv_lora_rank, self.mla_layer.N, self.mla_layer.qk_nope_head_dim, self.mla_layer.v_head_dim
+            if dequantized_weight.shape != (A, N *
+                                            (qk_nope_head_dim + v_head_dim)):
+                raise ValueError(
+                    f"Unexpected weight shape after dequantization: {dequantized_weight.shape}, expected {(A, N * (qk_nope_head_dim + v_head_dim))=}"
+                )
+            dequantized_weight = dequantized_weight.reshape(
+                A, N, qk_nope_head_dim + v_head_dim)
+            k_ANH, v_ANH = jnp.split(dequantized_weight, [qk_nope_head_dim],
+                                     axis=-1)
+            k_ANH_weight, k_ANH_scale = quantize_tensor(k_ANH,
+                                                        self.weight.dtype,
+                                                        dim=-1)
+            v_ANH_weight, v_1NH_scale = quantize_tensor(v_ANH,
+                                                        self.weight.dtype,
+                                                        dim=0)
+            # As of writing, sharded_quantized_batched_matmul expects scale to be
+            # a different shape order than weight
+            k_N1A_scale = k_ANH_scale.transpose(1, 2, 0)
+            v_N1H_scale = v_1NH_scale.transpose(1, 0, 2)
+        mla_layer = self.mla_layer
+        setattr(
+            mla_layer, "k_up_proj",
+            JaxEinsum(
+                einsum_str="TNH,ANH->TNA",
+                kernel_shape=(A, N, qk_nope_head_dim),
+                rngs=nnx.Rngs(0),
+                prefix=mla_layer.prefix + ".k_up_proj",
+                quant_config=self.quant_config,
+            ))
+        setattr(
+            mla_layer, "v_up_proj",
+            JaxEinsum(
+                einsum_str="TNA,ANH->TNH",
+                kernel_shape=(A, N, v_head_dim),
+                rngs=nnx.Rngs(0),
+                prefix=mla_layer.prefix + ".v_up_proj",
+                quant_config=self.quant_config,
+            ))
+        # Cannot apply anh_sharding to scales, otherwise it complains about shape mismatch.
+        mla_layer.k_up_proj.weight.value = shard_put(
+            k_ANH_weight, self.mla_layer.anh_sharding)
+        mla_layer.k_up_proj.weight_scale_inv.value = shard_put(k_N1A_scale, ())
+        mla_layer.v_up_proj.weight.value = shard_put(
+            v_ANH_weight, self.mla_layer.anh_sharding)
+        mla_layer.v_up_proj.weight_scale_inv.value = shard_put(v_N1H_scale, ())
+
+        delattr(self, 'weight')
+        delattr(self, 'weight_scale_inv')
+        delattr(self, 'quant_method')
+
+
 @dataclass(kw_only=True)
 class DeepseekV3MLA(DeepseekV3BaseAttention):
     """Multi-Head Latent Attention (MLA) for DeepSeek V3."""
     anh_sharding: Sharding = ()
 
-    def setup_specific_layers(self, rngs: nnx.Rngs) -> None:
-        weight_init = _weight_init(self.random_init)
-        self.k_up_proj = JaxEinsum(
-            einsum_str="TNH,ANH->TNA",
-            kernel_shape=(self.kv_lora_rank, self.N, self.qk_nope_head_dim),
-            rngs=rngs,
-            quant_config=self.quant_config,
-            param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(weight_init, self.anh_sharding),
-            prefix=self.prefix + ".k_up_proj",
-        )
+    def __post_init__(self, rngs: nnx.Rngs):
+        super().__post_init__(rngs)
 
-        self.v_up_proj = JaxEinsum(
-            einsum_str="TNA,ANH->TNH",
-            kernel_shape=(self.kv_lora_rank, self.N, self.v_head_dim),
+        weight_init = _weight_init(self.random_init)
+        self.kv_b_proj = MLAEinsum(
+            mla_layer=self,
+            einsum_str="SA,AL->SL",
+            kernel_shape=(self.kv_lora_rank,
+                          self.N * (self.qk_nope_head_dim + self.v_head_dim)),
             rngs=rngs,
             quant_config=self.quant_config,
             param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(weight_init, self.anh_sharding),
-            prefix=self.prefix + ".v_up_proj",
+            kernel_init=nnx.with_partitioning(weight_init, self.ap_sharding),
+            prefix=self.prefix + ".kv_b_proj",
         )
 
     def compute_q_projection(
@@ -721,6 +819,7 @@ class SharedFusedMoe(JaxMoE):
     def __call__(self, x_TD: jax.Array) -> jax.Array:
         # Compute Routed Experts
         final_hidden_states = super().__call__(x_TD)
+        final_hidden_states *= self.routed_scaling_factor
 
         # (Maybe) Compute Shared Experts
         if self.shared_experts is not None:
@@ -743,6 +842,7 @@ class DeepseekV2Moe(JaxModule):
                  num_expert_parallelism,
                  moe_backend,
                  quant_config,
+                 scoring_func,
                  rng,
                  prefix: str = ""):
 
@@ -760,6 +860,7 @@ class DeepseekV2Moe(JaxModule):
             activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
             ed_sharding=P(None, None),
             e_sharding=P(None, ),
+            scoring_func=scoring_func,
             quant_config=quant_config)
 
         # shared experts
@@ -770,8 +871,8 @@ class DeepseekV2Moe(JaxModule):
             intermediate_size=num_shared_experts * moe_intermediate_size,
             rngs=rng,
             activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
-            df_sharding=P(None, ShardingAxisName.MLP_TENSOR),
-            fd_sharding=P(ShardingAxisName.MLP_TENSOR, None),
+            df_sharding=P(None, ShardingAxisName.ATTN_HEAD),
+            fd_sharding=P(ShardingAxisName.ATTN_HEAD, None),
             quant_config=quant_config)
 
         # routed experts
@@ -816,6 +917,7 @@ class DeepseekV2Moe(JaxModule):
             prefix=f"{prefix}.experts",
             router=self.gate,
             shared_experts=self.shared_experts,
+            scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor)
 
     def __call__(self, x_TD: jax.Array):
@@ -888,6 +990,7 @@ class DeepSeekV3Router(JaxEinsum):
             random_init: bool = False,
             quant_config: Optional[QuantizationConfig] = None,
             router_bias_dtype: jnp.dtype = jnp.float32,
+            scoring_func: str = "sigmoid",
             moe_backend: MoEBackend = MoEBackend.DENSE_MAT):
         self.hidden_size = hidden_size
         self.num_experts = num_experts
@@ -903,6 +1006,7 @@ class DeepSeekV3Router(JaxEinsum):
         self.random_init = random_init
         self.quant_config = quant_config
         self.router_bias_dtype = router_bias_dtype
+        self.scoring_func = scoring_func
         self.moe_backend = moe_backend
         """Generates the router kernel (weights and bias) for routing."""
         D = self.hidden_size
@@ -942,14 +1046,18 @@ class DeepSeekV3Router(JaxEinsum):
                 scores_TE, (-1, self.n_groups, experts_per_group))
             group_scores_TG2 = jax.lax.top_k(group_scores_TGM, k=2)[0]
             group_scores_TG = jnp.sum(group_scores_TG2, axis=-1)
-            indices = jax.lax.top_k(group_scores_TG, k=self.topk_groups)[1]
+            group_indices = jax.lax.top_k(group_scores_TG,
+                                          k=self.topk_groups)[1]
 
-            mask_TG = jnp.any(jnp.arange(
-                self.n_groups)[:, None] == indices[..., None, :],
-                              axis=-1)
-            mask_TE = jnp.repeat(mask_TG,
-                                 scores_TE.shape[-1] // mask_TG.shape[-1], -1)
-            scores_TE = jnp.where(mask_TE, scores_TE, 0.0)
+            # Apply mask at the group level before flattening
+            mask_TG1 = jax.nn.one_hot(
+                group_indices,
+                self.n_groups).sum(axis=1)[..., None].astype(jnp.bool_)
+
+            # Apply mask to each group of experts
+            group_scores_TGM = jnp.where(mask_TG1, group_scores_TGM, -jnp.inf)
+
+            scores_TE = jnp.reshape(group_scores_TGM, (-1, self.num_experts))
 
         indices_TX = jax.lax.top_k(scores_TE, k=self.num_experts_per_tok)[1]
 
@@ -969,24 +1077,32 @@ class DeepSeekV3Router(JaxEinsum):
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = lax.with_sharding_constraint(x_TD, self.activation_ffw_td)
 
-        scores_TE = super().__call__(x_TD)
-        scores_TE = nnx.sigmoid(scores_TE)
+        # Expert assignments are accumulated in high precision to preserve accuracy.
+        # See: https://github.com/vllm-project/vllm/blob/e89a91d9275cd8ac086fe04476b41675a9ebbd5c/vllm/model_executor/layers/fused_moe/cpu_fused_moe.py#L59
+        logits_TE = super().__call__(x_TD).astype(jnp.float32)
 
+        # TODO(gpolovets): add back support for DeepSeek routing.
         if self.moe_backend in MoEBackend.fused_moe_backends():
-            return scores_TE
+            return logits_TE
 
-        original_scores_TE = scores_TE
-        topk_indices_TX = self.get_topk_indices(scores_TE)
-        weights_TX = jnp.take_along_axis(original_scores_TE,
-                                         topk_indices_TX,
-                                         axis=-1)
+        # Apply scoring function (Sigmoid/Softmax) to get probabilities
+        if self.scoring_func == "sigmoid":
+            probs_TE = jax.nn.sigmoid(logits_TE)
+        elif self.scoring_func == "softmax":
+            probs_TE = jax.nn.softmax(logits_TE, axis=-1)
+        else:
+            probs_TE = logits_TE
+
+        # Add Aux-Loss-Free bias to the activation outputs during topk selection.
+        topk_indices_TX = self.get_topk_indices(probs_TE)
+
+        # The actual weights do not include the bias terms.
+        weights_TX = jnp.take_along_axis(probs_TE, topk_indices_TX, axis=-1)
 
         if self.norm_topk_prob:
             weights_TX /= jnp.sum(weights_TX, axis=-1)[..., None] + 1e-20
 
-        weights_TX *= self.routed_scaling_factor
-
-        return weights_TX, topk_indices_TX
+        return weights_TX.astype(self.dtype), topk_indices_TX
 
 
 @dataclass
@@ -1025,6 +1141,7 @@ class DeepSeekV3(JaxModule):
         self.is_last_rank = get_pp_group().is_last_rank
         hf_config = vllm_config.model_config.hf_config
         dtype = vllm_config.model_config.dtype
+        scoring_func = getattr(hf_config, "scoring_func", "sigmoid")
 
         if self.is_first_rank:
             self.embed_tokens = JaxEmbed(
@@ -1041,6 +1158,19 @@ class DeepSeekV3(JaxModule):
         else:
             self.embed_tokens = PPMissingLayer()
 
+        self.rope_emb = DeepseekScalingRotaryEmbedding(
+            rotary_dim=qk_rope_head_dim,
+            rope_theta=rope_theta,
+            original_max_position_embeddings=rope_scaling[
+                "original_max_position_embeddings"],
+            scaling_factor=rope_scaling["factor"],
+            dtype=dtype,
+            beta_fast=rope_scaling["beta_fast"],
+            beta_slow=rope_scaling["beta_slow"],
+            mscale_value=rope_scaling["mscale"],
+            mscale_all_dim=rope_scaling["mscale_all_dim"],
+        )
+
         def _create_deepseek_attention(
                 i: int) -> Union[DeepseekV3MLA, DeepseekV3Attention]:
             if self.use_mla_kernel:
@@ -1052,10 +1182,10 @@ class DeepSeekV3(JaxModule):
                 query_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR)
                 keyvalue_skh_spec = P(None, ShardingAxisName.MLP_TENSOR)
                 attn_o_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR)
-            rd_sharding = (ShardingAxisName.MLP_TENSOR, None)
-            ap_sharding = (None, ShardingAxisName.MLP_TENSOR)
-            q_da_sharding = (None, ShardingAxisName.MLP_TENSOR)
-            kv_da_sharding = (None, ShardingAxisName.MLP_TENSOR)
+            rd_sharding = P(ShardingAxisName.ATTN_HEAD, None)
+            ap_sharding = P(None, ShardingAxisName.ATTN_HEAD)
+            q_da_sharding = P(None, ShardingAxisName.ATTN_HEAD)
+            kv_da_sharding = P(None, ShardingAxisName.ATTN_HEAD)
 
             if self.vllm_config.additional_config.get("replicate_attn_weights",
                                                       False):
@@ -1074,8 +1204,6 @@ class DeepSeekV3(JaxModule):
                 assert num_attention_heads == num_key_value_heads, "Expected same number of of attention heads and key value heads for MHA."
 
             kwargs = dict(
-                rope_theta=rope_theta,
-                rope_scaling=rope_scaling,
                 q_lora_rank=q_lora_rank,
                 kv_lora_rank=kv_lora_rank,
                 qk_nope_head_dim=qk_nope_head_dim,
@@ -1088,6 +1216,8 @@ class DeepSeekV3(JaxModule):
                 num_key_value_heads=1
                 if self.use_mla_kernel else num_key_value_heads,
                 head_dim=v_head_dim,  # MLA uses v_head_dim as head_dim
+                rope=self.rope_emb,
+                rope_mscale_all_dim=rope_scaling["mscale_all_dim"],
                 dtype=dtype,
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
@@ -1149,8 +1279,8 @@ class DeepSeekV3(JaxModule):
                     intermediate_size=ffw_intermediate_size,
                     rngs=rng,
                     activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
-                    df_sharding=P(None, ShardingAxisName.MLP_TENSOR),
-                    fd_sharding=P(ShardingAxisName.MLP_TENSOR, None),
+                    df_sharding=P(None, ShardingAxisName.ATTN_HEAD),
+                    fd_sharding=P(ShardingAxisName.ATTN_HEAD, None),
                     quant_config=quant_config)
             else:
                 # MoE Layer
@@ -1160,6 +1290,7 @@ class DeepSeekV3(JaxModule):
                     num_expert_parallelism=self.num_expert_parallelism,
                     moe_backend=self.moe_backend,
                     quant_config=quant_config,
+                    scoring_func=scoring_func,
                     rng=rng,
                     prefix=f"{prefix}.layers.{layer_index}.mlp")
 
@@ -1194,12 +1325,8 @@ class DeepSeekV3(JaxModule):
         return self.__call__(*args, **kwargs)
 
     def initialize_cache(self):
-        # Initialize RoPE caches after weights are loaded and before JIT compilation.
-        for layer in self.layers:
-            if hasattr(layer, 'self_attn') and hasattr(layer.self_attn,
-                                                       'rope'):
-                if hasattr(layer.self_attn.rope, 'initialize_cache'):
-                    layer.self_attn.rope.initialize_cache()
+        # Initialize RoPE cache once after weights are loaded.
+        self.rope_emb.initialize_cache()
 
     def __call__(
         self,

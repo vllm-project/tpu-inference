@@ -26,7 +26,7 @@ from tpu_inference.kernels.megablox.tuned_block_sizes import \
     round_up_to_multiple_of_128_within_limit
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.jax.layers import FlaxUtils
-from tpu_inference.mock.vllm_logger import init_logger
+from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
 modeling_flax_utils = FlaxUtils()

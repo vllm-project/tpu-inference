@@ -107,6 +107,10 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             shard_id = args[0]
             # Keep track of loaded weights for QKVLinear, e.g. (('weight', 'q'), ('bias', 'q'), ('weight', 'k'), ('bias', 'k'), ...)
             layer._loaded_weights.add((param_name, shard_id))
+        elif isinstance(layer, vllm_linear.MergedColumnParallelLinear):
+            assert len(args) == 1, "Expecting shard_id as the only argument"
+            shard_id = args[0]
+            layer._loaded_weights.add((param_name, shard_id))
         else:
             # Keep track of loaded weights for other linear layers, e.g. ('weight', 'bias')
             layer._loaded_weights.add(param_name)
