@@ -136,7 +136,7 @@ class FusedWeightsRef:
             w = pltpu.bitcast(w, packing_dtype)
             w_up = pltpu.bitcast(w_up, packing_dtype)
 
-        w = jnp.concatenate([w, w_up], axis=1)
+        w = jnp.concatenate([w, w_up], axis=-1)
 
         return w
 
@@ -144,13 +144,13 @@ class FusedWeightsRef:
         # Quantization subchannel scale per quant block
         s = self.gate.scale[..., b_id, :, :]
         s_up = self.up.scale[..., b_id, :, :]
-        s = jnp.concatenate([s, s_up], axis=1)
+        s = jnp.concatenate([s, s_up], axis=-1)
         return s
 
     def get_bias(self):
         b = self.gate.bias[...]
         b_up = self.up.bias[...]
-        b = jnp.concatenate([b, b_up], axis=1)
+        b = jnp.concatenate([b, b_up], axis=-1)
         return b
 
 
@@ -408,8 +408,7 @@ def inner_kernel(
         # When rhs is packed (quantized dtype packed into uint32), unpack it
         # back to the original dtype using pltpu.bitcast which operates on K
         # axis. This expands the K dimension back to tile_k.
-        packing_dtype = cfgs.rhs_cfgs.quant_dtype if cfgs.rhs_cfgs.packing > 1 else None
-        tiled_rhs = tiled_rhs_ref.get_weight(packing_dtype)
+        tiled_rhs = tiled_rhs_ref.get_weight(cfgs.rhs_cfgs.quant_dtype)
 
         valid_k = cfgs.dims.size_k % cfgs.tiles.tile_k
         if is_last_k_step and valid_k != 0:
@@ -439,7 +438,10 @@ def inner_kernel(
                     )
                     if cfgs.rhs_cfgs.has_scale:
                         tiled_rhs_scale = tiled_rhs_ref.get_scale(b_id)
-                        partial_result *= tiled_rhs_scale[..., start_n:end_n]
+                        scale = tiled_rhs_scale[..., start_n:end_n]
+                        assert scale.shape[0] == 1
+                        scale = jnp.tile(scale, (cfgs.tiles.tile_m, 1))
+                        partial_result *= scale
                     acc_n = acc_n + partial_result
                 acc_list.append(acc_n.astype(acc_ref.dtype))
             acc = jnp.concatenate(acc_list, axis=1)
