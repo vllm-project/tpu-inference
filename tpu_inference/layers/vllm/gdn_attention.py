@@ -370,6 +370,8 @@ def gdn_attention_core_tpu(
 
     # Map tokens to their respective requests
     q_loc = jax_view(attn_metadata.query_start_loc)
+    # Ensure q_loc is monotonically increasing to handle padded slots
+    q_loc = jnp.maximum.accumulate(q_loc)
     num_tokens = j_mixed_qkv.shape[0]
 
     token_idx = jnp.arange(num_tokens)
