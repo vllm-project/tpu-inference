@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Tuple
 from unittest.mock import MagicMock, patch
 
@@ -8,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import torch
 from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
@@ -479,8 +481,88 @@ class TestQwen3VLMoeForConditionalGeneration:
             assert kwargs['vllm_config'] == mock_vllm_config
             assert kwargs['model'] is model
             assert kwargs['mesh'] is mesh
-            # MoE load_weights filters out per-expert weights
-            assert 'filter_regex' in kwargs
+            # MoE load_weights filters out both fused and per-expert tensors.
+            filter_regex = kwargs['filter_regex']
+            assert re.match(filter_regex,
+                            "model.language_model.layers.0.self_attn.q_proj.weight")
+            assert not re.match(
+                filter_regex,
+                "model.language_model.layers.0.mlp.experts.down_proj",
+            )
+            assert not re.match(
+                filter_regex,
+                "model.language_model.layers.0.mlp.experts.0.down_proj.weight",
+            )
+
+    @patch('tpu_inference.models.jax.utils.weight_utils.get_model_weights_files')
+    @patch('tpu_inference.models.jax.utils.weight_utils.model_weights_single_file_generator')
+    def test_load_moe_expert_weights_supports_fused_hf_tensors(
+        self,
+        mock_generator: MagicMock,
+        mock_get_model_weights_files: MagicMock,
+        mock_vllm_config: MockMoeVllmConfig,
+        rng: PRNGKey,
+        mesh: Mesh,
+    ):
+        with patch(
+                'tpu_inference.models.jax.qwen3_vl_moe.Qwen3VLVisionTransformer',
+                autospec=True) as MockVision:
+            mock_visual = MockVision.return_value
+            mock_visual.dtype = mock_vllm_config.model_config.dtype
+            mock_visual.config = mock_vllm_config.model_config.hf_config.vision_config
+            mock_visual.spatial_merge_size = (
+                mock_vllm_config.model_config.hf_config.vision_config
+                .spatial_merge_size)
+            model = Qwen3VLMoeForConditionalGeneration(mock_vllm_config, rng,
+                                                       mesh)
+
+        layer = model.language_model.layers[0]
+        experts = layer.mlp.experts
+        hidden_size = mock_vllm_config.model_config.hf_config.hidden_size
+        moe_intermediate_size = (
+            mock_vllm_config.model_config.hf_config.moe_intermediate_size)
+        num_experts = mock_vllm_config.model_config.hf_config.num_experts
+
+        gate_up = (
+            torch.arange(num_experts * 2 * moe_intermediate_size *
+                         hidden_size,
+                         dtype=torch.float32).reshape(num_experts,
+                                                      2 * moe_intermediate_size,
+                                                      hidden_size) % 97)
+        down = (
+            torch.arange(num_experts * hidden_size * moe_intermediate_size,
+                         dtype=torch.float32).reshape(num_experts, hidden_size,
+                                                      moe_intermediate_size) %
+            89)
+
+        mock_get_model_weights_files.return_value = ["mock.safetensors"]
+        mock_generator.return_value = iter([
+            ("model.language_model.layers.0.mlp.experts.gate_up_proj", gate_up),
+            ("model.language_model.layers.0.mlp.experts.down_proj", down),
+        ])
+
+        model._load_moe_expert_weights()
+
+        expected_gate = np.array(
+            gate_up[:, :moe_intermediate_size, :].permute(0, 2, 1),
+            dtype=np.float32)
+        expected_up = np.array(
+            gate_up[:, moe_intermediate_size:, :].permute(0, 2, 1),
+            dtype=np.float32)
+        expected_down = np.array(down.permute(0, 2, 1), dtype=np.float32)
+
+        np.testing.assert_array_equal(
+            np.array(experts.kernel_gating_EDF.value, dtype=np.float32),
+            expected_gate,
+        )
+        np.testing.assert_array_equal(
+            np.array(experts.kernel_up_proj_EDF.value, dtype=np.float32),
+            expected_up,
+        )
+        np.testing.assert_array_equal(
+            np.array(experts.kernel_down_proj_EFD.value, dtype=np.float32),
+            expected_down,
+        )
 
 
 # --- Integration Tests (dense fallback, real layers) ---

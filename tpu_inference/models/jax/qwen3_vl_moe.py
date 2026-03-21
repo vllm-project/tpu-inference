@@ -41,6 +41,7 @@ from tpu_inference.models.jax.utils.multi_modal_utils import (
 from tpu_inference.models.jax.utils.weight_utils import (
     get_default_maps,
     load_hf_weights,
+    load_nnx_param_from_reshaped_torch,
 )
 
 init_fn = nnx.initializers.uniform()
@@ -547,7 +548,7 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
             )
 
     def _load_moe_expert_weights(self):
-        """Load per-expert MoE weights using JaxMoE._load_weights."""
+        """Load MoE expert weights from either fused or per-expert HF tensors."""
         from tpu_inference.models.jax.utils.weight_utils import (
             get_model_weights_files,
             model_weights_single_file_generator,
@@ -560,31 +561,75 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
         for weights_file in weights_files:
             for hf_key, hf_weight in model_weights_single_file_generator(
                 weights_file, framework="pt",
-                filter_regex=r".*\.experts\.\d+\.",
+                filter_regex=r".*\.mlp\.experts(?:\.\d+\.)?.*",
             ):
-                match = re.match(
-                    r".*layers\.(\d+)\.mlp\.experts\.(.+)", hf_key
+                indexed_match = re.match(
+                    r".*layers\.(\d+)\.mlp\.experts\.(\d+\.(?:gate_proj|up_proj|down_proj)(?:\.weight)?)$",
+                    hf_key,
                 )
-                if not match:
+                fused_match = re.match(
+                    r".*layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)(?:\.weight)?$",
+                    hf_key,
+                )
+
+                if not indexed_match and not fused_match:
                     continue
-                layer_idx = int(match.group(1))
-                expert_suffix = match.group(2)  # e.g. "0.gate_proj.weight"
+
+                layer_idx = int((indexed_match or fused_match).group(1))
                 layer = self.language_model.layers[layer_idx]
                 if isinstance(layer, PPMissingLayer):
                     continue
-                if hasattr(layer.mlp, 'experts'):
-                    layer.mlp.experts._load_weights(
-                        [(expert_suffix, hf_weight)]
+                if not hasattr(layer.mlp, "experts"):
+                    continue
+
+                experts = layer.mlp.experts
+                if indexed_match:
+                    expert_suffix = indexed_match.group(2)
+                    if not expert_suffix.endswith(".weight"):
+                        expert_suffix += ".weight"
+                    experts.load_weights([(expert_suffix, hf_weight)])
+                    continue
+
+                fused_name = fused_match.group(2)
+                if fused_name == "down_proj":
+                    load_nnx_param_from_reshaped_torch(
+                        experts.kernel_down_proj_EFD,
+                        hf_weight,
+                        permute_dims=(0, 2, 1),
+                        param_name=(
+                            "language_model.layers."
+                            f"{layer_idx}.mlp.experts.kernel_down_proj_EFD"
+                        ),
+                    )
+                elif fused_name == "gate_up_proj":
+                    gate_proj, up_proj = hf_weight.chunk(2, dim=1)
+                    load_nnx_param_from_reshaped_torch(
+                        experts.kernel_gating_EDF,
+                        gate_proj,
+                        permute_dims=(0, 2, 1),
+                        param_name=(
+                            "language_model.layers."
+                            f"{layer_idx}.mlp.experts.kernel_gating_EDF"
+                        ),
+                    )
+                    load_nnx_param_from_reshaped_torch(
+                        experts.kernel_up_proj_EDF,
+                        up_proj,
+                        permute_dims=(0, 2, 1),
+                        param_name=(
+                            "language_model.layers."
+                            f"{layer_idx}.mlp.experts.kernel_up_proj_EDF"
+                        ),
                     )
 
     def load_weights(self, rng_key: jax.Array) -> None:
         self.rng = nnx.Rngs(rng_key)
 
-        # Step 1: Load MoE expert weights first (via JaxMoE._load_weights)
+        # Step 1: Load MoE expert weights first (handles fused + per-expert HF layouts)
         self._load_moe_expert_weights()
 
         # Step 2: Load all other weights via load_hf_weights
-        # (filter out per-expert weights which are already loaded)
+        # (filter out expert tensors which are already loaded)
         mappings = {
             # Language model weights (framework layer names use .weight)
             "model.language_model.embed_tokens": "language_model.embed_tokens.weight",
@@ -654,5 +699,5 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
             model=self,
             metadata_map=metadata_map,
             mesh=self.mesh,
-            filter_regex=r"(?!.*\.experts\.\d+\.)",
+            filter_regex=r"^(?!.*\.mlp\.experts(?:\.|$)).*$",
         )
