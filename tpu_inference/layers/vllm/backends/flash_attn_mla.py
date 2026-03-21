@@ -117,13 +117,18 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
         q = jax_view(q)
         kv_c_normed = jax_view(kv_c_normed)
         k_pe = jax_view(k_pe)
+        input_dtype = q.dtype
 
         # Prepare inputs
         q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=2)
 
         # (B, N, P) x (N, P, L) -> (B, N, L)
         # torch nn param
-        q_nope = jnp.einsum("bnp,npl->bnl", q_nope, jax_view(layer.W_UK_T))
+        q_nope = (jnp.einsum("bnp,npl->bnl",
+                             q_nope,
+                             jax_view(layer.W_UK_T),
+                             preferred_element_type=jnp.float32) *
+                  jax_view(layer.W_UK_T_scale)).astype(input_dtype)
 
         q_scale = k_scale = v_scale = None
         if layer.kv_cache_quantized_dtype:
@@ -161,7 +166,11 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
         )
 
         outputs = outputs.reshape(-1, self.num_heads, self.kv_lora_rank)
-        outputs = jnp.einsum("bnl,nlv->bnv", outputs, jax_view(layer.W_UV))
+        outputs = (jnp.einsum("bnl,nlv->bnv",
+                              outputs,
+                              jax_view(layer.W_UV),
+                              preferred_element_type=jnp.float32) *
+                   jax_view(layer.W_UV_scale)).astype(input_dtype)
         outputs = outputs.reshape(-1, self.num_heads * self.v_head_dim)
 
         return outputs, new_kv_cache
