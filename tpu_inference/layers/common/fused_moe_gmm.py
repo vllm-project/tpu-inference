@@ -114,6 +114,9 @@ def moe_gmm_local(
     if parallelism == "tp" and w2_bias is not None:
         shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR).sum()
         w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
+    elif parallelism == "hybrid" and w2_bias is not None:
+        shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR)
+        w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
 
     gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
                            group_offset, True)
