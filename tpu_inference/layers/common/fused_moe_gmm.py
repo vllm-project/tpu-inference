@@ -143,7 +143,7 @@ def moe_gmm_local(
         )
         # 2. AllReduce across TP axis.
         return jax.lax.psum(
-            token_hidden, axis_name=ShardingAxisName.MLP_TENSOR
+            token_hidden, axis_name="model"
         )
 
 
@@ -300,7 +300,7 @@ def hybrid_parallel_gmm(
 ) -> jax.Array:
   # 1. Map EP axis to attn_dp, assumes EP and attention DP sharding are the same.
   ep_axis = "attn_dp"
-  tp_axis = ShardingAxisName.MLP_TENSOR
+  tp_axis = "model"
 
   # 2. Calculate the EP Group Offsets
   ep_size = get_mesh_shape_product(mesh, ep_axis)
