@@ -294,7 +294,10 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
             if ordered_devices is not None:
                 ordered_devices = np.array(ordered_devices)
                 ordered_devices = ordered_devices.reshape(axis_shapes)
-                mesh = mesh_lib.Mesh(ordered_devices, axis_names)
+                mesh = mesh_lib.Mesh(ordered_devices,
+                                     axis_names,
+                                     axis_types=(mesh_lib.AxisType.Auto, ) *
+                                     len(axis_shapes))
                 logger.info("Use customized mesh: %s", mesh)
                 return mesh
 
@@ -312,7 +315,10 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
             "jax.make_mesh failed due to topology constraints. Falling back to manual mesh: %s",
             e)
         ordered_devices = np.array(devices).reshape(axis_shapes)
-        return mesh_lib.Mesh(ordered_devices, axis_names)
+        return mesh_lib.Mesh(ordered_devices,
+                             axis_names,
+                             axis_types=(mesh_lib.AxisType.Auto, ) *
+                             len(axis_shapes))
 
 
 def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
