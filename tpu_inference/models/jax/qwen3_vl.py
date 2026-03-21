@@ -1531,16 +1531,17 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         input_ids: Optional[jax.Array],
         attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
-        *args,
+        _input_positions=None,
+        _layer_name_to_kv_cache=None,
+        _lora_metadata=None,
+        _intermediate_tensors=None,
+        _is_first_rank: bool = True,
+        _is_last_rank: bool = True,
+        deepstack_embeds: Optional[Union[List[jax.Array], Tuple[jax.Array, ...]]] = None,
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
         visual_pos_mask = None
-        deepstack_embeds = None
-        if args:
-            candidate = args[-1]
-            if isinstance(candidate, (list, tuple)):
-                deepstack_embeds = candidate
 
-        if deepstack_embeds and input_ids is not None:
+        if deepstack_embeds is not None and input_ids is not None:
             visual_pos_mask = (input_ids == self.image_token_id) | (
                 input_ids == self.video_token_id
             )
