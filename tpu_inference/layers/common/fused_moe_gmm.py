@@ -36,31 +36,6 @@ def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
                 f"FusedMoE does not support {scoring_fn} scoring function")
 
 
-def apply_act_fn(activation: str, x1: jax.Array, x2: jax.Array) -> jax.Array:
-    match activation:
-        case "silu":
-            return jax.nn.silu(x1) * x2
-        case "gelu":
-            return jax.nn.gelu(x1) * x2
-        case "swigluoai":
-            return _swigluoai(x1, x2)
-        case _:
-            raise NotImplementedError(
-                f"FusedMoE does not support {activation} activation function")
-
-
-def _swigluoai(x1: jax.Array,
-               x2: jax.Array,
-               alpha=1.702,
-               limit=7.0) -> jax.Array:
-    x1 = jnp.clip(x1, a_max=limit)
-    x2 = jnp.clip(x2, a_min=-limit, a_max=limit)
-
-    gated_activation = x1 * jax.nn.sigmoid(alpha * x1)
-
-    return gated_activation * (x2 + 1)
-
-
 def gmm_wrapper(
     lhs,
     rhs,
