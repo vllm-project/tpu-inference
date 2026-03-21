@@ -1015,9 +1015,9 @@ def validate_inputs(
         assert size_n % 2 == 0, (
             f"size_n {size_n} should be divisible by 2 when fuse_act is not None"
             " since we need to split n dimension for gate and up projection")
-        assert fuse_act in ("gelu", "silu", "swigluoi"), (
+        assert fuse_act in ("gelu", "silu", "swigluoai"), (
             f"Unsupported fuse_act {fuse_act}. Supported values are 'gelu', 'silu',"
-            " and 'swigluoi'.")
+            " and 'swigluoai'.")
         size_n //= 2
 
     return Dimensions(
