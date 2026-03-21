@@ -118,18 +118,25 @@ class MultiModalManager:
                     batched_mm_inputs["pixel_values"], list):
                 batched_mm_inputs["pixel_values"] = torch.cat(
                     batched_mm_inputs["pixel_values"], dim=0)
+            if "pixel_values_videos" in batched_mm_inputs and isinstance(
+                    batched_mm_inputs["pixel_values_videos"], list):
+                batched_mm_inputs["pixel_values_videos"] = torch.cat(
+                    batched_mm_inputs["pixel_values_videos"], dim=0)
 
             image_grid_thw = ()
             for key, value in batched_mm_inputs.items():
                 if isinstance(value, torch.Tensor):
-                    if key == 'image_grid_thw':
+                    if key in ('image_grid_thw', 'video_grid_thw'):
                         # change it to tuple of tuples to make it hashable for JIT
 
                         # Shape: (B, N, 3) -> (B*N, 3) -> tuple of tuples
                         grid_thw_tensor = batched_mm_inputs[key]
                         grid_thw_reshaped = grid_thw_tensor.reshape(-1, 3)
-                        image_grid_thw = tuple(
+                        grid_thw_tuple = tuple(
                             tuple(row) for row in grid_thw_reshaped.tolist())
+                        if key == 'image_grid_thw':
+                            image_grid_thw = grid_thw_tuple
+                        batched_mm_inputs[key] = grid_thw_tuple
 
                         continue
 
