@@ -23,6 +23,8 @@ from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers import linear as vllm_linear
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe.layer import \
+    FusedMoeWeightScaleSupported
 from vllm.model_executor.layers.quantization import fp8 as vllm_fp8
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
@@ -30,7 +32,9 @@ from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
+from vllm.model_executor.utils import set_weight_attrs
 
+from tpu_inference import envs
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.linear_weights import (
     shard_linear_weights, to_parameter_list)
@@ -38,6 +42,7 @@ from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_fp8_moe_weights, shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import FP8
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
+from tpu_inference.layers.common.quantization import u8_unpack_e2m1
 from tpu_inference.layers.vllm.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import (
@@ -221,16 +226,133 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
     def is_monolithic(self) -> bool:
         return True
 
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        # When loading pre-quantized FP4 MoE weights (stored as uint8),
+        # allocate weight parameters at the packed (halved) dimensions so
+        # that vLLM's .narrow() in _load_w13/_load_w2 sees matching sizes.
+        # The last axis is the packed axis (2 FP4 values per uint8 byte).
+        if envs.MOE_SKIP_REQUANTIZE:
+            fp4_bs = envs.MOE_REQUANTIZE_BLOCK_SIZE or 512
+            logger.info(
+                "FP4 pre-quantized MoE: allocating uint8 packed weights "
+                "(hidden=%d→%d, inter=%d→%d, fp4_block=%d)",
+                hidden_size,
+                hidden_size // 2,
+                intermediate_size_per_partition,
+                intermediate_size_per_partition // 2,
+                fp4_bs,
+            )
+            layer.intermediate_size_per_partition = (
+                intermediate_size_per_partition)
+            layer.hidden_size = hidden_size
+            layer.num_experts = num_experts
+            layer.orig_dtype = params_dtype
+            layer.weight_block_size = [1, fp4_bs]
+
+            # w13 logical: (E, 2*intermediate, hidden_size) as fp8
+            # w13 packed:  (E, 2*intermediate, hidden_size // 2) as uint8
+            # Last axis is packed (2 FP4 per byte).
+            w13_weight = torch.nn.Parameter(
+                torch.empty(
+                    num_experts,
+                    2 * intermediate_size_per_partition,
+                    hidden_size // 2,
+                    dtype=torch.uint8,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_weight", w13_weight)
+            set_weight_attrs(w13_weight, extra_weight_attrs)
+
+            # w2 logical: (E, hidden_size, intermediate) as fp8
+            # w2 packed:  (E, hidden_size, intermediate // 2) as uint8
+            w2_weight = torch.nn.Parameter(
+                torch.empty(
+                    num_experts,
+                    hidden_size,
+                    intermediate_size_per_partition // 2,
+                    dtype=torch.uint8,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_weight", w2_weight)
+            set_weight_attrs(w2_weight, extra_weight_attrs)
+
+            # FP4 scales: 1D block quantization on last axis (axis=-1).
+            # The converter quantizes with block_size on the K (last) axis
+            # only, so scales preserve the full M (first) dimension and
+            # divide K by fp4_block_size.
+            # w13 weight: (E, 2*inter, hidden//2) → scale: (E, 2*inter, ceil(hidden/fp4_bs))
+            w13_scale_data = torch.ones(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                (hidden_size + fp4_bs - 1) // fp4_bs,
+                dtype=torch.float32,
+            )
+            # w2 weight: (E, hidden, inter//2) → scale: (E, hidden, ceil(inter/fp4_bs))
+            w2_scale_data = torch.ones(
+                num_experts,
+                hidden_size,
+                (intermediate_size_per_partition + fp4_bs - 1) // fp4_bs,
+                dtype=torch.float32,
+            )
+            w13_weight_scale = torch.nn.Parameter(w13_scale_data,
+                                                  requires_grad=False)
+            w2_weight_scale = torch.nn.Parameter(w2_scale_data,
+                                                 requires_grad=False)
+            layer.register_parameter(f"w13_{self.weight_scale_name}",
+                                     w13_weight_scale)
+            layer.register_parameter(f"w2_{self.weight_scale_name}",
+                                     w2_weight_scale)
+
+            extra_weight_attrs.update(
+                {"quant_method": FusedMoeWeightScaleSupported.BLOCK.
+                 value} if self.block_quant else
+                {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
+            set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+            set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+
+            # Dynamic activation scheme — no static input scales.
+            layer.w13_input_scale = None
+            layer.w2_input_scale = None
+            return
+
+        # Standard FP8 path — delegate to parent.
+        super().create_weights(
+            layer=layer,
+            num_experts=num_experts,
+            hidden_size=hidden_size,
+            intermediate_size_per_partition=intermediate_size_per_partition,
+            params_dtype=params_dtype,
+            **extra_weight_attrs,
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, FusedMoE)
 
         assert self.block_quant
         assert not self.moe.has_bias
 
-        w13_weight = t2j(layer.w13_weight, use_dlpack=False)
-        w13_weight_scale = t2j(layer.w13_weight_scale_inv, use_dlpack=False)
+        # Pre-quantized FP4 MoE weights are stored as uint8 (packed).
+        # Unpack: uint8 → JAX → u8_unpack_e2m1 → float4_e2m1fn logical shape.
+        if (envs.MOE_SKIP_REQUANTIZE
+                and layer.w13_weight.dtype == torch.uint8):
+            logger.info("Unpacking pre-quantized FP4 MoE weights (uint8)")
+            w13_weight = u8_unpack_e2m1(jnp.array(layer.w13_weight.numpy()))
+            w2_weight = u8_unpack_e2m1(jnp.array(layer.w2_weight.numpy()))
+        else:
+            w13_weight = t2j(layer.w13_weight, use_dlpack=False)
+            w2_weight = t2j(layer.w2_weight, use_dlpack=False)
 
-        w2_weight = t2j(layer.w2_weight, use_dlpack=False)
+        w13_weight_scale = t2j(layer.w13_weight_scale_inv, use_dlpack=False)
         w2_weight_scale = t2j(layer.w2_weight_scale_inv, use_dlpack=False)
 
         # TODO: do we need to support bias?

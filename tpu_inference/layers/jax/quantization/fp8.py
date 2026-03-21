@@ -23,6 +23,7 @@ import torch
 from flax import nnx
 from jax.sharding import PartitionSpec as P
 
+from tpu_inference import envs
 from tpu_inference.layers.common.linear import sharded_quantized_batched_matmul
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.linear_weights import \
@@ -30,6 +31,7 @@ from tpu_inference.layers.common.process_weights.linear_weights import \
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_fp8_moe_weights)
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
+from tpu_inference.layers.common.quantization import u8_unpack_e2m1
 from tpu_inference.layers.common.utils import cpu_mesh, cpu_mesh_context
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.base import create_param
@@ -515,6 +517,14 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 w2_weight_scale = jnp.concatenate(getattr(
                     layer, down_scale_name)._weights_to_load,
                                                   axis=0)
+
+                # Unpack uint8 (packed FP4) → float4_e2m1fn with logical
+                # shape restored.
+                if envs.MOE_SKIP_REQUANTIZE and w_gate.dtype == jnp.uint8:
+                    logger.info("Unpacking pre-quantized FP4 MoE weights")
+                    w_gate = u8_unpack_e2m1(w_gate)
+                    w_up = u8_unpack_e2m1(w_up)
+                    w2_weight = u8_unpack_e2m1(w2_weight)
 
                 # Fuse the weights into w13: [Gate, Up]. w2 is expected to be
                 # (num_experts, hidden_size, intermediate_size), w13 is expected to
