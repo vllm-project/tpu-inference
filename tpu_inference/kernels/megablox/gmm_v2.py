@@ -135,7 +135,8 @@ class FusedWeightsRef:
         if packing_dtype is not None:
             w = pltpu.bitcast(w, packing_dtype)
             w_up = pltpu.bitcast(w_up, packing_dtype)
-            w = jnp.concatenate([w, w_up], axis=1)
+
+        w = jnp.concatenate([w, w_up], axis=1)
 
         return w
 
