@@ -133,7 +133,7 @@ def moe_gmm_local(
     # TODO(wyzhang): cleanup
     enforce_layout = True
     with jax.named_scope("RestoreOriginalTokenOrder"):
-        if gmm2_res.shape[0] <= 0:
+        if True: # One-Hot dense scatter reconstruct
             one_hot_selector = jax.nn.one_hot(
                 topk_argsort_revert_indices,
                 num_classes=gmm2_res.shape[0],
@@ -407,7 +407,7 @@ def fused_moe_func(
     x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
     
     # TODO(wyzhang): cleanup
-    enforce_layout = True
+    enforce_layout = False
     if enforce_layout:
         dummy_weights = jnp.eye(padded_hidden_size, dtype=x.dtype) + 1e-4
         x = jnp.matmul(x, dummy_weights)
