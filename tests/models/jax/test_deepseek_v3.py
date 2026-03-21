@@ -151,6 +151,54 @@ class TestDeepSeekV3:
 
             model.weight_loader.load_weights.assert_called_once_with(model)
 
+    @pytest.mark.parametrize("model_name", ["hugg1ngfac3/deepseek-r1-tiny"])
+    @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1)])
+    @pytest.mark.parametrize(
+        "load_format", ["skip_layers_model_loader_for_test", "jax_dummy"])
+    def test_model_loading(self, model_name, pp_rank, pp_world_size,
+                           load_format, rng, mesh,
+                           assert_weight_loading_memory_bounded):
+        """Tests loading weights from HF model"""
+        from transformers import AutoConfig
+        from vllm.config import set_current_vllm_config
+        from vllm.model_executor.model_loader import get_model_loader
+
+        from tpu_inference.distributed.jax_parallel_state import \
+            init_pp_distributed_environment
+        from tpu_inference.layers.jax.quantization import \
+            get_tpu_quantization_config
+
+        config = MockVllmConfig(model_name=model_name, use_mla=False)
+        hf_config = AutoConfig.from_pretrained(model_name,
+                                               trust_remote_code=True)
+        config.model_config.hf_config = hf_config
+
+        # No need to load full model.
+        config.model_config.hf_config.num_hidden_layers = 1
+        config.load_config.load_format = load_format
+        config.load_config.num_layers_to_load_for_test = 1
+        config.parallel_config = None
+
+        init_pp_distributed_environment(
+            ip="",
+            rank=pp_rank,
+            world_size=pp_world_size,
+            device=jax.devices()[0],
+            need_pp=False,
+        )
+        config.quant_config = get_tpu_quantization_config(config)
+
+        with jax.set_mesh(mesh):
+            model = DeepSeekV3(config, rng, mesh)
+
+            loader = get_model_loader(config.load_config)
+            with assert_weight_loading_memory_bounded(
+                    model,
+                    description=f"load_weights({model_name})",
+                    threshold_multiplier=10.0,
+            ), set_current_vllm_config(config):
+                loader.load_weights(model, config.model_config)
+
 
 class TestDeepSeekV3WeightLoader:
 
