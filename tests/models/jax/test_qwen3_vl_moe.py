@@ -564,6 +564,76 @@ class TestQwen3VLMoeForConditionalGeneration:
             expected_down,
         )
 
+    @patch('tpu_inference.models.jax.utils.weight_utils.get_model_weights_files')
+    @patch('tpu_inference.models.jax.utils.weight_utils.model_weights_single_file_generator')
+    def test_load_moe_expert_weights_supports_fused_hf_down_proj_already_efd(
+        self,
+        mock_generator: MagicMock,
+        mock_get_model_weights_files: MagicMock,
+        mock_vllm_config: MockMoeVllmConfig,
+        rng: PRNGKey,
+        mesh: Mesh,
+    ):
+        with patch(
+                'tpu_inference.models.jax.qwen3_vl_moe.Qwen3VLVisionTransformer',
+                autospec=True) as MockVision:
+            mock_visual = MockVision.return_value
+            mock_visual.dtype = mock_vllm_config.model_config.dtype
+            mock_visual.config = mock_vllm_config.model_config.hf_config.vision_config
+            mock_visual.spatial_merge_size = (
+                mock_vllm_config.model_config.hf_config.vision_config
+                .spatial_merge_size)
+            model = Qwen3VLMoeForConditionalGeneration(mock_vllm_config, rng,
+                                                       mesh)
+
+        layer = model.language_model.layers[0]
+        experts = layer.mlp.experts
+        hidden_size = mock_vllm_config.model_config.hf_config.hidden_size
+        moe_intermediate_size = (
+            mock_vllm_config.model_config.hf_config.moe_intermediate_size)
+        num_experts = mock_vllm_config.model_config.hf_config.num_experts
+
+        gate_up = (
+            torch.arange(num_experts * 2 * moe_intermediate_size *
+                         hidden_size,
+                         dtype=torch.float32).reshape(num_experts,
+                                                      2 * moe_intermediate_size,
+                                                      hidden_size) % 97)
+        down = (
+            torch.arange(num_experts * moe_intermediate_size * hidden_size,
+                         dtype=torch.float32).reshape(num_experts,
+                                                      moe_intermediate_size,
+                                                      hidden_size) % 89)
+
+        mock_get_model_weights_files.return_value = ["mock.safetensors"]
+        mock_generator.return_value = iter([
+            ("model.language_model.layers.0.mlp.experts.gate_up_proj", gate_up),
+            ("model.language_model.layers.0.mlp.experts.down_proj", down),
+        ])
+
+        model._load_moe_expert_weights()
+
+        expected_gate = np.array(
+            gate_up[:, :moe_intermediate_size, :].permute(0, 2, 1),
+            dtype=np.float32)
+        expected_up = np.array(
+            gate_up[:, moe_intermediate_size:, :].permute(0, 2, 1),
+            dtype=np.float32)
+        expected_down = np.array(down, dtype=np.float32)
+
+        np.testing.assert_array_equal(
+            np.array(experts.kernel_gating_EDF.value, dtype=np.float32),
+            expected_gate,
+        )
+        np.testing.assert_array_equal(
+            np.array(experts.kernel_up_proj_EDF.value, dtype=np.float32),
+            expected_up,
+        )
+        np.testing.assert_array_equal(
+            np.array(experts.kernel_down_proj_EFD.value, dtype=np.float32),
+            expected_down,
+        )
+
 
 # --- Integration Tests (dense fallback, real layers) ---
 class TestMoeServingIntegration:

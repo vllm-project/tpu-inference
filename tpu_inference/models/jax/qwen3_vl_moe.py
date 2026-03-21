@@ -592,10 +592,24 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
 
                 fused_name = fused_match.group(2)
                 if fused_name == "down_proj":
+                    down_proj_permute = None
+                    target_shape = tuple(experts.kernel_down_proj_EFD.value.shape)
+                    source_shape = tuple(hf_weight.shape)
+                    if source_shape != target_shape:
+                        swapped_shape = source_shape[:-2] + (
+                            source_shape[-1], source_shape[-2])
+                        if swapped_shape == target_shape:
+                            down_proj_permute = (0, 2, 1)
+                        else:
+                            raise ValueError(
+                                "Unsupported fused down_proj layout for "
+                                f"language_model.layers.{layer_idx}.mlp.experts: "
+                                f"source {source_shape} vs target {target_shape}"
+                            )
                     load_nnx_param_from_reshaped_torch(
                         experts.kernel_down_proj_EFD,
                         hf_weight,
-                        permute_dims=(0, 2, 1),
+                        permute_dims=down_proj_permute,
                         param_name=(
                             "language_model.layers."
                             f"{layer_idx}.mlp.experts.kernel_down_proj_EFD"

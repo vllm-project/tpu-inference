@@ -48,17 +48,13 @@ DEFAULT_BLOCK_K_MAJOR = 128
 VISION_GRID_SIZE = 48
 
 
-def _sync_param_sharding_metadata(param) -> None:
-    out_sharding = getattr(param, "out_sharding", None)
-    if out_sharding is not None and getattr(param, "sharding", None) is None:
-        param.set_metadata("sharding", out_sharding)
-
-
-def _sync_module_param_sharding(module, *param_names: str) -> None:
-    for param_name in param_names:
-        param = getattr(module, param_name, None)
-        if param is not None:
-            _sync_param_sharding_metadata(param)
+def _sync_module_param_sharding(module: nnx.Module) -> None:
+    for param in jax.tree_util.tree_leaves(nnx.state(module)):
+        if isinstance(param, nnx.Param):
+            out_sharding = getattr(param, "out_sharding", None)
+            if out_sharding is not None and getattr(param, "sharding",
+                                                    None) is None:
+                param.set_metadata("sharding", out_sharding)
 
 
 class _Qwen3VLConfigAdapter:
@@ -514,7 +510,6 @@ class Qwen3VLVisionPatchEmbed(nnx.Module):
             bias_init=nnx.with_partitioning(init_fn, ("model",)),
             rngs=rngs,
         )
-        _sync_module_param_sharding(self.proj, "kernel", "bias")
 
     def __call__(self, x: jax.Array) -> jax.Array:
         """Apply 3D patch embedding.
@@ -563,7 +558,6 @@ class Qwen3VLVisionMLP(nnx.Module):
             bias_init=nnx.with_partitioning(init_fn, ("model",)),
             rngs=rngs,
         )
-        _sync_module_param_sharding(self.fc1, "kernel", "bias")
         self.fc2 = nnx.Linear(
             intermediate_size,
             hidden_size,
@@ -573,7 +567,6 @@ class Qwen3VLVisionMLP(nnx.Module):
             bias_init=nnx.with_partitioning(init_fn, (None,)),
             rngs=rngs,
         )
-        _sync_module_param_sharding(self.fc2, "kernel", "bias")
 
     def __call__(self, x: jax.Array) -> jax.Array:
         x = self.fc1(x)
@@ -612,7 +605,6 @@ class Qwen3VLVisionAttention(nnx.Module):
             bias_init=nnx.with_partitioning(init_fn, ("model",)),
             rngs=rngs,
         )
-        _sync_module_param_sharding(self.qkv_proj, "kernel", "bias")
 
         # Output projection
         self.proj = nnx.Linear(
@@ -624,7 +616,6 @@ class Qwen3VLVisionAttention(nnx.Module):
             bias_init=nnx.with_partitioning(init_fn, (None,)),
             rngs=rngs,
         )
-        _sync_module_param_sharding(self.proj, "kernel", "bias")
 
         # Qwen3VL's Vision Transformer uses full bidirectional attention.
         self.flash_attention = sharded_flash_attention(
@@ -722,7 +713,6 @@ class Qwen3VLVisionBlock(nnx.Module):
             scale_init=nnx.with_partitioning(init_fn, (None,)),
             bias_init=nnx.with_partitioning(init_fn, (None,)),
         )
-        _sync_module_param_sharding(self.norm1, "scale", "bias")
         self.attn = Qwen3VLVisionAttention(
             hidden_size=hidden_size,
             num_heads=num_heads,
@@ -738,7 +728,6 @@ class Qwen3VLVisionBlock(nnx.Module):
             scale_init=nnx.with_partitioning(init_fn, (None,)),
             bias_init=nnx.with_partitioning(init_fn, (None,)),
         )
-        _sync_module_param_sharding(self.norm2, "scale", "bias")
         self.mlp = Qwen3VLVisionMLP(
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
@@ -788,7 +777,6 @@ class Qwen3VLVisionPatchMerger(nnx.Module):
             scale_init=nnx.with_partitioning(init_fn, (None,)),
             bias_init=nnx.with_partitioning(init_fn, (None,)),
         )
-        _sync_module_param_sharding(self.norm, "scale", "bias")
 
         self.linear_fc1 = nnx.Linear(
             self.hidden_size,
@@ -799,7 +787,6 @@ class Qwen3VLVisionPatchMerger(nnx.Module):
             bias_init=nnx.with_partitioning(init_fn, ("model",)),
             rngs=rngs,
         )
-        _sync_module_param_sharding(self.linear_fc1, "kernel", "bias")
         self.linear_fc2 = nnx.Linear(
             self.hidden_size,
             d_model,
@@ -809,7 +796,6 @@ class Qwen3VLVisionPatchMerger(nnx.Module):
             bias_init=nnx.with_partitioning(init_fn, (None,)),
             rngs=rngs,
         )
-        _sync_module_param_sharding(self.linear_fc2, "kernel", "bias")
 
     def __call__(self, x: jax.Array) -> jax.Array:
         """Apply patch merging.
@@ -879,7 +865,6 @@ class Qwen3VLVisionTransformer(nnx.Module):
             embedding_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rngs,
         )
-        _sync_module_param_sharding(self.pos_embed, "embedding")
         image_size = getattr(vision_config, "image_size", None)
         pos_embed_grid_h = pos_embed_grid_w = None
         if isinstance(image_size, (tuple, list)) and len(image_size) == 2:
@@ -963,6 +948,7 @@ class Qwen3VLVisionTransformer(nnx.Module):
         self.enable_dynamic_image_sizes = additional_config.get(
             "enable_dynamic_image_sizes", False
         )
+        _sync_module_param_sharding(self)
 
     def rotary_pos_emb_thw(
         self, t: int, h: int, w: int
