@@ -1035,7 +1035,7 @@ class TestServingIntegration:
         kv_caches_deep = _make_kv_caches(model, mesh)
         _, out_base, _ = model(kv_caches_base, input_ids, attn_meta, inputs_embeds)
         _, out_deep, _ = model(kv_caches_deep, input_ids, attn_meta,
-                               inputs_embeds, deepstack)
+                               inputs_embeds, deepstack_embeds=deepstack)
 
         diff = np.abs(np.array(out_deep - out_base))
         placeholder_mask = np.array(input_ids) == model.image_token_id
