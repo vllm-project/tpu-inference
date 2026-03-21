@@ -32,7 +32,7 @@ DECODE_HEAVY_RATIO_THRESHOLD = 0.2
 # We will say that any batch who has between 40% and 60% of its tokens scheduled
 # for prefilling is in the BALANCED phase
 BALANCED_RATIO_THRESHOLD = (0.4, 0.6)
-PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR = 15
+PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR = 16
 
 logger = init_logger(__name__)
 

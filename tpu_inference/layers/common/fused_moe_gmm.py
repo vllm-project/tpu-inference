@@ -130,9 +130,23 @@ def moe_gmm_local(
 
     gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
                            group_offset, True)
-
-    # First run local reduction on topk experts owned by the rank for all tokens
-    token_topk_hidden = gmm2_res[topk_argsort_revert_indices].reshape(
+    # TODO(wyzhang): cleanup
+    enforce_layout = True
+    with jax.named_scope("RestoreOriginalTokenOrder"):
+        if gmm2_res.shape[0] <= 0:
+            one_hot_selector = jax.nn.one_hot(
+                topk_argsort_revert_indices,
+                num_classes=gmm2_res.shape[0],
+                dtype=gmm2_res.dtype)
+            token_topk_hidden = jnp.matmul(one_hot_selector, gmm2_res)
+        elif enforce_layout:
+            token_topk_hidden = gmm2_res[topk_argsort_revert_indices]
+            from jax.experimental import layout as jax_layout
+            token_topk_hidden = jax_layout.with_layout_constraint(
+                token_topk_hidden, jax_layout.Layout(major_to_minor=(0, 1), tiling=((16, 128),)))
+        else:
+            token_topk_hidden = gmm2_res[topk_argsort_revert_indices]
+    token_topk_hidden = token_topk_hidden.reshape(
         (-1, topk, gmm2_res.shape[-1]))
     token_topk_hidden = token_topk_hidden * jnp.expand_dims(topk_weights,
                                                             axis=-1)
@@ -345,21 +359,36 @@ def fused_moe_func(
     topk_weights = topk_weights.astype(dtype)
 
     def _process_tokens_locally(hidden_states_local, topk_indices_local):
-        num_tokens_local = hidden_states_local.shape[0]
-        topk_indices_flat = topk_indices_local.flatten()
-        topk_argsort_indices = jnp.argsort(topk_indices_flat)
-        token_indices = jnp.arange(num_tokens_local,
-                                   dtype=jnp.int32).repeat(topk)
-        token_indices_sorted = token_indices[topk_argsort_indices]
-        x = hidden_states_local[token_indices_sorted]
-        # Below one_hot is equivalent to jnp.bincount(topk_indices_flat,
-        # length=global_num_experts) but is more performant.
-        group_sizes_local = jax.nn.one_hot(topk_indices_flat,
-                                           global_num_experts,
-                                           dtype=jnp.int32).sum(axis=0)
-        topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
+        with jax.named_scope("ProcessTokensLocally"):
+            num_tokens_local = hidden_states_local.shape[0]
+            topk_indices_flat = topk_indices_local.flatten()
+            topk_argsort_indices = jnp.argsort(topk_indices_flat)
+            token_indices = jnp.arange(num_tokens_local,
+                                    dtype=jnp.int32).repeat(topk)
+            token_indices_sorted = token_indices[topk_argsort_indices]
+            # TODO(wyzhang): cleanup
+            enforce_layout = True
+            if token_indices_sorted.shape[0] <= 0:
+                one_hot_selector = jax.nn.one_hot(
+                    token_indices_sorted,
+                    num_classes=num_tokens_local,
+                    dtype=hidden_states_local.dtype)
+                x = jnp.matmul(one_hot_selector, hidden_states_local)        
+            elif enforce_layout:
+                x = hidden_states_local[token_indices_sorted]
+                from jax.experimental import layout as jax_layout
+                x = jax_layout.with_layout_constraint(
+                    x, jax_layout.Layout(major_to_minor=(0, 1), tiling=((16, 128),)))
+            else:
+                x = hidden_states_local[token_indices_sorted]
+            # Below one_hot is equivalent to jnp.bincount(topk_indices_flat,
+            # length=global_num_experts) but is more performant.
+            group_sizes_local = jax.nn.one_hot(topk_indices_flat,
+                                            global_num_experts,
+                                            dtype=jnp.int32).sum(axis=0)
+            topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
 
-        return x, group_sizes_local, topk_argsort_revert_indices
+            return x, group_sizes_local, topk_argsort_revert_indices
 
     x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
         _process_tokens_locally,
@@ -376,6 +405,13 @@ def fused_moe_func(
     )(hidden_states, topk_indices)
 
     x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
+    
+    # TODO(wyzhang): cleanup
+    enforce_layout = True
+    if enforce_layout:
+        dummy_weights = jnp.eye(padded_hidden_size, dtype=x.dtype) + 1e-4
+        x = jnp.matmul(x, dummy_weights)
+        x = jax.lax.optimization_barrier(x)
 
     if use_ep:
         x = expert_parallel_gmm(
