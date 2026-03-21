@@ -1,0 +1,5 @@
+* remote tpu vm hostname
+wyzhang-tpu7x-8
+
+* how to ssh
+ssh wyzhang-tpu7x-8-a
