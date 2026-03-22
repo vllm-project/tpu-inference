@@ -56,25 +56,18 @@ def gmm_wrapper(lhs,
     return gmm_res
 
 
-def get_masked_topk_weights(
-    group_sizes: jax.Array,
-    group_start: jax.Array,
-    group_end: jax.Array,
-    topk_argsort_revert_indices: jax.Array,
-    topk_weights: jax.Array,
-) -> jax.Array:
-    """Masks the topk weights based on the group sizes and group offset."""
+def valid_rows_mask(batch_size: int, group_sizes: jax.Array,
+                    group_start: jax.Array, group_end: jax.Array) -> jax.Array:
+    """Mask indicating rows processed by current shard."""
 
     group_sizes_sum = jnp.cumulative_sum(group_sizes, include_initial=True)
 
     token_start = group_sizes_sum[group_start]
     token_end = group_sizes_sum[group_end]
 
-    index = jnp.arange(topk_weights.size)
-    mask = jnp.where(jnp.logical_and(token_start <= index, index < token_end),
+    index = jnp.arange(batch_size)
+    return jnp.where(jnp.logical_and(token_start <= index, index < token_end),
                      True, False)
-    mask = mask[topk_argsort_revert_indices].reshape(topk_weights.shape)
-    return jnp.where(mask, topk_weights, 0)
 
 
 def moe_gmm_local(
@@ -122,21 +115,22 @@ def moe_gmm_local(
     gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
                            group_offset)
 
-    local_group_size = w1.shape[0]
-    if local_group_size < group_sizes.size:
-        topk_weights = get_masked_topk_weights(
-            group_sizes,
-            group_offset,
-            group_offset + local_group_size,
-            topk_argsort_revert_indices,
-            topk_weights,
-        )
-
     # First run local reduction on topk experts owned by the rank for all tokens
     token_topk_hidden = gmm2_res[topk_argsort_revert_indices].reshape(
         (-1, topk, gmm2_res.shape[-1]))
     token_topk_hidden = token_topk_hidden * jnp.expand_dims(topk_weights,
                                                             axis=-1)
+
+    local_group_size = w1.shape[0]
+    if local_group_size < group_sizes.size:
+        mask = valid_rows_mask(
+            gmm2_res.shape[0],
+            group_sizes,
+            group_offset,
+            group_offset + local_group_size,
+        )[topk_argsort_revert_indices].reshape(-1, topk, 1)
+        token_topk_hidden = jnp.where(mask, token_topk_hidden, 0.0)
+
     token_hidden = token_topk_hidden.sum(axis=-2)
 
     reduction_axis = (ShardingAxisName.MLP_TENSOR
