@@ -8,7 +8,7 @@ ITER=3 # default iteration count
 INPUT_LEN=1024 # default input len
 OUTPUT_LEN=8192 # default output len
 NUM_PROMPTS=320 # default number of prompts
-TARGET_DIR="qwen450b-0310" # default target dir
+TARGET_DIR="bench-res" # default target dir
 XPROF_ENABLED=false
 
 parse_arguments() {
@@ -35,6 +35,10 @@ parse_arguments() {
             ;;
         esac
     done
+
+    if [ "$XPROF_ENABLED" != "false" ]; then
+        TARGET_DIR="${TARGET_DIR}-xprof"
+    fi
 
     # Compose the storage path after parsing overrides
     BASE_DIR="${ROOT_DIR}/${TARGET_DIR}"
