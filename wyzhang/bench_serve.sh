@@ -2,7 +2,7 @@
 
 readonly ROOT_DIR="/home/wyzhang_google_com/mnt/ullm/debug"
 readonly BENCH_SERVING_BASEDIR="/home/wyzhang_google_com/mnt/ullm/bench_serving"
-readonly SLEEP_INTERVAL_SEC=15
+readonly SLEEP_INTERVAL_SEC=60
 
 ITER=3 # default iteration count
 INPUT_LEN=1024 # default input len
@@ -68,7 +68,6 @@ start_vllm_server() {
 }
 
 wait_for_vllm() {
-    echo "Waiting for vllm to be ready..."
     vllm_log_file="${BASE_DIR}/vllm.log"
     local timeout=1800 # 30 minutes in seconds
     local elapsed=0
@@ -84,6 +83,7 @@ wait_for_vllm() {
             exit 1
         fi
 
+        echo "Waiting for vllm to be ready..."
         sleep "$SLEEP_INTERVAL_SEC"
         elapsed=$((elapsed + SLEEP_INTERVAL_SEC))
     done
