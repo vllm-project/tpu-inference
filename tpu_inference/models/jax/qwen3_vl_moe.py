@@ -40,8 +40,10 @@ from tpu_inference.models.jax.utils.multi_modal_utils import (
 )
 from tpu_inference.models.jax.utils.weight_utils import (
     get_default_maps,
+    jax_array_from_reshaped_torch,
     load_hf_weights,
     load_nnx_param_from_reshaped_torch,
+    shard_put,
 )
 
 init_fn = nnx.initializers.uniform()
@@ -606,15 +608,12 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
                                 f"language_model.layers.{layer_idx}.mlp.experts: "
                                 f"source {source_shape} vs target {target_shape}"
                             )
-                    load_nnx_param_from_reshaped_torch(
-                        experts.kernel_down_proj_EFD,
-                        hf_weight,
-                        permute_dims=down_proj_permute,
-                        param_name=(
-                            "language_model.layers."
-                            f"{layer_idx}.mlp.experts.kernel_down_proj_EFD"
-                        ),
-                    )
+                    jax_w = jax_array_from_reshaped_torch(
+                        hf_weight, permute_dims=down_proj_permute)
+                    assert jax_w.shape == target_shape, \
+                        f"down_proj shape mismatch: {jax_w.shape} vs {target_shape}"
+                    experts.kernel_down_proj_EFD.value = shard_put(
+                        jax_w, experts.efd_sharding)
                 elif fused_name == "gate_up_proj":
                     E, D, F = experts.kernel_gating_EDF.value.shape
                     fused_shape = tuple(hf_weight.shape)
@@ -633,24 +632,18 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
                             f"source {fused_shape} vs expected EDF=({E}, {D}, {F})"
                         )
                     gate_proj, up_proj = hf_weight.chunk(2, dim=chunk_dim)
-                    load_nnx_param_from_reshaped_torch(
-                        experts.kernel_gating_EDF,
-                        gate_proj,
-                        permute_dims=gate_permute,
-                        param_name=(
-                            "language_model.layers."
-                            f"{layer_idx}.mlp.experts.kernel_gating_EDF"
-                        ),
-                    )
-                    load_nnx_param_from_reshaped_torch(
-                        experts.kernel_up_proj_EDF,
-                        up_proj,
-                        permute_dims=gate_permute,
-                        param_name=(
-                            "language_model.layers."
-                            f"{layer_idx}.mlp.experts.kernel_up_proj_EDF"
-                        ),
-                    )
+                    jax_gate = jax_array_from_reshaped_torch(
+                        gate_proj, permute_dims=gate_permute)
+                    assert tuple(jax_gate.shape) == (E, D, F), \
+                        f"gate shape mismatch: {jax_gate.shape} vs ({E}, {D}, {F})"
+                    experts.kernel_gating_EDF.value = shard_put(
+                        jax_gate, experts.edf_sharding)
+                    jax_up = jax_array_from_reshaped_torch(
+                        up_proj, permute_dims=gate_permute)
+                    assert tuple(jax_up.shape) == (E, D, F), \
+                        f"up_proj shape mismatch: {jax_up.shape} vs ({E}, {D}, {F})"
+                    experts.kernel_up_proj_EDF.value = shard_put(
+                        jax_up, experts.edf_sharding)
 
     def load_weights(self, rng_key: jax.Array) -> None:
         self.rng = nnx.Rngs(rng_key)
