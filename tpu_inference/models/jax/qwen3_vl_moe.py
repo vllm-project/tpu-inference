@@ -39,11 +39,10 @@ from tpu_inference.models.jax.utils.multi_modal_utils import (
     split_mm_embeddings_by_grid,
 )
 from tpu_inference.models.jax.utils.weight_utils import (
+    assign_and_shard_param,
     get_default_maps,
     jax_array_from_reshaped_torch,
     load_hf_weights,
-    load_nnx_param_from_reshaped_torch,
-    shard_put,
 )
 
 init_fn = nnx.initializers.uniform()
@@ -612,8 +611,12 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
                         hf_weight, permute_dims=down_proj_permute)
                     assert jax_w.shape == target_shape, \
                         f"down_proj shape mismatch: {jax_w.shape} vs {target_shape}"
-                    experts.kernel_down_proj_EFD.value = shard_put(
-                        jax_w, tuple(experts.efd_sharding))
+                    assign_and_shard_param(
+                        experts.kernel_down_proj_EFD,
+                        jax_w,
+                        param_name=(
+                            f"language_model.layers.{layer_idx}.mlp.experts.down_proj"),
+                    )
                 elif fused_name == "gate_up_proj":
                     E, D, F = experts.kernel_gating_EDF.value.shape
                     fused_shape = tuple(hf_weight.shape)
@@ -636,14 +639,22 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
                         gate_proj, permute_dims=gate_permute)
                     assert tuple(jax_gate.shape) == (E, D, F), \
                         f"gate shape mismatch: {jax_gate.shape} vs ({E}, {D}, {F})"
-                    experts.kernel_gating_EDF.value = shard_put(
-                        jax_gate, tuple(experts.edf_sharding))
+                    assign_and_shard_param(
+                        experts.kernel_gating_EDF,
+                        jax_gate,
+                        param_name=(
+                            f"language_model.layers.{layer_idx}.mlp.experts.gate_proj"),
+                    )
                     jax_up = jax_array_from_reshaped_torch(
                         up_proj, permute_dims=gate_permute)
                     assert tuple(jax_up.shape) == (E, D, F), \
                         f"up_proj shape mismatch: {jax_up.shape} vs ({E}, {D}, {F})"
-                    experts.kernel_up_proj_EDF.value = shard_put(
-                        jax_up, tuple(experts.edf_sharding))
+                    assign_and_shard_param(
+                        experts.kernel_up_proj_EDF,
+                        jax_up,
+                        param_name=(
+                            f"language_model.layers.{layer_idx}.mlp.experts.up_proj"),
+                    )
 
     def load_weights(self, rng_key: jax.Array) -> None:
         self.rng = nnx.Rngs(rng_key)
