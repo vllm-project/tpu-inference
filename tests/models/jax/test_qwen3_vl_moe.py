@@ -354,33 +354,6 @@ class TestQwen3VLMoeForConditionalGeneration:
             model.language_model = MockLM.return_value
             yield model
 
-    def test_moe_experts_use_non_replicated_sharding(
-        self, mock_vllm_config: MockMoeVllmConfig, rng: PRNGKey, mesh: Mesh
-    ):
-        with patch(
-                'tpu_inference.models.jax.qwen3_vl_moe.Qwen3VLVisionTransformer',
-                autospec=True) as MockVision:
-            mock_visual = MockVision.return_value
-            mock_visual.dtype = mock_vllm_config.model_config.dtype
-            mock_visual.config = mock_vllm_config.model_config.hf_config.vision_config
-            mock_visual.spatial_merge_size = (
-                mock_vllm_config.model_config.hf_config.vision_config
-                .spatial_merge_size)
-            model = Qwen3VLMoeForConditionalGeneration(mock_vllm_config, rng,
-                                                       mesh)
-
-        experts = model.language_model.layers[0].mlp.experts
-        if {"attn_dp_expert", "expert"}.issubset(mesh.shape):
-            expected_expert_axis = ("attn_dp_expert", "expert")
-        elif "expert" in mesh.shape:
-            expected_expert_axis = "expert"
-        else:
-            expected_expert_axis = "model"
-
-        assert experts.expert_axis_name == expected_expert_axis
-        assert any(axis is not None for axis in tuple(experts.edf_sharding))
-        assert any(axis is not None for axis in tuple(experts.efd_sharding))
-
     def test_embed_multimodal_none_pixel_values_returns_empty(
         self, model: Qwen3VLMoeForConditionalGeneration
     ):

@@ -58,61 +58,6 @@ logger = init_logger(__name__)
 init_fn = nnx.initializers.uniform()
 
 
-def _get_qwen3_moe_sharding(mesh: Mesh):
-    """Build MoE sharding rules that work on both legacy and new meshes.
-
-    The Qwen3 MoE path can run on the legacy 2D/3D meshes used in unit tests
-    as well as the newer 5D TPU mesh. On the newer mesh, expert sharding lives
-    on the dedicated expert axes; on the legacy mesh, the only usable non-data
-    axis is ``model``.
-
-    In the legacy case we must avoid using the same mesh axis twice in a single
-    PartitionSpec, so TP-only and EP layouts need separate specs.
-    """
-    mesh_axis_names = set(mesh.shape)
-    if {"attn_dp_expert", "expert"}.issubset(mesh_axis_names):
-        expert_axis_name = ("attn_dp_expert", "expert")
-    elif "expert" in mesh_axis_names:
-        expert_axis_name = "expert"
-    else:
-        expert_axis_name = "model"
-    num_expert_parallelism = get_expert_parallelism(expert_axis_name, mesh)
-    use_ep = num_expert_parallelism > 1
-    moe_backend = select_moe_backend(use_ep)
-
-    mlp_data_axis = ShardingAxisName.MLP_DATA
-    moe_tensor_axis = ShardingAxisName.MOE_TENSOR
-    expert_axis_set = ({expert_axis_name} if isinstance(expert_axis_name, str)
-                       else set(expert_axis_name))
-    moe_tensor_axis_set = ({moe_tensor_axis}
-                           if isinstance(moe_tensor_axis, str) else
-                           set(moe_tensor_axis))
-    legacy_shared_axis = bool(expert_axis_set & moe_tensor_axis_set)
-
-    if use_ep:
-        if legacy_shared_axis:
-            activation_ffw_td = P(mlp_data_axis, None)
-            activation_ffw_ted = P(mlp_data_axis, None, None)
-        else:
-            activation_ffw_td = P(mlp_data_axis, moe_tensor_axis)
-            activation_ffw_ted = P(mlp_data_axis, None, moe_tensor_axis)
-        edf_sharding = P(expert_axis_name, None, None)
-        efd_sharding = P(expert_axis_name, None, None)
-    else:
-        activation_ffw_td = P(mlp_data_axis, None)
-        activation_ffw_ted = P(mlp_data_axis, None, moe_tensor_axis)
-        if legacy_shared_axis:
-            edf_sharding = P(None, None, moe_tensor_axis)
-            efd_sharding = P(None, moe_tensor_axis, None)
-        else:
-            edf_sharding = P(None, expert_axis_name, moe_tensor_axis)
-            efd_sharding = P(None, moe_tensor_axis, expert_axis_name)
-
-    return (activation_ffw_td, activation_ffw_ted, edf_sharding,
-            efd_sharding, expert_axis_name, num_expert_parallelism,
-            moe_backend)
-
-
 class Qwen3MoeSparseMoeBlock(JaxModule):
 
     def __init__(self,
@@ -125,9 +70,11 @@ class Qwen3MoeSparseMoeBlock(JaxModule):
         quant_config = vllm_config.quant_config
 
         # --- Sharding Config ---
-        (activation_ffw_td, activation_ffw_ted, edf_sharding, efd_sharding,
-         expert_axis_name, num_expert_parallelism,
-         moe_backend) = _get_qwen3_moe_sharding(mesh)
+        edf_sharding = (None, None, None)
+        expert_axis_name = edf_sharding[0]
+        num_expert_parallelism = get_expert_parallelism(expert_axis_name, mesh)
+        use_ep = num_expert_parallelism > 1
+        moe_backend = select_moe_backend(use_ep)
 
         # Router
         self.gate = JaxLinear(
@@ -160,10 +107,10 @@ class Qwen3MoeSparseMoeBlock(JaxModule):
             rngs=rng,
             router=self.gate,
             mesh=mesh,
-            activation_ffw_td=activation_ffw_td,
-            activation_ffw_ted=activation_ffw_ted,
-            edf_sharding=edf_sharding,
-            efd_sharding=efd_sharding,
+            activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
+            activation_ffw_ted=P(ShardingAxisName.MLP_DATA, None, None),
+            edf_sharding=P(None, ),
+            efd_sharding=P(None, ),
             apply_expert_weight_before_computation=False,
             expert_axis_name=expert_axis_name,
             num_expert_parallelism=num_expert_parallelism,
