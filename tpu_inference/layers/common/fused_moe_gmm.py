@@ -144,7 +144,10 @@ def moe_gmm_local(
             token_topk_hidden = jnp.matmul(one_hot_selector, gmm2_res)
         elif gather_mode == "fence":
             with jax.named_scope("ExplicitLayoutCopy"):
-                dummy_weight = jnp.eye(gmm2_res.shape[-1], gmm2_res.shape[-1], dtype=gmm2_res.dtype)
+                gmm2_res = jax.lax.optimization_barrier(gmm2_res)
+                dummy_weight = jax.lax.optimization_barrier(
+                    jnp.eye(gmm2_res.shape[-1], gmm2_res.shape[-1], dtype=gmm2_res.dtype)
+                )
                 gmm2_res = jnp.matmul(gmm2_res, dummy_weight)
                 gmm2_res = jax.lax.optimization_barrier(gmm2_res)
             with jax.named_scope("Gather"):
