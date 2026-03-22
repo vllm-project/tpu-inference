@@ -151,7 +151,7 @@ def moe_gmm_local(
                 dummy_mm = jax.lax.optimization_barrier(dummy_mm)
             with jax.named_scope("Gather"):
                 token_topk_hidden = gmm2_res[topk_argsort_revert_indices]
-                token_topk_hidden = token_topk_hidden + dummy_mm[topk_argsort_revert_indices] * 0.0
+                token_topk_hidden = token_topk_hidden + dummy_mm[topk_argsort_revert_indices]
         else:
             token_topk_hidden = gmm2_res[topk_argsort_revert_indices]
     token_topk_hidden = token_topk_hidden.reshape(
