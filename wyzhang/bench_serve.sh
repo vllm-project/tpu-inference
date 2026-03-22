@@ -7,7 +7,9 @@ readonly SLEEP_INTERVAL_SEC=60
 ITER=3 # default iteration count
 INPUT_LEN=1024 # default input len
 OUTPUT_LEN=8192 # default output len
+NUM_PROMPTS=320 # default number of prompts
 TARGET_DIR="qwen450b-0310" # default target dir
+XPROF_ENABLED=false
 
 parse_arguments() {
     for arg in "$@"; do
@@ -27,6 +29,10 @@ parse_arguments() {
             TARGET_DIR="${arg#*=}"
             shift
             ;;
+            --xprof)
+            XPROF_ENABLED="${arg#*=}"
+            shift
+            ;;
         esac
     done
 
@@ -44,6 +50,11 @@ start_vllm_server() {
 
     echo "Starting vllm server"
     vllm_log_file="${BASE_DIR}/vllm.log"
+
+    if [ "$XPROF_ENABLED" = true ]; then
+        export PHASED_PROFILING_DIR="${BASE_DIR}/xprof"
+    fi
+
     # TPU_VMODULE=tpu_pjrt_client=0 \
     # PHASED_PROFILING_DIR=$xprof_dir \
     TPU_STDERR_LOG_LEVEL=0 \
@@ -65,6 +76,10 @@ start_vllm_server() {
         --load-format=runai_streamer \
         --model-loader-extra-config='{"memory_limit":68719476736,"concurrency":4}' \
         &> "$vllm_log_file" &
+
+    if [ "$XPROF_ENABLED" = true ]; then
+        unset PHASED_PROFILING_DIR
+    fi        
 }
 
 wait_for_vllm() {
@@ -91,15 +106,13 @@ wait_for_vllm() {
 
 run_benchmarks() {
     for i in $(seq 1 "$ITER"); do
-        vllm_bench_log_dir="${BASE_DIR}/bench_log_${i}"
-        vllm_bench_results_dir="${BASE_DIR}/bench_results_${i}"
-        xprof_dir="${BASE_DIR}/xprof/exp-${i}"
+        bench_log_dir="${BASE_DIR}/bench_log_${i}"
+        bench_res_dir="${BASE_DIR}/bench_results_${i}"
 
-        mkdir -p "$vllm_bench_log_dir"
-        mkdir -p "$vllm_bench_results_dir"
-        mkdir -p "$xprof_dir"
+        mkdir -p "$bench_log_dir"
+        mkdir -p "$bench_res_dir"
 
-        vllm_bench_log_file="${vllm_bench_log_dir}/bench_${i}.log"
+        vllm_bench_log_file="${bench_log_dir}/bench_${i}.log"
 
         echo "Running benchmark iteration ${i}/${ITER}..."
         python3 "${BENCH_SERVING_BASEDIR}/benchmark_serving.py" \
@@ -108,18 +121,17 @@ run_benchmarks() {
             --ignore-eos \
             --max-concurrency=64 \
             --model Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 \
-            --num-prompts=320 \
+            --num-prompts="$NUM_PROMPTS" \
             --percentile-metrics='ttft,tpot,itl,e2el' \
             --random-input-len="$INPUT_LEN" \
             --random-output-len="$OUTPUT_LEN" \
             --random-range-ratio=1 \
             --request-rate=inf \
-            --result-dir "$vllm_bench_results_dir" \
+            --result-dir "$bench_res_dir" \
             --save-result \
             --temperature=0.0 \
             2>&1 | tee "$vllm_bench_log_file"
 
-        sleep "$SLEEP_INTERVAL_SEC"
     done
 }
 
