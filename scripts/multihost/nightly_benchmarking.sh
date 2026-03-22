@@ -65,6 +65,10 @@ export MOE_REQUANTIZE_WEIGHT_DTYPE_ENV=""
 export PHASED_PROFILING_DIR=""
 export PHASED_PROFILING_DIR_ENV=""
 export SKIP_DB_UPLOAD="false"
+export RUN_ACCURACY=""
+export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=vllm"
+export USE_UNFUSED_MEGABLOCKS_ENV=""
+export HF_CONFIG=""
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -95,6 +99,10 @@ while [[ $# -gt 0 ]]; do
     --moe-requantize-weight-dtype) export MOE_REQUANTIZE_WEIGHT_DTYPE="$2"; MOE_REQUANTIZE_WEIGHT_DTYPE_ENV="MOE_REQUANTIZE_WEIGHT_DTYPE=$2"; shift 2 ;;
     --phased-profiling-dir) export PHASED_PROFILING_DIR="$2"; PHASED_PROFILING_DIR_ENV="PHASED_PROFILING_DIR=$2"; shift 2 ;;
     --skip-db-upload) export SKIP_DB_UPLOAD="true"; shift 1 ;;
+    --run-accuracy) export RUN_ACCURACY="$2"; shift 2 ;;
+    --model-impl-type) export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=$2"; shift 2 ;;
+    --use-unfused-megablocks) export USE_UNFUSED_MEGABLOCKS_ENV="USE_UNFUSED_MEGABLOCKS=$2"; shift 2 ;;
+    --hf-config) export HF_CONFIG="$2"; shift 2 ;;
     *) echo "Unknown parameter passed: $1"; exit 1 ;;
   esac
 done
@@ -117,6 +125,10 @@ if [[ -n "${GENERATION_CONFIG}" ]]; then
   EXTRA_SERVER_ARGS="--generation-config /workspace/${CONFIG_DIR_NAME}/${CONFIG_FILE_NAME}"
 fi
 
+if [[ -n "${HF_CONFIG}" ]]; then
+  EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS} --hf-config=${HF_CONFIG}"
+fi
+
 # Define the commands utilizing the unified parameters
 SERVER_CMD="${PRE_SERVER_CMD}VLLM_DISABLE_SHARED_EXPERTS_STREAM=${DISABLE_SHARED_EXPERTS_STREAM} \
 NEW_MODEL_DESIGN=${NEW_MODEL_DESIGN} \
@@ -124,8 +136,9 @@ ${VLLM_MLA_DISABLE_ENV} \
 ${MOE_REQUANTIZE_BLOCK_SIZE_ENV} \
 ${MOE_REQUANTIZE_WEIGHT_DTYPE_ENV} \
 ${PHASED_PROFILING_DIR_ENV} \
+${USE_UNFUSED_MEGABLOCKS_ENV} \
 TPU_BACKEND_TYPE=jax \
-MODEL_IMPL_TYPE=vllm \
+${MODEL_IMPL_TYPE_ENV} \
 vllm serve \
   --seed 42 \
   --model ${TARGET_MODEL_PATH} \
@@ -137,7 +150,7 @@ vllm serve \
   --no-enable-prefix-caching \
   --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \
   --kv_cache_dtype=\"fp8\" \
-  --no-async-scheduling \
+  --async-scheduling \
   --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION} \
   ${ENABLE_EXPERT_PARALLEL} \
   ${ADDITIONAL_CONFIG} \
@@ -153,6 +166,23 @@ BENCHMARK_CMD="vllm bench serve \
   --ignore-eos \
   --trust-remote-code"
 
+if [[ "${RUN_ACCURACY}" == "mmlu" ]]; then
+  echo "--- Accuracy benchmark requested: appending MMLU accuracy commands..."
+  BENCHMARK_CMD="${BENCHMARK_CMD} && \
+    mkdir -p /workspace/mmlu && \
+    cd /workspace/mmlu && \
+    if [ ! -f data.tar ]; then wget https://people.eecs.berkeley.edu/~hendrycks/data.tar -P .; tar -xvf data.tar; fi && \
+    python3 /workspace/tpu_inference/scripts/vllm/benchmarking/benchmark_serving.py \
+      --backend vllm \
+      --model ${TARGET_TOKENIZER} \
+      --dataset-name mmlu \
+      --dataset-path /workspace/mmlu/data/test \
+      --num-prompts 14000 \
+      --run_eval \
+      --temperature 0"
+fi
+
+
 
 echo "=== Starting nightly benchmark (Record ID: $RECORD_ID) ==="
 echo "Logging output to: $BENCHMARK_LOG"
@@ -166,7 +196,7 @@ else
   
   # 2. Parse benchmark log and generate key-value .result file
   python3 -c '
-import sys, re
+import sys, re, ast, json
 
 # Mapping of what vllm prints vs what Spanner column expects
 METRIC_MAPPING = {
@@ -189,13 +219,14 @@ except FileNotFoundError:
 
 results = {}
 in_results = False
-for line in lines:
+for i, line in enumerate(lines):
     line = line.strip()
-    if line.startswith("============ Serving Benchmark Result ============"):
+    if "============ Serving Benchmark Result ============" in line:
         in_results = True
         continue
-    if line.startswith("==================================================") and in_results:
-        break
+    if "==================================================" in line and in_results:
+        in_results = False
+        
     if in_results and ":" in line:
         key, val = line.split(":", 1)
         val = val.strip()
@@ -203,8 +234,19 @@ for line in lines:
         # Remove units like (ms) or (tok/s) or (excl. 1st token)
         clean_key = re.sub(r"\(.*?\)", "", key).strip()
         
-        if clean_key in METRIC_MAPPING:
+        if clean_key in METRIC_MAPPING and METRIC_MAPPING[clean_key] not in results:
             results[METRIC_MAPPING[clean_key]] = val
+            
+    # Parse Accuracy result dict printed by benchmark_serving.py
+    if line == "Results":
+        for j in range(1, min(6, len(lines) - i)):
+            try:
+                acc_dict = ast.literal_eval(lines[i+j].strip())
+                if isinstance(acc_dict, dict) and "accuracy" in acc_dict:
+                    results["AccuracyMetrics"] = json.dumps({"accuracy": acc_dict["accuracy"]})
+                    break
+            except Exception:
+                pass
 
 with open(sys.argv[2], "w") as out:
     for k, v in results.items():
@@ -227,6 +269,7 @@ NumPrompts=${NUM_PROMPTS}
 CodeHash=${CODE_HASH}
 Model=${MODEL_NAME}
 JobReference=${JOB_REFERENCE}
+ExtraArgs=${MODEL_IMPL_TYPE_ENV#*=}
 EOF
 
 fi

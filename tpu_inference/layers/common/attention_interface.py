@@ -27,19 +27,32 @@ from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from jax.sharding import Sharding
 
-import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
+from tpu_inference import envs
 from tpu_inference.kernels.flash_attention.kernel import flash_attention
 from tpu_inference.kernels.mla.v1.kernel import mla_ragged_paged_attention
 from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
     get_tuned_block_sizes
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_megacore
+
+logger = init_logger(__name__)
 
 MAX_ALLOWED_PAGE_INDICES_N = (
     128 * 1024
 )  # Based on experiments on v5e, 256x1024 results in smem oom but 128x1024 not. TODO: Adjust this based on TPU version.
+
+# NOTE: this kernel is experimental and not fully tested.  See
+# tpu-inference/tpu_inference/kernels/experimental/batched_rpa/wrapper.py
+# for details
+if envs.USE_BATCHED_RPA_KERNEL:
+    import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa
+    logger.info_once("Using experimental batched RPA kernel")
+else:
+    import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
+    logger.info_once("Using default RPA kernel")
 
 ragged_paged_attention = rpa.ragged_paged_attention
 get_kv_cache_shape = rpa.get_kv_cache_shape
@@ -53,26 +66,51 @@ def sharded_flash_attention(
     causal: bool = True,
     sm_scale: Optional[float] = None,
     vmem_limit_bytes: int | None = None,
+    use_attention_bias: bool = False,
 ) -> Callable[..., Any]:
-    in_specs = (
-        P("data", "model", None, None),  # q
-        P("data", "model", None, None),  # k
-        P("data", "model", None, None),  # v
-        P(),  # segment_ids
-    )
-    out_specs = P("data", "model", None, None)
+    if use_attention_bias:
+        in_specs = (
+            P("data", "model", None, None),  # q
+            P("data", "model", None, None),  # k
+            P("data", "model", None, None),  # v
+            P("data", "model", None, None),  # attention_bias
+            P(),  # segment_ids
+        )
+        out_specs = P("data", "model", None, None)
 
-    def _flash_attention(q, k, v, segment_ids):
-        return flash_attention(q,
-                               k,
-                               v,
-                               segment_ids=segment_ids,
-                               sm_scale=sm_scale,
-                               causal=causal,
-                               vmem_limit_bytes=vmem_limit_bytes)
+        def _flash_attention_use_ab(q, k, v, attention_bias, segment_ids):
+            return flash_attention(q,
+                                   k,
+                                   v,
+                                   ab=attention_bias,
+                                   segment_ids=segment_ids,
+                                   sm_scale=sm_scale,
+                                   causal=causal,
+                                   vmem_limit_bytes=vmem_limit_bytes)
+
+        attn_fn = _flash_attention_use_ab
+    else:
+        in_specs = (
+            P("data", "model", None, None),  # q
+            P("data", "model", None, None),  # k
+            P("data", "model", None, None),  # v
+            P(),  # segment_ids
+        )
+        out_specs = P("data", "model", None, None)
+
+        def _flash_attention(q, k, v, segment_ids):
+            return flash_attention(q,
+                                   k,
+                                   v,
+                                   segment_ids=segment_ids,
+                                   sm_scale=sm_scale,
+                                   causal=causal,
+                                   vmem_limit_bytes=vmem_limit_bytes)
+
+        attn_fn = _flash_attention
 
     return jax.jit(
-        jax.shard_map(_flash_attention,
+        jax.shard_map(attn_fn,
                       mesh=mesh,
                       in_specs=in_specs,
                       out_specs=out_specs,

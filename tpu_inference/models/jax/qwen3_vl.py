@@ -1421,8 +1421,11 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         self,
         input_ids: jax.Array,
         multimodal_embeddings: Optional[jax.Array] = None,
+        *,
+        is_multimodal: jax.Array | None = None,
     ) -> jax.Array:
         """Compute input embeddings and merge multimodal embeddings if present."""
+        del is_multimodal
         return self.get_input_embeddings(input_ids, multimodal_embeddings)
 
     def _parse_and_validate_image_input(

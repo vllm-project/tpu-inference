@@ -1044,8 +1044,14 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         return multimodal_embeddings
 
     def embed_input_ids(
-            self, input_ids: jax.Array,
-            multimodal_embeddings: Optional[jax.Array]) -> jax.Array:
+        self,
+        input_ids: jax.Array,
+        multimodal_embeddings: jax.Array | None,
+        *,
+        is_multimodal: jax.Array | None = None,
+    ) -> jax.Array:
+
+        del is_multimodal
 
         if not self.is_first_rank:
             return None

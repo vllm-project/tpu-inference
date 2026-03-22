@@ -377,9 +377,21 @@ def get_vllm_model(
     jit_model = model.jit_step_func()
     compute_logits_fn = model.jit_compute_logits_func()
     pooler_fn = model.build_pooler_func()
+
+    multimodal_fns = {
+        "precompile_vision_encoder_fn":
+        getattr(model.model.vllm_model, "precompile_vision_encoder", None),
+        "embed_multimodal_fn":
+        model.wrap_embed_multimodal_func(),
+        "embed_input_ids_fn":
+        model.wrap_embed_input_ids_func(),
+        "get_mrope_input_positions_fn":
+        getattr(model.model.vllm_model, "get_mrope_input_positions", None),
+    }
+
     # the model needs to be returned because lora weights are neither torch.nn.parameter nor torch.nn.buffer. After we load the lora weights and set it to the torch.nn.Module, we can shard it and move it to TPU.
     combine_hidden_states_fn = None
-    return jit_model, compute_logits_fn, pooler_fn, combine_hidden_states_fn, None, params, lora_manager, model
+    return jit_model, compute_logits_fn, pooler_fn, combine_hidden_states_fn, multimodal_fns, params, lora_manager, model
 
 
 def get_model(

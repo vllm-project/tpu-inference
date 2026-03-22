@@ -12,14 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import collections
+
 import jax
 import jax.numpy as jnp
 from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 
-from tpu_inference.kernels.megablox.gmm_v2 import TileSizes, gmm_v2
+from tpu_inference.kernels.megablox.gmm_v2 import (TileSizes, apply_act_fn,
+                                                   gmm_v2)
 
 jax.config.parse_flags_with_absl()
+
+_GroupConfig = collections.namedtuple(
+    "_GroupConfig", ["num_groups", "group_offset", "num_local_groups"])
 
 
 def get_group_sizes(batch_size: int, num_groups: int) -> jax.Array:
@@ -514,6 +520,168 @@ class GmmTest(jtu.JaxTestCase):
 
         self.assertEqual(actual.shape, (batch_size, out_size))
         self.assertArraysAllClose(actual, expected, atol=3e-1, rtol=3e-1)
+
+    @parameterized.product(
+        batch_size=[128],
+        in_size=[512],
+        out_size=[512],
+        # group_config: (num_groups, group_offset, num_local_groups)
+        group_config=[
+            # groups 0-1: group<0, groups 2-5: local and active,
+            # groups 6-15: group>=num_local_groups
+            _GroupConfig(num_groups=16, group_offset=2, num_local_groups=4),
+            # no negative groups, groups 0-7: local and active,
+            # groups 8-15: group>=num_local_groups
+            _GroupConfig(num_groups=16, group_offset=0, num_local_groups=8),
+            # groups 0-3: group<0, groups 4-7: local and active,
+            # groups 8-31: group>=num_local_groups
+            _GroupConfig(num_groups=32, group_offset=4, num_local_groups=4),
+        ],
+    )
+    def test_gmm_nonlocal_groups_produce_zeros(self, batch_size, in_size,
+                                               out_size, group_config):
+        num_groups, group_offset, num_local_groups = group_config
+        key = jax.random.key(0)
+
+        lhs = jax.random.normal(key, (batch_size, in_size), dtype=jnp.bfloat16)
+        rhs = jax.random.normal(key, (num_local_groups, in_size, out_size),
+                                dtype=jnp.bfloat16)
+        rhs_bias = jax.random.normal(key, (num_local_groups, 1, out_size),
+                                     dtype=jnp.bfloat16)
+
+        group_sizes = get_group_sizes(batch_size, num_groups)
+        group_offset = jnp.array(group_offset, dtype=jnp.int32)
+
+        expected = reference_gmm(
+            lhs,
+            rhs,
+            group_sizes,
+            rhs_bias=rhs_bias,
+            group_offset=group_offset,
+        )
+
+        actual = gmm_v2(
+            lhs,
+            rhs,
+            group_sizes,
+            rhs_bias=rhs_bias,
+            group_offset=group_offset,
+        )
+
+        self.assertEqual(actual.shape, (batch_size, out_size))
+        self.assertArraysAllClose(actual, expected)
+
+    @parameterized.product(
+        batch_size=[128],
+        in_size=[512],
+        out_size=[512],
+        num_groups=[16],
+        has_bias=[True, False],
+        use_weight_scale=[True, False],
+        maybe_quantize_lhs=[True, False],
+        fuse_act=["silu", "swigluoai", "gelu"],
+        group_offset=[0, 2],
+        block_size=[256, 512],
+    )
+    def test_gmm_fused_activation(
+        self,
+        batch_size,
+        in_size,
+        out_size,
+        num_groups,
+        has_bias,
+        use_weight_scale,
+        maybe_quantize_lhs,
+        fuse_act,
+        group_offset,
+        block_size,
+    ):
+        if maybe_quantize_lhs and not use_weight_scale:
+            self.skipTest(
+                "LHS quantization requires RHS quantization/scale in this config."
+            )
+        if block_size > in_size:
+            self.skipTest("block_size must be <= in_size")
+        key = jax.random.key(0)
+        final_out_size = out_size // 2
+        num_local_groups = num_groups - group_offset
+
+        # 1. Generate Inputs
+        lhs = jax.random.uniform(key, (batch_size, in_size), jnp.bfloat16, -1,
+                                 1)
+        rhs = jax.random.uniform(key, (num_local_groups, in_size, out_size),
+                                 jnp.bfloat16, -1, 1)
+
+        rhs_q = rhs
+        rhs_scale = None
+        if use_weight_scale:
+            rhs_q, rhs_scale = quantize_tensor(rhs,
+                                               jnp.int8,
+                                               axis=1,
+                                               block_size=block_size)
+            rhs_scale = jnp.expand_dims(rhs_scale, axis=2)
+
+        rhs_bias = None
+        if has_bias:
+            rhs_bias = jax.random.normal(key, (num_local_groups, 1, out_size),
+                                         dtype=jnp.bfloat16)
+
+        group_sizes = get_group_sizes(batch_size, num_groups)
+        group_offset = jnp.array([group_offset], dtype=jnp.int32)
+
+        # 2. Simulate LHS Quantization Noise
+        lhs_simulated = lhs
+        # because the kernel quantizes LHS in blocks, while reference does it at the whole tensor level,
+        # and output is casted down
+        # we need to simulate that quantization noise in the reference as well for a fair comparison
+        if maybe_quantize_lhs:
+            lhs_block_size = min(512, in_size)
+            lhs_q, lhs_scale_factor = quantize_tensor(
+                lhs, jnp.int8, axis=1, block_size=lhs_block_size)
+            lhs_q_blocked = lhs_q.reshape(batch_size, -1,
+                                          lhs_block_size).astype(jnp.float32)
+            lhs_scale_expanded = jnp.expand_dims(lhs_scale_factor, axis=2)
+            lhs_simulated = ((lhs_q_blocked * lhs_scale_expanded).reshape(
+                lhs.shape).astype(lhs.dtype))
+
+        # 3. Compute Reference Output
+        raw_expected = reference_gmm(
+            lhs_simulated,
+            rhs_q,
+            group_sizes,
+            rhs_scale=rhs_scale,
+            rhs_bias=rhs_bias,
+            group_offset=group_offset,
+        )
+
+        # Slice the reference and apply the activation function
+        expected = apply_act_fn(raw_expected.astype(jnp.float32),
+                                final_out_size, fuse_act).astype(lhs.dtype)
+
+        # 4. Compute Actual Kernel Output
+        actual = gmm_v2(
+            lhs,
+            rhs_q,
+            group_sizes,
+            rhs_scale=rhs_scale,
+            rhs_bias=rhs_bias,
+            group_offset=group_offset,
+            maybe_quantize_lhs=maybe_quantize_lhs,
+            fuse_act=fuse_act,
+        ).astype(lhs.dtype)
+
+        # 5. Compare Results
+        self.assertEqual(actual.shape, (batch_size, final_out_size))
+
+        # tolerances based quantization noise difference between reference and gmm_v2
+        if maybe_quantize_lhs:
+            atol, rtol = 4.0, 2.0  # Act + Weight Quantization
+        elif use_weight_scale:
+            atol, rtol = 3e-1, 3e-1  # Weight Quantization Only
+        else:
+            atol, rtol = 5e-2, 5e-2  # Unquantized Path (bfloat16 precision diffs)
+
+        self.assertArraysAllClose(actual, expected, atol=atol, rtol=rtol)
 
 
 if __name__ == "__main__":

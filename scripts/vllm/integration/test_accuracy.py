@@ -55,6 +55,7 @@ def run_test(model_name, expected_value, more_args=None):
     assert measured_value >= expected_value - RTOL, f"Expected: {expected_value} |  Measured: {measured_value}"
 
 
+@pytest.mark.skip_global_cleanup
 @pytest.mark.skipif(not current_platform.is_cuda()
                     and not current_platform.is_tpu(),
                     reason="V1 is currently only supported on CUDA and TPU")
@@ -87,6 +88,7 @@ def test_lm_eval_accuracy_v1_engine(monkeypatch: pytest.MonkeyPatch,
         run_test(model, expected_value, more_args)
 
 
+@pytest.mark.skip_global_cleanup
 @pytest.mark.skipif(not current_platform.is_cuda()
                     and not current_platform.is_tpu(),
                     reason="V1 is currently only supported on CUDA and TPU")

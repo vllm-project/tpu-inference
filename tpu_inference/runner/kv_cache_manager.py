@@ -186,6 +186,22 @@ class KVCacheManager:
                 # Add them to the main dictionary (equivalent to your | operator)
                 layers.update(new_layers)
 
+            # TODO(yuyanpeng): enable sliding windows once mixed dims support
+            # Currently, with sliding windows, there is
+            # shared_kv_cache_layers among each group.
+            # The shared kv_cache_layers do not support mixed dims for
+            # TPU for now. If share kv_cache, the attention kernel would
+            # throw exception for non-matched dimension between kv_cache
+            # and actual dims. Disable sliding window for workaround.
+            head_size_set = set()
+            for layer_name, attn_module in layers.items():
+                head_size_set.add(
+                    common_utils.get_padded_head_dim(attn_module.head_size))
+
+            if len(head_size_set) > 1:
+                for layer_name, attn_module in layers.items():
+                    attn_module.sliding_window = None
+
             logger.warning(f"Compilation num_layers = {len(layers.items())}")
             for layer_name, attn_module in layers.items():
                 if (kv_tgt_layer :=

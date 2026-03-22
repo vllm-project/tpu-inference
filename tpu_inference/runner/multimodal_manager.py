@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
@@ -186,13 +187,38 @@ class MultiModalManager:
                     self.runner.deepstack_cache[mm_hash] = deepstack_output
 
     def gather_mm_embeddings(
-        self, scheduler_output: "VllmSchedulerOutput",
+        self,
+        scheduler_output: "VllmSchedulerOutput",
         target_pad_len: int,
-    ) -> jax.Array | tuple[jax.Array, list[jax.Array]] | None:
+    ) -> tuple[jax.Array | None, jax.Array | None, list[jax.Array] | None]:
+        """Gather multimodal embeddings, mask, and optional DeepStack outputs.
+
+        Args:
+            scheduler_output: The VllmSchedulerOutput.
+            target_pad_len: The target length to pad the resulting embeddings
+                and mask to.
+
+        Returns:
+            A tuple containing:
+                - flattened_embeds: A JAX array of flattened multimodal
+                    embeddings, padded to target_pad_len.
+                - is_mm_embed: A boolean JAX array mask indicating which
+                    positions in the input sequence are multimodal embeddings.
+                - deepstack_embeds: Optional list of per-layer DeepStack
+                    embeddings padded to target_pad_len.
+        """
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        assert (
+            target_pad_len >= total_num_scheduled_tokens
+        ), f"{target_pad_len=} should >= {total_num_scheduled_tokens=} for output is_mm_embedded"
+
         mm_embeds: list[jax.Array] = []
+        is_mm_embed_cpu = np.zeros((total_num_scheduled_tokens, ),
+                                   dtype=np.bool_)
         deepstack_layers: list[list[jax.Array]] | None = None
         deepstack_dim = None
         deepstack_dtype = None
+        req_start_idx = 0
         for req_id in self.runner.input_batch.req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
@@ -228,8 +254,7 @@ class MultiModalManager:
 
                 mm_hash = mm_feature.identifier
                 encoder_output = self.runner.encoder_cache.get(mm_hash, None)
-                assert encoder_output is not None,\
-                      f"Encoder cache miss for {mm_hash}."
+                assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
                 encoder_output = self.runner.encoder_cache[mm_hash]
 
                 if (is_embed := pos_info.is_embed) is not None:
@@ -253,18 +278,37 @@ class MultiModalManager:
                         else:
                             layer_item = layer_embeds[start_idx:end_idx]
                         deepstack_layers[layer_idx].append(layer_item)
+
+                req_start_pos = req_start_idx + start_pos - num_computed_tokens
+
+                # use cpu numpy array for inplace modification
+                if is_embed is None:
+                    is_mm_embed_cpu[req_start_pos + start_idx:req_start_pos +
+                                    end_idx] = True
+                else:
+                    embed_mask = is_embed.numpy() if hasattr(
+                        is_embed, "numpy") else np.asarray(is_embed,
+                                                           dtype=np.bool_)
+                    is_mm_embed_cpu[req_start_pos + start_idx:req_start_pos +
+                                    end_idx] |= embed_mask
+
+            req_start_idx += num_scheduled_tokens
         if not mm_embeds:
-            if deepstack_layers is None:
-                return None
+            return None, None, None
         flattened_embeds = flatten_embeddings(mm_embeds)
         if flattened_embeds.shape[0] == 0:
-            if deepstack_layers is None:
-                return None
+            return None, None, None
 
-        padding = jnp.zeros((target_pad_len - flattened_embeds.shape[0],
-                             flattened_embeds.shape[1]),
-                            dtype=flattened_embeds.dtype)
+        padding = jnp.zeros(
+            (target_pad_len - flattened_embeds.shape[0],
+             flattened_embeds.shape[1]),
+            dtype=flattened_embeds.dtype,
+        )
         flattened_embeds = jnp.concatenate([flattened_embeds, padding], axis=0)
+        is_mm_embed_cpu = np.pad(
+            is_mm_embed_cpu, (0, target_pad_len - is_mm_embed_cpu.shape[0]))
+        is_mm_embed = jnp.array(is_mm_embed_cpu, dtype=jnp.bool_)
+        assert flattened_embeds.shape[0] == is_mm_embed.shape[0]
 
         deepstack_embeds = None
         if deepstack_layers is not None:
@@ -281,6 +325,4 @@ class MultiModalManager:
                 deepstack_embeds.append(
                     jnp.concatenate([layer_flat, layer_padding], axis=0))
 
-        if deepstack_embeds is not None:
-            return flattened_embeds, deepstack_embeds
-        return flattened_embeds
+        return flattened_embeds, is_mm_embed, deepstack_embeds

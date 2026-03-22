@@ -60,7 +60,7 @@ trap print_logs_on_exit EXIT
 # docker related
 CONTAINER_PREFIX=${CONTAINER_PREFIX:="disagg-node"}
 RUN_IN_BUILDKITE=${RUN_IN_BUILDKITE:=false}
-TPU_VERSION=${TPU_VERSION:=tpu6e}
+TPU_VERSION=${TPU_VERSION:=tpu7x}
 MODEL=${MODEL:="Qwen/Qwen3-0.6B"}
 DOCKER_IMAGE=${DOCKER_IMAGE:="vllm-tpu:000"}
 
@@ -232,7 +232,8 @@ set -x
 docker exec -d ${CONTAINER_PREFIX}-0 /bin/bash -c \
     "vllm serve $MODEL \
     --port ${PREFILL_VLLM_PORT} \
-    --gpu-memory-utilization 0.3 \
+    --gpu-memory-utilization 0.8 \
+    --max-num-batched-tokens 1024 \
     --tensor-parallel-size 4 \
     --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}' \
     --no-async-scheduling \
@@ -304,7 +305,8 @@ set -x
 docker exec -d ${CONTAINER_PREFIX}-2-0 /bin/bash -c \
     "vllm serve $MODEL \
     --port ${DECODE_VLLM_PORT} \
-    --gpu-memory-utilization 0.3 \
+    --gpu-memory-utilization 0.8 \
+    --max-num-batched-tokens 1024 \
     --tensor-parallel-size 4 \
     --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}' \
     --no-async-scheduling \
