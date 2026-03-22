@@ -30,7 +30,7 @@ parse_arguments() {
             shift
             ;;
             --xprof)
-            XPROF_ENABLED="${arg#*=}"
+            XPROF_ENABLED=true
             shift
             ;;
         esac
@@ -43,6 +43,8 @@ parse_arguments() {
 
     # Compose the storage path after parsing overrides
     BASE_DIR="${ROOT_DIR}/${TARGET_DIR}"
+
+    echo "Use basedir ${BASE_DIR}"
 }
 
 setup_directories() {
@@ -62,6 +64,7 @@ start_vllm_server() {
 
     # TPU_VMODULE=tpu_pjrt_client=0 \
     # PHASED_PROFILING_DIR=$xprof_dir \
+    set -x
     TPU_STDERR_LOG_LEVEL=0 \
     USE_MOE_EP_KERNEL="0" \
     MODEL_IMPL_TYPE="vllm" \
@@ -81,6 +84,7 @@ start_vllm_server() {
         --load-format=runai_streamer \
         --model-loader-extra-config='{"memory_limit":68719476736,"concurrency":4}' \
         &> "$vllm_log_file" &
+    set +x
 
     if [ "$XPROF_ENABLED" != "false" ]; then
         unset PHASED_PROFILING_DIR
@@ -120,6 +124,7 @@ run_benchmarks() {
         vllm_bench_log_file="${bench_log_dir}/bench_${i}.log"
 
         echo "Running benchmark iteration ${i}/${ITER}..."
+        set -x
         python3 "${BENCH_SERVING_BASEDIR}/benchmark_serving.py" \
             --backend vllm \
             --dataset-name random \
@@ -136,6 +141,7 @@ run_benchmarks() {
             --save-result \
             --temperature=0.0 \
             2>&1 | tee "$vllm_bench_log_file"
+        set +x
 
     done
 }
