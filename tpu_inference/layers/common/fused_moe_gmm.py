@@ -142,10 +142,10 @@ def moe_gmm_local(
                 dtype=gmm2_res.dtype)
             token_topk_hidden = jnp.matmul(one_hot_selector, gmm2_res)
         elif gather_mode == "fence":
-            gmm2_res = jax.lax.optimization_barrier(gmm2_res)
             from jax.experimental import layout as jax_layout
             gmm2_res = jax_layout.with_layout_constraint(
                 gmm2_res, jax_layout.Layout(major_to_minor=(0, 1), tiling=((16, 128),)))
+            gmm2_res = jax.lax.optimization_barrier(gmm2_res)
             token_topk_hidden = gmm2_res[topk_argsort_revert_indices]
         else:
             token_topk_hidden = gmm2_res[topk_argsort_revert_indices]

@@ -739,7 +739,13 @@ def validate_inputs(
 
     assert group_offset.shape == (1, )
 
-    size_lhs_sublane = pltpu.get_tpu_info().get_sublane_tiling(lhs.dtype)
+    # TODO(wyzhang): hack
+    import os
+    gather_mode = os.environ.get("MOE_GATHER_MODE", "onehot")
+    if gather_mode == "fence":
+        size_lhs_sublane = 16
+    else:
+        size_lhs_sublane = pltpu.get_tpu_info().get_sublane_tiling(lhs.dtype)
     size_lhs_sublane = min(size_lhs_sublane, size_m)
 
     return Dimensions(
