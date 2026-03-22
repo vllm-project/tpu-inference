@@ -613,7 +613,7 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
                     assert jax_w.shape == target_shape, \
                         f"down_proj shape mismatch: {jax_w.shape} vs {target_shape}"
                     experts.kernel_down_proj_EFD.value = shard_put(
-                        jax_w, experts.efd_sharding)
+                        jax_w, tuple(experts.efd_sharding))
                 elif fused_name == "gate_up_proj":
                     E, D, F = experts.kernel_gating_EDF.value.shape
                     fused_shape = tuple(hf_weight.shape)
@@ -637,13 +637,13 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
                     assert tuple(jax_gate.shape) == (E, D, F), \
                         f"gate shape mismatch: {jax_gate.shape} vs ({E}, {D}, {F})"
                     experts.kernel_gating_EDF.value = shard_put(
-                        jax_gate, experts.edf_sharding)
+                        jax_gate, tuple(experts.edf_sharding))
                     jax_up = jax_array_from_reshaped_torch(
                         up_proj, permute_dims=gate_permute)
                     assert tuple(jax_up.shape) == (E, D, F), \
                         f"up_proj shape mismatch: {jax_up.shape} vs ({E}, {D}, {F})"
                     experts.kernel_up_proj_EDF.value = shard_put(
-                        jax_up, experts.edf_sharding)
+                        jax_up, tuple(experts.edf_sharding))
 
     def load_weights(self, rng_key: jax.Array) -> None:
         self.rng = nnx.Rngs(rng_key)
