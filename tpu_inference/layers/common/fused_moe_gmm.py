@@ -143,15 +143,11 @@ def moe_gmm_local(
                 dtype=gmm2_res.dtype)
             token_topk_hidden = jnp.matmul(one_hot_selector, gmm2_res)
         elif gather_mode == "fence":
-            with jax.named_scope("DummyWeight"):
-                dummy_weight = jax.lax.optimization_barrier(
-                    jnp.zeros((gmm2_res.shape[-1], 1), dtype=gmm2_res.dtype)
-                )
-                dummy_mm = jnp.matmul(gmm2_res, dummy_weight)
-                dummy_mm = jax.lax.optimization_barrier(dummy_mm)
+            # Firewall the MXU layout from communicating with the downstream VPU Gather!
+            # This completely severs backward layout propagation without using any math.
+            gmm2_res = jax.lax.optimization_barrier(gmm2_res)
             with jax.named_scope("Gather"):
                 token_topk_hidden = gmm2_res[topk_argsort_revert_indices]
-                token_topk_hidden = token_topk_hidden + dummy_mm[topk_argsort_revert_indices]
         else:
             token_topk_hidden = gmm2_res[topk_argsort_revert_indices]
     token_topk_hidden = token_topk_hidden.reshape(
