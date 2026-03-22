@@ -1027,7 +1027,7 @@ def gmm_v2(
     out_init = jax.ShapeDtypeStruct((dims.size_m, aligned_n), cfgs.out_dtype)
     rhs_weights = WeightsRef(weight=rhs, scale=rhs_scale, bias=rhs_bias)
 
-    return pl.pallas_call(
+    out_call = pl.pallas_call(
         functools.partial(kernel_main, cfgs=cfgs),
         out_shape=out_init,
         grid_spec=pltpu.PrefetchScalarGridSpec(
@@ -1051,7 +1051,15 @@ def gmm_v2(
         cost_estimate=get_cost_estimate(lhs, rhs_weights, out_init.dtype,
                                         dims),
         metadata=get_metadata(cfgs),
-    )(group_sizes, group_offset, lhs, rhs_weights)[:, :dims.size_n]
+    )(group_sizes, group_offset, lhs, rhs_weights)
+
+    import os
+    if os.environ.get("MOE_GATHER_MODE", "onehot") == "fence":
+        from jax.experimental import layout as jax_layout
+        out_call = jax_layout.with_layout_constraint(
+            out_call, jax_layout.Layout(major_to_minor=(0, 1), tiling=((16, 128), (2, 1))))
+
+    return out_call[:, :dims.size_n]
 
 
 def is_supported_by_gmm_v2(rhs_scale: jax.Array | None) -> bool:

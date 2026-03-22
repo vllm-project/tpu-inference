@@ -129,9 +129,6 @@ def moe_gmm_local(
         shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR).sum()
         w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
 
-    # TODO(wyzhang): Hack
-    gmm1_res = jax_layout.with_layout_constraint(
-        gmm1_res, jax_layout.Layout(major_to_minor=(0, 1), tiling=((16, 128),)))
     gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
                            group_offset, True)
     # TODO(wyzhang): Hack
@@ -146,10 +143,15 @@ def moe_gmm_local(
                 dtype=gmm2_res.dtype)
             token_topk_hidden = jnp.matmul(one_hot_selector, gmm2_res)
         elif gather_mode == "fence":
-            gmm2_res = jax_layout.with_layout_constraint(
-                gmm2_res, jax_layout.Layout(major_to_minor=(0, 1), tiling=((16, 128),)))
-            gmm2_res = jax.lax.optimization_barrier(gmm2_res)
-            token_topk_hidden = gmm2_res[topk_argsort_revert_indices]
+            with jax.named_scope("DummyWeight"):
+                dummy_weight = jax.lax.optimization_barrier(
+                    jnp.zeros((gmm2_res.shape[-1], 1), dtype=gmm2_res.dtype)
+                )
+                dummy_mm = jnp.matmul(gmm2_res, dummy_weight)
+                dummy_mm = jax.lax.optimization_barrier(dummy_mm)
+            with jax.named_scope("Gather"):
+                token_topk_hidden = gmm2_res[topk_argsort_revert_indices]
+                token_topk_hidden = token_topk_hidden + dummy_mm[topk_argsort_revert_indices] * 0.0
         else:
             token_topk_hidden = gmm2_res[topk_argsort_revert_indices]
     token_topk_hidden = token_topk_hidden.reshape(
