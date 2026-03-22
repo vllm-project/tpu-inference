@@ -4,7 +4,7 @@ readonly ROOT_DIR="/home/wyzhang_google_com/mnt/ullm/debug"
 readonly BENCH_SERVING_BASEDIR="/home/wyzhang_google_com/mnt/ullm/bench_serving"
 readonly SLEEP_INTERVAL_SEC=15
 
-ITER=8 # default iteration count
+ITER=3 # default iteration count
 INPUT_LEN=1024 # default input len
 OUTPUT_LEN=8192 # default output len
 TARGET_DIR="qwen450b-0310" # default target dir
@@ -14,7 +14,6 @@ parse_arguments() {
         case $arg in
             --iter=*)
             ITER="${arg#*=}"
-            shift
             ;;
             --input_len=*)
             INPUT_LEN="${arg#*=}"
