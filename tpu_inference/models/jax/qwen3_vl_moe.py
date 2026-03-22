@@ -27,23 +27,18 @@ from tpu_inference.models.jax.qwen3_vl import (
     build_mrope_input_positions,
     _ModelConfigAdapter,
     _VllmConfigAdapter,
-    Qwen3VLImagePixelInputs,
-    Qwen3VLImageInputs,
+    Qwen3VLForConditionalGeneration,
     Qwen3VLTextAttention,
     Qwen3VLVisionTransformer,
 )
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     merge_multimodal_embeddings,
-    normalize_mm_grid_thw,
-    reshape_mm_tensor,
-    split_mm_embeddings_by_grid,
 )
 from tpu_inference.models.jax.utils.weight_utils import (
+    assign_and_shard_param,
     get_default_maps,
     jax_array_from_reshaped_torch,
     load_hf_weights,
-    load_nnx_param_from_reshaped_torch,
-    shard_put,
 )
 
 init_fn = nnx.initializers.uniform()
@@ -274,7 +269,9 @@ class Qwen3VLMoeTextModel(Qwen3MoeModel):
         return new_kv_caches, x
 
 
-class Qwen3VLMoeForConditionalGeneration(nnx.Module):
+class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
+    """Qwen3-VL MoE wrapper that reuses the dense VL multimodal surface."""
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -295,7 +292,6 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
             mesh=mesh,
             norm_eps=getattr(text_config, "rms_norm_eps", 1e-6),
         )
-
         self.language_model = Qwen3VLMoeTextModel(
             vllm_config=vllm_config,
             rng=self.rng,
@@ -317,7 +313,8 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
 
         self.image_token_id = config.image_token_id
         self.video_token_id = config.video_token_id
-        self.vision_start_token_id = getattr(config, "vision_start_token_id", 151652)
+        self.vision_start_token_id = getattr(config, "vision_start_token_id",
+                                             151652)
         self.spatial_merge_size = config.vision_config.spatial_merge_size
 
     def get_input_embeddings(
@@ -326,7 +323,6 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
         multimodal_embeddings: Optional[jax.Array],
     ) -> jax.Array:
         inputs_embeds = self.language_model.embed_tokens(input_ids)
-
         if multimodal_embeddings is not None and multimodal_embeddings.shape[0] != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
@@ -334,7 +330,6 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
                 multimodal_embeddings,
                 [self.image_token_id, self.video_token_id],
             )
-
         return inputs_embeds
 
     def embed_input_ids(
@@ -346,132 +341,6 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
     ) -> jax.Array:
         del is_multimodal
         return self.get_input_embeddings(input_ids, multimodal_embeddings)
-
-    def _parse_and_validate_image_input(
-            self, image_grid_thw: Tuple[Tuple[int, int, int], ...],
-            **kwargs: object) -> Optional[Qwen3VLImageInputs]:
-        pixel_values = kwargs.pop("pixel_values", None)
-        if pixel_values is None:
-            pixel_values = kwargs.pop("pixel_values_videos", None)
-        image_embeds = kwargs.pop("image_embeds", None)
-
-        if pixel_values is None and image_embeds is None:
-            return None
-
-        if pixel_values is not None:
-            pixel_values = reshape_mm_tensor(pixel_values, "pixel values")
-
-            if not isinstance(pixel_values, jax.Array):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values)}")
-
-            return Qwen3VLImagePixelInputs(
-                type="pixel_values",
-                pixel_values=pixel_values,
-                image_grid_thw=image_grid_thw)
-
-    def _parse_and_validate_multimodal_inputs(self,
-                                              image_grid_thw: Tuple[Tuple[int,
-                                                                          int,
-                                                                          int],
-                                                                    ...],
-                                              **kwargs: object) -> dict:
-        mm_input_by_modality = {}
-        for input_key in kwargs:
-            if input_key in ("pixel_values", "pixel_values_videos",
-                             "image_embeds"
-                             ) and "image" not in mm_input_by_modality:
-                mm_input_by_modality[
-                    "image"] = self._parse_and_validate_image_input(
-                        image_grid_thw, **kwargs)
-        return mm_input_by_modality
-
-    def _process_image_input(
-            self, image_input: Qwen3VLImageInputs
-    ) -> tuple[tuple[jax.Array, ...],
-               Optional[list[list[jax.Array]]]]:
-        grid_thw = image_input["image_grid_thw"]
-        if not grid_thw:
-            return (), None
-
-        if image_input["type"] == "image_embeds":
-            image_embeds = image_input["image_embeds"].astype(self.visual.dtype)
-            deepstack_embeds = None
-        else:
-            pixel_values = image_input["pixel_values"]
-            image_embeds, deepstack_embeds = self.visual(pixel_values, grid_thw)
-        return split_mm_embeddings_by_grid(image_embeds, grid_thw,
-                                           self.spatial_merge_size,
-                                           deepstack_embeds)
-
-    def embed_multimodal(
-        self,
-        image_grid_thw: Tuple[Tuple[int, int, int], ...],
-        **kwargs,
-    ) -> dict:
-        image_grid_thw = normalize_mm_grid_thw(image_grid_thw)
-        if not image_grid_thw:
-            image_grid_thw = normalize_mm_grid_thw(
-                kwargs.get("video_grid_thw", None))
-
-        mm_input_by_modality = self._parse_and_validate_multimodal_inputs(
-            image_grid_thw, **kwargs)
-        if not mm_input_by_modality:
-            return {}
-        if not image_grid_thw:
-            return {}
-
-        multimodal_embeddings: tuple[jax.Array, ...] = ()
-        deepstack_outputs = None
-        for modality in mm_input_by_modality:
-            multimodal_input = mm_input_by_modality[modality]
-            if modality == "image":
-                image_splits, deepstack_by_item = self._process_image_input(
-                    multimodal_input)
-                multimodal_embeddings += image_splits
-                if deepstack_by_item is not None:
-                    if deepstack_outputs is None:
-                        deepstack_outputs = []
-                    deepstack_outputs.extend(deepstack_by_item)
-
-        return {"embeds": multimodal_embeddings, "deepstack": deepstack_outputs}
-
-    def __call__(
-        self,
-        kv_caches: List[jax.Array],
-        input_ids: Optional[jax.Array],
-        attention_metadata,
-        inputs_embeds: Optional[jax.Array] = None,
-        _input_positions=None,
-        _layer_name_to_kv_cache=None,
-        _lora_metadata=None,
-        _intermediate_tensors=None,
-        _is_first_rank: bool = True,
-        _is_last_rank: bool = True,
-        deepstack_embeds: Optional[List[jax.Array]] = None,
-    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
-        visual_pos_mask = None
-
-        if deepstack_embeds is not None and input_ids is not None:
-            visual_pos_mask = (input_ids == self.image_token_id) | (
-                input_ids == self.video_token_id
-            )
-
-        kv_caches, hidden_states = self.language_model(
-            kv_caches=kv_caches,
-            input_ids=input_ids,
-            attention_metadata=attention_metadata,
-            inputs_embeds=inputs_embeds,
-            visual_pos_mask=visual_pos_mask,
-            deepstack_visual_embeds=deepstack_embeds,
-        )
-
-        return kv_caches, hidden_states, []
-
-    def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        if hasattr(self, 'lm_head'):
-            return self.lm_head(hidden_states)
-        return self.language_model.embed_tokens.decode(hidden_states)
 
     def get_mrope_input_positions(
         self,
@@ -493,8 +362,7 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
         if video_grid_thw is not None:
             expanded_video = []
             for t, h, w in video_grid_thw:
-                t_val = int(t)
-                expanded_video.extend([(1, int(h), int(w))] * t_val)
+                expanded_video.extend([(1, int(h), int(w))] * int(t))
             video_grid_thw = expanded_video
 
         llm_positions, mrope_position_delta = build_mrope_input_positions(
@@ -507,53 +375,11 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
                                           self.vision_start_token_id),
             spatial_merge_size=hf_config.vision_config.spatial_merge_size,
         )
-
         llm_positions = llm_positions[:, context_len:seq_len]
         return llm_positions, mrope_position_delta
 
-    def precompile_vision_encoder(
-        self,
-        run_compilation_fn,
-    ) -> None:
-        vc = self.config.vision_config
-        patch_input_dim = (
-            vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size
-        )
-
-        image_shapes = []
-        if warmup_config := self.vllm_config.additional_config.get(
-            "vision_warmup_config"
-        ):
-            image_shapes = warmup_config.get("image_shapes", [])
-
-        factor = vc.patch_size * vc.spatial_merge_size
-        for input_hw in image_shapes:
-            if not isinstance(input_hw, list) or len(input_hw) != 2:
-                logger.warning(f"Skipping invalid shape {input_hw}.")
-                continue
-            h_input, w_input = input_hw
-            h_processed = round(h_input / factor) * factor
-            w_processed = round(w_input / factor) * factor
-            t, h, w = 1, h_processed // vc.patch_size, w_processed // vc.patch_size
-            grid_thw = (t, h, w)
-            num_patches = t * h * w
-
-            dummy_pixel_values = jnp.ones(
-                (num_patches, patch_input_dim),
-                self.vllm_config.model_config.dtype,
-            )
-            dummy_grid_thw = (grid_thw,)
-
-            run_compilation_fn(
-                "vision_encoder",
-                self.visual.encode_jit,
-                dummy_pixel_values,
-                dummy_grid_thw,
-                image_shape=input_hw,
-            )
-
-    def _load_moe_expert_weights(self):
-        """Load MoE expert weights from either fused or per-expert HF tensors."""
+    def _load_moe_expert_weights(self) -> None:
+        """Load fused or per-expert HF MoE tensors using real param metadata."""
         from tpu_inference.models.jax.utils.weight_utils import (
             get_model_weights_files,
             model_weights_single_file_generator,
@@ -562,12 +388,13 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
         model_path = self.vllm_config.model_config.model
         download_dir = self.vllm_config.load_config.download_dir
         weights_files = get_model_weights_files(model_path, download_dir)
+        loaded_expert_modules = {}
 
         for weights_file in weights_files:
             for hf_key, hf_weight in model_weights_single_file_generator(
-                weights_file, framework="pt",
-                filter_regex=r".*\.mlp\.experts(?:\.\d+\.)?.*",
-            ):
+                    weights_file,
+                    framework="pt",
+                    filter_regex=r".*\.mlp\.experts(?:\.\d+\.)?.*"):
                 indexed_match = re.match(
                     r".*layers\.(\d+)\.mlp\.experts\.(\d+\.(?:gate_proj|up_proj|down_proj)(?:\.weight)?)$",
                     hf_key,
@@ -576,18 +403,18 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
                     r".*layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)(?:\.weight)?$",
                     hf_key,
                 )
-
                 if not indexed_match and not fused_match:
                     continue
 
                 layer_idx = int((indexed_match or fused_match).group(1))
                 layer = self.language_model.layers[layer_idx]
-                if isinstance(layer, PPMissingLayer):
-                    continue
-                if not hasattr(layer.mlp, "experts"):
+                if isinstance(layer, PPMissingLayer) or not hasattr(layer.mlp,
+                                                                    "experts"):
                     continue
 
                 experts = layer.mlp.experts
+                loaded_expert_modules[layer_idx] = experts
+
                 if indexed_match:
                     expert_suffix = indexed_match.group(2)
                     if not expert_suffix.endswith(".weight"):
@@ -597,67 +424,72 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
 
                 fused_name = fused_match.group(2)
                 if fused_name == "down_proj":
-                    down_proj_permute = None
                     target_shape = tuple(experts.kernel_down_proj_EFD.value.shape)
                     source_shape = tuple(hf_weight.shape)
+                    permute_dims = None
                     if source_shape != target_shape:
                         swapped_shape = source_shape[:-2] + (
                             source_shape[-1], source_shape[-2])
                         if swapped_shape == target_shape:
-                            down_proj_permute = (0, 2, 1)
+                            permute_dims = (0, 2, 1)
                         else:
                             raise ValueError(
                                 "Unsupported fused down_proj layout for "
                                 f"language_model.layers.{layer_idx}.mlp.experts: "
                                 f"source {source_shape} vs target {target_shape}"
                             )
-                    jax_w = jax_array_from_reshaped_torch(
-                        hf_weight, permute_dims=down_proj_permute)
-                    assert jax_w.shape == target_shape, \
-                        f"down_proj shape mismatch: {jax_w.shape} vs {target_shape}"
-                    experts.kernel_down_proj_EFD.value = shard_put(
-                        jax_w, tuple(experts.efd_sharding))
-                elif fused_name == "gate_up_proj":
-                    E, D, F = experts.kernel_gating_EDF.value.shape
-                    fused_shape = tuple(hf_weight.shape)
-                    if fused_shape == (E, 2 * F, D):
-                        # Standard layout: (E, 2*moe_intermediate, hidden)
-                        chunk_dim = 1
-                        gate_permute = (0, 2, 1)
-                    elif fused_shape == (E, D, 2 * F):
-                        # Transposed layout: (E, hidden, 2*moe_intermediate)
-                        chunk_dim = 2
-                        gate_permute = None
-                    else:
-                        raise ValueError(
-                            "Unsupported fused gate_up_proj layout for "
-                            f"language_model.layers.{layer_idx}.mlp.experts: "
-                            f"source {fused_shape} vs expected EDF=({E}, {D}, {F})"
-                        )
-                    gate_proj, up_proj = hf_weight.chunk(2, dim=chunk_dim)
-                    jax_gate = jax_array_from_reshaped_torch(
-                        gate_proj, permute_dims=gate_permute)
-                    assert tuple(jax_gate.shape) == (E, D, F), \
-                        f"gate shape mismatch: {jax_gate.shape} vs ({E}, {D}, {F})"
-                    experts.kernel_gating_EDF.value = shard_put(
-                        jax_gate, tuple(experts.edf_sharding))
-                    jax_up = jax_array_from_reshaped_torch(
-                        up_proj, permute_dims=gate_permute)
-                    assert tuple(jax_up.shape) == (E, D, F), \
-                        f"up_proj shape mismatch: {jax_up.shape} vs ({E}, {D}, {F})"
-                    experts.kernel_up_proj_EDF.value = shard_put(
-                        jax_up, tuple(experts.edf_sharding))
+                    assign_and_shard_param(
+                        experts.kernel_down_proj_EFD,
+                        jax_array_from_reshaped_torch(
+                            hf_weight, permute_dims=permute_dims),
+                        param_name=(
+                            f"language_model.layers.{layer_idx}.mlp.experts.down_proj"
+                        ),
+                    )
+                    continue
+
+                E, D, F = experts.kernel_gating_EDF.value.shape
+                fused_shape = tuple(hf_weight.shape)
+                if fused_shape == (E, 2 * F, D):
+                    chunk_dim = 1
+                    permute_dims = (0, 2, 1)
+                elif fused_shape == (E, D, 2 * F):
+                    chunk_dim = 2
+                    permute_dims = None
+                else:
+                    raise ValueError(
+                        "Unsupported fused gate_up_proj layout for "
+                        f"language_model.layers.{layer_idx}.mlp.experts: "
+                        f"source {fused_shape} vs expected EDF=({E}, {D}, {F})"
+                    )
+                gate_proj, up_proj = hf_weight.chunk(2, dim=chunk_dim)
+                assign_and_shard_param(
+                    experts.kernel_gating_EDF,
+                    jax_array_from_reshaped_torch(
+                        gate_proj, permute_dims=permute_dims),
+                    param_name=(
+                        f"language_model.layers.{layer_idx}.mlp.experts.gate_proj"
+                    ),
+                )
+                assign_and_shard_param(
+                    experts.kernel_up_proj_EDF,
+                    jax_array_from_reshaped_torch(
+                        up_proj, permute_dims=permute_dims),
+                    param_name=(
+                        f"language_model.layers.{layer_idx}.mlp.experts.up_proj"
+                    ),
+                )
+
+        for experts in loaded_expert_modules.values():
+            quant_method = getattr(experts, "quant_method", None)
+            if quant_method is not None:
+                quant_method.process_weights_after_loading(experts)
 
     def load_weights(self, rng_key: jax.Array) -> None:
         self.rng = nnx.Rngs(rng_key)
-
-        # Step 1: Load MoE expert weights first (handles fused + per-expert HF layouts)
         self._load_moe_expert_weights()
 
-        # Step 2: Load all other weights via load_hf_weights
-        # (filter out expert tensors which are already loaded)
         mappings = {
-            # Language model weights (framework layer names use .weight)
             "model.language_model.embed_tokens": "language_model.embed_tokens.weight",
             "model.language_model.layers.*.input_layernorm": "language_model.layers.*.input_layernorm.weight",
             "model.language_model.layers.*.post_attention_layernorm": "language_model.layers.*.post_attention_layernorm.weight",
@@ -668,13 +500,10 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
             "model.language_model.layers.*.self_attn.q_norm": "language_model.layers.*.self_attn.q_norm.weight",
             "model.language_model.layers.*.self_attn.k_norm": "language_model.layers.*.self_attn.k_norm.weight",
             "model.language_model.norm": "language_model.norm.weight",
-            # MoE router gate
             "model.language_model.layers.*.mlp.gate": "language_model.layers.*.mlp.gate.weight",
-            # Dense MLP layers (for non-MoE layers if any)
             "model.language_model.layers.*.mlp.gate_proj": "language_model.layers.*.mlp.gate_proj.weight",
             "model.language_model.layers.*.mlp.up_proj": "language_model.layers.*.mlp.up_proj.weight",
             "model.language_model.layers.*.mlp.down_proj": "language_model.layers.*.mlp.down_proj.weight",
-            # Vision encoder weights
             "model.visual.patch_embed.proj": "visual.patch_embed.proj.kernel",
             "model.visual.patch_embed.proj.bias": "visual.patch_embed.proj.bias",
             "model.visual.pos_embed": "visual.pos_embed.embedding",
@@ -703,21 +532,25 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
             mappings["lm_head"] = "lm_head.weight"
 
         vision_config = hf_config.vision_config
-        deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", [8, 16, 24])
+        deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes",
+                                    [8, 16, 24])
         for i in range(len(deepstack_indexes)):
-            mappings[f"model.visual.deepstack_merger_list.{i}.norm"] = f"visual.deepstack_merger_list.{i}.norm.scale"
-            mappings[f"model.visual.deepstack_merger_list.{i}.norm.bias"] = f"visual.deepstack_merger_list.{i}.norm.bias"
-            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc1"] = f"visual.deepstack_merger_list.{i}.linear_fc1.kernel"
-            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc1.bias"] = f"visual.deepstack_merger_list.{i}.linear_fc1.bias"
-            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc2"] = f"visual.deepstack_merger_list.{i}.linear_fc2.kernel"
-            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc2.bias"] = f"visual.deepstack_merger_list.{i}.linear_fc2.bias"
+            mappings[f"model.visual.deepstack_merger_list.{i}.norm"] = \
+                f"visual.deepstack_merger_list.{i}.norm.scale"
+            mappings[f"model.visual.deepstack_merger_list.{i}.norm.bias"] = \
+                f"visual.deepstack_merger_list.{i}.norm.bias"
+            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc1"] = \
+                f"visual.deepstack_merger_list.{i}.linear_fc1.kernel"
+            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc1.bias"] = \
+                f"visual.deepstack_merger_list.{i}.linear_fc1.bias"
+            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc2"] = \
+                f"visual.deepstack_merger_list.{i}.linear_fc2.kernel"
+            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc2.bias"] = \
+                f"visual.deepstack_merger_list.{i}.linear_fc2.bias"
 
         adapted_model_config = _ModelConfigAdapter(self.vllm_config.model_config)
-        metadata_map = get_default_maps(
-            adapted_model_config, self.mesh, mappings
-        )
-
-        # Add transpose for MoE router gate: HF stores (E, D), JaxLinear expects (D, E)
+        metadata_map = get_default_maps(adapted_model_config, self.mesh,
+                                        mappings)
         metadata_map.transpose_map["mlp.gate"] = (1, 0)
 
         load_hf_weights(
