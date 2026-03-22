@@ -25,6 +25,7 @@ from tpu_inference.kernels.megablox.gmm_v2 import (gmm_v2,
                                                    is_supported_by_gmm_v2)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
+from jax.experimental import layout as jax_layout
 
 
 def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
@@ -128,6 +129,9 @@ def moe_gmm_local(
         shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR).sum()
         w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
 
+    # TODO(wyzhang): Hack
+    gmm1_res = jax_layout.with_layout_constraint(
+        gmm1_res, jax_layout.Layout(major_to_minor=(0, 1), tiling=((16, 128),)))
     gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
                            group_offset, True)
     # TODO(wyzhang): Hack
@@ -142,7 +146,6 @@ def moe_gmm_local(
                 dtype=gmm2_res.dtype)
             token_topk_hidden = jnp.matmul(one_hot_selector, gmm2_res)
         elif gather_mode == "fence":
-            from jax.experimental import layout as jax_layout
             gmm2_res = jax_layout.with_layout_constraint(
                 gmm2_res, jax_layout.Layout(major_to_minor=(0, 1), tiling=((16, 128),)))
             gmm2_res = jax.lax.optimization_barrier(gmm2_res)

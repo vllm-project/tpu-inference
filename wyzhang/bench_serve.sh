@@ -38,6 +38,7 @@ parse_arguments() {
 
     if [ "$XPROF_ENABLED" != "false" ]; then
         TARGET_DIR="${TARGET_DIR}-xprof"
+        NUM_PROMPTS=64
     fi
 
     # Compose the storage path after parsing overrides
@@ -55,7 +56,7 @@ start_vllm_server() {
     echo "Starting vllm server"
     vllm_log_file="${BASE_DIR}/vllm.log"
 
-    if [ "$XPROF_ENABLED" = true ]; then
+    if [ "$XPROF_ENABLED" != "false" ]; then
         export PHASED_PROFILING_DIR="${BASE_DIR}/xprof"
     fi
 
@@ -81,7 +82,7 @@ start_vllm_server() {
         --model-loader-extra-config='{"memory_limit":68719476736,"concurrency":4}' \
         &> "$vllm_log_file" &
 
-    if [ "$XPROF_ENABLED" = true ]; then
+    if [ "$XPROF_ENABLED" != "false" ]; then
         unset PHASED_PROFILING_DIR
     fi        
 }
