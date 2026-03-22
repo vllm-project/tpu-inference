@@ -1,0 +1,20 @@
+# common 
+see setup.txt for the setup
+
+# baseline gather + gmm + gmm + gather 
+* using MOE_GATHER_MODE="gather" to run bench_serve.sh --iter=8 --input_len=1024 --output_len=8192 --target_dir=gather-gather
+* collect the output token throughput from the bench log
+* calculate the average output token throughput across all runs
+
+# onehot + gmm + gmm + onehot 
+* MOE_GATHER_MODE="onehot" to run bench_serve.sh --iter=8 --input_len=1024 --output_len=8192 --target_dir=onehot-onehot
+* collect the output token throughput from the bench log
+* calculate the average output token throughput across all runs
+
+# gather + gmm + gmm + fence + gather 
+* MOE_GATHER_MODE="fence" to run bench_serve.sh --iter=8 --input_len=1024 --output_len=8192 --target_dir=gather-fence
+* collect the output token throughput from the bench log
+* calculate the average output token throughput across all runs
+
+
+

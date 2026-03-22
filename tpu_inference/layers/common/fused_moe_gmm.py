@@ -130,16 +130,18 @@ def moe_gmm_local(
 
     gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
                            group_offset, True)
-    # TODO(wyzhang): hack
-    enforce_layout = False
+    # TODO(wyzhang): Hack
+    import os
+    gather_mode = os.environ.get("MOE_GATHER_MODE", "onehot")
+
     with jax.named_scope("RestoreOriginalTokenOrder"):
-        if gmm2_res.shape[0] <= 1024: # One-Hot dense scatter reconstruct if sequence is small
+        if gather_mode == "onehot" and gmm2_res.shape[0] <= 1024: # One-Hot dense scatter reconstruct if sequence is small
             one_hot_selector = jax.nn.one_hot(
                 topk_argsort_revert_indices,
                 num_classes=gmm2_res.shape[0],
                 dtype=gmm2_res.dtype)
             token_topk_hidden = jnp.matmul(one_hot_selector, gmm2_res)
-        elif enforce_layout:
+        elif gather_mode == "fence":
             gmm2_res = jax.lax.optimization_barrier(gmm2_res)
             from jax.experimental import layout as jax_layout
             gmm2_res = jax_layout.with_layout_constraint(

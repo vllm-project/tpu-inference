@@ -1,27 +1,27 @@
-#!/path/to/fish
-set base_dir /home/wyzhang_google_com/mnt/ullm/debug/qwen450b-0310
+#!/bin/bash
+base_dir="/home/wyzhang_google_com/mnt/ullm/debug/qwen450b-0310"
 
-rm -rf $base_dir
-mkdir -p $base_dir
+rm -rf "$base_dir"
+mkdir -p "$base_dir"
 
 pkill vllm
 
-for i in (seq 1 4)
-    set vllm_log_dir {$base_dir}/vllm_{$i}
-    set vllm_bench_log_dir {$base_dir}/bench_log_{$i}
-    set vllm_bench_results_dir {$base_dir}/bench_results_{$i}
-    set xprof_dir {$base_dir}/xprof/exp-{$i}
+for i in $(seq 1 4); do
+    vllm_log_dir="${base_dir}/vllm_${i}"
+    vllm_bench_log_dir="${base_dir}/bench_log_${i}"
+    vllm_bench_results_dir="${base_dir}/bench_results_${i}"
+    xprof_dir="${base_dir}/xprof/exp-${i}"
 
-    mkdir -p $vllm_log_dir
-    mkdir -p $vllm_bench_log_dir
-    mkdir -p $vllm_bench_results_dir
-    mkdir -p $xprof_dir
+    mkdir -p "$vllm_log_dir"
+    mkdir -p "$vllm_bench_log_dir"
+    mkdir -p "$vllm_bench_results_dir"
+    mkdir -p "$xprof_dir"
 
 
     echo "Starting vllm server"
-    set vllm_log_file {$vllm_log_dir}/vllm.log
-    # TPU_VMODULE=tpu_pjrt_client=0 \
-    PHASED_PROFILING_DIR=$xprof_dir \
+    vllm_log_file="${vllm_log_dir}/vllm.log"
+    
+    PHASED_PROFILING_DIR="$xprof_dir" \
     TPU_STDERR_LOG_LEVEL=0 \
     USE_MOE_EP_KERNEL="0" \
     MODEL_IMPL_TYPE="vllm" \
@@ -40,21 +40,21 @@ for i in (seq 1 4)
         --safetensors-load-strategy=eager \
         --load-format=runai_streamer \
         --model-loader-extra-config='{"memory_limit":68719476736,"concurrency":4}' \
-        &> $vllm_log_file &
+        &> "$vllm_log_file" &
 
     # Waiting for vllm to be ready.
-    while true
+    while true; do
         echo "waiting for vllm to be ready"
 
-        if grep "Application startup complete" $vllm_log_file > /dev/null
+        if grep -q "Application startup complete" "$vllm_log_file"; then
             echo "vllm ready"
             break
-        end
+        fi
         sleep 15
-    end
+    done
 
 
-    set vllm_bench_log_file {$vllm_bench_log_dir}/bench_{$i}.log
+    vllm_bench_log_file="${vllm_bench_log_dir}/bench_${i}.log"
     python3 /home/wyzhang_google_com/mnt/ullm/bench_serving/benchmark_serving.py \
         --backend vllm \
         --dataset-name random \
@@ -67,10 +67,11 @@ for i in (seq 1 4)
         --random-output-len=8192 \
         --random-range-ratio=1.0 \
         --request-rate=inf \
-        --result-dir $vllm_bench_results_dir \
+        --result-dir "$vllm_bench_results_dir" \
         --save-result \
         --temperature=0.0 \
-        2>&1 | tee $vllm_bench_log_file
+        2>&1 | tee "$vllm_bench_log_file"
 
+    pkill vllm
     sleep 15
-end
+done

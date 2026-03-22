@@ -1,5 +1,19 @@
-* remote tpu vm hostname
-wyzhang-tpu7x-8
+# Common
+* remote tpu vm hostname: wyzhang-tpu7x-8
+* how to ssh: ssh wyzhang-tpu7x-8-a
+* all hf checkoint: /home/wyzhang_google_com/ckpt/hf
 
-* how to ssh
-ssh wyzhang-tpu7x-8-a
+# Project uLLM/vLLM
+
+* dir structure on tpu vm host: basedir=/home/wyzhang_google_com/mnt/ullm
+
+${basedir}
+├── bench_serving # benchmark serving repo
+├── debug # root dir for all debug related output 
+├── tpu-inference # tpu inference repo
+├── ullm.code-workspace # vscode workspace file
+├── venv # env for running vllm and tpu infernece
+├── vllm # vllm codebase
+├── tmp # random stuff
+
+* my scripts: ${basedir}/tpu-inference/wyzhang/*
