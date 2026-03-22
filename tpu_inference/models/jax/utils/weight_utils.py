@@ -777,6 +777,13 @@ def assign_and_shard_param(jax_param: nnx.Param,
         jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
         jax_param.set_metadata("_is_loaded", True)
     except Exception as e:
+        import traceback
+        print(f"[DEBUG] assign_and_shard_param FAILED for '{param_name}'")
+        print(f"[DEBUG]   jax_weight: shape={jax_weight.shape}, dtype={jax_weight.dtype}, devices={jax_weight.devices()}")
+        print(f"[DEBUG]   jax_param:  shape={jax_param.value.shape}, dtype={jax_param.value.dtype}")
+        print(f"[DEBUG]   spec={spec}, mesh={mesh}")
+        print(f"[DEBUG]   Original exception: {type(e).__name__}: {e}")
+        traceback.print_exc()
         raise RuntimeError(
             f"Failed to load weight '{param_name}' with shape {jax_weight.shape} into param with shape {jax_param.value.shape}"
         ) from e
