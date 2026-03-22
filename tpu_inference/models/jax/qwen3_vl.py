@@ -88,6 +88,10 @@ class _ModelConfigAdapter:
     def hf_config(self):
         return self._hf_config_adapter
 
+    @property
+    def hf_text_config(self):
+        return self._hf_config_adapter
+
     def __getattr__(self, name):
         return getattr(self._model_config, name)
 

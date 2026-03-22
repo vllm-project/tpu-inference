@@ -616,11 +616,27 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
                         ),
                     )
                 elif fused_name == "gate_up_proj":
-                    gate_proj, up_proj = hf_weight.chunk(2, dim=1)
+                    E, D, F = experts.kernel_gating_EDF.value.shape
+                    fused_shape = tuple(hf_weight.shape)
+                    if fused_shape == (E, 2 * F, D):
+                        # Standard layout: (E, 2*moe_intermediate, hidden)
+                        chunk_dim = 1
+                        gate_permute = (0, 2, 1)
+                    elif fused_shape == (E, D, 2 * F):
+                        # Transposed layout: (E, hidden, 2*moe_intermediate)
+                        chunk_dim = 2
+                        gate_permute = None
+                    else:
+                        raise ValueError(
+                            "Unsupported fused gate_up_proj layout for "
+                            f"language_model.layers.{layer_idx}.mlp.experts: "
+                            f"source {fused_shape} vs expected EDF=({E}, {D}, {F})"
+                        )
+                    gate_proj, up_proj = hf_weight.chunk(2, dim=chunk_dim)
                     load_nnx_param_from_reshaped_torch(
                         experts.kernel_gating_EDF,
                         gate_proj,
-                        permute_dims=(0, 2, 1),
+                        permute_dims=gate_permute,
                         param_name=(
                             "language_model.layers."
                             f"{layer_idx}.mlp.experts.kernel_gating_EDF"
@@ -629,7 +645,7 @@ class Qwen3VLMoeForConditionalGeneration(nnx.Module):
                     load_nnx_param_from_reshaped_torch(
                         experts.kernel_up_proj_EDF,
                         up_proj,
-                        permute_dims=(0, 2, 1),
+                        permute_dims=gate_permute,
                         param_name=(
                             "language_model.layers."
                             f"{layer_idx}.mlp.experts.kernel_up_proj_EDF"
