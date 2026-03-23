@@ -14,5 +14,5 @@ Feature,CorrectnessTest,PerformanceTest
 "hybrid kv cache",❌ Failing,❓ Untested
 "multi-host",❓ Untested,❓ Untested
 "runai_model_streamer_loader",✅ Passing,❓ Untested
-"sampling_params",❌ Failing,❓ Untested
+"sampling_params",✅ Passing,❓ Untested
 "structured_decoding",✅ Passing,❓ Untested
