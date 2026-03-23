@@ -11,26 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Wrapper for RPA kernel to match expected interface.
-
-NOTE: all of the code in this directory is experimental and not fully tested!
-To enable usage of this kernel in full run, you can pass the USE_BATCHED_RPA_KERNEL=1
-environment variable.
-
-Compared to the default RPA kernel, this kernel does the following:
-
-1. Batches multiple sequences together to replace per-request flash_attention loops
-
-2. Enables triple-buffering via Pallas emit_pipeline, significantly reducing communication stalls
-
-3. Precomputes expensive metadata upfront (e.g., page locations and bounds clipping)
-
-4. Improves decode pipelining by interleaving sequences to unblock serial q@k and p@v multiplications
-
-5. Amortizes MXU stall costs (~200 cycles) across multiple sequences
-
-6. Uses more granular block sizes (bkv_sz) to minimize wasted padding and boost prefill performance
-"""
+"""Wrapper for RPA kernel to match expected interface."""
 
 import functools
 from typing import Any
@@ -599,30 +580,49 @@ def ragged_paged_attention(
             n_buffer=n_buffer,
         )
         rpa_kernel_instance = kernel.make_rpa_kernel(config)
-        kv_packing = schedule.get_dtype_packing(kv_cache.dtype)
-        bkv_stride = (actual_num_kv_heads * 2) // kv_packing
-        if schedule.has_bank_conflicts(bkv_stride):
-            bkv_stride += 1
-        kv_vmem_shape_single = (
-            kernel_bkv_sz,
-            bkv_stride,
-            kv_packing,
-            aligned_head_dim,
+        rpa_schedule = schedule.generate_rpa_metadata(
+            cu_q_lens,
+            kv_lens,
+            distribution,
+            config,
         )
-        kv_cache_zero_hbm = jnp.zeros(kv_vmem_shape_single,
-                                      dtype=kv_cache.dtype)
         o_hbm, kv_cache = rpa_kernel_instance(
             cu_q_lens,
             kv_lens,
             page_indices,
-            distribution,
+            rpa_schedule,
             q_hbm,
             new_kv_hbm,
             kv_cache,
             o_hbm,
-            kv_cache_zero_hbm,
         )
         return o_hbm, kv_cache
+
+    # num_decode = distribution[0]
+    # num_prefill = distribution[1] - distribution[0]
+    # num_mixed = distribution[2] - distribution[1]
+
+    # o_hbm, kv_cache = jax.lax.cond(
+    #     num_decode > 0,
+    #     lambda o, kv: run_rpa_kernel(schedule.RpaCase.DECODE, q_hbm, o, kv),
+    #     lambda o, kv: (o, kv),
+    #     o_hbm,
+    #     kv_cache,
+    # )
+    # o_hbm, kv_cache = jax.lax.cond(
+    #     num_prefill > 0,
+    #     lambda o, kv: run_rpa_kernel(schedule.RpaCase.PREFILL, q_hbm, o, kv),
+    #     lambda o, kv: (o, kv),
+    #     o_hbm,
+    #     kv_cache,
+    # )
+    # o_hbm, kv_cache = jax.lax.cond(
+    #     num_mixed > 0,
+    #     lambda o, kv: run_rpa_kernel(schedule.RpaCase.MIXED, q_hbm, o, kv),
+    #     lambda o, kv: (o, kv),
+    #     o_hbm,
+    #     kv_cache,
+    # )
 
     o_hbm, kv_cache = run_rpa_kernel(schedule.RpaCase.DECODE, q_hbm, o_hbm,
                                      kv_cache)

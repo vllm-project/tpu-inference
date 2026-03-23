@@ -14,19 +14,14 @@
 
 import jax.numpy as jnp
 from jax import lax
+from jax.experimental import pallas as pl
 
 from tpu_inference.kernels.experimental.batched_rpa import \
     schedule as rpa_schedule
 
-_NUM_LANES = 128
-
-
-def cdiv(a, b):
-    return (a + b - 1) // b
-
 
 def align_to(a, b):
-    return cdiv(a, b) * b
+    return pl.cdiv(a, b) * b
 
 
 def broadcast_minor(src, shape):
