@@ -328,14 +328,24 @@ class KVCacheManager:
                     num_blocks = (num_blocks // dp_size) * dp_size
 
                     mamba_states = []
-                    for shape, dtype in zip(layer_spec.shapes,
-                                            layer_spec.dtypes):
+                    for state_index, (shape, dtype) in enumerate(
+                            zip(layer_spec.shapes, layer_spec.dtypes)):
                         jax_dtype = t2j_dtype(dtype)
                         cache_shape = (num_blocks, *shape)
-                        sharding = NamedSharding(
-                            self.runner.mesh,
-                            PartitionSpec(ShardingAxisName.ATTN_DATA,
-                                          *([None] * (len(cache_shape) - 1))))
+                        if state_index == 0:
+                            # conv_state: [num_blocks, conv_kernel_size, intermediate_size]
+                            spec = PartitionSpec(None, None,
+                                                 ShardingAxisName.ATTN_HEAD)
+                        elif state_index == 1:
+                            # ssm_state: [num_blocks, num_heads, head_dim, state_size]
+                            spec = PartitionSpec(None,
+                                                 ShardingAxisName.ATTN_HEAD,
+                                                 None, None)
+                        else:
+                            spec = PartitionSpec(
+                                None, *([None] * (len(cache_shape) - 1)))
+
+                        sharding = NamedSharding(self.runner.mesh, spec)
 
                         def _allocate_mamba(c_shape=cache_shape,
                                             c_dtype=jax_dtype):
