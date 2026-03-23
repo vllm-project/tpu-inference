@@ -258,6 +258,16 @@ def _scheduler_worker_process(
                     _send_result(error)
                     raise error
 
+        except (SystemExit, KeyboardInterrupt):
+            logger.info(
+                f"Scheduler worker {rank} received shutdown signal, "
+                "exiting gracefully.")
+            try:
+                scheduler.shutdown()
+            except Exception:
+                pass
+            break
+
         except Exception as e:
             logger.error(
                 f"Error in scheduler worker {rank}: {e}. If "
@@ -431,7 +441,17 @@ class DPScheduler(SchedulerInterface):
                     f"(pipe_wait={pipe_wait:.2f}s, "
                     f"deserialize={deserialize:.2f}s, "
                     f"{len(raw_bytes)} bytes).")
-        except EOFError as e:
+        except (EOFError, ConnectionResetError, BrokenPipeError, OSError) as e:
+            # Check if the worker process is still alive for a better message
+            proc = self.processes[rank]
+            if not proc.is_alive():
+                exit_code = proc.exitcode
+                raise RuntimeError(
+                    f"Pipe error for rank {rank}: "
+                    f"Worker process terminated with exit code {exit_code}. "
+                    "This may indicate a crash or signal in the scheduler "
+                    "worker process."
+                ) from e
             raise RuntimeError(
                 f"Pipe error for rank {rank}: "
                 "Worker process terminated unexpectedly. "
@@ -1010,13 +1030,29 @@ class DPScheduler(SchedulerInterface):
 
     def shutdown(self) -> None:
         """Shutdown all DP rank scheduler worker processes."""
-        # Send shutdown command to all workers
+        # Send shutdown command to all workers, skipping dead ones
         for rank in range(self.dp_size):
-            self._send_command(rank, SchedulerCommand.SHUTDOWN)
+            if not self.processes[rank].is_alive():
+                logger.warning(
+                    f"Rank {rank}: Worker process already terminated "
+                    f"(exit code {self.processes[rank].exitcode}), "
+                    "skipping shutdown command.")
+                continue
+            try:
+                self._send_command(rank, SchedulerCommand.SHUTDOWN)
+            except (BrokenPipeError, OSError) as e:
+                logger.warning(
+                    f"Rank {rank}: Failed to send shutdown command: {e}")
 
-        # Wait for acknowledgment (blocking)
+        # Wait for acknowledgment (blocking), skipping dead ones
         for rank in range(self.dp_size):
-            self._get_result(rank, SchedulerCommand.SHUTDOWN)
+            if not self.processes[rank].is_alive():
+                continue
+            try:
+                self._get_result(rank, SchedulerCommand.SHUTDOWN)
+            except (RuntimeError, OSError) as e:
+                logger.warning(
+                    f"Rank {rank}: Failed to get shutdown acknowledgment: {e}")
 
         # Terminate and join all processes
         for process in self.processes:
@@ -1024,6 +1060,17 @@ class DPScheduler(SchedulerInterface):
             if process.is_alive():
                 process.terminate()
                 process.join()
+
+        # Close all pipe connections
+        for rank in range(self.dp_size):
+            try:
+                self.input_conns[rank].close()
+            except OSError:
+                pass
+            try:
+                self.output_conns[rank].close()
+            except OSError:
+                pass
 
         # Restore original pickle
         _disable_cloudpickle()
