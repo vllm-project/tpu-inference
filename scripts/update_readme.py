@@ -531,11 +531,7 @@ def update_readme():
                         c = r[1] if len(r) > 1 else ""
                         p = r[2] if len(r) > 2 else ""
 
-                        if section_key == "core_features" and feature in (
-                                "multi-host",
-                                "Single-Host-P-D-disaggregation"):
-                            # Skip rendering redundant rows
-                            continue
+                        # [REMOVED SKIP FILTER]
 
                         if section_key == "parallelism":
                             # Correctly parse Single-Host Correctness/Performance (r1,r2) and Multi-Host (r3,r4)
@@ -705,7 +701,8 @@ def update_readme():
                     }
 
             headers = [
-                "Model", "Type", "Unit Test", "Correctness Test", "Benchmark"
+                "Model", "Type", "Unit Test", "Correctness Test",
+                "Performance Test"
             ]
 
             for model_name, metrics in sorted(
