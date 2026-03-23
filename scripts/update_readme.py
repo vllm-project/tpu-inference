@@ -161,21 +161,12 @@ def _merge_hw_status(status_v6, status_v7):
     if "❌" in s6 or "fail" in s6 or "❌" in s7 or "fail" in s7:
         return _format_cell("❌&nbsp;Failing")
 
-    # If both pass natively
-    if ("✅" in s6 or "pass" in s6) and ("✅" in s7 or "pass" in s7):
+    # If ANY passes natively without failing, it gets a pass globally (fixes Either/OR logic for Features)
+    if "✅" in s6 or "pass" in s6 or "✅" in s7 or "pass" in s7:
         return _format_cell("✅&nbsp;Passing")
 
     # Handling N/A edge cases
-    s6_na = "n/a" in s6
-    s7_na = "n/a" in s7
-    s6_pass = "✅" in s6 or "pass" in s6
-    s7_pass = "✅" in s7 or "pass" in s7
-
-    if s6_pass and s7_na:
-        return _format_cell("✅&nbsp;Passing")
-    if s7_pass and s6_na:
-        return _format_cell("✅&nbsp;Passing")
-    if s6_na and s7_na:
+    if "n/a" in s6 and "n/a" in s7:
         return _format_cell("N/A")
 
     # Any residual state (unverified, untested, missing) goes to untested.
@@ -659,6 +650,9 @@ def update_readme():
             for row in static_d:
                 if not row or len(row) < 3:
                     continue
+                # Explicitly drop the duplicate bugged AWQ INT4 row per Brittany's feedback
+                if row[0] == "AWQ INT4" and not row[1]:
+                    continue
                 w = row[0]
                 m = row[1]
                 v6_f = _find_quantization_status(w, m, nightly_data["v6_flax"])
@@ -718,8 +712,9 @@ def update_readme():
                 "Model", "Type", "Unit Test", "Correctness Test", "Benchmark"
             ]
 
-            for model_name, metrics in sorted(merged_models.items(),
-                                              key=lambda x: x[0].lower()):
+            for model_name, metrics in sorted(
+                    merged_models.items(),
+                    key=lambda x: (x[1]["Type"].lower(), x[0].lower())):
                 u_combined = _merge_model_status_text(metrics["v6"]["u"],
                                                       metrics["v7"]["u"])
                 c_combined = _merge_model_status_text(metrics["v6"]["c"],
