@@ -18,48 +18,44 @@ set -euo pipefail
 readonly EXIT_SUCCESS=0
 readonly EXIT_FAILURE=1
 
+ARTIFACT_FOLDER="$(pwd)/artifacts"
+LOG_FOLDER="${ARTIFACT_FOLDER}/temp_logs"
+export ARTIFACT_FOLDER
+export LOG_FOLDER
+
+# shellcheck disable=SC2317
+cleanup_artifact_log() {
+  echo "deleting artifacts: $ARTIFACT_FOLDER"
+  rm -rf "$ARTIFACT_FOLDER"
+}
+
+# shellcheck disable=SC2317
+function defer_cleanup_and_report() {
+  # Capture the exit code of the last command executed before the trap was triggered.
+  # If the task is canceled too quickly, cleanup might not finish completely. Do not rely on it.
+  local exit_code=$?
+  echo "--- Running defer (cleanup and report)"
+  
+  # Best-effort cleanup of Docker resources.
+  # We use '|| true' to ensure that a cleanup failure doesn't overwrite our final exit code.
+  .buildkite/benchmark/scripts/cleanup_docker.sh || true
+  cleanup_artifact_log || true
+
+  # Exit with the final determined status code.
+  exit "$exit_code"
+}
+trap defer_cleanup_and_report EXIT
+
 echo "--- Generating Record ID"
 if [ -n "${BUILDKITE_STEP_ID:-}" ]; then
   # Use Buildkite step ID to ensure retries map to the same RecordId
   export RECORD_ID="bk-${BUILDKITE_STEP_ID}"
 else
-export RECORD_ID
+  export RECORD_ID
   RECORD_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 fi
 echo "Record ID: $RECORD_ID"
 
-# shellcheck disable=SC2317
-function defer_cleanup_and_report() {
-  # Capture the exit code of the last command executed before the trap was triggered.
-  local exit_code=$?
-  echo "--- Running defer (cleanup and report)"
-  
-  # Attempt to report the benchmark results to the database.
-  # If the reporting script fails (returns non-zero), we log an error.
-  if ! .buildkite/benchmark/scripts/report_result.sh "$RECORD_ID"; then
-    echo "Error: report_result.sh failed!"
-    
-    # If the main job was successful (exit_code 0) but reporting failed,
-    # we override the exit code to 1 so the Buildkite job is marked as failed.
-    if [ "$exit_code" -eq 0 ]; then
-      exit_code=1
-    fi
-  fi
-  
-  # Best-effort cleanup of Docker resources.
-  # We use '|| true' to ensure that a cleanup failure doesn't overwrite our final exit code.
-  .buildkite/benchmark/scripts/cleanup_docker.sh || true
-
-  # Cleanup artifact log folder
-  if [ -d "${ARTIFACT_FOLDER:-}" ]; then
-    echo "--- Cleaning up artifact folder: $ARTIFACT_FOLDER"
-    rm -rf "$ARTIFACT_FOLDER"
-  fi
-  
-  # Exit with the final determined status code.
-  exit "$exit_code"
-}
-trap defer_cleanup_and_report EXIT
 
 echo "--- Verifying Submodule Commit"
 git submodule status
@@ -67,56 +63,40 @@ git submodule status
 echo "--- Registering Run to Spanner DB"
 # Ensure all required envs are present. Some are provided by Buildkite directly or from the step.
 # For missing optional fields we provide defaults.
+CODE_HASH=$(buildkite-agent meta-data get "CODE_HASH")
+JOB_REFERENCE=$(buildkite-agent meta-data get "JOB_REFERENCE")
+RUN_TYPE="${RUN_TYPE:-DAILY}"
 EXPECTED_ETEL="${EXPECTED_ETEL:-3600000}"
 NUM_PROMPTS="${NUM_PROMPTS:-1000}"
 MODELTAG="${MODELTAG:-PROD}"
 PREFIX_LEN="${PREFIX_LEN:-0}"
 DATASET="${DATASET:-}"
-ADDITIONAL_CONFIG="${ADDITIONAL_CONFIG:-"{}"}"
-EXTRA_ARGS="${EXTRA_ARGS:-}"
 
-# Reconstruct EXTRA_ENVS for the database based on the environment variables
-# that are present. This allows the YAML to remain clean while keeping the DB populated.
-GENERATED_EXTRA_ENVS=""
-EXTRA_ENV_KEYS=(
-  "VLLM_MLA_DISABLE" "NEW_MODEL_DESIGN" "MOE_REQUANTIZE_BLOCK_SIZE" 
-  "MOE_REQUANTIZE_WEIGHT_DTYPE" "TPU_BACKEND_TYPE" "MODEL_IMPL_TYPE"
-  "USE_MOE_EP_KERNEL" "USE_BENCHMARK_SERVING" "MAX_CONCURRENCY"
-)
-for key in "${EXTRA_ENV_KEYS[@]}"; do
-  # Check if the environment variable is set
-  if [ -n "${!key:-}" ]; then
-    GENERATED_EXTRA_ENVS+="${key}=${!key};"
-  fi
-done
-
-# If EXTRA_ENVS was passed directly, append the generated ones to it
-if [ -n "${EXTRA_ENVS:-}" ]; then
-  EXTRA_ENVS="${EXTRA_ENVS};${GENERATED_EXTRA_ENVS}"
-else
-  EXTRA_ENVS="${GENERATED_EXTRA_ENVS}"
-fi
-
-# We will need CODE_HASH and JOB_REFERENCE from Buildkite env
-CODE_HASH="${CODE_HASH:-$(buildkite-agent meta-data get 'CODE_HASH' || echo '')}"
-JOB_REFERENCE="${JOB_REFERENCE:-${BUILDKITE_BUILD_URL:-}}"
-RUN_TYPE="${RUN_TYPE:-DAILY}"
-
+# Helper to handle SQL quoting for JSON/String fields.
+# This now properly escapes internal single quotes by doubling them (' -> '').
 prepare_sql_val() {
   local val="$1"
   local default="$2"
+
+  # if empty, return default
   if [ -z "$val" ]; then
     echo "$default"
     return
   fi
-  # Escape internal single quotes
+
+  # Remove leading/trailing single quotes if the CSV parser preserved them
+  val="${val#\'}"
+  val="${val%\'}"
+
+  # Escape internal single quotes for Spanner SQL (replace ' with '')
   local escaped_val="${val//\'/\'\'}"
+
+  # Wrap the escaped value in single quotes for the SQL statement
   echo "'$escaped_val'"
 }
 
-SQL_ADDITIONAL_CONFIG=$(prepare_sql_val "$ADDITIONAL_CONFIG" "'{}'")
-SQL_EXTRA_ARGS=$(prepare_sql_val "$EXTRA_ARGS" "''")
-SQL_EXTRA_ENVS=$(prepare_sql_val "$EXTRA_ENVS" "''")
+SQL_ADDITIONAL_CONFIG=$(prepare_sql_val "${ADDITIONAL_CONFIG:-}" "'{}'")
+SQL_EXTRA_ARGS=$(prepare_sql_val "${EXTRA_ARGS:-}" "''")
 
 echo "--- Querying existing TryCount for $RECORD_ID"
 TRY_COUNT_JSON=$(gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
@@ -131,8 +111,8 @@ TRY_COUNT=$(echo "$TRY_COUNT_JSON" | jq -r 'if .rows then (if (.rows | length) >
 if [ "$TRY_COUNT" == "null" ] || [ -z "$TRY_COUNT" ]; then
   echo "--- Inserting new RunRecord (TryCount=1)"
   gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
-    --project="$GCP_PROJECT_ID" \
     --instance="$GCP_INSTANCE_ID" \
+    --project="$GCP_PROJECT_ID" \
     --sql="INSERT INTO RunRecord (
       RecordId, Status, CreatedTime, LastUpdate, CreatedBy, JobReference, RunBy,
       Device, Model, RunType, CodeHash,
@@ -154,7 +134,7 @@ if [ "$TRY_COUNT" == "null" ] || [ -z "$TRY_COUNT" ]; then
       $NUM_PROMPTS,
       '$MODELTAG',
       $PREFIX_LEN,
-      $SQL_EXTRA_ENVS,
+      $EXTRA_ENVS,
       $SQL_ADDITIONAL_CONFIG,
       $SQL_EXTRA_ARGS,
       1
@@ -172,17 +152,19 @@ else
   }
 fi
 
-echo "--- Preparing Config Environment"
-ARTIFACT_FOLDER="$(pwd)/artifacts"
-export ARTIFACT_FOLDER
-LOG_FOLDER="${ARTIFACT_FOLDER}/temp_logs"
-export LOG_FOLDER
+#
+# Prepare artifacts folder to save log and another need shared file, mount to docker container
+#
 mkdir -p "$ARTIFACT_FOLDER"
 mkdir -p "$LOG_FOLDER"
 
 # We safely dump the specific environment variables
 ENV_FILE="artifacts/${RECORD_ID}.env"
 cat <<EOF > "$ENV_FILE"
+RECORD_ID='${RECORD_ID}'
+CODE_HASH='${CODE_HASH}'
+JOB_REFERENCE='${JOB_REFERENCE}'
+RUN_TYPE='${RUN_TYPE:-DAILY}'
 DEVICE='${DEVICE}'
 MODEL='${MODEL}'
 MAX_NUM_SEQS='${MAX_NUM_SEQS}'
@@ -198,21 +180,7 @@ MODELTAG='${MODELTAG}'
 PREFIX_LEN='${PREFIX_LEN}'
 ADDITIONAL_CONFIG='${ADDITIONAL_CONFIG}'
 EXTRA_ARGS='${EXTRA_ARGS}'
-CODE_HASH='${CODE_HASH}'
-RECORD_ID='${RECORD_ID}'
-GCP_REGION='${GCP_REGION:-}'
-GCP_PROJECT_ID='${GCP_PROJECT_ID:-}'
-ARTIFACT_REPO='${ARTIFACT_REPO:-}'
-GCS_BUCKET='${GCS_BUCKET:-}'
-SKIP_JAX_PRECOMPILE='${SKIP_JAX_PRECOMPILE:-}'
 EOF
-
-# Inject dynamic EXTRA_ENVS generated ones
-for key in "${EXTRA_ENV_KEYS[@]}"; do
-  if [ -n "${!key:-}" ]; then
-    echo "${key}='${!key}'" >> "$ENV_FILE"
-  fi
-done
 
 # Sync datasets (Copied from run_job.sh)
 DATASETS=("custom-token" "mmlu" "mlperf" "bench-custom-token" "math500" "bench-custom-mm")
@@ -253,8 +221,17 @@ declare -a BENCHMARK_DOCKER_ARGS=(
 BENCHMARK_DOCKER_ARGS_STR="$(printf '%s\n' "${BENCHMARK_DOCKER_ARGS[@]}")"
 export BENCHMARK_DOCKER_ARGS_STR
 
-# Restore the SKIP_JAX_PRECOMPILE logic
-[ -n "${SKIP_JAX_PRECOMPILE:-}" ] && export SKIP_JAX_PRECOMPILE
+if [ -n "${EXTRA_ENVS:-}" ]; then
+  echo "--- Parsing EXTRA_ENVS into Docker arguments"
+  
+  IFS=';' read -ra ENV_PAIRS <<< "$EXTRA_ENVS"
+  
+  for pair in "${ENV_PAIRS[@]}"; do
+    if [ -n "$pair" ]; then
+      BENCHMARK_DOCKER_ARGS+=("-e" "$pair")
+    fi
+  done
+fi
 
 .buildkite/scripts/run_in_docker.sh bash -c "
   echo always > /sys/kernel/mm/transparent_hugepage/enabled && \
@@ -263,5 +240,13 @@ export BENCHMARK_DOCKER_ARGS_STR
     echo "Error running benchmark job in docker."
     BM_JOB_STATUS=$EXIT_FAILURE
 }
+
+echo "Benchmark script completed."
+
+#
+# Report result
+#
+echo "Reporting result..."
+.buildkite/benchmark/scripts/report_result.sh "$RECORD_ID"
 
 exit $BM_JOB_STATUS

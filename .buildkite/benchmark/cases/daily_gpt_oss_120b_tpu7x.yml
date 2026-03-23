@@ -31,8 +31,7 @@ definitions:
     EXPECTED_ETEL: "43200000"
     NUM_PROMPTS: "1000"
     MODELTAG: "NEW"
-    USE_MOE_EP_KERNEL: "0"
-    MODEL_IMPL_TYPE: "vllm"
+    EXTRA_ENVS: "USE_MOE_EP_KERNEL=0;MODEL_IMPL_TYPE=vllm"
     EXTRA_ARGS: '--data-parallel-size=2 --gpu-memory-utilization=0.98'
 
   base_cfg_0: &base_cfg_0
@@ -50,8 +49,7 @@ definitions:
     EXPECTED_ETEL: "43200000"
     NUM_PROMPTS: "1024"
     MODELTAG: "NEW"
-    USE_MOE_EP_KERNEL: "0"
-    MODEL_IMPL_TYPE: "vllm"
+    EXTRA_ENVS: "USE_MOE_EP_KERNEL=0;MODEL_IMPL_TYPE=vllm"
     EXTRA_ARGS: '--kv-cache-dtype=fp8 --gpu-memory-utilization=0.97'
 
   base_cfg_1: &base_cfg_1
@@ -69,8 +67,7 @@ definitions:
     EXPECTED_ETEL: "43200000"
     NUM_PROMPTS: "1024"
     MODELTAG: "NEW"
-    USE_MOE_EP_KERNEL: "0"
-    MODEL_IMPL_TYPE: "vllm"
+    EXTRA_ENVS: "USE_MOE_EP_KERNEL=0;MODEL_IMPL_TYPE=vllm"
     EXTRA_ARGS: '--kv-cache-dtype=fp8 --gpu-memory-utilization=0.95'
 
   base_cfg_2: &base_cfg_2
@@ -88,8 +85,7 @@ definitions:
     EXPECTED_ETEL: "43200000"
     NUM_PROMPTS: "4096"
     MODELTAG: "NEW"
-    USE_MOE_EP_KERNEL: "0"
-    MODEL_IMPL_TYPE: "vllm"
+    EXTRA_ENVS: "USE_MOE_EP_KERNEL=0;MODEL_IMPL_TYPE=vllm"
     EXTRA_ARGS: '--data-parallel-size=4 --kv-cache-dtype=fp8 --gpu-memory-utilization=0.97'
 
   base_cfg_3: &base_cfg_3
@@ -107,8 +103,7 @@ definitions:
     EXPECTED_ETEL: "43200000"
     NUM_PROMPTS: "4096"
     MODELTAG: "NEW"
-    USE_MOE_EP_KERNEL: "0"
-    MODEL_IMPL_TYPE: "vllm"
+    EXTRA_ENVS: "USE_MOE_EP_KERNEL=0;MODEL_IMPL_TYPE=vllm"
     EXTRA_ARGS: '--data-parallel-size=4 --kv-cache-dtype=fp8 --gpu-memory-utilization=0.95'
 
   base_cfg_4: &base_cfg_4

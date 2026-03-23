@@ -28,4 +28,4 @@ steps:
      commands:
        - CODE_HASH=$$(buildkite-agent meta-data get 'CODE_HASH')
        - echo "CODE_HASH=$${CODE_HASH}"
-       - bash .buildkite/benchmark/scripts/daily_benchmark.sh $${CODE_HASH}
+       - bash .buildkite/benchmark/scripts/daily_benchmark.sh
