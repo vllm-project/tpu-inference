@@ -246,8 +246,8 @@ def generate_html_quantization_table(headers, data):
     html.append("      <th>Checkpoint dtype</th>")
     html.append("      <th>Method</th>")
     html.append("      <th>Supported<br>Hardware Acceleration</th>")
-    html.append("      <th>flax</th>")
-    html.append("      <th>torchax</th>")
+    html.append("      <th>Flax</th>")
+    html.append("      <th>Torchax</th>")
     html.append("    </tr>")
     html.append("  </thead>")
     html.append("  <tbody>")
@@ -473,10 +473,14 @@ def generate_html_parallelism_table(headers, data):
         v7_flax = row[3]
         v7_torch = row[4]
 
-        flax_single = _merge_hw_status(v6_flax.get("single", "❓ Untested"), v7_flax.get("single", "❓ Untested"))
-        flax_multi = _merge_hw_status(v6_flax.get("multi", "❓ Untested"), v7_flax.get("multi", "❓ Untested"))
-        torch_single = _merge_hw_status(v6_torch.get("single", "❓ Untested"), v7_torch.get("single", "❓ Untested"))
-        torch_multi = _merge_hw_status(v6_torch.get("multi", "❓ Untested"), v7_torch.get("multi", "❓ Untested"))
+        flax_single = _merge_hw_status(v6_flax.get("single", "❓ Untested"),
+                                       v7_flax.get("single", "❓ Untested"))
+        flax_multi = _merge_hw_status(v6_flax.get("multi", "❓ Untested"),
+                                      v7_flax.get("multi", "❓ Untested"))
+        torch_single = _merge_hw_status(v6_torch.get("single", "❓ Untested"),
+                                        v7_torch.get("single", "❓ Untested"))
+        torch_multi = _merge_hw_status(v6_torch.get("multi", "❓ Untested"),
+                                       v7_torch.get("multi", "❓ Untested"))
 
         html.append(f"      <td>{flax_single}</td>")
         html.append(f"      <td>{flax_multi}</td>")
@@ -493,7 +497,6 @@ def update_readme():
     """Finds markers in README.md and replaces content with fresh tables."""
     with open(README_PATH, "r", encoding="utf-8") as f:
         content = f.read()
-
 
     for section_key, file_sources in CSV_MAP.items():
         headers, all_data = [], []
@@ -549,8 +552,12 @@ def update_readme():
 
                         if section_key == "parallelism":
                             # Correctly parse Single-Host Correctness/Performance (r1,r2) and Multi-Host (r3,r4)
-                            single_merged = merge_metrics(r[1] if len(r) > 1 else "", r[2] if len(r) > 2 else "")
-                            multi_merged = merge_metrics(r[3] if len(r) > 3 else "", r[4] if len(r) > 4 else "")
+                            single_merged = merge_metrics(
+                                r[1] if len(r) > 1 else "",
+                                r[2] if len(r) > 2 else "")
+                            multi_merged = merge_metrics(
+                                r[3] if len(r) > 3 else "",
+                                r[4] if len(r) > 4 else "")
                             merged_features[feature][col_key] = {
                                 "single": single_merged,
                                 "multi": multi_merged
@@ -688,8 +695,16 @@ def update_readme():
                     if model_name not in merged_models:
                         merged_models[model_name] = {
                             "Type": m_type,
-                            "v6": {"u": "❓ Untested", "c": "❓ Untested", "b": "❓ Untested"},
-                            "v7": {"u": "❓ Untested", "c": "❓ Untested", "b": "❓ Untested"}
+                            "v6": {
+                                "u": "❓ Untested",
+                                "c": "❓ Untested",
+                                "b": "❓ Untested"
+                            },
+                            "v7": {
+                                "u": "❓ Untested",
+                                "c": "❓ Untested",
+                                "b": "❓ Untested"
+                            }
                         }
 
                     hw_key = "v6" if "v6" in col_key else "v7"
