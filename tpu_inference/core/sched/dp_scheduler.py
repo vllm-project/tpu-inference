@@ -176,7 +176,11 @@ def _scheduler_worker_process(
                     _send_result(None)  # Signal completion
 
                 case SchedulerCommand.UPDATE_FROM_OUTPUT:
-                    scheduler_output, model_runner_output = data
+                    scheduler_output, rank_req_ids, \
+                        model_runner_output_bytes = data
+                    model_runner_output = cloudpickle.loads(
+                        model_runner_output_bytes)
+                    model_runner_output.req_ids = rank_req_ids
                     result = scheduler.update_from_output(
                         scheduler_output, model_runner_output)
                     _send_result(result)
@@ -768,7 +772,8 @@ class DPScheduler(SchedulerInterface):
         for rank in range(self.dp_size):
             self._send_command(
                 rank, SchedulerCommand.UPDATE_FROM_OUTPUT,
-                (rank_scheduler_outputs[rank], rank_model_outputs[rank]))
+                (rank_scheduler_outputs[rank], rank_req_ids[rank],
+                 model_runner_output_bytes))
 
         combined_engine_outputs = defaultdict(list)
         rank_scheduler_stats: List[Optional[SchedulerStats]] = []
@@ -832,6 +837,22 @@ class DPScheduler(SchedulerInterface):
             outputs[rank].req_ids.append(req_id)
 
         return outputs
+
+    def _split_req_ids_by_rank(
+            self,
+            global_model_output: ModelRunnerOutput) -> List[List[str]]:
+        """Split request IDs by DP rank.
+
+        This is a lightweight alternative to _split_model_output_by_rank that
+        returns only the per-rank req_id lists. Used with the optimized
+        UPDATE_FROM_OUTPUT path where ModelRunnerOutput is serialized once and
+        shared across all ranks.
+        """
+        rank_req_ids: List[List[str]] = [[] for _ in range(self.dp_size)]
+        for req_id in global_model_output.req_ids:
+            rank = self.assigned_dp_rank[req_id]
+            rank_req_ids[rank].append(req_id)
+        return rank_req_ids
 
     def _cleanup_finished_requests(self, finished_req_ids: set[str]) -> None:
         """Remove finished requests from our DP rank assignment tracking."""
