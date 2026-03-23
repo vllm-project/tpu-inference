@@ -31,12 +31,7 @@ definitions:
     EXPECTED_ETEL: "43200000"
     NUM_PROMPTS: "512"
     MODELTAG: "DP_ATTENTION"
-    VLLM_MLA_DISABLE: "0"
-    NEW_MODEL_DESIGN: "1"
-    MOE_REQUANTIZE_BLOCK_SIZE: "512"
-    MOE_REQUANTIZE_WEIGHT_DTYPE: "fp4"
-    TPU_BACKEND_TYPE: "jax"
-    MODEL_IMPL_TYPE: "vllm"
+    EXTRA_ENVS: "VLLM_MLA_DISABLE=0;NEW_MODEL_DESIGN=1;MOE_REQUANTIZE_BLOCK_SIZE=512;MOE_REQUANTIZE_WEIGHT_DTYPE=fp4;TPU_BACKEND_TYPE=jax;MODEL_IMPL_TYPE=vllm"
     ADDITIONAL_CONFIG: '{"sharding": {"sharding_strategy": {"enable_dp_attention": true}}}'
     EXTRA_ARGS: '--kv-cache-dtype=fp8 --enable-expert-parallel --gpu-memory-utilization=0.95'
 
@@ -55,12 +50,7 @@ definitions:
     EXPECTED_ETEL: "43200000"
     NUM_PROMPTS: "3584"
     MODELTAG: "DP_ATTENTION"
-    VLLM_MLA_DISABLE: "0"
-    NEW_MODEL_DESIGN: "1"
-    MOE_REQUANTIZE_BLOCK_SIZE: "512"
-    MOE_REQUANTIZE_WEIGHT_DTYPE: "fp4"
-    TPU_BACKEND_TYPE: "jax"
-    MODEL_IMPL_TYPE: "vllm"
+    EXTRA_ENVS: "VLLM_MLA_DISABLE=0;NEW_MODEL_DESIGN=1;MOE_REQUANTIZE_BLOCK_SIZE=512;MOE_REQUANTIZE_WEIGHT_DTYPE=fp4;TPU_BACKEND_TYPE=jax;MODEL_IMPL_TYPE=vllm"
     ADDITIONAL_CONFIG: '{"sharding": {"sharding_strategy": {"enable_dp_attention": true}}}'
     EXTRA_ARGS: '--kv-cache-dtype=fp8 --enable-expert-parallel --gpu-memory-utilization=0.95'
 
