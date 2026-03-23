@@ -120,7 +120,6 @@ class VllmModelWrapper:
         self.vllm_config.quant_config = get_tpu_quantization_config(
             self.vllm_config, self.mesh)
         self._apply_pp_patch()
-        self._apply_pp_patch()
         self._patch_vllm_ops()
         apply_gated_delta_net_torch_ops_patch()
 
@@ -196,7 +195,6 @@ class VllmModelWrapper:
         # The DummyModelLoader in vLLM calls torch._sync for torch_xla path when
         # it detects the tpu platform, but we don't need it and it causes crash
         # without proper setup.
-
         load_context = patch(
             "torch._sync",
             return_value=None) if use_random_weights else nullcontext()

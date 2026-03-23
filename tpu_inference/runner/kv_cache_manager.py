@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, List
 
 import jax
@@ -44,6 +44,14 @@ if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class KVCacheMetadata:
+    count: int = 0
+    shape: tuple = None
+    dtype: jnp.dtype = None
+    sharding: NamedSharding = None
 
 
 class KVCacheManager:
@@ -312,11 +320,21 @@ class KVCacheManager:
         kv_caches = self.runner.kv_caches
         num_blocks_list = []
         # assert that each kv_cache_tensor in kv_cache_config.kv_cache_tensors has the same number of shared layers
+        # This is needed for models like Qwen3.5 where every 4 layers share the same KV cache (3 linear attn and 1 full attn)
         num_shared_layers = len(kv_cache_config.kv_cache_tensors[0].shared_by)
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             assert len(
                 kv_cache_tensor.shared_by
             ) == num_shared_layers, f"Expected all kv_cache_tensors to have the same number of shared layers {num_shared_layers}, but found {len(kv_cache_tensor.shared_by)}"
+        # TODO (jacobplatin): we should not be replicating the kv cache for each layer and instead
+        # should follow the native GPU/Torch approach where every group of layers (shared_by)
+        # shares the same underlying raw tensor.
+        # Mapping between KV cache type and the associated metadata, needed for logging
+        # about KV cache
+        metadata = {
+            "mamba": KVCacheMetadata(),
+            "regular_attn": KVCacheMetadata()
+        }
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             for j, layer_name in enumerate(kv_cache_tensor.shared_by):
                 layer_spec = layer_name_to_spec[layer_name]
@@ -347,6 +365,8 @@ class KVCacheManager:
 
                         sharding = NamedSharding(self.runner.mesh, spec)
 
+                        # NOTE: conv state will always be BF16 and SSM state will always be FP32
+                        # regardless of the `kv-cache-dtype` (as is in upstream vLLM)
                         def _allocate_mamba(c_shape=cache_shape,
                                             c_dtype=jax_dtype):
                             return jnp.empty(shape=c_shape, dtype=c_dtype)
@@ -355,39 +375,50 @@ class KVCacheManager:
                                                  out_shardings=sharding)
                         mamba_states.append(mamba_allocate())
 
-                    kv_caches.append(tuple(mamba_states))
-                    num_blocks_list.append(num_blocks)
-                    self.runner.layer_name_to_kvcache_index[layer_name] = (
-                        i * num_shared_layers) + j
-                    continue
+                    metadata["mamba"].count += 1
+                    if metadata["mamba"].shape is None:
+                        # Mamba is a tuple of arrays, so we store a tuple of their metadata
+                        metadata["mamba"].shape = tuple(s.shape
+                                                        for s in mamba_states)
+                        metadata["mamba"].dtype = tuple(s.dtype
+                                                        for s in mamba_states)
+                        metadata["mamba"].sharding = tuple(
+                            s.sharding for s in mamba_states)
 
-                page_size_bytes = layer_spec.page_size_bytes
-                assert kv_cache_tensor.size % page_size_bytes == 0
-                num_blocks = kv_cache_tensor.size // page_size_bytes
-                dp_size = self.runner.vllm_config.sharding_config.total_dp_size
-                # num_blocks must be a multiple of dp_size
-                num_blocks = (num_blocks // dp_size) * dp_size
-                # NOTE: we'll multiply the num_kv_heads by 2 in the function
-                if self.use_mla:
-                    head_size = self.runner.model_config.hf_config.kv_lora_rank + \
-                        self.runner.model_config.hf_config.qk_rope_head_dim
+                    kv_caches.append(tuple(mamba_states))
                 else:
-                    head_size = layer_spec.head_size
-                kv_cache = create_kv_caches(
-                    num_blocks=num_blocks,
-                    block_size=layer_spec.block_size,
-                    num_kv_heads=layer_spec.num_kv_heads,
-                    head_size=head_size,
-                    mesh=self.runner.mesh,
-                    layer_names=[f'kv_cache_tensor.{i}'],
-                    cache_dtype=t2j_dtype(layer_spec.dtype),
-                    use_mla=self.use_mla,
-                )[0]
-                # (14212, 2096, 2, 2, 256)
-                kv_caches.append(kv_cache)
+                    page_size_bytes = layer_spec.page_size_bytes
+                    assert kv_cache_tensor.size % page_size_bytes == 0
+                    num_blocks = kv_cache_tensor.size // page_size_bytes
+                    dp_size = self.runner.vllm_config.sharding_config.total_dp_size
+                    # num_blocks must be a multiple of dp_size
+                    num_blocks = (num_blocks // dp_size) * dp_size
+                    # NOTE: we'll multiply the num_kv_heads by 2 in the function
+                    if self.use_mla:
+                        head_size = self.runner.model_config.hf_config.kv_lora_rank + \
+                            self.runner.model_config.hf_config.qk_rope_head_dim
+                    else:
+                        head_size = layer_spec.head_size
+                    kv_cache = create_kv_caches(
+                        num_blocks=num_blocks,
+                        block_size=layer_spec.block_size,
+                        num_kv_heads=layer_spec.num_kv_heads,
+                        head_size=head_size,
+                        mesh=self.runner.mesh,
+                        layer_names=[f'kv_cache_tensor.{i}'],
+                        cache_dtype=t2j_dtype(layer_spec.dtype),
+                        use_mla=self.use_mla,
+                    )[0]
+                    kv_caches.append(kv_cache)
+
+                    # Update Regular Attention Metadata
+                    metadata["regular_attn"].count += 1
+                    if metadata["regular_attn"].shape is None:
+                        metadata["regular_attn"].shape = kv_cache.shape
+                        metadata["regular_attn"].dtype = kv_cache.dtype
+                        metadata["regular_attn"].sharding = kv_cache.sharding
+
                 num_blocks_list.append(num_blocks)
-                # for layer_name in kv_cache_tensor.shared_by:
-                # TODO
                 self.runner.layer_name_to_kvcache_index[layer_name] = (
                     i * num_shared_layers) + j
         if self.shared_kv_cache_layers:
@@ -396,15 +427,29 @@ class KVCacheManager:
                 self.runner.layer_name_to_kvcache_index[
                     layer_name] = self.runner.layer_name_to_kvcache_index[
                         target_layer_name]
-        # TODO: update for Mamba
-        logger.info(
-            f"Init kv-cache | "
-            f"num_layers={len(kv_caches)} | "
-            # f"shape=(num_blocks, {kv_caches[0].shape[1:]}) | "
-            f"num_blocks={num_blocks_list} | "
-            # f"sharding={kv_caches[0].sharding} | "
-            # f"dtype={kv_caches[0].dtype} | "
+
+        log_parts = [
+            "Init kv-cache", f"num_total_layers={len(kv_caches)}",
+            f"num_blocks={num_blocks_list}"
+        ]
+
+        if metadata["regular_attn"].count > 0:
+            log_parts.append(
+                f"regular_attn_layers={metadata['regular_attn'].count} | "
+                f"regular_attn_shape={metadata['regular_attn'].shape} | "
+                f"regular_attn_sharding={metadata['regular_attn'].sharding} | "
+                f"regular_attn_dtype={metadata['regular_attn'].dtype}")
+
+        if metadata["mamba"].count > 0:
+            log_parts.append(f"mamba_layers={metadata['mamba'].count} | "
+                             f"mamba_shape={metadata['mamba'].shape} | "
+                             f"mamba_sharding={metadata['mamba'].sharding} | "
+                             f"mamba_dtype={metadata['mamba'].dtype}")
+
+        log_parts.append(
             f"hbm={utils.hbm_usage_gb(self.runner.mesh.devices.flatten())}Gb")
+
+        logger.info(" | ".join(log_parts))
 
     def delete_kv_cache(self) -> None:
         """Delete KV cache JAX arrays to free HBM.

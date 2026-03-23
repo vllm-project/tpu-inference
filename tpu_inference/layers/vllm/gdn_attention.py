@@ -24,7 +24,15 @@ from tpu_inference.models.vllm.vllm_model_wrapper_context import \
 
 
 def _l2_normalize(x: jnp.ndarray, eps: float = 1e-6) -> jnp.ndarray:
-    """L2 normalize along last dimension."""
+    """L2 normalize along last dimension.
+
+    Args:
+        x: input to normalize
+        eps: epsilon for numerical stability
+
+    Returns:
+        normalized x
+    """
     norm = jnp.sqrt(jnp.sum(x * x, axis=-1, keepdims=True) + eps)
     return x / norm
 
@@ -46,7 +54,7 @@ def _causal_conv1d(
     Returns:
         (B, T, C) output (same length due to causal padding)
     """
-    B, T, C = x.shape
+    _, _, C = x.shape
 
     # Left-pad by (kernel_size - 1) for causal
     x_padded = jnp.pad(x, ((0, 0), (kernel_size - 1, 0), (0, 0)))
@@ -84,7 +92,18 @@ def _causal_conv1d_step(
     conv_weight: jnp.ndarray,
     conv_bias: Optional[jnp.ndarray] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Single-step causal conv1d for decode mode."""
+    """Single-step causal conv1d for decode mode.
+
+    Args:
+        x_new: (B, 1, C) input
+        conv_state: (B, T, C) state
+        conv_weight: (C, 1, kernel_size) depthwise kernel (PyTorch Conv1d format)
+        conv_bias: optional (C,) bias
+
+    Returns:
+        (B, 1, C) output
+        (B, T, C) new state
+    """
     new_state = jnp.concatenate([conv_state[:, 1:, :], x_new], axis=1)
     window = jnp.concatenate([conv_state, x_new], axis=1)
 
@@ -214,14 +233,27 @@ def _chunk_gated_delta_rule(
 
 
 def _recurrent_gated_delta_rule_step(
-    query,
-    key,
-    value,
-    g,
-    beta,
-    state,
+    query: jnp.ndarray,
+    key: jnp.ndarray,
+    value: jnp.ndarray,
+    g: jnp.ndarray,
+    beta: jnp.ndarray,
+    state: Optional[jnp.ndarray] = None,
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
-    """Single-step for decode. Not yet optimized."""
+    """Single-step for decode.
+
+    Args:
+        query: (B, H, T, d_k)
+        key: (B, H, T, d_k)
+        value: (B, H, T, d_v)
+        g: (B, H, T)
+        beta: (B, H, T)
+        state: (B, H, d_k, d_v)
+
+    Returns:
+        output: (B, H, T, d_v)
+        new_state: (B, H, d_k, d_v)
+    """
     # Just use chunk_gated_delta_rule with T=1
     output, new_state = _chunk_gated_delta_rule(
         query,
@@ -252,8 +284,32 @@ def _jax_gdn_attention_core(
     d_k: int,
     d_v: int,
     kernel_size: int,
-):
-    """Pure JAX implementation of the GDN sequence and recurrence logic."""
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Pure JAX implementation of the GDN sequence and recurrence logic.
+
+    Args:
+        mixed_qkv: (B, T, 3 * d_k)
+        b: (B, H, T, d_k)
+        a: (B, H, T, d_k)
+        conv_state: (B, T, C)
+        recurrent_state: (B, H, d_k, d_v)
+        conv_weight: (C, 1, kernel_size)
+        conv_bias: (C,)
+        A_log: (B, H, T)
+        dt_bias: (B, H, T)
+        is_prefill: bool
+        n_kq: int
+        n_v: int
+        d_k: int
+        d_v: int
+        kernel_size: int
+
+    Returns:
+        output: (B, H, T, d_v)
+        new_conv_state: (B, T, C)
+        new_recurrent_state: (B, H, d_k, d_v)
+
+    """
     B, T, _ = mixed_qkv.shape
     key_dim = n_kq * d_k
 
@@ -435,7 +491,14 @@ def gdn_attention_core_tpu(
     core_attn_out.copy_(torch_view(j_output_flat))
 
 
-def apply_gated_delta_net_torch_ops_patch():
+def apply_gated_delta_net_torch_ops_patch() -> None:
+    """
+    This is a patch to inject the `gdn_attention_core` op so the
+    Torch/GPU  kernel is bypassed in favor of the TPU kernel
+    here:
+    https://github.com/vllm-project/vllm/blob/697e4ff3528c72806a4d00ed9b7581332b9efd43/vllm/model_executor/models/qwen3_next.py#L671
+
+    """
     try:
         import vllm.model_executor.models.qwen3_next  # noqa: F401
     except ImportError:

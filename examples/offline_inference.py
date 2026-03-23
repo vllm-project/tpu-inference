@@ -30,6 +30,8 @@ def create_parser():
     # chat params
     chat_group = parser.add_argument_group("Chat parameters")
     chat_group.add_argument("--use-chat-template", action="store_true")
+    # NOTE: a few models (like Qwen3.5) can use this to disable thinking,
+    # e.g. --chat-template-kwargs='{"enable_thinking": false}'
     chat_group.add_argument('--chat-template-kwargs',
                             type=json.loads,
                             default={})
@@ -45,6 +47,9 @@ def main(args: dict):
     top_k = args.pop("top_k")
     use_chat_template = args.pop("use_chat_template")
     chat_template_kwargs = args.pop('chat_template_kwargs')
+    # Safeguard in case the user doesn't provide use_chat_template
+    if chat_template_kwargs != {}:
+        use_chat_template = True
 
     # Create an LLM
     llm = LLM(**args)
