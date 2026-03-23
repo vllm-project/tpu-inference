@@ -259,9 +259,8 @@ def _scheduler_worker_process(
                     raise error
 
         except (SystemExit, KeyboardInterrupt):
-            logger.info(
-                f"Scheduler worker {rank} received shutdown signal, "
-                "exiting gracefully.")
+            logger.info(f"Scheduler worker {rank} received shutdown signal, "
+                        "exiting gracefully.")
             try:
                 scheduler.shutdown()
             except Exception:
@@ -351,7 +350,7 @@ class DPScheduler(SchedulerInterface):
         # which causes GIL contention and thread convoy effects at high DP
         # sizes. Using raw Pipe connections eliminates all background threads.
         ctx = multiprocessing.get_context('fork')
-        self.input_conns: List[Connection] = []   # parent writes, child reads
+        self.input_conns: List[Connection] = []  # parent writes, child reads
         self.output_conns: List[Connection] = []  # child writes, parent reads
         self.processes: List[Process] = []
 
@@ -401,7 +400,9 @@ class DPScheduler(SchedulerInterface):
             rank_config.num_blocks = kv_cache_config.num_blocks // self.dp_size
             self.per_rank_kv_cache_configs.append(rank_config)
 
-    def _send_command(self, rank: int, command: SchedulerCommand,
+    def _send_command(self,
+                      rank: int,
+                      command: SchedulerCommand,
                       data: Any = None) -> None:
         """Send a command to a worker process via its input pipe."""
         start_time = time()
@@ -409,12 +410,12 @@ class DPScheduler(SchedulerInterface):
         serialize_time = time() - start_time
         self.input_conns[rank].send_bytes(payload)
         if serialize_time > 1.0:
-            logger.warning(
-                f"Slow serialization ({serialize_time:.2f}s, "
-                f"{len(payload)} bytes) for '{command.value}' "
-                f"command to rank {rank}/{self.dp_size}.")
+            logger.warning(f"Slow serialization ({serialize_time:.2f}s, "
+                           f"{len(payload)} bytes) for '{command.value}' "
+                           f"command to rank {rank}/{self.dp_size}.")
 
-    def _get_result(self, rank: int,
+    def _get_result(self,
+                    rank: int,
                     command: Optional[SchedulerCommand] = None) -> Any:
         """Get result from a worker process via its output pipe.
 
@@ -434,14 +435,13 @@ class DPScheduler(SchedulerInterface):
                 cmd_name = command.value if command else "unknown"
                 pipe_wait = recv_time - start_time
                 deserialize = end_time - recv_time
-                logger.warning(
-                    f"Long wait time ({total_time:.2f}s) for "
-                    f"rank {rank}/{self.dp_size} response to "
-                    f"'{cmd_name}' command "
-                    f"(pipe_wait={pipe_wait:.2f}s, "
-                    f"deserialize={deserialize:.2f}s, "
-                    f"{len(raw_bytes)} bytes).")
-        except (EOFError, ConnectionResetError, BrokenPipeError, OSError) as e:
+                logger.warning(f"Long wait time ({total_time:.2f}s) for "
+                               f"rank {rank}/{self.dp_size} response to "
+                               f"'{cmd_name}' command "
+                               f"(pipe_wait={pipe_wait:.2f}s, "
+                               f"deserialize={deserialize:.2f}s, "
+                               f"{len(raw_bytes)} bytes).")
+        except Exception as e:
             # Check if the worker process is still alive for a better message
             proc = self.processes[rank]
             if not proc.is_alive():
@@ -450,8 +450,7 @@ class DPScheduler(SchedulerInterface):
                     f"Pipe error for rank {rank}: "
                     f"Worker process terminated with exit code {exit_code}. "
                     "This may indicate a crash or signal in the scheduler "
-                    "worker process."
-                ) from e
+                    "worker process.") from e
             raise RuntimeError(
                 f"Pipe error for rank {rank}: "
                 "Worker process terminated unexpectedly. "
@@ -906,8 +905,8 @@ class DPScheduler(SchedulerInterface):
 
         all_success = True
         for rank in range(self.dp_size):
-            success = self._get_result(
-                rank, SchedulerCommand.RESET_PREFIX_CACHE)
+            success = self._get_result(rank,
+                                       SchedulerCommand.RESET_PREFIX_CACHE)
             all_success &= success
         return all_success
 
@@ -1038,11 +1037,7 @@ class DPScheduler(SchedulerInterface):
                     f"(exit code {self.processes[rank].exitcode}), "
                     "skipping shutdown command.")
                 continue
-            try:
-                self._send_command(rank, SchedulerCommand.SHUTDOWN)
-            except (BrokenPipeError, OSError) as e:
-                logger.warning(
-                    f"Rank {rank}: Failed to send shutdown command: {e}")
+            self._send_command(rank, SchedulerCommand.SHUTDOWN)
 
         # Wait for acknowledgment (blocking), skipping dead ones
         for rank in range(self.dp_size):

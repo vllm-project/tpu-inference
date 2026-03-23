@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 from vllm.config import VllmConfig
@@ -32,8 +32,7 @@ def _make_mock_mp_context():
     """Create a mock multiprocessing context that properly handles Pipe()."""
     mock_ctx = MagicMock()
     mock_process = MagicMock()
-    mock_ctx.Pipe = MagicMock(
-        return_value=(MagicMock(), MagicMock()))
+    mock_ctx.Pipe = MagicMock(return_value=(MagicMock(), MagicMock()))
     mock_ctx.Process = MagicMock(return_value=mock_process)
     return mock_ctx
 
@@ -68,15 +67,17 @@ class TestDPScheduler:
         """Create a mock StructuredOutputManager."""
         return MagicMock()
 
-    def _create_scheduler(self, mock_vllm_config, mock_kv_cache_config,
-                          mock_structured_output_manager, log_stats=False):
+    def _create_scheduler(self,
+                          mock_vllm_config,
+                          mock_kv_cache_config,
+                          mock_structured_output_manager,
+                          log_stats=False):
         """Helper to create a DPScheduler with mocked multiprocessing."""
         mock_ctx = _make_mock_mp_context()
         with patch(
                 'tpu_inference.core.sched.dp_scheduler._scheduler_worker_process'
         ):
-            with patch('multiprocessing.get_context',
-                        return_value=mock_ctx):
+            with patch('multiprocessing.get_context', return_value=mock_ctx):
                 scheduler = DPScheduler(
                     vllm_config=mock_vllm_config,
                     kv_cache_config=mock_kv_cache_config,
@@ -201,9 +202,9 @@ class TestDPScheduler:
                                    mock_kv_cache_config,
                                    mock_structured_output_manager):
         """Test _get_rank_token_counts queries workers and aggregates tokens."""
-        scheduler = self._create_scheduler(
-            mock_vllm_config, mock_kv_cache_config,
-            mock_structured_output_manager)
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
 
         # Mock _send_command and _get_result (the pipe-based API)
         scheduler._send_command = MagicMock()
@@ -218,10 +219,10 @@ class TestDPScheduler:
             1, SchedulerCommand.GET_TOKEN_COUNT)
 
         # Verify results were collected
-        scheduler._get_result.assert_any_call(
-            0, SchedulerCommand.GET_TOKEN_COUNT)
-        scheduler._get_result.assert_any_call(
-            1, SchedulerCommand.GET_TOKEN_COUNT)
+        scheduler._get_result.assert_any_call(0,
+                                              SchedulerCommand.GET_TOKEN_COUNT)
+        scheduler._get_result.assert_any_call(1,
+                                              SchedulerCommand.GET_TOKEN_COUNT)
 
         assert rank_tokens[0] == 30
         assert rank_tokens[1] == 15
@@ -230,9 +231,9 @@ class TestDPScheduler:
                                            mock_kv_cache_config,
                                            mock_structured_output_manager):
         """Test _find_best_rank_for_request prefers cache hits."""
-        scheduler = self._create_scheduler(
-            mock_vllm_config, mock_kv_cache_config,
-            mock_structured_output_manager)
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
 
         mock_request = MagicMock(spec=Request)
 
@@ -241,8 +242,10 @@ class TestDPScheduler:
         # then _find_best_rank calls _get_result for PROBE_COMPUTED_BLOCKS (2 ranks)
         scheduler._send_command = MagicMock()
         scheduler._get_result = MagicMock(side_effect=[
-            100, 50,  # GET_TOKEN_COUNT: rank 0=100, rank 1=50
-            10, 25,   # PROBE_COMPUTED_BLOCKS: rank 0=10, rank 1=25
+            100,
+            50,  # GET_TOKEN_COUNT: rank 0=100, rank 1=50
+            10,
+            25,  # PROBE_COMPUTED_BLOCKS: rank 0=10, rank 1=25
         ])
 
         rank = scheduler._find_best_rank_for_request(mock_request)
@@ -254,17 +257,19 @@ class TestDPScheduler:
                                               mock_kv_cache_config,
                                               mock_structured_output_manager):
         """Test _find_best_rank_for_request uses load balancing without cache hit."""
-        scheduler = self._create_scheduler(
-            mock_vllm_config, mock_kv_cache_config,
-            mock_structured_output_manager)
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
 
         mock_request = MagicMock(spec=Request)
 
         # Mock _send_command and _get_result
         scheduler._send_command = MagicMock()
         scheduler._get_result = MagicMock(side_effect=[
-            100, 50,  # GET_TOKEN_COUNT: rank 0=100, rank 1=50
-            0, 0,     # PROBE_COMPUTED_BLOCKS: no cache hits
+            100,
+            50,  # GET_TOKEN_COUNT: rank 0=100, rank 1=50
+            0,
+            0,  # PROBE_COMPUTED_BLOCKS: no cache hits
         ])
 
         rank = scheduler._find_best_rank_for_request(mock_request)
@@ -276,16 +281,15 @@ class TestDPScheduler:
                                               mock_kv_cache_config,
                                               mock_structured_output_manager):
         """Test add_request assigns request to best rank."""
-        scheduler = self._create_scheduler(
-            mock_vllm_config, mock_kv_cache_config,
-            mock_structured_output_manager)
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
 
         mock_request = MagicMock(spec=Request)
         mock_request.request_id = "req1"
 
         # Mock _find_best_rank_for_request to return rank 1
-        scheduler._find_best_rank_for_request = MagicMock(
-            return_value=1)
+        scheduler._find_best_rank_for_request = MagicMock(return_value=1)
         scheduler._send_command = MagicMock()
         scheduler._get_result = MagicMock(return_value=None)
 
@@ -299,16 +303,16 @@ class TestDPScheduler:
             1, SchedulerCommand.ADD_REQUEST, mock_request)
 
         # Verify we waited for completion
-        scheduler._get_result.assert_called_with(
-            1, SchedulerCommand.ADD_REQUEST)
+        scheduler._get_result.assert_called_with(1,
+                                                 SchedulerCommand.ADD_REQUEST)
 
     def test_schedule_sends_commands_and_combines_output(
             self, mock_vllm_config, mock_kv_cache_config,
             mock_structured_output_manager):
         """Test schedule sends SCHEDULE command to all workers and combines output."""
-        scheduler = self._create_scheduler(
-            mock_vllm_config, mock_kv_cache_config,
-            mock_structured_output_manager)
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
 
         # Create mock scheduler outputs
         mock_output_0 = MagicMock(spec=SchedulerOutput)
@@ -358,10 +362,8 @@ class TestDPScheduler:
         output = scheduler.schedule()
 
         # Verify SCHEDULE commands were sent
-        scheduler._send_command.assert_any_call(
-            0, SchedulerCommand.SCHEDULE)
-        scheduler._send_command.assert_any_call(
-            1, SchedulerCommand.SCHEDULE)
+        scheduler._send_command.assert_any_call(0, SchedulerCommand.SCHEDULE)
+        scheduler._send_command.assert_any_call(1, SchedulerCommand.SCHEDULE)
 
         # Verify combined output
         assert isinstance(output, DPSchedulerOutput)
@@ -374,9 +376,9 @@ class TestDPScheduler:
                                          mock_kv_cache_config,
                                          mock_structured_output_manager):
         """Test _combine_cached_request_data combines data from all ranks."""
-        scheduler = self._create_scheduler(
-            mock_vllm_config, mock_kv_cache_config,
-            mock_structured_output_manager)
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
 
         # Create mock rank outputs
         output_0 = MagicMock(spec=SchedulerOutput)
@@ -401,8 +403,7 @@ class TestDPScheduler:
             num_output_tokens=[2],
         )
 
-        combined = scheduler._combine_cached_request_data(
-            [output_0, output_1])
+        combined = scheduler._combine_cached_request_data([output_0, output_1])
 
         # Verify combined data
         assert combined.req_ids == ["req1", "req2"]
@@ -419,9 +420,9 @@ class TestDPScheduler:
                                                mock_kv_cache_config,
                                                mock_structured_output_manager):
         """Test finish_requests sends FINISH_REQUESTS command to appropriate workers."""
-        scheduler = self._create_scheduler(
-            mock_vllm_config, mock_kv_cache_config,
-            mock_structured_output_manager)
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
 
         scheduler._send_command = MagicMock()
         scheduler._get_result = MagicMock(return_value=None)
@@ -434,19 +435,17 @@ class TestDPScheduler:
 
         # Verify FINISH_REQUESTS commands were sent to correct ranks
         scheduler._send_command.assert_any_call(
-            0, SchedulerCommand.FINISH_REQUESTS,
-            (["req1"], "completed"))
+            0, SchedulerCommand.FINISH_REQUESTS, (["req1"], "completed"))
         scheduler._send_command.assert_any_call(
-            1, SchedulerCommand.FINISH_REQUESTS,
-            (["req2"], "completed"))
+            1, SchedulerCommand.FINISH_REQUESTS, (["req2"], "completed"))
 
     def test_get_num_unfinished_requests(self, mock_vllm_config,
                                          mock_kv_cache_config,
                                          mock_structured_output_manager):
         """Test get_num_unfinished_requests queries all workers."""
-        scheduler = self._create_scheduler(
-            mock_vllm_config, mock_kv_cache_config,
-            mock_structured_output_manager)
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
 
         scheduler._send_command = MagicMock()
         scheduler._get_result = MagicMock(side_effect=[5, 3])
@@ -465,9 +464,9 @@ class TestDPScheduler:
                                    mock_kv_cache_config,
                                    mock_structured_output_manager):
         """Test has_finished_requests checks all workers."""
-        scheduler = self._create_scheduler(
-            mock_vllm_config, mock_kv_cache_config,
-            mock_structured_output_manager)
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
 
         scheduler._send_command = MagicMock()
         scheduler._get_result = MagicMock(side_effect=[False, True])
@@ -485,13 +484,12 @@ class TestDPScheduler:
     def test_get_request_counts(self, mock_vllm_config, mock_kv_cache_config,
                                 mock_structured_output_manager):
         """Test get_request_counts queries all workers."""
-        scheduler = self._create_scheduler(
-            mock_vllm_config, mock_kv_cache_config,
-            mock_structured_output_manager)
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
 
         scheduler._send_command = MagicMock()
-        scheduler._get_result = MagicMock(
-            side_effect=[(2, 1), (1, 3)])
+        scheduler._get_result = MagicMock(side_effect=[(2, 1), (1, 3)])
 
         running, waiting = scheduler.get_request_counts()
 
@@ -507,9 +505,9 @@ class TestDPScheduler:
     def test_reset_prefix_cache(self, mock_vllm_config, mock_kv_cache_config,
                                 mock_structured_output_manager):
         """Test reset_prefix_cache sends command to all workers."""
-        scheduler = self._create_scheduler(
-            mock_vllm_config, mock_kv_cache_config,
-            mock_structured_output_manager)
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
 
         scheduler._send_command = MagicMock()
         scheduler._get_result = MagicMock(side_effect=[True, True])
@@ -528,15 +526,15 @@ class TestDPScheduler:
                                           mock_kv_cache_config,
                                           mock_structured_output_manager):
         """Test reset_prefix_cache forwards reset_running_requests and reset_connector args."""
-        scheduler = self._create_scheduler(
-            mock_vllm_config, mock_kv_cache_config,
-            mock_structured_output_manager)
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
 
         scheduler._send_command = MagicMock()
         scheduler._get_result = MagicMock(side_effect=[True, False])
 
-        result = scheduler.reset_prefix_cache(
-            reset_running_requests=True, reset_connector=True)
+        result = scheduler.reset_prefix_cache(reset_running_requests=True,
+                                              reset_connector=True)
 
         # Verify commands were sent with provided args
         scheduler._send_command.assert_any_call(
@@ -550,9 +548,9 @@ class TestDPScheduler:
     def test_reset_encoder_cache(self, mock_vllm_config, mock_kv_cache_config,
                                  mock_structured_output_manager):
         """Test reset_encoder_cache sends command to all workers."""
-        scheduler = self._create_scheduler(
-            mock_vllm_config, mock_kv_cache_config,
-            mock_structured_output_manager)
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
 
         scheduler._send_command = MagicMock()
         scheduler._get_result = MagicMock(return_value=None)
@@ -568,13 +566,12 @@ class TestDPScheduler:
     def test_pause_state_default(self, mock_vllm_config, mock_kv_cache_config,
                                  mock_structured_output_manager):
         """Test pause_state queries worker and defaults to UNPAUSED."""
-        scheduler = self._create_scheduler(
-            mock_vllm_config, mock_kv_cache_config,
-            mock_structured_output_manager)
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
 
         scheduler._send_command = MagicMock()
-        scheduler._get_result = MagicMock(
-            return_value=PauseState.UNPAUSED)
+        scheduler._get_result = MagicMock(return_value=PauseState.UNPAUSED)
 
         assert scheduler.pause_state == PauseState.UNPAUSED
 
@@ -585,9 +582,9 @@ class TestDPScheduler:
     def test_set_pause_state(self, mock_vllm_config, mock_kv_cache_config,
                              mock_structured_output_manager):
         """Test set_pause_state sends command to all workers."""
-        scheduler = self._create_scheduler(
-            mock_vllm_config, mock_kv_cache_config,
-            mock_structured_output_manager)
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
 
         scheduler._send_command = MagicMock()
         scheduler._get_result = MagicMock(return_value=None)
@@ -604,9 +601,10 @@ class TestDPScheduler:
             self, mock_vllm_config, mock_kv_cache_config,
             mock_structured_output_manager):
         """Test make_stats aggregates statistics from all workers."""
-        scheduler = self._create_scheduler(
-            mock_vllm_config, mock_kv_cache_config,
-            mock_structured_output_manager, log_stats=True)
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager,
+                                           log_stats=True)
 
         # Create mock stats
         stats_0 = SchedulerStats(
@@ -642,16 +640,15 @@ class TestDPScheduler:
         )
 
         scheduler._send_command = MagicMock()
-        scheduler._get_result = MagicMock(
-            side_effect=[stats_0, stats_1])
+        scheduler._get_result = MagicMock(side_effect=[stats_0, stats_1])
 
         combined_stats = scheduler.make_stats()
 
         # Verify commands were sent
-        scheduler._send_command.assert_any_call(
-            0, SchedulerCommand.MAKE_STATS, (None, None))
-        scheduler._send_command.assert_any_call(
-            1, SchedulerCommand.MAKE_STATS, (None, None))
+        scheduler._send_command.assert_any_call(0, SchedulerCommand.MAKE_STATS,
+                                                (None, None))
+        scheduler._send_command.assert_any_call(1, SchedulerCommand.MAKE_STATS,
+                                                (None, None))
 
         assert combined_stats.num_running_reqs == 7
         assert combined_stats.num_waiting_reqs == 3
@@ -661,9 +658,10 @@ class TestDPScheduler:
             self, mock_vllm_config, mock_kv_cache_config,
             mock_structured_output_manager):
         """Test make_stats returns None when logging disabled."""
-        scheduler = self._create_scheduler(
-            mock_vllm_config, mock_kv_cache_config,
-            mock_structured_output_manager, log_stats=False)
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager,
+                                           log_stats=False)
 
         stats = scheduler.make_stats()
         assert stats is None
@@ -672,9 +670,9 @@ class TestDPScheduler:
                                     mock_kv_cache_config,
                                     mock_structured_output_manager):
         """Test update_draft_token_ids routes to correct workers."""
-        scheduler = self._create_scheduler(
-            mock_vllm_config, mock_kv_cache_config,
-            mock_structured_output_manager)
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
 
         scheduler._send_command = MagicMock()
         scheduler._get_result = MagicMock(return_value=None)
@@ -701,9 +699,9 @@ class TestDPScheduler:
             self, mock_vllm_config, mock_kv_cache_config,
             mock_structured_output_manager):
         """Test _combine_scheduler_outputs calculates max_num_scheduled_tokens_per_dp_rank."""
-        scheduler = self._create_scheduler(
-            mock_vllm_config, mock_kv_cache_config,
-            mock_structured_output_manager)
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
 
         # Mock SchedulerOutput for two DP ranks
         # Rank 0 has 10 tokens, Rank 1 has 20 tokens
@@ -714,8 +712,7 @@ class TestDPScheduler:
         output_0.scheduled_spec_decode_tokens = {}
         output_0.scheduled_encoder_inputs = {}
         output_0.finished_req_ids = set()
-        output_0.scheduled_cached_reqs = MagicMock(
-            spec=CachedRequestData)
+        output_0.scheduled_cached_reqs = MagicMock(spec=CachedRequestData)
         output_0.scheduled_cached_reqs.req_ids = ["req1"]
         output_0.scheduled_cached_reqs.resumed_req_ids = set()
         output_0.scheduled_cached_reqs.new_token_ids = [[1, 2]]
@@ -732,8 +729,7 @@ class TestDPScheduler:
         output_1.scheduled_spec_decode_tokens = {}
         output_1.scheduled_encoder_inputs = {}
         output_1.finished_req_ids = set()
-        output_1.scheduled_cached_reqs = MagicMock(
-            spec=CachedRequestData)
+        output_1.scheduled_cached_reqs = MagicMock(spec=CachedRequestData)
         output_1.scheduled_cached_reqs.req_ids = ["req2"]
         output_1.scheduled_cached_reqs.resumed_req_ids = set()
         output_1.scheduled_cached_reqs.new_token_ids = [[3, 4]]
@@ -745,17 +741,16 @@ class TestDPScheduler:
 
         scheduler.assigned_dp_rank = {"req1": 0, "req2": 1}
 
-        combined = scheduler._combine_scheduler_outputs(
-            [output_0, output_1])
+        combined = scheduler._combine_scheduler_outputs([output_0, output_1])
 
         assert combined.total_num_scheduled_tokens == 30
 
     def test_shutdown(self, mock_vllm_config, mock_kv_cache_config,
                       mock_structured_output_manager):
         """Test shutdown sends SHUTDOWN command to all workers."""
-        scheduler = self._create_scheduler(
-            mock_vllm_config, mock_kv_cache_config,
-            mock_structured_output_manager)
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
 
         scheduler._send_command = MagicMock()
         scheduler._get_result = MagicMock(return_value=None)
@@ -769,10 +764,8 @@ class TestDPScheduler:
         scheduler.shutdown()
 
         # Verify SHUTDOWN commands were sent
-        scheduler._send_command.assert_any_call(
-            0, SchedulerCommand.SHUTDOWN)
-        scheduler._send_command.assert_any_call(
-            1, SchedulerCommand.SHUTDOWN)
+        scheduler._send_command.assert_any_call(0, SchedulerCommand.SHUTDOWN)
+        scheduler._send_command.assert_any_call(1, SchedulerCommand.SHUTDOWN)
 
         # Verify processes were joined
         mock_process_0.join.assert_called()

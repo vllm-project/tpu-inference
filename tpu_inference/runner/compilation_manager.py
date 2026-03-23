@@ -286,10 +286,9 @@ class CompilationManager:
                 input_ids = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32, dp_sharding)
                 # Need align to the sampling output
-                next_tokens = self._create_dummy_tensor(
-                    (num_reqs, ),
-                    jnp.int32,
-                    sharding=dp_sharding)
+                next_tokens = self._create_dummy_tensor((num_reqs, ),
+                                                        jnp.int32,
+                                                        sharding=dp_sharding)
 
                 placeholder_num = 1
                 self._run_compilation(
