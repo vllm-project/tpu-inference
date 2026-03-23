@@ -31,8 +31,7 @@ definitions:
     EXPECTED_ETEL: "10800000"
     NUM_PROMPTS: "320"
     MODELTAG: "NEW"
-    USE_BENCHMARK_SERVING: "1"
-    MAX_CONCURRENCY: "64"
+    EXTRA_ENVS: "USE_BENCHMARK_SERVING=1;MAX_CONCURRENCY=64"
     ADDITIONAL_CONFIG: '{"quantization": { "qwix": { "rules": [{ "module_path": ".*", "weight_qtype": "float8_e4m3fn", "act_qtype": "float8_e4m3fn"}]}}}'
     EXTRA_ARGS: '--kv-cache-dtype=fp8 --gpu-memory-utilization=0.98'
 
@@ -51,8 +50,7 @@ definitions:
     EXPECTED_ETEL: "10800000"
     NUM_PROMPTS: "320"
     MODELTAG: "NEW"
-    USE_BENCHMARK_SERVING: "1"
-    MAX_CONCURRENCY: "320"
+    EXTRA_ENVS: "USE_BENCHMARK_SERVING=1;MAX_CONCURRENCY=320;"
     ADDITIONAL_CONFIG: '{"quantization": { "qwix": { "rules": [{ "module_path": ".*", "weight_qtype": "float8_e4m3fn", "act_qtype": "float8_e4m3fn"}]}}}'
     EXTRA_ARGS: '--kv-cache-dtype=fp8 --gpu-memory-utilization=0.98'
 
@@ -71,8 +69,7 @@ definitions:
     EXPECTED_ETEL: "10800000"
     NUM_PROMPTS: "320"
     MODELTAG: "NEW"
-    USE_BENCHMARK_SERVING: "1"
-    MAX_CONCURRENCY: "64"
+    EXTRA_ENVS: "USE_BENCHMARK_SERVING=1;MAX_CONCURRENCY=64;"
     ADDITIONAL_CONFIG: '{"quantization": { "qwix": { "rules": [{ "module_path": ".*", "weight_qtype": "float8_e4m3fn", "act_qtype": "float8_e4m3fn"}]}}}'
     EXTRA_ARGS: '--kv-cache-dtype=fp8 --gpu-memory-utilization=0.98'
 
@@ -91,8 +88,7 @@ definitions:
     EXPECTED_ETEL: "10800000"
     NUM_PROMPTS: "320"
     MODELTAG: "NEW"
-    USE_BENCHMARK_SERVING: "1"
-    MAX_CONCURRENCY: "320"
+    EXTRA_ENVS: "USE_BENCHMARK_SERVING=1;MAX_CONCURRENCY=320;"
     ADDITIONAL_CONFIG: '{"quantization": { "qwix": { "rules": [{ "module_path": ".*", "weight_qtype": "float8_e4m3fn", "act_qtype": "float8_e4m3fn"}]}}}'
     EXTRA_ARGS: '--kv-cache-dtype=fp8 --gpu-memory-utilization=0.98'
 

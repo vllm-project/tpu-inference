@@ -28,10 +28,7 @@ definitions:
     MAX_NUM_BATCHED_TOKENS: "1024"
     TENSOR_PARALLEL_SIZE: "8"
     DATASET: "mmlu"
-    VLLM_MLA_DISABLE: "1"
-    NEW_MODEL_DESIGN: "True"
-    TPU_BACKEND_TYPE: "jax"
-    ADDITIONAL_CONFIG: '""'
+    EXTRA_ENVS: "VLLM_MLA_DISABLE=1;NEW_MODEL_DESIGN=True;TPU_BACKEND_TYPE=jax"
 
   base_cfg_0: &base_cfg_0
     depends_on: "build-vllm-tpu-image"

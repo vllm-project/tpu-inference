@@ -13,17 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-CODE_HASH=$1
 TIMEZONE="America/Los_Angeles"
-TAG="$(TZ="$TIMEZONE" date +%Y%m%d_%H%M%S)"
-JOB_PRIORITY=$(buildkite-agent meta-data get "JOB_PRIORITY" || echo "1")
+JOB_REFERENCE="$(TZ="$TIMEZONE" date +%Y%m%d_%H%M%S)"
+buildkite-agent meta-data set "JOB_REFERENCE" "${JOB_REFERENCE}"
+JOB_PRIORITY=$(buildkite-agent meta-data get "JOB_PRIORITY")
 
 echo "Benchmark pipeline priority: $JOB_PRIORITY"
 
-# Export these so they are available to run_job_from_env.sh later on
-export RUN_TYPE="DAILY"
-export CODE_HASH="$CODE_HASH"
-export JOB_REFERENCE="$TAG"
 
 # A small helper to upload YMLs with dynamic priority interpolation
 upload_benchmark_yml() {
