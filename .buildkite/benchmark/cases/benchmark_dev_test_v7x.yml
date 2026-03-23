@@ -34,7 +34,7 @@ definitions:
     EXTRA_ARGS: '--kv-cache-dtype=fp8 --gpu-memory-utilization=0.98'
 
   base_cfg_0: &base_cfg_0
-    depends_on: "build-vllm-tpu-image"
+    # depends_on: "build-vllm-tpu-image"
     agents:
       queue: "tpu_v7x_2_queue"
     command: ".buildkite/benchmark/scripts/run_job_from_env.sh"
