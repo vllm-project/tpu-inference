@@ -24,6 +24,8 @@ from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
 
+from tpu_inference.kernels.sparse_core import gather_reduce as gather_reduce_sc
+
 
 def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
     match scoring_fn:
@@ -113,30 +115,119 @@ def moe_gmm_local(
         w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
     gmm1_res = gmm1_res[:, :w2.shape[1]]  # trim to hidden size if padded
     gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
-                           group_offset)
+                            group_offset)
 
-    # First run local reduction on topk experts owned by the rank for all tokens
-    token_topk_hidden = gmm2_res[topk_argsort_revert_indices].reshape(
-        (-1, topk, gmm2_res.shape[-1]))
-    token_topk_hidden = token_topk_hidden * jnp.expand_dims(topk_weights,
-                                                            axis=-1)
 
-    local_group_size = w1.shape[0]
-    if local_group_size < group_sizes.size:
-        mask = valid_rows_mask(
-            gmm2_res.shape[0],
-            group_sizes,
-            group_offset,
-            group_offset + local_group_size,
-        )[topk_argsort_revert_indices].reshape(-1, topk, 1)
-        token_topk_hidden = jnp.where(mask, token_topk_hidden, 0.0)
+    if gmm2_res.shape[0] > 8 * 1024:
 
-    token_hidden = token_topk_hidden.sum(axis=-2)
+        inds = topk_argsort_revert_indices
+        topk_weights = topk_weights.flatten().reshape(-1, 128)
+        # Pipelined execution of sparsecore kernel and psum
 
-    reduction_axis = (ShardingAxisName.MLP_TENSOR
-                      if parallelism == "tp" else ShardingAxisName.EXPERT)
-    # Then global reduction on all ranks for all tokens and all experts
-    return jax.lax.psum(token_hidden, axis_name=reduction_axis)
+        num_chunks = 4
+        chunk_size = gmm2_res.shape[0] // num_chunks
+        inds_reshaped = inds.reshape(num_chunks, chunk_size)
+        topk_weights_reshaped = topk_weights.reshape(
+            num_chunks, chunk_size // 128, 128
+        )
+
+        reduction_axis = (
+            ShardingAxisName.MLP_TENSOR
+            if parallelism == "tp"
+            else ShardingAxisName.EXPERT
+        )
+
+        # Pre-allocate output buffer to save memory and avoids list accumulation
+        # The shape is (inds.shape[0] // 8, hidden_size)
+        token_hidden = jnp.zeros((inds.shape[0] // 8, gmm2_res.shape[-1]), dtype=jnp.bfloat16)
+
+        # Prologue: Execute the first kernel chunk
+        chunk_out_prev = gather_reduce_sc.sc_gather_reduce(
+            op=gmm2_res,
+            idx=inds_reshaped[0],
+            reduce_group_size=8,
+            single_sc=False,
+            topk_weights=topk_weights_reshaped[0],
+            col_chunk_size=3072,
+        )
+
+        chunk_out_reduced = None
+
+        for i in range(1, num_chunks):
+            weights_chunk = topk_weights_reshaped[i]
+
+            # Optimization barrier to ensure SC_i and TC_{i-1} start in parallel
+            if i == 1:
+                idx_chunk_barriered, chunk_out_prev_barriered = jax.lax.optimization_barrier(
+                    (inds_reshaped[i], chunk_out_prev)
+                )
+            else:
+                idx_chunk_barriered, chunk_out_prev_barriered, _ = jax.lax.optimization_barrier(
+                    (inds_reshaped[i], chunk_out_prev, chunk_out_reduced)
+                )
+
+            # Start SC kernel using the barriered index
+            chunk_out = gather_reduce_sc.sc_gather_reduce(
+                op=gmm2_res,
+                idx=idx_chunk_barriered,
+                reduce_group_size=8,
+                single_sc=False,
+                topk_weights=weights_chunk,
+                col_chunk_size=3072,
+            )
+
+            # psum on the previous chunk output 
+            chunk_out_reduced = jax.lax.psum(chunk_out_prev_barriered, axis_name=reduction_axis)
+
+            # In-place update of the pre-allocated buffer
+            token_hidden = jax.lax.dynamic_update_slice(
+              token_hidden, chunk_out_reduced, ((i - 1) * (chunk_size // 8), 0)
+            )
+
+            chunk_out_prev = chunk_out
+
+        # Epilogue: Perform psum on the last kernel output
+        if num_chunks > 1:
+            chunk_out_prev_barriered, _ = jax.lax.optimization_barrier((chunk_out_prev, chunk_out_reduced))
+        else:
+            chunk_out_prev_barriered = jax.lax.optimization_barrier((chunk_out_prev,))[0]
+
+        chunk_out_reduced_final = jax.lax.psum(chunk_out_prev_barriered, axis_name=reduction_axis)
+        token_hidden = jax.lax.dynamic_update_slice(
+            token_hidden, chunk_out_reduced_final, ((num_chunks - 1) * (chunk_size // 8), 0)
+        )
+
+        return token_hidden
+    else:
+        # First run local reduction on topk experts owned by the rank for all tokens
+        token_topk_hidden = gmm2_res[topk_argsort_revert_indices].reshape(
+            (-1, topk, gmm2_res.shape[-1]))
+        token_topk_hidden = token_topk_hidden * jnp.expand_dims(topk_weights,
+                                                                axis=-1)
+
+        local_group_size = w1.shape[0]
+        if local_group_size < group_sizes.size:
+            mask = valid_rows_mask(
+                gmm2_res.shape[0],
+                group_sizes,
+                group_offset,
+                group_offset + local_group_size,
+            )[topk_argsort_revert_indices].reshape(-1, topk, 1)
+            token_topk_hidden = jnp.where(mask, token_topk_hidden, 0.0)
+
+        token_hidden = token_topk_hidden.sum(axis=-2)
+
+        reduction_axis = (ShardingAxisName.MLP_TENSOR
+                          if parallelism == "tp" else ShardingAxisName.EXPERT)
+        # Then global reduction on all ranks for all tokens and all experts
+        return jax.lax.psum(token_hidden, axis_name=reduction_axis)
+    
+    # # First run local reduction on topk experts owned by the rank for all tokens
+    # token_topk_hidden = gmm2_res[topk_argsort_revert_indices].reshape(
+    #     (-1, topk, gmm2_res.shape[-1]))
+    # token_topk_hidden = token_topk_hidden * jnp.expand_dims(topk_weights,
+    #                                                         axis=-1)
+    # token_hidden = token_topk_hidden.sum(axis=-2)
 
 
 def tensor_parallel_gmm(
@@ -282,7 +373,8 @@ def expert_parallel_gmm(
     "use_ep",
     "activation",
     "scoring_fn",
-))
+),
+)
 def fused_moe_func(
     hidden_states: jax.Array,
     w1: jax.Array,
@@ -323,6 +415,7 @@ def fused_moe_func(
     num_tokens, hidden_size = hidden_states.shape
     global_num_experts, padded_hidden_size, _ = w1.shape
     dtype = hidden_states.dtype
+
 
     assert (num_tokens * topk) % 16 == 0, (
         "The kernel requires num_tokens * topk to be a multiple of "

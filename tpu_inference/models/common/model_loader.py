@@ -26,6 +26,8 @@ from vllm.model_executor.model_loader.runai_streamer_loader import \
     RunaiModelStreamerLoader
 from vllm.utils.func_utils import supports_kw
 
+from vllm.config import set_current_vllm_config  # Add this import
+
 from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
@@ -355,16 +357,17 @@ def get_vllm_model(
     rng: jax.Array,
     mesh: Mesh,
 ):
-    model_dtype = to_torch_dtype(vllm_config.model_config.dtype)
-    vllm_config.model_config.dtype = model_dtype
-    from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
+    with set_current_vllm_config(vllm_config):
+        model_dtype = to_torch_dtype(vllm_config.model_config.dtype)
+        vllm_config.model_config.dtype = model_dtype
+        from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
 
-    model = VllmModelWrapper(
-        vllm_config=vllm_config,
-        rng=rng,
-        mesh=mesh,
-    )
-    params, lora_manager = model.load_weights()
+        model = VllmModelWrapper(
+            vllm_config=vllm_config,
+            rng=rng,
+            mesh=mesh,
+        )
+        params, lora_manager = model.load_weights()
 
     jit_model = model.jit_step_func()
     compute_logits_fn = model.jit_compute_logits_func()

@@ -249,7 +249,11 @@ class VllmModelWrapper:
                 "xla_tpu_all_gather_collective_matmul_mode":
                 "post_spmd_conservative",
                 "xla_tpu_reduce_scatter_collective_matmul_mode":
-                "post_spmd_conservative"
+                "post_spmd_conservative",
+                "xla_tpu_use_tc_device_shape_on_sc":
+                True,
+                "xla_tpu_enable_sparse_core_collective_offload_all_reduce":
+                False,
             },
             static_argnames=(
                 "layer_name_to_kvcache_index",
@@ -397,7 +401,11 @@ class VllmModelWrapper:
         @jax.jit(out_shardings=(NamedSharding(
             self.mesh,
             PartitionSpec(ShardingAxisName.MLP_DATA,
-                          ShardingAxisName.MLP_TENSOR))))
+                          ShardingAxisName.MLP_TENSOR))),
+            compiler_options={
+                "xla_tpu_use_tc_device_shape_on_sc": True,
+                "xla_tpu_enable_sparse_core_collective_offload_all_reduce": False,
+            })
         def compute_logits_func(
             params_and_buffers: Any,
             hidden_states: jax.Array,
