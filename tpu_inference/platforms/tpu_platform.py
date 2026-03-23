@@ -58,8 +58,6 @@ class TpuPlatform(Platform):
         "VLLM_DISABLE_SHARED_EXPERTS_STREAM",
         "MOE_REQUANTIZE_BLOCK_SIZE",
         "MOE_REQUANTIZE_WEIGHT_DTYPE",
-        "USE_JAX_PROFILER_SERVER",
-        "JAX_PROFILER_SERVER_PORT",
     ]
 
     @classmethod
