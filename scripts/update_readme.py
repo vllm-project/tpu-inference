@@ -265,23 +265,19 @@ def generate_html_quantization_table(headers, data):
 
 def merge_metrics(c, p):
     """Merges Correctness (c) and Performance (p) metrics."""
-    c = str(c).strip()
-    p = str(p).strip()
+    c_clean = str(c).replace("&nbsp;", " ").strip()
+    p_clean = str(p).replace("&nbsp;", " ").strip()
 
-    if c == p:
-        return c.replace(" ", "&nbsp;")
-
-    c_clean = c.replace("&nbsp;", " ")
-    p_clean = p.replace("&nbsp;", " ")
-
-    if "❌" in c_clean or "❌" in p_clean:
+    if "❌" in c_clean or "❌" in p_clean or "fail" in c_clean.lower(
+    ) or "fail" in p_clean.lower():
         return "❌&nbsp;Failing"
+
+    if "✅" in c_clean or "pass" in c_clean.lower(
+    ) or "✅" in p_clean or "pass" in p_clean.lower():
+        return "✅&nbsp;Passing"
 
     if "❓" in c_clean or "❓" in p_clean:
         return "❓&nbsp;Untested"
-
-    if "✅" in c_clean and "✅" in p_clean:
-        return "✅&nbsp;Passing"
 
     return "❓&nbsp;Untested"
 
