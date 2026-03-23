@@ -176,11 +176,7 @@ def _scheduler_worker_process(
                     _send_result(None)  # Signal completion
 
                 case SchedulerCommand.UPDATE_FROM_OUTPUT:
-                    scheduler_output, rank_req_ids, \
-                        model_runner_output_bytes = data
-                    model_runner_output = cloudpickle.loads(
-                        model_runner_output_bytes)
-                    model_runner_output.req_ids = rank_req_ids
+                    scheduler_output, model_runner_output = data
                     result = scheduler.update_from_output(
                         scheduler_output, model_runner_output)
                     _send_result(result)
@@ -286,10 +282,19 @@ def _scheduler_worker_process(
 class DPSchedulerOutput(SchedulerOutput):
     """Extended SchedulerOutput that includes DP rank assignments."""
     assigned_dp_rank: Optional[Dict[str, int]] = None
+    # The maximum number of tokens scheduled on any single DP rank in this step.
+    # This is used by the Runner to calculate the global padded batch size
+    # (padded_max * dp_size), ensuring consistent shapes across pipeline stages.
+    max_num_scheduled_tokens_per_dp_rank: int = 0
 
-    def __init__(self, *args, assigned_dp_rank=None, **kwargs):
+    def __init__(self,
+                 *args,
+                 assigned_dp_rank=None,
+                 max_num_scheduled_tokens_per_dp_rank=0,
+                 **kwargs):
         super().__init__(*args, **kwargs)
         self.assigned_dp_rank = assigned_dp_rank or {}
+        self.max_num_scheduled_tokens_per_dp_rank = max_num_scheduled_tokens_per_dp_rank
 
 
 class DPScheduler(SchedulerInterface):
@@ -579,6 +584,9 @@ class DPScheduler(SchedulerInterface):
                 output.scheduled_spec_decode_tokens)
             combined_encoder_inputs.update(output.scheduled_encoder_inputs)
             total_scheduled_tokens += output.total_num_scheduled_tokens
+            max_scheduled_tokens_per_rank = max(
+                max_scheduled_tokens_per_rank,
+                output.total_num_scheduled_tokens)
 
         # Combine finished request IDs
         combined_finished_req_ids = set()
@@ -605,6 +613,7 @@ class DPScheduler(SchedulerInterface):
             finished_req_ids=combined_finished_req_ids,
             free_encoder_mm_hashes=set(),
             assigned_dp_rank=assigned_dp_rank,
+            max_num_scheduled_tokens_per_dp_rank=max_scheduled_tokens_per_rank,
         )
 
     def _combine_cached_request_data(
@@ -772,8 +781,7 @@ class DPScheduler(SchedulerInterface):
         for rank in range(self.dp_size):
             self._send_command(
                 rank, SchedulerCommand.UPDATE_FROM_OUTPUT,
-                (rank_scheduler_outputs[rank], rank_req_ids[rank],
-                 model_runner_output_bytes))
+                (rank_scheduler_outputs[rank], rank_model_outputs[rank]))
 
         combined_engine_outputs = defaultdict(list)
         rank_scheduler_stats: List[Optional[SchedulerStats]] = []
@@ -837,22 +845,6 @@ class DPScheduler(SchedulerInterface):
             outputs[rank].req_ids.append(req_id)
 
         return outputs
-
-    def _split_req_ids_by_rank(
-            self,
-            global_model_output: ModelRunnerOutput) -> List[List[str]]:
-        """Split request IDs by DP rank.
-
-        This is a lightweight alternative to _split_model_output_by_rank that
-        returns only the per-rank req_id lists. Used with the optimized
-        UPDATE_FROM_OUTPUT path where ModelRunnerOutput is serialized once and
-        shared across all ranks.
-        """
-        rank_req_ids: List[List[str]] = [[] for _ in range(self.dp_size)]
-        for req_id in global_model_output.req_ids:
-            rank = self.assigned_dp_rank[req_id]
-            rank_req_ids[rank].append(req_id)
-        return rank_req_ids
 
     def _cleanup_finished_requests(self, finished_req_ids: set[str]) -> None:
         """Remove finished requests from our DP rank assignment tracking."""
