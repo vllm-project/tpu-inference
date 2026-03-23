@@ -1570,6 +1570,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
+        data_parallel_attn_sharding = NamedSharding(
+            self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
+
         # Get the number of scheduled tokens for each request.
         num_scheduled_tokens_per_req = []
         max_num_scheduled_tokens_all_reqs = 0
@@ -1687,16 +1690,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Put to device
         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
-            self.mesh, self.input_batch, padded_num_reqs)
+            self.mesh,
+            self.input_batch,
+            padded_num_reqs,
+            sharding=data_parallel_attn_sharding,
+        )
         if self.uses_mrope:
             positions = mrope_positions
         query_start_loc_cpu = query_start_loc
         seq_lens_cpu = seq_lens
 
-        (input_ids, positions, query_start_loc, seq_lens,
-         logits_indices, request_distribution) = device_array(
-             self.mesh, (input_ids, positions, query_start_loc, seq_lens,
-                         logits_indices, request_distribution))
+        (input_ids, positions, query_start_loc, seq_lens, logits_indices,
+         request_distribution) = device_array(
+             self.mesh,
+             (input_ids, positions, query_start_loc, seq_lens, logits_indices,
+              request_distribution),
+             sharding=data_parallel_attn_sharding,
+         )
 
         def build_block_table(kv_cache_gid: int) -> jax.Array:
             block_tables = self.block_tables_cpu[kv_cache_gid][:self.
@@ -1706,7 +1716,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 [:num_reqs])
             # Convert block_tables to 1D on cpu.
             block_tables = block_tables.reshape(-1)
-            block_tables = device_array(self.mesh, (block_tables))
+            block_tables = device_array(
+                self.mesh,
+                (block_tables),
+                sharding=data_parallel_attn_sharding,
+            )
             return block_tables
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:

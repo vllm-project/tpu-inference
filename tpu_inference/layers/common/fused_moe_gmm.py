@@ -36,16 +36,13 @@ def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
                 f"FusedMoE does not support {scoring_fn} scoring function")
 
 
-def gmm_wrapper(
-    lhs,
-    rhs,
-    rhs_scale,
-    rhs_bias,
-    group_sizes,
-    group_offset,
-    last_gmm,
-    fuse_act=None,
-):
+def gmm_wrapper(lhs,
+                rhs,
+                rhs_scale,
+                rhs_bias,
+                group_sizes,
+                group_offset,
+                fuse_act=None):
     gmm_res = gmm_v2(
         lhs=lhs,
         rhs=rhs,
@@ -53,12 +50,24 @@ def gmm_wrapper(
         rhs_bias=rhs_bias,
         group_sizes=group_sizes,
         group_offset=group_offset[0],
-        # If it's last gmm, we need to zero out unvisited rows because it would
-        # cause numeric error during final reduce if the rows are unitialized.
-        zero_initialize=last_gmm,
+        zero_initialize=False,
         fuse_act=fuse_act,
     )
     return gmm_res
+
+
+def valid_rows_mask(batch_size: int, group_sizes: jax.Array,
+                    group_start: jax.Array, group_end: jax.Array) -> jax.Array:
+    """Mask indicating rows processed by current shard."""
+
+    group_sizes_sum = jnp.cumulative_sum(group_sizes, include_initial=True)
+
+    token_start = group_sizes_sum[group_start]
+    token_end = group_sizes_sum[group_end]
+
+    index = jnp.arange(batch_size)
+    return jnp.where(jnp.logical_and(token_start <= index, index < token_end),
+                     True, False)
 
 
 def moe_gmm_local(
@@ -78,7 +87,7 @@ def moe_gmm_local(
     topk: int,
     parallelism: Literal["tp", "ep"],
 ) -> jax.Array:
-    """ Main MoE logic on a local shard can run in TP or EP mode.
+    """Main MoE logic on a local shard can run in TP or EP mode.
 
     Set parallelism for "tp" or "ep"
     """
@@ -93,7 +102,6 @@ def moe_gmm_local(
         w1_bias,
         group_sizes,
         group_offset,
-        False,
         fuse_act=activation,
     )
 
@@ -105,13 +113,24 @@ def moe_gmm_local(
         w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
     gmm1_res = gmm1_res[:, :w2.shape[1]]  # trim to hidden size if padded
     gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
-                           group_offset, True)
+                           group_offset)
 
     # First run local reduction on topk experts owned by the rank for all tokens
     token_topk_hidden = gmm2_res[topk_argsort_revert_indices].reshape(
         (-1, topk, gmm2_res.shape[-1]))
     token_topk_hidden = token_topk_hidden * jnp.expand_dims(topk_weights,
                                                             axis=-1)
+
+    local_group_size = w1.shape[0]
+    if local_group_size < group_sizes.size:
+        mask = valid_rows_mask(
+            gmm2_res.shape[0],
+            group_sizes,
+            group_offset,
+            group_offset + local_group_size,
+        )[topk_argsort_revert_indices].reshape(-1, topk, 1)
+        token_topk_hidden = jnp.where(mask, token_topk_hidden, 0.0)
+
     token_hidden = token_topk_hidden.sum(axis=-2)
 
     reduction_axis = (ShardingAxisName.MLP_TENSOR
