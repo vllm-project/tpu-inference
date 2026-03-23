@@ -30,9 +30,9 @@ REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
 
 (
   printf "[DEBUG] Start scan artifacts folder...\n"
-  printf "[DEBUG] pwd=%s\n\nls artifacts=%s\n" "$(pwd)" "$(ls artifacts)"
-  printf "[DEBUG] ls artifacts/temp_logs=%s\n" "$(ls artifacts/temp_logs)"
-  printf "[INFO] LOG_FOLDER=%s\n" "$LOG_FOLDER"
+  printf "[DEBUG] pwd=%s\n\nls artifacts=\n%s\n" "$(pwd)" "$(ls -al artifacts)"
+  printf "[DEBUG] ls artifacts/temp_logs=\n%s\n" "$(ls -al artifacts/temp_logs)"
+  printf "[INFO] LOG_FOLDER=\n%s\n" "$LOG_FOLDER"
 
   # Handle log file
   VLLM_LOG="$LOG_FOLDER/vllm_log.txt"
