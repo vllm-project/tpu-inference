@@ -77,4 +77,4 @@
 </table>
 
 > **Note:**
-> *   *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*
+> - *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*

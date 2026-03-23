@@ -45,8 +45,10 @@ CSV_MAP = {
         "support_matrices/v7x/vllm/parallelism_support_matrix.csv"
     },
     "quantization": {
-        "static": "support_matrices/v6e/vllm/quantization_support_matrix.csv",
-        "v6_flax": "support_matrices/v6e/flax_nnx/quantization_support_matrix.csv",
+        "static":
+        "support_matrices/v6e/vllm/quantization_support_matrix.csv",
+        "v6_flax":
+        "support_matrices/v6e/flax_nnx/quantization_support_matrix.csv",
         "v6_pytorch":
         "support_matrices/v6e/vllm/quantization_support_matrix.csv",
         "v6_default":
@@ -492,7 +494,6 @@ def update_readme():
     with open(README_PATH, "r", encoding="utf-8") as f:
         content = f.read()
 
-    extracted_parallelism_features = {}
 
     for section_key, file_sources in CSV_MAP.items():
         headers, all_data = [], []
@@ -692,16 +693,29 @@ def update_readme():
                         }
 
                     hw_key = "v6" if "v6" in col_key else "v7"
-                    merged_models[model_name][hw_key] = {"u": unit, "c": corr, "b": bench}
+                    merged_models[model_name][hw_key] = {
+                        "u": unit,
+                        "c": corr,
+                        "b": bench
+                    }
 
-            headers = ["Model", "Type", "Unit Test", "Correctness Test", "Benchmark"]
-            
-            for model_name, metrics in sorted(merged_models.items(), key=lambda x: x[0].lower()):
-                u_combined = _merge_model_status_text(metrics["v6"]["u"], metrics["v7"]["u"])
-                c_combined = _merge_model_status_text(metrics["v6"]["c"], metrics["v7"]["c"])
-                b_combined = _merge_model_status_text(metrics["v6"]["b"], metrics["v7"]["b"])
-                
-                all_data.append([model_name, metrics["Type"], u_combined, c_combined, b_combined])
+            headers = [
+                "Model", "Type", "Unit Test", "Correctness Test", "Benchmark"
+            ]
+
+            for model_name, metrics in sorted(merged_models.items(),
+                                              key=lambda x: x[0].lower()):
+                u_combined = _merge_model_status_text(metrics["v6"]["u"],
+                                                      metrics["v7"]["u"])
+                c_combined = _merge_model_status_text(metrics["v6"]["c"],
+                                                      metrics["v7"]["c"])
+                b_combined = _merge_model_status_text(metrics["v6"]["b"],
+                                                      metrics["v7"]["b"])
+
+                all_data.append([
+                    model_name, metrics["Type"], u_combined, c_combined,
+                    b_combined
+                ])
 
             for row in all_data:
                 if row and row[0]:
@@ -728,38 +742,33 @@ def update_readme():
         if section_key == "microbenchmarks":
             footer = (
                 "\n\n> **Note:**\n"
-                "> *   *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*"
+                "> - *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*"
             )
             new_table += footer
         elif section_key == "quantization":
             footer = (
                 "\n\n> **Note:**\n"
-                "> &bull;&nbsp;&nbsp;&nbsp;*This table only tests checkpoint loading compatibility.*"
+                "> - *This table only tests checkpoint loading compatibility.*"
             )
             new_table += footer
 
+        # Write out decoupled MkDocs snippet regardless of README presence
+        os.makedirs("docs/includes", exist_ok=True)
+        snippet_path = os.path.join("docs", "includes", f"{section_key}.md")
+        with open(snippet_path, "w", encoding="utf-8") as f:
+            f.write(new_table.strip() + "\n")
+
         start_marker, end_marker = f"<!-- START: {section_key} -->", f"<!-- END: {section_key} -->"
         pattern = f"({re.escape(start_marker)})(.*?)({re.escape(end_marker)})"
-        replacement = f"\\1\n{new_table}\n\\3"
-        content = re.sub(pattern, replacement, content, flags=re.DOTALL)
+        if start_marker in content:
+            replacement = f"\\1\n{new_table}\n\\3"
+            content = re.sub(pattern, replacement, content, flags=re.DOTALL)
 
     # Automatically update the Last Updated timestamp
     current_time = datetime.datetime.now(
         datetime.timezone.utc).strftime("%Y-%m-%d %I:%M %p UTC")
     content = re.sub(r"\*Last Updated: .*\*?",
                      f"*Last Updated: {current_time}*", content)
-
-    # Write MkDocs formatted README identically to sync platforms
-    # Export decoupled tables directly to MkDocs snippet folder
-    os.makedirs("docs/includes", exist_ok=True)
-    for section_key in CSV_MAP.keys():
-        start_m, end_m = f"<!-- START: {section_key} -->", f"<!-- END: {section_key} -->"
-        if start_m in content:
-            table_block = re.search(f"{start_m}(.*?){end_m}", content, re.DOTALL)
-            if table_block:
-                snippet_path = os.path.join("docs", "includes", f"{section_key}.md")
-                with open(snippet_path, "w", encoding="utf-8") as f:
-                    f.write(table_block.group(1).strip() + "\n")
 
     with open(README_PATH, "w", encoding="utf-8") as f:
         f.write(content)
