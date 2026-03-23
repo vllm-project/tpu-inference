@@ -21,7 +21,6 @@ from typing import Any, List, Optional, Tuple
 from unittest.mock import patch
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 import torch
 import torch.nn
@@ -329,21 +328,22 @@ class VllmModelWrapper:
             image_grid_thw: Any,
             **kwargs,
         ) -> Any:
-            # Del args for jax path. Need to refactor the function call.
+            # TODO: b/494300919 - Historical arg, need to be removed.
             del image_grid_thw
 
-            with torchax.default_env():
-                call_kwargs = {}
-                for k, v in kwargs.items():
-                    if isinstance(v, jax.Array):
-                        call_kwargs[k] = torch_view(v)
-                    elif isinstance(v, np.ndarray):
-                        # The "pixel_values" need to be a torch.Tensor.
-                        # Cast it back to torch.Tensor.
-                        call_kwargs[k] = torch_view(jnp.array(v))
-                    else:
-                        call_kwargs[k] = v
+            def move(v: torch.Tensor) -> torch.Tensor:
+                if not isinstance(v, torch.Tensor):
+                    logger.warning(f"Expect torch.Tensor, got {type(v)}")
+                    return v
+                return v.to(device="jax")
 
+            with torchax.default_env():
+                # Ensure all tensors are moved into accelerator so the
+                # computation with weights can work properly.
+                call_kwargs = {
+                    k: jax.tree.map(move, v)
+                    for k, v in kwargs.items()
+                }
                 output_from_torch = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
