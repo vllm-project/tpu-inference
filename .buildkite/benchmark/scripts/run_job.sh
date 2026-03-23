@@ -18,8 +18,8 @@ set -euo pipefail
 readonly EXIT_SUCCESS=0
 readonly EXIT_FAILURE=1
 
-ARTIFACT_FOLDER="artifacts"
-LOG_FOLDER="artifacts/temp_logs"
+ARTIFACT_FOLDER="$(pwd)/artifacts"
+LOG_FOLDER="${ARTIFACT_FOLDER}/temp_logs"
 export ARTIFACT_FOLDER
 export LOG_FOLDER
 
@@ -79,6 +79,7 @@ cleanup_artifact_log
 # Prepare artifacts folder to save log and another need shared file, mount to docker container
 #
 mkdir -p "$ARTIFACT_FOLDER"
+mkdir -p "$LOG_FOLDER"
 
 #
 # Create running config
@@ -143,7 +144,7 @@ if (( BM_JOB_STATUS == EXIT_SUCCESS )); then
   declare -a BENCHMARK_DOCKER_ARGS=(
     "-v" "$ARTIFACT_FOLDER:/workspace/artifacts"
     "-e" "DOCKER_ARTIFACT_FOLDER=/workspace/artifacts"
-    "-e" "LOG_FOLDER=/workspace/$LOG_FOLDER"
+    "-e" "DOCKER_LOG_FOLDER=/workspace/artifacts/temp_logs"
     "--env-file" "$ENV_FILE"
   )
   # Join the array elements using newline as the delimiter and export as a single string.
