@@ -15,19 +15,19 @@
     <tr>
       <td rowspan="2"><b>Moe</b></td>
       <td>Fused&nbsp;MoE</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>gmm</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
@@ -36,10 +36,10 @@
     <tr>
       <td rowspan="1"><b>Dense</b></td>
       <td>All&#8209;gather&nbsp;matmul</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
@@ -48,28 +48,28 @@
     <tr>
       <td rowspan="3"><b>Attention</b></td>
       <td>Generic&nbsp;Ragged&nbsp;Paged<br>Attention&nbsp;V3*</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>MLA</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>Ragged&nbsp;Paged<br>Attention&nbsp;V3&nbsp;Head_Dim<br>64*</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
