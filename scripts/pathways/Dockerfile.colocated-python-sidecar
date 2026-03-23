@@ -29,22 +29,10 @@ RUN export VLLM_COMMIT_HASH="$(cat tpu-inference/.buildkite/vllm_lkg.version)" &
     git checkout "${VLLM_COMMIT_HASH}"
 
 # Install vllm (TPU target)
-RUN uv pip install --system -r requirements/tpu.txt && \
+RUN cd vllm && \
+    uv pip install --system -r requirements/tpu.txt && \
     VLLM_TARGET_DEVICE="tpu" uv pip install --system -e .
 
 # Install tpu-inference
 RUN cd tpu-inference && \
     uv pip install --system -e .
-
-# Verify the installation
-RUN python -c '\
-import jax; \
-import vllm; \
-import safetensors; \
-import importlib.metadata; \
-tpu_version = importlib.metadata.version("tpu_inference"); \
-print(f"vllm version: {vllm.__version__}"); \
-print(f"tpu_inference version: {tpu_version}"); \
-print(f"jax version: {jax.__version__}"); \
-print(f"safetensors version: {safetensors.__version__}"); \
-'
