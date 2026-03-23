@@ -42,7 +42,8 @@ def sharded_quantized_matmul(x: jax.Array,
                              w_s: jax.Array,
                              weight_sharding: P | NamedSharding,
                              *,
-                             mesh: Mesh | None = None) -> jax.Array:
+                             mesh: Mesh | None = None,
+                             x_q_dtype: jnp.dtype | None = None) -> jax.Array:
     """
     Wrapper around the quantized matmul kernel.
 
@@ -80,7 +81,8 @@ def sharded_quantized_matmul(x: jax.Array,
         scale_sharding = P(out_axis, )
     out_sharding = P(ShardingAxisName.ATTN_DATA, out_axis)
 
-    x_q_dtype = _get_x_q_dtype(w_q.dtype)
+    if x_q_dtype is None:
+        x_q_dtype = _get_x_q_dtype(w_q.dtype)
     x = jax.lax.with_sharding_constraint(
         x,
         NamedSharding(mesh, x_sharding) if mesh else x_sharding)
