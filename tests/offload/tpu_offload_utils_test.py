@@ -1,3 +1,17 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import unittest
 
 import jax
@@ -84,11 +98,16 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
 
         jax.block_until_ready(initial_kv_caches)
 
+        # Copy to host early because the operation will donate via stack_kv_cache_cross_layers
+        initial_kv_caches_baseline = [
+            np.array(cache) for cache in initial_kv_caches
+        ]
+
         src_blocks_array = jnp.array(src_blocks)
 
-        output = stack_kv_cache_cross_layers(initial_kv_caches,
-                                             src_blocks_array,
-                                             num_blocks_to_gather)
+        _, output = stack_kv_cache_cross_layers(initial_kv_caches,
+                                                src_blocks_array,
+                                                num_blocks_to_gather)
         jax.block_until_ready(output)
 
         # --- Verification ---
@@ -103,8 +122,8 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
             block_id = src_blocks[i]
             for j in range(self.num_layers):
                 output_np = np.array(output[i])
-                initial_np = np.array(initial_kv_caches[j])
-                np.testing.assert_array_equal(output_np[j],
+                initial_np = np.array(initial_kv_caches_baseline[j])
+                np.testing.assert_array_equal(output_np[0, j],
                                               initial_np[block_id])
 
         print(

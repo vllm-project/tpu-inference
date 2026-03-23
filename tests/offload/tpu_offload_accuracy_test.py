@@ -1,4 +1,16 @@
-# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import itertools
 import os
@@ -61,7 +73,6 @@ def _test_kv_cache_cpu_offloading_accuracy(
         os.environ['TPU_OFFLOAD_NUM_CPU_CHUNKS'] = cpu_chunks
         llm = LLM(model="meta-llama/Llama-3.2-3B",
                   max_model_len=3072,
-                  task="generate",
                   kv_transfer_config=kv_transfer_config)
 
         # 1st generate
