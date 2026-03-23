@@ -142,8 +142,11 @@ class KVCacheManager:
                         head_size = getattr(text_config, "global_head_dim",
                                             base_head_size)
                     else:
-                        num_kv_heads = base_num_kv_heads
-                        head_size = base_head_size
+                        num_kv_heads = getattr(text_config,
+                                               "num_key_value_heads",
+                                               base_num_kv_heads)
+                        head_size = getattr(text_config, "head_dim",
+                                            base_head_size)
                     # Pad num_kv_heads to multiple of TP size.
                     num_kv_heads = common_utils.get_padded_num_heads(
                         num_kv_heads, model_cnt)
