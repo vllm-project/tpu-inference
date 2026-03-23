@@ -3,6 +3,6 @@ Feature,CorrectnessTest,PerformanceTest
 "MLA",❓ Untested,❓ Untested
 "MoE",❓ Untested,❓ Untested
 "Quantized Attention",❓ Untested,❓ Untested
-"Quantized KV Cache",❓ Untested,❓ Untested
+"Quantized KV Cache",❓ Untested,❌ Failing
 "Quantized Matmul",❓ Untested,❓ Untested
 "Ragged Paged Attention V3",✅ Passing,✅ Passing

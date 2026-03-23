@@ -355,7 +355,7 @@ class VllmModelWrapper:
                     tie_weights=False,
                 )
 
-                return jax.tree.map(jax_view, output_from_torch)
+                return jax_view(output_from_torch)
 
         return embed_multimodal_func
 

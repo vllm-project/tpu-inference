@@ -106,7 +106,20 @@ class TestTPUJaxRunner:
             dummy_mm_embeds,
             is_multimodal=dummy_is_mm_embed)
 
-        # 3. ===== Act & Assert (Text-only) =====
+        # 3. ===== Act & Assert (Multimodal w/o mm embeds) =====
+        self.mock_get_input_embed_fn.reset_mock()
+        self.runner.is_multimodal_model = True
+
+        # Without mm_embeds in the current scheduled tokens
+        input_ids_res, inputs_embeds_res = self.runner._get_input_ids_embeds(
+            dummy_input_ids, None, None)
+
+        assert inputs_embeds_res is None
+        np.testing.assert_array_equal(np.asarray(input_ids_res),
+                                      np.asarray(dummy_input_ids))
+        self.mock_get_input_embed_fn.assert_not_called()
+
+        # 4. ===== Act & Assert (Text-only) =====
         self.mock_get_input_embed_fn.reset_mock()
         self.runner.is_multimodal_model = False
 
