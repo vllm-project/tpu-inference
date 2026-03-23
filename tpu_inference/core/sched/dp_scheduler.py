@@ -176,11 +176,7 @@ def _scheduler_worker_process(
                     _send_result(None)  # Signal completion
 
                 case SchedulerCommand.UPDATE_FROM_OUTPUT:
-                    scheduler_output, rank_req_ids, \
-                        model_runner_output_bytes = data
-                    model_runner_output = cloudpickle.loads(
-                        model_runner_output_bytes)
-                    model_runner_output.req_ids = rank_req_ids
+                    scheduler_output, model_runner_output = data
                     result = scheduler.update_from_output(
                         scheduler_output, model_runner_output)
                     _send_result(result)
@@ -743,28 +739,16 @@ class DPScheduler(SchedulerInterface):
         We need to route the model runner output to the appropriate scheduler
         based on which rank each request belongs to.
         """
-        # Split req_ids by DP rank (lightweight, just string lists).
-        rank_req_ids = self._split_req_ids_by_rank(model_runner_output)
+        # Split model output by DP rank (each rank gets only its req_ids).
+        rank_model_outputs = self._split_model_output_by_rank(
+            model_runner_output)
         rank_scheduler_outputs = self.cached_schedulers_output.popleft()
 
-        # Serialize ModelRunnerOutput once (the expensive part), then reuse
-        # the same bytes for every rank instead of re-serializing per rank.
-        start_time = time()
-        model_runner_output_bytes = cloudpickle.dumps(model_runner_output)
-        serialize_time = time() - start_time
-        if serialize_time > 0.5:
-            logger.warning(
-                f"Slow ModelRunnerOutput serialization "
-                f"({serialize_time:.2f}s, "
-                f"{len(model_runner_output_bytes)} bytes, "
-                f"{len(model_runner_output.req_ids)} reqs).")
-
-        # Send each rank its scheduler output + req_ids + shared bytes.
+        # Send each rank its scheduler output + per-rank model output.
         for rank in range(self.dp_size):
             self._send_command(
                 rank, SchedulerCommand.UPDATE_FROM_OUTPUT,
-                (rank_scheduler_outputs[rank], rank_req_ids[rank],
-                 model_runner_output_bytes))
+                (rank_scheduler_outputs[rank], rank_model_outputs[rank]))
 
         combined_engine_outputs = defaultdict(list)
         rank_scheduler_stats: List[Optional[SchedulerStats]] = []
@@ -828,22 +812,6 @@ class DPScheduler(SchedulerInterface):
             outputs[rank].req_ids.append(req_id)
 
         return outputs
-
-    def _split_req_ids_by_rank(
-            self,
-            global_model_output: ModelRunnerOutput) -> List[List[str]]:
-        """Split request IDs by DP rank.
-
-        This is a lightweight alternative to _split_model_output_by_rank that
-        returns only the per-rank req_id lists. Used with the optimized
-        UPDATE_FROM_OUTPUT path where ModelRunnerOutput is serialized once and
-        shared across all ranks.
-        """
-        rank_req_ids: List[List[str]] = [[] for _ in range(self.dp_size)]
-        for req_id in global_model_output.req_ids:
-            rank = self.assigned_dp_rank[req_id]
-            rank_req_ids[rank].append(req_id)
-        return rank_req_ids
 
     def _cleanup_finished_requests(self, finished_req_ids: set[str]) -> None:
         """Remove finished requests from our DP rank assignment tracking."""
