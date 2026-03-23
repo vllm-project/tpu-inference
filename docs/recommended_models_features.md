@@ -32,6 +32,12 @@ This table shows the features currently tested for accuracy and performance.
 
 --8<-- "docs/includes/core_features.md"
 
+## Kernel Support
+
+This table tracks high-level correctness and performance validation for distributed compute kernels.
+
+--8<-- "docs/includes/kernel_support.md"
+
 ## Microbenchmark Kernel Support
 
 This section outlines the detailed hardware and precision validation for our core microbenchmark kernels.
