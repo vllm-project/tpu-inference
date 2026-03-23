@@ -32,9 +32,9 @@ This table shows the features currently tested for accuracy and performance.
 
 --8<-- "docs/includes/core_features.md"
 
-## Kernel Support
+## Microbenchmark Kernel Support
 
-This table shows the current kernel support status.
+This section outlines the detailed hardware and precision validation for our core microbenchmark kernels.
 
 --8<-- "docs/includes/microbenchmarks.md"
 
