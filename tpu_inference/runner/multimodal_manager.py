@@ -113,32 +113,34 @@ class MultiModalManager:
         for _, num_items, mm_kwargs_group in group_and_batch_mm_kwargs(
                 mm_kwargs):
             batched_mm_inputs = mm_kwargs_group
-            # Convert torch tensors to numpy arrays that JAX can handle.
-            if "pixel_values" in batched_mm_inputs and isinstance(
-                    batched_mm_inputs["pixel_values"], list):
-                batched_mm_inputs["pixel_values"] = torch.cat(
-                    batched_mm_inputs["pixel_values"], dim=0)
-
             image_grid_thw = ()
-            for key, value in batched_mm_inputs.items():
-                if isinstance(value, torch.Tensor):
-                    if key == 'image_grid_thw':
-                        # change it to tuple of tuples to make it hashable for JIT
-
-                        # Shape: (B, N, 3) -> (B*N, 3) -> tuple of tuples
-                        grid_thw_tensor = batched_mm_inputs[key]
-                        grid_thw_reshaped = grid_thw_tensor.reshape(-1, 3)
-                        image_grid_thw = tuple(
-                            tuple(row) for row in grid_thw_reshaped.tolist())
-
-                        continue
-
-                    if value.dtype == torch.bfloat16:
-                        batched_mm_inputs[key] = value.to(
-                            torch.float32).numpy().astype(jnp.bfloat16)
-                    else:
-                        batched_mm_inputs[key] = value.numpy()
+            # TODO: b/494300919 - QWen 2.5 VL specific logic, need to be moved.
             if 'image_grid_thw' in batched_mm_inputs:
+                # Convert torch tensors to numpy arrays that JAX can handle.
+                if "pixel_values" in batched_mm_inputs and isinstance(
+                        batched_mm_inputs["pixel_values"], list):
+                    batched_mm_inputs["pixel_values"] = torch.cat(
+                        batched_mm_inputs["pixel_values"], dim=0)
+
+                for key, value in batched_mm_inputs.items():
+                    if isinstance(value, torch.Tensor):
+                        if key == 'image_grid_thw':
+                            # change it to tuple of tuples to make it hashable for JIT
+
+                            # Shape: (B, N, 3) -> (B*N, 3) -> tuple of tuples
+                            grid_thw_tensor = batched_mm_inputs[key]
+                            grid_thw_reshaped = grid_thw_tensor.reshape(-1, 3)
+                            image_grid_thw = tuple(
+                                tuple(row)
+                                for row in grid_thw_reshaped.tolist())
+
+                            continue
+
+                        if value.dtype == torch.bfloat16:
+                            batched_mm_inputs[key] = value.to(
+                                torch.float32).numpy().astype(jnp.bfloat16)
+                        else:
+                            batched_mm_inputs[key] = value.numpy()
                 batched_mm_inputs.pop('image_grid_thw')
 
             # Run the encoder.
