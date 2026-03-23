@@ -279,3 +279,16 @@ class TpuPlatform(Platform):
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True
+
+    @classmethod
+    def current_device(cls) -> torch.device:
+        """
+        Get the current device for the current platform.
+
+        This is mostly a placeholder since this method isn't
+        currently called from TPU Inference but instead
+        from upstream vLLM.  This won't be an issue,
+        however, because we'll manually place tensors
+        on the TPU device(s).
+        """
+        return torch.device("cpu")
