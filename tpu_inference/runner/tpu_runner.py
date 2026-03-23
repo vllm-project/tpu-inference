@@ -17,6 +17,7 @@ import logging
 import random
 from contextlib import nullcontext
 from dataclasses import dataclass
+import json
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import jax
@@ -771,6 +772,36 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices_selector,
             padded_num_reqs,
         ) = self._prepare_inputs(scheduler_output)
+        # Dump a jsonl with line corresponding to forward-pass metadata statistics
+        with open(self.vllm_config.additional_config["metrics_path"], 'a') as f:
+            shard_decode_lens = [[] for _ in range(self.dp_size)]
+            shard_prefill_lens = [[] for _ in range(self.dp_size)]
+            shard_context_lens = [[] for _ in range(self.dp_size)]
+            shard_total_tokens = [0 for _ in range(self.dp_size)]
+
+            for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
+                rank = scheduler_output.assigned_dp_rank[req_id]
+                num_tokens_int = int(num_tokens)
+                shard_total_tokens[rank] += num_tokens_int
+                
+                # Get context length (tokens already in cache)
+                context_len = self.requests[req_id].num_computed_tokens
+                shard_context_lens[rank].append(int(context_len))
+                
+                if num_tokens_int == 1:
+                    shard_decode_lens[rank].append(num_tokens_int)
+                else:
+                    shard_prefill_lens[rank].append(num_tokens_int)
+
+            metrics = {
+                "shard_decode_lens": shard_decode_lens,
+                "shard_prefill_lens": shard_prefill_lens,
+                "shard_context_lens": shard_context_lens,
+                "shard_total_tokens": shard_total_tokens,
+                "total_decode_reqs": sum(len(shard) for shard in shard_decode_lens),
+                "total_prefill_reqs": sum(len(shard) for shard in shard_prefill_lens),
+            }
+            f.write(json.dumps(metrics) + "\n")
 
         # multi-modal support
         if self.is_multimodal_model:
