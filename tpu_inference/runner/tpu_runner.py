@@ -56,6 +56,7 @@ from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   ShardingConfigManager)
 from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
 from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
+                                                      compute_processed_logprobs,
                                                       gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
@@ -947,8 +948,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         with self.maybe_forbid_compile:
             if tpu_sampling_metadata.logprobs:
-                logprobs = self._compute_and_gather_logprobs(
-                    logits, next_tokens, self.model_config.max_logprobs)
+                if self.model_config.logprobs_mode == "processed_logprobs":
+                    logprobs = \
+                        self._compute_and_gather_processed_logprobs(
+                            logits, next_tokens,
+                            self.model_config.max_logprobs,
+                            tpu_sampling_metadata)
+                else:
+                    logprobs = self._compute_and_gather_logprobs(
+                        logits, next_tokens,
+                        self.model_config.max_logprobs)
                 logprobs = _jax_logprobs_copy_to_host_async(logprobs)
             else:
                 logprobs = None
@@ -1115,6 +1124,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     @jax.jit(static_argnames=("max_logprobs", ))
     def _compute_and_gather_logprobs(logits, next_tokens, max_logprobs):
         logprobs = compute_logprobs(logits)
+        return gather_logprobs(logprobs, next_tokens, max_logprobs)
+
+    @staticmethod
+    @jax.jit(static_argnames=("max_logprobs", ))
+    def _compute_and_gather_processed_logprobs(logits, next_tokens,
+                                               max_logprobs,
+                                               tpu_sampling_metadata):
+        logprobs = compute_processed_logprobs(logits, tpu_sampling_metadata)
         return gather_logprobs(logprobs, next_tokens, max_logprobs)
 
     def _prepare_dp_input_metadata(self,

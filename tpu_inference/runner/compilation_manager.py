@@ -591,25 +591,61 @@ class CompilationManager:
     def _precompile_gather_logprobs(self) -> None:
         logger.info("Compiling gather_logprobs with different input shapes.")
         hsize = self.runner.model_config.get_vocab_size()
+        is_processed = (
+            self.runner.model_config.logprobs_mode == "processed_logprobs")
         for num_reqs in self.runner.num_reqs_paddings:
+            dp_size = self.runner.vllm_config.sharding_config.total_dp_size
             logits_sharding = NamedSharding(
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.MLP_DATA,
                               ShardingAxisName.MLP_TENSOR))
             token_ids_sharding = NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA, ))
+                self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA, ))  if dp_size>1 else NamedSharding(
+                self.runner.mesh, PartitionSpec())
             logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
                                                logits_sharding)
             token_ids = self._create_dummy_tensor((num_reqs, ), jnp.int32,
                                                   token_ids_sharding)
-            self._run_compilation(
-                f"worker{self.runner.rank} gather_logprobs",
-                self.runner._compute_and_gather_logprobs,
-                logits,
-                token_ids,
-                self.runner.model_config.max_logprobs,
-                num_reqs=num_reqs,
-            )
+            if is_processed:
+                # Precompile processed_logprobs path which needs
+                # sampling metadata to apply temperature/top-k/top-p.
+                sampling_metadata_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.ATTN_DATA))
+                temperature = np.full((num_reqs, ), 0.7, dtype=np.float32)
+                top_k = np.full((num_reqs, ), 20, dtype=np.int32)
+                top_p = np.full((num_reqs, ), 0.8, dtype=np.float32)
+                (temperature, top_k, top_p) = device_array(
+                    self.runner.mesh, (temperature, top_k, top_p),
+                    sharding=sampling_metadata_sharding)
+                for do_sampling in (True, False):
+                    sampling_metadata = TPUSupportedSamplingMetadata(
+                        temperature=temperature,
+                        top_k=top_k,
+                        top_p=top_p,
+                        _cache_collision_dummy=None,
+                        do_sampling=do_sampling,
+                        logprobs=True)
+                    self._run_compilation(
+                        f"worker{self.runner.rank}"
+                        " gather_processed_logprobs",
+                        self.runner
+                        ._compute_and_gather_processed_logprobs,
+                        logits,
+                        token_ids,
+                        self.runner.model_config.max_logprobs,
+                        sampling_metadata,
+                        num_reqs=num_reqs,
+                    )
+            else:
+                self._run_compilation(
+                    f"worker{self.runner.rank} gather_logprobs",
+                    self.runner._compute_and_gather_logprobs,
+                    logits,
+                    token_ids,
+                    self.runner.model_config.max_logprobs,
+                    num_reqs=num_reqs,
+                )
 
         self._gather_logprobs_precompiled = True
 
