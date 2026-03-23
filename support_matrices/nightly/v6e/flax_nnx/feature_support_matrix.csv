@@ -4,10 +4,10 @@ Feature,CorrectnessTest,PerformanceTest
 "KV cache host offloading",❓ Untested,❓ Untested
 "LoRA_Torch",✅ Passing,✅ Passing
 "Multimodal Inputs",✅ Passing,✅ Passing
-"Out-of-tree model support",✅ Passing,❌ Failing
+"Out-of-tree model support",✅ Passing,✅ Passing
 "Prefix Caching",✅ Passing,✅ Passing
 "Single Program Multi Data",✅ Passing,✅ Passing
-"Single-Host-P-D-disaggregation",✅ Passing,❓ Untested
+"Single-Host-P-D-disaggregation",❌ Failing,❓ Untested
 "Speculative Decoding: Eagle3",✅ Passing,✅ Passing
 "Speculative Decoding: Ngram",✅ Passing,✅ Passing
 "async scheduler",✅ Passing,❌ Failing
