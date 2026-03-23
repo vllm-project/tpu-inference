@@ -1,4 +1,4 @@
-| Model | Type | Unit&nbsp;Test | Correctness&nbsp;Test | Benchmark |
+| Model | Type | Unit&nbsp;Test | Correctness&nbsp;Test | Performance&nbsp;Test |
 | --- | --- | --- | --- | --- |
 | [meta-llama/Llama-4-Maverick-17B-128E-Instruct](https://huggingface.co/meta-llama/Llama-4-Maverick-17B-128E-Instruct) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
 | [meta-llama/Llama-Guard-4-12B/Multimodal](https://huggingface.co/meta-llama/Llama-Guard-4-12B/Multimodal) | Multimodal | <span title="✅ Passing">✅</span> | <span title="❌ Failing">❌</span> | <span title="❓ Untested">❓</span> |

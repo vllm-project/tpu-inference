@@ -46,9 +46,9 @@
     </tr>
     <tr>
       <td>multi-host</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
       <td>Multimodal Inputs</td>
@@ -88,9 +88,9 @@
     </tr>
     <tr>
       <td>Single-Host-P-D-disaggregation</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
     </tr>
     <tr>
       <td>Speculative Decoding: Eagle3</td>
