@@ -467,39 +467,51 @@ class TestQwen3VLMoeForConditionalGeneration:
         model.lm_head.assert_called_once_with(hidden_states)
 
     @patch('tpu_inference.models.jax.qwen3_vl_moe.get_default_maps')
-    @patch('tpu_inference.models.jax.qwen3_vl_moe.load_hf_weights')
+    @patch('tpu_inference.models.jax.qwen3_vl_moe.check_all_loaded')
+    @patch('tpu_inference.models.jax.qwen3_vl_moe._load_and_shard_weight')
+    @patch('tpu_inference.models.jax.qwen3_vl_moe.model_weights_generator')
     def test_load_weights(
-        self, mock_load_weights: MagicMock, mock_get_default_maps: MagicMock,
+        self, mock_weights_generator: MagicMock,
+        mock_load_and_shard_weight: MagicMock,
+        mock_check_all_loaded: MagicMock,
+        mock_get_default_maps: MagicMock,
         model: Qwen3VLMoeForConditionalGeneration,
         mock_vllm_config: MockMoeVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
-        with patch.object(model, '_load_moe_expert_weights') as mock_expert_load:
-            model.load_weights(rng)
-            mock_expert_load.assert_called_once()
-            mock_load_weights.assert_called_once()
-            kwargs = mock_load_weights.call_args.kwargs
-            assert kwargs['vllm_config'] == mock_vllm_config
-            assert kwargs['model'] is model
-            assert kwargs['mesh'] is mesh
-            # MoE load_weights filters out both fused and per-expert tensors.
-            filter_regex = kwargs['filter_regex']
-            assert re.match(filter_regex,
-                            "model.language_model.layers.0.self_attn.q_proj.weight")
-            assert not re.match(
-                filter_regex,
-                "model.language_model.layers.0.mlp.experts.down_proj",
-            )
-            assert not re.match(
-                filter_regex,
-                "model.language_model.layers.0.mlp.experts.0.down_proj.weight",
-            )
+        mock_metadata_map = MagicMock()
+        mock_metadata_map.transpose_map = {}
+        mock_get_default_maps.return_value = mock_metadata_map
+        mock_weights_generator.return_value = iter([
+            ("model.language_model.layers.0.mlp.experts.gate_up_proj",
+             torch.zeros((1, 2, 1), dtype=torch.float32)),
+            ("model.language_model.layers.0.self_attn.q_proj.weight",
+             torch.zeros((1, 1), dtype=torch.float32)),
+        ])
 
-    @patch('tpu_inference.models.jax.utils.weight_utils.get_model_weights_files')
-    @patch('tpu_inference.models.jax.utils.weight_utils.model_weights_single_file_generator')
+        with patch.object(model,
+                          '_load_moe_expert_weight') as mock_load_moe_weight, \
+             patch.object(model,
+                          '_finalize_loaded_expert_modules') as mock_finalize:
+            model.load_weights(rng)
+            mock_weights_generator.assert_called_once_with(
+                model_name_or_path=mock_vllm_config.model_config.model,
+                download_dir=mock_vllm_config.load_config.download_dir,
+                framework="pt",
+            )
+            mock_load_moe_weight.assert_called_once()
+            mock_load_and_shard_weight.assert_called_once()
+            assert mock_load_and_shard_weight.call_args.args[0] == mock_vllm_config
+            assert mock_load_and_shard_weight.call_args.args[4] is mesh
+            assert mock_load_and_shard_weight.call_args.args[5] == (
+                "model.language_model.layers.0.self_attn.q_proj.weight")
+            assert mock_metadata_map.transpose_map["mlp.gate"] == (1, 0)
+            mock_finalize.assert_called_once()
+            mock_check_all_loaded.assert_called_once()
+
+    @patch('tpu_inference.models.jax.qwen3_vl_moe.model_weights_generator')
     def test_load_moe_expert_weights_supports_fused_hf_tensors(
         self,
         mock_generator: MagicMock,
-        mock_get_model_weights_files: MagicMock,
         mock_vllm_config: MockMoeVllmConfig,
         rng: PRNGKey,
         mesh: Mesh,
@@ -535,7 +547,6 @@ class TestQwen3VLMoeForConditionalGeneration:
                                                       moe_intermediate_size) %
             89)
 
-        mock_get_model_weights_files.return_value = ["mock.safetensors"]
         mock_generator.return_value = iter([
             ("model.language_model.layers.0.mlp.experts.gate_up_proj", gate_up),
             ("model.language_model.layers.0.mlp.experts.down_proj", down),
@@ -564,12 +575,10 @@ class TestQwen3VLMoeForConditionalGeneration:
             expected_down,
         )
 
-    @patch('tpu_inference.models.jax.utils.weight_utils.get_model_weights_files')
-    @patch('tpu_inference.models.jax.utils.weight_utils.model_weights_single_file_generator')
+    @patch('tpu_inference.models.jax.qwen3_vl_moe.model_weights_generator')
     def test_load_moe_expert_weights_supports_fused_hf_down_proj_already_efd(
         self,
         mock_generator: MagicMock,
-        mock_get_model_weights_files: MagicMock,
         mock_vllm_config: MockMoeVllmConfig,
         rng: PRNGKey,
         mesh: Mesh,
@@ -605,7 +614,6 @@ class TestQwen3VLMoeForConditionalGeneration:
                                                       moe_intermediate_size,
                                                       hidden_size) % 89)
 
-        mock_get_model_weights_files.return_value = ["mock.safetensors"]
         mock_generator.return_value = iter([
             ("model.language_model.layers.0.mlp.experts.gate_up_proj", gate_up),
             ("model.language_model.layers.0.mlp.experts.down_proj", down),
@@ -633,6 +641,91 @@ class TestQwen3VLMoeForConditionalGeneration:
             np.array(experts.kernel_down_proj_EFD.value, dtype=np.float32),
             expected_down,
         )
+
+    @patch('tpu_inference.models.jax.qwen3_vl_moe.model_weights_generator')
+    def test_load_moe_expert_weights_releases_indexed_buffers_after_sharding(
+        self,
+        mock_generator: MagicMock,
+        mock_vllm_config: MockMoeVllmConfig,
+        rng: PRNGKey,
+        mesh: Mesh,
+    ):
+        with patch(
+                'tpu_inference.models.jax.qwen3_vl_moe.Qwen3VLVisionTransformer',
+                autospec=True) as MockVision:
+            mock_visual = MockVision.return_value
+            mock_visual.dtype = mock_vllm_config.model_config.dtype
+            mock_visual.config = mock_vllm_config.model_config.hf_config.vision_config
+            mock_visual.spatial_merge_size = (
+                mock_vllm_config.model_config.hf_config.vision_config
+                .spatial_merge_size)
+            model = Qwen3VLMoeForConditionalGeneration(mock_vllm_config, rng,
+                                                       mesh)
+
+        layer = model.language_model.layers[0]
+        experts = layer.mlp.experts
+        num_experts = mock_vllm_config.model_config.hf_config.num_experts
+
+        gate_shape = tuple(experts.kernel_gating_EDF.value.shape[1:])
+        up_shape = tuple(experts.kernel_up_proj_EDF.value.shape[1:])
+        down_shape = tuple(experts.kernel_down_proj_EFD.value.shape[1:])
+
+        def make_weight(shape: tuple[int, ...], offset: int) -> torch.Tensor:
+            size = int(np.prod(shape))
+            return torch.arange(offset,
+                                offset + size,
+                                dtype=torch.float32).reshape(shape)
+
+        gate_weights = [make_weight(gate_shape, expert_id * 1000)
+                        for expert_id in range(num_experts)]
+        up_weights = [make_weight(up_shape, expert_id * 2000)
+                      for expert_id in range(num_experts)]
+        down_weights = [make_weight(down_shape, expert_id * 3000)
+                        for expert_id in range(num_experts)]
+
+        file_1_entries = []
+        file_2_entries = []
+        for expert_id in range(num_experts):
+            entries = [
+                (f"model.language_model.layers.0.mlp.experts.{expert_id}.gate_proj.weight",
+                 gate_weights[expert_id]),
+                (f"model.language_model.layers.0.mlp.experts.{expert_id}.up_proj.weight",
+                 up_weights[expert_id]),
+                (f"model.language_model.layers.0.mlp.experts.{expert_id}.down_proj.weight",
+                 down_weights[expert_id]),
+            ]
+            if expert_id == 0:
+                file_1_entries.extend(entries)
+            else:
+                file_2_entries.extend(entries)
+
+        mock_generator.return_value = iter(file_1_entries + file_2_entries)
+
+        model._load_moe_expert_weights()
+
+        np.testing.assert_array_equal(
+            np.array(experts.kernel_gating_EDF.value, dtype=np.float32),
+            np.stack([np.array(weight, dtype=np.float32)
+                      for weight in gate_weights],
+                     axis=0),
+        )
+        np.testing.assert_array_equal(
+            np.array(experts.kernel_up_proj_EDF.value, dtype=np.float32),
+            np.stack([np.array(weight, dtype=np.float32) for weight in up_weights],
+                     axis=0),
+        )
+        np.testing.assert_array_equal(
+            np.array(experts.kernel_down_proj_EFD.value, dtype=np.float32),
+            np.stack([np.array(weight, dtype=np.float32)
+                      for weight in down_weights],
+                     axis=0),
+        )
+        assert all(weight is None
+                   for weight in experts.kernel_gating_EDF._weights_to_load)
+        assert all(weight is None
+                   for weight in experts.kernel_up_proj_EDF._weights_to_load)
+        assert all(weight is None
+                   for weight in experts.kernel_down_proj_EFD._weights_to_load)
 
 
 # --- Integration Tests (dense fallback, real layers) ---

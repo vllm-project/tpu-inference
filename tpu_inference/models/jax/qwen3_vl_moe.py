@@ -7,6 +7,7 @@ from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import torchax
 from flax import nnx
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
@@ -35,10 +36,12 @@ from tpu_inference.models.jax.utils.multi_modal_utils import (
     merge_multimodal_embeddings,
 )
 from tpu_inference.models.jax.utils.weight_utils import (
+    _load_and_shard_weight,
     assign_and_shard_param,
+    check_all_loaded,
     get_default_maps,
     jax_array_from_reshaped_torch,
-    load_hf_weights,
+    model_weights_generator,
 )
 
 init_fn = nnx.initializers.uniform()
@@ -378,117 +381,131 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         llm_positions = llm_positions[:, context_len:seq_len]
         return llm_positions, mrope_position_delta
 
-    def _load_moe_expert_weights(self) -> None:
-        """Load fused or per-expert HF MoE tensors using real param metadata."""
-        from tpu_inference.models.jax.utils.weight_utils import (
-            get_model_weights_files,
-            model_weights_single_file_generator,
+    @staticmethod
+    def _clear_loaded_expert_buffers(experts,
+                                     loaded_names: Optional[set[str]]) -> None:
+        if not loaded_names:
+            return
+
+        for param_name in loaded_names:
+            param = getattr(experts, param_name, None)
+            weights_to_load = getattr(param, "_weights_to_load", None)
+            if weights_to_load is None:
+                continue
+            param._weights_to_load = [None] * len(weights_to_load)
+
+    def _load_moe_expert_weight(self, hf_key, hf_weight,
+                                loaded_expert_modules) -> None:
+        indexed_match = re.match(
+            r".*layers\.(\d+)\.mlp\.experts\.(\d+\.(?:gate_proj|up_proj|down_proj)(?:\.weight)?)$",
+            hf_key,
         )
+        fused_match = re.match(
+            r".*layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)(?:\.weight)?$",
+            hf_key,
+        )
+        if not indexed_match and not fused_match:
+            return
 
-        model_path = self.vllm_config.model_config.model
-        download_dir = self.vllm_config.load_config.download_dir
-        weights_files = get_model_weights_files(model_path, download_dir)
-        loaded_expert_modules = {}
+        layer_idx = int((indexed_match or fused_match).group(1))
+        layer = self.language_model.layers[layer_idx]
+        if isinstance(layer, PPMissingLayer) or not hasattr(layer.mlp,
+                                                            "experts"):
+            return
 
-        for weights_file in weights_files:
-            for hf_key, hf_weight in model_weights_single_file_generator(
-                    weights_file,
-                    framework="pt",
-                    filter_regex=r".*\.mlp\.experts(?:\.\d+\.)?.*"):
-                indexed_match = re.match(
-                    r".*layers\.(\d+)\.mlp\.experts\.(\d+\.(?:gate_proj|up_proj|down_proj)(?:\.weight)?)$",
-                    hf_key,
-                )
-                fused_match = re.match(
-                    r".*layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)(?:\.weight)?$",
-                    hf_key,
-                )
-                if not indexed_match and not fused_match:
-                    continue
+        experts = layer.mlp.experts
+        loaded_expert_modules[layer_idx] = experts
 
-                layer_idx = int((indexed_match or fused_match).group(1))
-                layer = self.language_model.layers[layer_idx]
-                if isinstance(layer, PPMissingLayer) or not hasattr(layer.mlp,
-                                                                    "experts"):
-                    continue
+        if indexed_match:
+            expert_suffix = indexed_match.group(2)
+            if not expert_suffix.endswith(".weight"):
+                expert_suffix += ".weight"
+            loaded_names = experts.load_weights([(expert_suffix, hf_weight)])
+            if getattr(experts, "quant_method", None) is None:
+                self._clear_loaded_expert_buffers(experts, loaded_names)
+            return
 
-                experts = layer.mlp.experts
-                loaded_expert_modules[layer_idx] = experts
-
-                if indexed_match:
-                    expert_suffix = indexed_match.group(2)
-                    if not expert_suffix.endswith(".weight"):
-                        expert_suffix += ".weight"
-                    experts.load_weights([(expert_suffix, hf_weight)])
-                    continue
-
-                fused_name = fused_match.group(2)
-                if fused_name == "down_proj":
-                    target_shape = tuple(experts.kernel_down_proj_EFD.value.shape)
-                    source_shape = tuple(hf_weight.shape)
-                    permute_dims = None
-                    if source_shape != target_shape:
-                        swapped_shape = source_shape[:-2] + (
-                            source_shape[-1], source_shape[-2])
-                        if swapped_shape == target_shape:
-                            permute_dims = (0, 2, 1)
-                        else:
-                            raise ValueError(
-                                "Unsupported fused down_proj layout for "
-                                f"language_model.layers.{layer_idx}.mlp.experts: "
-                                f"source {source_shape} vs target {target_shape}"
-                            )
-                    assign_and_shard_param(
-                        experts.kernel_down_proj_EFD,
-                        jax_array_from_reshaped_torch(
-                            hf_weight, permute_dims=permute_dims),
-                        param_name=(
-                            f"language_model.layers.{layer_idx}.mlp.experts.down_proj"
-                        ),
-                    )
-                    continue
-
-                E, D, F = experts.kernel_gating_EDF.value.shape
-                fused_shape = tuple(hf_weight.shape)
-                if fused_shape == (E, 2 * F, D):
-                    chunk_dim = 1
+        fused_name = fused_match.group(2)
+        if fused_name == "down_proj":
+            target_shape = tuple(experts.kernel_down_proj_EFD.value.shape)
+            source_shape = tuple(hf_weight.shape)
+            permute_dims = None
+            if source_shape != target_shape:
+                swapped_shape = source_shape[:-2] + (
+                    source_shape[-1], source_shape[-2])
+                if swapped_shape == target_shape:
                     permute_dims = (0, 2, 1)
-                elif fused_shape == (E, D, 2 * F):
-                    chunk_dim = 2
-                    permute_dims = None
                 else:
                     raise ValueError(
-                        "Unsupported fused gate_up_proj layout for "
+                        "Unsupported fused down_proj layout for "
                         f"language_model.layers.{layer_idx}.mlp.experts: "
-                        f"source {fused_shape} vs expected EDF=({E}, {D}, {F})"
-                    )
-                gate_proj, up_proj = hf_weight.chunk(2, dim=chunk_dim)
-                assign_and_shard_param(
-                    experts.kernel_gating_EDF,
-                    jax_array_from_reshaped_torch(
-                        gate_proj, permute_dims=permute_dims),
-                    param_name=(
-                        f"language_model.layers.{layer_idx}.mlp.experts.gate_proj"
-                    ),
-                )
-                assign_and_shard_param(
-                    experts.kernel_up_proj_EDF,
-                    jax_array_from_reshaped_torch(
-                        up_proj, permute_dims=permute_dims),
-                    param_name=(
-                        f"language_model.layers.{layer_idx}.mlp.experts.up_proj"
-                    ),
-                )
+                        f"source {source_shape} vs target {target_shape}")
+            assign_and_shard_param(
+                experts.kernel_down_proj_EFD,
+                jax_array_from_reshaped_torch(hf_weight,
+                                              permute_dims=permute_dims),
+                param_name=(
+                    f"language_model.layers.{layer_idx}.mlp.experts.down_proj"),
+            )
+            return
 
+        E, D, F = experts.kernel_gating_EDF.value.shape
+        fused_shape = tuple(hf_weight.shape)
+        if fused_shape == (E, 2 * F, D):
+            chunk_dim = 1
+            permute_dims = (0, 2, 1)
+        elif fused_shape == (E, D, 2 * F):
+            chunk_dim = 2
+            permute_dims = None
+        else:
+            raise ValueError(
+                "Unsupported fused gate_up_proj layout for "
+                f"language_model.layers.{layer_idx}.mlp.experts: "
+                f"source {fused_shape} vs expected EDF=({E}, {D}, {F})")
+        gate_proj, up_proj = hf_weight.chunk(2, dim=chunk_dim)
+        assign_and_shard_param(
+            experts.kernel_gating_EDF,
+            jax_array_from_reshaped_torch(gate_proj,
+                                          permute_dims=permute_dims),
+            param_name=(
+                f"language_model.layers.{layer_idx}.mlp.experts.gate_proj"),
+        )
+        assign_and_shard_param(
+            experts.kernel_up_proj_EDF,
+            jax_array_from_reshaped_torch(up_proj, permute_dims=permute_dims),
+            param_name=(
+                f"language_model.layers.{layer_idx}.mlp.experts.up_proj"),
+        )
+
+    def _finalize_loaded_expert_modules(self, loaded_expert_modules) -> None:
         for experts in loaded_expert_modules.values():
             quant_method = getattr(experts, "quant_method", None)
             if quant_method is not None:
-                quant_method.process_weights_after_loading(experts)
+                processed = quant_method.process_weights_after_loading(experts)
+                if processed is not False:
+                    self._clear_loaded_expert_buffers(
+                        experts, {
+                            "kernel_gating_EDF",
+                            "kernel_up_proj_EDF",
+                            "kernel_down_proj_EFD",
+                        })
+
+    def _load_moe_expert_weights(self) -> None:
+        """Load fused or per-expert HF MoE tensors using real param metadata."""
+        weights_iterator = model_weights_generator(
+            model_name_or_path=self.vllm_config.model_config.model,
+            download_dir=self.vllm_config.load_config.download_dir,
+            framework="pt",
+            filter_regex=r".*\.mlp\.experts(?:\.\d+\.)?.*",
+        )
+        loaded_expert_modules = {}
+        for hf_key, hf_weight in weights_iterator:
+            self._load_moe_expert_weight(hf_key, hf_weight,
+                                         loaded_expert_modules)
+        self._finalize_loaded_expert_modules(loaded_expert_modules)
 
     def load_weights(self, rng_key: jax.Array) -> None:
         self.rng = nnx.Rngs(rng_key)
-        self._load_moe_expert_weights()
-
         mappings = {
             "model.language_model.embed_tokens": "language_model.embed_tokens.weight",
             "model.language_model.layers.*.input_layernorm": "language_model.layers.*.input_layernorm.weight",
@@ -552,11 +569,38 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         metadata_map = get_default_maps(adapted_model_config, self.mesh,
                                         mappings)
         metadata_map.transpose_map["mlp.gate"] = (1, 0)
+        loaded_expert_modules = {}
+        params = nnx.state(self)
+        try:
+            shardings = nnx.get_named_sharding(params, self.mesh)
+        except TypeError:
+            shardings = params
+        env = torchax.default_env()
+        weights_iterator = getattr(self.vllm_config.model_config,
+                                   "runai_model_weights_iterator", None)
+        if weights_iterator is None:
+            weights_iterator = model_weights_generator(
+                model_name_or_path=self.vllm_config.model_config.model,
+                download_dir=self.vllm_config.load_config.download_dir,
+                framework="pt",
+            )
 
-        load_hf_weights(
-            vllm_config=self.vllm_config,
-            model=self,
-            metadata_map=metadata_map,
-            mesh=self.mesh,
-            filter_regex=r"^(?!.*\.mlp\.experts(?:\.|$)).*$",
-        )
+        for hf_key, hf_weight in weights_iterator:
+            if re.match(r".*\.mlp\.experts(?:\.\d+\.)?.*", hf_key):
+                self._load_moe_expert_weight(hf_key, hf_weight,
+                                             loaded_expert_modules)
+                continue
+
+            _load_and_shard_weight(
+                self.vllm_config,
+                params,
+                shardings,
+                metadata_map,
+                self.mesh,
+                hf_key,
+                env.t2j_copy(hf_weight),
+            )
+
+        self._finalize_loaded_expert_modules(loaded_expert_modules)
+        check_all_loaded(params)
+        nnx.update(self, params)
