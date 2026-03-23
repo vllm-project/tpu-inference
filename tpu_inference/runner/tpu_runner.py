@@ -15,7 +15,6 @@
 import functools
 import logging
 import random
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
@@ -536,15 +535,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # See page 5 of https://arxiv.org/abs/2409.12191
         self.mrope_positions_cpu = np.zeros((3, self.max_num_tokens),
                                             dtype=np.int64)
-
-        # Thread pool for parallelizing per-DP-rank CPU work in
-        # _prepare_inputs_dp.  Numpy ops release the GIL so threads give
-        # real parallelism here.
-        if self.dp_size > 1:
-            self._dp_executor = ThreadPoolExecutor(
-                max_workers=self.dp_size)
-        else:
-            self._dp_executor = None
 
     def load_model(self):
         with set_current_vllm_config(self.vllm_config):
@@ -1268,93 +1258,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         else:
             return self._prepare_inputs_non_dp(scheduler_output)
 
-    def _prepare_per_rank_inputs(
-        self,
-        dp_rank: int,
-        num_req_per_dp_rank: dict,
-        req_indices_dp: dict,
-        scheduled_tokens_per_dp_rank: dict,
-        num_scheduled_tokens_per_dp_rank: dict,
-        padded_num_scheduled_tokens_per_dp_rank: int,
-        max_num_reqs_per_dp_rank: int,
-        padded_num_reqs_per_dp_rank: int,
-    ) -> None:
-        """Prepare input_ids, positions, query_start_loc, seq_lens, and
-        logits_indices for a single DP rank.  Each rank writes to
-        non-overlapping slices of the shared CPU buffers, so this method
-        is safe to call concurrently from multiple threads."""
-
-        num_scheduled_tokens_per_req = scheduled_tokens_per_dp_rank[dp_rank]
-        _num_reqs = num_req_per_dp_rank[dp_rank]
-
-        # --- input_ids & positions ---
-        if _num_reqs > 0:
-            token_offset = (padded_num_scheduled_tokens_per_dp_rank
-                            * dp_rank)
-            total_num_scheduled_tokens = num_scheduled_tokens_per_dp_rank[
-                dp_rank]
-            input_ids_cpu = self.input_ids_cpu[
-                token_offset:token_offset +
-                padded_num_scheduled_tokens_per_dp_rank]
-            positions_cpu = self.positions_cpu[
-                token_offset:token_offset +
-                padded_num_scheduled_tokens_per_dp_rank]
-            req_indices = np.repeat(req_indices_dp[dp_rank],
-                                    num_scheduled_tokens_per_req)
-            arange = np.concatenate(
-                [self.arange_cpu[:n] for n in num_scheduled_tokens_per_req])
-            positions_np = positions_cpu[:total_num_scheduled_tokens]
-            np.add(
-                self.input_batch.num_computed_tokens_cpu[req_indices],
-                arange,
-                out=positions_np,
-            )
-            token_indices = (
-                positions_np +
-                req_indices * self.input_batch.token_ids_cpu.shape[1])
-            np.take(
-                self.input_batch.token_ids_cpu.ravel(),
-                token_indices,
-                out=input_ids_cpu[:total_num_scheduled_tokens],
-            )
-            input_ids_cpu[total_num_scheduled_tokens:] = 0
-
-        # --- query_start_loc & seq_lens ---
-        req_offset = dp_rank * max_num_reqs_per_dp_rank
-        query_start_loc_cpu = self.query_start_loc_cpu[
-            req_offset + dp_rank:req_offset + max_num_reqs_per_dp_rank
-            + dp_rank + 1]
-        seq_lens_cpu = self.seq_lens_cpu[req_offset:req_offset +
-                                         max_num_reqs_per_dp_rank]
-        req_indices_for_attn = req_indices_dp[dp_rank]
-
-        if _num_reqs == 0:
-            query_start_loc_cpu[:] = 0
-            seq_lens_cpu[:] = 0
-        else:
-            np.cumsum(
-                num_scheduled_tokens_per_req,
-                out=query_start_loc_cpu[1:_num_reqs + 1],
-            )
-            query_start_loc_cpu[_num_reqs + 1:] = 1
-
-            seq_lens_cpu[:_num_reqs] = (
-                self.input_batch.num_computed_tokens_cpu[
-                    req_indices_for_attn] +
-                num_scheduled_tokens_per_req)
-            seq_lens_cpu[_num_reqs:] = 0
-
-        # --- logits_indices ---
-        li_req_offset = dp_rank * padded_num_reqs_per_dp_rank
-        query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank + 1)
-        logits_indices_cpu = self.logits_indices_cpu[
-            li_req_offset:li_req_offset + padded_num_reqs_per_dp_rank]
-        logits_indices_cpu[:_num_reqs] = (
-            self.query_start_loc_cpu[query_loc_req_offset +
-                                     1:query_loc_req_offset + _num_reqs +
-                                     1] - 1)
-        logits_indices_cpu[_num_reqs:] = -1
-
     def _prepare_inputs_dp(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -1389,24 +1292,98 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                  req_ids_dp, scheduled_tokens_per_dp_rank,
                  padded_num_scheduled_tokens_per_dp_rank, dp_size)
 
-        # Populate input_ids, positions, query_start_loc, seq_lens, and
-        # logits_indices for each DP rank.  Each rank operates on
-        # non-overlapping slices of the shared numpy buffers, so the work
-        # is dispatched to a thread pool for parallel execution (numpy ops
-        # release the GIL).
-        def _per_rank_work(dp_rank):
-            self._prepare_per_rank_inputs(
-                dp_rank,
-                num_req_per_dp_rank,
-                req_indices_dp,
-                scheduled_tokens_per_dp_rank,
-                num_scheduled_tokens_per_dp_rank,
-                padded_num_scheduled_tokens_per_dp_rank,
-                max_num_reqs_per_dp_rank,
-                padded_num_reqs_per_dp_rank,
+        # Populates input_ids and positions
+        for dp_rank in range(dp_size):
+            if num_req_per_dp_rank[dp_rank] == 0:
+                continue
+            token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
+            num_scheduled_tokens_per_req = scheduled_tokens_per_dp_rank[
+                dp_rank]
+            total_num_scheduled_tokens = num_scheduled_tokens_per_dp_rank[
+                dp_rank]
+            input_ids_cpu = self.input_ids_cpu[
+                token_offset:token_offset +
+                padded_num_scheduled_tokens_per_dp_rank]
+            positions_cpu = self.positions_cpu[
+                token_offset:token_offset +
+                padded_num_scheduled_tokens_per_dp_rank]
+            # Get request indices.
+            # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
+            # For each scheduled token, what are the corresponding req index.
+            req_indices = np.repeat(req_indices_dp[dp_rank],
+                                    num_scheduled_tokens_per_req)
+            # Get batched arange.
+            # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+            # For each scheduled token, what is its position in corresponding req.
+            arange = np.concatenate(
+                [self.arange_cpu[:n] for n in num_scheduled_tokens_per_req])
+            # Get positions.
+            positions_np = positions_cpu[:total_num_scheduled_tokens]
+            np.add(
+                self.input_batch.num_computed_tokens_cpu[req_indices],
+                arange,
+                out=positions_np,
+            )
+            # Get token indices.
+            # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+            # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
+            # where M is the max_model_len.
+            token_indices = (
+                positions_np +
+                req_indices * self.input_batch.token_ids_cpu.shape[1])
+            # NOTE(woosuk): We use torch.index_select instead of np.take here
+            # because torch.index_select is much faster than np.take for large
+            # tensors.
+            np.take(
+                self.input_batch.token_ids_cpu.ravel(),
+                token_indices,
+                out=input_ids_cpu[:total_num_scheduled_tokens],
             )
 
-        list(self._dp_executor.map(_per_rank_work, range(dp_size)))
+            input_ids_cpu[total_num_scheduled_tokens:] = 0
+
+        # Prepare the attention metadata (query_start_loc_cpu, seq_lens_cpu)
+        for dp_rank in range(dp_size):
+            req_offset = dp_rank * max_num_reqs_per_dp_rank
+            query_start_loc_cpu = self.query_start_loc_cpu[
+                req_offset + dp_rank:req_offset + max_num_reqs_per_dp_rank +
+                dp_rank + 1]
+            seq_lens_cpu = self.seq_lens_cpu[req_offset:req_offset +
+                                             max_num_reqs_per_dp_rank]
+            _num_reqs = num_req_per_dp_rank[dp_rank]
+            req_indices = req_indices_dp[dp_rank]
+            num_scheduled_tokens_per_req = scheduled_tokens_per_dp_rank[
+                dp_rank]
+
+            if _num_reqs == 0:
+                query_start_loc_cpu[:] = 0
+                seq_lens_cpu[:] = 0
+                continue
+
+            np.cumsum(
+                num_scheduled_tokens_per_req,
+                out=query_start_loc_cpu[1:_num_reqs + 1],
+            )
+            query_start_loc_cpu[_num_reqs + 1:] = 1
+
+            seq_lens_cpu[:_num_reqs] = (
+                self.input_batch.num_computed_tokens_cpu[req_indices] +
+                num_scheduled_tokens_per_req)
+            seq_lens_cpu[_num_reqs:] = 0
+
+        # populate logits_indices
+        for dp_rank in range(dp_size):
+            req_offset = dp_rank * padded_num_reqs_per_dp_rank
+            query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank + 1)
+            _num_reqs = num_req_per_dp_rank[dp_rank]
+
+            logits_indices_cpu = self.logits_indices_cpu[
+                req_offset:req_offset + padded_num_reqs_per_dp_rank]
+            logits_indices_cpu[:_num_reqs] = (
+                self.query_start_loc_cpu[query_loc_req_offset +
+                                         1:query_loc_req_offset + _num_reqs +
+                                         1] - 1)
+            logits_indices_cpu[_num_reqs:] = -1
 
         logits_indices = self.logits_indices_cpu[:padded_num_reqs]
 
@@ -1554,12 +1531,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     token_in_tpu_pre_next_tokens_indices)
 
         if self.lora_config is not None:
-            # Concatenate per-req scheduled tokens across all DP ranks for
-            # LoRA adapter activation.
-            all_num_scheduled_tokens_per_req = np.concatenate(
-                [scheduled_tokens_per_dp_rank[r] for r in range(dp_size)])
             self.lora_utils.set_active_loras(
-                all_num_scheduled_tokens_per_req,
+                num_scheduled_tokens_per_req,
                 total_num_scheduled_tokens,
                 padded_total_num_scheduled_tokens,
             )
