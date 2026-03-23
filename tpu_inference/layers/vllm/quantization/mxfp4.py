@@ -25,13 +25,13 @@ from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig, FusedMoEQuantConfig, mxfp4_w4a16_moe_quant_config)
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
-from vllm.model_executor.layers.quantization.mxfp4 import (Mxfp4Backend,
-                                                           Mxfp4Config,
+from vllm.model_executor.layers.quantization.mxfp4 import (Mxfp4Config,
                                                            Mxfp4MoEMethod)
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
@@ -102,7 +102,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
 
         # We piggyback on triton implementation as it applies minimal hardware
         # specific post processing to the weights.
-        self.mxfp4_backend = Mxfp4Backend.TRITON
+        self.mxfp4_backend = Mxfp4MoeBackend.TRITON
 
         self.mesh = mesh
         self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
