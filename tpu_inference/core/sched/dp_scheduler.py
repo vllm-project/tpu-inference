@@ -13,17 +13,12 @@
 # limitations under the License.
 
 import copy
-import multiprocessing
-import multiprocessing.reduction
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from enum import Enum
-from multiprocessing import Process
-from multiprocessing.connection import Connection
-from time import time
 from typing import Any, Dict, List, Optional, Tuple
 
-import cloudpickle
+import jax
+import jax.experimental.colocated_python as colocated_python
 import torch
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -45,242 +40,137 @@ from tpu_inference.utils import time_function
 logger = init_logger(__name__)
 
 
-class SchedulerCommand(Enum):
-    """Enum for scheduler worker process commands."""
-    ADD_REQUEST = "add_request"
-    SCHEDULE = "schedule"
-    FINISH_REQUESTS = "finish_requests"
-    UPDATE_DRAFT_TOKEN_IDS = "update_draft_token_ids"
-    UPDATE_FROM_OUTPUT = "update_from_output"
-    GET_GRAMMAR_BITMASK = "get_grammar_bitmask"
-    MAKE_STATS = "make_stats"
-    RESET_PREFIX_CACHE = "reset_prefix_cache"
-    GET_NUM_UNFINISHED_REQUESTS = "get_num_unfinished_requests"
-    HAS_FINISHED_REQUESTS = "has_finished_requests"
-    GET_REQUEST_COUNTS = "get_request_counts"
-    GET_TOKEN_COUNT = "get_token_count"
-    PROBE_COMPUTED_BLOCKS = "probe_computed_blocks"
-    RESET_ENCODER_CACHE = "reset_encoder_cache"
-    SET_PAUSE_STATE = "set_pause_state"
-    GET_PAUSE_STATE = "get_pause_state"
-    SHUTDOWN = "shutdown"
+class SchedulerWorker:
+    """Wraps a single vLLM Scheduler instance for one DP rank.
 
+    This class is intended to be used with
+    ``jax.experimental.colocated_python.colocated_python_class`` so that
+    each instance lives on the colocated host CPU(s) rather than the
+    single-controller CPU.  All methods are plain synchronous Python;
+    the colocated-Python runtime takes care of shipping the calls to the
+    correct host.
+    """
 
-class SchedulerWorkerError(Exception):
-    """Exception raised when a scheduler worker process encounters an error."""
-
-    def __init__(self, rank: int, message: str):
+    def __init__(
+        self,
+        rank: int,
+        vllm_config: Any,
+        kv_cache_config: Any,
+        structured_output_manager: Any,
+        block_size: int,
+        mm_registry: Any,
+        include_finished_set: bool,
+        log_stats: bool,
+        original_scheduler_cls: type,
+    ):
         self.rank = rank
-        self.message = message
-        super().__init__(f"Scheduler worker {rank} error: {message}")
+        self.scheduler = original_scheduler_cls(
+            vllm_config=vllm_config,
+            kv_cache_config=kv_cache_config,
+            structured_output_manager=structured_output_manager,
+            block_size=block_size,
+            mm_registry=mm_registry,
+            include_finished_set=include_finished_set,
+            log_stats=log_stats,
+        )
+        logger.debug(f"SchedulerWorker (colocated) for rank {rank} created")
 
-    def __reduce__(self):
-        """Enable proper pickling/unpickling of this exception."""
-        return (self.__class__, (self.rank, self.message))
+    # ---- forwarded scheduler methods ----
+
+    def add_request(self, request: Request) -> None:
+        self.scheduler.add_request(request)
+
+    def schedule(self) -> SchedulerOutput:
+        return self.scheduler.schedule()
+
+    def finish_requests(self, request_ids, finished_status) -> None:
+        self.scheduler.finish_requests(request_ids, finished_status)
+
+    def update_draft_token_ids(self, draft_token_ids) -> None:
+        self.scheduler.update_draft_token_ids(draft_token_ids)
+
+    def update_from_output(self, scheduler_output, model_runner_output):
+        return self.scheduler.update_from_output(scheduler_output,
+                                                 model_runner_output)
+
+    def get_grammar_bitmask(self, scheduler_output):
+        return self.scheduler.get_grammar_bitmask(scheduler_output)
+
+    def make_stats(self, spec_decoding_stats=None, kv_connector_stats=None):
+        return self.scheduler.make_stats(spec_decoding_stats,
+                                         kv_connector_stats)
+
+    def reset_prefix_cache(self, reset_running_requests=False,
+                           reset_connector=False) -> bool:
+        return self.scheduler.reset_prefix_cache(
+            reset_running_requests=reset_running_requests,
+            reset_connector=reset_connector)
+
+    def reset_encoder_cache(self) -> None:
+        self.scheduler.reset_encoder_cache()
+
+    def get_num_unfinished_requests(self) -> int:
+        return self.scheduler.get_num_unfinished_requests()
+
+    def has_finished_requests(self) -> bool:
+        return self.scheduler.has_finished_requests()
+
+    def get_request_counts(self) -> Tuple[int, int]:
+        running = len(self.scheduler.running)
+        waiting = len(self.scheduler.waiting)
+        return (running, waiting)
+
+    def get_token_count(self) -> int:
+        total_tokens = 0
+        for req in self.scheduler.running:
+            total_tokens += len(req.all_token_ids)
+        for req in self.scheduler.waiting:
+            total_tokens += len(req.all_token_ids)
+        return total_tokens
+
+    def probe_computed_blocks(self, request: Request) -> int:
+        kv_cache_mgr = self.scheduler.kv_cache_manager
+        if not kv_cache_mgr.enable_caching or request.skip_reading_prefix_cache:
+            return 0
+        max_cache_hit_length = request.num_tokens - 1
+        _, num_cached_tokens = (
+            kv_cache_mgr.coordinator.find_longest_cache_hit(
+                request.block_hashes, max_cache_hit_length))
+        return num_cached_tokens
+
+    def get_pause_state(self) -> PauseState:
+        return self.scheduler.pause_state
+
+    def set_pause_state(self, pause_state: PauseState) -> None:
+        self.scheduler.set_pause_state(pause_state)
+
+    def shutdown(self) -> None:
+        logger.info(f"SchedulerWorker rank {self.rank}: Shutting down")
+        self.scheduler.shutdown()
 
 
-# Monkey-patch multiprocessing to use cloudpickle
-# Standard pickle fails to serialize the vLLM Request object.
-_original_dumps = multiprocessing.reduction.ForkingPickler.dumps
-_original_loads = multiprocessing.reduction.ForkingPickler.loads
-
-
-def _cloudpickle_dumps(obj, protocol=None):
-    """Use cloudpickle for serialization."""
-    try:
-        return cloudpickle.dumps(obj, protocol=protocol)
-    except Exception as e:
-        obj_type = type(obj).__name__
-        logger.error(f"Error pickling {obj_type}: {e}")
-        if isinstance(obj, tuple) and len(obj) == 2:
-            cmd, data = obj
-            logger.error(
-                f"Failed to pickle command: {cmd}, data type: {type(data).__name__}"
-            )
-        raise
-
-
-def _cloudpickle_loads(data):
-    """Use cloudpickle for deserialization."""
-    return cloudpickle.loads(data)
-
-
-def _enable_cloudpickle():
-    """Enable cloudpickle for multiprocessing serialization."""
-    multiprocessing.reduction.ForkingPickler.dumps = staticmethod(
-        _cloudpickle_dumps)
-    multiprocessing.reduction.ForkingPickler.loads = staticmethod(
-        _cloudpickle_loads)
-
-
-def _disable_cloudpickle():
-    """Restore original pickle for multiprocessing."""
-    multiprocessing.reduction.ForkingPickler.dumps = _original_dumps
-    multiprocessing.reduction.ForkingPickler.loads = _original_loads
-
-
-def _scheduler_worker_process(
-    rank: int,
-    input_conn: Connection,
-    output_conn: Connection,
-    vllm_config: Any,
-    kv_cache_config: Any,
-    structured_output_manager: Any,
-    block_size: int,
-    mm_registry: Any,
-    include_finished_set: bool,
-    log_stats: bool,
-    original_scheduler_cls: type,
-):
-    """Worker process that manages a single scheduler instance."""
-    # Initialize the scheduler in this process
-    scheduler = original_scheduler_cls(
-        vllm_config=vllm_config,
-        kv_cache_config=kv_cache_config,
-        structured_output_manager=structured_output_manager,
-        block_size=block_size,
-        mm_registry=mm_registry,
-        include_finished_set=include_finished_set,
-        log_stats=log_stats,
-    )
-
-    logger.debug(f"Scheduler worker process {rank} started")
-
-    def _send_result(result):
-        """Send result back using cloudpickle serialization."""
-        output_conn.send_bytes(cloudpickle.dumps(result))
-
-    # Process commands from the input connection
-    while True:
-        try:
-            command, data = cloudpickle.loads(input_conn.recv_bytes())
-
-            match command:
-                case SchedulerCommand.ADD_REQUEST:
-                    request = data
-                    scheduler.add_request(request)
-                    _send_result(None)  # Signal completion
-
-                case SchedulerCommand.SCHEDULE:
-                    output = scheduler.schedule()
-                    _send_result(output)
-
-                case SchedulerCommand.FINISH_REQUESTS:
-                    request_ids, finished_status = data
-                    scheduler.finish_requests(request_ids, finished_status)
-                    _send_result(None)  # Signal completion
-
-                case SchedulerCommand.UPDATE_DRAFT_TOKEN_IDS:
-                    draft_token_ids = data
-                    scheduler.update_draft_token_ids(draft_token_ids)
-                    _send_result(None)  # Signal completion
-
-                case SchedulerCommand.UPDATE_FROM_OUTPUT:
-                    scheduler_output, rank_req_ids, \
-                        model_runner_output_bytes = data
-                    model_runner_output = cloudpickle.loads(
-                        model_runner_output_bytes)
-                    model_runner_output.req_ids = rank_req_ids
-                    result = scheduler.update_from_output(
-                        scheduler_output, model_runner_output)
-                    _send_result(result)
-
-                case SchedulerCommand.GET_GRAMMAR_BITMASK:
-                    scheduler_output = data
-                    result = scheduler.get_grammar_bitmask(scheduler_output)
-                    _send_result(result)
-
-                case SchedulerCommand.MAKE_STATS:
-                    spec_decoding_stats, kv_connector_stats = data
-                    result = scheduler.make_stats(spec_decoding_stats,
-                                                  kv_connector_stats)
-                    _send_result(result)
-
-                case SchedulerCommand.RESET_PREFIX_CACHE:
-                    reset_running_requests, reset_connector = data
-                    result = scheduler.reset_prefix_cache(
-                        reset_running_requests=reset_running_requests,
-                        reset_connector=reset_connector)
-                    _send_result(result)
-
-                case SchedulerCommand.RESET_ENCODER_CACHE:
-                    scheduler.reset_encoder_cache()
-                    _send_result(None)
-
-                case SchedulerCommand.GET_NUM_UNFINISHED_REQUESTS:
-                    result = scheduler.get_num_unfinished_requests()
-                    _send_result(result)
-
-                case SchedulerCommand.HAS_FINISHED_REQUESTS:
-                    result = scheduler.has_finished_requests()
-                    _send_result(result)
-
-                case SchedulerCommand.GET_REQUEST_COUNTS:
-                    running = len(scheduler.running)
-                    waiting = len(scheduler.waiting)
-                    _send_result((running, waiting))
-
-                case SchedulerCommand.GET_TOKEN_COUNT:
-                    # Calculate total tokens across running and waiting requests
-                    total_tokens = 0
-                    for req in scheduler.running:
-                        total_tokens += len(req.all_token_ids)
-                    for req in scheduler.waiting:
-                        total_tokens += len(req.all_token_ids)
-                    _send_result(total_tokens)
-
-                case SchedulerCommand.PROBE_COMPUTED_BLOCKS:
-                    # Probe for cached blocks without recording prefix cache stats.
-                    request = data
-                    kv_cache_mgr = scheduler.kv_cache_manager
-                    if not kv_cache_mgr.enable_caching or request.skip_reading_prefix_cache:
-                        _send_result(0)
-                    else:
-                        max_cache_hit_length = request.num_tokens - 1
-                        _, num_cached_tokens = (
-                            kv_cache_mgr.coordinator.find_longest_cache_hit(
-                                request.block_hashes, max_cache_hit_length))
-                        _send_result(num_cached_tokens)
-
-                case SchedulerCommand.SET_PAUSE_STATE:
-                    pause_state = data
-                    scheduler.set_pause_state(pause_state)
-                    _send_result(None)
-
-                case SchedulerCommand.GET_PAUSE_STATE:
-                    result = scheduler.pause_state
-                    _send_result(result)
-
-                case SchedulerCommand.SHUTDOWN:
-                    logger.info(f"Rank {rank}: Shutting down")
-                    scheduler.shutdown()
-                    _send_result(None)  # Signal completion
-                    break
-                case _:
-                    error = SchedulerWorkerError(
-                        rank, f"Unknown command: {command}")
-                    _send_result(error)
-                    raise error
-
-        except Exception as e:
-            logger.error(
-                f"Error in scheduler worker {rank}: {e}. If "
-                "async scheduling is enabled, consider disabling it to "
-                "debug this issue.",
-                exc_info=True)
-
-            error = SchedulerWorkerError(rank, str(e))
-            _send_result(error)
+# Wrap SchedulerWorker so instances are created on the colocated host CPUs.
+ColocatedSchedulerWorker = colocated_python.colocated_python_class(
+    SchedulerWorker)
 
 
 @dataclass
 class DPSchedulerOutput(SchedulerOutput):
     """Extended SchedulerOutput that includes DP rank assignments."""
     assigned_dp_rank: Optional[Dict[str, int]] = None
+    # The maximum number of tokens scheduled on any single DP rank in this step.
+    # This is used by the Runner to calculate the global padded batch size
+    # (padded_max * dp_size), ensuring consistent shapes across pipeline stages.
+    max_num_scheduled_tokens_per_dp_rank: int = 0
 
-    def __init__(self, *args, assigned_dp_rank=None, **kwargs):
+    def __init__(self,
+                 *args,
+                 assigned_dp_rank=None,
+                 max_num_scheduled_tokens_per_dp_rank=0,
+                 **kwargs):
         super().__init__(*args, **kwargs)
         self.assigned_dp_rank = assigned_dp_rank or {}
+        self.max_num_scheduled_tokens_per_dp_rank = max_num_scheduled_tokens_per_dp_rank
 
 
 class DPScheduler(SchedulerInterface):
@@ -324,9 +214,9 @@ class DPScheduler(SchedulerInterface):
         self.assigned_dp_rank: Dict[str, int] = {}  # req_id -> dp_rank
         self.cached_schedulers_output = deque()
         self._create_per_rank_configs(kv_cache_config)
+        print("WENXIN DEBUGGING")
 
-        # Initialize NONE_HASH global before forking worker processes
-        # This ensures all workers inherit the initialized value
+        # Initialize NONE_HASH global before creating worker instances
         if vllm_config.cache_config.enable_prefix_caching:
             from vllm.utils.hashing import get_hash_fn_by_name
             from vllm.v1.core.kv_cache_utils import init_none_hash
@@ -337,53 +227,43 @@ class DPScheduler(SchedulerInterface):
         # The original scheduler class could be Scheduler or AsyncScheduler
         original_scheduler_cls = vllm_config.scheduler_config._original_scheduler_cls
 
-        # Enable cloudpickle for multiprocessing to handle local functions
-        _enable_cloudpickle()
+        # Obtain colocated CPU devices so that we can specialize every
+        # worker method.  The SchedulerWorker methods exchange only plain
+        # Python objects (no JAX arrays), so the colocated-Python runtime
+        # cannot infer target devices from function arguments.  Explicit
+        # specialization is therefore mandatory.
+        cpu_devices = colocated_python.colocated_cpu_devices(jax.devices())
 
-        # Create worker processes with Pipe connections (no feeder threads).
-        # multiprocessing.Queue uses background feeder threads for put(),
-        # which causes GIL contention and thread convoy effects at high DP
-        # sizes. Using raw Pipe connections eliminates all background threads.
-        ctx = multiprocessing.get_context('fork')
-        self.input_conns: List[Connection] = []   # parent writes, child reads
-        self.output_conns: List[Connection] = []  # child writes, parent reads
-        self.processes: List[Process] = []
-
+        # Create colocated SchedulerWorker instances – one per DP rank.
+        # Each instance will be materialised on the colocated host CPU(s)
+        # the first time one of its methods is called.
+        self.workers: List[Any] = []
         for rank in range(self.dp_size):
-            # Each pipe gives (parent_end, child_end)
-            # Input pipe: parent sends commands, child receives
-            input_parent_conn, input_child_conn = ctx.Pipe()
-            # Output pipe: child sends results, parent receives
-            output_parent_conn, output_child_conn = ctx.Pipe()
-
-            self.input_conns.append(input_parent_conn)
-            self.output_conns.append(output_parent_conn)
-
-            process = ctx.Process(
-                target=_scheduler_worker_process,
-                args=(
-                    rank,
-                    input_child_conn,
-                    output_child_conn,
-                    self.vllm_config,
-                    self.per_rank_kv_cache_configs[rank],
-                    structured_output_manager,
-                    block_size,
-                    mm_registry,
-                    include_finished_set,
-                    log_stats,
-                    original_scheduler_cls,
-                ),
+            worker = ColocatedSchedulerWorker(
+                rank=rank,
+                vllm_config=self.vllm_config,
+                kv_cache_config=self.per_rank_kv_cache_configs[rank],
+                structured_output_manager=structured_output_manager,
+                block_size=block_size,
+                mm_registry=mm_registry,
+                include_finished_set=include_finished_set,
+                log_stats=log_stats,
+                original_scheduler_cls=original_scheduler_cls,
             )
-            process.start()
-            # Close child ends in parent process
-            input_child_conn.close()
-            output_child_conn.close()
-            self.processes.append(process)
+            # Specialize all public methods with devices so that
+            # colocated_python knows where to execute them.
+            for attr_name in dir(SchedulerWorker):
+                if attr_name.startswith('_'):
+                    continue
+                attr = getattr(worker, attr_name, None)
+                if attr is not None and hasattr(attr, 'specialize'):
+                    setattr(worker, attr_name,
+                            attr.specialize(devices=cpu_devices))
+            self.workers.append(worker)
 
         logger.info(
             f"DPScheduler (Async = {self.vllm_config.scheduler_config.async_scheduling}) "
-            f"started {self.dp_size} worker processes with cloudpickle. "
+            f"created {self.dp_size} colocated scheduler workers. "
             f"Per-rank limits: max_seqs={self.vllm_config.scheduler_config.max_num_seqs}, "
             f"max_tokens={self.vllm_config.scheduler_config.max_num_batched_tokens}"
         )
@@ -395,66 +275,11 @@ class DPScheduler(SchedulerInterface):
             rank_config.num_blocks = kv_cache_config.num_blocks // self.dp_size
             self.per_rank_kv_cache_configs.append(rank_config)
 
-    def _send_command(self, rank: int, command: SchedulerCommand,
-                      data: Any = None) -> None:
-        """Send a command to a worker process via its input pipe."""
-        start_time = time()
-        payload = cloudpickle.dumps((command, data))
-        serialize_time = time() - start_time
-        self.input_conns[rank].send_bytes(payload)
-        if serialize_time > 1.0:
-            logger.warning(
-                f"Slow serialization ({serialize_time:.2f}s, "
-                f"{len(payload)} bytes) for '{command.value}' "
-                f"command to rank {rank}/{self.dp_size}.")
-
-    def _get_result(self, rank: int,
-                    command: Optional[SchedulerCommand] = None) -> Any:
-        """Get result from a worker process via its output pipe.
-
-        Uses raw Connection.recv_bytes() + cloudpickle.loads() instead of
-        multiprocessing.Queue.get(). This eliminates the background feeder
-        threads that Queue uses, avoiding GIL contention and thread convoy
-        effects at high DP sizes.
-        """
-        try:
-            start_time = time()
-            raw_bytes = self.output_conns[rank].recv_bytes()
-            recv_time = time()
-            result = cloudpickle.loads(raw_bytes)
-            end_time = time()
-            total_time = end_time - start_time
-            if total_time > 1.0:
-                cmd_name = command.value if command else "unknown"
-                pipe_wait = recv_time - start_time
-                deserialize = end_time - recv_time
-                logger.warning(
-                    f"Long wait time ({total_time:.2f}s) for "
-                    f"rank {rank}/{self.dp_size} response to "
-                    f"'{cmd_name}' command "
-                    f"(pipe_wait={pipe_wait:.2f}s, "
-                    f"deserialize={deserialize:.2f}s, "
-                    f"{len(raw_bytes)} bytes).")
-        except EOFError as e:
-            raise RuntimeError(
-                f"Pipe error for rank {rank}: "
-                "Worker process terminated unexpectedly. "
-                "This may indicate a crash in the scheduler worker process."
-            ) from e
-        if isinstance(result, SchedulerWorkerError):
-            raise result
-        return result
-
     def _get_rank_token_counts(self) -> Dict[int, int]:
         """Calculate total tokens currently assigned to each DP rank."""
-        for rank in range(self.dp_size):
-            self._send_command(rank, SchedulerCommand.GET_TOKEN_COUNT)
-
         rank_tokens = {}
         for rank in range(self.dp_size):
-            rank_tokens[rank] = self._get_result(
-                rank, SchedulerCommand.GET_TOKEN_COUNT)
-
+            rank_tokens[rank] = self.workers[rank].get_token_count()
         return rank_tokens
 
     def _find_best_rank_for_request(self, request: Request) -> int:
@@ -462,15 +287,10 @@ class DPScheduler(SchedulerInterface):
         rank_tokens = self._get_rank_token_counts()
 
         # First, try to find a rank with prefix cache hit.
-        for rank in range(self.dp_size):
-            self._send_command(rank, SchedulerCommand.PROBE_COMPUTED_BLOCKS,
-                               request)
-
         best_cache_rank = None
         best_cache_tokens = 0
         for rank in range(self.dp_size):
-            cached_tokens = self._get_result(
-                rank, SchedulerCommand.PROBE_COMPUTED_BLOCKS)
+            cached_tokens = self.workers[rank].probe_computed_blocks(request)
             if cached_tokens > best_cache_tokens:
                 best_cache_tokens = cached_tokens
                 best_cache_rank = rank
@@ -496,8 +316,7 @@ class DPScheduler(SchedulerInterface):
         rank = self._find_best_rank_for_request(request)
         self.assigned_dp_rank[request.request_id] = rank
 
-        self._send_command(rank, SchedulerCommand.ADD_REQUEST, request)
-        self._get_result(rank, SchedulerCommand.ADD_REQUEST)
+        self.workers[rank].add_request(request)
 
     @time_function
     def schedule(self) -> DPSchedulerOutput:
@@ -510,14 +329,10 @@ class DPScheduler(SchedulerInterface):
         3. Combine outputs from all schedulers
         4. Return unified scheduling result
         """
-        # Run each scheduler independently
-        for rank in range(self.dp_size):
-            self._send_command(rank, SchedulerCommand.SCHEDULE)
-
-        # Collect outputs from all workers (blocking)
+        # Run each scheduler independently and collect outputs
         rank_outputs = []
         for rank in range(self.dp_size):
-            output = self._get_result(rank, SchedulerCommand.SCHEDULE)
+            output = self.workers[rank].schedule()
             rank_outputs.append(output)
 
         # Cache scheduler outputs to use in `update_from_output`
@@ -552,6 +367,8 @@ class DPScheduler(SchedulerInterface):
         combined_spec_decode_tokens = {}
         combined_encoder_inputs = {}
         total_scheduled_tokens = 0
+        # Track the maximum token load on any single rank to determine global padding.
+        max_scheduled_tokens_per_rank = 0
 
         for output in rank_outputs:
             combined_num_scheduled_tokens.update(output.num_scheduled_tokens)
@@ -559,6 +376,9 @@ class DPScheduler(SchedulerInterface):
                 output.scheduled_spec_decode_tokens)
             combined_encoder_inputs.update(output.scheduled_encoder_inputs)
             total_scheduled_tokens += output.total_num_scheduled_tokens
+            max_scheduled_tokens_per_rank = max(
+                max_scheduled_tokens_per_rank,
+                output.total_num_scheduled_tokens)
 
         # Combine finished request IDs
         combined_finished_req_ids = set()
@@ -585,6 +405,7 @@ class DPScheduler(SchedulerInterface):
             finished_req_ids=combined_finished_req_ids,
             free_encoder_mm_hashes=set(),
             assigned_dp_rank=assigned_dp_rank,
+            max_num_scheduled_tokens_per_dp_rank=max_scheduled_tokens_per_rank,
         )
 
     def _combine_cached_request_data(
@@ -711,11 +532,8 @@ class DPScheduler(SchedulerInterface):
 
         # Get grammar bitmask from each DP rank scheduler
         for rank in range(self.dp_size):
-            self._send_command(rank, SchedulerCommand.GET_GRAMMAR_BITMASK,
-                               rank_scheduler_outputs[rank])
-        for rank in range(self.dp_size):
-            grammar_output = self._get_result(
-                rank, SchedulerCommand.GET_GRAMMAR_BITMASK)
+            grammar_output = self.workers[rank].get_grammar_bitmask(
+                rank_scheduler_outputs[rank])
             if grammar_output is not None:
                 combined_structured_output_request_ids.extend(
                     grammar_output.structured_output_request_ids)
@@ -743,34 +561,16 @@ class DPScheduler(SchedulerInterface):
         We need to route the model runner output to the appropriate scheduler
         based on which rank each request belongs to.
         """
-        # Split req_ids by DP rank (lightweight, just string lists).
-        rank_req_ids = self._split_req_ids_by_rank(model_runner_output)
+        # Group model runner outputs by DP rank
+        rank_model_outputs = self._split_model_output_by_rank(
+            model_runner_output)
         rank_scheduler_outputs = self.cached_schedulers_output.popleft()
-
-        # Serialize ModelRunnerOutput once (the expensive part), then reuse
-        # the same bytes for every rank instead of re-serializing per rank.
-        start_time = time()
-        model_runner_output_bytes = cloudpickle.dumps(model_runner_output)
-        serialize_time = time() - start_time
-        if serialize_time > 0.5:
-            logger.warning(
-                f"Slow ModelRunnerOutput serialization "
-                f"({serialize_time:.2f}s, "
-                f"{len(model_runner_output_bytes)} bytes, "
-                f"{len(model_runner_output.req_ids)} reqs).")
-
-        # Send each rank its scheduler output + req_ids + shared bytes.
-        for rank in range(self.dp_size):
-            self._send_command(
-                rank, SchedulerCommand.UPDATE_FROM_OUTPUT,
-                (rank_scheduler_outputs[rank], rank_req_ids[rank],
-                 model_runner_output_bytes))
-
+        # Update each scheduler with its portion of the output
         combined_engine_outputs = defaultdict(list)
         rank_scheduler_stats: List[Optional[SchedulerStats]] = []
         for rank in range(self.dp_size):
-            rank_engine_outputs = self._get_result(
-                rank, SchedulerCommand.UPDATE_FROM_OUTPUT)
+            rank_engine_outputs = self.workers[rank].update_from_output(
+                rank_scheduler_outputs[rank], rank_model_outputs[rank])
             rank_stats = None
             for client_idx, engine_output in rank_engine_outputs.items():
                 combined_engine_outputs[client_idx].append(engine_output)
@@ -829,22 +629,6 @@ class DPScheduler(SchedulerInterface):
 
         return outputs
 
-    def _split_req_ids_by_rank(
-            self,
-            global_model_output: ModelRunnerOutput) -> List[List[str]]:
-        """Split request IDs by DP rank.
-
-        This is a lightweight alternative to _split_model_output_by_rank that
-        returns only the per-rank req_id lists. Used with the optimized
-        UPDATE_FROM_OUTPUT path where ModelRunnerOutput is serialized once and
-        shared across all ranks.
-        """
-        rank_req_ids: List[List[str]] = [[] for _ in range(self.dp_size)]
-        for req_id in global_model_output.req_ids:
-            rank = self.assigned_dp_rank[req_id]
-            rank_req_ids[rank].append(req_id)
-        return rank_req_ids
-
     def _cleanup_finished_requests(self, finished_req_ids: set[str]) -> None:
         """Remove finished requests from our DP rank assignment tracking."""
         for req_id in finished_req_ids:
@@ -864,44 +648,28 @@ class DPScheduler(SchedulerInterface):
 
         # Forward to each scheduler
         for rank, req_ids in rank_request_ids.items():
-            self._send_command(rank, SchedulerCommand.FINISH_REQUESTS,
-                               (req_ids, finished_status))
-            self._get_result(rank, SchedulerCommand.FINISH_REQUESTS)
+            self.workers[rank].finish_requests(req_ids, finished_status)
 
     def get_num_unfinished_requests(self) -> int:
         """Get total number of unfinished requests across all DP ranks."""
-        for rank in range(self.dp_size):
-            self._send_command(rank,
-                               SchedulerCommand.GET_NUM_UNFINISHED_REQUESTS)
-
         total = 0
         for rank in range(self.dp_size):
-            count = self._get_result(
-                rank, SchedulerCommand.GET_NUM_UNFINISHED_REQUESTS)
-            total += count
+            total += self.workers[rank].get_num_unfinished_requests()
         return total
 
     def has_finished_requests(self) -> bool:
         """Check if any DP rank has finished requests."""
-        for rank in range(self.dp_size):
-            self._send_command(rank, SchedulerCommand.HAS_FINISHED_REQUESTS)
-
         has_finished_any = False
         for rank in range(self.dp_size):
-            has_finished_any |= self._get_result(
-                rank, SchedulerCommand.HAS_FINISHED_REQUESTS)
+            has_finished_any |= self.workers[rank].has_finished_requests()
         return has_finished_any
 
     def get_request_counts(self) -> Tuple[int, int]:
         """Get total (running, waiting) request counts across all DP ranks."""
-        for rank in range(self.dp_size):
-            self._send_command(rank, SchedulerCommand.GET_REQUEST_COUNTS)
-
         total_running = 0
         total_waiting = 0
         for rank in range(self.dp_size):
-            running, waiting = self._get_result(
-                rank, SchedulerCommand.GET_REQUEST_COUNTS)
+            running, waiting = self.workers[rank].get_request_counts()
             total_running += running
             total_waiting += waiting
         return total_running, total_waiting
@@ -912,24 +680,17 @@ class DPScheduler(SchedulerInterface):
         reset_connector: bool = False,
     ) -> bool:
         """Reset prefix cache for all DP rank schedulers."""
-        for rank in range(self.dp_size):
-            self._send_command(rank, SchedulerCommand.RESET_PREFIX_CACHE,
-                               (reset_running_requests, reset_connector))
-
         all_success = True
         for rank in range(self.dp_size):
-            success = self._get_result(
-                rank, SchedulerCommand.RESET_PREFIX_CACHE)
+            success = self.workers[rank].reset_prefix_cache(
+                reset_running_requests, reset_connector)
             all_success &= success
         return all_success
 
     def reset_encoder_cache(self) -> None:
         """Reset encoder cache for all DP rank schedulers."""
         for rank in range(self.dp_size):
-            self._send_command(rank, SchedulerCommand.RESET_ENCODER_CACHE)
-
-        for rank in range(self.dp_size):
-            self._get_result(rank, SchedulerCommand.RESET_ENCODER_CACHE)
+            self.workers[rank].reset_encoder_cache()
 
     @property
     def pause_state(self) -> PauseState:
@@ -937,17 +698,12 @@ class DPScheduler(SchedulerInterface):
 
         All ranks share the same pause state, so we only need to query one.
         """
-        self._send_command(0, SchedulerCommand.GET_PAUSE_STATE)
-        return self._get_result(0, SchedulerCommand.GET_PAUSE_STATE)
+        return self.workers[0].get_pause_state()
 
     def set_pause_state(self, pause_state: PauseState) -> None:
         """Set pause state for all DP rank schedulers."""
         for rank in range(self.dp_size):
-            self._send_command(rank, SchedulerCommand.SET_PAUSE_STATE,
-                               pause_state)
-
-        for rank in range(self.dp_size):
-            self._get_result(rank, SchedulerCommand.SET_PAUSE_STATE)
+            self.workers[rank].set_pause_state(pause_state)
 
     def make_stats(self,
                    spec_decoding_stats=None,
@@ -966,11 +722,8 @@ class DPScheduler(SchedulerInterface):
             PrefixCacheStats] = None
 
         for rank in range(self.dp_size):
-            self._send_command(rank, SchedulerCommand.MAKE_STATS,
-                               (spec_decoding_stats, kv_connector_stats))
-
-        for rank in range(self.dp_size):
-            rank_stats = self._get_result(rank, SchedulerCommand.MAKE_STATS)
+            rank_stats = self.workers[rank].make_stats(
+                spec_decoding_stats, kv_connector_stats)
             if rank_stats is None:
                 continue
 
@@ -1024,13 +777,11 @@ class DPScheduler(SchedulerInterface):
                 rank_draft_tokens[rank]["draft_token_ids"].append(tokens)
 
         for rank, draft_data in rank_draft_tokens.items():
-            # Create a draft_token_ids object for this rank (mock structure)
+            # Create a draft_token_ids object for this rank
             rank_draft_token_ids = type(draft_token_ids)(
                 req_ids=draft_data["req_ids"],
                 draft_token_ids=draft_data["draft_token_ids"])
-            self._send_command(rank, SchedulerCommand.UPDATE_DRAFT_TOKEN_IDS,
-                               rank_draft_token_ids)
-            self._get_result(rank, SchedulerCommand.UPDATE_DRAFT_TOKEN_IDS)
+            self.workers[rank].update_draft_token_ids(rank_draft_token_ids)
 
     def update_draft_token_ids_in_output(
             self, draft_token_ids: "DraftTokenIds",
@@ -1041,24 +792,12 @@ class DPScheduler(SchedulerInterface):
         )
 
     def shutdown(self) -> None:
-        """Shutdown all DP rank scheduler worker processes."""
-        # Send shutdown command to all workers
+        """Shutdown all colocated scheduler workers."""
         for rank in range(self.dp_size):
-            self._send_command(rank, SchedulerCommand.SHUTDOWN)
-
-        # Wait for acknowledgment (blocking)
-        for rank in range(self.dp_size):
-            self._get_result(rank, SchedulerCommand.SHUTDOWN)
-
-        # Terminate and join all processes
-        for process in self.processes:
-            process.join(timeout=5.0)
-            if process.is_alive():
-                process.terminate()
-                process.join()
-
-        # Restore original pickle
-        _disable_cloudpickle()
+            self.workers[rank].shutdown()
+        # Release references so the colocated instances can be garbage-collected
+        # (which will trigger __del__ on the remote side).
+        self.workers.clear()
 
 
 def update_vllm_config_for_dp_scheduler(vllm_config: Any) -> None:
