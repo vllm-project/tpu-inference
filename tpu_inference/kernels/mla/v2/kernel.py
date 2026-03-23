@@ -276,7 +276,6 @@ def _mla_ragged_paged_attention_kernel(
   assert lkv_dim % 128 == 0
   assert r_dim % 128 == 0
   bkv_sz_per_kv_packing = bkv_p * page_size_per_kv_packing
-  bkv_buf_sz_per_kv_packing = bkv_sz_per_kv_packing + 2
   bkv_sz = bkv_sz_per_kv_packing * kv_packing
   page_size = page_size_per_kv_packing * kv_packing
   seq_idx = pl.program_id(0)
@@ -418,7 +417,6 @@ def _mla_ragged_paged_attention_kernel(
     kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
     kv_left_frm_cache_per_kv_packing = cdiv(kv_left_frm_cache, kv_packing)
     kv_left_frm_new = kv_left - kv_left_frm_cache
-    kv_packings_to_fetch = kv_left_frm_cache_per_kv_packing
 
     bkv_sz_frm_cache = jnp.minimum(kv_left_frm_cache, bkv_sz)
     bkv_sz_frm_new = jnp.minimum(bkv_sz - bkv_sz_frm_cache, kv_left_frm_new)
@@ -473,7 +471,7 @@ def _mla_ragged_paged_attention_kernel(
       for i in range(bkv_p):
         # Ensure only effective kvs are copied and we don't go negative.
         sz_per_kv_packing = jnp.clip(
-            kv_packings_to_fetch - i * page_size_per_kv_packing,
+            kv_left_frm_cache_per_kv_packing - i * page_size_per_kv_packing,
             0,
             page_size_per_kv_packing,
         )
