@@ -377,49 +377,26 @@ def sharded_ragged_paged_attention(
 
     args = (q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, distribution)
 
-    use_hd64 = q.shape[-1] == 64
-    func = ragged_paged_attention_hd64 if use_hd64 else ragged_paged_attention
-
-    if attention_sink is not None:
-        if not use_hd64:
-            raise NotImplementedError(
-                "Attention sink support is only available when head_dim==64")
-
-        in_specs += (P(ShardingAxisName.ATTN_HEAD), )
-        args += (attention_sink, )
-
     def _ragged_paged_attention(*args):
-        if use_hd64:
-            return func(
-                *args,
-                sm_scale=sm_scale,
-                sliding_window=attention_chunk_size,
-                q_scale=q_scale,
-                k_scale=k_scale,
-                v_scale=v_scale,
-                num_kv_pages_per_block=num_kv_pages_per_block,
-                num_queries_per_block=num_queries_per_block,
-            )
-        else:
-            # ragged_paged_attention uses (bq_sz, bkv_sz, bq_csz, bkv_csz) tuples
-            # instead of num_kv_pages_per_block/num_queries_per_block.
-            block_sizes = None
-            if num_kv_pages_per_block is not None and num_queries_per_block is not None:
-                page_size = args[3].shape[1]  # kv_cache.shape[1]
-                bkv_sz = num_kv_pages_per_block * page_size
-                block_sizes = (num_queries_per_block, bkv_sz,
-                               num_queries_per_block, bkv_sz)
-            return func(
-                *args,
-                sm_scale=sm_scale,
-                sliding_window=attention_chunk_size,
-                q_scale=q_scale,
-                k_scale=k_scale,
-                v_scale=v_scale,
-                d_block_sizes=block_sizes,
-                p_block_sizes=block_sizes,
-                m_block_sizes=block_sizes,
-            )
+        # ragged_paged_attention uses (bq_sz, bkv_sz, bq_csz, bkv_csz) tuples
+        # instead of num_kv_pages_per_block/num_queries_per_block.
+        block_sizes = None
+        if num_kv_pages_per_block is not None and num_queries_per_block is not None:
+            page_size = args[3].shape[1]  # kv_cache.shape[1]
+            bkv_sz = num_kv_pages_per_block * page_size
+            block_sizes = (num_queries_per_block, bkv_sz,
+                           num_queries_per_block, bkv_sz)
+        return ragged_paged_attention(
+            *args,
+            sm_scale=sm_scale,
+            sliding_window=attention_chunk_size,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            d_block_sizes=block_sizes,
+            p_block_sizes=block_sizes,
+            m_block_sizes=block_sizes,
+        )
 
     return jax.shard_map(
         _ragged_paged_attention,
