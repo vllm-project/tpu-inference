@@ -43,7 +43,7 @@ from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.unquantized import (
     VllmUnquantizedConfig, VllmUnquantizedFusedMoEMethod,
-    VllmUnquantizedLinearMethod)
+    VllmUnquantizedLinearMethod, _torch_to_jax)
 
 P = PartitionSpec
 MODELS = ["Qwen/Qwen2-1.5B-Instruct"]
@@ -674,3 +674,54 @@ def test_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
             atol=1e-2,
             rtol=1e-2,
         )
+
+
+# --- _torch_to_jax tests ---
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
+def test_torch_to_jax_non_pathways(dtype):
+    """_torch_to_jax falls back to t2j when not using Pathways."""
+    tensor = torch.randn(4, 8, dtype=dtype)
+    result = _torch_to_jax(tensor)
+    expected = t2j(tensor, use_dlpack=False)
+    assert result.shape == expected.shape
+    assert result.dtype == expected.dtype
+    import numpy as np
+    np.testing.assert_array_equal(np.asarray(result), np.asarray(expected))
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
+def test_torch_to_jax_non_pathways_ignores_sharding(dtype):
+    """_torch_to_jax ignores sharding arg when not using Pathways."""
+    mesh = test_utils.get_spmd_mesh(1)
+    sharding = NamedSharding(mesh, P(None, None))
+    tensor = torch.randn(4, 8, dtype=dtype)
+    result = _torch_to_jax(tensor, sharding=sharding)
+    expected = t2j(tensor, use_dlpack=False)
+    assert result.shape == expected.shape
+
+
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
+def test_torch_to_jax_pathways_requires_sharding():
+    """_torch_to_jax raises when sharding is None under Pathways."""
+    tensor = torch.randn(4, 8)
+    with pytest.raises(AssertionError, match="sharding must be provided"):
+        _torch_to_jax(tensor)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
+def test_torch_to_jax_pathways_with_sharding(dtype):
+    """_torch_to_jax converts via numpy + device_put under Pathways."""
+    mesh = test_utils.get_spmd_mesh(1)
+    sharding = NamedSharding(mesh, P(None, None))
+    tensor = torch.randn(4, 8, dtype=dtype)
+    result = _torch_to_jax(tensor, sharding=sharding)
+    # Check shape and values are preserved (converted through float32 intermediate)
+    assert result.shape == (4, 8)
+    # Under Pathways path the dtype is converted via to_jax_dtype
+    from tpu_inference.utils import to_jax_dtype
+    assert result.dtype == to_jax_dtype(dtype)

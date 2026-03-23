@@ -65,6 +65,7 @@ export MOE_REQUANTIZE_WEIGHT_DTYPE_ENV=""
 export PHASED_PROFILING_DIR=""
 export PHASED_PROFILING_DIR_ENV=""
 export SKIP_DB_UPLOAD="false"
+export RUN_ACCURACY=""
 export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=vllm"
 export USE_UNFUSED_MEGABLOCKS_ENV=""
 export HF_CONFIG=""
@@ -98,6 +99,7 @@ while [[ $# -gt 0 ]]; do
     --moe-requantize-weight-dtype) export MOE_REQUANTIZE_WEIGHT_DTYPE="$2"; MOE_REQUANTIZE_WEIGHT_DTYPE_ENV="MOE_REQUANTIZE_WEIGHT_DTYPE=$2"; shift 2 ;;
     --phased-profiling-dir) export PHASED_PROFILING_DIR="$2"; PHASED_PROFILING_DIR_ENV="PHASED_PROFILING_DIR=$2"; shift 2 ;;
     --skip-db-upload) export SKIP_DB_UPLOAD="true"; shift 1 ;;
+    --run-accuracy) export RUN_ACCURACY="$2"; shift 2 ;;
     --model-impl-type) export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=$2"; shift 2 ;;
     --use-unfused-megablocks) export USE_UNFUSED_MEGABLOCKS_ENV="USE_UNFUSED_MEGABLOCKS=$2"; shift 2 ;;
     --hf-config) export HF_CONFIG="$2"; shift 2 ;;
@@ -164,6 +166,23 @@ BENCHMARK_CMD="vllm bench serve \
   --ignore-eos \
   --trust-remote-code"
 
+if [[ "${RUN_ACCURACY}" == "mmlu" ]]; then
+  echo "--- Accuracy benchmark requested: appending MMLU accuracy commands..."
+  BENCHMARK_CMD="${BENCHMARK_CMD} && \
+    mkdir -p /workspace/mmlu && \
+    cd /workspace/mmlu && \
+    if [ ! -f data.tar ]; then wget https://people.eecs.berkeley.edu/~hendrycks/data.tar -P .; tar -xvf data.tar; fi && \
+    python3 /workspace/tpu_inference/scripts/vllm/benchmarking/benchmark_serving.py \
+      --backend vllm \
+      --model ${TARGET_TOKENIZER} \
+      --dataset-name mmlu \
+      --dataset-path /workspace/mmlu/data/test \
+      --num-prompts 14000 \
+      --run_eval \
+      --temperature 0"
+fi
+
+
 
 echo "=== Starting nightly benchmark (Record ID: $RECORD_ID) ==="
 echo "Logging output to: $BENCHMARK_LOG"
@@ -177,7 +196,7 @@ else
   
   # 2. Parse benchmark log and generate key-value .result file
   python3 -c '
-import sys, re
+import sys, re, ast, json
 
 # Mapping of what vllm prints vs what Spanner column expects
 METRIC_MAPPING = {
@@ -200,13 +219,14 @@ except FileNotFoundError:
 
 results = {}
 in_results = False
-for line in lines:
+for i, line in enumerate(lines):
     line = line.strip()
-    if line.startswith("============ Serving Benchmark Result ============"):
+    if "============ Serving Benchmark Result ============" in line:
         in_results = True
         continue
-    if line.startswith("==================================================") and in_results:
-        break
+    if "==================================================" in line and in_results:
+        in_results = False
+        
     if in_results and ":" in line:
         key, val = line.split(":", 1)
         val = val.strip()
@@ -214,8 +234,19 @@ for line in lines:
         # Remove units like (ms) or (tok/s) or (excl. 1st token)
         clean_key = re.sub(r"\(.*?\)", "", key).strip()
         
-        if clean_key in METRIC_MAPPING:
+        if clean_key in METRIC_MAPPING and METRIC_MAPPING[clean_key] not in results:
             results[METRIC_MAPPING[clean_key]] = val
+            
+    # Parse Accuracy result dict printed by benchmark_serving.py
+    if line == "Results":
+        for j in range(1, min(6, len(lines) - i)):
+            try:
+                acc_dict = ast.literal_eval(lines[i+j].strip())
+                if isinstance(acc_dict, dict) and "accuracy" in acc_dict:
+                    results["AccuracyMetrics"] = json.dumps({"accuracy": acc_dict["accuracy"]})
+                    break
+            except Exception:
+                pass
 
 with open(sys.argv[2], "w") as out:
     for k, v in results.items():

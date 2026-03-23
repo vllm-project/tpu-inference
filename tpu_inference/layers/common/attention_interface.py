@@ -66,26 +66,51 @@ def sharded_flash_attention(
     causal: bool = True,
     sm_scale: Optional[float] = None,
     vmem_limit_bytes: int | None = None,
+    use_attention_bias: bool = False,
 ) -> Callable[..., Any]:
-    in_specs = (
-        P("data", "model", None, None),  # q
-        P("data", "model", None, None),  # k
-        P("data", "model", None, None),  # v
-        P(),  # segment_ids
-    )
-    out_specs = P("data", "model", None, None)
+    if use_attention_bias:
+        in_specs = (
+            P("data", "model", None, None),  # q
+            P("data", "model", None, None),  # k
+            P("data", "model", None, None),  # v
+            P("data", "model", None, None),  # attention_bias
+            P(),  # segment_ids
+        )
+        out_specs = P("data", "model", None, None)
 
-    def _flash_attention(q, k, v, segment_ids):
-        return flash_attention(q,
-                               k,
-                               v,
-                               segment_ids=segment_ids,
-                               sm_scale=sm_scale,
-                               causal=causal,
-                               vmem_limit_bytes=vmem_limit_bytes)
+        def _flash_attention_use_ab(q, k, v, attention_bias, segment_ids):
+            return flash_attention(q,
+                                   k,
+                                   v,
+                                   ab=attention_bias,
+                                   segment_ids=segment_ids,
+                                   sm_scale=sm_scale,
+                                   causal=causal,
+                                   vmem_limit_bytes=vmem_limit_bytes)
+
+        attn_fn = _flash_attention_use_ab
+    else:
+        in_specs = (
+            P("data", "model", None, None),  # q
+            P("data", "model", None, None),  # k
+            P("data", "model", None, None),  # v
+            P(),  # segment_ids
+        )
+        out_specs = P("data", "model", None, None)
+
+        def _flash_attention(q, k, v, segment_ids):
+            return flash_attention(q,
+                                   k,
+                                   v,
+                                   segment_ids=segment_ids,
+                                   sm_scale=sm_scale,
+                                   causal=causal,
+                                   vmem_limit_bytes=vmem_limit_bytes)
+
+        attn_fn = _flash_attention
 
     return jax.jit(
-        jax.shard_map(_flash_attention,
+        jax.shard_map(attn_fn,
                       mesh=mesh,
                       in_specs=in_specs,
                       out_specs=out_specs,

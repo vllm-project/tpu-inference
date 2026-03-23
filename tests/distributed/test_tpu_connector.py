@@ -442,46 +442,25 @@ class TestTPUConnectorWorker(unittest.TestCase):
         worker._notify_pull_done.assert_called_once_with(
             "socket", "req1", uuid)
 
-    @patch('tpu_inference.distributed.tpu_connector.jnp')
-    def test_get_finished_recving(self, mock_jnp):
+    def test_get_finished_recving(self):
         """Tests get_finished for a request that has finished pulling."""
         self.vllm_config.kv_transfer_config.is_kv_producer = False
         worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
         worker.runner = MagicMock()
-        worker.num_layers = 1
         original_kv_caches = worker.runner.kv_caches
 
         mock_future = MagicMock()
         mock_future.done.return_value = True
-        mock_kv_data = [MagicMock(name="kv_data_layer0")]
-        mock_indices = MagicMock(name="indices")
-        mock_future.result.return_value = (mock_kv_data, mock_indices)
-        worker.reqs_pulling = {"req1": mock_future}
-
-        mock_merged_kvs = MagicMock(name="merged_kvs")
-        mock_merged_indices = MagicMock(name="merged_indices")
-
-        def mock_concatenate(elements, axis=0):
-            if elements[0] is mock_indices:
-                return mock_merged_indices
-            elif elements[0] is mock_kv_data[0]:
-                return mock_merged_kvs
-            return MagicMock()
-
-        mock_jnp.concatenate.side_effect = mock_concatenate
+        mock_future.result.return_value = ('kv_data', 'indices')
+        worker.reqs_pulling = {'req1': mock_future}
 
         done_sending, done_recving = worker.get_finished()
 
         self.assertEqual(done_sending, set())
-        self.assertEqual(done_recving, {"req1"})
-        self.assertNotIn("req1", worker.reqs_pulling)
-
-        # The new implementation merges kv and indices before scattering
-        merged_kvs = [mock_merged_kvs]
-        merged_indices = mock_merged_indices
-
-        self.all_mocks["scatter_kv_slices"].assert_called_once_with(
-            original_kv_caches, merged_kvs, merged_indices)
+        self.assertEqual(done_recving, {'req1'})
+        self.assertNotIn('req1', worker.reqs_pulling)
+        self.all_mocks['scatter_kv_slices'].assert_called_once_with(
+            original_kv_caches, 'kv_data', 'indices')
 
     def test_get_finished_sending_expired(self):
         """Tests get_finished for a request that has expired."""

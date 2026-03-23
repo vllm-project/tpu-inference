@@ -219,7 +219,7 @@ class TPUConnector(KVConnectorBase_V1):
         """TPU connector doesn't support layer wise load."""
         pass
 
-    def save_kv_layer(self, **kwargs) -> None:
+    def save_kv_layer(self, *args, **kwargs) -> None:
         """TPU connector doesn't support layer wise save."""
         pass
 
@@ -696,40 +696,16 @@ class TPUConnectorWorker:
         if not self.reqs_wait_pull and not self.reqs_pulling:
             return done_sending, done_recving
 
-        # 1. Create lists to hold all the finished data
-        ready_req_ids = []
-        ready_kvs = []
-        ready_indices = []
-
-        # 2. Gather all completed futures WITHOUT blocking
+        # Mark a req as done recieving after its pulling thread returns.
+        # This req can then be scheduled for decoding in the next scheduler step.
         for req_id in list(self.reqs_pulling.keys()):
             future = self.reqs_pulling[req_id]
             if future.done():
+                # NOTE(xiang): we do the scatter in main thread to avoid data racing.
+                # The data racing is not for the kv_caches buffer, it's for the runner.kv_caches ref.
                 kv, indices = future.result()
-                ready_kvs.append(kv)
-                ready_indices.append(indices)
-                ready_req_ids.append(req_id)
-
-        # 3. If we have data, merge and scatter it ALL AT ONCE
-        if ready_req_ids:
-            # Concatenate the indices
-            merged_indices = jnp.concatenate(ready_indices, axis=0)
-
-            # Concatenate the KV slices per layer
-            merged_kvs = []
-            for i in range(self.num_layers):
-                # Pull the i-th layer from every finished request and concatenate
-                merged_layer = jnp.concatenate(
-                    [req_kv[i] for req_kv in ready_kvs], axis=0)
-                merged_kvs.append(merged_layer)
-
-            # Fire the JIT function ONCE
-            self.runner.kv_caches = scatter_kv_slices(self.runner.kv_caches,
-                                                      merged_kvs,
-                                                      merged_indices)
-
-            # Cleanup
-            for req_id in ready_req_ids:
+                self.runner.kv_caches = scatter_kv_slices(
+                    self.runner.kv_caches, kv, indices)
                 del self.reqs_pulling[req_id]
                 done_recving.add(req_id)
 

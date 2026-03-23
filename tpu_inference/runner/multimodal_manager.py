@@ -16,9 +16,10 @@ from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
-from vllm.multimodal.utils import group_mm_kwargs_by_modality
+from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
 from tpu_inference.models.jax.utils.multi_modal_utils import (
@@ -109,35 +110,37 @@ class MultiModalManager:
         # multimodal inputs. The proper solution should be reordering the
         # encoder outputs.
         encoder_outputs = []
-        for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
+        for _, num_items, mm_kwargs_group in group_and_batch_mm_kwargs(
                 mm_kwargs):
             batched_mm_inputs = mm_kwargs_group
-            # Convert torch tensors to numpy arrays that JAX can handle.
-            if "pixel_values" in batched_mm_inputs and isinstance(
-                    batched_mm_inputs["pixel_values"], list):
-                batched_mm_inputs["pixel_values"] = torch.cat(
-                    batched_mm_inputs["pixel_values"], dim=0)
-
             image_grid_thw = ()
-            for key, value in batched_mm_inputs.items():
-                if isinstance(value, torch.Tensor):
-                    if key == 'image_grid_thw':
-                        # change it to tuple of tuples to make it hashable for JIT
-
-                        # Shape: (B, N, 3) -> (B*N, 3) -> tuple of tuples
-                        grid_thw_tensor = batched_mm_inputs[key]
-                        grid_thw_reshaped = grid_thw_tensor.reshape(-1, 3)
-                        image_grid_thw = tuple(
-                            tuple(row) for row in grid_thw_reshaped.tolist())
-
-                        continue
-
-                    if value.dtype == torch.bfloat16:
-                        batched_mm_inputs[key] = value.to(
-                            torch.float32).numpy().astype(jnp.bfloat16)
-                    else:
-                        batched_mm_inputs[key] = value.numpy()
+            # TODO: b/494300919 - QWen 2.5 VL specific logic, need to be moved.
             if 'image_grid_thw' in batched_mm_inputs:
+                # Convert torch tensors to numpy arrays that JAX can handle.
+                if "pixel_values" in batched_mm_inputs and isinstance(
+                        batched_mm_inputs["pixel_values"], list):
+                    batched_mm_inputs["pixel_values"] = torch.cat(
+                        batched_mm_inputs["pixel_values"], dim=0)
+
+                for key, value in batched_mm_inputs.items():
+                    if isinstance(value, torch.Tensor):
+                        if key == 'image_grid_thw':
+                            # change it to tuple of tuples to make it hashable for JIT
+
+                            # Shape: (B, N, 3) -> (B*N, 3) -> tuple of tuples
+                            grid_thw_tensor = batched_mm_inputs[key]
+                            grid_thw_reshaped = grid_thw_tensor.reshape(-1, 3)
+                            image_grid_thw = tuple(
+                                tuple(row)
+                                for row in grid_thw_reshaped.tolist())
+
+                            continue
+
+                        if value.dtype == torch.bfloat16:
+                            batched_mm_inputs[key] = value.to(
+                                torch.float32).numpy().astype(jnp.bfloat16)
+                        else:
+                            batched_mm_inputs[key] = value.numpy()
                 batched_mm_inputs.pop('image_grid_thw')
 
             # Run the encoder.
@@ -166,9 +169,35 @@ class MultiModalManager:
 
             self.runner.encoder_cache[mm_hash] = output
 
-    def gather_mm_embeddings(self, scheduler_output: "VllmSchedulerOutput",
-                             target_pad_len: int) -> list[jax.Array]:
+    def gather_mm_embeddings(
+            self, scheduler_output: "VllmSchedulerOutput",
+            target_pad_len: int) -> tuple[jax.Array | None, jax.Array | None]:
+        """Gather multimodal_embeddings from the encoder cache with is_multimodal.
+
+        Args:
+            scheduler_output: The VllmSchedulerOutput.
+            target_pad_len: The target length to pad the resulting embeddings
+                and mask to.
+
+        Returns:
+            A tuple containing:
+                - flattened_embeds: A JAX array of flattened multimodal
+                    embeddings, padded to target_pad_len.
+                - is_mm_embed: A boolean JAX array mask indicating which
+                    positions in the input sequence are multimodal embeddings.
+        """
+
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        assert (
+            target_pad_len >= total_num_scheduled_tokens
+        ), f"{target_pad_len=} should >= {total_num_scheduled_tokens=} for output is_mm_embedded"
+
         mm_embeds: list[jax.Array] = []
+        is_mm_embed_cpu = np.zeros((total_num_scheduled_tokens, ),
+                                   dtype=np.bool_)
+
+        req_start_idx = 0
+
         for req_id in self.runner.input_batch.req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
@@ -204,8 +233,7 @@ class MultiModalManager:
 
                 mm_hash = mm_feature.identifier
                 encoder_output = self.runner.encoder_cache.get(mm_hash, None)
-                assert encoder_output is not None,\
-                      f"Encoder cache miss for {mm_hash}."
+                assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
                 encoder_output = self.runner.encoder_cache[mm_hash]
 
                 if (is_embed := pos_info.is_embed) is not None:
@@ -216,15 +244,34 @@ class MultiModalManager:
                     mm_embeds_item = encoder_output[start_idx:end_idx]
 
                 mm_embeds.append(mm_embeds_item)
+
+                req_start_pos = req_start_idx + start_pos - num_computed_tokens
+
+                # use cpu numpy array for inplace modification
+                if is_embed is None:
+                    is_mm_embed_cpu[req_start_pos + start_idx:req_start_pos +
+                                    end_idx] = True
+                else:
+                    # is_embed is torch Tensor in cpu
+                    is_mm_embed_cpu[req_start_pos + start_idx:req_start_pos +
+                                    end_idx] |= is_embed.numpy()
+
+            req_start_idx += num_scheduled_tokens
         if not mm_embeds:
-            return None
+            return None, None
         flattened_embeds = flatten_embeddings(mm_embeds)
         if flattened_embeds.shape[0] == 0:
-            return None
+            return None, None
 
-        padding = jnp.zeros((target_pad_len - flattened_embeds.shape[0],
-                             flattened_embeds.shape[1]),
-                            dtype=flattened_embeds.dtype)
+        padding = jnp.zeros(
+            (target_pad_len - flattened_embeds.shape[0],
+             flattened_embeds.shape[1]),
+            dtype=flattened_embeds.dtype,
+        )
         flattened_embeds = jnp.concatenate([flattened_embeds, padding], axis=0)
+        is_mm_embed_cpu = np.pad(
+            is_mm_embed_cpu, (0, target_pad_len - is_mm_embed_cpu.shape[0]))
+        is_mm_embed = jnp.array(is_mm_embed_cpu, dtype=jnp.bool_)
+        assert flattened_embeds.shape[0] == is_mm_embed.shape[0]
 
-        return flattened_embeds
+        return flattened_embeds, is_mm_embed

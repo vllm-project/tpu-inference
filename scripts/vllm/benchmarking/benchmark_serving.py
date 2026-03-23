@@ -53,7 +53,8 @@ except ImportError:
 
 # yapf: disable
 from benchmark_dataset import (GPQADataset, MLPerfDataset, MMLUDataset,
-                               RandomDataset, SampleRequest, SonnetDataset)
+                               MMMUProDataset, RandomDataset, SampleRequest,
+                               SonnetDataset)
 # yapf: disable
 from benchmark_utils import (eval_benchmark_dataset_result,
                              sample_warmup_requests)
@@ -283,7 +284,7 @@ async def benchmark(
                 warmup_request.multi_modal_data,
             )
 
-            assert test_mm_content is None or isinstance(test_mm_content, dict)
+            assert test_mm_content is None or isinstance(test_mm_content, (dict, list))
             test_input = RequestFuncInput(
                 model=model_id,
                 model_name=model_name,
@@ -608,6 +609,17 @@ def main(args: argparse.Namespace):
                                     num_requests=args.num_prompts,
                                     output_len=args.gpqa_output_len,
                                     ),
+            "mmmu_pro":
+            lambda: MMMUProDataset(
+                random_seed=args.seed,
+                dataset_path=args.dataset_path,
+                subset=args.mmmu_pro_subset,
+                use_chat_template=args.mmmu_pro_use_chat_template,
+            ).sample(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+                output_len=args.mmmu_pro_output_len,
+            ),
             "random":
             lambda: RandomDataset(random_seed=args.seed,
                                   dataset_path=args.dataset_path).sample(
@@ -713,7 +725,7 @@ if __name__ == "__main__":
         default="sharegpt",
         choices=[
             "sharegpt", "burstgpt", "sonnet", "random", "hf", "custom", "mmlu",
-            "mlperf", "gpqa"
+            "mlperf", "gpqa", "mmmu_pro"
         ],
         help="Name of the dataset to benchmark on.",
     )
@@ -910,6 +922,27 @@ if __name__ == "__main__":
         "--gpqa-use-chat-template",
         action="store_true",
         help="Whether to format GPQA prompts using the tokenizer's chat template.",
+    )
+
+    mmmu_pro_group = parser.add_argument_group("mmmu_pro dataset options")
+    mmmu_pro_group.add_argument(
+        "--mmmu-pro-subset",
+        type=str,
+        default="vision",
+        choices=["vision", "standard (10 options)"],
+        help="MMMU-Pro subset to use. 'vision' has questions encoded in images; "
+        "'standard (10 options)' has text questions with images and 10 choices.",
+    )
+    mmmu_pro_group.add_argument(
+        "--mmmu-pro-output-len",
+        type=int,
+        default=16,
+        help="Output length for each request. Default is 16 (single-letter answer).",
+    )
+    mmmu_pro_group.add_argument(
+        "--mmmu-pro-use-chat-template",
+        action="store_true",
+        help="Whether to format MMMU-Pro prompts using the tokenizer's chat template.",
     )
 
     sonnet_group = parser.add_argument_group("sonnet dataset options")
