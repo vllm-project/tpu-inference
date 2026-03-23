@@ -41,10 +41,10 @@ pip install rouge-score==0.1.2 || true
 pip install "lm-eval[api,math]>=0.4.9.2" || true
 
 
-VLLM_LOG="$LOG_FOLDER/vllm_log.txt"
-BM_LOG="$LOG_FOLDER/bm_log.txt"
-BEST_BM_LOG="$LOG_FOLDER/best_bm_log.txt"
-PROFILE_FOLDER="$LOG_FOLDER/profile"
+VLLM_LOG="$DOCKER_LOG_FOLDER/vllm_log.txt"
+BM_LOG="$DOCKER_LOG_FOLDER/bm_log.txt"
+BEST_BM_LOG="$DOCKER_LOG_FOLDER/best_bm_log.txt"
+PROFILE_FOLDER="$DOCKER_LOG_FOLDER/profile"
 printf "[INFO] Pre-check %-25s = %s\n" "DOCKER_ARTIFACT_FOLDER" "$DOCKER_ARTIFACT_FOLDER" || true
 DOCKER_ARTIFACT_FOLDER=${DOCKER_ARTIFACT_FOLDER:-"/workspace/artifacts"}
 printf "[INFO] %-25s = %s\n" "VLLM_LOG" "$VLLM_LOG"
@@ -281,9 +281,9 @@ run_benchmark(){
   echo "$throughput $p99_e2el"
 }
 
-printf "[DEBUG] Checking folder structure in container..."
-printf "[DEBUG] pwd=%s\n\nls $DOCKER_ARTIFACT_FOLDER=%s\n" "$(pwd)" "$(ls "$DOCKER_ARTIFACT_FOLDER")" || true
-printf "[DEBUG] ls $DOCKER_ARTIFACT_FOLDER/temp_logs=%s\n" "$(ls "$DOCKER_ARTIFACT_FOLDER"/temp_logs)" || true
+printf "[DEBUG] Checking folder structure in container...\n"
+printf "[DEBUG] pwd=%s\n\nls $DOCKER_ARTIFACT_FOLDER=\n%s\n" "$(pwd)" "$(ls -al "$DOCKER_ARTIFACT_FOLDER")" || true
+printf "[DEBUG] ls $DOCKER_ARTIFACT_FOLDER/temp_logs=\n%s\n" "$(ls -al "$DOCKER_ARTIFACT_FOLDER"/temp_logs)" || true
 
 read -r throughput p99_e2el < <(run_benchmark "inf" | tail -n 1)
 
