@@ -1724,8 +1724,8 @@ def ragged_paged_attention(
         ]
 
         out_specs = [
-            pl.BlockSpec(memory_space=pltpu.HBM),
-            pl.BlockSpec(memory_space=pltpu.HBM),
+            pl.BlockSpec(),
+            pl.BlockSpec(),
         ]
 
         bkv_stride = num_kv_heads_x2_per_kv_packing
