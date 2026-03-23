@@ -4,8 +4,8 @@
       <th>Checkpoint dtype</th>
       <th>Method</th>
       <th>Supported<br>Hardware Acceleration</th>
-      <th>flax</th>
-      <th>torchax</th>
+      <th>Flax</th>
+      <th>Torchax</th>
     </tr>
   </thead>
   <tbody>
