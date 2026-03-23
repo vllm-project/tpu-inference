@@ -55,4 +55,4 @@
 </table>
 
 > **Note:**
-> &bull;&nbsp;&nbsp;&nbsp;*This table only tests checkpoint loading compatibility.*
+> - *This table only tests checkpoint loading compatibility.*

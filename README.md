@@ -378,7 +378,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 </table>
 
 > **Note:**
-> &bull;&nbsp;&nbsp;&nbsp;*This table only tests checkpoint loading compatibility.*
+> - *This table only tests checkpoint loading compatibility.*
 <!-- END: quantization -->
 
 </details>
@@ -482,7 +482,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 </table>
 
 > **Note:**
-> *   *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*
+> - *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*
 <!-- END: microbenchmarks -->
 
 </details>
