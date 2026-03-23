@@ -184,7 +184,7 @@ def parse_args():
     parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
-        default=0.5,
+        default=0.85,
         help="GPU memory utilization",
     )
 
