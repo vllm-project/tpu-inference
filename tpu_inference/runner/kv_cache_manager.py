@@ -439,56 +439,70 @@ class KVCacheManager:
 
         return jax.tree.map(gather_and_reshape, kv_caches)
 
-    @staticmethod
-    @jax.jit(
-        static_argnames=("block_size"),
-        donate_argnames=(
-            "kv_caches",
-            "kv_cache_slices",
-        ),
-    )
     def _jitted_insert_kv_cache(
         block_size,
         kv_caches: List[jax.Array],
         kv_cache_slices: List[jax.Array],
-        block_numbers: jax.Array,
+        block_numbers: List[int],
     ) -> List[jax.Array]:
         """
-        JIT-compiled function to insert KV cache slices into the physical
-        cache for all layers at once. This fuses the pad, reshape, and scatter
-        operations into a single efficient kernel.
+        Iteratively call continuous KV cache insertion for each contiguous block sub-array.
         """
+        if not block_numbers:
+            return kv_caches
 
-        def _update_layer(cache, slices):
-            """The function to apply to each layer's cache and slices."""
-            reshaped_slices = slices.reshape(-1, block_size, *slices.shape[1:])
-            cache.at[block_numbers].set(reshaped_slices)
-            return cache
+        start_idx = 0
+        for i in range(1, len(block_numbers) + 1):
+            if i == len(block_numbers
+                        ) or block_numbers[i] != block_numbers[i - 1] + 1:
+                start_block = block_numbers[start_idx]
 
-        return jax.tree.map(_update_layer, kv_caches, kv_cache_slices)
+                chunk_size = i - start_idx
+                token_start = start_idx * block_size
+                with runner_utils.LatencyTracker(
+                        f"insert_continuous_kv_cache_from_slice {start_block} {chunk_size}"
+                ):
+                    kv_caches = KVCacheManager._jitted_insert_continuous_kv_cache_from_slice(
+                        block_size,
+                        chunk_size,
+                        kv_caches,
+                        kv_cache_slices,
+                        token_start,
+                        start_block,
+                    )
+                start_idx = i
+
+        return kv_caches
 
     @staticmethod
     @jax.jit(
-        static_argnames=("block_size"),
-        donate_argnames=(
-            "kv_caches",
-            "kv_cache_slices",
-        ),
+        static_argnames=("block_size", "chunk_size"),
+        donate_argnames=("kv_caches", ),
     )
-    def _jitted_insert_continuous_kv_cache(
-        block_size,
+    def _jitted_insert_continuous_kv_cache_from_slice(
+        block_size: int,
+        chunk_size: int,
         kv_caches: List[jax.Array],
         kv_cache_slices: List[jax.Array],
-        start_block,
+        token_start: int,
+        start_block: int,
     ) -> List[jax.Array]:
         """
-        JIT-compiled function to insert KV cache slices into continuous blocks.
-        Makes use of dynamic_update_slice_in_dim.
+        JIT-compiled function that dynamically slices the required tokens from KV cache
+        slices and inserts them into continuous physical blocks.
         """
 
         def _update_layer(cache, slices):
             """The function to apply to each layer's cache and slices."""
-            reshaped_slices = slices.reshape(-1, block_size, *slices.shape[1:])
+
+            # Dynamically slice exactly chunk_size * block_size tokens starting at token_start
+            extracted_slices = jax.lax.dynamic_slice_in_dim(slices,
+                                                            token_start,
+                                                            chunk_size *
+                                                            block_size,
+                                                            axis=0)
+            reshaped_slices = extracted_slices.reshape(-1, block_size,
+                                                       *slices.shape[1:])
 
             return jax.lax.dynamic_update_slice_in_dim(cache,
                                                        reshaped_slices,
@@ -602,10 +616,12 @@ class KVCacheManager:
             with runner_utils.LatencyTracker(
                     f"JittedInsertContinuousKVCache-b{len(block_numbers)}"):
                 logger.debug(f"inserting to continuous blocks {block_numbers}")
-                self.runner.kv_caches = KVCacheManager._jitted_insert_continuous_kv_cache(
+                self.runner.kv_caches = KVCacheManager._jitted_insert_continuous_kv_cache_from_slice(
                     self.runner.block_size,
+                    len(block_numbers),
                     self.runner.kv_caches,
                     kv_cache_slices,
+                    0,
                     start_block,
                 )
                 jax.block_until_ready(self.runner.kv_caches)
@@ -618,7 +634,7 @@ class KVCacheManager:
                     self.runner.block_size,
                     self.runner.kv_caches,
                     kv_cache_slices,
-                    jnp.array(block_numbers),
+                    block_numbers,
                 )
                 jax.block_until_ready(self.runner.kv_caches)
 
