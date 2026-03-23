@@ -98,7 +98,15 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
         quant_config: VllmFp8Config,
         linear_config: VllmQuantLinearConfig,
     ):
+        from vllm.platforms import PlatformEnum, current_platform
+
+        # init_fp8_linear_kernel is called by super().__init__
+        # and needs a supported backend temporarily.
+        original_platform = current_platform._enum
+        current_platform._enum = PlatformEnum.CPU
         super().__init__(quant_config)
+        current_platform._enum = original_platform
+
         self.linear_config = linear_config
         if self.linear_config.enable_quantized_matmul_kernel and not self.linear_config.requant_block_size:
             raise ValueError(
