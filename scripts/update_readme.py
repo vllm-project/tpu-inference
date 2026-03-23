@@ -58,7 +58,7 @@ CSV_MAP = {
         "v7_default":
         "support_matrices/v7x/default/quantization_support_matrix.csv"
     },
-    "kernel_support": "support_matrices/kernel_support_matrix.csv",
+    "kernel_support": "support_matrices/v6e/vllm/kernel_support_matrix.csv",
     "microbenchmarks": {
         "v6":
         "support_matrices/v6e/vllm/kernel_support_matrix-microbenchmarks.csv",
@@ -750,41 +750,20 @@ def update_readme():
                      f"*Last Updated: {current_time}*", content)
 
     # Write MkDocs formatted README identically to sync platforms
-    with open("docs/recommended_models_features.md", "w", encoding="utf-8") as f:
-        # Generate the standard MkDocs Header structure
-        mkdocs_content = (
-            "# Models and Features\n\n"
-            "This table shows what hardware generations support which models and feature sets, "
-            "allowing developers to pick the optimal platform for execution.\n\n"
-            "*Last Updated: " + current_time + "*\n\n"
-            "## Recommended Models\n"
-            "<!-- START: model_support -->\n"
-            "<!-- END: model_support -->\n\n"
-            "## Recommended Features\n"
-            "<!-- START: core_features -->\n"
-            "<!-- END: core_features -->\n\n"
-            "## Kernel Support\n"
-            "<!-- START: kernel_support -->\n"
-            "<!-- END: kernel_support -->\n\n"
-            "## Parallelism Support\n"
-            "<!-- START: parallelism -->\n"
-            "<!-- END: parallelism -->\n\n"
-            "## Quantization Support\n"
-            "<!-- START: quantization -->\n"
-            "<!-- END: quantization -->\n"
-        )
-        for section_key in CSV_MAP.keys():
-            # Inject identically parsed HTML/MD maps into MkDocs to prevent structure drift!
-            start_m, end_m = f"<!-- START: {section_key} -->", f"<!-- END: {section_key} -->"
-            if start_m in content:
-                table_block = re.search(f"{start_m}(.*?){end_m}", content, re.DOTALL)
-                if table_block:
-                    mkdocs_content = re.sub(f"{start_m}.*?{end_m}", f"{start_m}{table_block.group(1)}{end_m}", mkdocs_content, flags=re.DOTALL)
-        f.write(mkdocs_content)
+    # Export decoupled tables directly to MkDocs snippet folder
+    os.makedirs("docs/includes", exist_ok=True)
+    for section_key in CSV_MAP.keys():
+        start_m, end_m = f"<!-- START: {section_key} -->", f"<!-- END: {section_key} -->"
+        if start_m in content:
+            table_block = re.search(f"{start_m}(.*?){end_m}", content, re.DOTALL)
+            if table_block:
+                snippet_path = os.path.join("docs", "includes", f"{section_key}.md")
+                with open(snippet_path, "w", encoding="utf-8") as f:
+                    f.write(table_block.group(1).strip() + "\n")
 
     with open(README_PATH, "w", encoding="utf-8") as f:
         f.write(content)
-    print("✅ README.md & docs/recommended_models_features.md have been autonomously updated in parity.")
+    print("✅ README.md and MkDocs snippets have been automatically updated.")
 
 
 if __name__ == "__main__":
