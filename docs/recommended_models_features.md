@@ -36,7 +36,7 @@ This table shows the features currently tested for accuracy and performance.
 
 This table shows the current kernel support status.
 
---8<-- "docs/includes/kernel_support.md"
+--8<-- "docs/includes/microbenchmarks.md"
 
 ## Parallelism Support
 
