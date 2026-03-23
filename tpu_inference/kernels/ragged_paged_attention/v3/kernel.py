@@ -1821,9 +1821,6 @@ def ragged_paged_attention(
                 disable_semaphore_checks=disable_semaphore_checks,
             ),
             out_shape=[
-                pltpu.HBM(shape=q.shape, dtype=q.dtype),
-                pltpu.HBM(shape=kv_cache.shape, dtype=kv_cache.dtype),
-            ] if tpu_version >= 7 else [
                 jax.ShapeDtypeStruct(shape=q.shape, dtype=q.dtype),
                 jax.ShapeDtypeStruct(shape=kv_cache.shape,
                                      dtype=kv_cache.dtype),
