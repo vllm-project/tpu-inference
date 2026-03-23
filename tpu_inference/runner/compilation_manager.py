@@ -289,8 +289,8 @@ class CompilationManager:
                 next_tokens = self._create_dummy_tensor(
                     (num_reqs, ),
                     jnp.int32,
-                    sharding=NamedSharding(self.runner.mesh, PartitionSpec()),
-                )
+                    sharding=dp_sharding)
+
                 placeholder_num = 1
                 self._run_compilation(
                     "_substitute_placeholder_token_fn",
