@@ -256,11 +256,12 @@ def static_validate_inputs(
     # Kernel optimization params.
     chunk_prefill_size: int | None = None,
     # Kernel tuning params.
-    bq_sz: int | None = None,
-    bkv_sz: int | None = None,
+    bq_sz: int | tuple[int, int] | None = None,
+    bkv_sz: int | tuple[int, int] | None = None,
     vmem_limit_bytes: int | None = None,
     # Debug params.
     debug_mode: bool = False,
+    use_causal_mask: bool = True,
 ):
     """Validate inputs to the RPA kernel statically."""
     q, k, v = queries, keys, values
@@ -367,13 +368,27 @@ def static_validate_inputs(
     if chunk_prefill_size is not None and chunk_prefill_size <= 0:
         raise ValueError(f"{chunk_prefill_size=} must be positive.")
     if bkv_sz is not None:
-        if bkv_sz <= 0:
-            raise ValueError(f"{bkv_sz=} must be positive.")
-        if bkv_sz % page_size != 0:
-            raise ValueError(f"{bkv_sz=} must be divisible by {page_size=}.")
+        if isinstance(bkv_sz, tuple):
+            for bkv in bkv_sz:
+                if bkv <= 0:
+                    raise ValueError(f"{bkv_sz=} must be positive.")
+                if bkv % page_size != 0:
+                    raise ValueError(
+                        f"{bkv_sz=} must be divisible by {page_size=}.")
+        else:
+            if bkv_sz <= 0:
+                raise ValueError(f"{bkv_sz=} must be positive.")
+            if bkv_sz % page_size != 0:
+                raise ValueError(
+                    f"{bkv_sz=} must be divisible by {page_size=}.")
     if bq_sz is not None:
-        if bq_sz <= 0:
-            raise ValueError(f"{bq_sz=} must be positive.")
+        if isinstance(bq_sz, tuple):
+            for bq in bq_sz:
+                if bq <= 0:
+                    raise ValueError(f"{bq_sz=} must be positive.")
+        else:
+            if bq_sz <= 0:
+                raise ValueError(f"{bq_sz=} must be positive.")
     if vmem_limit_bytes is not None and vmem_limit_bytes <= 0:
         raise ValueError(f"{vmem_limit_bytes=} must be positive.")
 
@@ -413,11 +428,11 @@ def get_default_block_sizes(
     )
     return {
         "bq_sz": 1,
-        "bkv_sz": 2048,
-        "batch_size": 6,
+        "bkv_sz": page_size,
+        "batch_size": 1
     }, {
-        "bq_sz": 256,
-        "bkv_sz": 512,
+        "bq_sz": 1,
+        "bkv_sz": page_size,
         "batch_size": 1,
     }
 
@@ -442,6 +457,7 @@ def get_default_block_sizes(
         "debug_mode",
         "m_block_sizes",
         "n_buffer",
+        "out_dtype",
     ),
     donate_argnames=("queries", "keys", "values", "kv_cache"),
 )
@@ -463,17 +479,26 @@ def ragged_paged_attention(
     k_scale: float | None = None,
     v_scale: float | None = None,
     chunk_prefill_size: int | None = None,
-    bq_sz: int | None = None,
-    bkv_sz: int | None = None,
+    bq_sz: int | tuple[int, int] | None = None,
+    bkv_sz: int | tuple[int, int] | None = None,
     # obsolete, for benchmarking backwards compatibility.
     bq_csz: int | None = None,
     bkv_csz: int | None = None,
-    batch_size: int | None = None,
+    batch_size: int | tuple[int, int] | None = None,
     vmem_limit_bytes: int | None = None,
     debug_mode: bool = False,
     m_block_sizes: tuple[int, int, int, int] | None = None,
     n_buffer: int = 2,
+    out_dtype: Any | None = None,
+    use_causal_mask: bool = True,
 ):
+
+    # Override default for testing purposes.
+    bq_sz = (1, 128)
+    bkv_sz = (2048, 512)
+    batch_size = (8, 2)
+    n_buffer = 3
+
     static_validate_inputs(
         queries,
         keys,
@@ -498,6 +523,8 @@ def ragged_paged_attention(
     )
     if mask_value is None:
         mask_value = DEFAULT_MASK_VALUE
+    if out_dtype is None:
+        out_dtype = jnp.float32 if queries.dtype == jnp.float32 else jnp.bfloat16
 
     max_num_seqs = kv_lens.shape[0]
     total_num_pages = kv_cache.shape[0]
@@ -535,12 +562,27 @@ def ragged_paged_attention(
         )
         if case == schedule.RpaCase.DECODE:
             block_sizes = decode_block_sizes
+            idx = 0
         else:
             block_sizes = prefill_block_sizes
-        kernel_batch_size = (batch_size if batch_size is not None else
-                             block_sizes["batch_size"])
-        kernel_bq_sz = bq_sz if bq_sz is not None else block_sizes["bq_sz"]
-        kernel_bkv_sz = bkv_sz if bkv_sz is not None else block_sizes["bkv_sz"]
+            idx = 1
+
+        if isinstance(batch_size, tuple):
+            kernel_batch_size = batch_size[idx]
+        else:
+            kernel_batch_size = batch_size if batch_size is not None else block_sizes[
+                "batch_size"]
+
+        if isinstance(bq_sz, tuple):
+            kernel_bq_sz = bq_sz[idx]
+        else:
+            kernel_bq_sz = bq_sz if bq_sz is not None else block_sizes["bq_sz"]
+
+        if isinstance(bkv_sz, tuple):
+            kernel_bkv_sz = bkv_sz[idx]
+        else:
+            kernel_bkv_sz = bkv_sz if bkv_sz is not None else block_sizes[
+                "bkv_sz"]
 
         max_steps_ub = _get_max_steps_ub(
             max_num_seqs,
@@ -578,6 +620,7 @@ def ragged_paged_attention(
             total_num_pages=total_num_pages,
             case=case,
             n_buffer=n_buffer,
+            out_dtype=out_dtype,
         )
         rpa_kernel_instance = kernel.make_rpa_kernel(config)
         rpa_schedule = schedule.generate_rpa_metadata(
@@ -597,32 +640,6 @@ def ragged_paged_attention(
             o_hbm,
         )
         return o_hbm, kv_cache
-
-    # num_decode = distribution[0]
-    # num_prefill = distribution[1] - distribution[0]
-    # num_mixed = distribution[2] - distribution[1]
-
-    # o_hbm, kv_cache = jax.lax.cond(
-    #     num_decode > 0,
-    #     lambda o, kv: run_rpa_kernel(schedule.RpaCase.DECODE, q_hbm, o, kv),
-    #     lambda o, kv: (o, kv),
-    #     o_hbm,
-    #     kv_cache,
-    # )
-    # o_hbm, kv_cache = jax.lax.cond(
-    #     num_prefill > 0,
-    #     lambda o, kv: run_rpa_kernel(schedule.RpaCase.PREFILL, q_hbm, o, kv),
-    #     lambda o, kv: (o, kv),
-    #     o_hbm,
-    #     kv_cache,
-    # )
-    # o_hbm, kv_cache = jax.lax.cond(
-    #     num_mixed > 0,
-    #     lambda o, kv: run_rpa_kernel(schedule.RpaCase.MIXED, q_hbm, o, kv),
-    #     lambda o, kv: (o, kv),
-    #     o_hbm,
-    #     kv_cache,
-    # )
 
     o_hbm, kv_cache = run_rpa_kernel(schedule.RpaCase.DECODE, q_hbm, o_hbm,
                                      kv_cache)

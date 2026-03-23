@@ -192,6 +192,7 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
             processed_q_len = []
             processed_kv_len = []
             effective_kv_len = []
+            int_ty = jnp.int16
             for b in range(config.batch_size):
                 idx = step * config.batch_size + b
                 s_idx = schedule.s_idx[idx]
@@ -205,9 +206,10 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
                 q_len = q_end - q_start
                 offset = kv_len - q_len
 
-                processed_q_len.append(q_idx * config.bq_sz + offset)
-                processed_kv_len.append(k_id)
-                effective_kv_len.append(kv_len)
+                processed_q_len.append(
+                    (q_idx * config.bq_sz + offset).astype(int_ty))
+                processed_kv_len.append(k_id.astype(int_ty))
+                effective_kv_len.append(kv_len.astype(int_ty))
 
                 start_k_idx = 0
                 if config.sliding_window is not None:

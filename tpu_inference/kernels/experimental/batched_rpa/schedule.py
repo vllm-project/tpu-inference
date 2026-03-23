@@ -84,6 +84,7 @@ class RPAConfig:
     vmem_limit_bytes: int | None = None
     case: RpaCase = RpaCase.MIXED
     n_buffer: int = 2
+    out_dtype: Any = jnp.bfloat16
 
     @property
     def bkv_p_cache(self) -> int:

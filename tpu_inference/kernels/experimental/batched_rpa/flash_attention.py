@@ -67,7 +67,7 @@ def flash_attention(
         dimension_numbers=(([2], [2]), ([0], [0])),
         preferred_element_type=jnp.float32,
     )
-    qk = qk.reshape((b, k_heads, tq, s))
+    qk = qk.reshape((b, k_heads, tq, s)).astype(config.out_dtype)
 
     qk *= config.sm_scale
     if config.k_scale is not None:
@@ -78,22 +78,29 @@ def flash_attention(
     if config.soft_cap is not None:
         qk = config.soft_cap * jnp.tanh(qk / config.soft_cap)
 
-    qk_seq_masks: list[jnp.ndarray] = []
-    for i in range(b):
-        kv_idx_i = processed_kv_len[i] + lax.broadcasted_iota(
-            jnp.int32, (k_heads, tq, s), 2)
-        q_idx_i = (processed_q_len[i] +
-                   lax.broadcasted_iota(jnp.int32, (k_heads, tq, s), 1) //
-                   config.num_q_heads_per_kv_head)
-        mask_i = kv_idx_i < effective_kv_len[i]
-        mask_i &= q_idx_i < effective_kv_len[i]
-        mask_i &= q_idx_i >= kv_idx_i
-        if config.sliding_window is not None:
-            mask_i &= q_idx_i < kv_idx_i + config.sliding_window
-        qk_seq_masks.append(mask_i)
-    mask = jnp.stack(qk_seq_masks, axis=0)
+    qk_masked = []
+    for b_idx in range(config.batch_size):
+        # 3. Add scalar offsets as simple additions
+        kv_idx_b = (lax.broadcasted_iota(jnp.int16, (k_heads, tq, s), 2) +
+                    processed_kv_len[b_idx])
+        q_idx_b = (lax.broadcasted_iota(jnp.int32, (k_heads, tq, s), 1) //
+                   config.num_q_heads_per_kv_head).astype(
+                       jnp.int16) + processed_q_len[b_idx]
 
-    qk = jnp.where(mask, qk, config.mask_value)
+        eff_kv_len_b = effective_kv_len[b_idx]
+        mask_b = kv_idx_b < eff_kv_len_b
+        mask_b &= q_idx_b < eff_kv_len_b
+        mask_b &= q_idx_b >= kv_idx_b
+
+        if config.sliding_window is not None:
+            mask_b &= q_idx_b < kv_idx_b + config.sliding_window
+        qk_masked.append(jnp.where(mask_b, qk[b_idx], config.mask_value))
+    qk = jnp.stack(qk_masked, axis=0)
+
+    # # 5. Final selection and reduction
+    # # Stack the masks and apply in a single 'vsel' step
+    # mask = jnp.stack(masks, axis=0)
+    # qk = jnp.where(mask, qk, config.mask_value)
 
     m_curr = jnp.max(qk, axis=-1, keepdims=True)
     m_next = jnp.maximum(m_prev, m_curr)
@@ -105,15 +112,15 @@ def flash_attention(
         dimension_numbers=(([2], [1]), ([0], [0])),
         preferred_element_type=jnp.float32,
     )
-    pv = pv.reshape((b, k_heads, tq, h))
+    pv = pv.reshape((b, k_heads, tq, h)).astype(config.out_dtype)
 
     if config.v_scale is not None:
         pv *= config.v_scale
 
-    p_rowsum = jnp.sum(p, axis=-1, keepdims=True)
+    p_rowsum = jnp.sum(p, axis=-1, keepdims=True, dtype=config.out_dtype)
     alpha = jnp.exp(m_prev - m_next)
     l_next = alpha * l_prev + p_rowsum
 
     o_next = broadcast_minor(alpha, o_prev.shape) * o_prev + pv
 
-    return m_next, l_next, o_next.astype(o_prev.dtype)
+    return m_next, l_next, o_next
