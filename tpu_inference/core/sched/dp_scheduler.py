@@ -282,10 +282,19 @@ def _scheduler_worker_process(
 class DPSchedulerOutput(SchedulerOutput):
     """Extended SchedulerOutput that includes DP rank assignments."""
     assigned_dp_rank: Optional[Dict[str, int]] = None
+    # The maximum number of tokens scheduled on any single DP rank in this step.
+    # This is used by the Runner to calculate the global padded batch size
+    # (padded_max * dp_size), ensuring consistent shapes across pipeline stages.
+    max_num_scheduled_tokens_per_dp_rank: int = 0
 
-    def __init__(self, *args, assigned_dp_rank=None, **kwargs):
+    def __init__(self,
+                 *args,
+                 assigned_dp_rank=None,
+                 max_num_scheduled_tokens_per_dp_rank=0,
+                 **kwargs):
         super().__init__(*args, **kwargs)
         self.assigned_dp_rank = assigned_dp_rank or {}
+        self.max_num_scheduled_tokens_per_dp_rank = max_num_scheduled_tokens_per_dp_rank
 
 
 class DPScheduler(SchedulerInterface):
@@ -567,6 +576,7 @@ class DPScheduler(SchedulerInterface):
         combined_spec_decode_tokens = {}
         combined_encoder_inputs = {}
         total_scheduled_tokens = 0
+        max_scheduled_tokens_per_rank = 0
 
         for output in rank_outputs:
             combined_num_scheduled_tokens.update(output.num_scheduled_tokens)
@@ -574,6 +584,9 @@ class DPScheduler(SchedulerInterface):
                 output.scheduled_spec_decode_tokens)
             combined_encoder_inputs.update(output.scheduled_encoder_inputs)
             total_scheduled_tokens += output.total_num_scheduled_tokens
+            max_scheduled_tokens_per_rank = max(
+                max_scheduled_tokens_per_rank,
+                output.total_num_scheduled_tokens)
 
         # Combine finished request IDs
         combined_finished_req_ids = set()
@@ -600,6 +613,7 @@ class DPScheduler(SchedulerInterface):
             finished_req_ids=combined_finished_req_ids,
             free_encoder_mm_hashes=set(),
             assigned_dp_rank=assigned_dp_rank,
+            max_num_scheduled_tokens_per_dp_rank=max_scheduled_tokens_per_rank,
         )
 
     def _combine_cached_request_data(

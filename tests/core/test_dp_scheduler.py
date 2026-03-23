@@ -757,8 +757,8 @@ class TestDPScheduler:
 
         mock_process_0 = MagicMock()
         mock_process_1 = MagicMock()
-        mock_process_0.is_alive = MagicMock(return_value=False)
-        mock_process_1.is_alive = MagicMock(return_value=False)
+        mock_process_0.is_alive = MagicMock(return_value=True)
+        mock_process_1.is_alive = MagicMock(return_value=True)
         scheduler.processes = [mock_process_0, mock_process_1]
 
         scheduler.shutdown()
