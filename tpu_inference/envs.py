@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     MOE_REQUANTIZE_BLOCK_SIZE: int | None = None
     MOE_REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
     LAYOUT_Q_PROJ_AS_NDH: bool = False
+    MOE_REQUANTIZE_ON_TPU: bool = False
     USE_JAX_PROFILER_SERVER: bool = False
     JAX_PROFILER_SERVER_PORT: int = 9999
     USE_BATCHED_RPA_KERNEL: bool = False
@@ -198,6 +199,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # or DNH (model dim, q-heads, head dim), which is the default (False)
     "LAYOUT_Q_PROJ_AS_NDH":
     env_bool("LAYOUT_Q_PROJ_AS_NDH"),
+    # Requantize FP8 MoE weights on TPU
+    "MOE_REQUANTIZE_ON_TPU":
+    env_bool("MOE_REQUANTIZE_ON_TPU", default=False),
     "USE_JAX_PROFILER_SERVER":
     env_bool("USE_JAX_PROFILER_SERVER"),
     "JAX_PROFILER_SERVER_PORT":
