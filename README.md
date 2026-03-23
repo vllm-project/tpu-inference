@@ -96,7 +96,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <summary><b> ✅ Tested Models </b></summary>
 
 <!-- START: model_support -->
-| Model | Type | Unit&nbsp;Test | Correctness&nbsp;Test | Benchmark |
+| Model | Type | Unit&nbsp;Test | Correctness&nbsp;Test | Performance&nbsp;Test |
 | --- | --- | --- | --- | --- |
 | [meta-llama/Llama-4-Maverick-17B-128E-Instruct](https://huggingface.co/meta-llama/Llama-4-Maverick-17B-128E-Instruct) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
 | [meta-llama/Llama-Guard-4-12B/Multimodal](https://huggingface.co/meta-llama/Llama-Guard-4-12B/Multimodal) | Multimodal | <span title="✅ Passing">✅</span> | <span title="❌ Failing">❌</span> | <span title="❓ Untested">❓</span> |
@@ -174,9 +174,9 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>multi-host</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
       <td>Multimodal Inputs</td>
@@ -216,9 +216,9 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>Single-Host-P-D-disaggregation</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
     </tr>
     <tr>
       <td>Speculative Decoding: Eagle3</td>
