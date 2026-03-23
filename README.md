@@ -75,7 +75,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-03-23 07:41 PM UTC*
+*Last Updated: 2026-03-23 07:57 PM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -128,10 +128,10 @@ Below is the live status of our supported models, features, and kernels. Click o
 <table>
   <thead>
     <tr>
-      <th>Test / Feature</th>
-      <th>flax</th>
-      <th>torchax</th>
-      <th>default</th>
+      <th>Feature</th>
+      <th>Flax</th>
+      <th>Torchax</th>
+      <th>Default</th>
     </tr>
   </thead>
   <tbody>
@@ -253,7 +253,7 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <th rowspan="2" width="150" style="text-align:left">Feature</th>
       <th colspan="2">Flax</th>
-      <th colspan="2">torchax</th>
+      <th colspan="2">Torchax</th>
     </tr>
     <tr>
       <th>Single-host</th>
@@ -272,23 +272,16 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>DP</td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>EP</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-    </tr>
-    <tr>
-      <td>multi-host</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
@@ -296,13 +289,6 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-    </tr>
-    <tr>
-      <td>Single-Host-P-D-disaggregation</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
@@ -315,9 +301,9 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td>TP</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
   </tbody>
 </table>
@@ -343,43 +329,43 @@ Below is the live status of our supported models, features, and kernels. Click o
   <tbody>
     <tr>
       <td>AWQ INT4</td>
+      <td></td>
       <td>v5, v6</td>
-      <td>unverified</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>FP4 W4A16</td>
+      <td>mxfp4</td>
       <td>v7</td>
-      <td>unverified</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>FP8 W8A8</td>
+      <td>compressed-tensor</td>
       <td>v7</td>
-      <td>unverified</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>FP8 W8A16</td>
+      <td>compressed-tensor</td>
       <td>v7</td>
-      <td>unverified</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>INT4 W4A16</td>
+      <td>awq</td>
       <td>v5, v6</td>
-      <td>unverified</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>INT8 W8A8</td>
+      <td>compressed-tensor</td>
       <td>v5, v6</td>
-      <td>unverified</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>

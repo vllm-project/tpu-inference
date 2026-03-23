@@ -45,10 +45,8 @@ CSV_MAP = {
         "support_matrices/v7x/vllm/parallelism_support_matrix.csv"
     },
     "quantization": {
-        "static":
-        "support_matrices/quantization_support_matrix.csv",
-        "v6_flax":
-        "support_matrices/v6e/flax_nnx/quantization_support_matrix.csv",
+        "static": "support_matrices/v6e/vllm/quantization_support_matrix.csv",
+        "v6_flax": "support_matrices/v6e/flax_nnx/quantization_support_matrix.csv",
         "v6_pytorch":
         "support_matrices/v6e/vllm/quantization_support_matrix.csv",
         "v6_default":
@@ -207,10 +205,10 @@ def generate_html_feature_table(headers, data):
     html.append("<table>")
     html.append("  <thead>")
     html.append("    <tr>")
-    html.append("      <th>Test / Feature</th>")
-    html.append("      <th>flax</th>")
-    html.append("      <th>torchax</th>")
-    html.append("      <th>default</th>")
+    html.append("      <th>Feature</th>")
+    html.append("      <th>Flax</th>")
+    html.append("      <th>Torchax</th>")
+    html.append("      <th>Default</th>")
     html.append("    </tr>")
     html.append("  </thead>")
     html.append("  <tbody>")
@@ -447,7 +445,7 @@ def generate_html_parallelism_table(headers, data):
         "      <th rowspan=\"2\" width=\"150\" style=\"text-align:left\">Feature</th>"
     )
     html.append("      <th colspan=\"2\">Flax</th>")
-    html.append("      <th colspan=\"2\">torchax</th>")
+    html.append("      <th colspan=\"2\">Torchax</th>")
     html.append("    </tr>")
     html.append("    <tr>")
     html.append("      <th>Single-host</th>")
@@ -473,10 +471,10 @@ def generate_html_parallelism_table(headers, data):
         v7_flax = row[3]
         v7_torch = row[4]
 
-        flax_single = _merge_hw_status(v6_flax["c"], v7_flax["c"])
-        flax_multi = _merge_hw_status(v6_flax["p"], v7_flax["p"])
-        torch_single = _merge_hw_status(v6_torch["c"], v7_torch["c"])
-        torch_multi = _merge_hw_status(v6_torch["p"], v7_torch["p"])
+        flax_single = _merge_hw_status(v6_flax.get("single", "❓ Untested"), v7_flax.get("single", "❓ Untested"))
+        flax_multi = _merge_hw_status(v6_flax.get("multi", "❓ Untested"), v7_flax.get("multi", "❓ Untested"))
+        torch_single = _merge_hw_status(v6_torch.get("single", "❓ Untested"), v7_torch.get("single", "❓ Untested"))
+        torch_multi = _merge_hw_status(v6_torch.get("multi", "❓ Untested"), v7_torch.get("multi", "❓ Untested"))
 
         html.append(f"      <td>{flax_single}</td>")
         html.append(f"      <td>{flax_multi}</td>")
@@ -545,47 +543,20 @@ def update_readme():
                         if section_key == "core_features" and feature in (
                                 "multi-host",
                                 "Single-Host-P-D-disaggregation"):
-                            if feature not in extracted_parallelism_features:
-                                extracted_parallelism_features[feature] = {
-                                    "v6_flax": {
-                                        "c": "❓",
-                                        "p": "❓"
-                                    },
-                                    "v6_pytorch": {
-                                        "c": "❓",
-                                        "p": "❓"
-                                    },
-                                    "v7_flax": {
-                                        "c": "❓",
-                                        "p": "❓"
-                                    },
-                                    "v7_pytorch": {
-                                        "c": "❓",
-                                        "p": "❓"
-                                    }
-                                }
-                            if col_key in extracted_parallelism_features[
-                                    feature]:
-                                extracted_parallelism_features[feature][
-                                    col_key] = {
-                                        "c": c,
-                                        "p": p
-                                    }
+                            # Skip rendering redundant rows
                             continue
 
                         if section_key == "parallelism":
+                            # Correctly parse Single-Host Correctness/Performance (r1,r2) and Multi-Host (r3,r4)
+                            single_merged = merge_metrics(r[1] if len(r) > 1 else "", r[2] if len(r) > 2 else "")
+                            multi_merged = merge_metrics(r[3] if len(r) > 3 else "", r[4] if len(r) > 4 else "")
                             merged_features[feature][col_key] = {
-                                "c": c,
-                                "p": p
+                                "single": single_merged,
+                                "multi": multi_merged
                             }
                         else:
                             merged_features[feature][col_key] = merge_metrics(
                                 c, p)
-
-            if section_key == "parallelism":
-                for ext_feature, ext_metrics in extracted_parallelism_features.items(
-                ):
-                    merged_features[ext_feature] = ext_metrics
 
             for feature in sorted(merged_features.keys(),
                                   key=lambda x: x.lower()):
@@ -778,9 +749,42 @@ def update_readme():
     content = re.sub(r"\*Last Updated: .*\*?",
                      f"*Last Updated: {current_time}*", content)
 
+    # Write MkDocs formatted README identically to sync platforms
+    with open("docs/recommended_models_features.md", "w", encoding="utf-8") as f:
+        # Generate the standard MkDocs Header structure
+        mkdocs_content = (
+            "# Models and Features\n\n"
+            "This table shows what hardware generations support which models and feature sets, "
+            "allowing developers to pick the optimal platform for execution.\n\n"
+            "*Last Updated: " + current_time + "*\n\n"
+            "## Recommended Models\n"
+            "<!-- START: model_support -->\n"
+            "<!-- END: model_support -->\n\n"
+            "## Recommended Features\n"
+            "<!-- START: core_features -->\n"
+            "<!-- END: core_features -->\n\n"
+            "## Kernel Support\n"
+            "<!-- START: kernel_support -->\n"
+            "<!-- END: kernel_support -->\n\n"
+            "## Parallelism Support\n"
+            "<!-- START: parallelism -->\n"
+            "<!-- END: parallelism -->\n\n"
+            "## Quantization Support\n"
+            "<!-- START: quantization -->\n"
+            "<!-- END: quantization -->\n"
+        )
+        for section_key in CSV_MAP.keys():
+            # Inject identically parsed HTML/MD maps into MkDocs to prevent structure drift!
+            start_m, end_m = f"<!-- START: {section_key} -->", f"<!-- END: {section_key} -->"
+            if start_m in content:
+                table_block = re.search(f"{start_m}(.*?){end_m}", content, re.DOTALL)
+                if table_block:
+                    mkdocs_content = re.sub(f"{start_m}.*?{end_m}", f"{start_m}{table_block.group(1)}{end_m}", mkdocs_content, flags=re.DOTALL)
+        f.write(mkdocs_content)
+
     with open(README_PATH, "w", encoding="utf-8") as f:
         f.write(content)
-    print("✅ README.md has been automatically updated.")
+    print("✅ README.md & docs/recommended_models_features.md have been autonomously updated in parity.")
 
 
 if __name__ == "__main__":
