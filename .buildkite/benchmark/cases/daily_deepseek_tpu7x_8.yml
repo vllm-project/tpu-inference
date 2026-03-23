@@ -31,8 +31,7 @@ definitions:
     EXPECTED_ETEL: "43200000"
     NUM_PROMPTS: "64"
     MODELTAG: "NEW"
-    VLLM_MLA_DISABLE: "1"
-    TPU_BACKEND_TYPE: "vllm"
+    EXTRA_ENVS: "VLLM_MLA_DISABLE=1;TPU_BACKEND_TYPE=vllm"
     EXTRA_ARGS: '--kv-cache-dtype=fp8 --enable-expert-parallel --gpu-memory-utilization 0.95'
 
   base_cfg_0: &base_cfg_0
