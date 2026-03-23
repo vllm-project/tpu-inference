@@ -49,6 +49,12 @@ function defer_cleanup_and_report() {
   # Best-effort cleanup of Docker resources.
   # We use '|| true' to ensure that a cleanup failure doesn't overwrite our final exit code.
   .buildkite/benchmark/scripts/cleanup_docker.sh || true
+
+  # Cleanup artifact log folder
+  if [ -d "${ARTIFACT_FOLDER:-}" ]; then
+    echo "--- Cleaning up artifact folder: $ARTIFACT_FOLDER"
+    rm -rf "$ARTIFACT_FOLDER"
+  fi
   
   # Exit with the final determined status code.
   exit "$exit_code"
@@ -65,6 +71,7 @@ EXPECTED_ETEL="${EXPECTED_ETEL:-3600000}"
 NUM_PROMPTS="${NUM_PROMPTS:-1000}"
 MODELTAG="${MODELTAG:-PROD}"
 PREFIX_LEN="${PREFIX_LEN:-0}"
+DATASET="${DATASET:-}"
 ADDITIONAL_CONFIG="${ADDITIONAL_CONFIG:-"{}"}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
@@ -166,10 +173,16 @@ else
 fi
 
 echo "--- Preparing Config Environment"
-mkdir -p artifacts
+ARTIFACT_FOLDER="$(pwd)/artifacts"
+export ARTIFACT_FOLDER
+LOG_FOLDER="${ARTIFACT_FOLDER}/temp_logs"
+export LOG_FOLDER
+mkdir -p "$ARTIFACT_FOLDER"
+mkdir -p "$LOG_FOLDER"
 
-# We safely dump the specific environment variables so docker_run_bm.sh can use them
-cat <<EOF > "artifacts/${RECORD_ID}.env"
+# We safely dump the specific environment variables
+ENV_FILE="artifacts/${RECORD_ID}.env"
+cat <<EOF > "$ENV_FILE"
 DEVICE='${DEVICE}'
 MODEL='${MODEL}'
 MAX_NUM_SEQS='${MAX_NUM_SEQS}'
@@ -197,31 +210,58 @@ EOF
 # Inject dynamic EXTRA_ENVS generated ones
 for key in "${EXTRA_ENV_KEYS[@]}"; do
   if [ -n "${!key:-}" ]; then
-    echo "${key}='${!key}'" >> "artifacts/${RECORD_ID}.env"
+    echo "${key}='${!key}'" >> "$ENV_FILE"
   fi
 done
 
-# Inject static configurations required by docker_run_bm.sh that are missing from env
-cat <<EOF >> "artifacts/${RECORD_ID}.env"
-TEST_NAME=static
-CONTAINER_NAME=vllm-tpu
-LOCAL_HF_HOME="/mnt/disks/persist/models"
-DOCKER_HF_HOME="/tmp/hf_home"
-IMAGE_TAG="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPO}/vllm-tpu:${CODE_HASH}"
-EOF
+# Sync datasets (Copied from run_job.sh)
+DATASETS=("custom-token" "mmlu" "mlperf" "bench-custom-token" "math500" "bench-custom-mm")
+if [[ " ${DATASETS[*]} " == *" $DATASET "* ]]; then
+  echo "--- Syncing dataset for $DATASET"
+  DATASET_DIR="./artifacts/dataset"
+  mkdir -p "$DATASET_DIR"
+  case "$DATASET" in
+    "custom-token") gsutil -m cp gs://"$GCS_BUCKET"/dataset/*.* "$DATASET_DIR/" ;;
+    "mmlu")         gsutil -m cp -r gs://"$GCS_BUCKET"/dataset/mmlu/* "$DATASET_DIR/" ;;
+    "mlperf")       gsutil -m cp gs://vllm-cb-storage2/dataset/mlperf/mlperf_shuffled.jsonl "$DATASET_DIR/mlperf.jsonl" ;;
+    "math500")      gsutil -m cp -r gs://"$GCS_BUCKET"/dataset/math500/math500.jsonl "$DATASET_DIR/" ;;
+    "bench-custom-token"|"bench-custom-mm") gsutil -m cp -r gs://"$GCS_BUCKET"/bench-dataset/* "$DATASET_DIR/" ;;
+  esac
+fi
+
+# Prep specialized configurations (DeepSeek)
+if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
+  GENERATION_CONFIG_FOLDER="$ARTIFACT_FOLDER/generation_configs"
+  export GENERATION_CONFIG_FOLDER
+  mkdir -p "$GENERATION_CONFIG_FOLDER"
+  gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/* "$GENERATION_CONFIG_FOLDER"
+fi
 
 gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 
-echo "--- Cleanup Docker images and containers"
-# shellcheck disable=SC1091
-source ".buildkite/scripts/setup_docker_env.sh"
-cleanup_docker_resource "vllm-tpu"
-
-echo "--- Running job in docker"
+echo "--- Running job in docker via run_in_docker.sh"
 BM_JOB_STATUS=$EXIT_SUCCESS
-.buildkite/benchmark/scripts/docker_run_bm.sh "artifacts/${RECORD_ID}.env" || {
-  echo "Error running benchmark job in docker."
-  BM_JOB_STATUS=$EXIT_FAILURE
+
+# Configuration docker parameter for execute benchmark
+declare -a BENCHMARK_DOCKER_ARGS=(
+  "-v" "$ARTIFACT_FOLDER:/workspace/artifacts"
+  "-e" "DOCKER_ARTIFACT_FOLDER=/workspace/artifacts"
+  "-e" "DOCKER_LOG_FOLDER=/workspace/artifacts/temp_logs"
+  "--env-file" "$ENV_FILE"
+)
+# Join the array elements using newline as the delimiter and export as a single string.
+BENCHMARK_DOCKER_ARGS_STR="$(printf '%s\n' "${BENCHMARK_DOCKER_ARGS[@]}")"
+export BENCHMARK_DOCKER_ARGS_STR
+
+# Restore the SKIP_JAX_PRECOMPILE logic
+[ -n "${SKIP_JAX_PRECOMPILE:-}" ] && export SKIP_JAX_PRECOMPILE
+
+.buildkite/scripts/run_in_docker.sh bash -c "
+  echo always > /sys/kernel/mm/transparent_hugepage/enabled && \
+  chmod +x .buildkite/benchmark/scripts/run_bm.sh && \
+  .buildkite/benchmark/scripts/run_bm.sh" || {
+    echo "Error running benchmark job in docker."
+    BM_JOB_STATUS=$EXIT_FAILURE
 }
 
 exit $BM_JOB_STATUS

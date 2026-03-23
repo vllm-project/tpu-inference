@@ -150,6 +150,7 @@ for _ in {1..360}; do
     # TODO: detect other type of errors.
     if grep -Fq "raise RuntimeError" "$VLLM_LOG"; then
         echo "Detected RuntimeError, exiting."
+        cat "$VLLM_LOG"
         exit 1
     elif grep -Fq "Application startup complete" "$VLLM_LOG"; then
         echo "Application started"
