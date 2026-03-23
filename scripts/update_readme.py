@@ -21,7 +21,10 @@ import re
 # This dictionary maps the "markers" in your README to your CSV files.
 # This MUST match your file structure exactly.
 CSV_MAP = {
-    "model_support": ["support_matrices/combined_model_support_matrix.csv"],
+    "model_support": {
+        "v6_pytorch": "support_matrices/v6e/vllm/model_support_matrix.csv",
+        "v7_pytorch": "support_matrices/v7x/vllm/model_support_matrix.csv"
+    },
     "core_features": {
         "v6_flax": "support_matrices/v6e/flax_nnx/feature_support_matrix.csv",
         "v6_pytorch": "support_matrices/v6e/vllm/feature_support_matrix.csv",
@@ -177,6 +180,22 @@ def _merge_hw_status(status_v6, status_v7):
 
     # Any residual state (unverified, untested, missing) goes to untested.
     return _format_cell("❓&nbsp;Untested")
+
+
+def _merge_model_status_text(status_v6, status_v7):
+    """Globally condenses v6 and v7 statuses into a single text outcome (no HTML)."""
+    s6 = str(status_v6).lower()
+    s7 = str(status_v7).lower()
+
+    if "❌" in s6 or "fail" in s6 or "❌" in s7 or "fail" in s7:
+        return "❌ Failing"
+    if "✅" in s6 or "pass" in s6 or "✅" in s7 or "pass" in s7:
+        return "✅ Passing"
+    if "⚠️" in s6 or "beta" in s6 or "⚠️" in s7 or "beta" in s7:
+        return "⚠️ Beta"
+    if "📝" in s6 or "plan" in s6 or "📝" in s7 or "plan" in s7:
+        return "📝 Planned"
+    return "❓ Untested"
 
 
 def generate_html_feature_table(headers, data):
@@ -679,6 +698,47 @@ def update_readme():
 
             new_table = generate_html_quantization_table(headers, all_data)
 
+        elif section_key == "model_support":
+            merged_models = {}
+            for col_key, fpath in file_sources.items():
+                h, d = read_csv_data(fpath)
+                if not d:
+                    continue
+                for r in d:
+                    if not r:
+                        continue
+                    model_name = r[0].strip()
+                    m_type = r[1] if len(r) > 1 else ""
+                    unit = r[2] if len(r) > 2 else "❓ Untested"
+                    corr = r[3] if len(r) > 3 else "❓ Untested"
+                    bench = r[4] if len(r) > 4 else "❓ Untested"
+
+                    if model_name not in merged_models:
+                        merged_models[model_name] = {
+                            "Type": m_type,
+                            "v6": {"u": "❓ Untested", "c": "❓ Untested", "b": "❓ Untested"},
+                            "v7": {"u": "❓ Untested", "c": "❓ Untested", "b": "❓ Untested"}
+                        }
+
+                    hw_key = "v6" if "v6" in col_key else "v7"
+                    merged_models[model_name][hw_key] = {"u": unit, "c": corr, "b": bench}
+
+            headers = ["Model", "Type", "Unit Test", "Correctness Test", "Benchmark"]
+            
+            for model_name, metrics in sorted(merged_models.items(), key=lambda x: x[0].lower()):
+                u_combined = _merge_model_status_text(metrics["v6"]["u"], metrics["v7"]["u"])
+                c_combined = _merge_model_status_text(metrics["v6"]["c"], metrics["v7"]["c"])
+                b_combined = _merge_model_status_text(metrics["v6"]["b"], metrics["v7"]["b"])
+                
+                all_data.append([model_name, metrics["Type"], u_combined, c_combined, b_combined])
+
+            for row in all_data:
+                if row and row[0]:
+                    raw_model_name = row[0].strip("'` ")
+                    if raw_model_name and not row[0].startswith("["):
+                        row[0] = f"[{row[0]}](https://huggingface.co/{raw_model_name})"
+            new_table = generate_markdown_table(headers, all_data)
+
         else:
             sources = file_sources if isinstance(file_sources,
                                                  list) else [file_sources]
@@ -692,12 +752,6 @@ def update_readme():
             if section_key == "core_features":
                 new_table = generate_html_feature_table(headers, all_data)
             else:
-                if section_key == "model_support":
-                    for row in all_data:
-                        if row and row[0]:
-                            raw_model_name = row[0].strip("'` ")
-                            if raw_model_name and not row[0].startswith("["):
-                                row[0] = f"[{row[0]}](https://huggingface.co/{raw_model_name})"
                 new_table = generate_markdown_table(headers, all_data)
 
         if section_key == "microbenchmarks":

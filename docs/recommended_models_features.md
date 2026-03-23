@@ -24,7 +24,12 @@ These tables show the models currently tested for accuracy and performance.
 
 ### Models
 
-{{ read_csv('../support_matrices/combined_model_support_matrix.csv', keep_default_na=False) }}
+### TPU v6e
+{{ read_csv('../support_matrices/v6e/vllm/model_support_matrix.csv', keep_default_na=False) }}
+
+### TPU v7x
+{{ read_csv('../support_matrices/v7x/vllm/model_support_matrix.csv', keep_default_na=False) }}
+
 
 ## Recommended Features
 
