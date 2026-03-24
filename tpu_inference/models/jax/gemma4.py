@@ -185,7 +185,7 @@ class Gemma4MoE(JaxMoE):
                                           eager_sharding=False)
 
         noop_router = JaxModule()
-        noop_router.num_experts_per_tok = config.num_experts
+        noop_router.num_experts_per_tok = config.top_k_experts
 
         # FusedMoE experts with custom Gemma4 routing
         JaxMoE.__init__(
@@ -210,6 +210,7 @@ class Gemma4MoE(JaxMoE):
             moe_backend=MoEBackend.GMM_TP,
             scoring_func=
             "softmax",  # vLLM implementation has a custom routing function, here we just use "softmax" for MVP
+            renormalize=True,
             quant_config=quant_config,
             prefix=prefix + ".experts")
 
@@ -218,7 +219,7 @@ class Gemma4MoE(JaxMoE):
 
         Args:
             x_TD: Input array of shape (sequence_length, d_model).
-            router_logits: Router logits.
+            router_logits: Router logits of shape (sequence_length, num_experts).
 
         Returns:
             Output array of shape (sequence_length, d_model) after passing through MoE.
@@ -475,11 +476,6 @@ class Gemma4Attention(JaxModule):
         else:
             raise NotImplementedError("Expect no shared layers")
 
-        jax.debug.print("before attention, q: {q}\nk: {k}\nv: {v}",
-                        q=q[:1, :],
-                        k=k[:1, :],
-                        v=v[:1, :])
-
         q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
             # q_scale = self._q_scale
@@ -501,8 +497,6 @@ class Gemma4Attention(JaxModule):
             k_scale=k_scale,
             v_scale=v_scale,
         )
-        jax.debug.print("after attention, outputs: {outputs}",
-                        outputs=outputs[:3, :])
         # (T, D)
         o = self.o_proj(outputs)
         return new_kv_cache, o

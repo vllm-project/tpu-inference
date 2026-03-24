@@ -23,15 +23,17 @@ from jax.sharding import PartitionSpec as P
 
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, UnfusedMoEWeights)
+    FusedMoEWeights, UnfusedMoEWeights, process_moe_weights)
 from tpu_inference.layers.common.quantization import unquantized as jax_common
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.models.jax.utils.weight_utils import shard_put
+from tpu_inference.utils import get_mesh_shape_product
 
 
 class UnquantizedLinearMethod(QuantizeMethodBase,
@@ -52,11 +54,6 @@ class UnquantizedLinearMethod(QuantizeMethodBase,
             else:
                 raise NotImplementedError(
                     "Non-fused matmuls not implemented yet.")
-
-        jax.debug.print("Output for layer {name} {prefix}: {out}",
-                        name=layer._get_name(),
-                        prefix=getattr(layer, 'prefix', None),
-                        out=out[:1, :])
 
         return out
 
@@ -205,9 +202,14 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
 
         else:
             raise ValueError(f"Unsupported moe backend {layer.moe_backend}")
-        return moe_apply(layer, x_TD, router_logits, weights,
-                         layer.moe_backend, layer.mesh,
-                         self.extra_backend_kwargs)
+        return moe_apply(layer,
+                         x_TD,
+                         router_logits,
+                         weights,
+                         layer.moe_backend,
+                         layer.mesh,
+                         self.extra_backend_kwargs,
+                         per_expert_scale=per_expert_scale)
 
 
 class UnquantizedConfig(QuantizationConfig):

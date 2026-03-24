@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import functools
-from typing import Literal
+from typing import Literal, Optional
 
 import jax
 from jax import numpy as jnp
@@ -401,6 +401,13 @@ def fused_moe_func(
     # All-gather topk weights for attention dp
     topk_weights = jax.lax.with_sharding_constraint(
         topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
+    topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
+    topk_weights = topk_weights.astype(dtype)
+    # All-gather topk weights for attention dp
+    topk_weights = jax.lax.with_sharding_constraint(
+        topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
 
     def _process_tokens_locally(hidden_states_local, topk_indices_local):
         num_tokens_local = hidden_states_local.shape[0]
@@ -433,7 +440,12 @@ def fused_moe_func(
         ),
     )(hidden_states, topk_indices)
 
-    x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
+    try:
+        x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
+    except Exception as e:
+        raise ValueError(
+            f"Error when padding input hidden states from {hidden_size} to {padded_hidden_size}."
+        ) from e
 
     if use_ep:
         x = expert_parallel_gmm(
