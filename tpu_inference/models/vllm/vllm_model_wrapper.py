@@ -483,8 +483,23 @@ class VllmModelWrapper:
 
         return embed_multimodal_func
 
-    def _wrap_generic_embed_input_ids_func(self):
+    def wrap_embed_input_ids_func(self):
         # The function cannot be JITted directly due to its dynamic implementation
+
+        if not self.vllm_config.model_config.is_multimodal_model:
+            return None
+
+        always_wrap_list = False
+        try:
+            sig = inspect.signature(self.model.vllm_model.embed_input_ids)
+            param = sig.parameters.get("mm_embeds")
+            if param and param.annotation != inspect.Parameter.empty:
+                annotation_str = str(param.annotation)
+                if "list[" in annotation_str.lower():
+                    always_wrap_list = True
+        except Exception:
+            pass
+
         def embed_input_ids_func(
             params_and_buffers: Any,
             input_ids: jax.Array,
@@ -496,6 +511,9 @@ class VllmModelWrapper:
                 if mm_embeds is not None:
                     if isinstance(mm_embeds, list):
                         torch_mm_embeds = [torch_view(x) for x in mm_embeds]
+                    elif always_wrap_list:
+                        # Specific fix for Qwen3-VL which expects mm_embeds to be a list of Tensors.
+                        torch_mm_embeds = [torch_view(mm_embeds)]
                     else:
                         torch_mm_embeds = torch_view(mm_embeds)
                     call_args = (torch_view(input_ids), torch_mm_embeds)
@@ -520,55 +538,6 @@ class VllmModelWrapper:
                 return jax_view(output_from_torch)
 
         return embed_input_ids_func
-
-    def _wrap_qwen3_vl_embed_input_ids_func(self):
-        # Specific fix for Qwen3-VL where multimodal embeds must always be a list or tuple of Tensors.
-        def embed_input_ids_func(
-            params_and_buffers: Any,
-            input_ids: jax.Array,
-            mm_embeds: list[jax.Array] | jax.Array | None = None,
-            *,
-            is_multimodal: jax.Array | None = None,
-            handle_oov_mm_token: bool = False,
-        ) -> jax.Array:
-            with torchax.default_env():
-                if mm_embeds is not None:
-                    if isinstance(mm_embeds, list):
-                        torch_mm_embeds = [torch_view(x) for x in mm_embeds]
-                    else:
-                        torch_mm_embeds = [torch_view(mm_embeds)] # Always pass a list of length 1
-                    call_args = (torch_view(input_ids), torch_mm_embeds)
-                else:
-                    call_args = (torch_view(input_ids), )
-
-                call_kwargs = {
-                    "is_multimodal": torch_view(is_multimodal),
-                }
-
-                output_from_torch = torch.func.functional_call(
-                    self.model,
-                    torch_view(params_and_buffers),
-                    kwargs={
-                        "call_method": "embed_input_ids",
-                        "call_args": call_args,
-                        "call_kwargs": call_kwargs,
-                    },
-                    tie_weights=False,
-                )
-
-                return jax_view(output_from_torch)
-
-        return embed_input_ids_func
-
-    def wrap_embed_input_ids_func(self):
-        if not self.vllm_config.model_config.is_multimodal_model:
-            return None
-
-        is_qwen3_vl = type(self.model.vllm_model).__name__ == "Qwen3VLForConditionalGeneration"
-        if is_qwen3_vl:
-            return self._wrap_qwen3_vl_embed_input_ids_func()
-        else:
-            return self._wrap_generic_embed_input_ids_func()
 
     def jit_compute_logits_func(self):
 
