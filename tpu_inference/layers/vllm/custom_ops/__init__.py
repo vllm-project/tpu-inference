@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,11 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from tpu_inference.layers.vllm import backends as backends
-from tpu_inference.layers.vllm import custom_ops as custom_ops
-from tpu_inference.layers.vllm import quantization as quantization
+from tpu_inference.layers.vllm.custom_ops import embedding as embedding
+from tpu_inference.layers.vllm.custom_ops import fused_moe as fused_moe
+from tpu_inference.layers.vllm.custom_ops import linear as linear
+from tpu_inference.layers.vllm.custom_ops import mla_attention as mla_attention
 
-
-# NOTE: this empty function exists for an entry_points target for vllm plugin.
-def register_layers():
-    pass
+# Register custom op to vLLM so that vLLM model implementation will instantiante
+# classes with definitions in tpu-inference.

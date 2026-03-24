@@ -68,8 +68,6 @@ class TpuPlatform(Platform):
                              **kwargs) -> str:
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-        # Invoke @register_backend in the module.
-        import tpu_inference.layers.vllm.backends  # noqa: F401
         use_mla = attn_selector_config.use_mla
         if use_mla:
             selected_backend = AttentionBackendEnum.FLASH_ATTN_MLA
