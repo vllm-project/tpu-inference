@@ -491,6 +491,38 @@ def gdn_attention_core_tpu(
     core_attn_out.copy_(torch_view(j_output_flat))
 
 
+def gdn_in_proj_tpu(
+    hidden_states: torch.Tensor,
+    qkvz_size: int,
+    ba_size: int,
+    prefix: str,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Torch OP replacement for gdn_in_proj.
+    Executes the underlying linear layers (in_proj_qkvz and in_proj_ba) directly
+    to mimic the old/non-kernel execution path that was reverted in:
+    https://github.com/vllm-project/vllm/pull/36795
+
+    Args:
+        hidden_states: Tensor of shape [num_tokens, hidden_size]
+        qkvz_size: int, unused but needed for signature
+        ba_size: int, unused but needed for signature
+        prefix: str
+    Returns:
+        mixed_qkvz: Tensor of shape [num_tokens, qkvz_size]
+        ba: Tensor of shape [num_tokens, ba_size]
+    """
+    fc = get_forward_context()
+    # The 'prefix' argument perfectly matches the key used to register the module
+    layer_module = fc.no_compile_layers[prefix]
+
+    # Run the original projections instead of the fused C++ kernel
+    mixed_qkvz, _ = layer_module.in_proj_qkvz(hidden_states)
+    ba, _ = layer_module.in_proj_ba(hidden_states)
+
+    return mixed_qkvz, ba
+
+
 def apply_gated_delta_net_torch_ops_patch() -> None:
     """
     This is a patch to inject the `gdn_attention_core` op so the
@@ -509,3 +541,7 @@ def apply_gated_delta_net_torch_ops_patch() -> None:
                                               "gdn_attention_core"):
         # dummy call to ensure the op is registered
         torch.ops.vllm.gdn_attention_core = gdn_attention_core_tpu
+
+    if hasattr(torch.ops.vllm, "gdn_in_proj"):
+        # dummy call to ensure the op is registered
+        torch.ops.vllm.gdn_in_proj = gdn_in_proj_tpu
