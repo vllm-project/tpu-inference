@@ -1186,6 +1186,7 @@ def _tgmm_v2_impl(
     lhs: jax.Array,  # [size_k, size_m]
     rhs: jax.Array,  # [size_m, size_n]
     group_sizes: jax.Array,
+    num_actual_groups: int,
     group_offset: jax.Array | None = None,
     *,
     tile_info: TileSizes | TileFn = calculate_tiling,
@@ -1240,7 +1241,8 @@ def _gmm_v2_fwd(
     zero_initialize: bool = True,
 ):
   out = _gmm_v2_impl(lhs, rhs, group_sizes, rhs_scale, rhs_bias, group_offset, tile_info=tile_info, vmem_limit_bytes=vmem_limit_bytes, precision=precision, preferred_element_type=preferred_element_type, acc_dtype=acc_dtype, maybe_quantize_lhs=maybe_quantize_lhs, zero_initialize=zero_initialize)
-  return out, (lhs, rhs, group_sizes, rhs_scale, rhs_bias, group_offset)
+  num_actual_groups = rhs.shape[0]
+  return out, (lhs, rhs, group_sizes, rhs_scale, rhs_bias, group_offset, num_actual_groups)
 
 def _gmm_v2_bwd(
     # residual
@@ -1251,6 +1253,7 @@ def _gmm_v2_bwd(
       jnp.ndarray,
       jnp.ndarray,
       jnp.ndarray,
+      int,
     ],
     grad: jnp.ndarray,
     *,
@@ -1264,7 +1267,7 @@ def _gmm_v2_bwd(
     maybe_quantize_lhs: bool = True,
     zero_initialize: bool = True,
 ):
-  lhs, rhs, group_sizes, rhs_scale, rhs_bias, group_offset = residuals
+  lhs, rhs, group_sizes, rhs_scale, rhs_bias, group_offset, num_actual_groups = residuals
   grad_lhs = _gmm_v2_impl(
     grad, 
     rhs, 
@@ -1284,6 +1287,7 @@ def _gmm_v2_bwd(
     lhs.swapaxes(0, 1),  # [k, m]
     grad,  # [m, n]
     group_sizes,
+    num_actual_groups,
     group_offset,
     tile_info=tile_info, 
     vmem_limit_bytes=vmem_limit_bytes, 

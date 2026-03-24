@@ -129,10 +129,35 @@ def reference_gmm(
 
   return jnp.concat(gmm_out, axis=0)
 
+def reference_tgmm(
+    lhs,  # [k, m]
+    rhs,  # [m, n]
+    group_sizes,  # [num_groups]
+    # num_actual_groups comes from w.shape[0]
+    num_actual_groups,  # int32
+    # group_offset comes from jnp.arange(0, num_experts, num_experts_per_shard)
+    group_offset=None,
+):  # [num_groups, k, n]
+    if group_offset is None:
+        group_offset = jnp.array([0], dtype=jnp.int32)
+
+    start = 0
+    out = []
+    for global_group in range(group_sizes.size):
+        group_size = group_sizes[global_group]
+        group = global_group - group_offset[0]
+        end = start + group_size
+        if 0 <= group and group < num_actual_groups:
+            out.append(lhs[:, start:end] @ rhs[start:end,
+:])
+        start = end
+    return jnp.stack(out)
+
 
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
 class GmmTest(jtu.JaxTestCase):
 
+  # pytest -s -v tests/kernels/gmm_v2_test.py -k test_gmm_basic
   @parameterized.product(
       # batch_size=[128],
       # in_size=[512, 1024],
