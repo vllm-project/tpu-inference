@@ -1468,6 +1468,43 @@ def static_validate_inputs(
     del v_scale
 
 
+def get_bkv_sz(kv_dtype,
+               actual_num_kv_heads,
+               head_dim,
+               page_size,
+               pages_per_seq,
+               *,
+               case: RpaCase = RpaCase.MIXED):
+    """Get bkv_sz by some heuristic formulas.
+
+    Note the default size is not necessarily optimal.
+    """
+    tpu_version = get_tpu_version()
+    kv_packing = get_dtype_packing(kv_dtype)
+    num_kv_heads_x2 = next_power_of_2(
+        align_to(actual_num_kv_heads * 2, kv_packing))
+    head_dim = align_to(head_dim, 128)
+    max_kv = pages_per_seq * page_size
+    min_bkv_sz_to_peak = (16 * 1024 * 1024 * kv_packing // 4 // head_dim //
+                          num_kv_heads_x2)
+
+    match tpu_version:
+        case 5 | 6:
+            if case == RpaCase.DECODE:
+                bkv_sz = min(min_bkv_sz_to_peak, max_kv)
+            else:
+                bkv_sz = min(1024, max_kv)
+        case 7:
+            if case == RpaCase.DECODE:
+                bkv_sz = min(min_bkv_sz_to_peak, max_kv)
+            else:
+                bkv_sz = min(2048, max_kv)
+        case _:
+            raise NotImplementedError(f"Unsupported {tpu_version=}.")
+
+    return max(page_size, bkv_sz)
+
+
 def get_default_block_sizes(
     q_dtype,
     kv_dtype,
@@ -1504,33 +1541,38 @@ def get_default_block_sizes(
         case 5 | 6:
             if case == RpaCase.DECODE:
                 bq_sz = 1
-                bkv_sz = min(min_bkv_sz_to_peak, max_kv)
                 bq_csz = 1
                 bkv_csz = min(min_bkv_sz_to_peak, max_kv)
             else:
                 bq_sz = min(1024 // num_q_heads_per_kv_head, max_q // 2)
-                bkv_sz = min(1024, max_kv)
                 bq_csz = min(512 // num_q_heads_per_kv_head, max_q)
                 bkv_csz = min(512, align_to(max_kv // 2, page_size))
         case 7:
             if case == RpaCase.DECODE:
                 bq_sz = 1
-                bkv_sz = min(min_bkv_sz_to_peak, max_kv)
                 bq_csz = 1
                 bkv_csz = min(min_bkv_sz_to_peak, max_kv)
             else:
                 bq_sz = min(2048 // num_q_heads_per_kv_head, max_q // 2)
-                bkv_sz = min(2048, max_kv)
                 bq_csz = min(1024 // num_q_heads_per_kv_head, max_q // 2)
                 bkv_csz = min(512, align_to(max_kv // 2, page_size))
         case _:
             raise NotImplementedError(f"Unsupported {tpu_version=}.")
 
     return {
-        "bq_sz": max(1, bq_sz),
-        "bkv_sz": max(page_size, bkv_sz),
-        "bq_csz": max(1, bq_csz),
-        "bkv_csz": max(page_size, bkv_csz),
+        "bq_sz":
+        max(1, bq_sz),
+        "bkv_sz":
+        get_bkv_sz(kv_dtype,
+                   actual_num_kv_heads,
+                   head_dim,
+                   page_size,
+                   pages_per_seq,
+                   case=case),
+        "bq_csz":
+        max(1, bq_csz),
+        "bkv_csz":
+        max(page_size, bkv_csz),
     }
 
 

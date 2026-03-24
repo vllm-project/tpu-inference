@@ -616,7 +616,7 @@ class TestKVCacheManager:
         mock_attn_module.get_kv_cache_spec.return_value = mock_mamba_spec
 
         def get_layers_side_effect(vllm_config, attn_cls):
-            if attn_cls == MambaBase:
+            if MambaBase in attn_cls:
                 return {'layer.0': mock_attn_module}
             return {}
 
@@ -672,8 +672,9 @@ class TestKVCacheManager:
             assert isinstance(mamba_states, tuple)
             assert len(mamba_states) == 2
 
-            assert mamba_states[0].shape == (num_blocks, 4, 128)
-            assert mamba_states[1].shape == (num_blocks, 8, 64, 32)
+            expected_num_blocks = num_blocks // len(layer_names)
+            assert mamba_states[0].shape == (expected_num_blocks, 4, 128)
+            assert mamba_states[1].shape == (expected_num_blocks, 8, 64, 32)
 
             assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == i
 
@@ -779,3 +780,74 @@ class TestKVCacheManager:
             assert isinstance(mamba_states, tuple)
             assert len(mamba_states) == 2
             assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == i
+
+    def test_get_kv_cache_spec_hybrid_mamba_cache_config_updates(self):
+        self.runner.cache_config.block_size = 1056
+        self.runner.kv_cache_dtype = torch.float8_e4m3fn
+        self.runner.max_model_len = 9216
+        self.runner.cache_config.mamba_page_size_padded = 2048
+
+        class DummyMamba(MambaBase):
+
+            def __init__(self):
+                super().__init__()
+
+            def get_state_shape(self):
+                return ((3, 12288), (64, 128, 128))
+
+            def get_state_dtype(self):
+                return (torch.bfloat16, torch.float32)
+
+            @property
+            def mamba_type(self):
+                return "dummy"
+
+        mock_mamba = DummyMamba()
+        mock_attn = MagicMock(spec=Attention)
+        mock_attn.attn_type = AttentionType.DECODER
+        mock_attn.num_kv_heads = 2
+        mock_attn.head_size = 256
+        mock_attn.sliding_window = None
+        mock_attn.kv_sharing_target_layer_name = None
+
+        layers = {
+            'linear_attn': mock_mamba,
+            'full_attn': mock_attn,
+        }
+        self.runner.vllm_config.compilation_config.static_forward_context = layers
+
+
+        with patch('tpu_inference.runner.kv_cache_manager.get_layers_from_vllm_config', return_value=layers), \
+             patch('tpu_inference.runner.kv_cache_manager.common_utils.get_mesh_shape_product', return_value=1), \
+             patch.object(self.runner.model_config, 'get_total_num_kv_heads', return_value=2), \
+             patch.object(self.runner.model_config, 'get_head_size', return_value=256), \
+             patch('tpu_inference.kernels.ragged_paged_attention.v3.kernel.get_tpu_version', return_value=7):
+            kv_cache_spec = self.runner.get_kv_cache_spec()
+
+            # Verify the block size was aligned and mamba page size was unified with full attention.
+            assert self.runner.cache_config.block_size == 2048
+            assert self.runner.cache_config.mamba_page_size_padded == 2097152
+
+            # The layer specs should reflect the cache cconfig updates
+            attn_spec = kv_cache_spec['full_attn']
+            assert isinstance(attn_spec, FullAttentionSpec)
+            assert attn_spec.block_size == 2048
+            mamba_spec = kv_cache_spec['linear_attn']
+            assert isinstance(mamba_spec, MambaSpec)
+            assert mamba_spec.page_size_padded == 2097152
+
+    def test_get_kv_cache_spec_pure_attention_no_cache_config_updates(self):
+        mock_attn = MagicMock(spec=Attention)
+        mock_attn.attn_type = AttentionType.DECODER
+        mock_attn.num_kv_heads = 2
+        mock_attn.head_size = 256
+        mock_attn.sliding_window = None
+        mock_attn.kv_sharing_target_layer_name = None
+        layers = {'layer.0': mock_attn}
+        self.runner.vllm_config.compilation_config.static_forward_context = layers
+
+        with patch('tpu_inference.runner.kv_cache_manager.get_layers_from_vllm_config', return_value=layers), \
+             patch.object(self.runner.kv_cache_manager, 'align_block_size_for_rpa') as mock_align, \
+             patch.object(self.runner.kv_cache_manager, 'update_mamba_page_size_padded') as mock_update:
+            mock_align.assert_not_called()
+            mock_update.assert_not_called()
