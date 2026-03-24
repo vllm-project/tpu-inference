@@ -170,6 +170,9 @@ if [ -f "$RESULT_FILE" ]; then
   done < "$RESULT_FILE"
 fi
 
+# fo test
+# FINAL_STATUS="FAILED"
+
 # 2. Prepare Base SQL Values
 SQL_ADDITIONAL_CONFIG=$(prepare_sql_val "${ADDITIONAL_CONFIG:-}" "'{}'")
 SQL_EXTRA_ARGS=$(prepare_sql_val "${EXTRA_ARGS:-}" "''")
@@ -177,7 +180,7 @@ SQL_EXTRA_ENVS=$(prepare_sql_val "${EXTRA_ENVS:-}" "''")
 SQL_RECORD_ID=$(prepare_sql_val "$RECORD_ID" "")
 SQL_STATUS=$(prepare_sql_val "$FINAL_STATUS" "FAILED")
 SQL_USER=$(prepare_sql_val "${USER:-buildkite-agent}" "buildkite-agent")
-SQL_BUILD_URL=$(prepare_sql_val "${BUILDKITE_BUILD_URL:-}" "")
+SQL_JOB_REFERENCE=$(prepare_sql_val "${JOB_REFERENCE:-}" "")
 SQL_AGENT_NAME=$(prepare_sql_val "${BUILDKITE_AGENT_NAME:-}" "")
 SQL_DEVICE=$(prepare_sql_val "${DEVICE:-}" "")
 SQL_MODEL=$(prepare_sql_val "${MODEL:-}" "")
@@ -195,7 +198,7 @@ SQL="INSERT INTO RunRecord (
     ExpectedETEL, NumPrompts, ModelTag, PrefixLen,
     ExtraEnvs, AdditionalConfig, ExtraArgs, TryCount $insert_cols
   ) VALUES (
-    $SQL_RECORD_ID, $SQL_STATUS, PENDING_COMMIT_TIMESTAMP(), PENDING_COMMIT_TIMESTAMP(), $SQL_USER, $SQL_BUILD_URL, $SQL_AGENT_NAME,
+    $SQL_RECORD_ID, $SQL_STATUS, PENDING_COMMIT_TIMESTAMP(), PENDING_COMMIT_TIMESTAMP(), $SQL_USER, $SQL_JOB_REFERENCE, $SQL_AGENT_NAME,
     $SQL_DEVICE, $SQL_MODEL, $SQL_RUN_TYPE, $SQL_CODE_HASH,
     ${MAX_NUM_SEQS:-NULL}, ${MAX_NUM_BATCHED_TOKENS:-NULL}, ${TENSOR_PARALLEL_SIZE:-NULL}, ${MAX_MODEL_LEN:-NULL},
     $SQL_DATASET, ${INPUT_LEN:-NULL}, ${OUTPUT_LEN:-NULL},
@@ -216,4 +219,19 @@ gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
   --instance="$GCP_INSTANCE_ID" \
   --sql="$SQL"
 
+# for test
+echo "--- Verification: Current Database State"
+DB_STATE_JSON=$(gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
+  --project="$GCP_PROJECT_ID" --instance="$GCP_INSTANCE_ID" \
+  --format=json \
+  --sql="SELECT TryCount, Status, LastUpdate, JobReference FROM RunRecord WHERE RecordId=$SQL_RECORD_ID")
+
+echo "$DB_STATE_JSON" | jq -r '.rows[] | "✅ DB Sync Result: [TryCount: \(.[0]), Status: \(.[1]), JobRef: \(.[3]), LastUpdate: \(.[2])]"'
+
 echo "--- Reporting finished"
+
+#for test
+# if [ "$FINAL_STATUS" == "FAILED" ]; then
+#   echo "🚨 [FAIL] Benchmark metrics were not found or failed. Exiting with error."
+#   exit 1
+# fi
