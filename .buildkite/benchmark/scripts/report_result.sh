@@ -23,6 +23,8 @@ prepare_sql_val() {
     echo "$default"
     return
   fi
+  val="${val#\'}"
+  val="${val%\'}"
   local escaped_val="${val//\'/\'\'}"
   echo "'$escaped_val'"
 }
