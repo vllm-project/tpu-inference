@@ -53,6 +53,9 @@ class MoEBackend(Enum):
 
     # Same as GMM_EP but uses `tensor_sharded_gmm_*` for the GMM calls and is production ready
     GMM_TP = "gmm_tp"
+    
+    # Same as GMM_EP but uses `hybrid_parallel_gmm` for the GMM calls.
+    GMM_HYBRID = "gmm_hybrid"
 
     # DENSE_MAT uses a simple dense matmul for the MoE backend,  is intended for testing, and is
     # only used in the JAX path for now
@@ -65,7 +68,7 @@ class MoEBackend(Enum):
     @classmethod
     def fused_moe_backends(cls):
         """Returns those backends that use fused weights"""
-        return {cls.FUSED_MOE, cls.GMM_EP, cls.GMM_TP}
+        return {cls.FUSED_MOE, cls.GMM_EP, cls.GMM_TP, cls.GMM_HYBRID}
 
 
 def moe_apply(
@@ -120,7 +123,7 @@ def moe_apply(
                     b2=weights.w2_bias,
                     **extra_backend_kwargs,
                 )[:, :actual_hidden_size]
-            case MoEBackend.GMM_EP | MoEBackend.GMM_TP:
+            case MoEBackend.GMM_EP | MoEBackend.GMM_TP | MoEBackend.GMM_HYBRID:
                 output = fused_moe_func(
                     hidden_states=x,
                     w1=weights.w13_weight,
@@ -134,6 +137,7 @@ def moe_apply(
                     renormalize=layer.renormalize,
                     mesh=mesh,
                     use_ep=layer.use_ep,
+                    use_hybrid=(moe_backend == MoEBackend.GMM_HYBRID),
                     activation=activation,
                     scoring_fn=layer.scoring_func,
                 )

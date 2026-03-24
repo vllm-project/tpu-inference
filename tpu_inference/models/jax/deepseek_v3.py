@@ -1127,7 +1127,8 @@ class DeepSeekV3(JaxModule):
         total_tensor_parallelsim = self.vllm_config.sharding_config.tp_size * \
                                         self.vllm_config.sharding_config.attn_dp_size
         self.use_ep = self.num_expert_parallelism > 1 and total_tensor_parallelsim == 1
-        self.moe_backend = select_moe_backend(self.use_ep)
+        use_hybrid = getattr(vllm_config.sharding_config, "enable_hybrid_moe", False)
+        self.moe_backend = select_moe_backend(self.use_ep, use_hybrid=use_hybrid)
 
         # TODO (jacobplatin): we will resolve this issue in a forthcoming PR that will refactor weight loading
         if vllm_config.load_config.load_format == "dummy" and self.moe_backend in MoEBackend.fused_moe_backends(

@@ -68,7 +68,6 @@ class ShardingAxisName2D:
     EXPERT_DATA = ('data', 'model')
     VOCAB = ('data', 'model')
 
-
 # Lazily initialize the ShardingAxisName so that we can decide which one to use based on the
 # propagated / updated environment variables in the multi-host setup.
 class LazyShardingAxisName:
@@ -93,9 +92,7 @@ class LazyShardingAxisName:
         self._initialize()
         return getattr(self._cls, name)
 
-
 ShardingAxisName = LazyShardingAxisName()
-
 
 @dataclass
 class ShardingStrategy:
@@ -119,6 +116,7 @@ class ShardingStrategy:
     data_parallelism: int = 1
     attention_data_parallelism: int = 1
     attention_data_expert_parallelism: int = 1
+    enable_hybrid_moe: bool = False
 
 
 class ShardingConfigManager:
@@ -159,6 +157,7 @@ class ShardingConfigManager:
         expert_parallelism = sharding_strategy.get("expert_parallelism", 1)
         sequence_parallelism = sharding_strategy.get("sequence_parallelism", 1)
         device_indexes = sharding_strategy.get("device_indexes", None)
+        enable_hybrid_moe = sharding_strategy.get("enable_hybrid_moe", False)
 
         enable_dp_attention = sharding_strategy.get("enable_dp_attention",
                                                     False)
@@ -206,7 +205,8 @@ class ShardingConfigManager:
             expert_parallelism=expert_parallelism,
             sequence_parallelism=sequence_parallelism,
             attention_data_parallelism=attn_dp,
-            attention_data_expert_parallelism=attn_dp_expert)
+            attention_data_expert_parallelism=attn_dp_expert,
+            enable_hybrid_moe=enable_hybrid_moe)
 
         # Must override here to avoid vLLM spinning up multiple DP engines.
         if vllm_config.parallel_config.data_parallel_size > 1:
@@ -264,6 +264,10 @@ class ShardingConfigManager:
     @property
     def sequence_size(self) -> int:
         return self.sharding_strategy.sequence_parallelism
+
+    @property
+    def enable_hybrid_moe(self) -> bool:
+        return self.sharding_strategy.enable_hybrid_moe
 
     @property
     def total_devices(self) -> int:

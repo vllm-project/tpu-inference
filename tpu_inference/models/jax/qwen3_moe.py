@@ -74,7 +74,8 @@ class Qwen3MoeSparseMoeBlock(JaxModule):
         expert_axis_name = edf_sharding[0]
         num_expert_parallelism = get_expert_parallelism(expert_axis_name, mesh)
         use_ep = num_expert_parallelism > 1
-        moe_backend = select_moe_backend(use_ep)
+        use_hybrid = getattr(vllm_config.sharding_config, "enable_hybrid_moe", False)
+        moe_backend = select_moe_backend(use_ep, use_hybrid=use_hybrid)
 
         # Router
         self.gate = JaxLinear(

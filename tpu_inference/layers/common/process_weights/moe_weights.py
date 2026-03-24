@@ -338,7 +338,7 @@ def process_moe_weights(
                     ((0, 0), (0, 0), (0, pad_width_hidden_size)),
                 )
 
-        case MoEBackend.GMM_TP:
+        case MoEBackend.GMM_TP | MoEBackend.GMM_HYBRID:
             assert w13_reorder_size is not None
             assert intermediate_size % w13_reorder_size == 0
 
@@ -461,6 +461,44 @@ def shard_moe_weights(
                     P(None, None, None),
                 ),  # (num_experts, 1, out_dim)
             )
+        case MoEBackend.GMM_HYBRID:
+            ep_axis = "attn_dp"
+            tp_axis = "model"
+
+            num_blocks = (
+                1
+                if weights.w2_weight_scale is None
+                else weights.w2_weight_scale.shape[1]
+            )
+            w1_scale_spec = (
+                None
+                if weights.w13_weight_scale is None
+                else P(ep_axis, None, None, tp_axis)
+            )
+
+            if weights.w2_weight_scale is None:
+                w2_scale_spec = None
+            elif num_blocks == 1:
+                w2_scale_spec = P(ep_axis, None, None, None)
+            else:
+                w2_scale_spec = P(ep_axis, tp_axis, None, None)
+
+            weight_shardings = FusedMoEWeights(
+                w13_weight=NamedSharding(mesh, P(ep_axis, None, tp_axis)),
+                w13_weight_scale=NamedSharding(mesh, w1_scale_spec)
+                if w1_scale_spec
+                else None,
+                w13_bias=NamedSharding(mesh, P(ep_axis, None, tp_axis))
+                if weights.w13_bias is not None
+                else None,
+                w2_weight=NamedSharding(mesh, P(ep_axis, tp_axis, None)),
+                w2_weight_scale=NamedSharding(mesh, w2_scale_spec)
+                if w2_scale_spec
+                else None,
+                w2_bias=NamedSharding(mesh, P(ep_axis, None, None))
+                if weights.w2_bias is not None
+                else None,
+            )
 
     match moe_backend:
         case MoEBackend.FUSED_MOE:
@@ -472,7 +510,7 @@ def shard_moe_weights(
                 w2_weight_scale=Layout((0, 1, 2, 3)),
                 w2_bias=Layout((0, 1, 2)),
             )
-        case MoEBackend.GMM_TP | MoEBackend.GMM_EP:
+        case MoEBackend.GMM_TP | MoEBackend.GMM_EP| MoEBackend.GMM_HYBRID:
             weight_layouts = FusedMoEWeights(
                 w13_weight=Layout((0, 1, 2)),
                 w13_weight_scale=Layout((0, 1, 2, 3)),

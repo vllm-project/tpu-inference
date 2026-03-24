@@ -67,15 +67,17 @@ class VllmCompressedTensorsMoEMethod(CompressedTensorsMoEMethod):
                              "quantization scheme but found multiple")
 
         if scheme_dict is None:
+            enable_hybrid_moe = getattr(quant_config.vllm_config.sharding_config, "enable_hybrid_moe", False)
             return VllmUnquantizedFusedMoEMethod(layer.moe_config,
-                                                 quant_config.mesh)
+                                                 quant_config.mesh, enable_hybrid_moe=enable_hybrid_moe)
 
         weight_quant = scheme_dict.get("weights")
         input_quant = scheme_dict.get("input_activations")
 
         if quant_config._is_fp8_w8a8(weight_quant, input_quant):
+            enable_hybrid_moe = getattr(quant_config.vllm_config.sharding_config, "enable_hybrid_moe", False)
             return VllmCompressedTensorsW8A8Fp8MoEMethod(
-                weight_quant, input_quant, layer.moe_config, quant_config.mesh)
+                weight_quant, input_quant, layer.moe_config, quant_config.mesh, enable_hybrid_moe=enable_hybrid_moe)
         else:
             raise RuntimeError(
                 f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}")
@@ -89,11 +91,12 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
                  input_quant: QuantizationArgs,
                  moe: FusedMoEConfig,
                  mesh: Mesh,
+                 enable_hybrid_moe: bool = False,
                  ep_axis_name: str = "model"):
         super().__init__(weight_quant, input_quant, moe)
 
         self.mesh = mesh
-        self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
+        self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe, enable_hybrid_moe=enable_hybrid_moe)
 
         self.extra_backend_kwargs = {}
         if self.moe_backend == MoEBackend.FUSED_MOE:
