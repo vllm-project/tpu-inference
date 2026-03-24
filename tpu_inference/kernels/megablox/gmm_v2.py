@@ -1182,6 +1182,19 @@ def _gmm_v2_impl(
       metadata=get_metadata(cfgs),
   )(group_sizes, group_offset, lhs, rhs_weights)[:, :dims.size_n]
 
+@functools.partial(
+    jax.jit,
+    static_argnames=[
+        "num_actual_groups",
+        "tile_info",
+        "vmem_limit_bytes",
+        "precision",
+        "preferred_element_type",
+        "acc_dtype",
+        "maybe_quantize_lhs",
+        "zero_initialize", # xw32q: do we need this?
+    ],
+)
 def _tgmm_v2_impl(
     lhs: jax.Array,  # [size_k, size_m]
     rhs: jax.Array,  # [size_m, size_n]

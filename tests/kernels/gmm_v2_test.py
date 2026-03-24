@@ -18,7 +18,7 @@ import jax.numpy as jnp
 from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 
-from tpu_inference.kernels.megablox.gmm_v2 import TileSizes, gmm_v2
+from tpu_inference.kernels.megablox.gmm_v2 import TileSizes, gmm_v2, _tgmm_v2_impl
 
 jax.config.parse_flags_with_absl()
 
@@ -138,20 +138,24 @@ def reference_tgmm(
     # group_offset comes from jnp.arange(0, num_experts, num_experts_per_shard)
     group_offset=None,
 ):  # [num_groups, k, n]
-    if group_offset is None:
-        group_offset = jnp.array([0], dtype=jnp.int32)
+  # Compute lhs[:, sizes[i-1]:sizes[i]] @ rhs[sizes[i-1]:sizes[i], :]
+  if group_offset is None:
+    group_offset = jnp.array([0], dtype=jnp.int32)
+  elif jnp.isscalar(group_offset):
+    assert group_offset.size == 1
+    if jnp.isscalar(group_offset):
+      group_offset = group_offset[None]
 
-    start = 0
-    out = []
-    for global_group in range(group_sizes.size):
-        group_size = group_sizes[global_group]
-        group = global_group - group_offset[0]
-        end = start + group_size
-        if 0 <= group and group < num_actual_groups:
-            out.append(lhs[:, start:end] @ rhs[start:end,
-:])
-        start = end
-    return jnp.stack(out)
+  start = 0
+  out = []
+  for global_group in range(group_sizes.size):
+    group_size = group_sizes[global_group]
+    group = global_group - group_offset[0]
+    end = start + group_size
+    if 0 <= group and group < num_actual_groups:
+      out.append(lhs[:, start:end] @ rhs[start:end, :])
+    start = end
+  return jnp.stack(out)
 
 
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
@@ -216,6 +220,29 @@ class GmmTest(jtu.JaxTestCase):
     grad_lhs, grad_rhs, *_ = vjpfunc(cotangent)
     self.assertArraysAllClose(grad_lhs, expected_grad_lhs)
     self.assertArraysAllClose(grad_rhs, expected_grad_rhs)
+
+  @parameterized.product(
+      batch_size=[128],
+      in_size=[512],
+      out_size=[512],
+      num_groups=[16],
+      group_offset=[0],
+  )
+  def test_tgmm(self, batch_size, in_size, out_size, num_groups, group_offset):
+    num_actual_groups = num_groups - group_offset
+    key = jax.random.key(0)
+    key1, key2 = jax.random.split(key, 2)
+    lhs = jax.random.normal(key1, (batch_size, in_size), dtype=jnp.bfloat16)
+    grad = jax.random.normal(key2, (batch_size, out_size), dtype=jnp.bfloat16)
+    group_sizes = get_group_sizes(batch_size, num_groups)
+    group_offset = jnp.array(group_offset, dtype=jnp.int32)
+
+    lhs_t = lhs.swapaxes(0, 1)  # [k, m]
+
+    expected = reference_tgmm(lhs_t, grad, group_sizes, num_actual_groups, group_offset=group_offset)
+    actual = _tgmm_v2_impl(lhs_t, grad, group_sizes, num_actual_groups, group_offset=group_offset)
+
+    self.assertArraysAllClose(actual, expected)
 
   @parameterized.product(
       batch_size=[128],
