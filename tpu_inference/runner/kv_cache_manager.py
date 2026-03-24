@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, List
 import jax
 import jax.numpy as jnp
 import numpy as np
-import vllm.envs as envs
+import vllm.envs as vllm_envs
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import t2j_dtype
 from vllm.config import get_layers_from_vllm_config
@@ -29,6 +29,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, MambaSpec,
                                         MLAAttentionSpec, SlidingWindowSpec)
 
+from tpu_inference import envs
 from tpu_inference import utils
 from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -326,19 +327,28 @@ class KVCacheManager:
             assert len(
                 kv_cache_tensor.shared_by
             ) == num_shared_layers, f"Expected all kv_cache_tensors to have the same number of shared layers {num_shared_layers}, but found {len(kv_cache_tensor.shared_by)}"
-        # TODO (jacobplatin): we should not be replicating the kv cache for each layer and instead
-        # should follow the native GPU/Torch approach where every group of layers (shared_by)
-        # shares the same underlying raw tensor.
         # Mapping between KV cache type and the associated metadata, needed for logging
         # about KV cache
         metadata = {
             "mamba": KVCacheMetadata(),
             "regular_attn": KVCacheMetadata()
         }
+        # If this is true, then we'll initialize a new KV cache for each layer in "shared_by"
+        # instead of the default behavior of initializing a single KV cache for each of the
+        # shared layers
+        duplicate_shared_layers = envs.DUPLICATE_SHARED_KV_CACHE_LAYERS
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             for j, layer_name in enumerate(kv_cache_tensor.shared_by):
                 layer_spec = layer_name_to_spec[layer_name]
                 if isinstance(layer_spec, MambaSpec):
+                    if not duplicate_shared_layers:
+                        # TODO (jacobplatin): we should not be replicating the kv cache for each layer and instead
+                        # should follow the native GPU/Torch approach where every group of layers (shared_by)
+                        # shares the same underlying raw tensor.
+                        logger.warning_once(
+                            "MambaSpec does not support shared layers for now, defaulting to single KV cache per layer..."
+                        )
+                        duplicate_shared_layers = True
                     page_size_bytes = layer_spec.page_size_bytes
                     assert kv_cache_tensor.size % page_size_bytes == 0
                     num_blocks = kv_cache_tensor.size // page_size_bytes
@@ -387,40 +397,49 @@ class KVCacheManager:
 
                     kv_caches.append(tuple(mamba_states))
                 else:
-                    page_size_bytes = layer_spec.page_size_bytes
-                    assert kv_cache_tensor.size % page_size_bytes == 0
-                    num_blocks = kv_cache_tensor.size // page_size_bytes
-                    dp_size = self.runner.vllm_config.sharding_config.total_dp_size
-                    # num_blocks must be a multiple of dp_size
-                    num_blocks = (num_blocks // dp_size) * dp_size
-                    # NOTE: we'll multiply the num_kv_heads by 2 in the function
-                    if self.use_mla:
-                        head_size = self.runner.model_config.hf_config.kv_lora_rank + \
-                            self.runner.model_config.hf_config.qk_rope_head_dim
-                    else:
-                        head_size = layer_spec.head_size
-                    kv_cache = create_kv_caches(
-                        num_blocks=num_blocks,
-                        block_size=layer_spec.block_size,
-                        num_kv_heads=layer_spec.num_kv_heads,
-                        head_size=head_size,
-                        mesh=self.runner.mesh,
-                        layer_names=[f'kv_cache_tensor.{i}'],
-                        cache_dtype=t2j_dtype(layer_spec.dtype),
-                        use_mla=self.use_mla,
-                    )[0]
-                    kv_caches.append(kv_cache)
+                    # We should only init a new kv cache for the first layer in shared_by
+                    # if duplicate_shared_layers is False or if duplicate_shared_layers is True
+                    if (j == 0 and not duplicate_shared_layers
+                        ) or duplicate_shared_layers:
+                        page_size_bytes = layer_spec.page_size_bytes
+                        assert kv_cache_tensor.size % page_size_bytes == 0
+                        num_blocks = kv_cache_tensor.size // page_size_bytes
+                        dp_size = self.runner.vllm_config.sharding_config.total_dp_size
+                        # num_blocks must be a multiple of dp_size
+                        num_blocks = (num_blocks // dp_size) * dp_size
+                        # NOTE: we'll multiply the num_kv_heads by 2 in the function
+                        if self.use_mla:
+                            head_size = self.runner.model_config.hf_config.kv_lora_rank + \
+                                self.runner.model_config.hf_config.qk_rope_head_dim
+                        else:
+                            head_size = layer_spec.head_size
+                        kv_cache = create_kv_caches(
+                            num_blocks=num_blocks,
+                            block_size=layer_spec.block_size,
+                            num_kv_heads=layer_spec.num_kv_heads,
+                            head_size=head_size,
+                            mesh=self.runner.mesh,
+                            layer_names=[f'kv_cache_tensor.{i}'],
+                            cache_dtype=t2j_dtype(layer_spec.dtype),
+                            use_mla=self.use_mla,
+                        )[0]
+                        kv_caches.append(kv_cache)
 
-                    # Update Regular Attention Metadata
-                    metadata["regular_attn"].count += 1
-                    if metadata["regular_attn"].shape is None:
-                        metadata["regular_attn"].shape = kv_cache.shape
-                        metadata["regular_attn"].dtype = kv_cache.dtype
-                        metadata["regular_attn"].sharding = kv_cache.sharding
-
-                num_blocks_list.append(num_blocks)
-                self.runner.layer_name_to_kvcache_index[layer_name] = (
-                    i * num_shared_layers) + j
+                        # Update Regular Attention Metadata
+                        metadata["regular_attn"].count += 1
+                        if metadata["regular_attn"].shape is None:
+                            metadata["regular_attn"].shape = kv_cache.shape
+                            metadata["regular_attn"].dtype = kv_cache.dtype
+                            metadata[
+                                "regular_attn"].sharding = kv_cache.sharding
+                # We should only add the blocks for the first layer in shared_by
+                # if duplicate_shared_layers is False or if duplicate_shared_layers is True
+                if (j == 0 and not duplicate_shared_layers
+                    ) or duplicate_shared_layers:
+                    num_blocks_list.append(num_blocks)
+                layer_idx = (i * num_shared_layers
+                             ) + j if duplicate_shared_layers else i
+                self.runner.layer_name_to_kvcache_index[layer_name] = layer_idx
         if self.shared_kv_cache_layers:
             for layer_name, target_layer_name in self.shared_kv_cache_layers.items(
             ):
@@ -670,7 +689,7 @@ class KVCacheManager:
         )
         sharding = NamedSharding(
             self.runner.mesh, PartitionSpec(None, ShardingAxisName.ATTN_HEAD))
-        if envs.VLLM_TPU_USING_PATHWAYS:
+        if vllm_envs.VLLM_TPU_USING_PATHWAYS:
             from pathwaysutils.experimental import \
                 reshard as experimental_reshard
 

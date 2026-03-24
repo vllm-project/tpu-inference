@@ -64,6 +64,7 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("USE_MOE_EP_KERNEL", "0")
     monkeypatch.setenv("LAYOUT_Q_PROJ_AS_NDH", "0")
     monkeypatch.setenv("USE_BATCHED_RPA_KERNEL", "0")
+    monkeypatch.setenv("DUPLICATE_SHARED_KV_CACHE_LAYERS", "0")
 
     # Test SKIP_JAX_PRECOMPILE (default False)
     assert envs.SKIP_JAX_PRECOMPILE is False
@@ -103,6 +104,11 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert envs.USE_BATCHED_RPA_KERNEL is False
     monkeypatch.setenv("USE_BATCHED_RPA_KERNEL", "1")
     assert envs.USE_BATCHED_RPA_KERNEL is True
+
+    # Test DUPLICATE_SHARED_KV_CACHE_LAYERS (default False)
+    assert envs.DUPLICATE_SHARED_KV_CACHE_LAYERS is False
+    monkeypatch.setenv("DUPLICATE_SHARED_KV_CACHE_LAYERS", "1")
+    assert envs.DUPLICATE_SHARED_KV_CACHE_LAYERS is True
 
 
 def test_boolean_env_vars_string_values(monkeypatch: pytest.MonkeyPatch):

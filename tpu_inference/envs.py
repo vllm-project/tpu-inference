@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     USE_JAX_PROFILER_SERVER: bool = False
     JAX_PROFILER_SERVER_PORT: int = 9999
     USE_BATCHED_RPA_KERNEL: bool = False
+    DUPLICATE_SHARED_KV_CACHE_LAYERS: bool = False
 
 
 def env_with_choices(
@@ -204,6 +205,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("JAX_PROFILER_SERVER_PORT") or "9999"),
     "USE_BATCHED_RPA_KERNEL":
     env_bool("USE_BATCHED_RPA_KERNEL"),
+    "DUPLICATE_SHARED_KV_CACHE_LAYERS":
+    env_bool("DUPLICATE_SHARED_KV_CACHE_LAYERS"),
 }
 
 
