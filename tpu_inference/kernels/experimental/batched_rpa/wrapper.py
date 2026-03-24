@@ -19,6 +19,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.experimental.batched_rpa import kernel, schedule
@@ -26,13 +27,8 @@ from tpu_inference.kernels.experimental.batched_rpa import kernel, schedule
 DEFAULT_MASK_VALUE = -float(jnp.finfo(jnp.dtype("float32")).max)
 
 
-def cdiv(a, b):
-    assert b != 0
-    return (a + b - 1) // b
-
-
 def align_to(x, a):
-    return cdiv(x, a) * a
+    return pl.cdiv(x, a) * a
 
 
 def prepare_inputs(
@@ -54,7 +50,7 @@ def prepare_inputs(
     aligned_head_dim = align_to(actual_head_dim, 128)
 
     # queries: (T, H, D) -> (T, H_kv, G, D)
-    q_hbm = (jnp.pad(
+    o_hbm_alias_q_hbm = (jnp.pad(
         q.reshape(
             total_q_tokens,
             actual_num_kv_heads,
@@ -95,7 +91,7 @@ def prepare_inputs(
         kv_packing,
         aligned_head_dim,
     )
-    return q_hbm, new_kv_hbm
+    return o_hbm_alias_q_hbm, new_kv_hbm
 
 
 def prepare_outputs(
@@ -458,6 +454,7 @@ def get_default_block_sizes(
         "m_block_sizes",
         "n_buffer",
         "out_dtype",
+        "use_causal_mask",
     ),
     donate_argnames=("queries", "keys", "values", "kv_cache"),
 )
@@ -492,13 +489,6 @@ def ragged_paged_attention(
     out_dtype: Any | None = None,
     use_causal_mask: bool = True,
 ):
-
-    # Override default for testing purposes.
-    bq_sz = (1, 128)
-    bkv_sz = (2048, 512)
-    batch_size = (8, 2)
-    n_buffer = 3
-
     static_validate_inputs(
         queries,
         keys,
@@ -537,16 +527,15 @@ def ragged_paged_attention(
     total_q_tokens = queries.shape[0]
 
     num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
-    q_hbm, new_kv_hbm = prepare_inputs(queries, keys, values, queries.dtype,
-                                       kv_cache.dtype)
-    o_hbm = jnp.zeros_like(q_hbm)
-    _, _, q_per_kv_packed, q_packing, aligned_head_dim = q_hbm.shape
+    o_hbm_alias_q_hbm, new_kv_hbm = prepare_inputs(queries, keys, values,
+                                                   queries.dtype,
+                                                   kv_cache.dtype)
+    _, _, q_per_kv_packed, q_packing, aligned_head_dim = o_hbm_alias_q_hbm.shape
     aligned_num_q_heads_per_kv_head = q_per_kv_packed * q_packing
 
     def run_rpa_kernel(
         case: schedule.RpaCase,
-        q_hbm,
-        o_hbm,
+        o_hbm_alias_q_hbm,
         kv_cache,
     ):
         decode_block_sizes, prefill_block_sizes = get_default_block_sizes(
@@ -622,37 +611,35 @@ def ragged_paged_attention(
             n_buffer=n_buffer,
             out_dtype=out_dtype,
         )
+        rpa_schedule = schedule.generate_rpa_metadata(cu_q_lens,
+                                                      kv_lens,
+                                                      distribution,
+                                                      config=config)
         rpa_kernel_instance = kernel.make_rpa_kernel(config)
-        rpa_schedule = schedule.generate_rpa_metadata(
-            cu_q_lens,
-            kv_lens,
-            distribution,
-            config,
-        )
-        o_hbm, kv_cache = rpa_kernel_instance(
+        o_hbm_alias_q_hbm, kv_cache = rpa_kernel_instance(
             cu_q_lens,
             kv_lens,
             page_indices,
             rpa_schedule,
-            q_hbm,
+            o_hbm_alias_q_hbm,
             new_kv_hbm,
             kv_cache,
-            o_hbm,
         )
-        return o_hbm, kv_cache
+        return o_hbm_alias_q_hbm, kv_cache
 
-    o_hbm, kv_cache = run_rpa_kernel(schedule.RpaCase.DECODE, q_hbm, o_hbm,
-                                     kv_cache)
-    o_hbm, kv_cache = run_rpa_kernel(schedule.RpaCase.MIXED, q_hbm, o_hbm,
-                                     kv_cache)
+    o_hbm_alias_q_hbm, kv_cache = run_rpa_kernel(schedule.RpaCase.DECODE,
+                                                 o_hbm_alias_q_hbm, kv_cache)
+    o_hbm_alias_q_hbm, kv_cache = run_rpa_kernel(schedule.RpaCase.MIXED,
+                                                 o_hbm_alias_q_hbm, kv_cache)
 
-    # o_hbm: [kv_heads, max_tokens, q_per_kv // q_packing, q_packing, d]
-    o_hbm = prepare_outputs(o_hbm)
-    # o_hbm now: [kv_heads, max_tokens, q_per_kv, d]
+    # o_hbm_alias_q_hbm: [kv_heads, max_tokens, q_per_kv // q_packing, q_packing, d]
+    o_hbm_alias_q_hbm = prepare_outputs(o_hbm_alias_q_hbm)
+    # o_hbm_alias_q_hbm now: [kv_heads, max_tokens, q_per_kv, d]
 
     # We need to slice back to original shape if padded
-    o_hbm = (o_hbm[:, :, :num_q_heads_per_kv_head, :actual_head_dim].transpose(
-        1, 0, 2, 3).reshape(total_q_tokens, actual_num_q_heads,
-                            actual_head_dim))
+    o_hbm_alias_q_hbm = (
+        o_hbm_alias_q_hbm[:, :, :num_q_heads_per_kv_head, :actual_head_dim].
+        transpose(1, 0, 2, 3).reshape(total_q_tokens, actual_num_q_heads,
+                                      actual_head_dim))
 
-    return o_hbm, kv_cache
+    return o_hbm_alias_q_hbm, kv_cache

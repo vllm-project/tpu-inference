@@ -79,6 +79,7 @@ def flash_attention(
         qk = config.soft_cap * jnp.tanh(qk / config.soft_cap)
 
     qk_masked = []
+    v_masked = []
     for b_idx in range(config.batch_size):
         # 3. Add scalar offsets as simple additions
         kv_idx_b = (lax.broadcasted_iota(jnp.int16, (k_heads, tq, s), 2) +
@@ -88,14 +89,21 @@ def flash_attention(
                        jnp.int16) + processed_q_len[b_idx]
 
         eff_kv_len_b = effective_kv_len[b_idx]
-        mask_b = kv_idx_b < eff_kv_len_b
-        mask_b &= q_idx_b < eff_kv_len_b
+        mask_b = q_idx_b < eff_kv_len_b
         mask_b &= q_idx_b >= kv_idx_b
 
         if config.sliding_window is not None:
             mask_b &= q_idx_b < kv_idx_b + config.sliding_window
         qk_masked.append(jnp.where(mask_b, qk[b_idx], config.mask_value))
+
+        # Mask v where kv_idx >= eff_kv_len
+        kv_idx_v = (lax.broadcasted_iota(jnp.int16, (k_heads, s, h), 1) +
+                    processed_kv_len[b_idx])
+        v_mask_b = kv_idx_v < eff_kv_len_b
+        v_masked.append(jnp.where(v_mask_b, v[b_idx], 0))
+
     qk = jnp.stack(qk_masked, axis=0)
+    v = jnp.stack(v_masked, axis=0)
 
     # # 5. Final selection and reduction
     # # Stack the masks and apply in a single 'vsel' step

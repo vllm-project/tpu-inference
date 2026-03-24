@@ -268,10 +268,13 @@ class RPASchedule:
 
 
 def rpa_metadata_schedule_kernel(
+    ## HBM inputs
     cu_q_lens_ref,
     kv_lens_ref,
     distribution_ref,
+    # output
     schedule: RPASchedule,
+    # scratch
     lane_lengths_ref,
     *,
     config: RPAConfig,
@@ -426,6 +429,9 @@ def rpa_metadata_schedule_kernel(
                               lane_lengths_ref[b], max_steps)
     schedule.actual_steps[0] = max_steps
 
+    safe_max_steps = jnp.minimum(max_steps + config.n_buffer + 1,
+                                 config.max_steps_ub)
+
     def mask_lane(b, _):
         start_step = lane_lengths_ref[b]
 
@@ -461,7 +467,7 @@ def rpa_metadata_schedule_kernel(
                 schedule.dma_kv_new[base_i + 2] = 0
                 schedule.dma_kv_new[base_i + 3] = 0
 
-        jax.lax.fori_loop(start_step, max_steps, mask_step, None)
+        jax.lax.fori_loop(start_step, safe_max_steps, mask_step, None)
 
     jax.lax.fori_loop(0, config.batch_size, mask_lane, None)
 
