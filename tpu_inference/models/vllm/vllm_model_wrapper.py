@@ -505,8 +505,6 @@ class VllmModelWrapper:
                 call_kwargs = {
                     "is_multimodal": torch_view(is_multimodal),
                 }
-                if handle_oov_mm_token:
-                    call_kwargs["handle_oov_mm_token"] = handle_oov_mm_token
 
                 output_from_torch = torch.func.functional_call(
                     self.model,
@@ -546,8 +544,6 @@ class VllmModelWrapper:
                 call_kwargs = {
                     "is_multimodal": torch_view(is_multimodal),
                 }
-                if handle_oov_mm_token:
-                    call_kwargs["handle_oov_mm_token"] = handle_oov_mm_token
 
                 output_from_torch = torch.func.functional_call(
                     self.model,
