@@ -32,7 +32,8 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
-from torchax.ops.ops_registry import register_torch_function_op
+from torchax.ops.ops_registry import (register_torch_dispatch_op,
+                                         register_torch_function_op)
 from vllm.config import VllmConfig, set_current_vllm_config, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
@@ -148,87 +149,13 @@ class VllmModelWrapper:
             needs_env=False,
         )
 
-        @register_function(
+        register_torch_dispatch_op(
             torch.ops.vllm.torch_sdpa_wrapper,
+            functools.partial(patch_ops.vllm_vit_sdpa, mesh=self.mesh),
             is_jax_function=True,
             needs_env=False,
         )
-        def patched_vllm_vit_sdpa(
-            query,
-            key,
-            value,
-            scale=None,
-            cu_seqlens=None,
-            enable_gqa=False,
-        ):
 
-            # Inputs are JAX arrays in shape [B, S, N, D]
-            # Rearrange to [B, N, S, D]
-            query = jnp.swapaxes(query, 1, 2)
-            key = jnp.swapaxes(key, 1, 2)
-            value = jnp.swapaxes(value, 1, 2)
-
-            batch = query.shape[0]
-            num_heads = query.shape[1]
-            q_seq_len = query.shape[2]
-            kv_seq_len = key.shape[2]
-
-            # Padding due to requirement of sharded_flash_attention
-            q_pad = (128 - (q_seq_len % 128)) % 128
-            kv_pad = (128 - (kv_seq_len % 128)) % 128
-
-            if q_pad > 0:
-                query = jnp.pad(query, ((0, 0), (0, 0), (0, q_pad), (0, 0)))
-            if kv_pad > 0:
-                key = jnp.pad(key, ((0, 0), (0, 0), (0, kv_pad), (0, 0)))
-                value = jnp.pad(value, ((0, 0), (0, 0), (0, kv_pad), (0, 0)))
-
-            if cu_seqlens is not None:
-                # Convert cu_seqlens to SegmentIds
-                cu_seqlens_arr = jnp.array(cu_seqlens)
-                lens = cu_seqlens_arr[1:] - cu_seqlens_arr[:-1]
-                num_segs = lens.shape[0]
-
-                # Real segments
-                q_real_seg = jnp.repeat(jnp.arange(num_segs), lens, total_repeat_length=q_seq_len)
-                kv_real_seg = q_real_seg  # Assuming Q and KV sequence lengths are same for ViT self attention
-
-                if q_pad > 0:
-                    q_pad_seg = jnp.full((q_pad,), num_segs)
-                    q_seg = jnp.concatenate([q_real_seg, q_pad_seg])
-                else:
-                    q_seg = q_real_seg
-
-                if kv_pad > 0:
-                    kv_pad_seg = jnp.full((kv_pad,), num_segs)
-                    kv_seg = jnp.concatenate([kv_real_seg, kv_pad_seg])
-                else:
-                    kv_seg = kv_real_seg
-
-                q_seg = jnp.broadcast_to(q_seg, (batch, q_seg.shape[0]))
-                kv_seg = jnp.broadcast_to(kv_seg, (batch, kv_seg.shape[0]))
-
-                from tpu_inference.kernels.flash_attention.kernel import SegmentIds
-                seg_ids = SegmentIds(q=q_seg, kv=kv_seg)
-            else:
-                seg_ids = None
-
-            attn_fn = sharded_flash_attention(
-                self.mesh,
-                causal=False,
-                sm_scale=scale,
-                use_attention_bias=False
-            )
-
-            out = attn_fn(query, key, value, seg_ids)
-
-            if q_pad > 0:
-                out = out[:, :, :q_seq_len, :]
-
-            # Rearrange back [B, N, S, D] -> [B, S, N, D]
-            out = jnp.swapaxes(out, 1, 2)
-
-            return out
 
     def _apply_pp_patch(self):
         # patch `get_pp_group` in vLLM to jax's get_pp_group.
