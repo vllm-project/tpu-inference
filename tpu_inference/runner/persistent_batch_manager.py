@@ -177,8 +177,11 @@ class PersistentBatchManager:
 
                 hf_config = self.model_config.hf_config
 
-                # Simple if-else logic for Qwen3-VL vs Qwen2.5-VL
-                if "qwen3" in self.model_config.model.lower():
+                # Qwen3-VL uses a different method signature and takes in mm_features as an argument.
+                import inspect
+                takes_mm_features = "mm_features" in inspect.signature(get_mrope_input_positions_fn).parameters
+
+                if takes_mm_features:
                     self.requests[req_id].mrope_positions, self.requests[
                         req_id].mrope_position_delta = get_mrope_input_positions_fn(
                             self.requests[req_id].prompt_token_ids,
