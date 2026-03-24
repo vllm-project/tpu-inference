@@ -10,7 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-YAML_FILE="${SCRIPT_DIR}/pathways_job_v5p.yaml"
+YAML_FILE="${SCRIPT_DIR}/pathways_job_v7x_16.yaml"
 
 GCS_BUCKET="gs://wenxindong-multipod-dev"
 GCS_PATCH_PATH="${GCS_BUCKET}/patches/tpu-inference.tar.gz"
@@ -33,7 +33,7 @@ echo "=== Uploading to ${GCS_PATCH_PATH} ==="
 gcloud storage cp /tmp/tpu-inference.tar.gz "${GCS_PATCH_PATH}"
 
 echo "=== Deleting existing workload '${WORKLOAD_NAME}' (if any) ==="
-kubectl delete pathwaysjob "${WORKLOAD_NAME}" --ignore-not-found
+kubectl delete jobset "${WORKLOAD_NAME}" --ignore-not-found
 
 echo "=== Applying ${YAML_FILE} ==="
 kubectl apply -f "${YAML_FILE}"
