@@ -168,6 +168,9 @@ if [ -f "$RESULT_FILE" ]; then
   done < "$RESULT_FILE"
 fi
 
+# for test
+FINAL_STATUS="FAILED"
+
 # 2. Prepare Base SQL Values
 SQL_ADDITIONAL_CONFIG=$(prepare_sql_val "${ADDITIONAL_CONFIG:-}" "'{}'")
 SQL_EXTRA_ARGS=$(prepare_sql_val "${EXTRA_ARGS:-}" "''")
@@ -214,4 +217,17 @@ gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
   --instance="$GCP_INSTANCE_ID" \
   --sql="$SQL"
 
+echo "--- Verification: Current Database State ---"
+DB_STATE=$(gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
+  --project="$GCP_PROJECT_ID" --instance="$GCP_INSTANCE_ID" \
+  --format=json \
+  --sql="SELECT TryCount, Status, LastUpdate FROM RunRecord WHERE RecordId=$SQL_RECORD_ID")
+
+echo "$DB_STATE" | jq -r '.rows[] | "✅ SUCCESS: Record sync completed. [TryCount: \(.[0]), Status: \(.[1]), LastUpdate: \(.[2])]"'
+
 echo "--- Reporting finished"
+
+if [ "$FINAL_STATUS" == "FAILED" ]; then
+  echo "🚨 [FAIL] Reporting status as FAILED for test purposes."
+  exit 1
+fi
