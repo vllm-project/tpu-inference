@@ -469,7 +469,7 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
     scope_name = f"RPA{config.case.symbol}-p{config.page_size}-b{config.batch_size}-q{config.bq_sz}-k{config.bkv_sz}"
     if config.sliding_window:
         scope_name += f"-sw{config.sliding_window}"
-    _kernel = pl.pallas_call(
+    return pl.pallas_call(
         ragged_paged_attention_pipeline,
         out_shape=out_shape,
         grid_spec=pltpu.PrefetchScalarGridSpec(
@@ -490,35 +490,3 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
         input_output_aliases=input_output_aliases,
         name=scope_name,
     )
-
-    def _wrap_kernel_in_hbm_constraints(
-        cu_q_lens_ref,
-        kv_lens_ref,
-        page_indices_ref,
-        schedule_hbm_ref,
-        o_hbm_alias_q_hbm_ref,
-        new_kv_hbm_ref,
-        kv_cache_hbm_ref,
-    ):
-
-        def _constrain_hbm(path, x):
-            for p in path:
-                key = getattr(p, "name", getattr(p, "key", None))
-                if key == "actual_steps":
-                    return x
-            return pltpu.with_memory_space_constraint(x, pltpu.HBM)
-
-        constrained_schedule_hbm_ref = jax.tree_util.tree_map_with_path(
-            _constrain_hbm, schedule_hbm_ref)
-        return _kernel(
-            cu_q_lens_ref,
-            kv_lens_ref,
-            page_indices_ref,
-            constrained_schedule_hbm_ref,
-            pltpu.with_memory_space_constraint(o_hbm_alias_q_hbm_ref,
-                                               pltpu.HBM),
-            pltpu.with_memory_space_constraint(new_kv_hbm_ref, pltpu.HBM),
-            pltpu.with_memory_space_constraint(kv_cache_hbm_ref, pltpu.HBM),
-        )
-
-    return _wrap_kernel_in_hbm_constraints

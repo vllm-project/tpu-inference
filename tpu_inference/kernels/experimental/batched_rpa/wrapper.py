@@ -489,6 +489,13 @@ def ragged_paged_attention(
     out_dtype: Any | None = None,
     use_causal_mask: bool = True,
 ):
+
+    # Override default for testing purposes.
+    bq_sz = (1, 128)
+    bkv_sz = (2048, 512)
+    batch_size = (8, 2)
+    n_buffer = 3
+
     static_validate_inputs(
         queries,
         keys,
