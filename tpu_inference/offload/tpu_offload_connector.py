@@ -100,7 +100,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional, get_args
 
 import jax
 import jax.numpy as jnp
-from jax.sharding import Mesh
+from jax.sharding import Mesh, PartitionSpec as P, NamedSharding
 from prometheus_client import Counter, Gauge, Histogram
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -1832,13 +1832,17 @@ class TPUOffloadConnectorWorker:
         all_block_ids = list(range(self.num_kv_blocks))
         for num_blocks in BLOCK_SIZE_BUCKETS:
             try:
-                logger.info(f"  - Compiling for {num_blocks} blocks...")
+                logger.info(f"[caojx-debug]  - Start compiling for {num_blocks} blocks...")
 
                 # Warm up
                 for _ in range(num_warmup):
                     dummy_block_ids = jnp.array(
                         random.sample(all_block_ids, num_blocks))
                     # 1. gather / stack (for save)
+                    logger.info(f"[caojx-debug] input tensor shapes: {dummy_block_ids.shape}")
+
+                    dummy_block_ids = jax.device_put(dummy_block_ids, NamedSharding(self.mesh, P()))
+                    
                     paged_kv_for_compilation, stacked_dummy_kv_caches_tpu = stack_kv_cache_cross_layers(
                         paged_kv_for_compilation, dummy_block_ids, num_blocks)
                     jax.block_until_ready(stacked_dummy_kv_caches_tpu)
@@ -1852,6 +1856,8 @@ class TPUOffloadConnectorWorker:
                 logger.warning(
                     f"    - Failed to pre-compile for {num_blocks} blocks: {e}",
                     exc_info=True)
+
+            logger.info(f"[caojx-debug]  - Finish compiling for {num_blocks} blocks...")
 
         self.runner.kv_caches = paged_kv_for_compilation
         duration = time.time() - start_time

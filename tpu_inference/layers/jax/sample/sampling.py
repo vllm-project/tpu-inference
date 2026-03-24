@@ -23,7 +23,11 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
+from tpu_inference.logger import init_logger
+
 _SAMPLING_EPS = 1e-5
+
+logger = init_logger(__name__)
 
 
 @jax.jit(static_argnames=["mesh"])
@@ -33,6 +37,20 @@ def sample(
     logits: jax.Array,
     tpu_sampling_metadata: TPUSupportedSamplingMetadata,
 ) -> jax.Array:
+    logger.info("tracing sample")
+    logger.info("rng, shape=%s, sharding=%s", rng.shape, jax.typeof(rng).sharding)
+    logger.info("logits, shape=%s, sharding=%s", logits.shape, jax.typeof(logits).sharding)
+    logger.info("tpu_sampling_metadata: %s", tpu_sampling_metadata)
+
+    # if tpu_sampling_metadata.temperature:
+    #     logger.info("tpu_sampling_metadata.temperature, shape=%s, sharding=%s", tpu_sampling_metadata.temperature.shape, jax.typeof(logitstpu_sampling_metadata.temperature).sharding)
+    # if tpu_sampling_metadata.top_k:
+    #     logger.info("tpu_sampling_metadata.top_k, shape=%s, sharding=%s", tpu_sampling_metadata.top_k.shape, jax.typeof(logitstpu_sampling_metadata.top_k).sharding)
+    # if tpu_sampling_metadata.top_p:
+    #     logger.info("tpu_sampling_metadata.top_p, shape=%s, sharding=%s", tpu_sampling_metadata.top_p.shape, jax.typeof(logitstpu_sampling_metadata.top_p).sharding)
+    # if tpu_sampling_metadata._cache_collision_dummy:
+    #     logger.info("tpu_sampling_metadata._cache_collision_dummy, shape=%s, sharding=%s", tpu_sampling_metadata._cache_collision_dummy.shape, jax.typeof(logitstpu_sampling_metadata._cache_collision_dummy).sharding)
+        
     # (B, vocab_size)
     if tpu_sampling_metadata._cache_collision_dummy is not None:
         # Force a dependency on the dummy tensor's shape to ensure unique HLO.

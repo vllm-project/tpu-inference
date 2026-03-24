@@ -126,7 +126,7 @@ class TPUWorker(WorkerBase):
         # This is because in vLLM V1, MP runtime is initialized before the
         # TPU Worker is initialized. The profiler server needs to start after
         # MP runtime is initialized.
-        self.profile_dir = None
+        self.profile_dir = self.vllm_config.profiler_config
         self.vllm_config.profiler_config
         profiler_config = self.vllm_config.profiler_config
         if profiler_config.profiler == "torch" and self.rank < 1 and self.pp_config.pp_world_size == 1:
@@ -384,7 +384,8 @@ class TPUWorker(WorkerBase):
         # deliberate, temporary compromise for the same reasons outlined in
         # the `get_kv_cache_spec` method.
         if self.step_counter == 1:
-           self.profile(is_start=True)
+            self.profile(is_start=True)
+
         if self.parallel_config.pipeline_parallel_size == 1 or self.rank == 0:
             intermediate_tensors = None
         else:
@@ -413,7 +414,7 @@ class TPUWorker(WorkerBase):
             return None
         else:
             self.step_counter += 1
-            if self.step_counter == 10:
+            if self.step_counter == 100:
                self.profile(is_start=False)
             # With a connector, the scheduler expects output from all workers
             # TODO(mrjunwan): Figure out if this is ok after https://github.com/vllm-project/vllm/pull/26866
@@ -432,6 +433,8 @@ class TPUWorker(WorkerBase):
                 is_start: bool = True,
                 profile_prefix: str | None = None):
         if is_start:
+            self.profile_dir = os.environ.get("VLLM_TORCH_PROFILER_DIR")
+
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
             options.python_tracer_level = envs.PYTHON_TRACER_LEVEL

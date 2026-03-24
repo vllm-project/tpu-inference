@@ -155,6 +155,12 @@ def stack_kv_cache_cross_layers(
     This uses jax.tree.map to apply the operation across all layers.
     """
 
+    logger.info("input information: ")
+    for i, kv_cache in enumerate(kv_caches):
+        logger.info("kv-cache %d, shape=%s, sharding=%s", i, kv_cache.shape, jax.typeof(kv_cache).sharding)
+    logger.info("block_ids, shape=%s, sharding=%s", block_ids.shape, jax.typeof(block_ids).sharding)
+    logger.info("num_blocks=%d", num_blocks)
+
     def _gather_blocks(layer_kv_cache):
         return layer_kv_cache.at[block_ids].get()
 
