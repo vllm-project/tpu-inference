@@ -23,31 +23,27 @@ if [ -n "${BUILDKITE_STEP_ID:-}" ]; then
   # Use Buildkite step ID to ensure retries map to the same RecordId
   export RECORD_ID="bk-${BUILDKITE_STEP_ID}"
 else
-export RECORD_ID
+  export RECORD_ID
   RECORD_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 fi
 echo "Record ID: $RECORD_ID"
 
+# Function to handle cleanup and final reporting to the database
 # shellcheck disable=SC2317
 function defer_cleanup_and_report() {
-  # Capture the exit code of the last command executed before the trap was triggered.
   local exit_code=$?
   echo "--- Running defer (cleanup and report)"
   
-  # Attempt to report the benchmark results to the database.
-  # If the reporting script fails (returns non-zero), we log an error.
+  # Call report_result.sh which now handles the "Select -> Insert/Update" logic.
+  # All exported variables are inherited by this sub-script.
   if ! .buildkite/benchmark/scripts/report_result.sh "$RECORD_ID"; then
     echo "Error: report_result.sh failed!"
-    
-    # If the main job was successful (exit_code 0) but reporting failed,
-    # we override the exit code to 1 so the Buildkite job is marked as failed.
     if [ "$exit_code" -eq 0 ]; then
       exit_code=1
     fi
   fi
   
   # Best-effort cleanup of Docker resources.
-  # We use '|| true' to ensure that a cleanup failure doesn't overwrite our final exit code.
   .buildkite/benchmark/scripts/cleanup_docker.sh || true
 
   # Cleanup artifact log folder
@@ -56,7 +52,6 @@ function defer_cleanup_and_report() {
     rm -rf "$ARTIFACT_FOLDER"
   fi
   
-  # Exit with the final determined status code.
   exit "$exit_code"
 }
 trap defer_cleanup_and_report EXIT
@@ -64,19 +59,16 @@ trap defer_cleanup_and_report EXIT
 echo "--- Verifying Submodule Commit"
 git submodule status
 
-echo "--- Registering Run to Spanner DB"
-# Ensure all required envs are present. Some are provided by Buildkite directly or from the step.
-# For missing optional fields we provide defaults.
-EXPECTED_ETEL="${EXPECTED_ETEL:-3600000}"
-NUM_PROMPTS="${NUM_PROMPTS:-1000}"
-MODELTAG="${MODELTAG:-PROD}"
-PREFIX_LEN="${PREFIX_LEN:-0}"
-DATASET="${DATASET:-}"
-ADDITIONAL_CONFIG="${ADDITIONAL_CONFIG:-"{}"}"
-EXTRA_ARGS="${EXTRA_ARGS:-}"
+# --- Prepare Configuration Metadata (Exported for report_result.sh) ---
+export EXPECTED_ETEL="${EXPECTED_ETEL:-3600000}"
+export NUM_PROMPTS="${NUM_PROMPTS:-1000}"
+export MODELTAG="${MODELTAG:-PROD}"
+export PREFIX_LEN="${PREFIX_LEN:-0}"
+export DATASET="${DATASET:-}"
+export ADDITIONAL_CONFIG="${ADDITIONAL_CONFIG:-"{}"}"
+export EXTRA_ARGS="${EXTRA_ARGS:-}"
 
-# Reconstruct EXTRA_ENVS for the database based on the environment variables
-# that are present. This allows the YAML to remain clean while keeping the DB populated.
+# Reconstruct EXTRA_ENVS string for the database registration
 GENERATED_EXTRA_ENVS=""
 EXTRA_ENV_KEYS=(
   "VLLM_MLA_DISABLE" "NEW_MODEL_DESIGN" "MOE_REQUANTIZE_BLOCK_SIZE" 
@@ -84,95 +76,26 @@ EXTRA_ENV_KEYS=(
   "USE_MOE_EP_KERNEL" "USE_BENCHMARK_SERVING" "MAX_CONCURRENCY"
 )
 for key in "${EXTRA_ENV_KEYS[@]}"; do
-  # Check if the environment variable is set
   if [ -n "${!key:-}" ]; then
     GENERATED_EXTRA_ENVS+="${key}=${!key};"
   fi
 done
+export EXTRA_ENVS="${EXTRA_ENVS:-};${GENERATED_EXTRA_ENVS}"
 
-# If EXTRA_ENVS was passed directly, append the generated ones to it
-if [ -n "${EXTRA_ENVS:-}" ]; then
-  EXTRA_ENVS="${EXTRA_ENVS};${GENERATED_EXTRA_ENVS}"
-else
-  EXTRA_ENVS="${GENERATED_EXTRA_ENVS}"
-fi
+export CODE_HASH="${CODE_HASH:-$(buildkite-agent meta-data get 'CODE_HASH' || echo '')}"
+export RUN_TYPE="${RUN_TYPE:-DAILY}"
+export DEVICE="${DEVICE:-}"
+export MODEL="${MODEL:-}"
 
-# We will need CODE_HASH and JOB_REFERENCE from Buildkite env
-CODE_HASH="${CODE_HASH:-$(buildkite-agent meta-data get 'CODE_HASH' || echo '')}"
-JOB_REFERENCE="${JOB_REFERENCE:-${BUILDKITE_BUILD_URL:-}}"
-RUN_TYPE="${RUN_TYPE:-DAILY}"
+# Numeric values exported for SQL insertion
+export MAX_NUM_SEQS="${MAX_NUM_SEQS:-NULL}"
+export MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-NULL}"
+export TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-NULL}"
+export MAX_MODEL_LEN="${MAX_MODEL_LEN:-NULL}"
+export INPUT_LEN="${INPUT_LEN:-NULL}"
+export OUTPUT_LEN="${OUTPUT_LEN:-NULL}"
 
-prepare_sql_val() {
-  local val="$1"
-  local default="$2"
-  if [ -z "$val" ]; then
-    echo "$default"
-    return
-  fi
-  # Escape internal single quotes
-  local escaped_val="${val//\'/\'\'}"
-  echo "'$escaped_val'"
-}
-
-SQL_ADDITIONAL_CONFIG=$(prepare_sql_val "$ADDITIONAL_CONFIG" "'{}'")
-SQL_EXTRA_ARGS=$(prepare_sql_val "$EXTRA_ARGS" "''")
-SQL_EXTRA_ENVS=$(prepare_sql_val "$EXTRA_ENVS" "''")
-
-echo "--- Querying existing TryCount for $RECORD_ID"
-TRY_COUNT_JSON=$(gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
-  --project="$GCP_PROJECT_ID" \
-  --instance="$GCP_INSTANCE_ID" \
-  --format=json \
-  --sql="SELECT TryCount FROM RunRecord WHERE RecordId='$RECORD_ID'" 2>/dev/null || echo '{"rows":[]}')
-
-# Parse TryCount using jq. Returns null if empty.
-TRY_COUNT=$(echo "$TRY_COUNT_JSON" | jq -r 'if .rows then (if (.rows | length) > 0 then .rows[0][0] else "null" end) else "null" end' || echo "null")
-
-if [ "$TRY_COUNT" == "null" ] || [ -z "$TRY_COUNT" ]; then
-  echo "--- Inserting new RunRecord (TryCount=1)"
-  gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
-    --project="$GCP_PROJECT_ID" \
-    --instance="$GCP_INSTANCE_ID" \
-    --sql="INSERT INTO RunRecord (
-      RecordId, Status, CreatedTime, LastUpdate, CreatedBy, JobReference, RunBy,
-      Device, Model, RunType, CodeHash,
-      MaxNumSeqs, MaxNumBatchedTokens, TensorParallelSize, MaxModelLen,
-      Dataset, InputLen, OutputLen,
-      ExpectedETEL, NumPrompts, ModelTag, PrefixLen, ExtraEnvs,
-      AdditionalConfig, ExtraArgs, TryCount
-    ) VALUES (
-      '$RECORD_ID', 'RUNNING', PENDING_COMMIT_TIMESTAMP(), PENDING_COMMIT_TIMESTAMP(), '${USER:-buildkite-agent}', '$JOB_REFERENCE', '${BUILDKITE_AGENT_NAME:-}',
-      '$DEVICE', '$MODEL', '$RUN_TYPE', '$CODE_HASH',
-      $MAX_NUM_SEQS,
-      $MAX_NUM_BATCHED_TOKENS,
-      $TENSOR_PARALLEL_SIZE,
-      $MAX_MODEL_LEN,
-      '$DATASET',
-      $INPUT_LEN,
-      $OUTPUT_LEN,
-      $EXPECTED_ETEL,
-      $NUM_PROMPTS,
-      '$MODELTAG',
-      $PREFIX_LEN,
-      $SQL_EXTRA_ENVS,
-      $SQL_ADDITIONAL_CONFIG,
-      $SQL_EXTRA_ARGS,
-      1
-    );" || {
-      echo "Warning: Failed to insert RunRecord for $RECORD_ID. Skipping DB registration."
-  }
-else
-  NEW_TRY_COUNT=$((TRY_COUNT + 1))
-  echo "--- Updating existing RunRecord (TryCount=$NEW_TRY_COUNT)"
-  gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
-    --project="$GCP_PROJECT_ID" \
-    --instance="$GCP_INSTANCE_ID" \
-    --sql="UPDATE RunRecord SET Status='RUNNING', LastUpdate=PENDING_COMMIT_TIMESTAMP(), TryCount=$NEW_TRY_COUNT, RunBy='${BUILDKITE_AGENT_NAME:-}' WHERE RecordId='$RECORD_ID'" || {
-      echo "Warning: Failed to update RunRecord for $RECORD_ID. Skipping DB update."
-  }
-fi
-
-echo "--- Preparing Config Environment"
+echo "--- Preparing Local Artifacts Folder"
 ARTIFACT_FOLDER="$(pwd)/artifacts"
 export ARTIFACT_FOLDER
 LOG_FOLDER="${ARTIFACT_FOLDER}/temp_logs"
@@ -180,52 +103,59 @@ export LOG_FOLDER
 mkdir -p "$ARTIFACT_FOLDER"
 mkdir -p "$LOG_FOLDER"
 
-# We safely dump the specific environment variables
-ENV_FILE="artifacts/${RECORD_ID}.env"
-cat <<EOF > "$ENV_FILE"
-DEVICE='${DEVICE}'
-MODEL='${MODEL}'
-MAX_NUM_SEQS='${MAX_NUM_SEQS}'
-MAX_NUM_BATCHED_TOKENS='${MAX_NUM_BATCHED_TOKENS}'
-TENSOR_PARALLEL_SIZE='${TENSOR_PARALLEL_SIZE}'
-MAX_MODEL_LEN='${MAX_MODEL_LEN}'
-DATASET='${DATASET}'
-INPUT_LEN='${INPUT_LEN}'
-OUTPUT_LEN='${OUTPUT_LEN}'
-EXPECTED_ETEL='${EXPECTED_ETEL}'
-NUM_PROMPTS='${NUM_PROMPTS}'
-MODELTAG='${MODELTAG}'
-PREFIX_LEN='${PREFIX_LEN}'
-ADDITIONAL_CONFIG='${ADDITIONAL_CONFIG}'
-EXTRA_ARGS='${EXTRA_ARGS}'
-CODE_HASH='${CODE_HASH}'
-RECORD_ID='${RECORD_ID}'
-GCP_REGION='${GCP_REGION:-}'
-GCP_PROJECT_ID='${GCP_PROJECT_ID:-}'
-ARTIFACT_REPO='${ARTIFACT_REPO:-}'
-GCS_BUCKET='${GCS_BUCKET:-}'
-SKIP_JAX_PRECOMPILE='${SKIP_JAX_PRECOMPILE:-}'
-EOF
+echo "--- Configuring Docker Arguments"
+# Prepare environment variables for the Docker container. 
+declare -a BENCHMARK_DOCKER_ARGS=(
+  "-v" "$ARTIFACT_FOLDER:/workspace/artifacts"
+  "-e" "DOCKER_ARTIFACT_FOLDER=/workspace/artifacts"
+  "-e" "DOCKER_LOG_FOLDER=/workspace/artifacts/temp_logs"
+  "-e" "RECORD_ID=$RECORD_ID"
+  "-e" "DEVICE=$DEVICE"
+  "-e" "MODEL=$MODEL"
+  "-e" "MAX_NUM_SEQS=$MAX_NUM_SEQS"
+  "-e" "MAX_NUM_BATCHED_TOKENS=$MAX_NUM_BATCHED_TOKENS"
+  "-e" "TENSOR_PARALLEL_SIZE=$TENSOR_PARALLEL_SIZE"
+  "-e" "MAX_MODEL_LEN=$MAX_MODEL_LEN"
+  "-e" "DATASET=$DATASET"
+  "-e" "INPUT_LEN=$INPUT_LEN"
+  "-e" "OUTPUT_LEN=$OUTPUT_LEN"
+  "-e" "EXPECTED_ETEL=$EXPECTED_ETEL"
+  "-e" "NUM_PROMPTS=$NUM_PROMPTS"
+  "-e" "MODELTAG=$MODELTAG"
+  "-e" "PREFIX_LEN=$PREFIX_LEN"
+  "-e" "ADDITIONAL_CONFIG=$ADDITIONAL_CONFIG"
+  "-e" "EXTRA_ARGS=$EXTRA_ARGS"
+  "-e" "CODE_HASH=$CODE_HASH"
+  "-e" "RUN_TYPE=$RUN_TYPE"
+  "-e" "GCP_REGION=${GCP_REGION:-}"
+  "-e" "GCP_PROJECT_ID=${GCP_PROJECT_ID:-}"
+  "-e" "ARTIFACT_REPO=${ARTIFACT_REPO:-}"
+  "-e" "GCS_BUCKET=${GCS_BUCKET:-}"
+  "-e" "SKIP_JAX_PRECOMPILE=${SKIP_JAX_PRECOMPILE:-}"
+)
 
-# Inject dynamic EXTRA_ENVS generated ones
+# Inject dynamic EXTRA_ENVS into the Docker container
 for key in "${EXTRA_ENV_KEYS[@]}"; do
   if [ -n "${!key:-}" ]; then
-    echo "${key}='${!key}'" >> "$ENV_FILE"
+    BENCHMARK_DOCKER_ARGS+=("-e" "${key}=${!key}")
   fi
 done
 
-# Sync datasets (Copied from run_job.sh)
+BENCHMARK_DOCKER_ARGS_STR="$(printf '%s\n' "${BENCHMARK_DOCKER_ARGS[@]}")"
+export BENCHMARK_DOCKER_ARGS_STR
+
+# Sync datasets (Copied from original logic)
 DATASETS=("custom-token" "mmlu" "mlperf" "bench-custom-token" "math500" "bench-custom-mm")
 if [[ " ${DATASETS[*]} " == *" $DATASET "* ]]; then
   echo "--- Syncing dataset for $DATASET"
   DATASET_DIR="./artifacts/dataset"
   mkdir -p "$DATASET_DIR"
   case "$DATASET" in
-    "custom-token") gsutil -m cp gs://"$GCS_BUCKET"/dataset/*.* "$DATASET_DIR/" ;;
-    "mmlu")         gsutil -m cp -r gs://"$GCS_BUCKET"/dataset/mmlu/* "$DATASET_DIR/" ;;
+    "custom-token") gsutil -m cp gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/*.* "$DATASET_DIR/" ;;
+    "mmlu")         gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/mmlu/* "$DATASET_DIR/" ;;
     "mlperf")       gsutil -m cp gs://vllm-cb-storage2/dataset/mlperf/mlperf_shuffled.jsonl "$DATASET_DIR/mlperf.jsonl" ;;
-    "math500")      gsutil -m cp -r gs://"$GCS_BUCKET"/dataset/math500/math500.jsonl "$DATASET_DIR/" ;;
-    "bench-custom-token"|"bench-custom-mm") gsutil -m cp -r gs://"$GCS_BUCKET"/bench-dataset/* "$DATASET_DIR/" ;;
+    "math500")      gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/math500/math500.jsonl "$DATASET_DIR/" ;;
+    "bench-custom-token"|"bench-custom-mm") gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/bench-dataset/* "$DATASET_DIR/" ;;
   esac
 fi
 
@@ -242,18 +172,6 @@ gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 echo "--- Running job in docker via run_in_docker.sh"
 BM_JOB_STATUS=$EXIT_SUCCESS
 
-# Configuration docker parameter for execute benchmark
-declare -a BENCHMARK_DOCKER_ARGS=(
-  "-v" "$ARTIFACT_FOLDER:/workspace/artifacts"
-  "-e" "DOCKER_ARTIFACT_FOLDER=/workspace/artifacts"
-  "-e" "DOCKER_LOG_FOLDER=/workspace/artifacts/temp_logs"
-  "--env-file" "$ENV_FILE"
-)
-# Join the array elements using newline as the delimiter and export as a single string.
-BENCHMARK_DOCKER_ARGS_STR="$(printf '%s\n' "${BENCHMARK_DOCKER_ARGS[@]}")"
-export BENCHMARK_DOCKER_ARGS_STR
-
-# Restore the SKIP_JAX_PRECOMPILE logic
 [ -n "${SKIP_JAX_PRECOMPILE:-}" ] && export SKIP_JAX_PRECOMPILE
 
 .buildkite/scripts/run_in_docker.sh bash -c "
