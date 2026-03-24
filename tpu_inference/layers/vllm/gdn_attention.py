@@ -288,15 +288,15 @@ def _jax_gdn_attention_core(
     """Pure JAX implementation of the GDN sequence and recurrence logic.
 
     Args:
-        mixed_qkv: (B, T, 3 * d_k)
-        b: (B, H, T, d_k)
-        a: (B, H, T, d_k)
+        mixed_qkv: (B, T, C)
+        b: (B, T, n_v)
+        a: (B, T, n_v)
         conv_state: (B, T, C)
         recurrent_state: (B, H, d_k, d_v)
         conv_weight: (C, 1, kernel_size)
         conv_bias: (C,)
-        A_log: (B, H, T)
-        dt_bias: (B, H, T)
+        A_log: (n_v,)
+        dt_bias: (n_v,)
         is_prefill: bool
         n_kq: int
         n_v: int
@@ -305,7 +305,7 @@ def _jax_gdn_attention_core(
         kernel_size: int
 
     Returns:
-        output: (B, H, T, d_v)
+        output: (B, T, n_v * d_v)
         new_conv_state: (B, T, C)
         new_recurrent_state: (B, H, d_k, d_v)
 
@@ -504,13 +504,13 @@ def gdn_in_proj_tpu(
     https://github.com/vllm-project/vllm/pull/36795
 
     Args:
-        hidden_states: Tensor of shape [num_tokens, hidden_size]
+        hidden_states: Tensor of shape (num_tokens, hidden_size)
         qkvz_size: int, unused but needed for signature
         ba_size: int, unused but needed for signature
         prefix: str
     Returns:
-        mixed_qkvz: Tensor of shape [num_tokens, qkvz_size]
-        ba: Tensor of shape [num_tokens, ba_size]
+        mixed_qkvz: Tensor of shape (num_tokens, qkvz_size)
+        ba: Tensor of shape (num_tokens, ba_size)
     """
     fc = get_forward_context()
     # The 'prefix' argument perfectly matches the key used to register the module

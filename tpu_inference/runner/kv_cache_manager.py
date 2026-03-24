@@ -349,6 +349,12 @@ class KVCacheManager:
                             "MambaSpec does not support shared layers for now, defaulting to single KV cache per layer..."
                         )
                         duplicate_shared_layers = True
+                        break
+
+        for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
+            for j, layer_name in enumerate(kv_cache_tensor.shared_by):
+                layer_spec = layer_name_to_spec[layer_name]
+                if isinstance(layer_spec, MambaSpec):
                     page_size_bytes = layer_spec.page_size_bytes
                     assert kv_cache_tensor.size % page_size_bytes == 0
                     num_blocks = kv_cache_tensor.size // page_size_bytes
