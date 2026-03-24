@@ -53,6 +53,11 @@ class UnquantizedLinearMethod(QuantizeMethodBase,
                 raise NotImplementedError(
                     "Non-fused matmuls not implemented yet.")
 
+        jax.debug.print("Output for layer {name} {prefix}: {out}",
+                        name=layer._get_name(),
+                        prefix=getattr(layer, 'prefix', None),
+                        out=out[:1, :])
+
         return out
 
 

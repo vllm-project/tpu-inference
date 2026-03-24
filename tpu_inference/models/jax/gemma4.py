@@ -369,39 +369,23 @@ class Gemma4Attention(JaxModule):
             prefix=prefix + ".q_norm",
         )
 
+        self.k_proj = JaxEinsum(
+            "TD,DKH->TKH",
+            (self.hidden_size, self.num_kv_heads, self.head_dim),
+            bias_shape=(self.num_kv_heads,
+                        self.head_dim) if config.attention_bias else None,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, (None, None, "model")),
+            bias_init=nnx.with_partitioning(init_fn, (None, "model"))
+            if config.attention_bias else None,
+            rngs=rng,
+            quant_config=quant_config,
+            prefix=prefix + ".k_proj",
+        )
         # --- Shared KV Projection Logic ---
-        if not self.is_sliding:  # Shared KV (GLOBAL layers)
-            self.k_proj = JaxEinsum(
-                "TD,DKH->TKH",
-                (self.hidden_size, self.num_kv_heads, self.head_dim),
-                bias_shape=(self.num_kv_heads,
-                            self.head_dim) if config.attention_bias else None,
-                param_dtype=dtype,
-                kernel_init=nnx.with_partitioning(init_fn,
-                                                  (None, None, "model")),
-                bias_init=nnx.with_partitioning(init_fn, (None, "model"))
-                if config.attention_bias else None,
-                rngs=rng,
-                quant_config=quant_config,
-                prefix=prefix + ".k_proj",
-            )
+        if use_k_eq_v:
             self.v_proj = None
         else:
-            # Standard separate K/V (LOCAL layers)
-            self.k_proj = JaxEinsum(
-                "TD,DKH->TKH",
-                (self.hidden_size, self.num_kv_heads, self.head_dim),
-                bias_shape=(self.num_kv_heads,
-                            self.head_dim) if config.attention_bias else None,
-                param_dtype=dtype,
-                kernel_init=nnx.with_partitioning(init_fn,
-                                                  (None, None, "model")),
-                bias_init=nnx.with_partitioning(init_fn, (None, "model"))
-                if config.attention_bias else None,
-                rngs=rng,
-                quant_config=quant_config,
-                prefix=prefix + ".k_proj",
-            )
             self.v_proj = JaxEinsum(
                 "TD,DKH->TKH",
                 (self.hidden_size, self.num_kv_heads, self.head_dim),
@@ -458,6 +442,10 @@ class Gemma4Attention(JaxModule):
             self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
                 kv_cache_dtype)
 
+        num_kv_shared_layers = getattr(config, "num_kv_shared_layers", 0)
+        assert num_kv_shared_layers == 0, "Expect no shared layers"
+        self.is_kv_shared_layer = False
+
     def __call__(
         self,
         kv_cache: Optional[jax.Array],
@@ -465,37 +453,33 @@ class Gemma4Attention(JaxModule):
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
         md = attention_metadata
+        k = self.k_proj(x)
+        if self.v_proj is None:
+            v = k
+        else:
+            v = self.v_proj(x)
         # q: (T, N, H)
         q = self.q_proj(x)
+        # Q norm (always applied)
         q = self.q_norm(q)
 
-        q = apply_rope(q,
-                       md.input_positions,
-                       self.head_dim_original,
-                       self.rope_theta,
-                       self.rope_scaling,
-                       rope_proportion=self.rope_proportion)
-
-        # k: (T, K, H)
-        # v: (T, K, H)
-        if not self.is_sliding:
-            shared_kv = self.k_proj(x)
-            k = self.k_norm(shared_kv)
-            v = self.v_norm(shared_kv)
-        else:
-            k = self.k_proj(x)
+        if not self.is_kv_shared_layer:
+            # Non-shared: apply K norm + RoPE, V norm
             k = self.k_norm(k)
-            v = self.v_proj(x)
+            q = apply_rope(q, md.input_positions, self.head_dim_original,
+                           self.rope_theta, self.rope_scaling)
+            k = apply_rope(k, md.input_positions, self.head_dim_original,
+                           self.rope_theta, self.rope_scaling)
+
             v = self.v_norm(v)
+        else:
+            raise NotImplementedError("Expect no shared layers")
 
-        k = apply_rope(k,
-                       md.input_positions,
-                       self.head_dim_original,
-                       self.rope_theta,
-                       self.rope_scaling,
-                       rope_proportion=self.rope_proportion)
+        jax.debug.print("before attention, q: {q}\nk: {k}\nv: {v}",
+                        q=q[:1, :],
+                        k=k[:1, :],
+                        v=v[:1, :])
 
-        # o: (T, N, H)
         q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
             # q_scale = self._q_scale
@@ -517,6 +501,8 @@ class Gemma4Attention(JaxModule):
             k_scale=k_scale,
             v_scale=v_scale,
         )
+        jax.debug.print("after attention, outputs: {outputs}",
+                        outputs=outputs[:3, :])
         # (T, D)
         o = self.o_proj(outputs)
         return new_kv_cache, o
@@ -663,7 +649,8 @@ class Gemma4DecoderLayer(JaxModule):
             attention_metadata,
         )
         attn_output = self.post_attention_layernorm(attn_output)
-        residual = residual + attn_output
+        hidden_states = residual + attn_output
+        residual = hidden_states
 
         if self.enable_moe_block:
             # Dense MLP branch
@@ -834,6 +821,8 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
                 self.lm_head = PPMissingLayer()
 
     def load_weights(self, weights: Iterable[Tuple[str, Any]]):
+        allowed_layers = set(f"layers.{i}."
+                             for i in range(len(self.model.layers)))
         stripped_weights = (
             (clean_name, 1.0 + tensor if "norm" in clean_name else tensor)
             for name, tensor in weights
@@ -841,7 +830,10 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
                 "model.", "lm_head")) and
             "vision" not in clean_name  # Exclude vision tower weights for now
         )
-        return super().load_weights(stripped_weights)
+        return super().load_weights(
+            (name, tensor) for name, tensor in stripped_weights
+            if not ("layers." in name and not any(
+                layer_prefix in name for layer_prefix in allowed_layers)))
 
     def __call__(
         self,
