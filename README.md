@@ -82,7 +82,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-03-07 03:01 AM UTC*
+*Last Updated: 2026-03-24 05:15 PM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -257,59 +257,53 @@ Below is the live status of our supported models, features, and kernels. Click o
 <table>
   <thead>
     <tr>
-      <th rowspan="2">Feature</th>
-      <th colspan="2">Flax</th>
-      <th colspan="2">torchax</th>
+      <th></th>
+      <th colspan="2">JAX</th>
+      <th>Pytorch</th>
     </tr>
     <tr>
-      <th>CorrectnessTest</th>
-      <th>PerformanceTest</th>
-      <th>CorrectnessTest</th>
-      <th>PerformanceTest</th>
+      <th>Features</th>
+      <th>Flax</th>
+      <th>torchax</th>
+      <th>TorchTPU</th>
     </tr>
   </thead>
   <tbody>
     <tr>
       <td><strong>CP</strong></td>
-      <td><span title="❓ Untested">❓</span></td>
-      <td><span title="❓ Untested">❓</span></td>
-      <td><span title="❓ Untested">❓</span></td>
-      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td><strong>DP</strong></td>
-      <td><span title="✅ Passing">✅</span></td>
-      <td><span title="✅ Passing">✅</span></td>
-      <td><span title="✅ Passing">✅</span></td>
-      <td><span title="✅ Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td><strong>EP</strong></td>
-      <td><span title="✅ Passing">✅</span></td>
-      <td><span title="✅ Passing">✅</span></td>
-      <td><span title="✅ Passing">✅</span></td>
-      <td><span title="✅ Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td><strong>PP</strong></td>
-      <td><span title="❓ Untested">❓</span></td>
-      <td><span title="❓ Untested">❓</span></td>
-      <td><span title="❓ Untested">❓</span></td>
-      <td><span title="❓ Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td><strong>SP</strong></td>
-      <td><span title="❌ Failing">❌</span></td>
-      <td><span title="⚪ N/A">⚪</span></td>
-      <td><span title="❌ Failing">❌</span></td>
-      <td><span title="⚪ N/A">⚪</span></td>
+      <td><span title="❌&nbsp;Failed">❌</span></td>
+      <td><span title="❌&nbsp;Failed">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td><strong>TP</strong></td>
-      <td><span title="✅ Passing">✅</span></td>
-      <td><span title="✅ Passing">✅</span></td>
-      <td><span title="✅ Passing">✅</span></td>
-      <td><span title="✅ Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
   </tbody>
 </table>

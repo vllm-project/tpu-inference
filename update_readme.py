@@ -168,15 +168,15 @@ def generate_html_parallelism_table(headers, data):
     html.append("<table>")
     html.append("  <thead>")
     html.append("    <tr>")
-    html.append("      <th rowspan=\"2\">Feature</th>")
-    html.append("      <th colspan=\"2\">Flax</th>")
-    html.append("      <th colspan=\"2\">torchax</th>")
+    html.append("      <th></th>")
+    html.append("      <th colspan=\"2\">JAX</th>")
+    html.append("      <th>Pytorch</th>")
     html.append("    </tr>")
     html.append("    <tr>")
-    html.append("      <th>CorrectnessTest</th>")
-    html.append("      <th>PerformanceTest</th>")
-    html.append("      <th>CorrectnessTest</th>")
-    html.append("      <th>PerformanceTest</th>")
+    html.append("      <th>Features</th>")
+    html.append("      <th>Flax</th>")
+    html.append("      <th>torchax</th>")
+    html.append("      <th>TorchTPU</th>")
     html.append("    </tr>")
     html.append("  </thead>")
     html.append("  <tbody>")
@@ -184,7 +184,7 @@ def generate_html_parallelism_table(headers, data):
     for row in data:
         html.append("    <tr>")
         technique_display = f"<strong>{row[0]}</strong>"
-        raw_statuses = row[5] if len(row) > 5 else []
+        raw_statuses = row[4] if len(row) > 4 else []
         
         if row[0].strip() == "SP":
             if any("Experimental" in str(s) for s in raw_statuses):
@@ -194,7 +194,6 @@ def generate_html_parallelism_table(headers, data):
         html.append(f"      <td>{row[1]}</td>")
         html.append(f"      <td>{row[2]}</td>")
         html.append(f"      <td>{row[3]}</td>")
-        html.append(f"      <td>{row[4]}</td>")
         html.append("    </tr>")
         
     html.append("  </tbody>")
@@ -391,35 +390,33 @@ def update_readme():
                         feature = r[0].strip()
                         if feature not in merged_features:
                             merged_features[feature] = {
-                                "v6_flax": ["❓ Untested", "❓ Untested"], 
-                                "v6_pytorch": ["❓ Untested", "❓ Untested"], 
-                                "v7_flax": ["❓ Untested", "❓ Untested"], 
-                                "v7_pytorch": ["❓ Untested", "❓ Untested"]
+                                "v6_flax": "❓ Untested", 
+                                "v6_pytorch": "❓ Untested", 
+                                "v7_flax": "❓ Untested", 
+                                "v7_pytorch": "❓ Untested"
                             }
                         c = r[1] if len(r) > 1 and r[1].strip() and r[1].strip() != "-" else "❓ Untested"
                         p = r[2] if len(r) > 2 and r[2].strip() and r[2].strip() != "-" else "❓ Untested"
-                        merged_features[feature][col_key] = [c, p]
+                        merged_features[feature][col_key] = merge_metrics(c, p)
 
             for feature in sorted(merged_features.keys(), key=lambda x: x.lower()):
                 metrics = merged_features[feature]
-                flax_c = _merge_hw_status(metrics["v6_flax"][0], metrics["v7_flax"][0])
-                flax_p = _merge_hw_status(metrics["v6_flax"][1], metrics["v7_flax"][1])
-                torch_c = _merge_hw_status(metrics["v6_pytorch"][0], metrics["v7_pytorch"][0])
-                torch_p = _merge_hw_status(metrics["v6_pytorch"][1], metrics["v7_pytorch"][1])
+                flax = _merge_hw_status(metrics["v6_flax"], metrics["v7_flax"])
+                torchax = _merge_hw_status(metrics["v6_pytorch"], metrics["v7_pytorch"])
+                torchtpu = '<span title="❓&nbsp;Untested">❓</span>'
                 
-                raw_statuses = metrics["v6_flax"] + metrics["v7_flax"] + metrics["v6_pytorch"] + metrics["v7_pytorch"]
+                raw_statuses = [metrics["v6_flax"], metrics["v7_flax"], metrics["v6_pytorch"], metrics["v7_pytorch"]]
                 
                 row = [
                     feature,
-                    flax_c,
-                    flax_p,
-                    torch_c,
-                    torch_p,
+                    flax,
+                    torchax,
+                    torchtpu,
                     raw_statuses
                 ]
                 all_data.append(row)
                 
-            headers = ["Feature"]
+            headers = ["Features"]
             new_table = generate_html_parallelism_table(headers, all_data)
             
         elif section_key == "microbenchmarks":
