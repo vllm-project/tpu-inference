@@ -15,18 +15,6 @@
 
 set -euo pipefail
 
-# Helper function to escape single quotes and handle defaults for SQL
-prepare_sql_val() {
-  local val="$1"
-  local default="$2"
-  if [ -z "$val" ]; then
-    echo "$default"
-    return
-  fi
-  local escaped_val="${val//\'/\'\'}"
-  echo "'$escaped_val'"
-}
-
 if [ $# -ne 1 ]; then
   echo "Usage: $0 <RECORD_ID>"
   exit 1
@@ -140,78 +128,55 @@ REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
   echo "Warning: Metric extraction block failed. Continuing with script execution."
 }
 
-# Database Reporting Logic (ON CONFLICT (RecordId) DO UPDATE SET)
+# Ensure BUILDKITE_AGENT_NAME is set
 : "${BUILDKITE_AGENT_NAME:?Need to set BUILDKITE_AGENT_NAME}"
 
-# 1. Parse metric assignments for dynamic columns
-FINAL_STATUS="FAILED"
-insert_cols=""
-insert_vals=""
-update_metrics=""
+# Case 1: result file does not exist → mark as FAILED
+if [ ! -f "$RESULT_FILE" ]; then
+  echo "Result file not found: $RESULT_FILE. Marking status as FAILED."
 
-if [ -f "$RESULT_FILE" ]; then
-  while IFS='=' read -r key value; do
-    if [[ -n "$key" && -n "$value" ]]; then
-      insert_cols+=", $key"
-      if [[ "$key" == "AccuracyMetrics" ]]; then
-        val_str="JSON '${value}'"
-      elif [[ "$value" =~ ^[0-9.]+$ ]]; then
-        val_str="${value}"
-      else
-        val_str="'${value//\'/\'\'}'"
-      fi
-      insert_vals+=", $val_str"
-      # Use excluded keyword to refer to the proposed insert value
-      update_metrics+=", ${key}=excluded.${key}"
-      FINAL_STATUS="COMPLETED"
-    fi
-  done < "$RESULT_FILE"
+  SQL="UPDATE RunRecord SET Status='FAILED', RunBy='${BUILDKITE_AGENT_NAME}', LastUpdate=CURRENT_TIMESTAMP() WHERE RecordId = '${RECORD_ID}';"
+
+  echo "Executing SQL:"
+  echo "$SQL"
+
+  gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
+    --project="$GCP_PROJECT_ID" \
+    --instance="$GCP_INSTANCE_ID" \
+    --sql="$SQL"
+
+  exit 0
 fi
 
-# 2. Prepare Base SQL Values
-SQL_ADDITIONAL_CONFIG=$(prepare_sql_val "${ADDITIONAL_CONFIG:-}" "'{}'")
-SQL_EXTRA_ARGS=$(prepare_sql_val "${EXTRA_ARGS:-}" "''")
-SQL_EXTRA_ENVS=$(prepare_sql_val "${EXTRA_ENVS:-}" "''")
-SQL_RECORD_ID=$(prepare_sql_val "$RECORD_ID" "")
-SQL_STATUS=$(prepare_sql_val "$FINAL_STATUS" "FAILED")
-SQL_USER=$(prepare_sql_val "${USER:-buildkite-agent}" "buildkite-agent")
-SQL_BUILD_URL=$(prepare_sql_val "${BUILDKITE_BUILD_URL:-}" "")
-SQL_AGENT_NAME=$(prepare_sql_val "${BUILDKITE_AGENT_NAME:-}" "")
-SQL_DEVICE=$(prepare_sql_val "${DEVICE:-}" "")
-SQL_MODEL=$(prepare_sql_val "${MODEL:-}" "")
-SQL_RUN_TYPE=$(prepare_sql_val "${RUN_TYPE:-DAILY}" "DAILY")
-SQL_CODE_HASH=$(prepare_sql_val "${CODE_HASH:-}" "")
-SQL_DATASET=$(prepare_sql_val "${DATASET:-}" "")
-SQL_MODELTAG=$(prepare_sql_val "${MODELTAG:-PROD}" "PROD")
+# Case 2: result file exists → parse and mark as COMPLETED
+assignments=""
+while IFS='=' read -r key value; do
+  if [[ -n "$key" && -n "$value" ]]; then
+    if [[ "$key" == "AccuracyMetrics" ]]; then
+      assignments+="${key}=JSON '${value}', "
+    elif [[ "$value" =~ ^[0-9.]+$ ]]; then
+      assignments+="${key}=${value}, "
+    else
+      assignments+="${key}='${value}', "
+    fi
+  fi
+done < "$RESULT_FILE"
 
-# 3. Construct the atomic Upsert (Insert or Update) SQL statement
-SQL="INSERT INTO RunRecord (
-    RecordId, Status, CreatedTime, LastUpdate, CreatedBy, JobReference, RunBy,
-    Device, Model, RunType, CodeHash,
-    MaxNumSeqs, MaxNumBatchedTokens, TensorParallelSize, MaxModelLen,
-    Dataset, InputLen, OutputLen,
-    ExpectedETEL, NumPrompts, ModelTag, PrefixLen,
-    ExtraEnvs, AdditionalConfig, ExtraArgs, TryCount $insert_cols
-  ) VALUES (
-    $SQL_RECORD_ID, $SQL_STATUS, PENDING_COMMIT_TIMESTAMP(), PENDING_COMMIT_TIMESTAMP(), $SQL_USER, $SQL_BUILD_URL, $SQL_AGENT_NAME,
-    $SQL_DEVICE, $SQL_MODEL, $SQL_RUN_TYPE, $SQL_CODE_HASH,
-    ${MAX_NUM_SEQS:-NULL}, ${MAX_NUM_BATCHED_TOKENS:-NULL}, ${TENSOR_PARALLEL_SIZE:-NULL}, ${MAX_MODEL_LEN:-NULL},
-    $SQL_DATASET, ${INPUT_LEN:-NULL}, ${OUTPUT_LEN:-NULL},
-    ${EXPECTED_ETEL:-3600000}, ${NUM_PROMPTS:-1000}, $SQL_MODELTAG, ${PREFIX_LEN:-0},
-    $SQL_EXTRA_ENVS, $SQL_ADDITIONAL_CONFIG, $SQL_EXTRA_ARGS, 1 $insert_vals
-  ) ON CONFLICT (RecordId) DO UPDATE SET
-    Status = excluded.Status,
-    LastUpdate = excluded.LastUpdate,
-    RunBy = excluded.RunBy,
-    TryCount = RunRecord.TryCount + 1
-    $update_metrics;"
+# Clean up trailing comma+space
+assignments="${assignments%, }"
 
-echo "Executing Atomic Upsert SQL:"
+
+if [ -z "$assignments" ]; then
+  echo "Result file was empty. Marking status as FAILED."
+  SQL="UPDATE RunRecord SET Status='FAILED', RunBy='${BUILDKITE_AGENT_NAME}', LastUpdate=CURRENT_TIMESTAMP() WHERE RecordId = '${RECORD_ID}';"
+else
+  SQL="UPDATE RunRecord SET ${assignments}, Status='COMPLETED', RunBy='${BUILDKITE_AGENT_NAME}', LastUpdate=CURRENT_TIMESTAMP() WHERE RecordId = '${RECORD_ID}';"
+fi
+
+echo "Executing SQL:"
 echo "$SQL"
 
 gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
   --project="$GCP_PROJECT_ID" \
   --instance="$GCP_INSTANCE_ID" \
   --sql="$SQL"
-
-echo "--- Reporting finished"
