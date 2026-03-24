@@ -82,6 +82,16 @@ def awq_u32_unpack_u4(awq_u32_packed: jax.Array) -> jax.Array:
     return jnp.reshape(u4, u4.shape[:-2] + (-1, ))
 
 
+def ct_u32_unpack_u4(u32_packed: jax.Array) -> jax.Array:
+    """Unpack u4 tensor that was packed into u32 in standard sequential order.
+
+    Used for compressed-tensors pack_quantized format where nibbles are stored
+    in ascending order within each int32 element.
+    """
+    u4 = jax.lax.bitcast_convert_type(u32_packed, jnp.uint4)
+    return jnp.reshape(u4, u4.shape[:-2] + (-1, ))
+
+
 def dequantize_tensor(
     tensor_q: jax.Array,
     scale: jax.Array,
