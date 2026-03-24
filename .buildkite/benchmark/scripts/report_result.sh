@@ -171,7 +171,7 @@ if [ -f "$RESULT_FILE" ]; then
 fi
 
 # fo test
-# FINAL_STATUS="FAILED"
+FINAL_STATUS="FAILED"
 
 # 2. Prepare Base SQL Values
 SQL_ADDITIONAL_CONFIG=$(prepare_sql_val "${ADDITIONAL_CONFIG:-}" "'{}'")
@@ -231,7 +231,7 @@ echo "$DB_STATE_JSON" | jq -r '.rows[] | "✅ DB Sync Result: [TryCount: \(.[0])
 echo "--- Reporting finished"
 
 #for test
-# if [ "$FINAL_STATUS" == "FAILED" ]; then
-#   echo "🚨 [FAIL] Benchmark metrics were not found or failed. Exiting with error."
-#   exit 1
-# fi
+if [ "$FINAL_STATUS" == "FAILED" ]; then
+  echo "🚨 [FAIL] Benchmark metrics were not found or failed. Exiting with error."
+  exit 1
+fi
