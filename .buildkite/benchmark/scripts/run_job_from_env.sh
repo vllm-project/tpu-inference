@@ -70,8 +70,10 @@ export ADDITIONAL_CONFIG="${ADDITIONAL_CONFIG:-}"
 export EXTRA_ARGS="${EXTRA_ARGS:-}"
 export EXTRA_ENVS="${EXTRA_ENVS:-}"
 
-export CODE_HASH=$(buildkite-agent meta-data get "CODE_HASH")
-export JOB_REFERENCE=$(buildkite-agent meta-data get "JOB_REFERENCE")
+CODE_HASH=$(buildkite-agent meta-data get "CODE_HASH")
+export CODE_HASH
+JOB_REFERENCE=$(buildkite-agent meta-data get "JOB_REFERENCE")
+export JOB_REFERENCE
 export RUN_TYPE="${RUN_TYPE:-DAILY}"
 export DEVICE="${DEVICE:-}"
 export MODEL="${MODEL:-}"
@@ -114,13 +116,6 @@ declare -a BENCHMARK_DOCKER_ARGS=(
   "-e" "PREFIX_LEN=$PREFIX_LEN"
   "-e" "ADDITIONAL_CONFIG=$ADDITIONAL_CONFIG"
   "-e" "EXTRA_ARGS=$EXTRA_ARGS"
-  "-e" "CODE_HASH=$CODE_HASH"
-  "-e" "RUN_TYPE=$RUN_TYPE"
-  "-e" "GCP_REGION=${GCP_REGION:-}"
-  "-e" "GCP_PROJECT_ID=${GCP_PROJECT_ID:-}"
-  "-e" "ARTIFACT_REPO=${ARTIFACT_REPO:-}"
-  "-e" "GCS_BUCKET=${GCS_BUCKET:-}"
-  "-e" "SKIP_JAX_PRECOMPILE=${SKIP_JAX_PRECOMPILE:-}"
 )
 
 if [ -n "${EXTRA_ENVS:-}" ]; then
@@ -176,9 +171,8 @@ BM_JOB_STATUS=$EXIT_SUCCESS
 
 echo "Benchmark script completed."
 
-#
-# Report result
-#
+# Call report_result.sh which now handles the "Select -> Insert/Update" logic.
+# All exported variables are inherited by this sub-script.
 echo "Reporting result..."
 .buildkite/benchmark/scripts/report_result.sh "$RECORD_ID"
 
