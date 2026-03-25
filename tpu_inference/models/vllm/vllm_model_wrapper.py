@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import copy
+import functools
 import time
 from collections.abc import Sequence
 from contextlib import nullcontext
@@ -29,6 +30,7 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
+from torchax.ops.ops_registry import register_torch_function_op
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
@@ -119,6 +121,23 @@ class VllmModelWrapper:
         self._patch_vllm_ops()
 
     def _patch_vllm_ops(self):
+        # Caution: there is no public api for restore the ops.
+        # It need to patched again if the ops are jitted and mesh is change.
+        # The overwritten ops should not be called after the end of model wrapper.
+
+        # Import the registered ops at first and then we can overwrite them.
+        import torchax.ops.jtorch  # noqa: F401
+
+        # Patch sdpa from torch ops to flash attention to prevent OOM
+        register_torch_function_op(
+            torch.nn.functional.scaled_dot_product_attention,
+            functools.partial(patch_ops.scaled_dot_product_attention.
+                              scaled_dot_product_attention,
+                              mesh=self.mesh),
+            is_jax_function=True,
+            needs_env=False,
+        )
+
         patch_ops.gdn_attention.apply_gated_delta_net_torch_ops_patch()
 
     def _apply_pp_patch(self):

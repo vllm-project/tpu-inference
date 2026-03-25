@@ -13,10 +13,9 @@
 # limitations under the License.
 from tpu_inference.layers.vllm import backends as backends
 from tpu_inference.layers.vllm import custom_ops as custom_ops
-from tpu_inference.layers.vllm import ops as ops
 from tpu_inference.layers.vllm import quantization as quantization
 
 
 # NOTE: this empty function exists for an entry_points target for vllm plugin.
 def register_layers():
-    ops.register_ops()
+    pass
