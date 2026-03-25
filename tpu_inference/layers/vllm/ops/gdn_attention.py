@@ -1,3 +1,13 @@
+"""
+This file implements a pure JAX implementation for Gated Delta Networks (GDNs)
+
+Key Implementation Considerations:
+- Dynamic Shapes & Continuous Batching: vLLM mixes ragged prefill and decode tokens
+  dynamically. To prevent XLA from recompiling on every varying batch size, we use
+  `jax.lax.scan` to iterate over flat token streams using conditional masking, allow us
+  to have a unified and statically-shaped executio
+"""
+
 # Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -44,6 +54,12 @@ def _causal_conv1d(
     kernel_size: int = 4,
 ) -> jnp.ndarray:
     """Apply causal depthwise 1D convolution.
+
+    Needed because Delta Networks uusally prepend a
+    sliding-window Conv1D before the recurrent mechanism to mix local token
+    context efficiently. This function handles the parallelized computation
+    over the entire sequence during the `prefill` phase.
+
 
     Args:
         x: (B, T, C) input
@@ -94,6 +110,10 @@ def _causal_conv1d_step(
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Single-step causal conv1d for decode mode.
 
+    During decode, instead of padding and convoluting over the whole sequence, we
+    maintain a rolling KV-cache equivalent (`conv_state`) of the last `kernel_size - 1` tokens
+    and compute a single step of the depthwise convolution
+
     Args:
         x_new: (B, 1, C) input
         conv_state: (B, T, C) state
@@ -131,6 +151,14 @@ def _chunk_gated_delta_rule(
     output_final_state: bool = True,
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
     """Chunked gated delta rule matching HF's torch_chunk_gated_delta_rule.
+
+    By chunking here, we can effectively transform the purely sequential
+    RNN recurrence into a block-parallel operation. It processes tokens in chunks
+    and then only passes the recurrent state sequentially between chunks.
+
+    One detail worth pointing out is that the continuous decay mask (`g`) is cumulative, so
+    Applying the triangular mask *before* exponentiation is key here to prevent NaNs
+    when dealing with large sequence lengths.
 
     Args:
         query: (B, H, T, d_k) — already L2-normed
@@ -386,9 +414,19 @@ def gdn_attention_core_tpu(
     layer_name: str,
 ) -> None:
     """
-    JAX Bridge for the GDN core attention.
+    This acts as main bridge between PyTorch and JAX for the GDN core attention.
     Uses a robust, token-by-token scan to inherently handle any mix of
     ragged prefill and decode sequences without dynamic shape compilation errors.
+
+    Some key details:
+    1. Cache Mapping: We'll read vLLM's  `block_tables` and `query_start_loc`
+       and translate them into static index arrays (`req_indices` and `state_indices`).
+    2. JAX Scan: We use `jax.lax.scan` to perform a robust, token-by-token loop over
+       the flat inputs. This allows us to handle ANY mix of prefill and decode tokens
+       in a single compiled XLA graph.
+    3. Conditional Updates: The `valid_mask` ensures that padded dummy tokens
+       (used to keep the tensor shape static) do not corrupt the recurrent state
+       in the cache.
     """
     fc = get_forward_context()
     attn_metadata = fc.attn_metadata[layer_name]

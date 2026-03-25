@@ -664,9 +664,7 @@ class TestKVCacheManager:
             self.runner.vllm_config.sharding_config = MagicMock()
             self.runner.vllm_config.sharding_config.total_dp_size = 1
 
-        with patch('tpu_inference.envs.DUPLICATE_SHARED_KV_CACHE_LAYERS',
-                   False):
-            self.runner.initialize_kv_cache(kv_cache_config)
+        self.runner.initialize_kv_cache(kv_cache_config)
 
         assert len(self.runner.kv_caches) == 2
         for i in range(2):
@@ -677,57 +675,6 @@ class TestKVCacheManager:
             assert mamba_states[0].shape == (num_blocks, 4, 128)
             assert mamba_states[1].shape == (num_blocks, 8, 64, 32)
 
-            assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == i
-
-    def test_initialize_kv_cache_duplicate_shared_layers(self):
-        block_size = self.runner.vllm_config.cache_config.block_size
-        num_kv_heads = 8
-        head_size = 128
-        num_blocks = 100
-        kv_packing = 2  #bf16
-
-        full_attn_spec = FullAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=num_kv_heads,
-            head_size=head_size,
-            dtype=torch.bfloat16,
-        )
-        layer_names = [f'layer.{i}' for i in range(4)]
-        kv_cache_groups = [
-            KVCacheGroupSpec(layer_names=layer_names,
-                             kv_cache_spec=full_attn_spec),
-        ]
-
-        page_size_bytes = full_attn_spec.page_size_bytes
-        kv_cache_tensors = [
-            KVCacheTensor(
-                size=num_blocks * page_size_bytes,
-                shared_by=layer_names,
-            )
-        ]
-
-        kv_cache_config = KVCacheConfig(
-            num_blocks=num_blocks,
-            kv_cache_tensors=kv_cache_tensors,
-            kv_cache_groups=kv_cache_groups,
-        )
-
-        if not hasattr(self.runner.vllm_config, 'sharding_config'
-                       ) or self.runner.vllm_config.sharding_config is None:
-            self.runner.vllm_config.sharding_config = MagicMock()
-            self.runner.vllm_config.sharding_config.total_dp_size = 1
-
-        with patch('tpu_inference.envs.DUPLICATE_SHARED_KV_CACHE_LAYERS',
-                   True):
-            self.runner.initialize_kv_cache(kv_cache_config)
-
-        assert len(self.runner.kv_caches) == 4
-
-        for i in range(4):
-            assert self.runner.kv_caches[i].shape == (num_blocks, block_size,
-                                                      num_kv_heads * 2 //
-                                                      kv_packing, kv_packing,
-                                                      head_size)
             assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == i
 
     def test_initialize_kv_cache_no_duplicate_shared_layers(self):
@@ -768,11 +715,8 @@ class TestKVCacheManager:
             self.runner.vllm_config.sharding_config = MagicMock()
             self.runner.vllm_config.sharding_config.total_dp_size = 1
 
-        with patch('tpu_inference.envs.DUPLICATE_SHARED_KV_CACHE_LAYERS',
-                   False):
-            self.runner.initialize_kv_cache(kv_cache_config)
+        self.runner.initialize_kv_cache(kv_cache_config)
 
-        # For non-Mamba with DUPLICATE_SHARED_KV_CACHE_LAYERS=False,
         # it should initialize 1 KV cache shared by all 4 layers
         assert len(self.runner.kv_caches) == 1
 
@@ -817,8 +761,8 @@ class TestKVCacheManager:
             self.runner.vllm_config.sharding_config = MagicMock()
             self.runner.vllm_config.sharding_config.total_dp_size = 1
 
-        with patch('tpu_inference.envs.DUPLICATE_SHARED_KV_CACHE_LAYERS', False), \
-             patch('tpu_inference.runner.kv_cache_manager.logger.warning_once') as mock_warning_once:
+        with patch('tpu_inference.runner.kv_cache_manager.logger.warning_once'
+                   ) as mock_warning_once:
             self.runner.initialize_kv_cache(kv_cache_config)
 
         # Even though DUPLICATE_SHARED_KV_CACHE_LAYERS=False, Mamba does not

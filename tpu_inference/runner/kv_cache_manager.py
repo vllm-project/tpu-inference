@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, List
 
 import jax
@@ -29,14 +28,13 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, MambaSpec,
                                         MLAAttentionSpec, SlidingWindowSpec)
 
-from tpu_inference import envs
 from tpu_inference import utils
 from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
-from tpu_inference.runner.kv_cache import (create_kv_caches,
+from tpu_inference.runner.kv_cache import (KVCacheMetadata, create_kv_caches,
                                            get_attention_page_size_bytes)
 
 if TYPE_CHECKING:
@@ -45,14 +43,6 @@ if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class KVCacheMetadata:
-    count: int = 0
-    shape: tuple = None
-    dtype: jnp.dtype = None
-    sharding: NamedSharding = None
 
 
 class KVCacheManager:
@@ -206,20 +196,15 @@ class KVCacheManager:
             # TPU for now. If share kv_cache, the attention kernel would
             # throw exception for non-matched dimension between kv_cache
             # and actual dims. Disable sliding window for workaround.
-            head_size_set = set()
-            for layer_name, attn_module in layers.items():
-                if isinstance(attn_module, MambaBase):
-                    continue
-                head_size_set.add(
-                    common_utils.get_padded_head_dim(attn_module.head_size))
+            head_size_set = {
+                common_utils.get_padded_head_dim(attn_module.head_size)
+                for attn_module in layers.values()
+                if not isinstance(attn_module, MambaBase)
+            }
+            disable_sliding_window = len(head_size_set) > 1
 
-            if len(head_size_set) > 1:
-                for layer_name, attn_module in layers.items():
-                    if isinstance(attn_module, MambaBase):
-                        continue
-                    attn_module.sliding_window = None
+            logger.warning(f"Compilation num_layers = {len(layers)}")
 
-            logger.warning(f"Compilation num_layers = {len(layers.items())}")
             for layer_name, attn_module in layers.items():
                 if isinstance(attn_module, MambaBase):
                     spec = attn_module.get_kv_cache_spec(
@@ -227,6 +212,9 @@ class KVCacheManager:
                     if spec is not None:
                         kv_cache_spec[layer_name] = spec
                     continue
+
+                if disable_sliding_window:
+                    attn_module.sliding_window = None
 
                 if (kv_tgt_layer :=
                         attn_module.kv_sharing_target_layer_name) is not None:
@@ -336,7 +324,7 @@ class KVCacheManager:
         # If this is true, then we'll initialize a new KV cache for each layer in "shared_by"
         # instead of the default behavior of initializing a single KV cache for each of the
         # shared layers
-        duplicate_shared_layers = envs.DUPLICATE_SHARED_KV_CACHE_LAYERS
+        duplicate_shared_layers = False
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             for j, layer_name in enumerate(kv_cache_tensor.shared_by):
                 layer_spec = layer_name_to_spec[layer_name]
@@ -461,7 +449,7 @@ class KVCacheManager:
         if metadata["regular_attn"].count > 0:
             log_parts.append(
                 f"regular_attn_layers={metadata['regular_attn'].count} | "
-                f"regular_attn_shape={metadata['regular_attn'].shape} | "
+                f"regular_attn_shape=(num_blocks, {metadata['regular_attn'].shape[1:]}) | "
                 f"regular_attn_sharding={metadata['regular_attn'].sharding} | "
                 f"regular_attn_dtype={metadata['regular_attn'].dtype}")
 

@@ -584,8 +584,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # passes the following to vLLM (on the CLI):
         # --limit-mm-per-prompt '{"image": 0, "video": 0}'
         disable_mm_from_limits = False
-        if hasattr(self.model_config, "multimodal_config") and hasattr(
-                self.model_config.multimodal_config, "limit_per_prompt"):
+        if self.model_config.is_multimodal_model:
             mm_limits = self.model_config.multimodal_config.limit_per_prompt
             image_limit = mm_limits.get("image")
             video_limit = mm_limits.get("video")
