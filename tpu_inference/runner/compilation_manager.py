@@ -286,9 +286,10 @@ class CompilationManager:
                 input_ids = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32, dp_sharding)
                 # Need align to the sampling output
-                next_tokens = self._create_dummy_tensor((num_reqs, ),
-                                                        jnp.int32,
-                                                        sharding=dp_sharding)
+                next_tokens = self._create_dummy_tensor(
+                    (num_reqs, ),
+                    jnp.int32,
+                    sharding=NamedSharding(self.runner.mesh, PartitionSpec()))
 
                 placeholder_num = 1
                 self._run_compilation(
@@ -310,8 +311,12 @@ class CompilationManager:
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
             input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32,
                                                   dp_sharding)
-            positions = self._create_dummy_tensor((num_tokens, ), jnp.int32,
-                                                  dp_sharding)
+            if self.runner.uses_mrope:
+                positions = self._create_dummy_tensor((3, num_tokens),
+                                                      jnp.int32, dp_sharding)
+            else:
+                positions = self._create_dummy_tensor((num_tokens, ),
+                                                      jnp.int32, dp_sharding)
             is_first_rank = self.runner.is_first_rank
             is_last_rank = self.runner.is_last_rank
             if is_first_rank:
