@@ -76,7 +76,7 @@ cleanup_artifact_log
 echo "--- Preparing Local Artifacts Folder"
 mkdir -p "$ARTIFACT_FOLDER"
 mkdir -p "$LOG_FOLDER"
-mkdir -P "$PROFILE_FOLDER"
+mkdir -p "$PROFILE_FOLDER"
 
 echo "--- Configuring Docker Arguments for benchmark"
 # Prepare environment variables for the Docker container.
