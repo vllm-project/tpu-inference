@@ -40,12 +40,10 @@ pip install rouge-score==0.1.2 || true
 # Install lm_eval with dependencies, version is same as https://github.com/vllm-project/vllm/blob/main/.buildkite/scripts/hardware_ci/run-tpu-v1-test.sh#L64
 pip install "lm-eval[api,math]>=0.4.9.2" || true
 
-
 VLLM_LOG="$DOCKER_LOG_FOLDER/vllm_log.txt"
 BM_LOG="$DOCKER_LOG_FOLDER/bm_log.txt"
 BEST_BM_LOG="$DOCKER_LOG_FOLDER/best_bm_log.txt"
 PROFILE_FOLDER="$DOCKER_LOG_FOLDER/profile"
-printf "[INFO] Pre-check %-25s = %s\n" "DOCKER_ARTIFACT_FOLDER" "$DOCKER_ARTIFACT_FOLDER" || true
 DOCKER_ARTIFACT_FOLDER=${DOCKER_ARTIFACT_FOLDER:-"/workspace/artifacts"}
 printf "[INFO] %-25s = %s\n" "VLLM_LOG" "$VLLM_LOG"
 printf "[INFO] %-25s = %s\n" "BM_LOG" "$BM_LOG"
@@ -278,8 +276,8 @@ run_benchmark(){
 }
 
 printf "[DEBUG] Checking folder structure in container...\n"
-printf "[DEBUG] pwd=%s\n\nls $DOCKER_ARTIFACT_FOLDER=\n%s\n" "$(pwd)" "$(ls -al "$DOCKER_ARTIFACT_FOLDER")" || true
-printf "[DEBUG] ls $DOCKER_ARTIFACT_FOLDER/temp_logs=\n%s\n" "$(ls -al "$DOCKER_ARTIFACT_FOLDER"/temp_logs)" || true
+printf "[DEBUG] pwd=%s\n\nls $DOCKER_ARTIFACT_FOLDER=\n%s\n" "$(pwd)" "$(ls "$DOCKER_ARTIFACT_FOLDER")" || true
+printf "[DEBUG] ls $DOCKER_ARTIFACT_FOLDER/temp_logs=\n%s\n" "$(ls "$DOCKER_ARTIFACT_FOLDER"/temp_logs)" || true
 
 read -r throughput p99_e2el < <(run_benchmark "inf" | tail -n 1)
 

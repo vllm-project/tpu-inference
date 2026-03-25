@@ -36,7 +36,6 @@ fi
 
 RECORD_ID="$1"
 RESULT_FILE="artifacts/${RECORD_ID}.result"
-printf "[INFO] Pre-check LOG_FOLDER=%s\n" "$LOG_FOLDER"
 LOG_FOLDER=${LOG_FOLDER:-"artifacts/temp_logs"}
 # Temp write to another bucket
 # REMOTE_LOG_ROOT="gs://$GCS_BUCKET/job_logs/$RECORD_ID/"
@@ -44,8 +43,7 @@ REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
 
 (
   printf "[DEBUG] Start scan artifacts folder...\n"
-  printf "[DEBUG] pwd=%s\n\nls artifacts=\n%s\n" "$(pwd)" "$(ls -al artifacts)"
-  printf "[DEBUG] ls artifacts/temp_logs=\n%s\n" "$(ls -al artifacts/temp_logs)"
+  printf "[DEBUG] ls artifacts/temp_logs=\n%s\n" "$(ls artifacts/temp_logs)"
   printf "[INFO] LOG_FOLDER=\n%s\n" "$LOG_FOLDER"
 
   # Handle log file
