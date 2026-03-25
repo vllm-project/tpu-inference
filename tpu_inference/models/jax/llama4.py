@@ -197,56 +197,30 @@ class Llama4WeightLoader(BaseWeightLoader):
 
         cast_type = jnp.dtype(jnp.bfloat16)
         # loaded_weight is a jax.Array when framework="flax", otherwise it's bfloat16
-        # if not isinstance(loaded_weight, jax.Array):
-        #     loaded_weight = convert_torch_to_jax_with_view(
-        #         loaded_weight, cast_type)
+        if not isinstance(loaded_weight, jax.Array):
+            loaded_weight = convert_torch_to_jax_with_view(
+                loaded_weight, cast_type)
 
-        # split_weights = jnp.split(loaded_weight, 2, axis=-1)
+        split_weights = jnp.split(loaded_weight, 2, axis=-1)
         layer_num = self._get_layer_num(loaded_name)
 
-        mid_idx = loaded_weight.shape[-1] // 2
-        weights_to_load = {
-            "gate": loaded_weight[..., :mid_idx],
-            "up": loaded_weight[..., mid_idx:]
-        }
-
-        if isinstance(loaded_weight, jax.Array):
-            del loaded_weight
-        
         for split_type in ["gate", "up"]:
-            split_loaded_name = loaded_name.replace("gate_up_proj", f"{split_type}_proj")
-            loaded_weight = weights_to_load[split_type]
-            
+            split_loaded_name = loaded_name.replace("gate_up_proj",
+                                                    f"{split_type}_proj")
             if split_type == "gate":
                 mapped_name = "layers.*.moe_ffw.kernel_gating_EDF"
+                loaded_weight = split_weights[0]
             else:
                 mapped_name = "layers.*.moe_ffw.kernel_up_proj_EDF"
+                loaded_weight = split_weights[1]
 
-            mapped_name = re.sub(r"layers\.\*", f"layers.{layer_num}", mapped_name)
-            
+            mapped_name = re.sub(r"layers\.\*", f"layers.{layer_num}",
+                                 mapped_name)
             if _is_pp_missing_layer(mapped_name, self.pp_missing_layers):
                 logger.debug(
                     f"Skip loading {mapped_name=} as it doesn't belong to this PP stage."
                 )
                 continue
-
-        # for split_type in ["gate", "up"]:
-        #     split_loaded_name = loaded_name.replace("gate_up_proj",
-        #                                             f"{split_type}_proj")
-        #     if split_type == "gate":
-        #         mapped_name = "layers.*.moe_ffw.kernel_gating_EDF"
-        #         loaded_weight = split_weights[0]
-        #     else:
-        #         mapped_name = "layers.*.moe_ffw.kernel_up_proj_EDF"
-        #         loaded_weight = split_weights[1]
-
-        #     mapped_name = re.sub(r"layers\.\*", f"layers.{layer_num}",
-        #                          mapped_name)
-        #     if _is_pp_missing_layer(mapped_name, self.pp_missing_layers):
-        #         logger.debug(
-        #             f"Skip loading {mapped_name=} as it doesn't belong to this PP stage."
-        #         )
-        #         continue
             mapped_model_weight = get_param(model_params, mapped_name)
 
             if mapped_model_weight.value.shape != loaded_weight.shape:
@@ -255,18 +229,12 @@ class Llama4WeightLoader(BaseWeightLoader):
                     f"does not match model shape for {mapped_name}: {mapped_model_weight.value.shape}!"
                 )
 
-            if not isinstance(loaded_weight, jax.Array):
-                loaded_weight = convert_torch_to_jax_with_view(loaded_weight, cast_type)
-
             mapped_model_weight.value = shard_put(loaded_weight,
                                                   mapped_model_weight.out_sharding,
                                                   mesh=model_for_loading.mesh)
             logger.debug(
                 f"{split_loaded_name}: {loaded_weight.shape}  -->  {mapped_name}: {mapped_model_weight.value.shape}"
             )
-
-            del loaded_weight
-
             if self.is_verbose:
                 print_param_info(mapped_model_weight, mapped_name)
 
@@ -359,26 +327,20 @@ class Llama4WeightLoader(BaseWeightLoader):
                     continue
                 model_weight = get_param(model_params, mapped_name)
 
-                # target_sharding = model_weight.out_sharding
-                # print(f"--- DEBUG: Layer {mapped_name} has sharding: {target_sharding} ---")
-
                 cast_type = model_weight.value.dtype
                 if not isinstance(loaded_weight, jax.Array):
                     logger.debug(
                         f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
                     )
-                    print(f"DEBUG: About to convert {loaded_name}. Free HBM: {jax.devices()[0].memory_stats()['available_bytes'] / 1024**3:.2f} GB")
                     loaded_weight = convert_torch_to_jax_with_view(
                         loaded_weight, cast_type)
-                    # loaded_weight = jax.device_put(loaded_weight, jax.devices("cpu")[0])
 
                 if not loaded_name.endswith(".bias"):
                     loaded_weight = reshape_params(loaded_name, loaded_weight,
-                                                self._weight_shape_map)
+                                                   self._weight_shape_map)
                     loaded_weight = transpose_params(loaded_name,
-                                                    loaded_weight,
-                                                    self._transpose_map)
-
+                                                     loaded_weight,
+                                                     self._transpose_map)
                 if model_weight.value.shape != loaded_weight.shape:
                     raise ValueError(
                         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
@@ -390,7 +352,6 @@ class Llama4WeightLoader(BaseWeightLoader):
                 model_weight.value = shard_put(loaded_weight,
                                                model_weight.out_sharding,
                                                mesh=model_for_loading.mesh)
-                del loaded_weight
                 if self.is_verbose:
                     print_param_info(model_weight, loaded_name)
             with jax.default_device(jax.devices("cpu")[0]):
@@ -423,9 +384,6 @@ class Llama4WeightLoader(BaseWeightLoader):
                                 f"does not match model shape for {loaded_name}: {model_weight.array.scale.value.shape}!"
                             )
 
-                        # target_sharding = model_weight.array.scale.out_sharding
-                        # print(f"--- DEBUG: Layer {loaded_name} has sharding: {target_sharding} ---")
-
                         model_weight.array.scale.value = shard_put(
                             aggregated_weight,
                             model_weight.array.scale.out_sharding,
@@ -439,9 +397,6 @@ class Llama4WeightLoader(BaseWeightLoader):
                                 f"does not match model shape for {loaded_name}: {model_weight.array.qvalue.value.shape}!"
                             )
 
-                        # target_sharding = model_weight.array.qvalue.out_sharding
-                        # print(f"--- DEBUG: Layer {loaded_name} has sharding: {target_sharding} ---")
-
                         model_weight.array.qvalue.value = shard_put(
                             aggregated_weight,
                             model_weight.array.qvalue.out_sharding,
@@ -450,8 +405,6 @@ class Llama4WeightLoader(BaseWeightLoader):
                     logger.debug(
                         f"Aggregated and loaded {loaded_name}: {aggregated_weight.shape}"
                     )
-
-                    del aggregated_weight
 
                     if self.is_verbose:
                         print_param_info(model_weight, loaded_name)
