@@ -631,6 +631,12 @@ class RandomDataset(BenchmarkDataset):
 # -----------------------------------------------------------------------------
 
 
+PROMPT_FOOTER = (
+    "Try to reason about the question step by step. Don't give a final"
+    " answer without reasoning. Output the final answer in the format"
+    " 'Final Answer: (X)' where X is the correct letter choice. Answer:"
+)
+
 class MMMUProDataset(BenchmarkDataset):
     """
     Implements the MMMU-Pro dataset for multimodal benchmarking.
@@ -654,7 +660,8 @@ Express your final answer as the corresponding option letter."""
 
 {options_text}
 
-Express your final answer as the corresponding option letter."""
+""" + PROMPT_FOOTER
+
 
     def __init__(
         self,
