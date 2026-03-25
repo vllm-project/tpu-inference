@@ -49,7 +49,6 @@ REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
   # Handle log file
   VLLM_LOG="$LOG_FOLDER/vllm_log.txt"
   BM_LOG="$LOG_FOLDER/bm_log.txt"
-  # PROFILE_FOLDER="$LOG_ROOT/$TEST_NAME"_profile
   echo "gsutil cp $LOG_FOLDER/* $REMOTE_LOG_ROOT"
   gsutil cp -r "$LOG_FOLDER"/* "$REMOTE_LOG_ROOT"
 
@@ -143,7 +142,7 @@ REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
 # Database Reporting Logic (ON CONFLICT (RecordId) DO UPDATE SET)
 : "${BUILDKITE_AGENT_NAME:?Need to set BUILDKITE_AGENT_NAME}"
 
-# 1. Parse metric assignments for dynamic columns
+# Parse metric assignments for dynamic columns
 FINAL_STATUS="FAILED"
 insert_cols=""
 insert_vals=""
@@ -168,7 +167,7 @@ if [ -f "$RESULT_FILE" ]; then
   done < "$RESULT_FILE"
 fi
 
-# 2. Prepare Base SQL Values
+# Prepare Base SQL Values
 SQL_ADDITIONAL_CONFIG=$(prepare_sql_val "${ADDITIONAL_CONFIG:-}" "'{}'")
 SQL_EXTRA_ARGS=$(prepare_sql_val "${EXTRA_ARGS:-}" "''")
 SQL_EXTRA_ENVS=$(prepare_sql_val "${EXTRA_ENVS:-}" "''")
@@ -184,7 +183,7 @@ SQL_CODE_HASH=$(prepare_sql_val "${CODE_HASH:-}" "")
 SQL_DATASET=$(prepare_sql_val "${DATASET:-}" "")
 SQL_MODELTAG=$(prepare_sql_val "${MODELTAG:-PROD}" "PROD")
 
-# 3. Construct the atomic Upsert (Insert or Update) SQL statement
+# Construct the atomic Upsert (Insert or Update) SQL statement
 SQL="INSERT INTO RunRecord (
     RecordId, Status, CreatedTime, LastUpdate, CreatedBy, JobReference, RunBy,
     Device, Model, RunType, CodeHash,
