@@ -18,32 +18,16 @@ set -euo pipefail
 readonly EXIT_SUCCESS=0
 readonly EXIT_FAILURE=1
 
-ARTIFACT_FOLDER="$(pwd)/artifacts"
-LOG_FOLDER="${ARTIFACT_FOLDER}/temp_logs"
-PROFILE_FOLDER="${LOG_FOLDER}/profile"
-export ARTIFACT_FOLDER
-export LOG_FOLDER
-export PROFILE_FOLDER
-
-cleanup_artifact_log() {
-  echo "deleting artifacts: $ARTIFACT_FOLDER"
-  rm -rf "$ARTIFACT_FOLDER"
-}
-trap cleanup_artifact_log EXIT
-
 echo "--- Generating Record ID"
-if [ -n "${BUILDKITE_STEP_ID:-}" ]; then
-  # Use Buildkite step ID to ensure retries map to the same RecordId
-  RECORD_ID="bk-${BUILDKITE_STEP_ID}"
-else
-  # Use `uuidgen` to generate `RECORD_ID` in non-Buildkite environments.
-  RECORD_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
-fi
+: "${BUILDKITE_STEP_ID:?[ERROR] The BUILDKITE_STEP_ID variable is missing or empty!}"
+# Use Buildkite step ID to ensure retries map to the same RecordId
+RECORD_ID="bk-${BUILDKITE_STEP_ID}"
 export RECORD_ID
-echo "Record ID: $RECORD_ID"
 
-echo "--- Verifying Submodule Commit"
-git submodule status
+: "${MODEL:?Error: Environment variable MODEL is strictly required but not set. Exiting.}"
+export MODEL
+
+echo "--- Prepare benchmark Record ID: ${RECORD_ID}, Model: ${MODEL}"
 
 # --- Prepare Configuration Metadata (Exported for report_result.sh) ---
 export EXPECTED_ETEL="${EXPECTED_ETEL:-3600000}"
@@ -61,7 +45,6 @@ JOB_REFERENCE=$(buildkite-agent meta-data get "JOB_REFERENCE")
 export JOB_REFERENCE
 export RUN_TYPE="${RUN_TYPE:-DAILY}"
 export DEVICE="${DEVICE:-}"
-export MODEL="${MODEL:-}"
 
 # Numeric values exported for SQL insertion
 export MAX_NUM_SEQS="${MAX_NUM_SEQS:-NULL}"
@@ -70,6 +53,27 @@ export TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-NULL}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-NULL}"
 export INPUT_LEN="${INPUT_LEN:-NULL}"
 export OUTPUT_LEN="${OUTPUT_LEN:-NULL}"
+
+# Dynamically update the Buildkite step label
+# Benchmark - Qwen/Qwen3-4B-datset_bench-custom-token-inlen_4096-outlen_1024 RecordId: bk-${BUILDKITE_STEP_ID}
+BK_LABEL="Benchmark - ${MODEL}-dataset_${DATASET}-inlen_${INPUT_LEN}-outlen_${OUTPUT_LEN} RecordId: ${RECORD_ID}"
+buildkite-agent step update --label "$BK_LABEL"
+
+ARTIFACT_FOLDER="$(pwd)/artifacts"
+LOG_FOLDER="${ARTIFACT_FOLDER}/temp_logs"
+PROFILE_FOLDER="${LOG_FOLDER}/profile"
+export ARTIFACT_FOLDER
+export LOG_FOLDER
+export PROFILE_FOLDER
+
+cleanup_artifact_log() {
+  echo "deleting artifacts: $ARTIFACT_FOLDER"
+  rm -rf "$ARTIFACT_FOLDER"
+}
+trap cleanup_artifact_log EXIT
+
+echo "--- Verifying Submodule Commit"
+git submodule status
 
 # Do cleanup before create config
 cleanup_artifact_log
