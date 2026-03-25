@@ -52,9 +52,6 @@ spec:
                         fi
                         pip install --no-deps /tmp/tpu-inference
                         echo "tpu-inference patch installed."
-                        
-                        # pip install jax==0.9.1
-                        # pip install libtpu==0.0.38.dev20260315 --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
                         # Environment variables
                         export VLLM_ENABLE_V1_MULTIPROCESSING=0
@@ -158,7 +155,6 @@ spec:
                     - --server_port=29000
                     - --resource_manager_address=$(PATHWAYS_HEAD):29001
                     - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
-                    - --sidecar_name=external
                   env:
                     - name: PATHWAYS_HEAD
                       valueFrom:
@@ -272,8 +268,6 @@ spec:
                   volumeMounts:
                     - mountPath: /tmp
                       name: shared-tmp
-                - name: colocated-python-sidecar
-                  image: us-east5-docker.pkg.dev/cloud-tpu-inference-test/wenxindong/colocated_python:latest
               dnsPolicy: ClusterFirstWithHostNet
               hostNetwork: true
               nodeSelector:
