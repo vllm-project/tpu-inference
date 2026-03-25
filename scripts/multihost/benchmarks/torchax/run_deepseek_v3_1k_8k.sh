@@ -12,12 +12,12 @@ bash "${NIGHTLY_SCRIPT}" \
   --model-name "DeepSeek-R1" \
   --tokenizer "deepseek-ai/DeepSeek-R1" \
   --input-len 1024 \
-  --output-len 1024 \
+  --output-len 8192 \
   --tp-size 16 \
-  --max-seqs 640 \
-  --max-model-len 2048 \
-  --max-batched-tokens 640 \
-  --num-prompts 10240 \
+  --max-seqs 128 \
+  --max-model-len 9216 \
+  --max-batched-tokens 512 \
+  --num-prompts 2048 \
   --dataset-name "random" \
   --run-type "DAILY" \
   --device "tpu7x-16" \
@@ -32,5 +32,4 @@ bash "${NIGHTLY_SCRIPT}" \
   --vllm-mla-disable "0" \
   --moe-requantize-block-size "512" \
   --moe-requantize-weight-dtype "fp4" \
-  --phased-profiling-dir "gs://tpu-commons-ci/xprof/deepseek-r1/1k-1k" \
-  --skip-db-upload
+  --run-accuracy "mmlu"

@@ -219,7 +219,7 @@ class TPUConnector(KVConnectorBase_V1):
         """TPU connector doesn't support layer wise load."""
         pass
 
-    def save_kv_layer(self, **kwargs) -> None:
+    def save_kv_layer(self, *args, **kwargs) -> None:
         """TPU connector doesn't support layer wise save."""
         pass
 
@@ -506,6 +506,11 @@ class TPUConnectorWorker:
         self.shape = list(kv_layer.shape)
         self.dtype = kv_layer.dtype
         self.sharding = kv_layer.sharding
+        self.host_sharding = jax.sharding.NamedSharding(
+            self.sharding.mesh,
+            self.sharding.spec,
+            memory_kind='pinned_host',
+        )
         logger.info(f"TPUConnector Worker --> register_runner | "
                     f"node_id={self.node_id} | "
                     f"ip={self.host_ip} | "
@@ -607,14 +612,24 @@ class TPUConnectorWorker:
         # TODO(xiang): pad block_ids to avoid recompilation
         indices = device_array(self.mesh, np.array(local_block_ids))
         kv = select_from_kv_caches(self.runner.kv_caches, indices)
+        start_time = time.perf_counter()
+        # (mrjunwan): we directly put the kv to host memory to reduce the memory pressure on device
+        # add time log here to monitor the transfer speed.
+        kv_dram = jax.device_put(kv, self.host_sharding)
+        end_time = time.perf_counter()
+        kv_size_mb = sum(k.nbytes for k in kv) / (1024 * 1024)
+        logger.info(
+            f"Worker {self.node_id} --> D2H kv load  | done put req_id={req_id} | duration={(end_time - start_time) * 1000:.2f}ms | size={kv_size_mb:.2f}MB"
+        )
+
         # NOTE(xiang): We need to manually store the kv because:
         # Although we can set use_raw_buffers=True to let kv be safely destroyed after
         # calling await_pull, it could be a stranding buffer if D never pulls it.
         # So we have to set use_raw_buffers=False and stores the kv, then the kv buffer
         # will be safely destroyed by either D notifying or expiration.
-        self.reqs_wait_pull[req_id] = [kv, req_meta.expiration_time]
+        self.reqs_wait_pull[req_id] = [kv_dram, req_meta.expiration_time]
         self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
-        self.kv_transfer_server.await_pull(req_meta.uuid, kv)
+        self.kv_transfer_server.await_pull(req_meta.uuid, kv_dram)
 
     def _maybe_build_kv_connection(self, req_meta: LoadMeta) -> Any:
         if isinstance(req_meta.remote_host, list):
@@ -696,40 +711,16 @@ class TPUConnectorWorker:
         if not self.reqs_wait_pull and not self.reqs_pulling:
             return done_sending, done_recving
 
-        # 1. Create lists to hold all the finished data
-        ready_req_ids = []
-        ready_kvs = []
-        ready_indices = []
-
-        # 2. Gather all completed futures WITHOUT blocking
+        # Mark a req as done recieving after its pulling thread returns.
+        # This req can then be scheduled for decoding in the next scheduler step.
         for req_id in list(self.reqs_pulling.keys()):
             future = self.reqs_pulling[req_id]
             if future.done():
+                # NOTE(xiang): we do the scatter in main thread to avoid data racing.
+                # The data racing is not for the kv_caches buffer, it's for the runner.kv_caches ref.
                 kv, indices = future.result()
-                ready_kvs.append(kv)
-                ready_indices.append(indices)
-                ready_req_ids.append(req_id)
-
-        # 3. If we have data, merge and scatter it ALL AT ONCE
-        if ready_req_ids:
-            # Concatenate the indices
-            merged_indices = jnp.concatenate(ready_indices, axis=0)
-
-            # Concatenate the KV slices per layer
-            merged_kvs = []
-            for i in range(self.num_layers):
-                # Pull the i-th layer from every finished request and concatenate
-                merged_layer = jnp.concatenate(
-                    [req_kv[i] for req_kv in ready_kvs], axis=0)
-                merged_kvs.append(merged_layer)
-
-            # Fire the JIT function ONCE
-            self.runner.kv_caches = scatter_kv_slices(self.runner.kv_caches,
-                                                      merged_kvs,
-                                                      merged_indices)
-
-            # Cleanup
-            for req_id in ready_req_ids:
+                self.runner.kv_caches = scatter_kv_slices(
+                    self.runner.kv_caches, kv, indices)
                 del self.reqs_pulling[req_id]
                 done_recving.add(req_id)
 

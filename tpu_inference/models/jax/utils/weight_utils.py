@@ -230,13 +230,18 @@ def shard_put(x: jax.Array,
         x_mesh = x.sharding.mesh
 
     if math.prod(mesh.axis_sizes) == 1:
-        return general_device_put(x,
-                                  mesh.devices.flatten()[0],
-                                  source_mesh=x_mesh)
+        return jax.device_put(x, mesh.devices.flatten()[0])
+
+    if shardings is None:
+        shardings = ()
 
     if isinstance(shardings, tuple):
         return general_device_put(x,
                                   NamedSharding(mesh, P(*shardings)),
+                                  source_mesh=x_mesh)
+    elif isinstance(shardings, P):
+        return general_device_put(x,
+                                  NamedSharding(mesh, shardings),
                                   source_mesh=x_mesh)
     else:
         return general_device_put(x, shardings, source_mesh=x_mesh)
@@ -758,7 +763,7 @@ def jax_array_from_reshaped_torch(
 
 def assign_and_shard_param(jax_param: nnx.Param,
                            jax_weight: jax.Array,
-                           param_name: str = "Unknown"):
+                           param_name: str = "Unknown") -> None:
     """Distributes a JAX array across devices according to the `nnx.Param`'s sharding metadata, assigns it to the parameter, and marks it as loaded.
 
     Args:
@@ -908,23 +913,35 @@ class JaxDummyModelLoader(DummyModelLoader):
 
     def load_weights(self, model: JaxModule,
                      model_config: ModelConfig) -> None:
-        if getattr(model_config.hf_config,
-                   "num_local_experts", 0) > 0 or getattr(
-                       model_config.hf_config, "num_experts", 0) > 0:
-            raise NotImplementedError(
-                "JaxDummyModelLoader does not support MoE models yet.")
-
         weight_loading_start_counter = time.perf_counter()
         for param_name, param in model.named_parameters():
-            dummy_weight = jax.random.uniform(
-                key=jax.random.PRNGKey(0),
-                shape=param.value.shape,
-                dtype=param.value.dtype,
-                # upstream claims this range works well
-                # https://github.com/vllm-project/vllm/blob/7291d1b288558d48508e1a17c37b0aa170332264/vllm/model_executor/model_loader/weight_utils.py#L1088
-                minval=-1e-3,
-                maxval=1e-3,
-            )
+            with cpu_mesh_context():
+                is_moe = hasattr(param, "_weights_to_load")
+                param_shape = param.value.shape
+
+                if is_moe:
+                    # For MoE parameters, the normal loading flow reads PyTorch
+                    # weights which are transposed (out_features, in_features)
+                    # compared to JAX. The downstream post-loading fusion methods
+                    # expect this transposed shape (E, F, D) instead of (E, D, F).
+                    # E = number of experts, D = input dimension, F = feed forward dimension
+                    num_experts, input_dim, intermediate_dim = param_shape
+                    param_shape = (num_experts, intermediate_dim, input_dim)
+
+                dummy_weight = jax.random.uniform(
+                    key=jax.random.PRNGKey(0),
+                    shape=param_shape,
+                    dtype=param.value.dtype,
+                    # upstream claims this range works well
+                    # https://github.com/vllm-project/vllm/blob/7291d1b288558d48508e1a17c37b0aa170332264/vllm/model_executor/model_loader/weight_utils.py#L1088
+                    minval=-1e-3,
+                    maxval=1e-3,
+                )
+
+                if is_moe:
+                    param._weights_to_load[:] = jnp.vsplit(
+                        dummy_weight, indices_or_sections=num_experts)
+
             assign_and_shard_param(param, dummy_weight, param_name)
 
         self._process_weights_after_loading(model)

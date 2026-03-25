@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     LAYOUT_Q_PROJ_AS_NDH: bool = False
     USE_JAX_PROFILER_SERVER: bool = False
     JAX_PROFILER_SERVER_PORT: int = 9999
+    USE_BATCHED_RPA_KERNEL: bool = False
 
 
 def env_with_choices(
@@ -201,6 +202,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("USE_JAX_PROFILER_SERVER"),
     "JAX_PROFILER_SERVER_PORT":
     lambda: int(os.getenv("JAX_PROFILER_SERVER_PORT") or "9999"),
+    "USE_BATCHED_RPA_KERNEL":
+    env_bool("USE_BATCHED_RPA_KERNEL"),
 }
 
 

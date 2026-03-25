@@ -25,6 +25,8 @@ from tpu_inference import envs
 from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.logger import init_logger
 
+logger = init_logger(__name__)
+
 GBYTES = 1024 * 1024 * 1024
 TPU_HEAD_SIZE_ALIGNMENT = 128
 TPU_SECOND_LAST_MINOR = 8
@@ -72,21 +74,27 @@ _NUMPY_UNSUPPORTED_DTYPES = {
 }
 
 
-def t2j(t, use_dlpack=False):
+def t2j(t: torch.Tensor, use_dlpack=False):
     # torchax's t2j is not efficient to handle types in
     # _NUMPY_UNSUPPORTED_DTYPES, it need to convert to
     # float32. For large tensor, that could be expensive.
     # https://github.com/google/torchax/blob/main/torchax/ops/mappings.py#L55
     # Here, we do a bit cast instead.
     # TODO(gxd3): upstream this improvement to the torchax library.
-    if t.dtype in _NUMPY_UNSUPPORTED_DTYPES and t.is_contiguous():
-        bytes = t.cpu().view(torch.uint8).detach().numpy()
-        return jnp.array(bytes).view(_NUMPY_UNSUPPORTED_DTYPES[t.dtype])
+    try:
+        if t.dtype in _NUMPY_UNSUPPORTED_DTYPES:
+            # This bit cast require t to be continguous and more than 1 dimension.
+            if t.is_contiguous() and t.dim():
+                bytes = t.cpu().view(torch.uint8).detach().numpy()
+                return jnp.array(bytes).view(
+                    _NUMPY_UNSUPPORTED_DTYPES[t.dtype])
+    except Exception as e:  # pylint: disable=broad-except
+        logger.warning("t2j bit cast failed, falling back to torchax t2j: %s",
+                       e)
     return torchax_t2j(t, use_dlpack=use_dlpack)
 
 
 _megacore = False
-logger = init_logger(__name__)
 
 
 def align_to(unpadded_dim, pad_multiple):
@@ -286,7 +294,10 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
             if ordered_devices is not None:
                 ordered_devices = np.array(ordered_devices)
                 ordered_devices = ordered_devices.reshape(axis_shapes)
-                mesh = mesh_lib.Mesh(ordered_devices, axis_names)
+                mesh = mesh_lib.Mesh(ordered_devices,
+                                     axis_names,
+                                     axis_types=(mesh_lib.AxisType.Auto, ) *
+                                     len(axis_shapes))
                 logger.info("Use customized mesh: %s", mesh)
                 return mesh
 
@@ -304,7 +315,10 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
             "jax.make_mesh failed due to topology constraints. Falling back to manual mesh: %s",
             e)
         ordered_devices = np.array(devices).reshape(axis_shapes)
-        return mesh_lib.Mesh(ordered_devices, axis_names)
+        return mesh_lib.Mesh(ordered_devices,
+                             axis_names,
+                             axis_types=(mesh_lib.AxisType.Auto, ) *
+                             len(axis_shapes))
 
 
 def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:

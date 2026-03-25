@@ -220,3 +220,15 @@ def test_t2j_numpy_unsupported_dtypes(torch_dtype, jax_dtype):
     reference = ref_t2j(t)
     assert result.dtype == jax_dtype
     np.testing.assert_array_equal(result, reference)
+
+
+def test_t2j_falls_back_on_exception(caplog):
+    """When the bit-cast path raises, t2j falls back to torchax."""
+    t = torch.tensor([1.0, 2.0], dtype=torch.bfloat16)
+
+    with patch("tpu_inference.utils.jnp.array",
+               side_effect=RuntimeError("boom")):
+        result = t2j(t)
+
+    reference = ref_t2j(t)
+    np.testing.assert_array_equal(result, reference)

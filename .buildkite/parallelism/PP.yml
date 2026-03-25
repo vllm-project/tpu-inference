@@ -19,15 +19,11 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Single_Host"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Single_Host" "unverified"
-        # Note: uncomment the actual tests after PP is fully supported.
-        # .buildkite/scripts/run_in_docker.sh \
-        #   python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model \
-        #   /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_vllm_model \
-        #   /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model_correctness
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
   - label: "${TPU_VERSION:-tpu6e} Record correctness test result for PP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_record_PP_CorrectnessTest_Single_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Single_Host"
@@ -47,15 +43,11 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_record_PP_CorrectnessTest_Single_Host"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_PP_PerformanceTest_Single_Host" "unverified"
-        # Note: uncomment the actual tests after PP is fully supported.
-        # .buildkite/scripts/run_in_docker.sh \
-        #   python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model \
-        #   /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_vllm_model \
-        #   /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model_correctness
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
   - label: "${TPU_VERSION:-tpu6e} Record performance test result for PP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_record_PP_PerformanceTest_Single_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_PP_PerformanceTest_Single_Host"
@@ -74,15 +66,11 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Multi_Host"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Multi_Host" "unverified"
-        # Note: uncomment the actual tests after PP is fully supported.
-        # .buildkite/scripts/run_in_docker.sh \
-        #   python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model \
-        #   /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_vllm_model \
-        #   /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model_correctness
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
   - label: "${TPU_VERSION:-tpu6e} Record correctness test result for PP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_record_PP_CorrectnessTest_Multi_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Multi_Host"
@@ -101,15 +89,11 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_record_PP_CorrectnessTest_Multi_Host"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_PP_PerformanceTest_Multi_Host" "unverified"
-        # Note: uncomment the actual tests after PP is fully supported.
-        # .buildkite/scripts/run_in_docker.sh \
-        #   python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model \
-        #   /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_vllm_model \
-        #   /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py::test_pipeline_parallelism_jax_model_correctness
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
   - label: "${TPU_VERSION:-tpu6e} Record performance test result for PP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_record_PP_PerformanceTest_Multi_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_PP_PerformanceTest_Multi_Host"

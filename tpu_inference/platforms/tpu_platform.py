@@ -58,6 +58,8 @@ class TpuPlatform(Platform):
         "VLLM_DISABLE_SHARED_EXPERTS_STREAM",
         "MOE_REQUANTIZE_BLOCK_SIZE",
         "MOE_REQUANTIZE_WEIGHT_DTYPE",
+        "USE_JAX_PROFILER_SERVER",
+        "JAX_PROFILER_SERVER_PORT",
     ]
 
     @classmethod
@@ -66,8 +68,6 @@ class TpuPlatform(Platform):
                              **kwargs) -> str:
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-        # Invoke @register_backend in the module.
-        import tpu_inference.layers.vllm.backends  # noqa: F401
         use_mla = attn_selector_config.use_mla
         if use_mla:
             selected_backend = AttentionBackendEnum.FLASH_ATTN_MLA
@@ -277,3 +277,16 @@ class TpuPlatform(Platform):
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True
+
+    @classmethod
+    def current_device(cls) -> torch.device:
+        """
+        Get the current device for the current platform.
+
+        This is mostly a placeholder since this method isn't
+        currently called from TPU Inference but instead
+        from upstream vLLM.  This won't be an issue,
+        however, because we'll manually place tensors
+        on the TPU device(s).
+        """
+        return torch.device("cpu")

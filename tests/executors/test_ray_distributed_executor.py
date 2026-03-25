@@ -514,6 +514,12 @@ class TestRayDistributedExecutorExecuteDag(unittest.TestCase):
         self.executor.has_connector = False
         self.executor.workers = [MagicMock(), MagicMock()]
 
+    def tearDown(self):
+        # Reset forward_dag to None so that __del__ -> shutdown() does not
+        # call ray.kill() on MagicMock workers (which would auto-init Ray and
+        # raise ValueError: "ray.kill() only supported for actors").
+        self.executor.forward_dag = None
+
     def test_without_async_scheduling_delegates_to_super(self):
         self.executor.scheduler_config.async_scheduling = False
 
