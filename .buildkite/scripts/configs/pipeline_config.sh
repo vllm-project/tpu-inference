@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Exit on error, exit on unset variable, fail on pipe errors.
-
 # Priority constants for pipeline jobs.
 # Post-merge > Pre-merge > Integration pipeline > Benchmark > Other/Default > Nightly
 export PRIORITY_POST_MERGE=10
