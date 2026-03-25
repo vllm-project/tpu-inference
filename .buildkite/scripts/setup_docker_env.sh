@@ -81,7 +81,10 @@ cleanup_docker_resource() {
 setup_environment() {
   local image_name_param=${1:-"vllm-tpu"}
   local should_push=${2:-"false"}
+  local push_to_ci_cache=${3:-"false"}
   IMAGE_NAME="$image_name_param"
+  local CI_IMAGE_REPO="us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/${IMAGE_NAME}"
+  local LOCAL_TPU_VERSION="${TPU_VERSION:-tpu6e}" 
 
   local DOCKERFILE_NAME="Dockerfile"
 
@@ -113,13 +116,36 @@ setup_environment() {
       TPU_INFERENCE_HASH="$BUILDKITE_COMMIT"
   fi
  
+  local CACHE_TAG="${TPU_INFERENCE_HASH}-${LOCAL_TPU_VERSION}"
+
+  # ==========================================
+  # Pull-Only Mode for TPU execution nodes
+  # ==========================================
+  if [[ "${USE_PREBUILT_IMAGE:-0}" == "1" ]]; then
+    echo "Pulling pre-built Docker image: ${CI_IMAGE_REPO}:${CACHE_TAG} ..."
+    docker pull "${CI_IMAGE_REPO}:${CACHE_TAG}"
+    docker tag "${CI_IMAGE_REPO}:${CACHE_TAG}" "${IMAGE_NAME}:${TPU_INFERENCE_HASH}"
+    docker tag "${CI_IMAGE_REPO}:${CACHE_TAG}" "${IMAGE_NAME}:latest"
+    return 0
+  fi
+
   # Build with specific hash and 'latest' tag for convenience
   docker build \
       --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" \
       --build-arg IS_TEST="true" \
       --no-cache -f docker/"${DOCKERFILE_NAME}" \
       -t "${IMAGE_NAME}:${TPU_INFERENCE_HASH}" \
-      -t "${IMAGE_NAME}:latest" .
+      -t "${IMAGE_NAME}:latest" \
+      -t "${IMAGE_NAME}:${CACHE_TAG}" .
+
+  # ==========================================
+  # Push to CI Image Registry (Executed by dedicate CPU builder)
+  # ==========================================
+  if [[ "$push_to_ci_cache" == "true" ]]; then
+    echo "Pushing Docker image to CI Image Registry..."
+    docker tag "${IMAGE_NAME}:${CACHE_TAG}" "${CI_IMAGE_REPO}:${CACHE_TAG}"
+    docker push "${CI_IMAGE_REPO}:${CACHE_TAG}"
+  fi
 
   # Push logic if requested
   if [[ "$should_push" == "true" ]]; then
