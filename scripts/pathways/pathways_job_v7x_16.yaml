@@ -63,6 +63,7 @@ spec:
                   export VLLM_ENGINE_READY_TIMEOUT_S=7200
                   export MODEL_IMPL_TYPE=vllm
                   export NEW_MODEL_DESIGN=1
+                  export PATHWAYS_DUMMY_WEIGHTS=1
                   # export SKIP_JAX_PRECOMPILE=1
 
                   # Clear potentially corrupted model streamer cache
