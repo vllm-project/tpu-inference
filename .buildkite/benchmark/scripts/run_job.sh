@@ -85,6 +85,7 @@ echo "--- Configuring Docker Arguments for benchmark"
 # Prepare environment variables for the Docker container.
 declare -a BENCHMARK_DOCKER_ARGS=(
   "-v" "$ARTIFACT_FOLDER:/workspace/artifacts"
+  "-v" "/dev/shm:/dev/shm"
   "-e" "DOCKER_ARTIFACT_FOLDER=/workspace/artifacts"
   "-e" "DOCKER_LOG_FOLDER=/workspace/artifacts/temp_logs"
   "-e" "RECORD_ID=$RECORD_ID"
@@ -145,8 +146,6 @@ if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
   mkdir -p "$GENERATION_CONFIG_FOLDER"
   gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/* "$GENERATION_CONFIG_FOLDER"
 fi
-
-# gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 
 echo "--- Running job in docker via run_in_docker.sh"
 BM_JOB_STATUS=$EXIT_SUCCESS

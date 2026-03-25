@@ -49,10 +49,6 @@ ENV_VARS=(
   -e MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
   -e MAX_NUM_SEQS="${MAX_NUM_SEQS:-}"
   -e MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
-  # Benchmark specific environment variables
-  ${MODEL:+-e MODEL="$MODEL"}
-  ${DATASET:+-e DATASET="$DATASET"}
-  ${SKIP_JAX_PRECOMPILE:+-e SKIP_JAX_PRECOMPILE="$SKIP_JAX_PRECOMPILE"}
 )
 
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
@@ -99,7 +95,6 @@ exec docker run \
   --shm-size=16G \
   --rm \
   -v "$LOCAL_HF_HOME":"$DOCKER_HF_HOME" \
-  -v /dev/shm:/dev/shm \
   "${ENV_VARS[@]}" \
   "${TEST_SUITE_VARS[@]}" \
   -e HF_HOME="$DOCKER_HF_HOME" \
