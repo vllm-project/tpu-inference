@@ -17,6 +17,7 @@ import jax.numpy as jnp
 import torch
 from jax.sharding import Mesh
 from torchax.interop import jax_view
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.v1.attention.backend import (AttentionBackend, AttentionLayer,
                                        MLAAttentionImpl)
@@ -42,6 +43,10 @@ class PallasMLAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["PallasMLAttentionBackend"]:
         return PallasMLAttentionBackendImpl
+
+    @staticmethod
+    def get_page_size(vllm_config: VllmConfig) -> int:
+        return 1024
 
 
 class PallasMLAttentionBackendImpl(MLAAttentionImpl):

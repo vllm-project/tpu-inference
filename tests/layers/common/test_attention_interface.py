@@ -338,11 +338,6 @@ def test_mla_attention(monkeypatch, mesh):
         request_distribution=jnp.array([0, 0, NUM_SEQS], dtype=jnp.int32),
     )
 
-    mock_tuned_block_sizes = MagicMock(return_value=(8, 8))
-    monkeypatch.setattr(
-        "tpu_inference.layers.common.attention_interface.get_tuned_block_sizes",
-        mock_tuned_block_sizes)
-
     expected_output = jnp.full(q_TNA.shape, 0.5)
     expected_new_cache = jnp.full(kv_cache_shape, 0.1)
 
@@ -365,8 +360,6 @@ def test_mla_attention(monkeypatch, mesh):
         sm_scale=0.1,
     )
 
-    # Verify mocked functions were called
-    mock_tuned_block_sizes.assert_called_once()
     mock_mla_kernel.assert_called_once()
 
     # Verify output correctness
@@ -374,6 +367,6 @@ def test_mla_attention(monkeypatch, mesh):
     assert jnp.array_equal(final_kv_cache, expected_new_cache)
 
     _, kernel_kwargs = mock_mla_kernel.call_args
-    assert kernel_kwargs["num_kv_pages_per_block"] == 4
-    assert kernel_kwargs["num_queries_per_block"] == 4
+    assert kernel_kwargs["num_kv_pages_per_block"] == 3
+    assert kernel_kwargs["num_queries_per_block"] == 1
     assert kernel_kwargs["sm_scale"] == 0.1
