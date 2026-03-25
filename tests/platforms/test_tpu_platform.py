@@ -251,6 +251,7 @@ class TestTpuPlatform:
         vllm_config.cache_config = MagicMock()
         vllm_config.cache_config.user_specified_block_size = False
         vllm_config.cache_config.block_size = 16
+        vllm_config.model_config.use_mla = False
 
         with patch.dict(
                 'sys.modules', {
