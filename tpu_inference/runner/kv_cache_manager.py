@@ -306,9 +306,17 @@ class KVCacheManager:
             page_size_bytes = layer_spec.page_size_bytes
             assert kv_cache_tensor.size % page_size_bytes == 0
             num_blocks = kv_cache_tensor.size // page_size_bytes
-            dp_size = self.runner.vllm_config.sharding_config.total_dp_size
-            # num_blocks must be a multiple of dp_size
-            num_blocks = (num_blocks // dp_size) * dp_size
+            sharding_config = self.runner.vllm_config.sharding_config
+            if self.use_mla:
+                # MLA KV cache is sharded with MLP_TENSOR = (attn_dp, attn_dp_expert, model, expert)
+                divisor = (sharding_config.attn_dp_size *
+                           sharding_config.attn_dp_expert_size *
+                           sharding_config.tp_size *
+                           sharding_config.expert_size)
+            else:
+                divisor = sharding_config.total_dp_size
+            # num_blocks must be a multiple of the sharding divisor
+            num_blocks = (num_blocks // divisor) * divisor
             # NOTE: we'll multiply the num_kv_heads by 2 in the function
             if self.use_mla:
                 head_size = self.runner.model_config.hf_config.kv_lora_rank + \
