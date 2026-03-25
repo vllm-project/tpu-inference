@@ -13,12 +13,14 @@
 # limitations under the License.
 """Performance tests for async copy on TPU."""
 
+import gc
 from typing import Tuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from absl.testing import absltest, parameterized
+from jax._src import compilation_cache as cc
 from jax._src import test_util as jtu
 
 from tpu_inference.distributed.kv_transfer import multi_layer_copy
@@ -79,6 +81,17 @@ def create_single_layer_kv_cache(
 
 
 class KVTransferTest(jtu.JaxTestCase):
+
+    def setUp(self):
+        super().setUp()
+
+    def tearDown(self):
+        super().tearDown()
+        cc.reset_cache()
+        jax.clear_caches()
+
+        # Force Python GC
+        gc.collect()
 
     @parameterized.named_parameters(
         dict(
