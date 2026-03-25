@@ -101,14 +101,16 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
         quant_config: VllmFp8Config,
         linear_config: VllmQuantLinearConfig,
     ):
-        from vllm.platforms import PlatformEnum, current_platform
 
-        # init_fp8_linear_kernel is called by super().__init__
-        # and needs a supported backend temporarily.
-        original_platform = current_platform._enum
-        current_platform._enum = PlatformEnum.CPU
+        # Per https://github.com/vllm-project/vllm/pull/32929,
+        # init_fp8_linear_kernel is now called by super().__init__
+        # but does not support TPU backends as expected.
+        # use_marlin was also changed to be determined via isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel).
+        # We need to monkeypatch init_fp8_linear_kernel and explicitly set use_marlin = True
+        # in order to bypass using native vLLM's vllm/vllm/model_executor/layers/quantization/utils/quant_utils.py:scaled_quantize.
+        vllm_fp8.init_fp8_linear_kernel = lambda *args, **kwargs: None
         super().__init__(quant_config)
-        current_platform._enum = original_platform
+        self.use_marlin = True
 
         self.linear_config = linear_config
         if self.linear_config.enable_quantized_matmul_kernel and not self.linear_config.requant_block_size:
