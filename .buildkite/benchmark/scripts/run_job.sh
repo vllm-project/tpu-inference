@@ -55,9 +55,8 @@ export INPUT_LEN="${INPUT_LEN:-NULL}"
 export OUTPUT_LEN="${OUTPUT_LEN:-NULL}"
 
 # Dynamically update the Buildkite step label
-# Benchmark - Qwen/Qwen3-4B-datset_bench-custom-token-inlen_4096-outlen_1024 RecordId: bk-${BUILDKITE_STEP_ID}
-BK_LABEL="Benchmark - ${MODEL}-dataset_${DATASET}-inlen_${INPUT_LEN}-outlen_${OUTPUT_LEN} RecordId: ${RECORD_ID}"
-buildkite-agent step update --label "$BK_LABEL"
+BK_RECORD_ID_LABEL=" RecordId: ${RECORD_ID}"
+buildkite-agent step update "label" "$BK_RECORD_ID_LABEL" --append
 
 ARTIFACT_FOLDER="$(pwd)/artifacts"
 LOG_FOLDER="${ARTIFACT_FOLDER}/temp_logs"
