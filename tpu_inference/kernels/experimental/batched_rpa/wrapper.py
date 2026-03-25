@@ -442,29 +442,51 @@ def get_default_block_sizes(
     max_num_seqs,
     pages_per_seq,
 ):
-    """Get (bq_sz, bkv_sz, batch_size) by some heuristic formulas.
-
-  Note the default block sizes are not necessarily optimal.
-  """
     del (
         q_dtype,
-        kv_dtype,
-        actual_num_q_heads,
-        actual_num_kv_heads,
         head_dim,
         max_num_tokens,
         max_num_seqs,
         pages_per_seq,
     )
+
+    is_8bit = schedule.get_dtype_packing(kv_dtype) == 4
+    # Qwen30b tuned sizes
+    if actual_num_q_heads == 32 and actual_num_kv_heads == 4 and is_8bit:
+        return {
+            "bq_sz": 1,
+            "bkv_sz": 512,
+            "batch_size": 10,
+            "n_buffer": 2,
+        }, {
+            "bq_sz": 256,
+            "bkv_sz": 512,
+            "batch_size": 2,
+            "n_buffer": 2,
+        }
+    # Qwen-coder tuned sizes
+    if actual_num_q_heads == 12 and actual_num_kv_heads == 1 and is_8bit:
+        return {
+            "bq_sz": 1,
+            "bkv_sz": 2304,
+            "batch_size": 8,
+            "n_buffer": 3,
+        }, {
+            "bq_sz": 512,
+            "bkv_sz": 512,
+            "batch_size": 3,
+            "n_buffer": 2,
+        }
+    # untuned sizes
     return {
         "bq_sz": 1,
-        "bkv_sz": 2304,
-        "batch_size": 8,
-        "n_buffer": 3
+        "bkv_sz": page_size,
+        "batch_size": 1,
+        "n_buffer": 2
     }, {
-        "bq_sz": 512,
-        "bkv_sz": 512,
-        "batch_size": 3,
+        "bq_sz": 1,
+        "bkv_sz": page_size,
+        "batch_size": 1,
         "n_buffer": 2,
     }
 
