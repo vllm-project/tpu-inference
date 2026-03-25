@@ -23,8 +23,8 @@ from typing import Any, Optional, Union
 import numpy as np
 import pandas as pd
 from transformers import PreTrainedTokenizerBase
+from vllm.inputs import MultiModalDataDict
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MultiModalDataDict
 
 logger = logging.getLogger(__name__)
 
