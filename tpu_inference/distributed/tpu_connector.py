@@ -506,6 +506,11 @@ class TPUConnectorWorker:
         self.shape = list(kv_layer.shape)
         self.dtype = kv_layer.dtype
         self.sharding = kv_layer.sharding
+        self.host_sharding = jax.sharding.NamedSharding(
+            self.sharding.mesh,
+            self.sharding.spec,
+            memory_kind='pinned_host',
+        )
         logger.info(f"TPUConnector Worker --> register_runner | "
                     f"node_id={self.node_id} | "
                     f"ip={self.host_ip} | "
@@ -607,14 +612,24 @@ class TPUConnectorWorker:
         # TODO(xiang): pad block_ids to avoid recompilation
         indices = device_array(self.mesh, np.array(local_block_ids))
         kv = select_from_kv_caches(self.runner.kv_caches, indices)
+        start_time = time.perf_counter()
+        # (mrjunwan): we directly put the kv to host memory to reduce the memory pressure on device
+        # add time log here to monitor the transfer speed.
+        kv_dram = jax.device_put(kv, self.host_sharding)
+        end_time = time.perf_counter()
+        kv_size_mb = sum(k.nbytes for k in kv) / (1024 * 1024)
+        logger.info(
+            f"Worker {self.node_id} --> D2H kv load  | done put req_id={req_id} | duration={(end_time - start_time) * 1000:.2f}ms | size={kv_size_mb:.2f}MB"
+        )
+
         # NOTE(xiang): We need to manually store the kv because:
         # Although we can set use_raw_buffers=True to let kv be safely destroyed after
         # calling await_pull, it could be a stranding buffer if D never pulls it.
         # So we have to set use_raw_buffers=False and stores the kv, then the kv buffer
         # will be safely destroyed by either D notifying or expiration.
-        self.reqs_wait_pull[req_id] = [kv, req_meta.expiration_time]
+        self.reqs_wait_pull[req_id] = [kv_dram, req_meta.expiration_time]
         self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
-        self.kv_transfer_server.await_pull(req_meta.uuid, kv)
+        self.kv_transfer_server.await_pull(req_meta.uuid, kv_dram)
 
     def _maybe_build_kv_connection(self, req_meta: LoadMeta) -> Any:
         if isinstance(req_meta.remote_host, list):
