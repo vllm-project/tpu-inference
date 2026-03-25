@@ -458,12 +458,14 @@ def get_default_block_sizes(
     )
     return {
         "bq_sz": 1,
-        "bkv_sz": page_size,
-        "batch_size": 1
+        "bkv_sz": 2304,
+        "batch_size": 8,
+        "n_buffer": 3
     }, {
-        "bq_sz": 1,
-        "bkv_sz": page_size,
-        "batch_size": 1,
+        "bq_sz": 512,
+        "bkv_sz": 512,
+        "batch_size": 3,
+        "n_buffer": 2,
     }
 
 
@@ -611,7 +613,7 @@ def ragged_paged_attention(
         if isinstance(n_buffer, tuple):
             kernel_n_buffer = n_buffer[idx]
         else:
-            kernel_n_buffer = n_buffer
+            kernel_n_buffer = block_sizes["n_buffer"]
 
         max_steps_ub = _get_max_steps_ub(
             max_num_seqs,
