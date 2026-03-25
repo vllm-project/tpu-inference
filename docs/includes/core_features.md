@@ -30,7 +30,7 @@
       <td>hybrid kv cache</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>KV cache host offloading</td>
@@ -46,9 +46,9 @@
     </tr>
     <tr>
       <td>multi-host</td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>Multimodal Inputs</td>
@@ -72,13 +72,13 @@
       <td>runai_model_streamer_loader</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>sampling_params</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>Single Program Multi Data</td>
@@ -88,9 +88,9 @@
     </tr>
     <tr>
       <td>Single-Host-P-D-disaggregation</td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>Speculative Decoding: Eagle3</td>
@@ -108,7 +108,7 @@
       <td>structured_decoding</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
   </tbody>
 </table>

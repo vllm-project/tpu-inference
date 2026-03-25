@@ -272,8 +272,9 @@ def merge_metrics(c, p):
     ) or "fail" in p_clean.lower():
         return "❌&nbsp;Failing"
 
-    if "✅" in c_clean or "pass" in c_clean.lower(
-    ) or "✅" in p_clean or "pass" in p_clean.lower():
+    if ("✅" in c_clean
+            or "pass" in c_clean.lower()) and ("✅" in p_clean
+                                               or "pass" in p_clean.lower()):
         return "✅&nbsp;Passing"
 
     if "❓" in c_clean or "❓" in p_clean:
