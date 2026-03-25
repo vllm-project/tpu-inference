@@ -321,7 +321,20 @@ def fused_moe_func(
         Output of moe operation [num_tokens, hidden_size]
     """
     num_tokens, hidden_size = hidden_states.shape
-    global_num_experts, padded_hidden_size, _ = w1.shape
+    # w1 can be (G, K, N) or (G, N, K). Detect which one is hidden_size (K).
+    global_num_experts, dim1, dim2 = w1.shape
+    if dim2 == hidden_size:
+         # Layout is (G, N, K) - this is what moe_weights.py produces for GMM
+         padded_hidden_size = dim2
+    elif dim1 == hidden_size:
+         # Layout is (G, K, N)
+         padded_hidden_size = dim1
+    else:
+         # Fallback with padding support
+         if dim2 > hidden_size and dim2 % 128 == 0:
+             padded_hidden_size = dim2
+         else:
+             padded_hidden_size = dim1
     dtype = hidden_states.dtype
 
     assert (num_tokens * topk) % 16 == 0, (

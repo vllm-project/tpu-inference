@@ -164,6 +164,10 @@ def process_w13_for_gmm(tensor,
                         padded_output_sizes: list[int] | None = None,
                         name: str = "w13"):
     """helper to split, pad, concatenate, and reorder w13 tensors."""
+    # Transpose concat_dim to the last dimension for easier processing
+    original_ndim = tensor.ndim
+    if concat_dim != original_ndim - 1:
+        tensor = jnp.swapaxes(tensor, concat_dim, original_ndim - 1)
 
     # 1. Split into W1 and W3
     w1 = tensor[..., :config.intermediate_size]
@@ -193,14 +197,22 @@ def process_w13_for_gmm(tensor,
     logger.info(f"{name}_w3 shape after padding: {padded_w3.shape}")
 
     # 3. Concatenate and Reorder for avoiding TP sharding comms
-    w13_concat = jnp.concatenate([padded_w1, padded_w3], axis=concat_dim)
+    w13_concat = jnp.concatenate([padded_w1, padded_w3], axis=-1)
     if padded_output_sizes is not None:
-        return reorder_concatenated_tensor_for_sharding(
+        w13_concat = reorder_concatenated_tensor_for_sharding(
             w13_concat,
             padded_output_sizes,
             config.w13_reorder_size,
-            dim=concat_dim,
+            dim=-1,
         )
+
+    # Transpose back if necessary and ensure contiguous layout with K as the last dimension
+    if concat_dim != original_ndim - 1:
+        w13_concat = jnp.swapaxes(w13_concat, concat_dim, original_ndim - 1)
+        w13_concat = jnp.array(w13_concat, copy=True)
+        # Explicitly set layout to (0, 1, 2) which means K (dim 2) is the most minor dim.
+        w13_concat = with_layout_constraint(w13_concat, Layout((0, 1, 2)))
+
     return w13_concat
 
 
@@ -253,8 +265,9 @@ def process_moe_weights(
             w13_bias = jnp.concat([w1_bias, w3_bias], axis=1)
 
     # Transpose non-constracting dim to right most dim
-    w13_weight = jnp.swapaxes(w13_weight, 1, 2)
-    w2_weight = jnp.swapaxes(w2_weight, 1, 2)
+    if moe_backend not in [MoEBackend.GMM_EP, MoEBackend.GMM_TP]:
+        w13_weight = jnp.swapaxes(w13_weight, 1, 2)
+        w2_weight = jnp.swapaxes(w2_weight, 1, 2)
 
     # Workaround for JAX error "must have valid byte strides"
     w13_weight = with_layout_constraint(w13_weight, Layout((0, 1, 2)))
@@ -265,7 +278,7 @@ def process_moe_weights(
         
         # Determine if the scale is (num_experts, out_channels, in_blocks) or (num_experts, out_blocks, in_blocks)
         # We need it to be (num_experts, in_blocks, 1, out_channels) for the GMM kernel
-        out_dim = w13_weight.shape[2]
+        out_dim = w13_weight.shape[1 if moe_backend in [MoEBackend.GMM_EP, MoEBackend.GMM_TP] else 2]
         
         if w13_weight_scale.shape[1] != out_dim:
             # Output dim is block quantized, repeat it to match full out_channels
@@ -280,7 +293,7 @@ def process_moe_weights(
 
     if w2_weight_scale is not None:
         w2_weight_scale = w2_weight_scale.astype(jnp.float32)
-        out_dim = w2_weight.shape[2]
+        out_dim = w2_weight.shape[1 if moe_backend in [MoEBackend.GMM_EP, MoEBackend.GMM_TP] else 2]
         
         if w2_weight_scale.shape[1] != out_dim:
             out_blocks = w2_weight_scale.shape[1]
@@ -378,7 +391,7 @@ def process_moe_weights(
                                      padded_output_sizes=padded_output_sizes)
 
             w13_weight = process_w13_tp(tensor=w13_weight,
-                                        concat_dim=2,
+                                        concat_dim=1,
                                         name="w13_weight")
 
             if w13_weight_scale is not None:
@@ -388,7 +401,7 @@ def process_moe_weights(
 
             if w13_bias is not None:
                 w13_bias = process_w13_tp(tensor=w13_bias,
-                                          concat_dim=2,
+                                          concat_dim=1,
                                           name="w13_bias")
 
         case MoEBackend.GMM_EP:
@@ -399,7 +412,7 @@ def process_moe_weights(
             process_w13_ep = partial(process_w13_for_gmm, config=pad_config)
 
             w13_weight = process_w13_ep(tensor=w13_weight,
-                                        concat_dim=2,
+                                        concat_dim=1,
                                         name="w13_weight")
 
             if w13_weight_scale is not None:
@@ -409,7 +422,7 @@ def process_moe_weights(
 
             if w13_bias is not None:
                 w13_bias = process_w13_ep(tensor=w13_bias,
-                                          concat_dim=2,
+                                          concat_dim=1,
                                           name="w13_bias")
 
         case MoEBackend.DENSE_MAT:

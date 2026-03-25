@@ -231,7 +231,7 @@ class IndexMaps:
         offset: int = 0,
     ):
         group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
-        return (group_id, k_id, offset + n_id)
+        return (group_id, offset + n_id, k_id)
 
     def rhs_bias_index_map(
         self,
@@ -243,6 +243,7 @@ class IndexMaps:
     ):
         group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
         return (group_id, 0, offset + n_id)
+
 
     def rhs_scale_index_map(
         self,
@@ -284,7 +285,7 @@ def create_rhs_spec(index_map: IndexMaps, cfgs: GmmConfigs) -> RhsRef:
       scales, and biases, configured based on the provided GmmConfigs.
     """
     rhs_weight_spec = pl.BlockSpec(
-        (None, cfgs.tiles.tile_k // cfgs.rhs_cfgs.packing, cfgs.tiles.tile_n),
+        (None, cfgs.tiles.tile_n, cfgs.tiles.tile_k // cfgs.rhs_cfgs.packing),
         index_map.rhs_weight_index_map,
         pipeline_mode=pl.Buffered(buffer_count=3),
     )
@@ -404,20 +405,23 @@ def inner_kernel(
 
     def _matmul(is_first_k_step: bool, is_last_k_step: bool):
         tiled_lhs = tiled_lhs_ref.reshape(-1, cfgs.tiles.tile_k)[...]
-        tiled_rhs = tiled_rhs_ref.weight[...]
+        tiled_rhs = tiled_rhs_ref.get_weight()
+
         if len(tiled_rhs.shape) == 3:
             tiled_rhs = jnp.squeeze(tiled_rhs, axis=0)
 
         num_quant_blocks_per_tile_k = cfgs.num_quant_blocks_per_tile_k
         # When rhs is packed (quantized dtype packed into uint32), unpack it
         # back to the original dtype using pltpu.bitcast which operates on the last
-        # axis. We must temporarily swap K and N so the packed K axis is last.
+        # axis.
         if cfgs.rhs_cfgs.packing > 1:
-            tiled_rhs = jnp.swapaxes(tiled_rhs, 0, 1)
             tiled_rhs = pltpu.bitcast(tiled_rhs, cfgs.rhs_cfgs.quant_dtype)
-            tiled_rhs = jnp.swapaxes(tiled_rhs, 0, 1)
+
+        # Transpose to (K, N) for matmul
+        tiled_rhs = jnp.swapaxes(tiled_rhs, 0, 1)
 
         valid_k = cfgs.dims.size_k % cfgs.tiles.tile_k
+
         if is_last_k_step and valid_k != 0:
             mask_rhs = lax.broadcasted_iota(jnp.int32, tiled_rhs.shape,
                                             0) < valid_k
@@ -859,17 +863,21 @@ def kernel_main(
         f"num_n {num_n} * tile_n {cfgs.tiles.tile_n} should be greater than or"
         f" equal to size_n {cfgs.dims.size_n}")
 
-    # Pack along K (2nd minor dim) so that pltpu.bitcast can unpack inside the
-    # kernel.
     # [G, K, N] -> [G, K//packing, N] uint32
     if cfgs.rhs_cfgs.quant_dtype is not None:
         rhs_weight = rhs_ref.weight
         rhs_weight = rhs_weight.bitcast(jnp.uint32)
-        assert rhs_weight.shape == (
-            cfgs.dims.size_group,
-            cfgs.dims.size_k // cfgs.rhs_cfgs.packing,
-            cfgs.dims.size_n * (2 if cfgs.fuse_act else 1),
-        )
+        # raise RuntimeError(f"DEBUG_KM: AFTER: rhs_weight.shape={rhs_weight.shape}")
+        # Assertion that handles both (G, K_packed, N) and (G, N, K_packed)
+        s_g = cfgs.dims.size_group
+        s_kp = cfgs.dims.size_k // cfgs.rhs_cfgs.packing
+        s_n = cfgs.dims.size_n * (2 if cfgs.fuse_act else 1)
+        if rhs_weight.shape == (s_g, s_kp, s_n):
+             pass
+        elif rhs_weight.shape == (s_g, s_n, s_kp):
+             pass
+        else:
+             raise AssertionError(f"rhs_weight shape {rhs_weight.shape} does not match expected {(s_g, s_kp, s_n)} or {(s_g, s_n, s_kp)}")
         rhs_ref = dataclasses.replace(rhs_ref, weight=rhs_weight)
 
     # Fill metadata buffer and return number of group & m interations.
@@ -1010,21 +1018,34 @@ def validate_inputs(
     fuse_act: str | None = None,
 ) -> Dimensions:
     """Validates the inputs for the GMM kernel."""
+    size_m, size_k_lhs = lhs.shape
+    size_group, rhs_dim1, rhs_dim2 = rhs.shape
+    
+    if rhs_dim1 == size_k_lhs:
+        size_k = rhs_dim1
+        size_n = rhs_dim2
+    elif rhs_dim2 == size_k_lhs:
+        size_k = rhs_dim2
+        size_n = rhs_dim1
+    else:
+        raise ValueError(f"Contracting dimension {size_k_lhs} not found in rhs shape {rhs.shape}")
 
-    size_m = lhs.shape[0]
-    size_group, size_k, size_n = rhs.shape
     size_lhs_group = group_sizes.shape[0]
 
     assert size_group <= size_lhs_group
-    assert lhs.shape == (size_m, size_k)
-    assert rhs.shape == (size_group, size_k, size_n)
+    # Check if fused activation
+    if fuse_act is not None:
+        assert size_n % 2 == 0
+        size_n //= 2
+
     if rhs_bias is not None:
-        assert rhs_bias.shape == (size_group, 1, size_n)
+        assert rhs_bias.shape == (size_group, 1, size_n * (2 if fuse_act else 1))
     if rhs_scale is not None:
         num_quant_blocks = rhs_scale.shape[1]
-        if rhs_scale.shape != (size_group, num_quant_blocks, 1, size_n):
-            raise RuntimeError(f"CRASH DEBUG rhs_scale.shape: {rhs_scale.shape}, expected: {(size_group, num_quant_blocks, 1, size_n)}")
-        assert rhs_scale.shape == (size_group, num_quant_blocks, 1, size_n)
+        expected_shape = (size_group, num_quant_blocks, 1, size_n * (2 if fuse_act else 1))
+        if rhs_scale.shape != expected_shape:
+            raise RuntimeError(f"VAL FAIL rhs_scale: shape={rhs_scale.shape}, expected={expected_shape}, fuse_act={fuse_act}, size_n={size_n}, size_k={size_k}, lhs.shape={lhs.shape}")
+        assert rhs_scale.shape == expected_shape
         assert size_k % num_quant_blocks == 0
 
     assert group_offset.shape == (1, )

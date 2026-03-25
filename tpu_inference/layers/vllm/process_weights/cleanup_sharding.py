@@ -29,7 +29,7 @@ from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from tpu_inference.layers.vllm.mla_attention import VllmTPUMLAAttention, VllmTPUMultiHeadLatentAttentionWrapper
+from tpu_inference.layers.vllm.custom_ops.mla_attention import VllmMLAAttention, VllmMultiHeadLatentAttentionWrapper
 
 from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.logger import init_logger
@@ -193,8 +193,8 @@ MODULE_TYPE_TO_SHARDING_FUNC = [
     (ReplicatedLinearWithLoRA, _shard_base_linear_lora_replicated),
     (FusedMoE, _shard_fused_moe),
     (SharedFusedMoE, _shard_fused_moe),
-    (VllmTPUMLAAttention, _shard_mla_attention),
-    (VllmTPUMultiHeadLatentAttentionWrapper, _shard_mla_attention),
+    (VllmMLAAttention, _shard_mla_attention),
+    (VllmMultiHeadLatentAttentionWrapper, _shard_mla_attention),
 ]
 
 

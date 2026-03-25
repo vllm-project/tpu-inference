@@ -16,14 +16,12 @@ from vllm.config.vllm import get_current_vllm_config
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, UnquantizedEmbeddingMethod, VocabParallelEmbedding)
 
-from tpu_inference.layers.vllm.quantization.unquantized import \
-    VllmUnquantizedEmbeddingMethod
-
-
 @VocabParallelEmbedding.register_oot
 class VllmVocabParallelEmbedding(VocabParallelEmbedding):
 
     def __init__(self, *args, **kwargs):
+        from tpu_inference.layers.vllm.quantization.unquantized import \
+            VllmUnquantizedEmbeddingMethod
         super().__init__(*args, **kwargs)
         if isinstance(self.quant_method, UnquantizedEmbeddingMethod):
             # TODO(kyuyeunk): Cleanup process of passing mesh variable.
@@ -42,6 +40,8 @@ class VllmVocabParallelEmbedding(VocabParallelEmbedding):
 class VllmParallelLMHead(ParallelLMHead):
 
     def __init__(self, *args, **kwargs):
+        from tpu_inference.layers.vllm.quantization.unquantized import \
+            VllmUnquantizedEmbeddingMethod
         super().__init__(*args, **kwargs)
         if isinstance(self.quant_method, UnquantizedEmbeddingMethod):
             # TODO(kyuyeunk): Cleanup process of passing mesh variable.
