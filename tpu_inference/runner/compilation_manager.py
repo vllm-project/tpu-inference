@@ -135,9 +135,15 @@ class CompilationManager:
             dummy_input_ids = self._create_dummy_tensor((num_tokens, ),
                                                         jnp.int32)
 
+            dummy_is_multimodal_multi = self._create_dummy_tensor(
+                (num_tokens, ), jnp.bool_)
+            dummy_is_multimodal_text = device_array(
+                self.runner.mesh, jnp.zeros((num_tokens, ), dtype=jnp.bool_))
+
             self._run_compilation(
                 "input_embeddings_merger",
-                self.runner.embed_input_ids_fn,
+                lambda *args: self.runner.embed_input_ids_fn(
+                    *args, is_multimodal=dummy_is_multimodal_multi),
                 self.runner.state,
                 dummy_input_ids,
                 dummy_multimodal_embeddings,
@@ -146,7 +152,8 @@ class CompilationManager:
 
             self._run_compilation(
                 "input_embeddings_merger_text_only",
-                self.runner.embed_input_ids_fn,
+                lambda *args: self.runner.embed_input_ids_fn(
+                    *args, is_multimodal=dummy_is_multimodal_text),
                 self.runner.state,
                 dummy_input_ids,
                 None,
