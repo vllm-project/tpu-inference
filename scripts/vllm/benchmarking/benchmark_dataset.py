@@ -760,11 +760,6 @@ Express your final answer as the corresponding option letter."""
                 content: list = mm_content
                 content.append({"type": "text", "text": question_text})
                 messages = [{
-                    "role":
-                    "system",
-                    "content":
-                    "Reasoning effort: low. Keep reasoning steps as short as possible and directly give the answer like A, B, C, D, etc."
-                }, {
                     "role": "user",
                     "content": content
                 }]
