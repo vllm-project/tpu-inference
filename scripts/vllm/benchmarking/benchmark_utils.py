@@ -201,12 +201,12 @@ def postprocess_text_mlperf(pred: str, target: str):
     return pred, target
 
 
-def eval_accuracy_mlperf(request_outputs: RequestFuncOutput) -> None:
+def eval_accuracy_mlperf(request_outputs: list[RequestFuncOutput]) -> None:
     """
     Evaluate the accuracy of the results of a given benchmark on the MLPerf dataset.
 
     Args:
-        request_outputs (RequestFuncOutput): The outputs of the benchmarking run.
+        request_outputs (list[RequestFuncOutput]): The outputs of the benchmarking run.
     """
     metric = evaluate.load("rouge")
     nltk.download("punkt")
@@ -376,13 +376,13 @@ def eval_accuracy_mmmu_pro(request_outputs: List[RequestFuncOutput]) -> dict:
     return result
 
 
-def eval_benchmark_dataset_result(request_outputs: RequestFuncOutput,
+def eval_benchmark_dataset_result(request_outputs: list[RequestFuncOutput],
                                   dataset_name: str) -> None:
     """
     Evaluate the accuracy of the results of a given benchmark on a given dataset.
 
     Args:
-        request_outputs (RequestFuncOutput): The outputs of the benchmarking run.
+        request_outputs (list[RequestFuncOutput]): The outputs of the benchmarking run.
         dataset_name (str): The name of the dataset that the benchmark was run on.
     """
     if dataset_name == "mmlu":
