@@ -52,7 +52,6 @@ printf "[INFO] %-25s = %s\n" "BM_LOG" "$BM_LOG"
 printf "[INFO] %-25s = %s\n" "DOCKER_ARTIFACT_FOLDER" "$DOCKER_ARTIFACT_FOLDER"
 
 echo "model: $MODEL"
-echo
 
 # Helper function to check if a value is in an array
 contains_element () {
@@ -74,10 +73,6 @@ if contains_element "$DATASET" "${LM_EVAL_DATASETS[@]}"; then
   echo "Finished running $DATASET benchmark."
   exit 0
 fi
-
-
-# create a log and profile folder
-mkdir -p "$PROFILE_FOLDER"
 
 if [ "$DATASET" = "sonnet" ]; then
   echo "Create sonnet_4x.txt"
