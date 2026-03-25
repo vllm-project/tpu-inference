@@ -146,3 +146,51 @@ def test_wrap_embed_multimodal_func_with_kwargs_fallback():
         
         actual_call_kwargs = call_kwargs["kwargs"]["call_kwargs"]
         assert "image_grid_thw" in actual_call_kwargs
+
+
+def test_wrap_embed_input_ids_func_for_qwen3vl():
+    """
+    Test that wrap_embed_input_ids_func sets always_wrap_list to True
+    for Qwen3VL architectures and wraps single tensors in a list.
+    """
+    mock_wrapper = MagicMock()
+    mock_wrapper.vllm_config.model_config.is_multimodal_model = True
+    
+    # Set architecture to Qwen3VLForConditionalGeneration
+    mock_wrapper.vllm_config.model_config.hf_config.architectures = ["Qwen3VLForConditionalGeneration"]
+
+    class MockInnerModel:
+        def embed_input_ids(self, input_ids, mm_embeds, **kwargs):
+            pass
+
+    mock_inner = MockInnerModel()
+    mock_runner = MagicMock()
+    mock_runner.vllm_model = mock_inner
+    mock_wrapper.model = mock_runner
+
+    embed_input_ids_func = VllmModelWrapper.wrap_embed_input_ids_func(mock_wrapper)
+
+    with patch("torchax.default_env"), \
+         patch("torch.func.functional_call") as mock_functional_call, \
+         patch("tpu_inference.models.vllm.vllm_model_wrapper.torch_view") as mock_torch_view:
+
+        mock_torch_view.side_effect = lambda x: x
+
+        params_and_buffers = {}
+        input_ids = jax.numpy.zeros((10, ), dtype=jax.numpy.int32)
+        mm_embeds = jax.numpy.zeros((10, 512))
+
+        embed_input_ids_func(
+            params_and_buffers,
+            input_ids,
+            mm_embeds,
+            is_multimodal=jax.numpy.zeros((10, ), dtype=jax.numpy.bool_)
+        )
+
+        mock_functional_call.assert_called_once()
+        _, call_kwargs = mock_functional_call.call_args
+        
+        actual_call_args = call_kwargs["kwargs"]["call_args"]
+        # Verify mm_embeds (second argument) was wrapped in a list
+        assert isinstance(actual_call_args[1], list)
+        assert len(actual_call_args[1]) == 1

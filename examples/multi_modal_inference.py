@@ -8,16 +8,17 @@ For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 
 Example Command:
-python examples/multi_modal_inference.py \
+python3 examples/multi_modal_inference.py \
   --model Qwen/Qwen2.5-VL-3B-Instruct \
   --tensor-parallel-size 1 \
   --num-prompts 1
 
 Example command to test multiple images  
-python examples/multi_modal_inference.py \
+python3 examples/multi_modal_inference.py \
   --model Qwen/Qwen3-VL-8B-Instruct \
   --test-multi-image \
-  --max-model-len 8192
+  --max-model-len 8192 \
+  --gpu-memory-utilization 0.9
 """
 
 from contextlib import contextmanager
@@ -184,7 +185,7 @@ def parse_args():
     parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
-        default=0.5,
+        default=0.85,
         help="GPU memory utilization",
     )
 
