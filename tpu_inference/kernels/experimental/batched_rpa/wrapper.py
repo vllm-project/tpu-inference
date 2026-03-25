@@ -224,8 +224,8 @@ def get_vmem_estimate_bytes(
     )
     kv_bytes = np.prod(kv_vmem_shape) * jnp.dtype(kv_dtype).itemsize
 
-    return m_bytes + l_bytes + acc_bytes + (n_buffer +
-                                            2) * q_bytes + n_buffer * kv_bytes
+    return (m_bytes + l_bytes + acc_bytes + (n_buffer + 2) * q_bytes +
+            n_buffer * kv_bytes)
 
 
 # Expect to run this validation during compile time.
@@ -566,8 +566,8 @@ def ragged_paged_attention(
         if isinstance(batch_size, tuple):
             kernel_batch_size = batch_size[idx]
         else:
-            kernel_batch_size = batch_size if batch_size is not None else block_sizes[
-                "batch_size"]
+            kernel_batch_size = (batch_size if batch_size is not None else
+                                 block_sizes["batch_size"])
 
         if isinstance(bq_sz, tuple):
             kernel_bq_sz = bq_sz[idx]
@@ -617,6 +617,7 @@ def ragged_paged_attention(
             case=case,
             n_buffer=n_buffer,
             out_dtype=out_dtype,
+            fuse_accum=True if case == schedule.RpaCase.DECODE else False,
         )
         rpa_schedule = schedule.generate_rpa_metadata(cu_q_lens,
                                                       kv_lens,

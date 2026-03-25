@@ -287,6 +287,55 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
             l_scratch[...] = l_next
             acc_scratch[...] = o_next
 
+            def strided_store(ref, start, sz, step, val):
+                assert schedule_lib.get_dtype_packing(ref.dtype) == 1
+                assert ref.dtype == val.dtype
+                assert ref.shape == val.shape
+                assert len(ref.shape) == 2
+                r, l = ref.shape  # noqa
+                assert l % 128 == 0
+                folds = l // 128
+                ref = ref.reshape(r * folds, 128)
+                start *= folds
+                sz *= folds
+                step *= folds
+                assert sz % step == 0
+                for i in range(folds):
+                    ref[pl.ds(start + i, sz // step,
+                              step)] = val[:, i * 128:(i + 1) * 128]
+
+            @pl.loop(0, config.batch_size, unroll=True)
+            def _for_each_row(b):
+
+                def _compute():
+                    o_ = acc_scratch[b]
+                    l_ = l_scratch[b]
+                    l_ = jnp.tile(l_, (o_.shape[-1] // l_.shape[-1], ))
+                    if config.out_dtype == jnp.float32:
+                        result = lax.div(o_, l_)
+                    else:
+                        result = (o_ * pl.reciprocal(l_, approx=True) if
+                                  (l_.dtype == jnp.float32
+                                   and config.out_dtype != jnp.float32) else
+                                  lax.div(o_, l_)).astype(config.out_dtype)
+
+                    out = result.astype(o_vref.dtype)
+                    out_ref = (o_vref.at[b].bitcast(jnp.int32).reshape(
+                        config.num_kv_heads * config.bq_sz *
+                        (config.num_q_heads_per_kv_head // q_packing),
+                        config.head_dim,
+                    ))
+                    out = pltpu.bitcast(out,
+                                        out_ref.dtype).reshape(out_ref.shape)
+                    strided_store(out_ref, 0, out_ref.shape[0], 1, out)
+
+                if not config.fuse_accum:
+                    idx = step * config.batch_size + b
+                    is_last_k = schedule.is_last_k[idx] == 1
+                    jax.lax.cond(is_last_k, _compute, lambda: None)
+                else:
+                    _compute()
+
         kv_cache_spec = pl.BlockSpec(
             block_shape=kv_vmem_shape,
             memory_space=pltpu.VMEM,
@@ -334,7 +383,6 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
             spec=o_spec,
             source_memory_space=o_hbm_ref,
             batch_size=config.batch_size,
-            config=config,
             buffer_count=2,
             use_lookahead=False,
         )
@@ -389,7 +437,7 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
             pipeline_func(
                 (o_hbm_alias_q_hbm_ref, schedule),
                 (kv_cache_hbm_ref, new_kv_hbm_ref, schedule, page_indices_ref),
-                (o_hbm_ref, schedule, acc_scratch, l_scratch),
+                (o_hbm_ref, schedule),
                 allocations=final_allocs,
             )
 
@@ -469,7 +517,7 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
     scope_name = f"RPA{config.case.symbol}-p{config.page_size}-b{config.batch_size}-q{config.bq_sz}-k{config.bkv_sz}"
     if config.sliding_window:
         scope_name += f"-sw{config.sliding_window}"
-    return pl.pallas_call(
+    _kernel = pl.pallas_call(
         ragged_paged_attention_pipeline,
         out_shape=out_shape,
         grid_spec=pltpu.PrefetchScalarGridSpec(
@@ -490,3 +538,35 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
         input_output_aliases=input_output_aliases,
         name=scope_name,
     )
+
+    def _wrap_kernel_in_hbm_constraints(
+        cu_q_lens_ref,
+        kv_lens_ref,
+        page_indices_ref,
+        schedule_hbm_ref,
+        o_hbm_alias_q_hbm_ref,
+        new_kv_hbm_ref,
+        kv_cache_hbm_ref,
+    ):
+
+        def _constrain_hbm(path, x):
+            for p in path:
+                key = getattr(p, "name", getattr(p, "key", None))
+                if key == "actual_steps":
+                    return x
+            return pltpu.with_memory_space_constraint(x, pltpu.HBM)
+
+        constrained_schedule_hbm_ref = jax.tree_util.tree_map_with_path(
+            _constrain_hbm, schedule_hbm_ref)
+        return _kernel(
+            cu_q_lens_ref,
+            kv_lens_ref,
+            page_indices_ref,
+            constrained_schedule_hbm_ref,
+            pltpu.with_memory_space_constraint(o_hbm_alias_q_hbm_ref,
+                                               pltpu.HBM),
+            pltpu.with_memory_space_constraint(new_kv_hbm_ref, pltpu.HBM),
+            pltpu.with_memory_space_constraint(kv_cache_hbm_ref, pltpu.HBM),
+        )
+
+    return _wrap_kernel_in_hbm_constraints

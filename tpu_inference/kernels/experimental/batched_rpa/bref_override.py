@@ -16,7 +16,6 @@ import dataclasses
 from typing import Any
 
 import jax
-import jax.experimental.pallas.tpu as pltpu
 import jax.numpy as jnp
 from jax import tree_util
 from jax._src.pallas.mosaic import pipeline
@@ -259,19 +258,11 @@ class BatchingORef(pipeline.BufferedRef):
     """Handles normalizing and storing the final attention output."""
 
     batch_size: int = dataclasses.field(metadata={"static": True})
-    config: rpa_schedule.RPAConfig = dataclasses.field(
-        metadata={"static": True})
 
     @classmethod
-    def from_ref(
-        cls,
-        ref: pipeline.BufferedRef,
-        batch_size: int,
-        config: rpa_schedule.RPAConfig,
-    ):
+    def from_ref(cls, ref: pipeline.BufferedRef, batch_size: int):
         return cls(
             batch_size=batch_size,
-            config=config,
             **{
                 f.name: getattr(ref, f.name)
                 for f in dataclasses.fields(pipeline.BufferedRef)
@@ -284,7 +275,6 @@ class BatchingORef(pipeline.BufferedRef):
         spec: pl.BlockSpec,
         source_memory_space: jax.Array,
         batch_size: int,
-        config: rpa_schedule.RPAConfig,
         buffer_count: int = 2,
         use_lookahead: bool = False,
     ):
@@ -297,82 +287,44 @@ class BatchingORef(pipeline.BufferedRef):
             use_lookahead=use_lookahead,
             source_memory_space=source_memory_space,
         )
-        return cls.from_ref(standard_ref, batch_size=batch_size, config=config)
+        return cls.from_ref(standard_ref, batch_size=batch_size)
 
     def copy_out(
         self,
-        dst_ref: tuple[jax.Array, rpa_schedule.RPASchedule, jax.Array,
-                       jax.Array],
+        dst_ref: tuple[jax.Array, rpa_schedule.RPASchedule],
         grid_indices: tuple[int, ...],
     ):
-        # dst_ref: (o_hbm, schedule, acc_scratch, l_scratch)
-        o_hbm, schedule, acc_scratch, l_scratch = dst_ref
+        # dst_ref: (o_hbm, schedule)
+        o_hbm, schedule = dst_ref
         slot = self.current_copy_out_slot
         sem = self.sem_sends.at[slot]
         vmem_src = self.window_ref.at[slot]
         block_idx = grid_indices[0]
-        config = self.config
-        q_packing = rpa_schedule.get_dtype_packing(config.q_dtype)
 
-        def strided_store(ref, start, sz, step, val):
-            assert rpa_schedule.get_dtype_packing(ref.dtype) == 1
-            assert ref.dtype == val.dtype
-            assert ref.shape == val.shape
-            assert len(ref.shape) == 2
-            r, l = ref.shape  # noqa
-            assert l % 128 == 0
-            folds = l // 128
-            ref = ref.reshape(r * folds, 128)
-            start *= folds
-            sz *= folds
-            step *= folds
-            assert sz % step == 0
-            for i in range(folds):
-                ref[pl.ds(start + i, sz // step,
-                          step)] = val[:, i * 128:(i + 1) * 128]
-
+        # is_last_k stride: batch size
+        dma_list = []
         for b in range(self.batch_size):
             idx = block_idx * self.batch_size + b
             is_last_k = schedule.is_last_k[idx]
             q_src, q_sz = schedule.get_dma_q(block_idx, b)
+            q_sz = jax.lax.select(is_last_k == 1, q_sz, 0)
+            dma_list.append((q_src, q_sz, b))
 
-            def _finalize_and_copy():
-                o = acc_scratch[b]
-                l = l_scratch[b]
-                l = jnp.tile(l, (o.shape[-1] // l.shape[-1], ))
-                if config.out_dtype == jnp.float32:
-                    result = jax.lax.div(o, l)
-                else:
-                    result = (o * pl.reciprocal(l, approx=True) if
-                              (l.dtype == jnp.float32
-                               and config.out_dtype != jnp.float32) else
-                              jax.lax.div(o, l)).astype(config.out_dtype)
-
-                out = result.astype(vmem_src.dtype)
-                out_ref = (vmem_src.at[b].bitcast(jnp.int32).reshape(
-                    config.num_kv_heads * config.bq_sz *
-                    (config.num_q_heads_per_kv_head // q_packing),
-                    config.head_dim,
-                ))
-                out = pltpu.bitcast(out, out_ref.dtype).reshape(out_ref.shape)
-                strided_store(out_ref, 0, out_ref.shape[0], 1, out)
-
-                tpu_primitives.make_async_copy(
-                    vmem_src.at[b, :, pl.ds(0, q_sz)],
-                    o_hbm.at[:, pl.ds(q_src, q_sz)],
-                    sem,
-                ).start()
-
-            jax.lax.cond(is_last_k == 1, _finalize_and_copy, lambda: None)
+        for i in range(len(dma_list)):
+            q_src, q_sz, b = dma_list[i]
+            tpu_primitives.make_async_copy(
+                vmem_src.at[b, :, pl.ds(0, q_sz)],
+                o_hbm.at[:, pl.ds(q_src, q_sz)],
+                sem,
+            ).start()
 
     def wait_out(
         self,
-        dst_ref: tuple[jax.Array, rpa_schedule.RPASchedule, jax.Array,
-                       jax.Array],
+        dst_ref: tuple[jax.Array, rpa_schedule.RPASchedule],
         grid_indices: tuple[int, ...],
     ):
-        # dst_ref: (o_hbm, schedule, acc_scratch, l_scratch)
-        o_hbm, schedule, _, _ = dst_ref
+        # dst_ref: (o_hbm, schedule)
+        o_hbm, schedule = dst_ref
         slot = self.current_wait_out_slot
         sem = self.sem_sends.at[slot]
         block_idx = grid_indices[0]

@@ -85,6 +85,7 @@ class RPAConfig:
     case: RpaCase = RpaCase.MIXED
     n_buffer: int = 2
     out_dtype: Any = jnp.bfloat16
+    fuse_accum: bool = False
 
     @property
     def bkv_p_cache(self) -> int:
