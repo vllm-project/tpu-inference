@@ -230,7 +230,7 @@ class Llama4WeightLoader(BaseWeightLoader):
                 )
 
             mapped_model_weight.value = shard_put(loaded_weight,
-                                                  mapped_model_weight.sharding,
+                                                  mapped_model_weight.out_sharding,
                                                   mesh=model_for_loading.mesh)
             logger.debug(
                 f"{split_loaded_name}: {loaded_weight.shape}  -->  {mapped_name}: {mapped_model_weight.value.shape}"
@@ -327,6 +327,9 @@ class Llama4WeightLoader(BaseWeightLoader):
                     continue
                 model_weight = get_param(model_params, mapped_name)
 
+                target_sharding = model_weight.out_sharding
+                print(f"--- DEBUG: Layer {mapped_name} has sharding: {target_sharding} ---")
+
                 cast_type = model_weight.value.dtype
                 if not isinstance(loaded_weight, jax.Array):
                     logger.debug(
@@ -350,7 +353,7 @@ class Llama4WeightLoader(BaseWeightLoader):
                     f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
                 )
                 model_weight.value = shard_put(loaded_weight,
-                                               model_weight.sharding,
+                                               model_weight.out_sharding,
                                                mesh=model_for_loading.mesh)
                 if self.is_verbose:
                     print_param_info(model_weight, loaded_name)
@@ -384,9 +387,12 @@ class Llama4WeightLoader(BaseWeightLoader):
                                 f"does not match model shape for {loaded_name}: {model_weight.array.scale.value.shape}!"
                             )
 
+                        target_sharding = model_weight.array.scale.out_sharding
+                        print(f"--- DEBUG: Layer {loaded_name} has sharding: {target_sharding} ---")
+
                         model_weight.array.scale.value = shard_put(
                             aggregated_weight,
-                            model_weight.array.scale.sharding,
+                            model_weight.array.scale.out_sharding,
                             mesh=model_for_loading.mesh)
 
                     elif aggregated_weight.itemsize < 2:  # check model weight elem nbits < 16
@@ -397,9 +403,12 @@ class Llama4WeightLoader(BaseWeightLoader):
                                 f"does not match model shape for {loaded_name}: {model_weight.array.qvalue.value.shape}!"
                             )
 
+                        target_sharding = model_weight.array.qvalue.out_sharding
+                        print(f"--- DEBUG: Layer {loaded_name} has sharding: {target_sharding} ---")
+
                         model_weight.array.qvalue.value = shard_put(
                             aggregated_weight,
-                            model_weight.array.qvalue.sharding,
+                            model_weight.array.qvalue.out_sharding,
                             mesh=model_for_loading.mesh)
 
                     logger.debug(
@@ -485,8 +494,7 @@ class Llama4ForCausalLM(nnx.Module):
             self.embedder = Embedder(vocab_size=self.vocab_size,
                                      hidden_size=self.hidden_size,
                                      dtype=dtype,
-                                     vd_sharding=(('data', 'expert', 'model'),
-                                                  None),
+                                     vd_sharding=P('model', None),
                                      rngs=self.rng,
                                      random_init=force_random_weights)
         else:
@@ -643,10 +651,8 @@ class Llama4ForCausalLM(nnx.Module):
                                   hidden_size=self.hidden_size,
                                   dtype=dtype,
                                   rngs=self.rng,
-                                  vd_sharding=(('data', 'expert', 'model'),
-                                               None),
-                                  dv_sharding=(None, ('data', 'expert',
-                                                      'model')),
+                                  vd_sharding=P('model', None),
+                                  dv_sharding=P(None, 'model'),
                                   random_init=force_random_weights)
         else:
             self.final_norm = PPMissingLayer()
