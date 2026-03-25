@@ -11,6 +11,35 @@ from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 
+# TODO(weiyulin): These dummy ops bypass vLLM's eager CUDA-specific imports during 
+# Sequence Parallelism initialization. Our TPU SP implementation (see 
+# vllmQuantLinearConfig) is independent of upstream compilation logic. 
+# Revisit to see if these imports can be guarded or disabled for TPU.
+
+try:
+    import vllm._C  # noqa: F401
+except ImportError:
+    # Ensure the _C namespace exists
+    if not hasattr(torch.ops, "_C"):
+        torch.library.define("_C::dummy", "() -> ()")
+
+    def _register_dummy(name: str, schema: str):
+        if not hasattr(torch.ops._C, name):
+            torch.library.define(f"_C::{name}", schema)
+            torch.library.impl(f"_C::{name}", "default", lambda *args, **kwargs: None)
+
+    # Register the ops vLLM expects
+    _register_dummy("rms_norm", "(Tensor input, Tensor weight, float epsilon) -> Tensor")
+    _register_dummy("fused_add_rms_norm", "(Tensor input, Tensor residual, Tensor weight, float epsilon) -> (Tensor, Tensor)")
+    _register_dummy("rotary_embedding", "(Tensor positions, Tensor query, Tensor key, int head_size, Tensor cos_sin_cache, bool is_neox) -> ()")
+    _register_dummy("static_scaled_fp8_quant", "(Tensor input, Tensor scale) -> Tensor")
+    _register_dummy("dynamic_scaled_fp8_quant", "(Tensor input, Tensor scale) -> Tensor")
+    _register_dummy("dynamic_per_token_scaled_fp8_quant", "(Tensor input, Tensor scale) -> Tensor")
+    _register_dummy("silu_and_mul", "(Tensor input) -> Tensor")
+    _register_dummy("rms_norm_static_fp8_quant", "(Tensor input, Tensor weight, Tensor scale, float epsilon) -> Tensor")
+    _register_dummy("fused_add_rms_norm_static_fp8_quant", "(Tensor input, Tensor residual, Tensor weight, Tensor scale, float epsilon) -> (Tensor, Tensor)")
+    _register_dummy("rms_norm_dynamic_per_token_quant", "(Tensor input, Tensor weight, Tensor scale, float epsilon) -> Tensor")
+
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.config.cache import BlockSize
