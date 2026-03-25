@@ -29,7 +29,7 @@ from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 
 from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import t2j, to_jax_dtype
+from tpu_inference.utils import t2j
 
 P = PartitionSpec
 
@@ -92,9 +92,25 @@ def _tensor_is_in_cpu(tensor: torch.tensor) -> bool:
 def _convert_to_torchax_and_shard(tensor: torch.Tensor,
                                   sharding: NamedSharding) -> torch.Tensor:
     if vllm_envs.VLLM_TPU_USING_PATHWAYS and isinstance(tensor, torch.Tensor):
-        np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
-        dtype = to_jax_dtype(tensor.dtype)
-        return torch_view(jax.device_put(np_tensor, sharding).astype(dtype))
+        from tpu_inference.layers.vllm.quantization.unquantized import (
+            _use_dummy_weights, _torch_to_jax_via_colocated,
+            _torch_to_jax_via_colocated_file)
+        if _use_dummy_weights():
+            # Dummy path: generate random values on colocated CPUs.
+            tensor_shape = tuple(tensor.shape)
+            tensor_dtype = tensor.dtype
+            tensor.untyped_storage().resize_(0)
+            return torch_view(_torch_to_jax_via_colocated_file(
+                file_path="<dummy>",
+                tensor_name="<embedding>",
+                tensor_dtype=tensor_dtype,
+                tpu_sharding=sharding,
+                tensor_shape=tensor_shape,
+                use_dummy=True,
+            ))
+        else:
+            # Real weights: send tensor data through the head.
+            return torch_view(_torch_to_jax_via_colocated(tensor, sharding))
     else:
         if isinstance(tensor, torchax.tensor.Tensor):
             tensor = jax_view(tensor)

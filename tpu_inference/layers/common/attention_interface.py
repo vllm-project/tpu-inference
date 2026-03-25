@@ -34,7 +34,7 @@ from tpu_inference.kernels.mla.v2.kernel import mla_ragged_paged_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_megacore
+from tpu_inference.utils import get_megacore, get_mesh_shape_product
 
 logger = init_logger(__name__)
 
@@ -344,8 +344,8 @@ def sharded_ragged_paged_attention(
     # Handle GQA/MQA where num_kv_heads < tp_size
     # We replicate KV heads to match tp_size so that we can shard them evenly.
     # TODO (ranlihao): This is not performant and introduces extra overhead during inference. We need to handle this during weight loading
-    if ShardingAxisName.ATTN_HEAD in mesh.shape:
-        tp_size = mesh.shape[ShardingAxisName.ATTN_HEAD]
+    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
+    if tp_size > 1:
         num_kv_heads = k.shape[1]
         if num_kv_heads < tp_size:
             if tp_size % num_kv_heads != 0:
