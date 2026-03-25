@@ -491,9 +491,9 @@ def ragged_paged_attention(
 ):
 
     # Override default for testing purposes.
-    bq_sz = (1, 128)
+    bq_sz = (1, 512)
     bkv_sz = (2048, 512)
-    batch_size = (8, 2)
+    batch_size = (8, 3)
     n_buffer = 3
 
     static_validate_inputs(
