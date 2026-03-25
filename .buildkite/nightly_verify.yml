@@ -91,7 +91,7 @@ steps:
        - bash .buildkite/scripts/commit_verified_commit_hashes.sh
 
    - label: "Upload pytest duration artifact"
-     if: build.env("NIGHTLY") == "1"     
+     # if: build.env("NIGHTLY") == "1"     
      key: unit_test_duration
      agents:
        queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}

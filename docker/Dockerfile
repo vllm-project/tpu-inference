@@ -53,12 +53,6 @@ RUN --mount=type=cache,target=/root/.cache/pip VLLM_TARGET_DEVICE="tpu" pip inst
 
 # Install test dependencies
 RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install -e tests/vllm_test_utils
-#RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install \
-#    git+https://github.com/thuml/depyf.git \
-#    pytest-asyncio \
-#    "lm-eval[api]==0.4.9.2" \
-#    pytest-cov \
-#    tblib
 
 # Install tpu_inference
 WORKDIR /workspace/tpu_inference
