@@ -239,8 +239,8 @@ def extract_abcd_gpqa(text: str, possible_choices: str = 'ABCD') -> str:
 
     patterns = [
         # "Answer: (C)" or "Answers: (B)"
-        re.compile(r'(?ix)\bAnswer[s]?\b\s*[:\-–]?\s*\(\s*(' +
-                   possible_choices + r')\s*\)'),
+        re.compile(r'(?ix)\bAnswer[s]?\b\s*[:\-–]?\s*\(\s*([' +
+                   possible_choices + r'])\s*\)'),
         # "Answer: C" or "Answers – D"
         re.compile(r'(?ix)\bAnswer[s]?\b\s*[:\-–]?\s*([' + possible_choices +
                    r'])\b'),
