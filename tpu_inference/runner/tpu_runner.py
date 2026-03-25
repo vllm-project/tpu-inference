@@ -776,7 +776,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         with open(self.vllm_config.additional_config["metrics_path"], 'a') as f:
             shard_decode_lens = [[] for _ in range(self.dp_size)]
             shard_prefill_lens = [[] for _ in range(self.dp_size)]
-            shard_context_lens = [[] for _ in range(self.dp_size)]
+            shard_decode_context_lens = [[] for _ in range(self.dp_size)]
+            shard_prefill_context_lens = [[] for _ in range(self.dp_size)]
             shard_total_tokens = [0 for _ in range(self.dp_size)]
 
             for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
@@ -786,17 +787,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 
                 # Get context length (tokens already in cache)
                 context_len = self.requests[req_id].num_computed_tokens
-                shard_context_lens[rank].append(int(context_len))
                 
                 if num_tokens_int == 1:
                     shard_decode_lens[rank].append(num_tokens_int)
+                    shard_decode_context_lens[rank].append(int(context_len))
                 else:
                     shard_prefill_lens[rank].append(num_tokens_int)
+                    shard_prefill_context_lens[rank].append(int(context_len))
 
             metrics = {
                 "shard_decode_lens": shard_decode_lens,
                 "shard_prefill_lens": shard_prefill_lens,
-                "shard_context_lens": shard_context_lens,
+                "shard_decode_context_lens": shard_decode_context_lens,
+                "shard_prefill_context_lens": shard_prefill_context_lens,
                 "shard_total_tokens": shard_total_tokens,
                 "total_decode_reqs": sum(len(shard) for shard in shard_decode_lens),
                 "total_prefill_reqs": sum(len(shard) for shard in shard_prefill_lens),
