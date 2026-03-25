@@ -73,7 +73,7 @@ def prepare_inputs(
     aligned_head_dim = align_to(actual_head_dim, 128)
 
     # queries: (T, H, D) -> (T, H_kv, G, D)
-    q_hbm = (jnp.pad(
+    o_hbm_alias_q_hbm = (jnp.pad(
         q.reshape(
             total_q_tokens,
             actual_num_kv_heads,
@@ -114,7 +114,7 @@ def prepare_inputs(
         kv_packing,
         aligned_head_dim,
     )
-    return q_hbm, new_kv_hbm
+    return o_hbm_alias_q_hbm, new_kv_hbm
 
 
 def prepare_outputs(
@@ -221,9 +221,11 @@ def get_vmem_estimate_bytes(
         bq_sz * aligned_num_q_heads_per_kv_head,
         aligned_head_dim,
     )
-    m_bytes = np.prod(m_shape) * 4
-    l_bytes = np.prod(l_shape) * 4
-    acc_bytes = np.prod(acc_shape) * 4
+    out_dtype = jnp.float32 if q_dtype == jnp.float32 else jnp.bfloat16
+    out_dtype_itemsize = jnp.dtype(out_dtype).itemsize
+    m_bytes = np.prod(m_shape) * out_dtype_itemsize
+    l_bytes = np.prod(l_shape) * out_dtype_itemsize
+    acc_bytes = np.prod(acc_shape) * out_dtype_itemsize
 
     q_vmem_shape = (
         batch_size,
@@ -235,7 +237,7 @@ def get_vmem_estimate_bytes(
     )
     q_bytes = np.prod(q_vmem_shape) * jnp.dtype(q_dtype).itemsize
 
-    bkv_stride = (num_kv_heads * 2) // kv_packing
+    bkv_stride = align_to(num_kv_heads * 2, kv_packing) // kv_packing
     if schedule.has_bank_conflicts(bkv_stride):
         bkv_stride += 1
     kv_vmem_shape = (
@@ -247,8 +249,8 @@ def get_vmem_estimate_bytes(
     )
     kv_bytes = np.prod(kv_vmem_shape) * jnp.dtype(kv_dtype).itemsize
 
-    return m_bytes + l_bytes + acc_bytes + (n_buffer +
-                                            2) * q_bytes + n_buffer * kv_bytes
+    return (m_bytes + l_bytes + acc_bytes + (n_buffer + 2) * q_bytes +
+            n_buffer * kv_bytes)
 
 
 # Expect to run this validation during compile time.
@@ -275,11 +277,13 @@ def static_validate_inputs(
     # Kernel optimization params.
     chunk_prefill_size: int | None = None,
     # Kernel tuning params.
-    bq_sz: int | None = None,
-    bkv_sz: int | None = None,
+    bq_sz: int | tuple[int, int] | None = None,
+    bkv_sz: int | tuple[int, int] | None = None,
     vmem_limit_bytes: int | None = None,
     # Debug params.
     debug_mode: bool = False,
+    use_causal_mask: bool = True,
+    n_buffer: int | tuple[int, int] = 2,
 ):
     """Validate inputs to the RPA kernel statically."""
     q, k, v = queries, keys, values
@@ -386,15 +390,37 @@ def static_validate_inputs(
     if chunk_prefill_size is not None and chunk_prefill_size <= 0:
         raise ValueError(f"{chunk_prefill_size=} must be positive.")
     if bkv_sz is not None:
-        if bkv_sz <= 0:
-            raise ValueError(f"{bkv_sz=} must be positive.")
-        if bkv_sz % page_size != 0:
-            raise ValueError(f"{bkv_sz=} must be divisible by {page_size=}.")
+        if isinstance(bkv_sz, tuple):
+            for bkv in bkv_sz:
+                if bkv <= 0:
+                    raise ValueError(f"{bkv_sz=} must be positive.")
+                if bkv % page_size != 0:
+                    raise ValueError(
+                        f"{bkv_sz=} must be divisible by {page_size=}.")
+        else:
+            if bkv_sz <= 0:
+                raise ValueError(f"{bkv_sz=} must be positive.")
+            if bkv_sz % page_size != 0:
+                raise ValueError(
+                    f"{bkv_sz=} must be divisible by {page_size=}.")
     if bq_sz is not None:
-        if bq_sz <= 0:
-            raise ValueError(f"{bq_sz=} must be positive.")
+        if isinstance(bq_sz, tuple):
+            for bq in bq_sz:
+                if bq <= 0:
+                    raise ValueError(f"{bq_sz=} must be positive.")
+        else:
+            if bq_sz <= 0:
+                raise ValueError(f"{bq_sz=} must be positive.")
     if vmem_limit_bytes is not None and vmem_limit_bytes <= 0:
         raise ValueError(f"{vmem_limit_bytes=} must be positive.")
+    if n_buffer is not None:
+        if isinstance(n_buffer, tuple):
+            for n in n_buffer:
+                if n <= 0:
+                    raise ValueError(f"{n_buffer=} must be positive.")
+        else:
+            if n_buffer <= 0:
+                raise ValueError(f"{n_buffer=} must be positive.")
 
     # No constraints for the following inputs.
     del sm_scale
@@ -432,12 +458,14 @@ def get_default_block_sizes(
     )
     return {
         "bq_sz": 1,
-        "bkv_sz": 2048,
-        "batch_size": 6,
+        "bkv_sz": 2304,
+        "batch_size": 8,
+        "n_buffer": 3
     }, {
-        "bq_sz": 256,
+        "bq_sz": 512,
         "bkv_sz": 512,
-        "batch_size": 1,
+        "batch_size": 3,
+        "n_buffer": 2
     }
 
 
@@ -461,6 +489,8 @@ def get_default_block_sizes(
         "debug_mode",
         "m_block_sizes",
         "n_buffer",
+        "out_dtype",
+        "use_causal_mask",
     ),
     donate_argnames=("queries", "keys", "values", "kv_cache"),
 )
@@ -482,16 +512,18 @@ def ragged_paged_attention(
     k_scale: float | None = None,
     v_scale: float | None = None,
     chunk_prefill_size: int | None = None,
-    bq_sz: int | None = None,
-    bkv_sz: int | None = None,
+    bq_sz: int | tuple[int, int] | None = None,
+    bkv_sz: int | tuple[int, int] | None = None,
     # obsolete, for benchmarking backwards compatibility.
     bq_csz: int | None = None,
     bkv_csz: int | None = None,
-    batch_size: int | None = None,
+    batch_size: int | tuple[int, int] | None = None,
     vmem_limit_bytes: int | None = None,
     debug_mode: bool = False,
     m_block_sizes: tuple[int, int, int, int] | None = None,
-    n_buffer: int = 2,
+    n_buffer: int | tuple[int, int] = 2,
+    out_dtype: Any | None = None,
+    use_causal_mask: bool = True,
 ):
     static_validate_inputs(
         queries,
@@ -514,9 +546,12 @@ def ragged_paged_attention(
         bkv_sz=bkv_sz,
         vmem_limit_bytes=vmem_limit_bytes,
         debug_mode=debug_mode,
+        n_buffer=n_buffer,
     )
     if mask_value is None:
         mask_value = DEFAULT_MASK_VALUE
+    if out_dtype is None:
+        out_dtype = jnp.float32 if queries.dtype == jnp.float32 else jnp.bfloat16
 
     max_num_seqs = kv_lens.shape[0]
     total_num_pages = kv_cache.shape[0]
@@ -529,16 +564,15 @@ def ragged_paged_attention(
     total_q_tokens = queries.shape[0]
 
     num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
-    q_hbm, new_kv_hbm = prepare_inputs(queries, keys, values, queries.dtype,
-                                       kv_cache.dtype)
-    o_hbm = jnp.zeros_like(q_hbm)
-    _, _, q_per_kv_packed, q_packing, aligned_head_dim = q_hbm.shape
+    o_hbm_alias_q_hbm, new_kv_hbm = prepare_inputs(queries, keys, values,
+                                                   queries.dtype,
+                                                   kv_cache.dtype)
+    _, _, q_per_kv_packed, q_packing, aligned_head_dim = o_hbm_alias_q_hbm.shape
     aligned_num_q_heads_per_kv_head = q_per_kv_packed * q_packing
 
     def run_rpa_kernel(
         case: schedule.RpaCase,
-        q_hbm,
-        o_hbm,
+        o_hbm_alias_q_hbm,
         kv_cache,
     ):
         decode_block_sizes, prefill_block_sizes = get_default_block_sizes(
@@ -554,12 +588,32 @@ def ragged_paged_attention(
         )
         if case == schedule.RpaCase.DECODE:
             block_sizes = decode_block_sizes
+            idx = 0
         else:
             block_sizes = prefill_block_sizes
-        kernel_batch_size = (batch_size if batch_size is not None else
-                             block_sizes["batch_size"])
-        kernel_bq_sz = bq_sz if bq_sz is not None else block_sizes["bq_sz"]
-        kernel_bkv_sz = bkv_sz if bkv_sz is not None else block_sizes["bkv_sz"]
+            idx = 1
+
+        if isinstance(batch_size, tuple):
+            kernel_batch_size = batch_size[idx]
+        else:
+            kernel_batch_size = (batch_size if batch_size is not None else
+                                 block_sizes["batch_size"])
+
+        if isinstance(bq_sz, tuple):
+            kernel_bq_sz = bq_sz[idx]
+        else:
+            kernel_bq_sz = bq_sz if bq_sz is not None else block_sizes["bq_sz"]
+
+        if isinstance(bkv_sz, tuple):
+            kernel_bkv_sz = bkv_sz[idx]
+        else:
+            kernel_bkv_sz = bkv_sz if bkv_sz is not None else block_sizes[
+                "bkv_sz"]
+
+        if isinstance(n_buffer, tuple):
+            kernel_n_buffer = n_buffer[idx]
+        else:
+            kernel_n_buffer = block_sizes["n_buffer"]
 
         max_steps_ub = _get_max_steps_ub(
             max_num_seqs,
@@ -596,46 +650,40 @@ def ragged_paged_attention(
             else pltpu.get_tpu_info().vmem_capacity_bytes,
             total_num_pages=total_num_pages,
             case=case,
-            n_buffer=n_buffer,
+            n_buffer=kernel_n_buffer,
+            out_dtype=out_dtype,
+            fuse_accum=True if case == schedule.RpaCase.DECODE else False,
+            mask_v=False if case == schedule.RpaCase.DECODE else True,
         )
+        rpa_schedule = schedule.generate_rpa_metadata(cu_q_lens,
+                                                      kv_lens,
+                                                      distribution,
+                                                      config=config)
         rpa_kernel_instance = kernel.make_rpa_kernel(config)
-        kv_packing = schedule.get_dtype_packing(kv_cache.dtype)
-        bkv_stride = (actual_num_kv_heads * 2) // kv_packing
-        if schedule.has_bank_conflicts(bkv_stride):
-            bkv_stride += 1
-        kv_vmem_shape_single = (
-            kernel_bkv_sz,
-            bkv_stride,
-            kv_packing,
-            aligned_head_dim,
-        )
-        kv_cache_zero_hbm = jnp.zeros(kv_vmem_shape_single,
-                                      dtype=kv_cache.dtype)
-        o_hbm, kv_cache = rpa_kernel_instance(
+        o_hbm_alias_q_hbm, kv_cache = rpa_kernel_instance(
             cu_q_lens,
             kv_lens,
             page_indices,
-            distribution,
-            q_hbm,
+            rpa_schedule,
+            o_hbm_alias_q_hbm,
             new_kv_hbm,
             kv_cache,
-            o_hbm,
-            kv_cache_zero_hbm,
         )
-        return o_hbm, kv_cache
+        return o_hbm_alias_q_hbm, kv_cache
 
-    o_hbm, kv_cache = run_rpa_kernel(schedule.RpaCase.DECODE, q_hbm, o_hbm,
-                                     kv_cache)
-    o_hbm, kv_cache = run_rpa_kernel(schedule.RpaCase.MIXED, q_hbm, o_hbm,
-                                     kv_cache)
+    o_hbm_alias_q_hbm, kv_cache = run_rpa_kernel(schedule.RpaCase.DECODE,
+                                                 o_hbm_alias_q_hbm, kv_cache)
+    o_hbm_alias_q_hbm, kv_cache = run_rpa_kernel(schedule.RpaCase.MIXED,
+                                                 o_hbm_alias_q_hbm, kv_cache)
 
-    # o_hbm: [kv_heads, max_tokens, q_per_kv // q_packing, q_packing, d]
-    o_hbm = prepare_outputs(o_hbm)
-    # o_hbm now: [kv_heads, max_tokens, q_per_kv, d]
+    # o_hbm_alias_q_hbm: [kv_heads, max_tokens, q_per_kv // q_packing, q_packing, d]
+    o_hbm_alias_q_hbm = prepare_outputs(o_hbm_alias_q_hbm)
+    # o_hbm_alias_q_hbm now: [kv_heads, max_tokens, q_per_kv, d]
 
     # We need to slice back to original shape if padded
-    o_hbm = (o_hbm[:, :, :num_q_heads_per_kv_head, :actual_head_dim].transpose(
-        1, 0, 2, 3).reshape(total_q_tokens, actual_num_q_heads,
-                            actual_head_dim))
+    o_hbm_alias_q_hbm = (
+        o_hbm_alias_q_hbm[:, :, :num_q_heads_per_kv_head, :actual_head_dim].
+        transpose(1, 0, 2, 3).reshape(total_q_tokens, actual_num_q_heads,
+                                      actual_head_dim))
 
-    return o_hbm, kv_cache
+    return o_hbm_alias_q_hbm, kv_cache
