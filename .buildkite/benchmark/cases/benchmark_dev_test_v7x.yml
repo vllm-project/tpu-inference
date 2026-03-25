@@ -40,7 +40,7 @@ definitions:
       queue: "tpu_v7x_2_queue"
     command: ".buildkite/benchmark/scripts/run_job.sh"
 steps:
-  - label: "Benchmark - Qwen/Qwen3-4B-datset_bench-custom-token-inlen_4096-outlen_1024 RecordId: bk-${BUILDKITE_STEP_ID}"
+  - label: "Benchmark - Qwen/Qwen3-4B-datset_bench-custom-token-inlen_4096-outlen_1024"
     <<: *base_cfg_0
     env:
       <<: *base_env_0
