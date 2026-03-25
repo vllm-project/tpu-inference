@@ -27,6 +27,10 @@ JOB_PRIORITY="$PRIORITY_BENCHMARK"
 export JOB_PRIORITY
 buildkite-agent meta-data set "JOB_PRIORITY" "$JOB_PRIORITY"
 
+TIMEZONE="America/Los_Angeles"
+JOB_REFERENCE="$(TZ="$TIMEZONE" date +%Y%m%d_%H%M%S)"
+buildkite-agent meta-data set "JOB_REFERENCE" "${JOB_REFERENCE}"
+
 upload_benchmark_pipeline() {
     VLLM_COMMIT_HASH=$(get_vllm_commit_hash)
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
@@ -36,7 +40,8 @@ upload_benchmark_pipeline() {
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     echo "Using vllm-tpu commit hash: $(buildkite-agent meta-data get "CODE_HASH")"
 
-    upload_with_priority ".buildkite/pipeline_benchmark.yml" "$JOB_PRIORITY"
+    # Upload benchmark pipelines
+    upload_with_priority .buildkite/benchmark/cases/benchmark_dev_test_v7x.yml "$JOB_PRIORITY"
 }
 
 upload_benchmark_pipeline
