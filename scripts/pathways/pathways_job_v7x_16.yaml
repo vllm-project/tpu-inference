@@ -40,25 +40,49 @@ spec:
                 _sigterm() (kill -SIGTERM $! 2>/dev/null;);
                 trap _sigterm SIGTERM;
 
-                # Patch local tpu-inference changes from GCS
-                echo "Installing tpu-inference patch from GCS..."
-                TOKEN=$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
-                curl -s -H "Authorization: Bearer ${TOKEN}" \
-                  -o /tmp/tpu-inference.tar.gz \
-                  "https://storage.googleapis.com/wenxindong-multipod-dev/patches/tpu-inference.tar.gz"
-                mkdir -p /tmp/tpu-inference && tar xzf /tmp/tpu-inference.tar.gz -C /tmp/tpu-inference
-                # Overwrite the pre-installed /workspace/tpu_inference in-place
-                # (editable installs there take precedence over site-packages)
-                if [ -d /workspace/tpu_inference ]; then
-                  cp -a /tmp/tpu-inference/. /workspace/tpu_inference/
-                fi
-                pip install --no-deps /tmp/tpu-inference
-                echo "tpu-inference patch installed."
+                (
+                  # Patch local tpu-inference changes from GCS
+                  echo "Installing tpu-inference patch from GCS..."
+                  TOKEN=$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+                  curl -s -H "Authorization: Bearer ${TOKEN}" \
+                    -o /tmp/tpu-inference.tar.gz \
+                    "https://storage.googleapis.com/wenxindong-multipod-dev/patches/tpu-inference.tar.gz"
+                  mkdir -p /tmp/tpu-inference && tar xzf /tmp/tpu-inference.tar.gz -C /tmp/tpu-inference
+                  # Overwrite the pre-installed /workspace/tpu_inference in-place
+                  # (editable installs there take precedence over site-packages)
+                  if [ -d /workspace/tpu_inference ]; then
+                    cp -a /tmp/tpu-inference/. /workspace/tpu_inference/
+                  fi
+                  pip install --no-deps /tmp/tpu-inference
+                  echo "tpu-inference patch installed."
+                
+                  # Environment variables
+                  export VLLM_ENABLE_V1_MULTIPROCESSING=0
+                  export HF_TOKEN=${HF_TOKEN}
+                  export PHASED_PROFILING_DIR=gs://wenxindong-cloud-tpu-inference-test/profiling/vllm_qwen3_235b_a22b_instruct_2507/dp32/mar20
+                  export VLLM_ENGINE_READY_TIMEOUT_S=7200
+                  export MODEL_IMPL_TYPE=vllm
+                  export NEW_MODEL_DESIGN=1
+                  # export SKIP_JAX_PRECOMPILE=1
 
-                python /tmp/tpu-inference/scripts/test_colocated_python.py
+                  # Clear potentially corrupted model streamer cache
+                  # rm -rf /root/.cache/vllm/assets/model_streamer
 
-
-                (bash run_pathways.sh) & PID=$!;
+                  # Launch vllm serve via Pathways
+                  JAX_PLATFORMS=proxy,cpu \
+                  JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 \
+                  vllm serve gs://wenxindong-cloud-tpu-inference-test/models--Qwen--Qwen3-235B-A22B-Instruct-2507/ \
+                    --tensor-parallel-size 8 \
+                    --data-parallel-size 2 \
+                    --api-server-count 1 \
+                    --max-model-len 5120 \
+                    --gpu-memory-utilization 0.95 \
+                    --no-enable-prefix-caching \
+                    --max-num-seqs 256 \
+                    --max-num-batched-tokens 4096 \
+                    --enable-expert-parallel \
+                    --load-format runai_streamer
+                ) & PID=$!;
                 while kill -0 $PID 2>/dev/null;
                     do sleep 5;
                 done;
