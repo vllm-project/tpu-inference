@@ -5,7 +5,7 @@ Key Implementation Considerations:
 - Dynamic Shapes & Continuous Batching: vLLM mixes ragged prefill and decode tokens
   dynamically. To prevent XLA from recompiling on every varying batch size, we use
   `jax.lax.scan` to iterate over flat token streams using conditional masking, allow us
-  to have a unified and statically-shaped executio
+  to have a unified and statically-shaped execution path.
 """
 
 # Copyright 2026 Google LLC
@@ -55,7 +55,7 @@ def _causal_conv1d(
 ) -> jnp.ndarray:
     """Apply causal depthwise 1D convolution.
 
-    Needed because Delta Networks uusally prepend a
+    Needed because Delta Networks usually prepend a
     sliding-window Conv1D before the recurrent mechanism to mix local token
     context efficiently. This function handles the parallelized computation
     over the entire sequence during the `prefill` phase.
