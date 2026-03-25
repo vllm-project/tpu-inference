@@ -1,4 +1,0 @@
-Device,Model,MaxNumSeqs,MaxNumBatchedTokens,TensorParallelSize,MaxModelLen,Dataset,InputLen,OutputLen,ExpectedETEL,NumPrompts,ModelTag,PrefixLen,AdditionalConfig,ExtraArgs
-tpu7x-8,deepseek-ai/DeepSeek-R1,64,1024,8,9216,random,1024,8192,43200000,512,DP_ATTENTION,0,'{"sharding": {"sharding_strategy": {"enable_dp_attention": true}}}','--kv-cache-dtype=fp8 --enable-expert-parallel --gpu-memory-utilization=0.95'
-tpu7x-8,deepseek-ai/DeepSeek-R1,64,1024,8,9216,random,8192,1024,43200000,512,DP_ATTENTION,0,'{"sharding": {"sharding_strategy": {"enable_dp_attention": true}}}','--kv-cache-dtype=fp8 --enable-expert-parallel --gpu-memory-utilization=0.95'
-tpu7x-8,deepseek-ai/DeepSeek-R1,448,1024,8,2048,random,1024,1024,43200000,3584,DP_ATTENTION,0,'{"sharding": {"sharding_strategy": {"enable_dp_attention": true}}}','--kv-cache-dtype=fp8 --enable-expert-parallel --gpu-memory-utilization=0.95'

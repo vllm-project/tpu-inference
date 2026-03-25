@@ -1,2 +1,0 @@
-Device,Model,MaxNumSeqs,MaxNumBatchedTokens,TensorParallelSize,MaxModelLen,Dataset,InputLen,OutputLen,ExpectedETEL,NumPrompts,ModelTag,PrefixLen,AdditionalConfig,ExtraArgs
-tpu7x-2,Qwen/Qwen3-4B,512,4096,2,5120,bench-custom-token,4096,1024,,1000,NEW,3600,'{"quantization": { "qwix": { "rules": [{ "module_path": ".*", "weight_qtype": "float8_e4m3fn", "act_qtype": "float8_e4m3fn"}]}}}','--kv-cache-dtype=fp8 --gpu-memory-utilization=0.98'
