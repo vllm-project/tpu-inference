@@ -697,7 +697,8 @@ Express your final answer as the corresponding option letter."""
                 f"({letter}) {opt}"
                 for letter, opt in zip(option_letters, options))
 
-            answer = row.get("answer", "A")
+            answer = row["answer"]
+            assert isinstance(answer, str) and len(answer) == 1
 
             # Collect images (image_1 through image_7).
             images = []
@@ -711,7 +712,7 @@ Express your final answer as the corresponding option letter."""
                     options_text=options_text)
             else:
                 question_text = self.QUERY_TEMPLATE_STANDARD.format(
-                    question=row.get("question", ""),
+                    question=row["question"],
                     options_text=options_text)
 
             mmmu_pro_data.append((question_text, answer, images))
