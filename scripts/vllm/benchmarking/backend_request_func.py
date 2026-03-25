@@ -69,7 +69,7 @@ async def async_request_openai_completions(
             "model":
             request_func_input.model_name
             if request_func_input.model_name else request_func_input.model,
-            "prompt":
+            "messages":
             request_func_input.prompt,
             "temperature":
             0.0,
@@ -121,7 +121,7 @@ async def async_request_openai_completions(
                             if choices := data.get("choices"):
                                 # Note that text could be empty here
                                 # e.g. for special tokens
-                                text = choices[0].get("text")
+                                text = choices[0]["delta"]["content"]
                                 timestamp = time.perf_counter()
                                 # First token
                                 if not first_chunk_received:

@@ -714,7 +714,7 @@ Express your final answer as the corresponding option letter."""
                 question_text = self.QUERY_TEMPLATE_STANDARD.format(
                     question=row["question"],
                     options_text=options_text)
-
+            
             test_id = row["id"]
 
             mmmu_pro_data.append((question_text, answer, images, test_id))
@@ -763,25 +763,16 @@ Express your final answer as the corresponding option letter."""
                     "role": "user",
                     "content": content
                 }]
-                try:
-                    prompt = tokenizer.apply_chat_template(
-                        messages, tokenize=False, add_generation_prompt=True)
-                except Exception as e:
-                    logger.error(
-                        "Could not apply chat template: %s. "
-                        "Falling back to raw prompt.", e)
-                    prompt = question_text
+                prompt = messages
             else:
                 prompt = question_text
 
-            prompt_ids = tokenizer(prompt).input_ids
-            prompt_len = len(prompt_ids)
             new_output_len = output_len if output_len is not None else 16
 
             samples.append(
                 SampleRequest(
                     prompt=prompt,
-                    prompt_len=prompt_len,
+                    prompt_len=0,
                     expected_output_len=new_output_len,
                     multi_modal_data=mm_content,
                     completion=answer,

@@ -716,7 +716,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--endpoint",
         type=str,
-        default="/v1/completions",
+        default="/v1/chat/completions",
         help="API endpoint.",
     )
     parser.add_argument(
