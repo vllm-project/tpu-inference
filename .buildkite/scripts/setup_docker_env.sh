@@ -109,7 +109,11 @@ setup_environment() {
   cleanup_docker_resource "${IMAGE_NAME}"
 
   if [ -z "${BUILDKITE:-}" ]; then
-      VLLM_COMMIT_HASH=""
+      if [ "${USE_VLLM_LKG:-false}" == "true" ] && [ -f ".buildkite/vllm_lkg.version" ]; then
+          VLLM_COMMIT_HASH=$(cat .buildkite/vllm_lkg.version)
+      else
+          VLLM_COMMIT_HASH=""
+      fi
       TPU_INFERENCE_HASH=$(git log -n 1 --pretty="%H")
   else
       VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")

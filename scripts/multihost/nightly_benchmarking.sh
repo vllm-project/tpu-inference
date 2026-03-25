@@ -69,6 +69,7 @@ export RUN_ACCURACY=""
 export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=vllm"
 export USE_UNFUSED_MEGABLOCKS_ENV=""
 export HF_CONFIG=""
+export USE_VLLM_LKG="true"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
