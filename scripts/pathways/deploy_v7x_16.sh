@@ -39,3 +39,16 @@ echo "=== Applying ${YAML_FILE} ==="
 kubectl apply -f "${YAML_FILE}"
 
 echo "=== Done! Workload '${WORKLOAD_NAME}' deployed with latest local changes. ==="
+
+echo "=== Waiting for pod to be created ==="
+while true; do
+  POD_NAME=$(kubectl get pods -l "jobset.sigs.k8s.io/jobset-name=${WORKLOAD_NAME},jobset.sigs.k8s.io/replicatedjob-name=pathways-head" -o name | head -n 1)
+  if [ -n "${POD_NAME}" ]; then
+    break
+  fi
+  sleep 2
+done
+
+echo "=== Following logs of pod ${POD_NAME} ==="
+kubectl logs -f "${POD_NAME}" -c jax-tpu
+
