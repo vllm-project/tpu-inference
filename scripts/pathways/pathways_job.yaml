@@ -155,6 +155,7 @@ spec:
                     - --server_port=29000
                     - --resource_manager_address=$(PATHWAYS_HEAD):29001
                     - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
+                    - --sidecar_name=external
                   env:
                     - name: PATHWAYS_HEAD
                       valueFrom:
@@ -270,6 +271,21 @@ spec:
                       name: shared-tmp
               dnsPolicy: ClusterFirstWithHostNet
               hostNetwork: true
+              initContainers:
+                - env:
+                    - name: GRPC_SERVER_ADDRESS
+                      value: "'0.0.0.0:50051'"
+                  image: us-east5-docker.pkg.dev/cloud-tpu-inference-test/wenxindong/colocated_python:latest
+                  imagePullPolicy: Always
+                  name: colocated-python-sidecar
+                  ports:
+                    - containerPort: 50051
+                      protocol: TCP
+                  resources: {}
+                  restartPolicy: Always
+                  volumeMounts:
+                    - mountPath: /tmp
+                      name: shared-tmp
               nodeSelector:
                 cloud.google.com/gke-tpu-accelerator: tpu7x
                 # cloud.google.com/gke-tpu-topology: 4x4x4
