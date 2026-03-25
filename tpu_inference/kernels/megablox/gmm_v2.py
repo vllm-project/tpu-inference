@@ -24,7 +24,10 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
 # Util.
+from tpu_inference.logger import init_logger
+from tpu_inference.kernels.megablox.tuned_block_sizes import TUNED_BLOCK_SIZES
 
+logger = init_logger(__name__)
 
 def swigluoai(gate: jax.Array,
               up: jax.Array,
@@ -911,9 +914,59 @@ def calculate_tiling(
         raise ValueError(
             f"Could not find valid tile sizes for {dims=} and {rhs_vmem_target=}."
         )
+    result = TileSizes(tile_m=tile_m, tile_k=tile_k, tile_n=tile_n)
+    # key = build_key(dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes, fuse_act)
+    # logger.info(f"Calculated : {build_key_tile(key, result)}")
+    return result
 
+def get_tiling_from_tuned_blocks(
+    dims: Dimensions,
+    lhs_cfgs: InputConfigs,
+    rhs_cfgs: InputConfigs,
+    vmem_limit_bytes: int,
+    fuse_act: str | None,
+) -> TileSizes:
+    m = dims.size_m
+    k = dims.size_k
+    n = dims.size_n
+    num_total_groups = dims.size_lhs_group
+    num_current_groups = dims.size_group
+    lhs_dtype = str(lhs_cfgs.dtype)
+    rhs_dtype = str(rhs_cfgs.dtype)
+    quant_block_size = k
+    key = (m, k, n, num_total_groups, num_current_groups, lhs_dtype, rhs_dtype, quant_block_size, fuse_act)
+    tile_m, tile_k, tile_n = TUNED_BLOCK_SIZES.get(key, (None, None, None))
+    if tile_m is None:
+        logger.info(f"--> No tuned tile sizes for {key=}")
+        # return calculate_tiling(dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes, fuse_act)
+    # else:
+        # logger.info(f"--> Found tuned tile sizes for {key=}: {(tile_m, tile_k, tile_n)}")
+        # pass
     return TileSizes(tile_m=tile_m, tile_k=tile_k, tile_n=tile_n)
 
+def build_key(
+    dims: Dimensions,
+    lhs_cfgs: InputConfigs,
+    rhs_cfgs: InputConfigs,
+    vmem_limit_bytes: int,
+    fuse_act: str | None,
+) -> TileSizes:
+    m = dims.size_m
+    k = dims.size_k
+    n = dims.size_n
+    num_total_groups = dims.size_lhs_group
+    num_current_groups = dims.size_group
+    lhs_dtype = str(lhs_cfgs.dtype)
+    rhs_dtype = str(rhs_cfgs.dtype)
+    quant_block_size = k
+    return (m, k, n, num_total_groups, num_current_groups, lhs_dtype, rhs_dtype, quant_block_size, fuse_act)
+
+def build_key_tile(
+    key: Tuple[int, int, int, int, int, str, str, int, bool],
+    tile_sizes: TileSizes,
+) -> TileSizes:
+    tm, tk, tn = (tile_sizes.tile_m, tile_sizes.tile_k, tile_sizes.tile_n)
+    return "-".join(map(str, [*key, tm, tk, tn, True]))
 
 def validate_inputs(
     lhs: jax.Array,
@@ -1126,7 +1179,8 @@ def gmm_v2(
     rhs_bias: jax.Array | None = None,  # [size_group, 1, out_size]
     group_offset: jax.Array | None = None,  # int32[1]
     *,
-    tile_info: TileSizes | TileFn = calculate_tiling,
+    # tile_info: TileSizes | TileFn = calculate_tiling,
+    tile_info: TileSizes | TileFn = get_tiling_from_tuned_blocks,
     vmem_limit_bytes: int | None = None,
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
     preferred_element_type: jnp.dtype | None = None,
