@@ -16,7 +16,7 @@
 set -e
 
 test_model=""
-tensor_parallel_size=1
+
 minimum_accuracy_threshold=0
 
 extra_serve_args=()
@@ -58,8 +58,15 @@ if [ -n "$MINIMUM_ACCURACY_THRESHOLD" ]; then
   minimum_accuracy_threshold="$MINIMUM_ACCURACY_THRESHOLD"
 fi
 
-if [ -n "$TENSOR_PARALLEL_SIZE" ]; then
+# if TENSOR_PARALLEL_SIZE is set respect it.
+# otherwise, if TPU is tpu7x, use tp=2.
+if [ -z "$TENSOR_PARALLEL_SIZE" ] && [ "$TPU_VERSION" = "tpu7x" ]; then
+  tensor_parallel_size=2
+elif [ -n "$TENSOR_PARALLEL_SIZE" ]; then
   tensor_parallel_size="$TENSOR_PARALLEL_SIZE"
+else
+  # Default fallback if neither condition is met
+  tensor_parallel_size=1
 fi
 
 # Check if test_model is provided and not empty
