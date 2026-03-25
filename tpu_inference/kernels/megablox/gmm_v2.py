@@ -1182,6 +1182,68 @@ def _gmm_v2_impl(
       metadata=get_metadata(cfgs),
   )(group_sizes, group_offset, lhs, rhs_weights)[:, :dims.size_n]
 
+def make_tgmm_configs(
+    lhs: jax.Array,
+    rhs: jax.Array,
+    group_sizes: jax.Array,
+    num_actual_groups: int,
+    *,
+    tile_info: TileSizes | TileFn,
+    vmem_limit_bytes: int | None,
+    out_dtype: jnp.dtype | None,
+    acc_dtype: jnp.dtype | None,
+):
+  """Fills the GMM config for the TGMM kernel."""
+  # dims = validate_inputs(lhs, rhs, None, None, group_sizes, group_offset)
+  assert lhs.shape[1] == rhs.shape[0], f'lhs and rhs m-dim mismatch: {lhs.shape} vs {rhs.shape}'
+  size_k, size_m = lhs.shape
+  _, size_n = rhs.shape
+  # xw32q: when do we use size_lhs_sublane?
+  size_lhs_sublane = pltpu.get_tpu_info().get_sublane_tiling(lhs.dtype)
+  size_lhs_sublane = min(size_lhs_sublane, size_m)
+  dims = Dimensions(
+      size_m=size_m,
+      size_k=size_k,
+      size_n=size_n,
+      size_group=num_actual_groups,
+      size_lhs_group=group_sizes.shape[0],
+      size_lhs_sublane=size_lhs_sublane
+  )
+  
+  rhs_cfgs = InputConfigs(
+      quant_dtype=None,
+      # xw32q: when we need to use this quant_block_size?
+      quant_block_size=-1,
+      dtype=rhs.dtype,
+  )
+  lhs_cfgs = InputConfigs(
+      quant_dtype=None,
+      quant_block_size=-1,
+      dtype=lhs.dtype,
+  )
+  if out_dtype is None:
+    out_dtype = lhs.dtype
+
+  if acc_dtype is None:
+    acc_dtype = jnp.bfloat16.dtype
+  if isinstance(tile_info, TileSizes):
+    tiles = tile_info
+  else:
+    tiles = tile_info(dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes)
+
+  return GmmConfigs(
+      dims=dims,
+      tiles=tiles,
+      lhs_cfgs=lhs_cfgs,
+      rhs_cfgs=rhs_cfgs,
+      out_dtype=out_dtype,
+      acc_dtype=acc_dtype,
+      # GMM's 'zero_init' zeros unvisited m-rows via DMA, which doesn't apply to tgmm's [num_groups, k, n] output. The actual zero-initialization for tgmm accumulation happens at the 'pallas_call' level
+      zero_init=False,
+  )
+  
+
+
 @functools.partial(
     jax.jit,
     static_argnames=[
@@ -1192,7 +1254,7 @@ def _gmm_v2_impl(
         "preferred_element_type",
         "acc_dtype",
         "maybe_quantize_lhs",
-        "zero_initialize", # xw32q: do we need this?
+        "zero_initialize", # xw32q: do we need this? No, we dont.
     ],
 )
 def _tgmm_v2_impl(
@@ -1210,9 +1272,44 @@ def _tgmm_v2_impl(
     maybe_quantize_lhs: bool = True,
     zero_initialize: bool = True,
 ):
+  # Compute grad_rhs=lhs[:, sizes[i-1]:sizes[i]] @ rhs[sizes[i-1]:sizes[i], :]
+  # aka grad_rhs = lhs.T @ grad
   num_groups = group_sizes.shape[0]
   size_k, size_m = lhs.shape
   _, size_n = rhs.shape
+  
+  # Step 1. delete precision, normalize group_offset, set vmem_limit_bytes
+  del precision
+  if group_offset is None:
+    group_offset = jnp.array([0], dtype=jnp.int32)
+  else:
+    if jnp.isscalar(group_offset):
+      group_offset = group_offset[None]
+  if vmem_limit_bytes is None:
+    vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9)
+
+  # Step 2. Make gmm configs (create a 'Dimensions' and a 'GmmConfigs):
+  # - Dimensions( size_m=size_m, size_k=size_k, size_n=size_n, size_group=size_group, size_lhs_group=size_lhs_group, size_lhs_sublane=size_lhs_sublane,)
+  # - calculate_tiling
+  # - GmmConfigs( dims=dims, tiles=tiles, lhs_cfgs=lhs_cfgs, rhs_cfgs=rhs_cfgs, out_dtype=out_dtype, acc_dtype=acc_dtype, zero_init=zero_initialize,)
+  cfgs = make_tgmm_configs(
+      lhs,
+      rhs,
+      group_sizes,
+      num_actual_groups,
+      tile_info=tile_info,
+      vmem_limit_bytes=vmem_limit_bytes,
+      out_dtype=preferred_element_type,
+      acc_dtype=acc_dtype,
+  )
+  print(f'xw32 {cfgs=}')
+  # TODO(xw32): continue
+  
+
+  # 3. Prepare block specs, scratch shapes, etc.
+  # 4. Form pl.pallas_call calling tgmm_kernel_main
+  # ...
+
 
   return jnp.zeros((num_groups, size_k, size_n))
 
@@ -1291,7 +1388,7 @@ def _gmm_v2_bwd(
     tile_info=tile_info, 
     vmem_limit_bytes=vmem_limit_bytes, 
     precision=precision, 
-    preferred_element_type=preferred_element_type, 
+    preferred_element_type=lhs.dtype, 
     acc_dtype=acc_dtype, 
     maybe_quantize_lhs=maybe_quantize_lhs, 
     zero_initialize=zero_initialize
@@ -1305,7 +1402,7 @@ def _gmm_v2_bwd(
     tile_info=tile_info, 
     vmem_limit_bytes=vmem_limit_bytes, 
     precision=precision, 
-    preferred_element_type=preferred_element_type, 
+    preferred_element_type=rhs.dtype, 
     acc_dtype=acc_dtype, 
     maybe_quantize_lhs=maybe_quantize_lhs, 
     zero_initialize=zero_initialize
