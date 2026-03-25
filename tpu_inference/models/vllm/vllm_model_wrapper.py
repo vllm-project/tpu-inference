@@ -490,15 +490,9 @@ class VllmModelWrapper:
             return None
 
         always_wrap_list = False
-        try:
-            sig = inspect.signature(self.model.vllm_model.embed_input_ids)
-            param = sig.parameters.get("mm_embeds")
-            if param and param.annotation != inspect.Parameter.empty:
-                annotation_str = str(param.annotation)
-                if "list[" in annotation_str.lower():
-                    always_wrap_list = True
-        except Exception:
-            pass
+        architectures = getattr(self.vllm_config.model_config.hf_config, "architectures", [])
+        if "Qwen3VLForConditionalGeneration" in architectures:
+            always_wrap_list = True
 
         def embed_input_ids_func(
             params_and_buffers: Any,
