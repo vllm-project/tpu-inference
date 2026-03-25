@@ -94,21 +94,23 @@ def flash_attention(
 
         if config.sliding_window is not None:
             mask_b &= q_idx_b < kv_idx_b + config.sliding_window
+
+        if not config.mask_v:
+            mask_b &= kv_idx_b < eff_kv_len_b
+
         qk_masked.append(jnp.where(mask_b, qk[b_idx], config.mask_value))
 
-        # Mask v where kv_idx >= eff_kv_len
-        kv_idx_v = (lax.broadcasted_iota(jnp.int16, (k_heads, s, h), 1) +
-                    processed_kv_len[b_idx])
-        v_mask_b = kv_idx_v < eff_kv_len_b
-        v_masked.append(jnp.where(v_mask_b, v[b_idx], 0))
+        if config.mask_v:
+            # Mask v where kv_idx >= eff_kv_len
+            kv_idx_v = (lax.broadcasted_iota(jnp.int16, (k_heads, s, h), 1) +
+                        processed_kv_len[b_idx])
+            v_mask_b = kv_idx_v < eff_kv_len_b
+            v_masked.append(jnp.where(v_mask_b, v[b_idx], 0))
+        else:
+            v_masked.append(v[b_idx])
 
     qk = jnp.stack(qk_masked, axis=0)
     v = jnp.stack(v_masked, axis=0)
-
-    # # 5. Final selection and reduction
-    # # Stack the masks and apply in a single 'vsel' step
-    # mask = jnp.stack(masks, axis=0)
-    # qk = jnp.where(mask, qk, config.mask_value)
 
     m_curr = jnp.max(qk, axis=-1, keepdims=True)
     m_next = jnp.maximum(m_prev, m_curr)
