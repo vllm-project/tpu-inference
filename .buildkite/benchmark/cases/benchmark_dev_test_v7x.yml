@@ -40,6 +40,7 @@ steps:
     command: ".buildkite/benchmark/scripts/run_job.sh"
     env:
       DEVICE: "tpu7x-2"
+      TPU_VERSION: "tpu7x"
       INPUT_LEN: "4096"
       OUTPUT_LEN: "1024"
       MAX_MODEL_LEN: "5120"
