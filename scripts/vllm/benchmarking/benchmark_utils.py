@@ -353,6 +353,8 @@ def eval_accuracy_mmmu_pro(request_outputs: List[RequestFuncOutput]) -> dict:
     correct = 0
     total = 0
 
+    results = []
+
     for output in request_outputs:
         if not output.success:
             continue
@@ -364,6 +366,16 @@ def eval_accuracy_mmmu_pro(request_outputs: List[RequestFuncOutput]) -> dict:
             correct += 1
         total += 1
 
+        results.append({
+            "id": output.input_request.request_id,
+            "correct": extracted is not None and extracted == target.upper(),
+            "message": output.generated_text,
+            "pred": extracted,
+            "gold": target,
+        })
+
+    results = sorted(results, key=lambda v: v["id"])
+
     accuracy = correct / total if total > 0 else 0.0
     result = {
         "accuracy": round(accuracy, 4),
@@ -371,6 +383,9 @@ def eval_accuracy_mmmu_pro(request_outputs: List[RequestFuncOutput]) -> dict:
         "total": total,
         "gen_num": len(request_outputs),
     }
+    with open("mmmu_pro.json", "w") as file_:
+        import json
+        json.dump(results, file_, indent=4)
     print("\nMMMU-Pro Results\n")
     print(result)
     return result

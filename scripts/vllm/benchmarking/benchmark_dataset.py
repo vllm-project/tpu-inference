@@ -715,7 +715,9 @@ Express your final answer as the corresponding option letter."""
                     question=row["question"],
                     options_text=options_text)
 
-            mmmu_pro_data.append((question_text, answer, images))
+            test_id = row["id"]
+
+            mmmu_pro_data.append((question_text, answer, images, test_id))
 
         self.data = mmmu_pro_data
         print(f"Loaded {len(self.data)} examples from MMMU-Pro "
@@ -747,7 +749,7 @@ Express your final answer as the corresponding option letter."""
         **kwargs,
     ) -> list:
         samples: list = []
-        for question_text, answer, images in self.data:
+        for question_text, answer, images, test_id in self.data:
             if len(samples) >= num_requests:
                 break
 
@@ -788,6 +790,7 @@ Express your final answer as the corresponding option letter."""
                     expected_output_len=new_output_len,
                     multi_modal_data=mm_content,
                     completion=answer,
+                    request_id=test_id
                 ))
 
         self.maybe_oversample_requests(samples, num_requests)
