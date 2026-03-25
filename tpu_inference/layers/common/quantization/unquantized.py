@@ -16,10 +16,17 @@ from typing import Optional, Sequence
 
 import jax
 from jax import numpy as jnp
+from jax.sharding import Mesh
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
+from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.common.process_weights.moe_weights import (
+    FusedMoEWeights, process_moe_weights)
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
+from tpu_inference.utils import get_mesh_shape_product
 
 
 class UnquantizedLinearMethod:
@@ -59,3 +66,35 @@ class UnquantizedLinearMethod:
             outs.append(out)
         out = jnp.concatenate(outs, axis=-1)
         return out
+
+
+@jax.jit
+def process_unquantized_moe_weights(
+    *,
+    mesh: Mesh,
+    moe_backend: MoEBackend,
+    activation: MoEActivation,
+    w13_weight: jax.Array,
+    w13_bias: jax.Array | None,
+    w2_weight: jax.Array,
+    w2_bias: jax.Array | None,
+) -> FusedMoEWeights:
+    """Jit'ed version to process unquantized moe weights. See `process_moe_weights` for details.
+    """
+    w13_interleave = activation == MoEActivation.SWIGLUOAI
+    w13_reorder_size = get_mesh_shape_product(mesh,
+                                              ShardingAxisName.MLP_TENSOR)
+
+    return process_moe_weights(
+        FusedMoEWeights(
+            w13_weight=w13_weight,
+            w13_weight_scale=None,
+            w13_bias=w13_bias,
+            w2_weight=w2_weight,
+            w2_weight_scale=None,
+            w2_bias=w2_bias,
+        ),
+        moe_backend=moe_backend,
+        w13_reorder_size=w13_reorder_size,
+        w13_interleave=w13_interleave,
+    )
