@@ -96,10 +96,10 @@ fi
 
 if [[ "$MODEL" == "google/gemma-3-27b-it" ]]; then
   echo "google/gemma-3-27b-it"
-  EXTRA_ARGS+="--limit-mm-per-prompt {\"image\":0}"
+  EXTRA_ARGS+=" --limit-mm-per-prompt {\"image\":0}"
 elif [[ "$MODEL" == "Qwen/Qwen2.5-VL-7B-Instruct" || "$MODEL" == "Qwen/Qwen2.5-VL-32B-Instruct" ]]; then
   echo "$MODEL"
-  EXTRA_ARGS+="--limit-mm-per-prompt {\"image\":1} --mm-processor-kwargs {\"max_pixels\":1024000}"
+  EXTRA_ARGS+=" --limit-mm-per-prompt {\"image\":1} --mm-processor-kwargs {\"max_pixels\":1024000}"
 elif [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
   echo "deepseek-ai/DeepSeek-R1"
   EXTRA_ARGS+=" --generation-config $DOCKER_ARTIFACT_FOLDER/generation_configs/DeepSeek-R1"
