@@ -240,6 +240,7 @@ class Gemma4MoE(JaxMoE):
             if name.endswith("down_proj"):
                 load_nnx_param_from_reshaped_torch(self.kernel_down_proj_EFD,
                                                    tensor,
+                                                   permute_dims=(0, 2, 1),
                                                    param_name=name)
                 loaded.add("kernel_down_proj_EFD")
                 self.kernel_down_proj_EFD._weights_to_load.clear()
@@ -247,24 +248,24 @@ class Gemma4MoE(JaxMoE):
                 # For compatibility, we permute here then expect another permute in process_weights_after_loading.
                 self.kernel_down_proj_EFD.value = jnp.swapaxes(
                     self.kernel_down_proj_EFD.value, 1, 2)
-            elif name.endswith("up_proj"):
+            elif name.endswith("gate_up_proj"):
+                F = tensor.shape[1] // 2
                 load_nnx_param_from_reshaped_torch(self.kernel_up_proj_EDF,
-                                                   tensor,
+                                                   tensor[:, :F, :],
+                                                   permute_dims=(0, 2, 1),
+                                                   param_name=name)
+                load_nnx_param_from_reshaped_torch(self.kernel_gating_EDF,
+                                                   tensor[:, F:, :],
+                                                   permute_dims=(0, 2, 1),
                                                    param_name=name)
                 loaded.add("kernel_up_proj_EDF")
                 self.kernel_up_proj_EDF._weights_to_load.clear()
-                # Other MoE models store expert weights in shape (F, D) and permute in *FusedMoEMethod.process_weights_after_loading.
-                # For compatibility, we permute here then expect another permute in process_weights_after_loading.
-                self.kernel_up_proj_EDF.value = jnp.swapaxes(
-                    self.kernel_up_proj_EDF.value, 1, 2)
-            elif name.endswith("gate_proj"):
-                load_nnx_param_from_reshaped_torch(self.kernel_gating_EDF,
-                                                   tensor,
-                                                   param_name=name)
                 loaded.add("kernel_gating_EDF")
                 self.kernel_gating_EDF._weights_to_load.clear()
                 # Other MoE models store expert weights in shape (F, D) and permute in *FusedMoEMethod.process_weights_after_loading.
                 # For compatibility, we permute here then expect another permute in process_weights_after_loading.
+                self.kernel_up_proj_EDF.value = jnp.swapaxes(
+                    self.kernel_up_proj_EDF.value, 1, 2)
                 self.kernel_gating_EDF.value = jnp.swapaxes(
                     self.kernel_gating_EDF.value, 1, 2)
             elif name.endswith("per_expert_scale"):
