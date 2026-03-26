@@ -21,6 +21,8 @@ from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import t2j_dtype
 from vllm.config import get_layers_from_vllm_config
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mla import MLAAttention
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType
@@ -90,6 +92,42 @@ class KVCacheManager:
                                          head_size=head_size,
                                          dtype=self.runner.kv_cache_dtype,
                                          page_size_padded=int(page_size_bytes))
+
+    def update_mamba_page_size_padded(
+            self, layers: dict[str, AttentionLayerBase]) -> None:
+        """Set mamba padded page size to match the full attention page size.
+
+        vLLM expects hybrid models to share KV cache across different attention
+        modules. This updates `mamba_page_size_padded` to the larger footprint
+        of full attention layers to unify the page sizes.
+
+        Args:
+            layers: A dictionary mapping layer names to their corresponding
+                attention module instances (e.g., `MambaBase`, `Attention`).
+        """
+        attn_modules = [
+            module for module in layers.values()
+            if isinstance(module, Attention)
+        ]
+        if not attn_modules:
+            return
+
+        first_attn_module = attn_modules[0]
+        for module in attn_modules:
+            assert module.num_kv_heads == first_attn_module.num_kv_heads
+            assert module.head_size == first_attn_module.head_size
+
+        num_kv_heads = common_utils.get_padded_num_heads(
+            first_attn_module.num_kv_heads,
+            self.runner.mesh.shape[ShardingAxisName.ATTN_HEAD])
+        head_size = common_utils.get_padded_head_dim(
+            first_attn_module.head_size)
+        page_size_bytes = get_attention_page_size_bytes(
+            self.runner.mesh, self.runner.cache_config.block_size,
+            num_kv_heads, head_size, self.runner.kv_cache_dtype, False)
+        logger.debug("Setting padded mamba page size in cache config to %d",
+                     page_size_bytes)
+        self.runner.cache_config.mamba_page_size_padded = page_size_bytes
 
     def get_kv_cache_spec(self):
         # TODO(xiang): this hack tricks engine core to init successfully
@@ -177,17 +215,24 @@ class KVCacheManager:
                                 block_size, num_kv_heads, head_size)
         else:
             # Else propagate attention modules from compilation config.
-            layers = {}
-            from vllm.model_executor.layers.mamba.abstract import MambaBase
-            attention_types = [Attention, MLAAttention, MambaBase]
+            layers = get_layers_from_vllm_config(
+                self.runner.vllm_config, (Attention, MLAAttention, MambaBase))
 
-            for attn_cls in attention_types:
-                # Get the layers for the current class
-                new_layers = get_layers_from_vllm_config(
-                    self.runner.vllm_config, attn_cls)
+            has_attention = any(
+                isinstance(attn_module, (Attention))
+                for attn_module in layers.values())
+            has_mamba = any(
+                isinstance(attn_module, MambaBase)
+                for attn_module in layers.values())
 
-                # Add them to the main dictionary (equivalent to your | operator)
-                layers.update(new_layers)
+            # Cache config update for hybrid attention models with mamba and
+            # full attention layers.
+            is_hybrid_mamba_attention = has_attention and has_mamba
+            if is_hybrid_mamba_attention:
+                # Unify the page sizes of mamba and full attention layers to
+                # enable use of shared kv cache, vLLM also expects page sizes to
+                # be unified.
+                self.update_mamba_page_size_padded(layers)
 
             # TODO(yuyanpeng): enable sliding windows once mixed dims support
             # Currently, with sliding windows, there is
@@ -347,6 +392,8 @@ class KVCacheManager:
                 page_size_bytes = layer_spec.page_size_bytes
                 assert kv_cache_tensor.size % page_size_bytes == 0
                 num_blocks = kv_cache_tensor.size // page_size_bytes
+                if duplicate_shared_layers:
+                    num_blocks //= num_shared_layers
                 dp_size = self.runner.vllm_config.sharding_config.total_dp_size
                 # num_blocks must be a multiple of dp_size
                 num_blocks = (num_blocks // dp_size) * dp_size
