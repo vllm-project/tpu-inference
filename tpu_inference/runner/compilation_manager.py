@@ -281,7 +281,7 @@ class CompilationManager:
                 padded_token_in_tpu_cur_input_indices = np.zeros(
                     (num_tokens, ), dtype=np.int32)
                 padded_token_in_tpu_pre_next_tokens_indices = np.zeros(
-                    (num_tokens, ), dtype=np.int32)
+                    (num_tokens, ), dtype=jnp.int32)
                 (padded_token_in_tpu_cur_input_indices,
                  padded_token_in_tpu_pre_next_tokens_indices) = device_array(
                      self.runner.mesh,
