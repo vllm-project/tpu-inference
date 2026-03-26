@@ -1824,28 +1824,30 @@ class TPUOffloadConnectorWorker:
         paged_kv_for_compilation = self.runner.kv_caches
         num_warmup = 15
         all_block_ids = list(range(self.num_kv_blocks))
-        for num_blocks in BLOCK_SIZE_BUCKETS:
-            try:
-                logger.info(f"  - Compiling for {num_blocks} blocks...")
 
-                # Warm up
-                for _ in range(num_warmup):
-                    dummy_block_ids = jnp.array(
-                        random.sample(all_block_ids, num_blocks))
-                    # 1. gather / stack (for save)
-                    paged_kv_for_compilation, stacked_dummy_kv_caches_tpu = stack_kv_cache_cross_layers(
-                        paged_kv_for_compilation, dummy_block_ids, num_blocks)
-                    jax.block_until_ready(stacked_dummy_kv_caches_tpu)
-                    # 2. update / insert  kv (for load)
-                    paged_kv_for_compilation = update_kv_caches(
-                        paged_kv_for_compilation, stacked_dummy_kv_caches_tpu,
-                        dummy_block_ids, self.stacked_kv_block_dim_nums)
-                    jax.block_until_ready(paged_kv_for_compilation)
+        with jax.set_mesh(self.mesh):
+            for num_blocks in BLOCK_SIZE_BUCKETS:
+                try:
+                    logger.info(f"  - Compiling for {num_blocks} blocks...")
 
-            except Exception as e:
-                logger.warning(
-                    f"    - Failed to pre-compile for {num_blocks} blocks: {e}",
-                    exc_info=True)
+                    # Warm up
+                    for _ in range(num_warmup):
+                        dummy_block_ids = jnp.array(
+                            random.sample(all_block_ids, num_blocks))
+                        # 1. gather / stack (for save)
+                        paged_kv_for_compilation, stacked_dummy_kv_caches_tpu = stack_kv_cache_cross_layers(
+                            paged_kv_for_compilation, dummy_block_ids, num_blocks)
+                        jax.block_until_ready(stacked_dummy_kv_caches_tpu)
+                        # 2. update / insert  kv (for load)
+                        paged_kv_for_compilation = update_kv_caches(
+                            paged_kv_for_compilation, stacked_dummy_kv_caches_tpu,
+                            dummy_block_ids, self.stacked_kv_block_dim_nums)
+                        jax.block_until_ready(paged_kv_for_compilation)
+
+                except Exception as e:
+                    logger.warning(
+                        f"    - Failed to pre-compile for {num_blocks} blocks: {e}",
+                        exc_info=True)
 
         self.runner.kv_caches = paged_kv_for_compilation
         duration = time.time() - start_time
