@@ -136,6 +136,8 @@ def moe_apply(
                     use_ep=layer.use_ep,
                     activation=activation,
                     scoring_fn=layer.scoring_func,
+                    onehot_matmul_gather_enabled=envs.ONEHOT_MATMUL_GATHER_ENABLED,
+                    onehot_matmul_gather_bs_threshold=envs.ONEHOT_MATMUL_GATHER_BS_THRESHOLD,
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance

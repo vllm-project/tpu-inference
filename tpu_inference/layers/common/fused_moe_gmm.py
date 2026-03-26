@@ -20,6 +20,7 @@ from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
+from tpu_inference import envs
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
@@ -282,6 +283,8 @@ def expert_parallel_gmm(
     "use_ep",
     "activation",
     "scoring_fn",
+    "onehot_matmul_gather_enabled",
+    "onehot_matmul_gather_bs_threshold",
 ))
 def fused_moe_func(
     hidden_states: jax.Array,
@@ -298,6 +301,8 @@ def fused_moe_func(
     use_ep: bool,
     activation: str,
     scoring_fn: str,
+    onehot_matmul_gather_enabled: bool = False,
+    onehot_matmul_gather_bs_threshold: int = 0,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -316,6 +321,8 @@ def fused_moe_func(
         use_ep: use expert parallelism.
         activation: activation function to perform on the output of w1.
         scoring_fn: scoring function to apply on gating_output.
+        onehot_matmul_gather_enabled: whether to use onehot matmul gather.
+        onehot_matmul_gather_bs_threshold: batch size threshold for onehot matmul gather.
 
     Returns:
         Output of moe operation [num_tokens, hidden_size]
@@ -346,7 +353,13 @@ def fused_moe_func(
         token_indices = jnp.arange(num_tokens_local,
                                    dtype=jnp.int32).repeat(topk)
         token_indices_sorted = token_indices[topk_argsort_indices]
-        x = hidden_states_local[token_indices_sorted]
+        if onehot_matmul_gather_enabled and num_tokens_local <= onehot_matmul_gather_bs_threshold:
+            one_hot_indices = jax.nn.one_hot(token_indices_sorted,
+                                               num_tokens_local,
+                                               dtype=hidden_states_local.dtype)
+            x = jnp.matmul(one_hot_indices, hidden_states_local)
+        else:
+            x = hidden_states_local[token_indices_sorted]
         # Below one_hot is equivalent to jnp.bincount(topk_indices_flat,
         # length=global_num_experts) but is more performant.
         group_sizes_local = jax.nn.one_hot(topk_indices_flat,
