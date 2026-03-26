@@ -22,11 +22,13 @@ import torch
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VllmConfig)
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.sampling_params import SamplingType
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor,
-                                        MLAAttentionSpec, SlidingWindowSpec)
+                                        MambaSpec, MLAAttentionSpec,
+                                        SlidingWindowSpec)
 from vllm.v1.request import Request
 
 from tpu_inference import utils as common_utils
@@ -606,3 +608,174 @@ class TestKVCacheManager:
         # Should not raise.
         self.runner.delete_kv_cache()
         assert len(self.runner.kv_caches) == 0
+
+    def test_get_kv_cache_spec_with_compilation_cfg_mamba(self):
+        mock_attn_module = MagicMock(spec=MambaBase)
+
+        mock_mamba_spec = MagicMock(spec=MambaSpec)
+        mock_attn_module.get_kv_cache_spec.return_value = mock_mamba_spec
+
+        def get_layers_side_effect(vllm_config, attn_cls):
+            if attn_cls == MambaBase:
+                return {'layer.0': mock_attn_module}
+            return {}
+
+        self.runner.vllm_config.compilation_config.static_forward_context = {
+            'layer.0': mock_attn_module
+        }
+
+        with patch(
+                'tpu_inference.runner.kv_cache_manager.get_layers_from_vllm_config',
+                side_effect=get_layers_side_effect):
+            kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        assert len(kv_cache_spec) == 1
+        assert kv_cache_spec['layer.0'] == mock_mamba_spec
+
+    def test_initialize_kv_cache_mamba(self):
+        num_blocks = 100
+        page_size_bytes = 16 * 1024
+
+        mamba_spec = MagicMock(spec=MambaSpec)
+        mamba_spec.block_size = self.runner.vllm_config.cache_config.block_size
+        mamba_spec.page_size_bytes = page_size_bytes
+        mamba_spec.shapes = [(4, 128), (8, 64, 32)]
+        mamba_spec.dtypes = [torch.bfloat16, torch.float32]
+
+        layer_names = ['layer.0', 'layer.1']
+        kv_cache_groups = [
+            KVCacheGroupSpec(layer_names=layer_names,
+                             kv_cache_spec=mamba_spec),
+        ]
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=num_blocks * page_size_bytes,
+                shared_by=layer_names,
+            )
+        ]
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        if not hasattr(self.runner.vllm_config, 'sharding_config'
+                       ) or self.runner.vllm_config.sharding_config is None:
+            self.runner.vllm_config.sharding_config = MagicMock()
+            self.runner.vllm_config.sharding_config.total_dp_size = 1
+
+        self.runner.initialize_kv_cache(kv_cache_config)
+
+        assert len(self.runner.kv_caches) == 2
+        for i in range(2):
+            mamba_states = self.runner.kv_caches[i]
+            assert isinstance(mamba_states, tuple)
+            assert len(mamba_states) == 2
+
+            assert mamba_states[0].shape == (num_blocks, 4, 128)
+            assert mamba_states[1].shape == (num_blocks, 8, 64, 32)
+
+            assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == i
+
+    def test_initialize_kv_cache_no_duplicate_shared_layers(self):
+        block_size = self.runner.vllm_config.cache_config.block_size
+        num_kv_heads = 8
+        head_size = 128
+        num_blocks = 100
+        kv_packing = 2  #bf16
+
+        full_attn_spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+        )
+        layer_names = [f'layer.{i}' for i in range(4)]
+        kv_cache_groups = [
+            KVCacheGroupSpec(layer_names=layer_names,
+                             kv_cache_spec=full_attn_spec),
+        ]
+
+        page_size_bytes = full_attn_spec.page_size_bytes
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=num_blocks * page_size_bytes,
+                shared_by=layer_names,
+            )
+        ]
+
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        if not hasattr(self.runner.vllm_config, 'sharding_config'
+                       ) or self.runner.vllm_config.sharding_config is None:
+            self.runner.vllm_config.sharding_config = MagicMock()
+            self.runner.vllm_config.sharding_config.total_dp_size = 1
+
+        self.runner.initialize_kv_cache(kv_cache_config)
+
+        # it should initialize 1 KV cache shared by all 4 layers
+        assert len(self.runner.kv_caches) == 1
+
+        assert self.runner.kv_caches[0].shape == (num_blocks, block_size,
+                                                  num_kv_heads * 2 //
+                                                  kv_packing, kv_packing,
+                                                  head_size)
+
+        # Ensure all layer indices map to the same underlying KV cache (0)
+        for i in range(4):
+            assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == 0
+
+    def test_initialize_kv_cache_mamba_duplicate_fallback(self):
+        num_blocks = 100
+        page_size_bytes = 16 * 1024
+
+        mamba_spec = MagicMock(spec=MambaSpec)
+        mamba_spec.block_size = self.runner.vllm_config.cache_config.block_size
+        mamba_spec.page_size_bytes = page_size_bytes
+        mamba_spec.shapes = [(4, 128), (8, 64, 32)]
+        mamba_spec.dtypes = [torch.bfloat16, torch.float32]
+
+        layer_names = [f'layer.{i}' for i in range(4)]
+        kv_cache_groups = [
+            KVCacheGroupSpec(layer_names=layer_names,
+                             kv_cache_spec=mamba_spec),
+        ]
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=num_blocks * page_size_bytes,
+                shared_by=layer_names,
+            )
+        ]
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        if not hasattr(self.runner.vllm_config, 'sharding_config'
+                       ) or self.runner.vllm_config.sharding_config is None:
+            self.runner.vllm_config.sharding_config = MagicMock()
+            self.runner.vllm_config.sharding_config.total_dp_size = 1
+
+        with patch('tpu_inference.runner.kv_cache_manager.logger.warning_once'
+                   ) as mock_warning_once:
+            self.runner.initialize_kv_cache(kv_cache_config)
+
+        # Even though DUPLICATE_SHARED_KV_CACHE_LAYERS=False, Mamba does not
+        # support shared layers right now, so we force it to fallback to True.
+        assert len(self.runner.kv_caches) == 4
+
+        # Verify the warning is triggered exactly once for the fallback
+        mock_warning_once.assert_called_once_with(
+            "MambaSpec does not support shared layers for now, defaulting to single KV cache per layer..."
+        )
+
+        for i in range(4):
+            mamba_states = self.runner.kv_caches[i]
+            assert isinstance(mamba_states, tuple)
+            assert len(mamba_states) == 2
+            assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == i

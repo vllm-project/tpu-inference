@@ -368,7 +368,10 @@ class TestTPUConnectorWorker(unittest.TestCase):
         mock_kv_cache_layer = MagicMock()
         mock_kv_cache_layer.shape = [10, 20, 30, 40]
         mock_kv_cache_layer.dtype = 'float32'
-        mock_kv_cache_layer.sharding = 'sharding_spec'
+        mock_sharding = MagicMock()
+        mock_sharding.mesh = 'mesh'
+        mock_sharding.spec = 'sharding_spec'
+        mock_kv_cache_layer.sharding = mock_sharding
         mock_runner.kv_caches = [mock_kv_cache_layer] * 5
         mock_runner.mesh = 'mesh'
 
@@ -380,7 +383,7 @@ class TestTPUConnectorWorker(unittest.TestCase):
         self.assertEqual(worker.num_layers, 5)
         self.assertEqual(worker.shape, [10, 20, 30, 40])
         self.assertEqual(worker.dtype, 'float32')
-        self.assertEqual(worker.sharding, 'sharding_spec')
+        self.assertEqual(worker.sharding, mock_sharding)
 
     def test_process_send_load_for_producer(self):
         """Tests process_send_load for the producer role."""

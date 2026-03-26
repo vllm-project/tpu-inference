@@ -3,14 +3,14 @@ Feature,CorrectnessTest,PerformanceTest
 "DCN-based P/D disaggregation",✅ Passing,✅ Passing
 "KV cache host offloading",❓ Untested,❓ Untested
 "LoRA_Torch",✅ Passing,✅ Passing
-"Multimodal Inputs",✅ Passing,✅ Passing
+"Multimodal Inputs",❌ Failing,❓ Untested
 "Out-of-tree model support",✅ Passing,❌ Failing
 "Prefix Caching",✅ Passing,✅ Passing
 "Single Program Multi Data",✅ Passing,✅ Passing
-"Single-Host-P-D-disaggregation",❌ Failing,❓ Untested
+"Single-Host-P-D-disaggregation",✅ Passing,❓ Untested
 "Speculative Decoding: Eagle3",✅ Passing,✅ Passing
 "Speculative Decoding: Ngram",✅ Passing,✅ Passing
-"async scheduler",❌ Failing,❓ Untested
+"async scheduler",✅ Passing,✅ Passing
 "hybrid kv cache",❌ Failing,❓ Untested
 "multi-host",❓ Untested,❓ Untested
 "runai_model_streamer_loader",✅ Passing,❓ Untested

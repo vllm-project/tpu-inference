@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -950,21 +950,18 @@ def _mla_ragged_paged_attention_kernel(
         ).reshape(actual_bq_sz * num_q_heads, r_dim)
         return q_nope_vec, q_rope_vec
 
-    def load_bkv(bkv_sem_idx, *, bkvc_mask, bkpe_mask):
+    def load_bkv(bkv_sem_idx):
         bkvc_ref = (bkvc_x2_ref.bitcast(
             jnp.uint32).at[bkv_sem_idx, :bkv_sz_per_kv_packing].reshape(
                 bkv_sz_per_kv_packing, lkv_dim))
         bkvc_vec = pltpu.bitcast(bkvc_ref[...],
                                  kv_dtype).reshape(bkv_sz, lkv_dim)
-        bkvc_vec = lax.select(bkvc_mask, bkvc_vec, jnp.zeros_like(bkvc_vec))
 
         bkpe_ref = (bkpe_x2_ref.bitcast(
             jnp.uint32).at[bkv_sem_idx, :bkv_sz_per_kv_packing].reshape(
                 bkv_sz_per_kv_packing, r_dim))
         bkpe_vec = pltpu.bitcast(bkpe_ref[...],
                                  kv_dtype).reshape(bkv_sz, r_dim)
-        bkpe_vec = lax.select(bkpe_mask, bkpe_vec, jnp.zeros_like(bkpe_vec))
-
         return bkvc_vec, bkpe_vec
 
     def broadcast_minor(src, shape):
@@ -1024,15 +1021,6 @@ def _mla_ragged_paged_attention_kernel(
                 start_fetch_bq(next_seq_idx, next_bq_idx, next_bq_sem_idx)
 
             def compute_with_bkv(bkv_idx, _):
-                # Create bitmask for KV.
-                assert bkv_sz % kv_packing == 0
-                actual_bkv_sz = jnp.minimum(bkv_sz, kv_len - bkv_idx * bkv_sz)
-                bkvc_shape = (bkv_sz, lkv_dim)
-                bkvc_mask = (lax.broadcasted_iota(jnp.int32, bkvc_shape, 0)
-                             < actual_bkv_sz)
-                bkpe_shape = (bkv_sz, r_dim)
-                bkpe_mask = (lax.broadcasted_iota(jnp.int32, bkpe_shape, 0)
-                             < actual_bkv_sz)
 
                 # Get next bkv ids.
                 bkv_sem_idx = sem_ids_ref[1]
@@ -1068,10 +1056,11 @@ def _mla_ragged_paged_attention_kernel(
                     start_update_kv_cache(seq_idx, bkv_sem_idx, offset,
                                           update_sz)
 
-                # Load bkv into vreg
-                bkvc, bkpe = load_bkv(bkv_sem_idx,
-                                      bkvc_mask=bkvc_mask,
-                                      bkpe_mask=bkpe_mask)
+                # Load bkv into vreg. There is no need to mask out invalid k/v entries,
+                # because the score of invalid Q.K^T pairs are masked (to be zero) in
+                # flash attention, so that the invalid kv entries
+                # (as long as they are not NaN or inf) won't affect to the output.
+                bkvc, bkpe = load_bkv(bkv_sem_idx, )
 
                 bq_nope_vec, bq_pe_vec = load_bq(bq_sem_idx,
                                                  actual_bq_sz=actual_bq_sz)
@@ -1133,7 +1122,22 @@ def _mla_ragged_paged_attention_kernel(
     @pl.when(seq_idx == 0)
     def prologue():
         start_fetch_bq(0, 0, 0)
+
+        # Initialize bkvc_x2_ref and bkpe_x2_ref to zeros to avoid NaN issues from accessing
+        # uninitialized memory. Bitcast into int32 to avoid tiling issues.
+        bkvc_x2_int32_ref = bkvc_x2_ref.bitcast(jnp.int32).reshape(
+            (2, -1, lkv_dim))
+        bkvc_zeros = jnp.zeros(bkvc_x2_int32_ref.shape[1:], jnp.int32)
+        bkpe_x2_int32_ref = bkpe_x2_ref.bitcast(jnp.int32).reshape(
+            (2, -1, r_dim))
+        bkpe_zeros = jnp.zeros(bkpe_x2_int32_ref.shape[1:], jnp.int32)
+
+        # To pipeline VST and DMA, we divide the initialization into two steps.
+        bkvc_x2_int32_ref[0] = bkvc_zeros
+        bkpe_x2_int32_ref[0] = bkpe_zeros
         start_fetch_bkv(0, 0, 0)
+        bkvc_x2_int32_ref[1] = bkvc_zeros
+        bkpe_x2_int32_ref[1] = bkpe_zeros
 
     @pl.when(seq_idx < decode_end)
     def process_decode():
