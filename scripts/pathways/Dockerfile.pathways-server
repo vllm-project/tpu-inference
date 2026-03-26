@@ -1,0 +1,18 @@
+# Dockerfile for custom Pathways server with a custom libtpu.so
+#
+# Extends the base Pathways server image to include a custom libtpu.so.
+# The build script downloads libtpu.so into this directory before building.
+#
+# Build:
+#   docker build -f Dockerfile.pathways-server \
+#     -t us-east5-docker.pkg.dev/cloud-tpu-inference-test/wenxindong/pathways_server:latest .
+#
+# Push:
+#   docker push us-east5-docker.pkg.dev/cloud-tpu-inference-test/wenxindong/pathways_server:latest
+
+FROM us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+
+# Copy the custom libtpu.so into the image
+COPY libtpu.so /usr/pathways/run/libtpu.so
+
+ENV TPU_LIBRARY_PATH=/usr/pathways/run/libtpu.so
