@@ -1,4 +1,16 @@
-# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 TPUOffloadConnector manages KV cache data transfer between TPU (HBM) and CPU.
 
@@ -1564,23 +1576,6 @@ class TPUOffloadConnectorScheduler():
                     self.staging_buffer_manager.
                     get_num_total_free_blocks_for_save())
 
-        # load
-        for req_id in connector_output.finished_recving or []:
-            if req_id in self._reqs_being_loaded:
-                assert len(self._reqs_being_loaded[req_id]) == 0
-                self._reqs_being_loaded.pop(req_id)
-            num_freed_blocks = self.staging_buffer_manager.free(req_id,
-                                                                usage="load")
-            logger.info(
-                f"  freed {num_freed_blocks} staging blocks (load) from {req_id}"
-            )
-            STAGING_BUFFER_BLOCKS_FOR_LOAD.set(
-                self.staging_buffer_manager.get_num_blocks_for_load())
-            STAGING_BUFFER_BLOCKS_FOR_LOAD_FREE.labels(
-                source="finished_recving").set(
-                    self.staging_buffer_manager.
-                    get_num_total_free_blocks_for_load())
-
         _finished_reqs = list(self._finished_reqs_w_pending_ops)
         FINISHED_REQS_W_PENDING_OPS_SIZE.labels(
             source="update_connector_output").set(len(_finished_reqs))
@@ -1705,7 +1700,6 @@ class TPUOffloadConnectorWorker:
             max_workers=self.num_save_threads,
             thread_name_prefix="tpu_save_handler")
         self.finished_save_reqs: set[ReqId] = set()
-        self.finished_load_reqs: set[ReqId] = set()
         # Tracks if wait_for_save has been called for the current step's metadata.
         self._processed_save_for_step = False
         # On-going asynchronous save operations tracking futures and their associated manifest.
@@ -2634,7 +2628,6 @@ class TPUOffloadConnectorWorker:
             LOAD_KV_LATENCY_SECONDS.observe(load_duration)
             load_times.append(load_duration)
             LOAD_KV_SIZE_BLOCKS.inc(num_blocks_to_load)
-            self.finished_load_reqs.add(meta.req_id)
             if num_blocks_to_load > 0:
                 self.offload_stats.record_load(req=meta.req_id,
                                                loaded_chunk_ids=src_chunks)
@@ -2678,9 +2671,8 @@ class TPUOffloadConnectorWorker:
         finished_saves = self.finished_save_reqs
         FINISHED_SAVE_REQS_SIZE.set(len(finished_saves))
         self.finished_save_reqs = set()
-        finished_loads = self.finished_load_reqs
-        FINISHED_LOAD_REQS_SIZE.set(len(finished_loads))
-        self.finished_load_reqs = set()
+        # NOTE: add back self.finished_load_reqs and report it back to vllm scheduler when async load gets implemented.
+        finished_loads = set()
         logger.debug(f"Finished saves: {finished_saves}, "
                      f"Finished loads: {finished_loads}")
         return finished_saves, finished_loads
