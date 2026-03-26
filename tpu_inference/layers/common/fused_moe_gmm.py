@@ -52,6 +52,7 @@ def gmm_wrapper(lhs,
         group_offset=group_offset[0],
         zero_initialize=False,
         fuse_act=fuse_act,
+        maybe_quantize_lhs=False,
     )
     return gmm_res
 
