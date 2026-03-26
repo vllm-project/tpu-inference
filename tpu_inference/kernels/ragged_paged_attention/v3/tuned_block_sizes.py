@@ -635,7 +635,7 @@ TUNED_BLOCK_SIZES = {
                     'max_model_len-256-sw-None': (2, 32),
                     'max_model_len-512-sw-None': (4, 32),
                     'max_model_len-1024-sw-None': (8, 32),
-                    'max_model_len-2048-sw-None': (16, 32),
+                    'max_model_len-2048-sw-None': (16, 64),
                     'max_model_len-4096-sw-None': (32, 32),
                     'max_model_len-8192-sw-None': (32, 32),
                 },
@@ -4120,7 +4120,7 @@ TUNED_BLOCK_SIZES = {
                 'q_head-32_kv_head-8_head-128': {
                     'max_model_len-1024-sw-None': (16, 32),
                     'max_model_len-128-sw-None': (2, 16),
-                    'max_model_len-2048-sw-None': (16, 32),
+                    'max_model_len-2048-sw-None': (16, 64),
                     'max_model_len-256-sw-None': (2, 16),
                     'max_model_len-4096-sw-None': (32, 32),
                     'max_model_len-512-sw-None': (8, 32),

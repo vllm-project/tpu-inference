@@ -28,6 +28,8 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import (
+    get_tuned_block_sizes)
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, cdiv, get_dtype_packing, get_tpu_version, next_power_of_2)
 
@@ -1854,12 +1856,36 @@ def ragged_paged_attention(
 
     def _prepare_block_sizes(block_sizes, case):
         if block_sizes is None:
+            if case != RpaCase.DECODE:
+                bkv_p, bq_sz = get_tuned_block_sizes(
+                    q.dtype,
+                    kv_cache.dtype,
+                    actual_num_q_heads,
+                    actual_num_kv_heads,
+                    actual_head_dim,
+                    page_size,
+                    max_num_tokens,
+                    pages_per_seq,
+                    sliding_window,
+                )
+                if bkv_p is not None and bq_sz is not None:
+                    bkv_sz = bkv_p * page_size
+                    # Heuristics for compute sizes when using tuned values.
+                    bq_csz = max(1, bq_sz // 2)
+                    bkv_csz = min(512, align_to(bkv_sz // 2, page_size))
+                    return {
+                        "bq_sz": bq_sz,
+                        "bkv_sz": bkv_sz,
+                        "bq_csz": bq_csz,
+                        "bkv_csz": bkv_csz,
+                    }
+
             return get_default_block_sizes(
                 q.dtype,
                 kv_cache.dtype,
                 actual_num_q_heads,
                 actual_num_kv_heads,
-                head_dim,
+                actual_head_dim,
                 page_size,
                 max_num_tokens,
                 max_num_seqs,
