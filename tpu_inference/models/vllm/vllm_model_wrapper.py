@@ -185,16 +185,28 @@ class VllmModelWrapper:
 
         use_random_weights = (
             vllm_config_for_load.load_config.load_format == "dummy")
-        if use_random_weights:
+        use_pathways_dummy = (use_random_weights
+                              and vllm_envs.VLLM_TPU_USING_PATHWAYS)
+        if use_pathways_dummy:
+            logger.info(
+                "Pathways dummy mode: will generate random weights "
+                "directly on TPU, skipping CPU allocation."
+            )
+            # Ensure the loader is registered before use.
+            import tpu_inference.models.common.pathways_dummy_loader  # noqa: F401
+            vllm_config_for_load.load_config.load_format = "pathways_dummy"
+        elif use_random_weights:
             logger.info(
                 "Initializing vLLM model with random weights, weight loading skipped."
             )
         # The DummyModelLoader in vLLM calls torch._sync for torch_xla path when
         # it detects the tpu platform, but we don't need it and it causes crash
-        # without proper setup.
+        # without proper setup.  Not needed for pathways_dummy since it skips
+        # DummyModelLoader entirely.
         load_context = patch(
             "torch._sync",
-            return_value=None) if use_random_weights else nullcontext()
+            return_value=None) if (use_random_weights
+                                   and not use_pathways_dummy) else nullcontext()
 
         # By default load weights to the CPU device first. If we are running
         # under Pathways, this would cause weights to be loaded on a CPU-only

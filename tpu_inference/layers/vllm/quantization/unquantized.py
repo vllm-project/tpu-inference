@@ -14,10 +14,7 @@
 
 from typing import Any, Callable, Optional
 
-import os
-
 import jax
-import jax.numpy as jnp
 import torch
 import vllm.envs as vllm_envs
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
@@ -61,42 +58,19 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-def _use_dummy_weights() -> bool:
+def _is_pathways_dummy_load() -> bool:
+    """Return True when the current load format is pathways-dummy.
 
-    return os.getenv("PATHWAYS_DUMMY_WEIGHTS", "0").lower() in ("1", "true", "yes")
-
-
-def _create_dummy_weights_on_tpu(
-    tpu_sharding: NamedSharding,
-    weight_shape: tuple[int, ...],
-    weight_dtype: jnp.dtype,
-) -> jax.Array:
-    """Create small random dummy weights directly on the TPU mesh.
+    This is the case when ``--load-format dummy`` is used under Pathways:
+    the format is remapped to ``"pathways_dummy"`` on the config copy that
+    drives the model loader, while the outer ``set_current_vllm_config``
+    still has ``"dummy"``.  We accept both values here so callers work
+    regardless of which config is currently active.
     """
-    import time as _time
-    t0 = _time.perf_counter()
-
-    low, high = -1e-3, 1e-3
-    seed = 1234
-    key = jax.random.PRNGKey(seed)
-
-    @jax.jit(out_shardings=tpu_sharding)
-    def _generate(key):
-        return jax.random.uniform(
-            key, shape=weight_shape, dtype=weight_dtype,
-            minval=low, maxval=high,
-        )
-
-    tpu_array = _generate(key)
-
-    t1 = _time.perf_counter()
-
-    logger.info(
-        "_create_dummy_weights_on_tpu shape=%s dtype=%s: total=%.3fs",
-        weight_shape, weight_dtype, t1 - t0,
-    )
-
-    return tpu_array
+    from vllm.config import get_current_vllm_config
+    load_format = get_current_vllm_config().load_config.load_format
+    print("Current load format:", load_format)
+    return load_format in ("dummy", "pathways_dummy")
 
 
 def _torch_to_jax(tensor: torch.Tensor,
@@ -129,9 +103,9 @@ def _load_weight_for_layer(
     Behaviour depends on the environment:
 
     * **Outside Pathways** — delegates to ``_torch_to_jax``.
-    * **Pathways + PATHWAYS_DUMMY_WEIGHTS** — ALL parameters (merged and
-      non-merged) are generated as small random values directly on the
-      TPU mesh via ``_create_dummy_weights_on_tpu``.  No colocated CPU
+    * **Pathways + pathways_dummy load format** — ALL parameters (merged
+      and non-merged) are generated as small random values directly on the
+      TPU mesh via :func:`create_dummy_weights_on_tpu`.  No colocated CPU
       allocation or CPU→TPU transfer is needed.
     Args:
         layer: The ``torch.nn.Module`` owning the weight.
@@ -146,9 +120,11 @@ def _load_weight_for_layer(
     if not vllm_envs.VLLM_TPU_USING_PATHWAYS:
         return _torch_to_jax(tensor, sharding=tpu_sharding)
 
-    use_dummy = _use_dummy_weights()
+    use_dummy = _is_pathways_dummy_load()
 
     if use_dummy:
+        from tpu_inference.models.common.pathways_dummy_loader import \
+            create_dummy_weights_on_tpu
         # ---- Dummy path ----
         # All parameters (merged and non-merged) become small random values
         # created directly on the TPU mesh.  Only shape/dtype are read from
@@ -161,11 +137,15 @@ def _load_weight_for_layer(
         logger.info(
             "Dummy TPU-direct loading for '%s' shape=%s dtype=%s",
             param_name, tensor_shape, dtype)
-        return _create_dummy_weights_on_tpu(
+        return create_dummy_weights_on_tpu(
             tpu_sharding=tpu_sharding,
             weight_shape=tensor_shape,
             weight_dtype=dtype,
         )
+
+    # ---- Pathways real-weight path ----
+    # Colocated-python weight loading (not dummy).
+    return _torch_to_jax(tensor, sharding=tpu_sharding)
 
 
 @register_quantization_config(UNQUANTIZED)

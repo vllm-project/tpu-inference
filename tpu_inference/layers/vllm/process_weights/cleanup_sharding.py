@@ -92,25 +92,26 @@ def _tensor_is_in_cpu(tensor: torch.tensor) -> bool:
 def _convert_to_torchax_and_shard(tensor: torch.Tensor,
                                   sharding: NamedSharding) -> torch.Tensor:
     if vllm_envs.VLLM_TPU_USING_PATHWAYS and isinstance(tensor, torch.Tensor):
-        from tpu_inference.layers.vllm.quantization.unquantized import (
-            _use_dummy_weights, _create_dummy_weights_on_tpu)
+        from tpu_inference.layers.vllm.quantization.unquantized import \
+            _is_pathways_dummy_load
+        from tpu_inference.models.common.pathways_dummy_loader import \
+            create_dummy_weights_on_tpu
         from tpu_inference.utils import to_jax_dtype
-        if _use_dummy_weights():
+        if _is_pathways_dummy_load():
             # Dummy path: generate random values directly on TPU.
             tensor_shape = tuple(tensor.shape)
             tensor_dtype = tensor.dtype
             tensor.untyped_storage().resize_(0)
-            return torch_view(_create_dummy_weights_on_tpu(
+            return torch_view(create_dummy_weights_on_tpu(
                 tpu_sharding=sharding,
                 weight_shape=tensor_shape,
                 weight_dtype=to_jax_dtype(tensor_dtype),
             ))
+    if isinstance(tensor, torchax.tensor.Tensor):
+        tensor = jax_view(tensor)
     else:
-        if isinstance(tensor, torchax.tensor.Tensor):
-            tensor = jax_view(tensor)
-        else:
-            tensor = t2j(tensor)
-        return torch_view(general_device_put(tensor, sharding))
+        tensor = t2j(tensor)
+    return torch_view(general_device_put(tensor, sharding))
 
 
 def _shard_tensor_to_tpu_replicated(tensor: torch.Tensor,

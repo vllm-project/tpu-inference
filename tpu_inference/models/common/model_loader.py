@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 import jax
 import torch
+import vllm.envs as vllm_envs
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from transformers import PretrainedConfig
@@ -215,7 +216,12 @@ def _get_nnx_model(
         # non-trivial overhead in PjitFunction.
         with jax.set_mesh(mesh):
             if vllm_config.load_config.load_format == "dummy":
-                vllm_config.load_config.load_format = "jax_dummy"
+                if vllm_envs.VLLM_TPU_USING_PATHWAYS:
+                    # Ensure the loader is registered before use.
+                    import tpu_inference.models.common.pathways_dummy_loader  # noqa: F401
+                    vllm_config.load_config.load_format = "pathways_dummy"
+                else:
+                    vllm_config.load_config.load_format = "jax_dummy"
             loader = get_model_loader(vllm_config.load_config)
             if isinstance(model, LoadableWithIterator):
                 assert isinstance(model, JaxModule)
