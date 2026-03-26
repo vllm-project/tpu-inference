@@ -62,6 +62,8 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
         self.weight_block_size = self.weight_quant.block_structure
 
         if self.weight_block_size is not None:
+            self.cutlass_block_fp8_supported = False
+            self.use_aiter_and_is_supported = False
             assert not self.is_static_input_scheme
             self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
             self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
@@ -111,7 +113,11 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                 weight, weight_scale = quantize_tensor(jnp.float8_e4m3fn,
                                                        weight, None)
             else:
-                weight_scale = jnp.squeeze(weight_scale, -1)
+                if weight_scale.ndim == 2:
+                    if weight_scale.shape[0] == 1:
+                        weight_scale = weight_scale[0]
+                    elif weight_scale.shape[1] == 1:
+                        weight_scale = weight_scale[:, 0]
 
             return process_linear_weights(
                 LinearWeights(
