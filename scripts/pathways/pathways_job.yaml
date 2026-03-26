@@ -60,7 +60,6 @@ spec:
                         export VLLM_ENGINE_READY_TIMEOUT_S=7200
                         export MODEL_IMPL_TYPE=vllm
                         export NEW_MODEL_DESIGN=1
-                        export PATHWAYS_DUMMY_WEIGHTS=1
                         # export SKIP_JAX_PRECOMPILE=1
 
                         # Clear potentially corrupted model streamer cache
@@ -69,7 +68,7 @@ spec:
                         # Launch vllm serve via Pathways
                         JAX_PLATFORMS=proxy,cpu \
                         JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 \
-                        vllm serve gs://wenxindong-cloud-tpu-inference-test/models--Qwen--Qwen3-235B-A22B-Instruct-2507/ \
+                        vllm serve Qwen/Qwen3-235B-A22B \
                           --tensor-parallel-size 8 \
                           --data-parallel-size 32 \
                           --api-server-count 1 \
@@ -80,7 +79,7 @@ spec:
                           --max-num-batched-tokens 4096 \
                           --enable-expert-parallel \
                           --additional_config='{"sharding":{"sharding_strategy": {"enable_dp_attention":1}}}' \
-                          --load-format runai_streamer
+                          --load-format dummy
                       ) & PID=$!
 
                       while kill -0 $PID 2>/dev/null; do
