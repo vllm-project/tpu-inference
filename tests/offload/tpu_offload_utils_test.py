@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import unittest
 
 import jax
@@ -19,7 +20,8 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import NamedSharding, PartitionSpec
 
-from tpu_inference.offload.utils import (stack_kv_cache_cross_layers,
+from tpu_inference.offload.utils import (pre_update_kv_caches,
+                                         stack_kv_cache_cross_layers,
                                          update_kv_caches)
 
 
@@ -49,19 +51,26 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
         )
 
         self.cache_dtype = jnp.bfloat16
-
         self.mesh = self.create_mesh((1, num_devices), ("data", "model"))
-        partition_spec = PartitionSpec(None, None, "model")
+        self.partition_spec = PartitionSpec(None, None, "model")
         self.device_sharding = NamedSharding(self.mesh,
-                                             partition_spec,
+                                             self.partition_spec,
                                              memory_kind="device")
         self.host_sharding = NamedSharding(self.mesh,
-                                           partition_spec,
+                                           self.partition_spec,
                                            memory_kind="pinned_host")
         flatten_partition_spec = PartitionSpec(None, "model")
         self.flatten_device_sharding = NamedSharding(self.mesh,
                                                      flatten_partition_spec,
                                                      memory_kind="device")
+
+        expand_partition_spec = PartitionSpec(None, None, None, "model")
+        self.expand_device_sharding = NamedSharding(self.mesh,
+                                                    expand_partition_spec,
+                                                    memory_kind="device")
+        self.replicated_device_sharding = NamedSharding(self.mesh,
+                                                        PartitionSpec(),
+                                                        memory_kind="device")
 
     def create_mesh(self, axis_shapes, axis_names):
         """Creates a JAX device mesh with the default device order."""
@@ -136,7 +145,6 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
         """
         num_blocks_to_update = 2
         update_indices = [1, 3]
-        block_indices = jnp.array(update_indices)
 
         # Initial KV caches (zeros)
         initial_kv_caches = [
@@ -149,9 +157,12 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
         # stacked_blocks is a list of arrays. Each array corresponds to one block index being updated.
         # Shape of one element in stacked_blocks: (1, num_layers, block_size, num_kv_heads, 2, head_dim)
         stacked_blocks = [
-            jax.random.uniform(jax.random.PRNGKey(1),
-                               shape=(1, self.num_layers, *self.block_shape),
-                               dtype=self.cache_dtype)
+            jax.device_put(
+                jax.random.uniform(jax.random.PRNGKey(1),
+                                   shape=(1, self.num_layers,
+                                          *self.block_shape),
+                                   dtype=self.cache_dtype),
+                self.expand_device_sharding)
             for i in range(num_blocks_to_update)
         ]
         stacked_blocks_backup = [
@@ -161,14 +172,35 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
         jax.block_until_ready(stacked_blocks_backup)
 
         # Call the function
-        dnums = jax.lax.ScatterDimensionNumbers(
-            update_window_dims=tuple(range(1, 5)),
-            inserted_window_dims=(0, ),
-            scatter_dims_to_operand_dims=(0, ))
+        src_offsets, dest_offsets, chunk_sizes, num_chunks = pre_update_kv_caches(
+            update_indices, self.mesh, self.replicated_device_sharding)
 
+        num_warmup = 2
+        for _ in range(num_warmup):
+            updated_caches = update_kv_caches(
+                initial_kv_caches, stacked_blocks, src_offsets, dest_offsets,
+                chunk_sizes, num_chunks, self.mesh, self.partition_spec,
+                self.partition_spec, self.replicated_device_sharding.spec)
+
+            jax.block_until_ready(updated_caches)
+            initial_kv_caches = updated_caches
+
+        exp_name = "test_kv_transfer"
+        profile_dir = f"/mnt/disks/jcgu/code/ullm/rebase/offload_tests/{exp_name}"
+        options = jax.profiler.ProfileOptions()
+        # default: https://docs.jax.dev/en/latest/profiling.html#general-options
+        options.python_tracer_level = 1
+        options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 2)
+        jax.profiler.start_trace(profile_dir, profiler_options=options)
         updated_caches = update_kv_caches(initial_kv_caches, stacked_blocks,
-                                          block_indices, dnums)
+                                          src_offsets, dest_offsets,
+                                          chunk_sizes, num_chunks, self.mesh,
+                                          self.partition_spec,
+                                          self.partition_spec,
+                                          self.replicated_device_sharding.spec)
+
         jax.block_until_ready(updated_caches)
+        jax.profiler.stop_trace()
 
         # Verification
         for layer_idx in range(self.num_layers):
