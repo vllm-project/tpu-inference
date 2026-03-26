@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 import time
-from dataclasses import asdict
 
 import pytest
-from vllm import LLM, EngineArgs, SamplingParams
+from vllm import LLM, SamplingParams
 
 
 @pytest.fixture
@@ -53,8 +52,7 @@ def _run_inference_with_config(
         disable_hybrid_kv_cache_manager: bool = False) -> list:
     """Helper function to run inference with specified configuration."""
 
-    # Create LLM args using parser-based approach similar to offline_inference.py
-    engine_args = EngineArgs(
+    llm = LLM(
         model=model_name,
         max_model_len=64,
         tensor_parallel_size=tensor_parallel_size,
@@ -65,9 +63,6 @@ def _run_inference_with_config(
         kv_cache_dtype=kv_cache_dtype,
         disable_hybrid_kv_cache_manager=disable_hybrid_kv_cache_manager,
     )
-
-    engine_args_dict = asdict(engine_args)
-    llm = LLM(**engine_args_dict)
 
     try:
         outputs = llm.generate(test_prompts, sampling_params)
