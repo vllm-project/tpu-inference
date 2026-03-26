@@ -24,6 +24,7 @@ from jax.experimental.pallas import tpu as pltpu
 Future = Any
 shard_map = jax.shard_map
 P = jax.sharding.PartitionSpec
+Mesh = jax.sharding.Mesh
 
 _NUM_CHUNKS_CACHE = {}
 
@@ -300,6 +301,10 @@ def multi_layer_copy(
     dest_offsets: jax.Array,
     chunk_sizes: jax.Array,
     num_chunks: jax.Array | None = None,
+    mesh: Mesh | None = None,
+    src_sharding_spec: P | None = None,
+    dest_sharding_spec: P | None = None,
+    replicated_sharding_spec: P | None = None,
 ):
     """Performs asynchronous chunked copy on TPU.
 
@@ -333,12 +338,6 @@ def multi_layer_copy(
     Updated_dest_array: The destination array reflecting the copied chunks.
   """
 
-    def get_spec(sharding):
-        return getattr(sharding, 'spec', P())
-
-    mesh = src_array[0].sharding.mesh
-    src_sharding_spec = get_spec(src_array[0].sharding)
-    dest_sharding_spec = get_spec(dest_array[0].sharding)
     if num_chunks is None:
         num_chunks_val = chunk_sizes.shape[0]
         num_chunks_sharding = chunk_sizes.sharding
@@ -364,9 +363,9 @@ def multi_layer_copy(
         mesh=mesh,
         src_sharding_spec=src_sharding_spec,
         dest_sharding_spec=dest_sharding_spec,
-        src_offsets_sharding_spec=get_spec(src_offsets.sharding),
-        dest_offsets_sharding_spec=get_spec(dest_offsets.sharding),
-        chunk_sizes_sharding_spec=get_spec(chunk_sizes.sharding),
-        num_chunks_sharding_spec=get_spec(num_chunks.sharding),
+        src_offsets_sharding_spec=replicated_sharding_spec,
+        dest_offsets_sharding_spec=replicated_sharding_spec,
+        chunk_sizes_sharding_spec=replicated_sharding_spec,
+        num_chunks_sharding_spec=replicated_sharding_spec,
         num_chunks=num_chunks,
     )
