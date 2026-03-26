@@ -15,14 +15,16 @@
 import functools
 import hashlib
 from dataclasses import dataclass
-from typing import Iterable, List, Literal, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh, PartitionSpec
 from vllm.config import get_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.factory import \
     KVConnectorFactory
 
+from tpu_inference.distributed import kv_transfer
 from tpu_inference.logger import init_logger
 
 ReqId = str
@@ -33,8 +35,6 @@ CpuChunkId = int
 NONE_HASH = 0
 
 logger = init_logger(__name__)
-
-CPU_OFFLOADING_SWAP_OP_TYPE = Literal["jax", "pallas", "jax_copy"]
 
 
 @dataclass(order=True)
@@ -185,18 +185,105 @@ def stack_kv_cache_cross_layers(
     return kv_caches, split_blocks
 
 
+# @functools.partial(
+#     jax.jit,
+#     static_argnames=("dim_nums", ),
+#     donate_argnames=(
+#         "kv_caches",
+#         "stacked_blocks",
+#     ),
+# )
+# def update_kv_caches(
+#         kv_caches: List[jax.Array], stacked_blocks: List[jax.Array],
+#         block_indices: jax.Array,
+#         dim_nums: jax.lax.ScatterDimensionNumbers) -> List[jax.Array]:
+#     """
+#     Updates KV caches by unstacking gathered blocks and inserting slices using scatter.
+
+#     Args:
+#       kv_caches: List of original KV caches for each layer.
+#       stacked_blocks: List of gathered blocks, each with shape (1, num_layers, ...).
+#       block_indices: Array of block indices to update.
+
+#     Returns:
+#       List of updated KV caches for each layer.
+#     """
+#     concatenated_blocks = jnp.concatenate(stacked_blocks, axis=0)
+#     layer_slices_tuple = jnp.unstack(concatenated_blocks, axis=1)
+#     layer_slices_list = list(layer_slices_tuple)
+
+#     def _update_layer(cache_layer, slices):
+#         # NOTE(jcgu): make it as a static arg
+#         # dnums = jax.lax.ScatterDimensionNumbers(
+#         #     update_window_dims=tuple(range(1, len(slices.shape))),
+#         #     inserted_window_dims=(0,),
+#         #     scatter_dims_to_operand_dims=(0,)
+#         # )
+#         return jax.lax.scatter(cache_layer, block_indices[:, None], slices,
+#                                dim_nums)
+
+#     return jax.tree.map(_update_layer, kv_caches, layer_slices_list)
+
+
+def update_kv_caches_one(
+    kv_caches: List[jax.Array],
+    stacked_blocks: List[jax.Array],
+    block_indices: List[int],
+    mesh: Mesh,
+    replicated_sharding: PartitionSpec | None = None,
+) -> List[jax.Array]:
+
+    src_offsets, dest_offsets, chunk_sizes, num_chunks = pre_update_kv_caches(
+        block_indices, mesh, replicated_sharding)
+    return update_kv_caches(
+        kv_caches,
+        stacked_blocks,
+        src_offsets,
+        dest_offsets,
+        chunk_sizes,
+        num_chunks,
+        mesh,
+        kv_caches[0].sharding.spec,
+        kv_caches[0].sharding.spec,
+        replicated_sharding.spec,
+    )
+
+
+def pre_update_kv_caches(
+    block_indices: List[int],
+    mesh: Mesh,
+    replicated_sharding: PartitionSpec | None = None,
+) -> Tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+
+    num_blocks = len(block_indices)
+    src_offsets = jnp.arange(num_blocks, dtype=jnp.int32)
+    dest_offsets = jnp.array(block_indices, dtype=jnp.int32)
+    chunk_sizes = jnp.ones(num_blocks, dtype=jnp.int32)
+    num_chunks = jnp.array([num_blocks], dtype=jnp.int32)
+
+    if replicated_sharding is None:
+        replicated_sharding = jax.sharding.NamedSharding(
+            mesh, jax.sharding.PartitionSpec(), memory_kind='device')
+    src_offsets = jax.device_put(src_offsets, replicated_sharding)
+    dest_offsets = jax.device_put(dest_offsets, replicated_sharding)
+    chunk_sizes = jax.device_put(chunk_sizes, replicated_sharding)
+    num_chunks = jax.device_put(num_chunks, replicated_sharding)
+
+    return src_offsets, dest_offsets, chunk_sizes, num_chunks
+
+
 @functools.partial(
     jax.jit,
-    static_argnames=("dim_nums", ),
-    donate_argnames=(
-        "kv_caches",
-        "stacked_blocks",
-    ),
+    static_argnames=("mesh", "src_sharding_spec", "dest_sharding_spec",
+                     "replicated_sharding_spec"),
+    donate_argnames=("kv_caches", ),
 )
-def update_kv_caches(
-        kv_caches: List[jax.Array], stacked_blocks: List[jax.Array],
-        block_indices: jax.Array,
-        dim_nums: jax.lax.ScatterDimensionNumbers) -> List[jax.Array]:
+def update_kv_caches(kv_caches: List[jax.Array],
+                     stacked_blocks: List[jax.Array], src_offsets: jax.Array,
+                     dest_offsets: jax.Array, chunk_sizes: jax.Array,
+                     num_chunks: jax.Array, mesh, src_sharding_spec,
+                     dest_sharding_spec,
+                     replicated_sharding_spec) -> List[jax.Array]:
     """
     Updates KV caches by unstacking gathered blocks and inserting slices using scatter.
 
@@ -212,14 +299,15 @@ def update_kv_caches(
     layer_slices_tuple = jnp.unstack(concatenated_blocks, axis=1)
     layer_slices_list = list(layer_slices_tuple)
 
-    def _update_layer(cache_layer, slices):
-        # NOTE(jcgu): make it as a static arg
-        # dnums = jax.lax.ScatterDimensionNumbers(
-        #     update_window_dims=tuple(range(1, len(slices.shape))),
-        #     inserted_window_dims=(0,),
-        #     scatter_dims_to_operand_dims=(0,)
-        # )
-        return jax.lax.scatter(cache_layer, block_indices[:, None], slices,
-                               dim_nums)
-
-    return jax.tree.map(_update_layer, kv_caches, layer_slices_list)
+    output = kv_transfer.multi_layer_copy(
+        src_array=layer_slices_list,
+        dest_array=kv_caches,
+        src_offsets=src_offsets,
+        dest_offsets=dest_offsets,
+        chunk_sizes=chunk_sizes,
+        num_chunks=num_chunks,
+        mesh=mesh,
+        src_sharding_spec=src_sharding_spec,
+        dest_sharding_spec=dest_sharding_spec,
+        replicated_sharding_spec=replicated_sharding_spec)
+    return output
