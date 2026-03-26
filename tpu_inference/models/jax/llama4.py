@@ -16,6 +16,7 @@ import math
 import re
 from itertools import islice
 from typing import Any, List, Optional, Tuple
+import numpy as np
 
 import jax
 import jax.numpy as jnp
@@ -195,13 +196,10 @@ class Llama4WeightLoader(BaseWeightLoader):
                                  loaded_weight: jax.Array):
         """HF's gate_up_proj is a fused tensor of gate and up projections. It needs to be split."""
 
-        cast_type = jnp.dtype(jnp.bfloat16)
-        # loaded_weight is a jax.Array when framework="flax", otherwise it's bfloat16
-        if not isinstance(loaded_weight, jax.Array):
-            loaded_weight = convert_torch_to_jax_with_view(
-                loaded_weight, cast_type)
-
-        split_weights = jnp.split(loaded_weight, 2, axis=-1)
+        if hasattr(loaded_weight, "numpy"): # Torch tensor
+            split_weights = [w.cpu().numpy() for w in loaded_weight.chunk(2, dim=-1)]
+        else:
+            split_weights = np.split(loaded_weight, 2, axis=-1)
         layer_num = self._get_layer_num(loaded_name)
 
         for split_type in ["gate", "up"]:
@@ -228,11 +226,14 @@ class Llama4WeightLoader(BaseWeightLoader):
                     f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
                     f"does not match model shape for {mapped_name}: {mapped_model_weight.value.shape}!"
                 )
+            
+            cast_type = jnp.dtype(jnp.bfloat16)
+            # loaded_weight is a jax.Array when framework="flax", otherwise it's bfloat16
+            if not isinstance(loaded_weight, jax.Array):
+                loaded_weight = convert_torch_to_jax_with_view(
+                            loaded_weight, cast_type, mapped_model_weight.out_sharding, model_for_loading.mesh)
 
-            mapped_model_weight.value = shard_put(
-                loaded_weight,
-                mapped_model_weight.out_sharding,
-                mesh=model_for_loading.mesh)
+            mapped_model_weight.value = loaded_weight
             logger.debug(
                 f"{split_loaded_name}: {loaded_weight.shape}  -->  {mapped_name}: {mapped_model_weight.value.shape}"
             )
@@ -288,17 +289,17 @@ class Llama4WeightLoader(BaseWeightLoader):
                         )
                         continue
                     model_weight = get_param(model_params, mapped_name)
-
-                    if is_scale:
-                        cast_type = model_weight.array.scale.value.dtype
-                    else:
-                        cast_type = model_weight.array.qvalue.value.dtype
-
-                    loaded_weight = convert_torch_to_jax_with_view(
-                        loaded_weight, cast_type)
                     loaded_weight = transpose_params(loaded_name,
                                                      loaded_weight,
                                                      self._transpose_map)
+                    if is_scale:
+                        cast_type = model_weight.array.scale.value.dtype
+                        loaded_weight = convert_torch_to_jax_with_view(
+                            loaded_weight, cast_type, model_weight.array.scale.out_sharding, model_for_loading.mesh)
+                    else:
+                        cast_type = model_weight.array.qvalue.value.dtype
+                        loaded_weight = convert_torch_to_jax_with_view(
+                            loaded_weight, cast_type, model_weight.array.qvalue.out_sharding, model_for_loading.mesh)
 
                     buffer_key = f"{mapped_name}_{'scale' if is_scale else 'qvalue'}"
                     if buffer_key not in self.expert_weights_buffer:
@@ -328,20 +329,21 @@ class Llama4WeightLoader(BaseWeightLoader):
                     continue
                 model_weight = get_param(model_params, mapped_name)
 
-                cast_type = model_weight.value.dtype
-                if not isinstance(loaded_weight, jax.Array):
-                    logger.debug(
-                        f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
-                    )
-                    loaded_weight = convert_torch_to_jax_with_view(
-                        loaded_weight, cast_type)
-
                 if not loaded_name.endswith(".bias"):
                     loaded_weight = reshape_params(loaded_name, loaded_weight,
                                                    self._weight_shape_map)
                     loaded_weight = transpose_params(loaded_name,
                                                      loaded_weight,
                                                      self._transpose_map)
+                    
+                cast_type = model_weight.value.dtype
+                if not isinstance(loaded_weight, jax.Array):
+                    logger.debug(
+                        f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
+                    )
+                    loaded_weight = convert_torch_to_jax_with_view(
+                        loaded_weight, cast_type, model_weight.out_sharding, model_for_loading.mesh)
+                    
                 if model_weight.value.shape != loaded_weight.shape:
                     raise ValueError(
                         f"Loaded shape for {loaded_name}: {loaded_weight.shape} "
@@ -350,9 +352,7 @@ class Llama4WeightLoader(BaseWeightLoader):
                 logger.debug(
                     f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
                 )
-                model_weight.value = shard_put(loaded_weight,
-                                               model_weight.out_sharding,
-                                               mesh=model_for_loading.mesh)
+                model_weight.value = loaded_weight
                 if self.is_verbose:
                     print_param_info(model_weight, loaded_name)
             with jax.default_device(jax.devices("cpu")[0]):
@@ -385,10 +385,7 @@ class Llama4WeightLoader(BaseWeightLoader):
                                 f"does not match model shape for {loaded_name}: {model_weight.array.scale.value.shape}!"
                             )
 
-                        model_weight.array.scale.value = shard_put(
-                            aggregated_weight,
-                            model_weight.array.scale.out_sharding,
-                            mesh=model_for_loading.mesh)
+                        model_weight.array.scale.value = aggregated_weight
 
                     elif aggregated_weight.itemsize < 2:  # check model weight elem nbits < 16
                         loaded_name = f"{base_mapped_name}.array.qvalue.value"
@@ -398,10 +395,7 @@ class Llama4WeightLoader(BaseWeightLoader):
                                 f"does not match model shape for {loaded_name}: {model_weight.array.qvalue.value.shape}!"
                             )
 
-                        model_weight.array.qvalue.value = shard_put(
-                            aggregated_weight,
-                            model_weight.array.qvalue.out_sharding,
-                            mesh=model_for_loading.mesh)
+                        model_weight.array.qvalue.value = aggregated_weight
 
                     logger.debug(
                         f"Aggregated and loaded {loaded_name}: {aggregated_weight.shape}"

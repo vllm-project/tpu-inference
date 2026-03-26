@@ -23,7 +23,7 @@ from collections import defaultdict
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -122,14 +122,15 @@ def model_weights_generator(
 
 
 def convert_torch_to_jax_with_view(loaded_weight: torch.Tensor,
-                                   cast_type: jnp.dtype) -> jax.Array:
+                                   cast_type: jnp.dtype, sharding_names: Tuple[str, ...] | P, mesh: jax.sharding.Mesh) -> jax.Array:
     """
     Converts a PyTorch tensor to a JAX array by reinterpreting its
     bit representation using a dtype view map.
     """
     torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+    
     loaded_weight = jnp.array(
-        loaded_weight.view(torch_view_type).numpy()).view(cast_type)
+        loaded_weight.view(torch_view_type).numpy(), NamedSharding(mesh, P(*sharding_names))).view(cast_type)
     return loaded_weight
 
 
