@@ -32,8 +32,6 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 
 from tpu_inference import utils
 from tpu_inference import utils as common_utils
-from tpu_inference.kernels.ragged_paged_attention.v3.kernel import (RpaCase,
-                                                                    get_bkv_sz)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.runner import utils as runner_utils
@@ -131,50 +129,6 @@ class KVCacheManager:
                      page_size_bytes)
         self.runner.cache_config.mamba_page_size_padded = page_size_bytes
 
-    def align_block_size_for_rpa(self) -> None:
-        """Update cache config block size for RPA kernel.
-
-        Checks if KV prefetch size(`bkv_sz`) used in the RPA kernel is aligned
-        to `cache_config.block_size`.
-        If not, updates the block size to be the minimum `bkv_sz` value that can
-        be computed by the kernel, to ensure alignment.
-        This is a kernel requirement (page_size and block_size are equivalent).
-        (https://github.com/vllm-project/tpu-inference/blob/30f637e345338e0b1cdb71cf5aa8f404d460e27d/tpu_inference/kernels/ragged_paged_attention/v3/kernel.py#L374)
-        """
-        kv_dtype = t2j_dtype(self.runner.kv_cache_dtype)
-        model_cnt = common_utils.get_mesh_shape_product(
-            self.runner.mesh, ShardingAxisName.ATTN_HEAD)
-        global_kv_heads = self.runner.model_config.get_total_num_kv_heads()
-        actual_num_kv_heads = common_utils.get_padded_num_heads(
-            global_kv_heads, model_cnt) // model_cnt
-        head_dim = common_utils.get_padded_head_dim(
-            self.runner.model_config.get_head_size())
-
-        def get_updated_block_size(page_size):
-            pages_per_seq = cdiv(self.runner.max_model_len, page_size)
-            bkv_sizes = [
-                get_bkv_sz(kv_dtype,
-                           actual_num_kv_heads,
-                           head_dim,
-                           page_size,
-                           pages_per_seq,
-                           case=case)
-                for case in (RpaCase.MIXED, RpaCase.DECODE)
-            ]
-
-            if any(sz % page_size != 0 for sz in bkv_sizes):
-                return min(bkv_sizes)
-            return page_size
-
-        block_size = self.runner.cache_config.block_size
-        new_block_size = get_updated_block_size(block_size)
-
-        if new_block_size != block_size:
-            logger.info("Setting block size in cache config to %d",
-                        new_block_size)
-            assert get_updated_block_size(new_block_size) == new_block_size
-            self.runner.cache_config.block_size = new_block_size
-
     def get_kv_cache_spec(self):
         # TODO(xiang): this hack tricks engine core to init successfully
         block_size = self.runner.cache_config.block_size
@@ -271,17 +225,10 @@ class KVCacheManager:
                 isinstance(attn_module, MambaBase)
                 for attn_module in layers.values())
 
-            # Cache config updates for hybrid attention models with mamba and
+            # Cache config update for hybrid attention models with mamba and
             # full attention layers.
             is_hybrid_mamba_attention = has_attention and has_mamba
             if is_hybrid_mamba_attention:
-                # vLLM overrides the block size in cache config such that the
-                # page size of the full attention layers is >= that of mamba
-                # layers. (https://github.com/vllm-project/vllm/blob/d7d2b5e405a24f716371cc7f9b488b14300b0991/vllm/model_executor/models/config.py#L107)
-                # This can cause the block size to not be aligned with RPA
-                # kernel requirements, update the block size to align.
-                self.align_block_size_for_rpa()
-                block_size = self.runner.cache_config.block_size
                 # Unify the page sizes of mamba and full attention layers to
                 # enable use of shared kv cache, vLLM also expects page sizes to
                 # be unified.
