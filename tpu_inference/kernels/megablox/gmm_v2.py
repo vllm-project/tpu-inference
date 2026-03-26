@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import dataclasses
+import enum
 import functools
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Tuple
@@ -22,6 +23,18 @@ import jax.numpy as jnp
 from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
+
+# Enums.
+
+
+class ActivationFn(str, enum.Enum):
+    SILU = "silu"
+    GELU = "gelu"
+    SWIGLUOAI = "swigluoai"
+
+    def __str__(self) -> str:
+        return self.value
+
 
 # Util.
 
@@ -39,7 +52,7 @@ def swigluoai(gate: jax.Array,
     return (up + 1.0) * glu
 
 
-def apply_act_fn(acc: jax.Array, fuse_act: str | None):
+def apply_act_fn(acc: jax.Array, fuse_act: ActivationFn | None):
     """Applies a fused activation function to the accumulator.
 
     This function is used when an activation function is fused with the matrix
@@ -63,11 +76,11 @@ def apply_act_fn(acc: jax.Array, fuse_act: str | None):
 
     acc_gate, acc_up = jnp.split(acc, 2, -1)
     match fuse_act:
-        case "silu":
+        case ActivationFn.SILU:
             return jax.nn.silu(acc_gate) * acc_up
-        case "gelu":
-            return jax.nn.gelu(acc_gate) * acc_up
-        case "swigluoai":
+        case ActivationFn.GELU:
+            return jax.nn.gelu(acc_gate, approximate=True) * acc_up
+        case ActivationFn.SWIGLUOAI:
             return swigluoai(acc_gate, acc_up)
         case _:
             raise NotImplementedError(
@@ -189,7 +202,7 @@ class GmmConfigs:
     out_dtype: jnp.dtype
     acc_dtype: jnp.dtype
     zero_init: bool
-    fuse_act: str | None
+    fuse_act: ActivationFn | None
 
     @property
     def num_quant_blocks_per_tile_k(self) -> int:
@@ -203,8 +216,9 @@ class GmmConfigs:
             return self.dims.size_n // 2
 
 
-TileFn = Callable[[Dimensions, InputConfigs, InputConfigs, int, str | None],
-                  TileSizes]
+TileFn = Callable[
+    [Dimensions, InputConfigs, InputConfigs, int, ActivationFn | None],
+    TileSizes]
 
 
 class IndexMaps:
@@ -834,7 +848,7 @@ def calculate_tiling(
     lhs_cfgs: InputConfigs,
     rhs_cfgs: InputConfigs,
     vmem_limit_bytes: int,
-    fuse_act: str | None = None,
+    fuse_act: ActivationFn | None = None,
 ) -> TileSizes:
     """Calculate optimal tile sizes for GMM kernel."""
 
@@ -922,7 +936,7 @@ def validate_inputs(
     rhs_bias: jax.Array | None,
     group_sizes: jax.Array,
     group_offset: jax.Array,
-    fuse_act: str | None = None,
+    fuse_act: ActivationFn | None = None,
 ) -> Dimensions:
     """Validates the inputs for the GMM kernel."""
 
@@ -988,11 +1002,27 @@ def get_cost_estimate(cfgs: GmmConfigs):
     out_bytes = dims.size_m * cfgs.out_size_n * cfgs.out_dtype.itemsize
 
     total_bytes = lhs_bytes + rhs_bytes + out_bytes
-
+    transcendentals = 0
+    if cfgs.fuse_act is not None:
+        # gelu is 1 because approximate=true (tanh) vs (1/x, exp)
+        transcendentals_multiplier = 1 if cfgs.fuse_act == ActivationFn.GELU else 2
+        act_transcendentals = dims.size_m * cfgs.out_size_n
+        act_transcendentals *= transcendentals_multiplier
+        transcendentals += act_transcendentals
+        act_alu_flops = {
+            ActivationFn.SILU: 5,  # -, +, /, *, *
+            ActivationFn.GELU: 8,  # *,*,*,*,+,*,+,*
+            ActivationFn.SWIGLUOAI: 7,  # *,-,+,/,*,+,*
+        }
+        flops += act_alu_flops[cfgs.fuse_act] * dims.size_m * cfgs.out_size_n
+    if cfgs.lhs_cfgs.quant_dtype is not None:
+        # every block inverse scale
+        transcendentals += dims.size_m * (dims.size_k //
+                                          cfgs.lhs_cfgs.quant_block_size)
     return pl.CostEstimate(
         flops=flops,
         bytes_accessed=total_bytes,
-        transcendentals=0,
+        transcendentals=transcendentals,
     )
 
 
@@ -1019,7 +1049,7 @@ def make_gmm_configs(
     acc_dtype: jnp.dtype | None,
     maybe_quantize_lhs: bool,
     zero_initialize: bool,
-    fuse_act: str | None = None,
+    fuse_act: ActivationFn | None = None,
 ):
     """Fills the GMM config for the GMM kernel."""
 
@@ -1133,7 +1163,7 @@ def gmm_v2(
     acc_dtype: jnp.dtype | None = None,
     maybe_quantize_lhs: bool = True,
     zero_initialize: bool = True,
-    fuse_act: str | None = None,
+    fuse_act: ActivationFn | str | None = None,
 ) -> jax.Array:
     """GMM kernel implemented with emit_pipeline.
 
