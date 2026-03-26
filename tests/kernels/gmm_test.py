@@ -656,7 +656,7 @@ class GmmTest(jtu.JaxTestCase):
 
         # Slice the reference and apply the activation function
         expected = apply_act_fn(raw_expected.astype(jnp.float32),
-                                final_out_size, fuse_act).astype(lhs.dtype)
+                                fuse_act).astype(lhs.dtype)
 
         # 4. Compute Actual Kernel Output
         actual = gmm_v2(
