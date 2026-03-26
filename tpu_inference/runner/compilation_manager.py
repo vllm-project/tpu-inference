@@ -293,22 +293,14 @@ class CompilationManager:
                 input_ids = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32, dp_sharding)
                 # Need align to the sampling output sharding (sharded by ATTN_DATA in DP)
-                next_tokens_sharding = NamedSharding(
-                    self.runner.mesh,
-                    PartitionSpec(ShardingAxisName.ATTN_DATA))
                 next_tokens = self._create_dummy_tensor(
-                    (num_reqs, ), jnp.int32, sharding=next_tokens_sharding)
+                    (num_reqs, ),
+                    jnp.int32,
+                    sharding=NamedSharding(
+                        self.runner.mesh,
+                        PartitionSpec(ShardingAxisName.ATTN_DATA)))
 
                 placeholder_num = jnp.asarray(1, dtype=jnp.int32)
-                logger.info(
-                    "Precompile substitution | "
-                    f"input_ids: shape={input_ids.shape}, dtype={input_ids.dtype}, sharding={input_ids.sharding} | "
-                    f"cur_indices: shape={padded_token_in_tpu_cur_input_indices.shape}, dtype={padded_token_in_tpu_cur_input_indices.dtype}, sharding={padded_token_in_tpu_cur_input_indices.sharding} | "
-                    f"pre_indices: shape={padded_token_in_tpu_pre_next_tokens_indices.shape}, dtype={padded_token_in_tpu_pre_next_tokens_indices.dtype}, sharding={padded_token_in_tpu_pre_next_tokens_indices.sharding} | "
-                    f"next_tokens: shape={next_tokens.shape}, dtype={next_tokens.dtype}, sharding={next_tokens.sharding} | "
-                    f"placeholder_num: val={placeholder_num}, type={type(placeholder_num)}"
-                )
-
                 self._run_compilation(
                     "_substitute_placeholder_token_fn",
                     self.runner._substitute_placeholder_token_fn,
