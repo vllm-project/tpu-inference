@@ -87,27 +87,25 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
             o_vref,
         ):
 
-            def strided_load(ref, start, sz, step, *, dtype=None):
-                assert schedule_lib.get_dtype_packing(ref.dtype) == 1
-                assert len(ref.shape) == 2
-                r, l = ref.shape  # noqa
-                assert l % 128 == 0
-                folds = l // 128
-                ref = ref.reshape(r * folds, 128)
-                start *= folds
-                sz *= folds
-                step *= folds
-                assert sz % step == 0
-                vec = jnp.concat(
-                    [
-                        ref[pl.ds(start + i, sz // step, step)]
-                        for i in range(folds)
-                    ],
-                    axis=1,
-                )
-                if dtype is not None:
-                    vec = pltpu.bitcast(vec, dtype)
-                return vec
+            def strided_load(ref, start_row, num_rows, step, *, dtype=None):
+                """Loads data from HBM with strided access, handling 128-lane alignment."""
+                _, row_width = ref.shape
+                num_sub_lanes = row_width // 128
+                ref_flat = ref.reshape(-1, 128)
+
+                # scale indices to match flattened arraw.
+                v_start = start_row * num_sub_lanes
+                v_num = num_rows * num_sub_lanes
+                v_step = step * num_sub_lanes
+
+                # Gather the chunks into the original head dimension.
+                chunks = [
+                    ref_flat[pl.ds(v_start + i, v_num // v_step, v_step)]
+                    for i in range(num_sub_lanes)
+                ]
+                vec = jnp.concat(chunks, axis=1)
+
+                return pltpu.bitcast(vec, dtype) if dtype is not None else vec
 
             def get_dtype_bitwidth(dtype):
                 return jax._src.dtypes.itemsize_bits(dtype)
@@ -189,10 +187,7 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
             processed_q_len = []
             processed_kv_len = []
             effective_kv_len = []
-            int_ty = jnp.int32
-            if (schedule_lib.get_dtype_packing(config.q_dtype) != 1
-                    and pltpu.get_tpu_info().generation >= 6):
-                int_ty = jnp.int16
+            int_ty = config.int_ty
             for b in range(config.batch_size):
                 idx = step * config.batch_size + b
                 s_idx = schedule.s_idx[idx]
@@ -510,7 +505,7 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
         pltpu.SemaphoreType.DMA((1, )),  # dma_sem
     ]
     in_specs = [
-        schedule_lib.RPASchedule.test_specs(config),  # 9 refs
+        schedule_lib.RPASchedule.kernel_in_specs(config),  # 9 refs
         pl.BlockSpec(memory_space=pltpu.HBM),  # o_hbm_alias_q_hbm_ref
         pl.BlockSpec(memory_space=pltpu.HBM),  # new_kv_hbm_ref
         pl.BlockSpec(memory_space=pltpu.HBM),  # kv_cache_hbm_ref

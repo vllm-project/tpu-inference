@@ -15,12 +15,9 @@
 import jax.numpy as jnp
 from jax import lax
 from jax.experimental import pallas as pl
-from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.experimental.batched_rpa import \
     schedule as rpa_schedule
-
-_NUM_LANES = 128
 
 
 def align_to(a, b):
@@ -84,10 +81,7 @@ def flash_attention(
     qk_masked = []
     v_masked = []
 
-    int_ty = jnp.int32
-    if (rpa_schedule.get_dtype_packing(config.q_dtype) != 1
-            and pltpu.get_tpu_info().generation >= 6):
-        int_ty = jnp.int16
+    int_ty = config.int_ty
 
     for b_idx in range(config.batch_size):
         kv_idx_b = (lax.broadcasted_iota(int_ty, (k_heads, tq, s), 2) +
@@ -98,13 +92,14 @@ def flash_attention(
 
         eff_kv_len_b = effective_kv_len[b_idx]
         mask_b = q_idx_b < eff_kv_len_b
-        mask_b &= q_idx_b >= kv_idx_b
+        mask_b = jnp.logical_and(mask_b, q_idx_b >= kv_idx_b)
 
         if config.sliding_window is not None:
-            mask_b &= q_idx_b < kv_idx_b + config.sliding_window
+            mask_b = jnp.logical_and(
+                mask_b, q_idx_b < kv_idx_b + config.sliding_window)
 
         if not config.mask_v:
-            mask_b &= kv_idx_b < eff_kv_len_b
+            mask_b = jnp.logical_and(mask_b, kv_idx_b < eff_kv_len_b)
 
         qk_masked.append(jnp.where(mask_b, qk[b_idx], config.mask_value))
 

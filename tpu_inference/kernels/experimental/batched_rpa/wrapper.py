@@ -543,7 +543,7 @@ def ragged_paged_attention(
     vmem_limit_bytes: int | None = None,
     debug_mode: bool = False,
     m_block_sizes: tuple[int, int, int, int] | None = None,
-    n_buffer: int | tuple[int, int] = 2,
+    n_buffer: int | tuple[int, int] | None = None,
     out_dtype: Any | None = None,
     use_causal_mask: bool = True,
 ):
@@ -635,7 +635,8 @@ def ragged_paged_attention(
         if isinstance(n_buffer, tuple):
             kernel_n_buffer = n_buffer[idx]
         else:
-            kernel_n_buffer = block_sizes["n_buffer"]
+            kernel_n_buffer = n_buffer if n_buffer is not None else block_sizes[
+                "n_buffer"]
 
         max_steps_ub = _get_max_steps_ub(
             max_num_seqs,

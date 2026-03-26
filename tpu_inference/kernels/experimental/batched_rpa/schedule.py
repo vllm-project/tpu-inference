@@ -27,10 +27,10 @@ from jax.experimental.pallas import tpu as pltpu
 class RpaCase(Enum):
     """Represents the different cases for Ragged Paged Attention.
 
-  - DECODE: Sequences are in decode-only mode (q_len = 1).
-  - PREFILL: Sequences are in prefill-only mode (q_len > 1, static).
-  - MIXED: Sequences can be a mix of prefill and decode (q_len > 1, dynamic).
-  """
+    - DECODE: Sequences are in decode-only mode (q_len = 1).
+    - PREFILL: Sequences are in prefill-only mode (q_len > 1, static).
+    - MIXED: Sequences can be a mix of prefill and decode (q_len > 1, dynamic).
+    """
 
     DECODE = 0
     PREFILL = 1
@@ -81,7 +81,7 @@ class RPAConfig:
     q_scale: Any = None
     k_scale: Any = None
     v_scale: Any = None
-    vmem_limit_bytes: int | None = 60 * 1024 * 1024
+    vmem_limit_bytes: int | None = None
     case: RpaCase = RpaCase.MIXED
     n_buffer: int = 2
     out_dtype: Any = jnp.bfloat16
@@ -111,6 +111,13 @@ class RPAConfig:
     @property
     def page_size_mask(self) -> int:
         return self.page_size - 1
+
+    @property
+    def int_ty(self) -> Any:
+        if (get_dtype_packing(self.q_dtype) != 1
+                and pltpu.get_tpu_info().generation >= 6):
+            return jnp.int16
+        return jnp.int32
 
 
 def get_dtype_bitwidth(dtype):
@@ -253,8 +260,8 @@ class RPASchedule:
         return cls._map_shapes(config, wrapper)
 
     @classmethod
-    def test_specs(cls, config: RPAConfig):
-        """Returns a Pytree of BlockSpecs matching the output structure."""
+    def kernel_in_specs(cls, config: RPAConfig):
+        """Returns a Pytree of BlockSpecs for passing schedule to kernel."""
 
         def wrapper(shape, is_smem=False):
             memory_space = pltpu.SMEM if is_smem else pltpu.HBM
@@ -294,20 +301,20 @@ def rpa_metadata_schedule_kernel(
 ):
     """Generates the HBM-to-VMEM DMA schedule
 
-  This kernel:
-  1. Iterates through each (potentially ragged) sequence
-  2. Breaks Queries (Q) and Key-Values (KV) into blocks (bq_sz, bkv_sz).
-  3. Assigns tasks to 'lanes' (TPU batch items) based on current lane occupancy
-     to ensure balanced execution across the batch dimension.
-  4. Encodes DMA offsets:
-     - dma_q: HBM start index and size for Query blocks.
-     - dma_kv_cache: Paged indices for existing KV tokens.
-     - dma_kv_new: offsets for new tokens being added to the cache.
-     - do_writeback: boolean flag indicating if a block should be flushed to
-     HBM (ie does this block contain new tokens to add to KV cache).
+    This kernel:
+    1. Iterates through each (potentially ragged) sequence
+    2. Breaks Queries (Q) and Key-Values (KV) into blocks (bq_sz, bkv_sz).
+    3. Assigns tasks to 'lanes' (TPU batch items) based on current lane occupancy
+        to ensure balanced execution across the batch dimension.
+    4. Encodes DMA offsets:
+        - dma_q: HBM start index and size for Query blocks.
+        - dma_kv_cache: Paged indices for existing KV tokens.
+        - dma_kv_new: offsets for new tokens being added to the cache.
+        - do_writeback: boolean flag indicating if a block should be flushed to
+        HBM (ie does this block contain new tokens to add to KV cache).
 
-  Check bref_override.py to check usage of the schedule.
-  """
+    Check bref_override.py to check usage of the schedule.
+    """
     for b in range(config.batch_size):
         lane_lengths_ref[b] = 0
 
@@ -343,12 +350,6 @@ def rpa_metadata_schedule_kernel(
             end_k_idx = jnp.minimum(n_k, end_k_idx_causal)
 
             def k_loop(k_idx, curr_ptr):
-                # pl.debug_check(
-                #     curr_ptr < config.max_steps_ub,
-                #     f"ERROR: rpa_metadata_schedule_kernel overflow: curr_ptr ({curr_ptr}) "
-                #     f"exceeds max_steps_ub ({config.max_steps_ub})"
-                # )
-
                 idx = curr_ptr * config.batch_size + target_lane
                 schedule.s_idx[idx] = s_idx
                 schedule.q_idx[idx] = q_idx
