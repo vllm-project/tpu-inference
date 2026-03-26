@@ -24,6 +24,9 @@ from vllm.config import VllmConfig
 
 from tpu_inference import utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
+from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import (
+    get_tuned_block_sizes)
+from tpu_inference.kernels.ragged_paged_attention.v3.util import align_to
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
@@ -150,6 +153,7 @@ class LlamaAttention(nnx.Module):
         if kv_cache_dtype != "auto":
             self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
                 kv_cache_dtype)
+        self.sliding_window = getattr(config, "sliding_window", None)
 
     def __call__(
         self,
@@ -177,6 +181,31 @@ class LlamaAttention(nnx.Module):
             v_scale = self._v_scale
             k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
                                v_scale)
+
+        m_block_sizes = None
+        if kv_cache is not None:
+            max_num_tokens = q.shape[0]
+            page_size = kv_cache.shape[1]
+            pages_per_seq = md.block_tables.shape[0] // md.seq_lens.shape[0]
+
+            bkv_p, bq_sz = get_tuned_block_sizes(
+                q.dtype,
+                kv_cache.dtype,
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_dim_original,
+                page_size,
+                max_num_tokens,
+                pages_per_seq,
+                self.sliding_window,
+            )
+
+            if bkv_p is not None and bq_sz is not None:
+                bkv_sz = bkv_p * page_size
+                bq_csz = max(1, bq_sz // 2)
+                bkv_csz = min(512, align_to(bkv_sz // 2, page_size))
+                m_block_sizes = (bq_sz, bkv_sz, bq_csz, bkv_csz)
+
         new_kv_cache, outputs = attention(
             kv_cache,
             q,
@@ -185,9 +214,11 @@ class LlamaAttention(nnx.Module):
             attention_metadata,
             self.mesh,
             self.head_dim_original,
+            attention_chunk_size=self.sliding_window,
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
+            m_block_sizes=m_block_sizes,
         )
         # (T, D)
         o = self.o_proj(outputs)

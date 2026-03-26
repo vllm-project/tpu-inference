@@ -339,6 +339,7 @@ def sharded_ragged_paged_attention(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    m_block_sizes: Any = None,
 ):
     """Shards along KV heads."""
     # Handle GQA/MQA where num_kv_heads < tp_size
@@ -392,6 +393,8 @@ def sharded_ragged_paged_attention(
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
+            m_block_sizes=m_block_sizes,
+            p_block_sizes=m_block_sizes,
         )
 
     return jax.shard_map(
@@ -417,6 +420,7 @@ def attention(
     k_scale: float | None = None,
     v_scale: float | None = None,
     sinks: jax.Array | None = None,
+    m_block_sizes: Any = None,
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads
@@ -455,6 +459,7 @@ def attention(
         q_scale=q_scale,
         k_scale=k_scale,
         v_scale=v_scale,
+        m_block_sizes=m_block_sizes,
     )
 
     return kv_cache, output

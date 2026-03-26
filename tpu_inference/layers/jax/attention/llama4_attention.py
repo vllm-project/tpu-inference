@@ -23,6 +23,9 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jax.sharding import Sharding
 
+from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import (
+    get_tuned_block_sizes)
+from tpu_inference.kernels.ragged_paged_attention.v3.util import align_to
 from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -140,6 +143,31 @@ class Llama4Attention(Attention):
             v_scale = self._v_scale
             k_SKH, v_SKH = quantize_kv(self.kv_cache_quantized_dtype, k_SKH,
                                        v_SKH, k_scale, v_scale)
+
+        m_block_sizes = None
+        if kv_cache is not None:
+            max_num_tokens = q_TNH.shape[0]
+            page_size = kv_cache.shape[1]
+            pages_per_seq = attention_metadata.block_tables.shape[0] // attention_metadata.seq_lens.shape[0]
+
+            bkv_p, bq_sz = get_tuned_block_sizes(
+                q_TNH.dtype,
+                kv_cache.dtype,
+                self.num_attention_heads,
+                self.num_key_value_heads,
+                self.head_dim,
+                page_size,
+                max_num_tokens,
+                pages_per_seq,
+                self.attention_chunk_size,
+            )
+
+            if bkv_p is not None and bq_sz is not None:
+                bkv_sz = bkv_p * page_size
+                bq_csz = max(1, bq_sz // 2)
+                bkv_csz = min(512, align_to(bkv_sz // 2, page_size))
+                m_block_sizes = (bq_sz, bkv_sz, bq_csz, bkv_csz)
+
         with jax.named_scope("attn_op"):
             new_kv_cache, outputs_TNH = self.attention(is_prefill,
                                                        kv_cache,
@@ -151,6 +179,7 @@ class Llama4Attention(Attention):
                                                        q_scale=q_scale,
                                                        k_scale=k_scale,
                                                        v_scale=v_scale,
+                                                       m_block_sizes=m_block_sizes,
                                                        **kwargs)
         with jax.named_scope("o_proj"):
             o_TD = jnp.einsum('TNH,NHD -> TD', outputs_TNH,

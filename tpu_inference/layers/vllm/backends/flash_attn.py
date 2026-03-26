@@ -16,6 +16,9 @@ from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
                                                  register_backend)
 
 from tpu_inference import utils
+from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import (
+    get_tuned_block_sizes)
+from tpu_inference.kernels.ragged_paged_attention.v3.util import align_to
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
@@ -254,6 +257,30 @@ def _jax_attn_func(
     k = k.reshape(k_len, num_kv_heads, head_size)
     v = v.reshape(k_len, num_kv_heads, head_size)
 
+    m_block_sizes = None
+    if kv_cache is not None:
+        max_num_tokens = q.shape[0]
+        page_size = kv_cache.shape[1]
+        pages_per_seq = attention_metadata.block_tables.shape[0] // attention_metadata.seq_lens.shape[0]
+
+        bkv_p, bq_sz = get_tuned_block_sizes(
+            q.dtype,
+            kv_cache.dtype,
+            num_heads,
+            num_kv_heads,
+            head_size,
+            page_size,
+            max_num_tokens,
+            pages_per_seq,
+            sliding_window,
+        )
+
+        if bkv_p is not None and bq_sz is not None:
+            bkv_sz = bkv_p * page_size
+            bq_csz = max(1, bq_sz // 2)
+            bkv_csz = min(512, align_to(bkv_sz // 2, page_size))
+            m_block_sizes = (bq_sz, bkv_sz, bq_csz, bkv_csz)
+
     new_kv_cache, outputs = attention(
         kv_cache,
         q,
@@ -267,6 +294,7 @@ def _jax_attn_func(
         v_scale=v_scale,
         sinks=sinks,
         attention_chunk_size=sliding_window,
+        m_block_sizes=m_block_sizes,
     )
 
     # Convert the shape back to vLLM's convention
