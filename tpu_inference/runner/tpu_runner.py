@@ -1262,7 +1262,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         idx_pad_len = len(input_ids) - len(token_in_tpu_cur_input_indices)
 
         # Pad according to the instructions written inside self._substitute_placeholder_token_fn
-        full_range = np.arange(0, len(input_ids))
+        full_range = np.arange(0, len(input_ids), dtype=np.int32)
         missing_values = np.setdiff1d(full_range,
                                       token_in_tpu_cur_input_indices)
         padded_token_in_tpu_cur_input_indices = np.concatenate(
@@ -1271,7 +1271,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         padded_token_in_tpu_pre_next_tokens_indices = np.pad(
             token_in_tpu_pre_next_tokens_indices, (0, idx_pad_len),
             mode='constant',
-            constant_values=-1)
+            constant_values=-1).astype(np.int32)
 
         (padded_token_in_tpu_cur_input_indices,
          padded_token_in_tpu_pre_next_tokens_indices) = device_array(
@@ -1283,7 +1283,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 input_ids, padded_token_in_tpu_cur_input_indices,
                 padded_token_in_tpu_pre_next_tokens_indices,
                 self._pre_async_results.next_tokens,
-                len(token_in_tpu_cur_input_indices))
+                jnp.asarray(len(token_in_tpu_cur_input_indices),
+                            dtype=jnp.int32))
 
         return input_ids
 
@@ -1451,7 +1452,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     num_decode_in_dp_rank += 1
             _request_distribution.append(
                 [num_decode_in_dp_rank, num_decode_in_dp_rank, _num_reqs])
-        request_distribution = np.array(_request_distribution).ravel()
+        request_distribution = np.array(_request_distribution,
+                                        dtype=np.int32).ravel()
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
