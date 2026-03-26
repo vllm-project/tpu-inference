@@ -27,6 +27,7 @@ import jax
         "seq_lens",
         "query_start_loc",
         "request_distribution",
+        "mm_prefix_range",
     ],
     meta_fields=[],
     drop_fields=["query_start_loc_cpu", "seq_lens_cpu"],
@@ -44,6 +45,8 @@ class AttentionMetadata(object):
     query_start_loc: jax.Array = None
     # (3,)
     request_distribution: jax.Array = None
+    # (max_num_seqs, max_mm_prefix_ranges, 2)
+    mm_prefix_range: jax.Array | None = None
 
     query_start_loc_cpu: Any = field(init=False)
     seq_lens_cpu: Any = field(init=False)
