@@ -96,6 +96,17 @@ def process_linear_weights(
     if output_sizes is None:
         output_sizes = [weight.shape[dim]]
 
+    def get_scaled_sizes(tensor):
+        if tensor is None:
+            return output_sizes
+        tensor_dim = tensor.shape[dim]
+        weight_dim = weight.shape[dim]
+        if tensor_dim == weight_dim:
+            return output_sizes
+        assert weight_dim % tensor_dim == 0
+        ratio = weight_dim // tensor_dim
+        return [s // ratio for s in output_sizes]
+
     if fused:
         assert reorder_size is not None
         weight = reorder_concatenated_tensor_for_sharding(
@@ -103,19 +114,22 @@ def process_linear_weights(
 
         if weight_scale is not None and not per_tensor:
             weight_scale = reorder_concatenated_tensor_for_sharding(
-                weight_scale, output_sizes, reorder_size, dim)
+                weight_scale, get_scaled_sizes(weight_scale), reorder_size, dim)
         if zero_point is not None:
             zero_point = reorder_concatenated_tensor_for_sharding(
-                zero_point, output_sizes, reorder_size, dim)
+                zero_point, get_scaled_sizes(zero_point), reorder_size, dim)
         if bias is not None:
             bias = reorder_concatenated_tensor_for_sharding(
-                bias, output_sizes, reorder_size, dim)
+                bias, get_scaled_sizes(bias), reorder_size, dim)
     else:
 
         def slice_tensor(tensor):
+            if tensor is None:
+                return None
             tensors = []
             start = 0
-            for size in output_sizes:
+            scaled_sizes = get_scaled_sizes(tensor)
+            for size in scaled_sizes:
                 end = start + size
                 tensor_split = jax.lax.slice_in_dim(tensor,
                                                     start,
