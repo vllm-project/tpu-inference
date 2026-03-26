@@ -40,9 +40,6 @@ upload_benchmark_pipeline() {
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     echo "Using vllm-tpu commit hash: $(buildkite-agent meta-data get "CODE_HASH")"
 
-    # Upload build image pipeline
-    upload_with_priority .buildkite/benchmark/pipeline_build_image.yml "$JOB_PRIORITY"
-
     # Upload benchmark pipelines
     upload_with_priority .buildkite/benchmark/cases/benchmark_dev_test_v7x.yml "$JOB_PRIORITY"
 }
