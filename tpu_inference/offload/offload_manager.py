@@ -294,8 +294,6 @@ class StagingBufferManager():
         self._blocks_for_load: dict[ReqId, int] = {}
 
         self._num_free_blocks: int = self.num_blocks
-        self._num_free_save_blocks: int = self.num_blocks // 2 - 1
-        self._num_free_load_blocks: int = self.num_blocks // 2 - 1
         # keep track of the total occupied staging blocks for save and load respectively
         self._num_blocks_for_save: int = 0
         self._num_blocks_for_load: int = 0
@@ -325,12 +323,6 @@ class StagingBufferManager():
 
     def get_num_free_staging_blocks(self) -> int:
         return self._num_free_blocks
-
-    def get_num_free_save_staging_blocks(self) -> int:
-        return self._num_free_save_blocks
-
-    def get_num_free_load_staging_blocks(self) -> int:
-        return self._num_free_load_blocks
 
     def get_num_used_staging_blocks(self) -> int:
         return self._num_blocks_for_load + self._num_blocks_for_save
@@ -365,18 +357,13 @@ class StagingBufferManager():
             else:
                 self._blocks_for_load[req_id] = num_blocks
             self._num_blocks_for_load += num_blocks
-            self._num_free_load_blocks -= num_blocks
             self._num_total_allocate_blocks_for_load += num_blocks
         elif usage == "save":
-            # if num_blocks > self._num_free_save_blocks:
-            #     # do not have enough capacity, return 0
-            #     return 0
             if req_id in self._blocks_for_save:
                 self._blocks_for_save[req_id] += num_blocks
             else:
                 self._blocks_for_save[req_id] = num_blocks
             self._num_blocks_for_save += num_blocks
-            self._num_free_save_blocks -= num_blocks
             self._num_total_allocate_blocks_for_save += num_blocks
         else:
             raise ValueError(
@@ -417,7 +404,6 @@ class StagingBufferManager():
             if self._blocks_for_load[req_id] <= 0:
                 del self._blocks_for_load[req_id]
             self._num_blocks_for_load -= num_freed_blocks
-            self._num_free_load_blocks += num_freed_blocks
             self._num_total_free_blocks_for_load += num_freed_blocks
         elif usage == "save":
             if req_id not in self._blocks_for_save:
@@ -438,7 +424,6 @@ class StagingBufferManager():
             if self._blocks_for_save[req_id] <= 0:
                 del self._blocks_for_save[req_id]
             self._num_blocks_for_save -= num_freed_blocks
-            self._num_free_save_blocks += num_freed_blocks
             self._num_total_free_blocks_for_save += num_freed_blocks
         else:
             raise ValueError(
