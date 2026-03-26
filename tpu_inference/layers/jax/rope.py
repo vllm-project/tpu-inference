@@ -359,7 +359,8 @@ class Llama4VisionRotaryEmbedding(nnx.Module):
         freqs_cis_stacked = jnp.stack([cos_freqs, sin_freqs], axis=-1)
 
         # Store as parameter - Cast to model dtype only at the very end
-        self.freqs_cis_stacked = nnx.Param(freqs_cis_stacked.astype(jnp.float32))
+        self.freqs_cis_stacked = nnx.Param(
+            freqs_cis_stacked.astype(jnp.float32))
         self.freqs_cis_stacked.value = freqs_cis_stacked.astype(jnp.float32)
 
     def __call__(self) -> jax.Array:

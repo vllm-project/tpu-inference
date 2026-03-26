@@ -229,9 +229,10 @@ class Llama4WeightLoader(BaseWeightLoader):
                     f"does not match model shape for {mapped_name}: {mapped_model_weight.value.shape}!"
                 )
 
-            mapped_model_weight.value = shard_put(loaded_weight,
-                                                  mapped_model_weight.out_sharding,
-                                                  mesh=model_for_loading.mesh)
+            mapped_model_weight.value = shard_put(
+                loaded_weight,
+                mapped_model_weight.out_sharding,
+                mesh=model_for_loading.mesh)
             logger.debug(
                 f"{split_loaded_name}: {loaded_weight.shape}  -->  {mapped_name}: {mapped_model_weight.value.shape}"
             )
