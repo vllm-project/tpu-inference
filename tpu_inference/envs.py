@@ -35,6 +35,8 @@ if TYPE_CHECKING:
     USE_JAX_PROFILER_SERVER: bool = False
     JAX_PROFILER_SERVER_PORT: int = 9999
     USE_BATCHED_RPA_KERNEL: bool = False
+    ONEHOT_MATMUL_GATHER_ENABLED: bool = False
+    ONEHOT_MATMUL_GATHER_BS_THRESHOLD: int = 512
 
 
 def env_with_choices(
@@ -204,7 +206,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("JAX_PROFILER_SERVER_PORT") or "9999"),
     "USE_BATCHED_RPA_KERNEL":
     env_bool("USE_BATCHED_RPA_KERNEL"),
+    "ONEHOT_MATMUL_GATHER_ENABLED":
+    env_bool("ONEHOT_MATMUL_GATHER_ENABLED", default=False),
+    "ONEHOT_MATMUL_GATHER_BS_THRESHOLD":
+    lambda: int(os.getenv("ONEHOT_MATMUL_GATHER_BS_THRESHOLD") or "512"),
 }
+
+def dump_envs() -> None:
+    """
+    Dump all environment variables to stdout.
+    """
+    print("Dumping tpu-inference environment variables:")
+    for name in environment_variables:
+        try:
+            value = environment_variables[name]()
+            print(f"{name}: {value}")
+        except Exception as e:
+            print(f"{name}: Error evaluating: {e}")
 
 
 def __getattr__(name: str) -> Any:

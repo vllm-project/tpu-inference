@@ -225,6 +225,7 @@ class TPUWorker(WorkerBase):
             logger.debug(
                 f"TPUWorker | Worker {self.rank} JAX/TPU environment after init_device: {env_dump}"
             )
+        envs.dump_envs()
 
         if not self.devices:
             sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
