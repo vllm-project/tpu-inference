@@ -21,7 +21,7 @@ readonly EXIT_FAILURE=1
 echo "--- Generating Record ID"
 : "${BUILDKITE_STEP_ID:?[ERROR] The BUILDKITE_STEP_ID variable is missing or empty!}"
 # Use Buildkite step ID to ensure retries map to the same RecordId
-RECORD_ID="bk-${BUILDKITE_STEP_ID}"
+RECORD_ID="${BUILDKITE_STEP_ID}"
 export RECORD_ID
 
 : "${MODEL:?Error: Environment variable MODEL is strictly required but not set. Exiting.}"
@@ -29,30 +29,17 @@ export MODEL
 
 echo "--- Prepare benchmark Record ID: ${RECORD_ID}, Model: ${MODEL}"
 
-# --- Prepare Configuration Metadata (Exported for report_result.sh) ---
+# --- Prepare Default Configuration ---
 export EXPECTED_ETEL="${EXPECTED_ETEL:-3600000}"
 export NUM_PROMPTS="${NUM_PROMPTS:-1000}"
 export MODELTAG="${MODELTAG:-PROD}"
 export PREFIX_LEN="${PREFIX_LEN:-0}"
-export DATASET="${DATASET:-}"
-export ADDITIONAL_CONFIG="${ADDITIONAL_CONFIG:-}"
-export EXTRA_ARGS="${EXTRA_ARGS:-}"
-export EXTRA_ENVS="${EXTRA_ENVS:-}"
 
 CODE_HASH=$(buildkite-agent meta-data get "CODE_HASH")
 export CODE_HASH
 JOB_REFERENCE=$(buildkite-agent meta-data get "JOB_REFERENCE")
 export JOB_REFERENCE
 export RUN_TYPE="${RUN_TYPE:-DAILY}"
-export DEVICE="${DEVICE:-}"
-
-# Numeric values exported for SQL insertion
-export MAX_NUM_SEQS="${MAX_NUM_SEQS:-NULL}"
-export MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-NULL}"
-export TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-NULL}"
-export MAX_MODEL_LEN="${MAX_MODEL_LEN:-NULL}"
-export INPUT_LEN="${INPUT_LEN:-NULL}"
-export OUTPUT_LEN="${OUTPUT_LEN:-NULL}"
 
 # Dynamically update the Buildkite step label
 BK_RECORD_ID_LABEL=" RecordId: ${RECORD_ID}"
@@ -161,10 +148,5 @@ BM_JOB_STATUS=$EXIT_SUCCESS
 # report_result.sh determines whether to Insert or Update data by checking if the same RecordId already exists in the DB
 echo "--- Reporting result"
 .buildkite/benchmark/scripts/report_result.sh "$RECORD_ID"
-
-echo "--- Cleanup docker"
-.buildkite/benchmark/scripts/cleanup_docker.sh || {
-  echo "Failed to clean up Docker resources, but Ignore this error."
-}
 
 exit $BM_JOB_STATUS

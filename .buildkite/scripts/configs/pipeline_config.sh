@@ -26,9 +26,9 @@ export PRIORITY_NIGHTLY=0
 upload_with_priority() {
   local yaml_file=$1
   local JOB_PRIORITY=$2
-  echo "--- :pipeline: Uploading $yaml_file with priority ${JOB_PRIORITY:-1}"
+  echo "--- :pipeline: Uploading $yaml_file with priority ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
   { 
-    echo "priority: ${JOB_PRIORITY:-1}"; 
+    echo "priority: ${JOB_PRIORITY:-PRIORITY_DEFAULT}"; 
     cat "$yaml_file"; 
   } | buildkite-agent pipeline upload
 }
