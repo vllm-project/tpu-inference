@@ -308,13 +308,6 @@ class KVCacheManager:
 
         kv_caches = self.runner.kv_caches
         num_blocks_list = []
-        # assert that each kv_cache_tensor in kv_cache_config.kv_cache_tensors has the same number of shared layers
-        # This is needed for models like Qwen3.5 where every 4 layers share the same KV cache (3 linear attn and 1 full attn)
-        num_shared_layers = len(kv_cache_config.kv_cache_tensors[0].shared_by)
-        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            assert len(
-                kv_cache_tensor.shared_by
-            ) == num_shared_layers, f"Expected all kv_cache_tensors to have the same number of shared layers {num_shared_layers}, but found {len(kv_cache_tensor.shared_by)}"
         # Mapping between KV cache type and the associated metadata, needed for logging
         # about KV cache
         metadata = {
@@ -337,6 +330,14 @@ class KVCacheManager:
                         "MambaSpec does not support shared layers for now, defaulting to single KV cache per layer..."
                     )
                     duplicate_shared_layers = True
+                    # assert that each kv_cache_tensor in kv_cache_config.kv_cache_tensors has the same number of shared layers
+                    # This is needed for models like Qwen3.5 where every 4 layers share the same KV cache (3 linear attn and 1 full attn)
+                    num_shared_layers = len(
+                        kv_cache_config.kv_cache_tensors[0].shared_by)
+                    for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                        assert len(
+                            kv_cache_tensor.shared_by
+                        ) == num_shared_layers, f"Expected all kv_cache_tensors to have the same number of shared layers {num_shared_layers}, but found {len(kv_cache_tensor.shared_by)}"
                     break
 
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
