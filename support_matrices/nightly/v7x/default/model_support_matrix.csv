@@ -4,7 +4,7 @@ Model,Type,UnitTest,Accuracy/Correctness,Benchmark
 "meta-llama/Llama-4-Maverick-17B-128E-Instruct",Multimodal,❓ Untested,❓ Untested,❓ Untested
 "meta-llama/Llama-Guard-4-12B/Multimodal",Multimodal,✅ Passing,❌ Failing,❓ Untested
 "Qwen/Qwen3-30B-A3B",Text,✅ Passing,❌ Failing,❓ Untested
-"Qwen/Qwen3-32B",Text,✅ Passing,✅ Passing,✅ Passing
+"Qwen/Qwen3-32B",Text,✅ Passing,✅ Passing,❌ Failing
 "Qwen/Qwen3-4B",Text,✅ Passing,❌ Failing,❓ Untested
 "Qwen/Qwen3-Coder-480B-A35B-Instruct",Text,✅ Passing,✅ Passing,✅ Passing
 "deepseek-ai/DeepSeek-V3.1",Text,❓ Untested,❓ Untested,❓ Untested
