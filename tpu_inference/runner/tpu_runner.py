@@ -579,10 +579,29 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.rng_params_for_sampling = nnx.Rngs(
             jax.random.key(self.model_config.seed)).params()
+
+        # This allows a multi-modal model to be used as text-only, assuming the user
+        # passes the following to vLLM (on the CLI):
+        # --limit-mm-per-prompt '{"image": 0, "video": 0}'
+        disable_mm_from_limits = False
+        if self.model_config.is_multimodal_model:
+            mm_limits = self.model_config.multimodal_config.limit_per_prompt
+            image_limit = mm_limits.get("image")
+            video_limit = mm_limits.get("video")
+            image_count = image_limit.count if image_limit else 0
+            video_count = video_limit.count if video_limit else 0
+            disable_mm_from_limits = image_count == 0 and video_count == 0
+
+            if disable_mm_from_limits:
+                logger.info(
+                    "Disabling multi-modality for model because limits are set to 0."
+                )
+
         self.is_multimodal_model = (self.model_config.is_multimodal_model
                                     and self.embed_multimodal_fn is not None
                                     and hasattr(self.model_config.hf_config,
-                                                "architectures"))
+                                                "architectures")
+                                    and not disable_mm_from_limits)
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
