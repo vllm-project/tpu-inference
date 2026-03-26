@@ -108,7 +108,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Optional, get_args
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import jax
 import jax.numpy as jnp
@@ -134,10 +134,11 @@ from tpu_inference.logger import init_logger
 from tpu_inference.offload.cpu_backend import LocalCPUBackend
 from tpu_inference.offload.offload_manager import (LRUCacheManager,
                                                    StagingBufferManager)
-from tpu_inference.offload.utils import (CPU_OFFLOADING_SWAP_OP_TYPE,
-                                         CpuChunkId, ReqId,
+from tpu_inference.offload.utils import (CpuChunkId, ReqId,
+                                         pre_update_kv_caches,
                                          stack_kv_cache_cross_layers,
-                                         update_kv_caches)
+                                         update_kv_caches,
+                                         update_kv_caches_one)
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
@@ -1679,7 +1680,7 @@ class TPUOffloadConnectorWorker:
         self.mesh: Optional[Mesh] = None
         self.swap_op_type = envs.TPU_OFFLOAD_SWAP_OP_TYPE
         # TODO(jcgu): check libtpu compatibility for pallas dma kernel
-        assert self.swap_op_type in get_args(CPU_OFFLOADING_SWAP_OP_TYPE)
+        # assert self.swap_op_type in get_args(CPU_OFFLOADING_SWAP_OP_TYPE)
         self.use_bucketed_swap_ops = not envs.TPU_OFFLOAD_SKIP_JAX_PRECOMPILE
         self.batched_save = envs.TPU_OFFLOAD_BATCHED_SAVE
         logger.info(f" swap operation type is {self.swap_op_type}, "
@@ -1766,6 +1767,10 @@ class TPUOffloadConnectorWorker:
                 mesh=self.device_sharding.mesh,
                 spec=jax.sharding.PartitionSpec(None, None, None, "model"),
                 memory_kind="device")
+            self.indices_sharding = jax.sharding.NamedSharding(
+                mesh=self.device_sharding.mesh,
+                spec=jax.sharding.PartitionSpec(),
+                memory_kind="device")
 
             # used for scatter (kv blocks -> kv cache)
             self.stacked_kv_block_dim_nums = jax.lax.ScatterDimensionNumbers(
@@ -1822,7 +1827,7 @@ class TPUOffloadConnectorWorker:
         logger.info("Starting pre-compilation of KV cache swap operations")
         start_time = time.time()
         paged_kv_for_compilation = self.runner.kv_caches
-        num_warmup = 15
+        num_warmup = 2
         all_block_ids = list(range(self.num_kv_blocks))
 
         with jax.set_mesh(self.mesh):
@@ -1836,13 +1841,25 @@ class TPUOffloadConnectorWorker:
                             random.sample(all_block_ids, num_blocks))
                         # 1. gather / stack (for save)
                         paged_kv_for_compilation, stacked_dummy_kv_caches_tpu = stack_kv_cache_cross_layers(
-                            paged_kv_for_compilation, dummy_block_ids, num_blocks)
+                            paged_kv_for_compilation, dummy_block_ids,
+                            num_blocks)
                         jax.block_until_ready(stacked_dummy_kv_caches_tpu)
                         # 2. update / insert  kv (for load)
-                        paged_kv_for_compilation = update_kv_caches(
-                            paged_kv_for_compilation, stacked_dummy_kv_caches_tpu,
-                            dummy_block_ids, self.stacked_kv_block_dim_nums)
-                        jax.block_until_ready(paged_kv_for_compilation)
+                        src_offsets, dest_offsets, chunk_sizes, num_chunks = pre_update_kv_caches(
+                            dummy_block_ids, self.mesh, self.indices_sharding)
+                        updated_kv_caches = update_kv_caches(
+                            paged_kv_for_compilation,
+                            stacked_dummy_kv_caches_tpu, src_offsets,
+                            dest_offsets, chunk_sizes, num_chunks, self.mesh,
+                            self.device_sharding.spec,
+                            self.device_sharding.spec,
+                            self.indices_sharding.spec)
+
+                        # paged_kv_for_compilation = update_kv_caches(
+                        #     paged_kv_for_compilation, stacked_dummy_kv_caches_tpu,
+                        #     dummy_block_ids, self.stacked_kv_block_dim_nums)
+                        jax.block_until_ready(updated_kv_caches)
+                        paged_kv_for_compilation = updated_kv_caches
 
                 except Exception as e:
                     logger.warning(
@@ -1915,28 +1932,25 @@ class TPUOffloadConnectorWorker:
         if num_blocks == 0:
             return kv_caches
         if num_blocks in BLOCK_SIZE_BUCKETS:
-            dst_blocks_arr = jnp.array(dst_blocks)
-            return update_kv_caches(kv_caches, kv_cache_slices, dst_blocks_arr,
-                                    self.stacked_kv_block_dim_nums)
+            return update_kv_caches_one(kv_caches, kv_cache_slices, dst_blocks,
+                                        self.mesh, self.indices_sharding)
 
         decomposed_block_buckets = self._decompose_into_buckets(dst_blocks)
-        decomposed_block_slice_arr = [
-            jnp.array(x) for x in decomposed_block_buckets
-        ]
         logger.info(
             f"Decomposing insert for {num_blocks} blocks into bucket: {decomposed_block_buckets}"
         )
 
         updated_kv_caches = kv_caches
         block_offset = 0
-        for i, decomposed_block_bucket in enumerate(decomposed_block_buckets):
+        for _, decomposed_block_bucket in enumerate(decomposed_block_buckets):
             bucket_size = len(decomposed_block_bucket)
             next_offset = block_offset + bucket_size
             slices_for_bucket = kv_cache_slices[block_offset:next_offset]
-            dst_blocks_for_bucket = decomposed_block_slice_arr[i]
-            updated_kv_caches = update_kv_caches(
-                updated_kv_caches, slices_for_bucket, dst_blocks_for_bucket,
-                self.stacked_kv_block_dim_nums)
+            updated_kv_caches = update_kv_caches_one(updated_kv_caches,
+                                                     slices_for_bucket,
+                                                     decomposed_block_bucket,
+                                                     self.mesh,
+                                                     self.indices_sharding)
             block_offset = next_offset
 
         return updated_kv_caches
@@ -2609,11 +2623,12 @@ class TPUOffloadConnectorWorker:
                         dst_blocks,
                     )
                 else:
-                    self.runner.kv_caches = update_kv_caches(
+                    self.runner.kv_caches = update_kv_caches_one(
                         self.runner.kv_caches,
                         raw_chunked_kv_on_tpu,
-                        jnp.array(dst_blocks),
-                        self.stacked_kv_block_dim_nums,
+                        dst_blocks,
+                        self.mesh,
+                        self.indices_sharding,
                     )
                 jax.block_until_ready(self.runner.kv_caches)
                 update_duration = time.time() - update_kv_start
