@@ -352,7 +352,9 @@ class Llama4WeightLoader(BaseWeightLoader):
                 logger.debug(
                     f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
                 )
-                model_weight.value = loaded_weight
+                model_weight.value = shard_put(loaded_weight,
+                                               model_weight.sharding,
+                                               mesh=model_for_loading.mesh)
                 if self.is_verbose:
                     print_param_info(model_weight, loaded_name)
             with jax.default_device(jax.devices("cpu")[0]):
@@ -385,7 +387,10 @@ class Llama4WeightLoader(BaseWeightLoader):
                                 f"does not match model shape for {loaded_name}: {model_weight.array.scale.value.shape}!"
                             )
 
-                        model_weight.array.scale.value = aggregated_weight
+                        model_weight.array.scale.value = shard_put(
+                            aggregated_weight,
+                            model_weight.array.scale.sharding,
+                            mesh=model_for_loading.mesh)
 
                     elif aggregated_weight.itemsize < 2:  # check model weight elem nbits < 16
                         loaded_name = f"{base_mapped_name}.array.qvalue.value"
@@ -395,7 +400,10 @@ class Llama4WeightLoader(BaseWeightLoader):
                                 f"does not match model shape for {loaded_name}: {model_weight.array.qvalue.value.shape}!"
                             )
 
-                        model_weight.array.qvalue.value = aggregated_weight
+                        model_weight.array.qvalue.value = shard_put(
+                            aggregated_weight,
+                            model_weight.array.qvalue.sharding,
+                            mesh=model_for_loading.mesh)
 
                     logger.debug(
                         f"Aggregated and loaded {loaded_name}: {aggregated_weight.shape}"

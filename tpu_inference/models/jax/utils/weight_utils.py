@@ -452,8 +452,8 @@ def _load_and_shard_weight(vllm_config,
         assert model_weight.value.shape == hf_weight.shape, f"{hf_key}: {model_weight.value.shape} != {hf_weight.shape}"
 
     # Update the model weight
-    spec = model_weight.sharding.spec if isinstance(
-        model_weight.sharding, NamedSharding) else model_weight.sharding
+    spec = model_sharding.spec if isinstance(model_sharding,
+                                             NamedSharding) else model_sharding
     model_weight.value = shard(hf_weight, spec)
 
 
