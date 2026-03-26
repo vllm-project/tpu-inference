@@ -161,8 +161,8 @@ def _merge_hw_status(status_v6, status_v7):
     if "❌" in s6 or "fail" in s6 or "❌" in s7 or "fail" in s7:
         return _format_cell("❌&nbsp;Failing")
 
-    # If ANY passes natively without failing, it gets a pass globally (fixes Either/OR logic for Features)
-    if "✅" in s6 or "pass" in s6 or "✅" in s7 or "pass" in s7:
+    # Both must pass natively without failing
+    if ("✅" in s6 or "pass" in s6) and ("✅" in s7 or "pass" in s7):
         return _format_cell("✅&nbsp;Passing")
 
     # Handling N/A edge cases
