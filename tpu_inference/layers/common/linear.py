@@ -69,7 +69,7 @@ def sharded_quantized_matmul(x: jax.Array,
     out_axis, in_axis = weight_spec
     x_sharding = P(ShardingAxisName.ATTN_DATA, in_axis)
     enable_quantized_matmul_kernel = len(w_s.shape) == 3 or (
-        len(w_s.shape) == 2 and w_s.shape[1] > 1)
+        len(w_s.shape) == 2 and w_s.shape[0] > 1 and w_s.shape[1] > 1)
     if enable_quantized_matmul_kernel:
         if len(w_s.shape) == 3:
             num_blocks, _, __ = w_s.shape
@@ -109,6 +109,11 @@ def sharded_quantized_matmul(x: jax.Array,
                                                        x_q_dtype=x_q_dtype,
                                                        block_size=block_size)
         else:
+            if len(w_s.shape) == 2:
+                if w_s.shape[0] == 1:
+                    w_s = w_s[0]
+                elif w_s.shape[1] == 1:
+                    w_s = w_s[:, 0]
             output = xla_quantized_matmul(x, w_q, w_s)
         if in_axis:
             output = jax.lax.psum(output, axis_name=in_axis)
