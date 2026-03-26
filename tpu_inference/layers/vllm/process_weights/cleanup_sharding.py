@@ -93,24 +93,18 @@ def _convert_to_torchax_and_shard(tensor: torch.Tensor,
                                   sharding: NamedSharding) -> torch.Tensor:
     if vllm_envs.VLLM_TPU_USING_PATHWAYS and isinstance(tensor, torch.Tensor):
         from tpu_inference.layers.vllm.quantization.unquantized import (
-            _use_dummy_weights, _torch_to_jax_via_colocated,
-            _torch_to_jax_via_colocated_file)
+            _use_dummy_weights, _create_dummy_weights_on_tpu)
+        from tpu_inference.utils import to_jax_dtype
         if _use_dummy_weights():
-            # Dummy path: generate random values on colocated CPUs.
+            # Dummy path: generate random values directly on TPU.
             tensor_shape = tuple(tensor.shape)
             tensor_dtype = tensor.dtype
             tensor.untyped_storage().resize_(0)
-            return torch_view(_torch_to_jax_via_colocated_file(
-                file_path="<dummy>",
-                tensor_name="<embedding>",
-                tensor_dtype=tensor_dtype,
+            return torch_view(_create_dummy_weights_on_tpu(
                 tpu_sharding=sharding,
-                tensor_shape=tensor_shape,
-                use_dummy=True,
+                weight_shape=tensor_shape,
+                weight_dtype=to_jax_dtype(tensor_dtype),
             ))
-        else:
-            # Real weights: send tensor data through the head.
-            return torch_view(_torch_to_jax_via_colocated(tensor, sharding))
     else:
         if isinstance(tensor, torchax.tensor.Tensor):
             tensor = jax_view(tensor)
