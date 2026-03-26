@@ -68,14 +68,23 @@ def sharded_quantized_matmul(x: jax.Array,
     # with the kernel and thus we disable it for now.
     out_axis, in_axis = weight_spec
     x_sharding = P(ShardingAxisName.ATTN_DATA, in_axis)
-    enable_quantized_matmul_kernel = len(w_s.shape) == 3
+    enable_quantized_matmul_kernel = len(w_s.shape) == 3 or (
+        len(w_s.shape) == 2 and w_s.shape[1] > 1)
     if enable_quantized_matmul_kernel:
-        num_blocks, _, __ = w_s.shape
-        scale_sharding = P(
-            in_axis if num_blocks > 1 else None,
-            None,
-            out_axis,
-        )
+        if len(w_s.shape) == 3:
+            num_blocks, _, __ = w_s.shape
+            scale_sharding = P(
+                in_axis if num_blocks > 1 else None,
+                None,
+                out_axis,
+            )
+        else:
+            # Global w_s is (out_features, num_blocks)
+            _, num_blocks = w_s.shape
+            scale_sharding = P(
+                out_axis,
+                in_axis if num_blocks > 1 else None,
+            )
     else:
         scale_sharding = P(out_axis, )
     out_sharding = P(ShardingAxisName.ATTN_DATA, out_axis)
@@ -88,6 +97,10 @@ def sharded_quantized_matmul(x: jax.Array,
     def wrapper(x, w_q, w_s):
         if enable_quantized_matmul_kernel:
             k_dim = x.shape[1]
+            if len(w_s.shape) == 2:
+                w_s = jnp.transpose(w_s, (1, 0))
+                w_s = jnp.expand_dims(w_s, 1)
+
             sharded_num_blocks, _, __ = w_s.shape
             block_size = k_dim // sharded_num_blocks
             output = blockwise_quantized_matmul_kernel(x,
