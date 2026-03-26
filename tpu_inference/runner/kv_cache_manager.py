@@ -97,7 +97,16 @@ class KVCacheManager:
 
     def update_mamba_page_size_padded(
             self, layers: dict[str, AttentionLayerBase]) -> None:
-        """Sets mamba padded page size to the full attention page size."""
+        """Set mamba padded page size to match the full attention page size.
+
+        vLLM expects hybrid models to share KV cache across different attention
+        modules. This updates `mamba_page_size_padded` to the larger footprint
+        of full attention layers to unify the page sizes.
+
+        Args:
+            layers: A dictionary mapping layer names to their corresponding
+                attention module instances (e.g., `MambaBase`, `Attention`).
+        """
         attn_modules = [
             module for module in layers.values()
             if isinstance(module, Attention)
@@ -123,12 +132,14 @@ class KVCacheManager:
         self.runner.cache_config.mamba_page_size_padded = page_size_bytes
 
     def align_block_size_for_rpa(self) -> None:
-        """
-        Check if KV prefetch size(`bkv_sz`) used in the RPA kernel is aligned
+        """Update cache config block size for RPA kernel.
+
+        Checks if KV prefetch size(`bkv_sz`) used in the RPA kernel is aligned
         to `cache_config.block_size`.
-        If not, update the block size to be the minimum `bkv_sz` value that can
-        be computed by the kernel to ensure alignment.
-        This is a kernel requirement. (https://github.com/vllm-project/tpu-inference/blob/30f637e345338e0b1cdb71cf5aa8f404d460e27d/tpu_inference/kernels/ragged_paged_attention/v3/kernel.py#L374)
+        If not, updates the block size to be the minimum `bkv_sz` value that can
+        be computed by the kernel, to ensure alignment.
+        This is a kernel requirement (page_size and block_size are equivalent).
+        (https://github.com/vllm-project/tpu-inference/blob/30f637e345338e0b1cdb71cf5aa8f404d460e27d/tpu_inference/kernels/ragged_paged_attention/v3/kernel.py#L374)
         """
         kv_dtype = t2j_dtype(self.runner.kv_cache_dtype)
         model_cnt = common_utils.get_mesh_shape_product(

@@ -1490,17 +1490,16 @@ def get_bkv_sz(kv_dtype,
 
     match tpu_version:
         case 5 | 6:
-            if case == RpaCase.DECODE:
-                bkv_sz = min(min_bkv_sz_to_peak, max_kv)
-            else:
-                bkv_sz = min(1024, max_kv)
+            bkv_sz_limit = 1024
         case 7:
-            if case == RpaCase.DECODE:
-                bkv_sz = min(min_bkv_sz_to_peak, max_kv)
-            else:
-                bkv_sz = min(2048, max_kv)
+            bkv_sz_limit = 2048
         case _:
             raise NotImplementedError(f"Unsupported {tpu_version=}.")
+
+    if case == RpaCase.DECODE:
+        bkv_sz = min(min_bkv_sz_to_peak, max_kv)
+    else:
+        bkv_sz = min(bkv_sz_limit, max_kv)
 
     return max(page_size, bkv_sz)
 
@@ -1559,20 +1558,17 @@ def get_default_block_sizes(
         case _:
             raise NotImplementedError(f"Unsupported {tpu_version=}.")
 
+    bkv_sz = get_bkv_sz(kv_dtype,
+                        actual_num_kv_heads,
+                        head_dim,
+                        page_size,
+                        pages_per_seq,
+                        case=case)
     return {
-        "bq_sz":
-        max(1, bq_sz),
-        "bkv_sz":
-        get_bkv_sz(kv_dtype,
-                   actual_num_kv_heads,
-                   head_dim,
-                   page_size,
-                   pages_per_seq,
-                   case=case),
-        "bq_csz":
-        max(1, bq_csz),
-        "bkv_csz":
-        max(page_size, bkv_csz),
+        "bq_sz": max(1, bq_sz),
+        "bkv_sz": bkv_sz,
+        "bq_csz": max(1, bq_csz),
+        "bkv_csz": max(page_size, bkv_csz),
     }
 
 
