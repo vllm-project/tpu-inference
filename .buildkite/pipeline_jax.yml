@@ -164,7 +164,7 @@ steps:
             rm -f .coverage.part* .coveragerc pex coverage.pex .coverage
             exit $EXIT_CODE
 
-      - label: "${TPU_VERSION:-tpu6e} JAX unit tests - kernels"
+      - label: "${TPU_VERSION:-tpu6e} JAX unit tests - kernels - no meaning change."
         key: ${TPU_VERSION:-tpu6e}_test_8
         depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
