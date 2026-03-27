@@ -186,6 +186,13 @@ class VllmCompressedTensorsW8A8Int8(CompressedTensorsW8A8Int8):
         assert getattr(layer, "input_zero_point", None) is None
         assert getattr(layer, "azp_adj", None) is None
 
+        import jax
+        from torchax.interop import jax_view
+        if isinstance(layer.weight, torch.nn.ParameterList):
+            jax.block_until_ready(jax_view(layer.weight[0]))
+        else:
+            jax.block_until_ready(jax_view(layer.weight))
+
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         with jax.named_scope(layer._get_name()):

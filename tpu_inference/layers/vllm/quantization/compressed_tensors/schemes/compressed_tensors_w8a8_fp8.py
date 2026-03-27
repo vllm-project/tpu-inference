@@ -177,6 +177,13 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
             delattr(layer, "input_scale")
             layer.input_scale = input_scale
 
+        import jax
+        from torchax.interop import jax_view
+        if isinstance(layer.weight, torch.nn.ParameterList):
+            jax.block_until_ready(jax_view(layer.weight[0]))
+        else:
+            jax.block_until_ready(jax_view(layer.weight))
+
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         with jax.named_scope(layer._get_name()):
