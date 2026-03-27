@@ -16,7 +16,7 @@
 # pipeline-type: text-only
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for deepseek-ai/DeepSeek-V3.1"
-    key: "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-V3_1_UnitTest"
+    key: "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-V3_1_UnitTest123"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true
