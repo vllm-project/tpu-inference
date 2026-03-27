@@ -20,6 +20,7 @@ from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
+from tpu_inference.kernels.gather import tc_gather
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
@@ -224,10 +225,14 @@ def expert_parallel_gmm(
     activation: str,
     topk: int,
     mesh: Mesh,
+    use_pallas_gather: bool = False,
 ) -> jax.Array:
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
     data_p_spec = P(ShardingAxisName.MLP_DATA)
+    x_p_spec = (P(
+        (ShardingAxisName.EXPERT,
+         ShardingAxisName.MLP_DATA)) if use_pallas_gather else data_p_spec)
     num_experts = w1.shape[0]
     num_experts_per_shard = num_experts // ep_size
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
@@ -246,7 +251,7 @@ def expert_parallel_gmm(
         ),
         mesh=mesh,
         in_specs=(
-            data_p_spec,
+            x_p_spec,
             ep_p_spec,
             w1_scale_spec,
             w1_bias_spec,
@@ -282,7 +287,8 @@ def expert_parallel_gmm(
     "use_ep",
     "activation",
     "scoring_fn",
-))
+    "use_pallas_gather",
+), )
 def fused_moe_func(
     hidden_states: jax.Array,
     w1: jax.Array,
@@ -298,6 +304,9 @@ def fused_moe_func(
     use_ep: bool,
     activation: str,
     scoring_fn: str,
+    # TODO(donghyun): Remove this flag once it's verified in various workloads.
+    use_pallas_gather: bool = True,
+    # use_pallas_gather: bool = False,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -330,6 +339,11 @@ def fused_moe_func(
 
     assert gating_output.shape == (num_tokens, global_num_experts)
 
+    local_num_experts = global_num_experts // get_mesh_shape_product(
+        mesh, ShardingAxisName.EXPERT)
+    use_pallas_gather = (use_pallas_gather
+                         and global_num_experts > local_num_experts)
+
     topk_weights = apply_scoring_fn(scoring_fn, gating_output)
     topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
     if renormalize:
@@ -346,7 +360,6 @@ def fused_moe_func(
         token_indices = jnp.arange(num_tokens_local,
                                    dtype=jnp.int32).repeat(topk)
         token_indices_sorted = token_indices[topk_argsort_indices]
-        x = hidden_states_local[token_indices_sorted]
         # Below one_hot is equivalent to jnp.bincount(topk_indices_flat,
         # length=global_num_experts) but is more performant.
         group_sizes_local = jax.nn.one_hot(topk_indices_flat,
@@ -354,7 +367,28 @@ def fused_moe_func(
                                            dtype=jnp.int32).sum(axis=0)
         topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
 
+        if use_pallas_gather:
+            shard_idx = jax.lax.axis_index(ShardingAxisName.EXPERT)
+
+            experts_start = shard_idx * local_num_experts
+            experts_end = experts_start + local_num_experts
+            group_offsets = jnp.cumulative_sum(group_sizes_local,
+                                               include_initial=True)
+            shard_output_start = group_offsets[experts_start]
+            shard_output_end = group_offsets[experts_end]
+            x = tc_gather.tensorcore_gather(
+                hidden_states_local,
+                token_indices_sorted,
+                start_idx=shard_output_start,
+                end_idx=shard_output_end,
+                block_size=128,
+            )
+        else:
+            x = hidden_states_local[token_indices_sorted]
         return x, group_sizes_local, topk_argsort_revert_indices
+
+    x_out_spec = (P((ShardingAxisName.EXPERT, ShardingAxisName.MLP_DATA), None)
+                  if use_pallas_gather else P(ShardingAxisName.MLP_DATA, None))
 
     x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
         _process_tokens_locally,
@@ -364,10 +398,11 @@ def fused_moe_func(
             P(ShardingAxisName.MLP_DATA, None),
         ),
         out_specs=(
-            P(ShardingAxisName.MLP_DATA, None),
+            x_out_spec,
             P(ShardingAxisName.MLP_DATA),
             P(ShardingAxisName.MLP_DATA),
         ),
+        check_vma=False,
     )(hidden_states, topk_indices)
 
     x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
@@ -387,6 +422,7 @@ def fused_moe_func(
             activation=activation,
             topk=topk,
             mesh=mesh,
+            use_pallas_gather=use_pallas_gather,
         )
     else:
         x = tensor_parallel_gmm(
