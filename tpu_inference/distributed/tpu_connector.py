@@ -469,7 +469,7 @@ class TPUConnectorWorker:
             self.pull_notify_listener_t.start()
             ready_event.wait()
         else:
-            self.pull_executor = ThreadPoolExecutor(max_workers=64)
+            self.pull_executor = ThreadPoolExecutor(max_workers=128)
             self.pull_conns: dict[str, Any] = {}
             self.notif_sockets: dict[str, zmq.Socket] = {}
 
