@@ -90,6 +90,8 @@ def moe_gmm_local(
     activation: str,
     topk: int,
     parallelism: Literal["tp", "ep"],
+    sc_kernel_threshold: int,
+    sc_kernel_col_chunk_size: int,
 ) -> jax.Array:
     """Main MoE logic on a local shard can run in TP or EP mode.
 
@@ -119,7 +121,7 @@ def moe_gmm_local(
     gmm1_res = gmm1_res[:, :w2.shape[1]]  # trim to hidden size if padded
 
 
-    if gmm1_res.shape[0] > 8 * 1024:
+    if gmm1_res.shape[0] > sc_kernel_threshold:
         gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
                             group_offset, preferred_element_type=jnp.dtype(jnp.float32))
 
@@ -139,18 +141,14 @@ def moe_gmm_local(
         token_hidden = gather_reduce_sc.sc_gather_reduce(
             op=gmm2_res,
             idx=inds,
-            reduce_group_size=8,
-            single_sc=False,
+            reduce_group_size=topk,
             topk_weights=topk_weights,
-            col_chunk_size=3072,
+            col_chunk_size=sc_kernel_col_chunk_size,
         )
-        reduction_axis = (ShardingAxisName.MLP_TENSOR
-                          if parallelism == "tp" else ShardingAxisName.EXPERT)
-        # Then global reduction on all ranks for all tokens and all experts
-        return jax.lax.psum(token_hidden, axis_name=reduction_axis).astype(x.dtype)
     else:
         gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
                             group_offset, preferred_element_type=x.dtype)
+
         # First run local reduction on topk experts owned by the rank for all tokens
         token_topk_hidden = gmm2_res[topk_argsort_revert_indices].reshape(
             (-1, topk, gmm2_res.shape[-1]))
@@ -169,10 +167,10 @@ def moe_gmm_local(
 
         token_hidden = token_topk_hidden.sum(axis=-2)
 
-        reduction_axis = (ShardingAxisName.MLP_TENSOR
-                          if parallelism == "tp" else ShardingAxisName.EXPERT)
-        # Then global reduction on all ranks for all tokens and all experts
-        return jax.lax.psum(token_hidden, axis_name=reduction_axis).astype(x.dtype)
+    reduction_axis = (ShardingAxisName.MLP_TENSOR
+                      if parallelism == "tp" else ShardingAxisName.EXPERT)
+    # Then global reduction on all ranks for all tokens and all experts
+    return jax.lax.psum(token_hidden, axis_name=reduction_axis).astype(x.dtype)
 
 
 def tensor_parallel_gmm(
@@ -190,6 +188,8 @@ def tensor_parallel_gmm(
     activation: str,
     topk: int,
     mesh: Mesh,
+    sc_kernel_threshold: int,
+    sc_kernel_col_chunk_size: int,
 ) -> jax.Array:
     data_p_spec = P(ShardingAxisName.MLP_DATA)
     group_offset = jnp.array([0])
@@ -213,6 +213,8 @@ def tensor_parallel_gmm(
             activation=activation,
             topk=topk,
             parallelism="tp",
+            sc_kernel_threshold=sc_kernel_threshold,
+            sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
         ),
         mesh=mesh,
         in_specs=(
@@ -260,6 +262,8 @@ def expert_parallel_gmm(
     activation: str,
     topk: int,
     mesh: Mesh,
+    sc_kernel_threshold: int,
+    sc_kernel_col_chunk_size: int,
 ) -> jax.Array:
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
@@ -279,6 +283,8 @@ def expert_parallel_gmm(
             activation=activation,
             topk=topk,
             parallelism="ep",
+            sc_kernel_threshold=sc_kernel_threshold,
+            sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
         ),
         mesh=mesh,
         in_specs=(
@@ -318,6 +324,8 @@ def expert_parallel_gmm(
     "use_ep",
     "activation",
     "scoring_fn",
+    "sc_kernel_threshold",
+    "sc_kernel_col_chunk_size",
 ))
 def fused_moe_func(
     hidden_states: jax.Array,
@@ -334,6 +342,8 @@ def fused_moe_func(
     use_ep: bool,
     activation: str,
     scoring_fn: str,
+    sc_kernel_threshold: int,
+    sc_kernel_col_chunk_size: int,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -423,6 +433,8 @@ def fused_moe_func(
             activation=activation,
             topk=topk,
             mesh=mesh,
+            sc_kernel_threshold=sc_kernel_threshold,
+            sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
         )
     else:
         x = tensor_parallel_gmm(
@@ -439,6 +451,8 @@ def fused_moe_func(
             activation=activation,
             topk=topk,
             mesh=mesh,
+            sc_kernel_threshold=sc_kernel_threshold,
+            sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
         )
 
     return x[:num_tokens, :hidden_size]
