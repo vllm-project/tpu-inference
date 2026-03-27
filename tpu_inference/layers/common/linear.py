@@ -68,25 +68,91 @@ def sharded_quantized_matmul(x: jax.Array,
     # with the kernel and thus we disable it for now.
     out_axis, in_axis = weight_spec
     x_sharding = P(ShardingAxisName.ATTN_DATA, in_axis)
-    enable_quantized_matmul_kernel = len(w_s.shape) == 3 or (
-        len(w_s.shape) == 2 and w_s.shape[0] > 1 and w_s.shape[1] > 1)
-    if enable_quantized_matmul_kernel:
-        if len(w_s.shape) == 3:
-            num_blocks, _, __ = w_s.shape
+
+    if w_s.ndim > 1:
+        w_s = jnp.squeeze(w_s)
+        if w_s.ndim == 0:
+            w_s = jnp.expand_dims(w_s, 0)
+
+    # Calculate local dimensions if sharded
+    in_axis_size = mesh.shape[in_axis] if mesh and in_axis else 1
+    local_in_features = w_q.shape[1] // in_axis_size
+
+    # Identify scale layout and whether we should enable the blockwise kernel.
+    # Blockwise kernel supports (num_blocks, 1, out_features) 3D layout.
+    # We also support (out_features, num_blocks) 2D layout and convert it.
+    if len(w_s.shape) == 3:
+        # Check for (num_blocks, 1, out_features)
+        if w_s.shape[1] == 1 and w_s.shape[2] == w_q.shape[0]:
+            num_blocks = w_s.shape[0]
             scale_sharding = P(
                 in_axis if num_blocks > 1 else None,
                 None,
                 out_axis,
             )
+            enable_quantized_matmul_kernel = num_blocks > 1
+        # Check for (num_blocks, out_features, 1)
+        elif w_s.shape[2] == 1 and w_s.shape[1] == w_q.shape[0]:
+            num_blocks = w_s.shape[0]
+            scale_sharding = P(
+                in_axis if num_blocks > 1 else None,
+                out_axis,
+                None,
+            )
+            enable_quantized_matmul_kernel = num_blocks > 1
         else:
-            # Global w_s is (out_features, num_blocks)
-            _, num_blocks = w_s.shape
+            enable_quantized_matmul_kernel = False
+            scale_sharding = P(None, None, out_axis)  # Fallback
+    elif len(w_s.shape) == 2:
+        # Check for (out_features, num_blocks)
+        if w_s.shape[0] == w_q.shape[0]:
+            num_blocks = w_s.shape[1]
             scale_sharding = P(
                 out_axis,
                 in_axis if num_blocks > 1 else None,
             )
+            enable_quantized_matmul_kernel = num_blocks > 1
+        # Check for (num_blocks, out_features)
+        elif w_s.shape[1] == w_q.shape[0]:
+            num_blocks = w_s.shape[0]
+            scale_sharding = P(
+                in_axis if num_blocks > 1 else None,
+                out_axis,
+            )
+            enable_quantized_matmul_kernel = num_blocks > 1
+        # Check for fully blockwise (out_blocks, in_blocks)
+        elif w_q.shape[0] % w_s.shape[0] == 0 and w_q.shape[1] % w_s.shape[1] == 0:
+            num_blocks = w_s.shape[1]
+            in_block_size = w_q.shape[1] // num_blocks
+            if local_in_features < in_block_size:
+                enable_quantized_matmul_kernel = False
+                scale_sharding = P(out_axis if w_s.shape[0] > 1 else None, None)
+            else:
+                scale_sharding = P(
+                    out_axis if w_s.shape[0] > 1 else None,
+                    in_axis if num_blocks > 1 else None,
+                )
+                enable_quantized_matmul_kernel = True
+        # Check for fully blockwise (in_blocks, out_blocks)
+        elif w_q.shape[1] % w_s.shape[0] == 0 and w_q.shape[0] % w_s.shape[1] == 0:
+            num_blocks = w_s.shape[0]
+            in_block_size = w_q.shape[1] // num_blocks
+            if local_in_features < in_block_size:
+                enable_quantized_matmul_kernel = False
+                scale_sharding = P(None, out_axis if w_s.shape[1] > 1 else None)
+            else:
+                scale_sharding = P(
+                    in_axis if num_blocks > 1 else None,
+                    out_axis if w_s.shape[1] > 1 else None,
+                )
+                enable_quantized_matmul_kernel = True
+        else:
+            enable_quantized_matmul_kernel = False
+            scale_sharding = P(out_axis, None)
     else:
+        enable_quantized_matmul_kernel = False
         scale_sharding = P(out_axis, )
+
     out_sharding = P(ShardingAxisName.ATTN_DATA, out_axis)
 
     x_q_dtype = _get_x_q_dtype(w_q.dtype)
@@ -98,8 +164,33 @@ def sharded_quantized_matmul(x: jax.Array,
         if enable_quantized_matmul_kernel:
             k_dim = x.shape[1]
             if len(w_s.shape) == 2:
-                w_s = jnp.transpose(w_s, (1, 0))
-                w_s = jnp.expand_dims(w_s, 1)
+                # If we sharded w_s as (in_axis, out_axis), it's (blocks, out)
+                # If we sharded w_s as (out_axis, in_axis), it's (out, blocks)
+                # We need it as (blocks, 1, out)
+                if w_s.shape[1] == w_q.shape[0]:  # (blocks, out)
+                    w_s = jnp.expand_dims(w_s, 1)
+                elif w_s.shape[0] == w_q.shape[0]:  # (out, blocks)
+                    w_s = jnp.transpose(w_s, (1, 0))
+                    w_s = jnp.expand_dims(w_s, 1)
+                elif w_q.shape[0] % w_s.shape[0] == 0 and k_dim % w_s.shape[1] == 0:
+                    # (local_out_blocks, local_in_blocks)
+                    w_s = jnp.transpose(w_s, (1, 0))
+                    out_block_size = w_q.shape[0] // w_s.shape[1]
+                    w_s = jnp.repeat(w_s, out_block_size, axis=1)
+                    w_s = jnp.expand_dims(w_s, 1)
+                elif k_dim % w_s.shape[0] == 0 and w_q.shape[0] % w_s.shape[1] == 0:
+                    # (local_in_blocks, local_out_blocks)
+                    out_block_size = w_q.shape[0] // w_s.shape[1]
+                    w_s = jnp.repeat(w_s, out_block_size, axis=1)
+                    w_s = jnp.expand_dims(w_s, 1)
+                else:
+                    # Fallback just in case
+                    w_s = jnp.transpose(w_s, (1, 0))
+                    w_s = jnp.expand_dims(w_s, 1)
+            elif len(w_s.shape) == 3:
+                # If it's (blocks, out, 1), convert to (blocks, 1, out)
+                if w_s.shape[1] == w_q.shape[0]:
+                    w_s = jnp.swapaxes(w_s, 1, 2)
 
             sharded_num_blocks, _, __ = w_s.shape
             block_size = k_dim // sharded_num_blocks
@@ -109,11 +200,33 @@ def sharded_quantized_matmul(x: jax.Array,
                                                        x_q_dtype=x_q_dtype,
                                                        block_size=block_size)
         else:
-            if len(w_s.shape) == 2:
-                if w_s.shape[0] == 1:
-                    w_s = w_s[0]
-                elif w_s.shape[1] == 1:
+            if w_s.ndim == 2:
+                if w_q.shape[0] % w_s.shape[0] == 0:
+                    out_blocks = w_s.shape[0]
+                    in_blocks = w_s.shape[1]
+                else:
+                    out_blocks = w_s.shape[1]
+                    in_blocks = w_s.shape[0]
+                    w_s = jnp.transpose(w_s, (1, 0))
+
+                if in_blocks > 1 and in_axis is not None:
+                    chip_idx = jax.lax.axis_index(in_axis)
+                    num_chips = jax.lax.psum(1, in_axis)
+                    blocks_per_chip = in_blocks / num_chips
+                    if blocks_per_chip < 1:
+                        block_idx = (chip_idx * in_blocks) // num_chips
+                        w_s = w_s[:, block_idx]
+                elif in_blocks == 1:
                     w_s = w_s[:, 0]
+
+                if w_s.ndim == 1:
+                    out_block_size = w_q.shape[0] // w_s.shape[0]
+                    w_s = jnp.repeat(w_s, out_block_size)
+
+            if w_s.ndim > 1:
+                w_s = jnp.squeeze(w_s)
+                if w_s.ndim == 0:
+                    w_s = jnp.expand_dims(w_s, 0)
             output = xla_quantized_matmul(x, w_q, w_s)
         if in_axis:
             output = jax.lax.psum(output, axis_name=in_axis)
