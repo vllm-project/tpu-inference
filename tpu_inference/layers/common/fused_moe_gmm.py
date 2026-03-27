@@ -24,7 +24,7 @@ from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
 
-from tpu_inference.kernels.sparse_core import gather_reduce as gather_reduce_sc
+from tpu_inference.kernels.gather import gather_reduce as gather_reduce_sc
 
 
 def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
@@ -54,7 +54,7 @@ def gmm_wrapper(lhs,
         group_sizes=group_sizes,
         group_offset=group_offset[0],
         zero_initialize=False,
-        fuse_act=None,
+        fuse_act=fuse_act,
         preferred_element_type=preferred_element_type,
     )
     return gmm_res
