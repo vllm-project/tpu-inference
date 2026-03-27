@@ -624,15 +624,20 @@ class MMMUProDataset(BenchmarkDataset):
 
     OPTION_LETTERS = "ABCDEFGHIJ"
 
+    PROMPT_FOOTER = (
+        "Try to reason about the question step by step. Don't give a final"
+        " answer without reasoning. Output the final answer in the format"
+        " 'Final Answer: (X)' where X is the correct letter choice. Answer:")
+
     QUERY_TEMPLATE_VISION = """{options_text}
 
-Express your final answer as the corresponding option letter."""
+""" + PROMPT_FOOTER
 
     QUERY_TEMPLATE_STANDARD = """{question}
 
 {options_text}
 
-Express your final answer as the corresponding option letter."""
+""" + PROMPT_FOOTER
 
     def __init__(
         self,
@@ -728,13 +733,8 @@ Express your final answer as the corresponding option letter."""
                 content: list = mm_content
                 content.append({"type": "text", "text": question_text})
                 messages = [{
-                    "role":
-                    "system",
-                    "content":
-                    "Reasoning effort: low. Keep reasoning steps as short as possible and directly give the answer like A, B, C, D, etc."
-                }, {
                     "role": "user",
-                    "content": content
+                    "content": content,
                 }]
                 try:
                     prompt = tokenizer.apply_chat_template(
