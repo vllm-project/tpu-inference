@@ -393,6 +393,37 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 continue
             param._weights_to_load = [None] * len(weights_to_load)
 
+    def _skip_non_expert_weight(self, hf_key: str) -> bool:
+        layer_match = re.match(r".*layers\.(\d+)\.(.*)", hf_key)
+        if layer_match is None:
+            if (hf_key == "language_model.embed_tokens.weight"
+                    and isinstance(self.language_model.embed_tokens,
+                                   PPMissingLayer)):
+                return True
+            if (hf_key == "language_model.norm.weight"
+                    and isinstance(self.language_model.norm, PPMissingLayer)):
+                return True
+            return False
+
+        layer_idx = int(layer_match.group(1))
+        suffix = layer_match.group(2)
+        layer = self.language_model.layers[layer_idx]
+        if isinstance(layer, PPMissingLayer):
+            return True
+
+        is_moe_layer = hasattr(layer.mlp, "experts")
+        if suffix == "mlp.gate.weight":
+            return not is_moe_layer
+        if suffix.startswith("mlp.experts."):
+            return not is_moe_layer
+        if suffix in {
+                "mlp.gate_proj.weight",
+                "mlp.up_proj.weight",
+                "mlp.down_proj.weight",
+        }:
+            return is_moe_layer
+        return False
+
     def _load_moe_expert_weight(self, hf_key, hf_weight,
                                 loaded_expert_modules) -> None:
         indexed_match = re.match(
@@ -507,6 +538,11 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
 
     def load_weights(self, rng_key: jax.Array) -> None:
         self.rng = nnx.Rngs(rng_key)
+        pp_missing_layers = []
+        for path, module in nnx.iter_graph(self):
+            if isinstance(module, PPMissingLayer):
+                pp_missing_layers.append(".".join(str(segment)
+                                                  for segment in path))
         mappings = {
             "model.language_model.embed_tokens": "language_model.embed_tokens.weight",
             "model.language_model.layers.*.input_layernorm": "language_model.layers.*.input_layernorm.weight",
@@ -587,6 +623,8 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             )
 
         for hf_key, hf_weight in weights_iterator:
+            if self._skip_non_expert_weight(hf_key):
+                continue
             if re.match(r".*\.mlp\.experts(?:\.\d+\.)?.*", hf_key):
                 self._load_moe_expert_weight(hf_key, hf_weight,
                                              loaded_expert_modules)
@@ -601,6 +639,7 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 hf_key,
                 env.t2j_copy(hf_weight),
                 keep_hf_weight_suffix_when_match=[],
+                pp_missing_layers=pp_missing_layers,
             )
 
         self._finalize_loaded_expert_modules(loaded_expert_modules)

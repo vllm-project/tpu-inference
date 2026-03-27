@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from typing import Tuple
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import copy
 import jax
@@ -507,6 +507,70 @@ class TestQwen3VLMoeForConditionalGeneration:
             assert mock_metadata_map.transpose_map["mlp.gate"] == (1, 0)
             mock_finalize.assert_called_once()
             mock_check_all_loaded.assert_called_once()
+
+    @patch('tpu_inference.models.jax.qwen3_vl_moe.get_default_maps')
+    @patch('tpu_inference.models.jax.qwen3_vl_moe.check_all_loaded')
+    @patch('tpu_inference.models.jax.qwen3_vl_moe._load_and_shard_weight')
+    @patch('tpu_inference.models.jax.qwen3_vl_moe.model_weights_generator')
+    def test_load_weights_routes_mlp_keys_by_layer_type(
+        self,
+        mock_weights_generator: MagicMock,
+        mock_load_and_shard_weight: MagicMock,
+        mock_check_all_loaded: MagicMock,
+        mock_get_default_maps: MagicMock,
+        mock_vllm_config: MockMoeVllmConfig,
+        rng: PRNGKey,
+        mesh: Mesh,
+    ):
+        hf_config = mock_vllm_config.model_config.hf_config
+        hf_config.mlp_only_layers = [0]
+
+        mock_metadata_map = MagicMock()
+        mock_metadata_map.transpose_map = {}
+        mock_get_default_maps.return_value = mock_metadata_map
+        mock_weights_generator.return_value = iter([
+            ("model.language_model.layers.0.mlp.gate.weight",
+             torch.zeros((1, 1), dtype=torch.float32)),
+            ("model.language_model.layers.0.mlp.gate_proj.weight",
+             torch.zeros((1, 1), dtype=torch.float32)),
+            ("model.language_model.layers.1.mlp.gate_proj.weight",
+             torch.zeros((1, 1), dtype=torch.float32)),
+            ("model.language_model.layers.1.mlp.gate.weight",
+             torch.zeros((1, 1), dtype=torch.float32)),
+            ("model.language_model.layers.1.mlp.experts.gate_up_proj",
+             torch.zeros((1, 2, 1), dtype=torch.float32)),
+        ])
+
+        with patch(
+                'tpu_inference.models.jax.qwen3_vl_moe.Qwen3VLVisionTransformer',
+                autospec=True) as MockVision:
+            mock_visual = MockVision.return_value
+            mock_visual.dtype = mock_vllm_config.model_config.dtype
+            mock_visual.config = hf_config.vision_config
+            mock_visual.spatial_merge_size = hf_config.vision_config.spatial_merge_size
+            model = Qwen3VLMoeForConditionalGeneration(mock_vllm_config, rng,
+                                                       mesh)
+
+        with patch.object(model,
+                          '_load_moe_expert_weight') as mock_load_moe_weight, \
+             patch.object(model,
+                          '_finalize_loaded_expert_modules') as mock_finalize:
+            model.load_weights(rng)
+
+        loaded_non_expert_keys = [
+            call.args[5] for call in mock_load_and_shard_weight.call_args_list
+        ]
+        assert loaded_non_expert_keys == [
+            "model.language_model.layers.0.mlp.gate_proj.weight",
+            "model.language_model.layers.1.mlp.gate.weight",
+        ]
+        mock_load_moe_weight.assert_called_once_with(
+            "model.language_model.layers.1.mlp.experts.gate_up_proj",
+            ANY,
+            ANY,
+        )
+        mock_finalize.assert_called_once()
+        mock_check_all_loaded.assert_called_once()
 
     @patch('tpu_inference.models.jax.qwen3_vl_moe.model_weights_generator')
     def test_load_moe_expert_weights_supports_fused_hf_tensors(
