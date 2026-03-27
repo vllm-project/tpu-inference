@@ -15,8 +15,7 @@
 
 set -euo pipefail
 
-# Strip quotes from environment variables (important when passed via docker --env-file)
-# which doesn't strip quotes like bash 'source' does.
+# Strip quotes from environment variables which doesn't strip quotes like bash 'source' does.
 for var in MODEL DATASET NUM_PROMPTS INPUT_LEN OUTPUT_LEN EXPECTED_ETEL TENSOR_PARALLEL_SIZE MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS MAX_MODEL_LEN PREFIX_LEN ADDITIONAL_CONFIG EXTRA_ARGS; do
   if [ -n "${!var:-}" ]; then
     val="${!var}"
