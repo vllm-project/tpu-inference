@@ -21,14 +21,17 @@ Key Implementation Considerations:
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import functools
 from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec as P
 import torch
 from torchax.interop import jax_view, torch_view
 from vllm.forward_context import get_forward_context
 
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
 
@@ -406,12 +409,147 @@ def _jax_gdn_attention_core(
     return output, new_conv_state, new_recurrent_state
 
 
+def run_jax_gdn_attention_local(
+    j_mixed_qkv: jnp.ndarray,
+    j_b: jnp.ndarray,
+    j_a: jnp.ndarray,
+    conv_state: jnp.ndarray,
+    recurrent_state: jnp.ndarray,
+    j_conv_weight: jnp.ndarray,
+    j_conv_bias: Optional[jnp.ndarray],
+    j_A_log: jnp.ndarray,
+    j_dt_bias: jnp.ndarray,
+    req_indices: jnp.ndarray,
+    valid_mask: jnp.ndarray,
+    state_indices: jnp.ndarray,
+    n_kq: int,
+    n_v: int,
+    d_k: int,
+    d_v: int,
+    kernel_size: int,
+    mesh: Optional[jax.sharding.Mesh] = None,
+) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
+    attn_head_axis_size = jax.lax.axis_size("model")
+    n_kq = n_kq // attn_head_axis_size
+    n_v = n_v // attn_head_axis_size
+    
+    def scan_fn(carry, xs):
+        c_state_all, r_state_all = carry
+        curr_qkv, curr_b, curr_a, req_idx, is_valid = xs
+
+        curr_qkv = curr_qkv[None, None, :]
+        curr_b = curr_b[None, None, :]
+        curr_a = curr_a[None, None, :]
+
+        state_idx = state_indices[req_idx]
+        c_state = c_state_all[state_idx][None, ...]
+        r_state = r_state_all[state_idx][None, ...]
+
+        out, new_c, new_r = _jax_gdn_attention_core(curr_qkv,
+                                                    curr_b,
+                                                    curr_a,
+                                                    c_state,
+                                                    r_state,
+                                                    j_conv_weight,
+                                                    j_conv_bias,
+                                                    j_A_log,
+                                                    j_dt_bias,
+                                                    is_prefill=False,
+                                                    n_kq=n_kq,
+                                                    n_v=n_v,
+                                                    d_k=d_k,
+                                                    d_v=d_v,
+                                                    kernel_size=kernel_size)
+
+        c_state_all = jnp.where(is_valid,
+                                c_state_all.at[state_idx].set(new_c[0]),
+                                c_state_all)
+        r_state_all = jnp.where(is_valid,
+                                r_state_all.at[state_idx].set(new_r[0]),
+                                r_state_all)
+
+        return (c_state_all, r_state_all), out[0, 0]
+
+    carry_init = (conv_state, recurrent_state)
+    xs = (j_mixed_qkv, j_b, j_a, req_indices, valid_mask)
+
+    (new_conv_state,
+     new_recurrent_state), j_output = jax.lax.scan(scan_fn, carry_init, xs)
+
+    return (new_conv_state, new_recurrent_state), j_output
+
+
+def run_jax_gdn_attention(
+    j_mixed_qkv: jnp.ndarray,
+    j_b: jnp.ndarray,
+    j_a: jnp.ndarray,
+    conv_state: jnp.ndarray,
+    recurrent_state: jnp.ndarray,
+    j_conv_weight: jnp.ndarray,
+    j_conv_bias: Optional[jnp.ndarray],
+    j_A_log: jnp.ndarray,
+    j_dt_bias: jnp.ndarray,
+    state_indices: jnp.ndarray,
+    req_indices: jnp.ndarray,
+    valid_mask: jnp.ndarray,
+    n_kq: int,
+    n_v: int,
+    d_k: int,
+    d_v: int,
+    kernel_size: int,
+    mesh: jax.sharding.Mesh,
+) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
+    bias_spec = P(ShardingAxisName.ATTN_HEAD) if j_conv_bias is not None else None
+    
+    in_specs = (
+        P(None, ShardingAxisName.ATTN_HEAD),  # j_mixed_qkv: (num_tokens, C)
+        P(None, ShardingAxisName.ATTN_HEAD),  # j_b: (num_tokens, n_v)
+        P(None, ShardingAxisName.ATTN_HEAD),  # j_a: (num_tokens, n_v)
+        P(None, None, ShardingAxisName.ATTN_HEAD),  # conv_state: (num_blocks, kernel_size-1, C)
+        P(None, ShardingAxisName.ATTN_HEAD, None, None),  # recurrent_state: (num_blocks, n_v, d_k, d_v)
+        P(ShardingAxisName.ATTN_HEAD, None, None),  # j_conv_weight: (C, 1, kernel_size)
+        bias_spec,  # j_conv_bias: (C,)
+        P(ShardingAxisName.ATTN_HEAD),  # j_A_log: (n_v,)
+        P(ShardingAxisName.ATTN_HEAD),  # j_dt_bias: (n_v,)
+        P(),  # req_indices: (num_tokens,)
+        P(),  # valid_mask: (num_tokens,)
+        P(),  # state_indices: (num_reqs,)
+        None,  # n_kq
+        None,  # n_v
+        None,  # d_k
+        None,  # d_v
+        None,  # kernel_size
+    )
+    
+    out_specs = (
+        (
+            P(None, None, ShardingAxisName.ATTN_HEAD),
+            P(None, ShardingAxisName.ATTN_HEAD, None, None)),  # (new_conv_state, new_recurrent_state)
+        P(None, ShardingAxisName.ATTN_HEAD),  # j_output: (num_tokens, n_v * d_v)
+    )
+    
+    mapped_fn = jax.shard_map(
+        run_jax_gdn_attention_local,
+        mesh=mesh,
+        in_specs=in_specs,
+        out_specs=out_specs,
+    )
+    
+    return mapped_fn(
+        j_mixed_qkv, j_b, j_a, conv_state, recurrent_state,
+        j_conv_weight, j_conv_bias, j_A_log, j_dt_bias,
+        req_indices, valid_mask, state_indices,
+        n_kq, n_v, d_k, d_v, kernel_size,
+    )
+
+
 def gdn_attention_core_tpu(
     mixed_qkv: torch.Tensor,
     b: torch.Tensor,
     a: torch.Tensor,
     core_attn_out: torch.Tensor,
     layer_name: str,
+    mesh: jax.sharding.Mesh,
 ) -> None:
     """
     This acts as main bridge between PyTorch and JAX for the GDN core attention.
@@ -435,8 +573,8 @@ def gdn_attention_core_tpu(
     vllm_context = get_vllm_model_wrapper_context()
 
     tp_size = layer_module.tp_size
-    n_kq = layer_module.num_k_heads // tp_size
-    n_v = layer_module.num_v_heads // tp_size
+    n_kq = layer_module.num_k_heads
+    n_v = layer_module.num_v_heads
     d_k = layer_module.head_k_dim
     d_v = layer_module.head_v_dim
     kernel_size = layer_module.conv_kernel_size
@@ -475,53 +613,13 @@ def gdn_attention_core_tpu(
     # Exclude trailing padding indices from mutating cache
     valid_mask = token_idx < q_loc[-1]
 
-    def scan_fn(carry, xs):
-        c_state_all, r_state_all = carry
-        curr_qkv, curr_b, curr_a, req_idx, is_valid = xs
-
-        # Reshape for single step computation: (B=1, T=1, D)
-        curr_qkv = curr_qkv[None, None, :]
-        curr_b = curr_b[None, None, :]
-        curr_a = curr_a[None, None, :]
-
-        # Fetch the current state for this specific request
-        state_idx = state_indices[req_idx]
-        c_state = c_state_all[state_idx][None, ...]
-        r_state = r_state_all[state_idx][None, ...]
-
-        # Run 1 recurrence step (works seamlessly for prefill or decode)
-        out, new_c, new_r = _jax_gdn_attention_core(curr_qkv,
-                                                    curr_b,
-                                                    curr_a,
-                                                    c_state,
-                                                    r_state,
-                                                    j_conv_weight,
-                                                    j_conv_bias,
-                                                    j_A_log,
-                                                    j_dt_bias,
-                                                    is_prefill=False,
-                                                    n_kq=n_kq,
-                                                    n_v=n_v,
-                                                    d_k=d_k,
-                                                    d_v=d_v,
-                                                    kernel_size=kernel_size)
-
-        # Conditionally update the global cache maps
-        c_state_all = jnp.where(is_valid,
-                                c_state_all.at[state_idx].set(new_c[0]),
-                                c_state_all)
-        r_state_all = jnp.where(is_valid,
-                                r_state_all.at[state_idx].set(new_r[0]),
-                                r_state_all)
-
-        return (c_state_all, r_state_all), out[0, 0]
-
-    carry_init = (conv_state, recurrent_state)
-    xs = (j_mixed_qkv, j_b, j_a, req_indices, valid_mask)
-
-    # XLA optimizes this loop natively via in-place updates.
     (new_conv_state,
-     new_recurrent_state), j_output = jax.lax.scan(scan_fn, carry_init, xs)
+     new_recurrent_state), j_output = run_jax_gdn_attention(
+         j_mixed_qkv, j_b, j_a, conv_state, recurrent_state,
+         j_conv_weight, j_conv_bias, j_A_log, j_dt_bias,
+         state_indices, req_indices, valid_mask,
+         n_kq, n_v, d_k, d_v, kernel_size, mesh=mesh
+     )
 
     vllm_context.kv_caches[layer_idx] = (new_conv_state, new_recurrent_state)
 
@@ -561,7 +659,7 @@ def gdn_in_proj_tpu(
     return mixed_qkvz, ba
 
 
-def apply_gated_delta_net_torch_ops_patch() -> None:
+def apply_gated_delta_net_torch_ops_patch(mesh: jax.sharding.Mesh) -> None:
     """
     This is a patch to inject the `gdn_attention_core` op so the
     Torch/GPU  kernel is bypassed in favor of the TPU kernel
@@ -578,7 +676,8 @@ def apply_gated_delta_net_torch_ops_patch() -> None:
     if hasattr(torch.ops, "vllm") and hasattr(torch.ops.vllm,
                                               "gdn_attention_core"):
         # dummy call to ensure the op is registered
-        torch.ops.vllm.gdn_attention_core = gdn_attention_core_tpu
+        torch.ops.vllm.gdn_attention_core = functools.partial(
+            gdn_attention_core_tpu, mesh=mesh)
 
     if hasattr(torch.ops.vllm, "gdn_in_proj"):
         # dummy call to ensure the op is registered
