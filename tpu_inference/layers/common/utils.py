@@ -122,9 +122,9 @@ def general_device_put(tensor: jax.Array,
         if multihost_backend != "ray" or (isinstance(t, jax.Array)
                                           and not t.is_fully_addressable):
             if layout is not None:
-                return jax.device_put(t, Format(layout, sharding))
+                return jax.block_until_ready(jax.device_put(t, Format(layout, sharding)))
             else:
-                return jax.device_put(t, sharding)
+                return jax.block_until_ready(jax.device_put(t, sharding))
 
         # NOTE: at here, num_global_devices != num_local_devices
         # meaning we are in multi-host setup. Each host will run the same process
@@ -141,7 +141,7 @@ def general_device_put(tensor: jax.Array,
             with jax.set_mesh(dst_mesh):
                 global_array = jax.device_put(global_array,
                                               Format(layout, sharding))
-        return global_array
+        return jax.block_until_ready(global_array)
 
     return jax.tree_util.tree_map(_put, tensor)
 
