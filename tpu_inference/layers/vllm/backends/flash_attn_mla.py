@@ -26,7 +26,8 @@ from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
 
 from tpu_inference.layers.common.attention_interface import mla_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.common.quantization import quantize_kv
+from tpu_inference.layers.common.quantization import (
+    quantize_kv, static_per_tensor_quantize_tensor)
 
 
 @register_backend(AttentionBackendEnum.FLASH_ATTN_MLA)
@@ -157,6 +158,11 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             q_scale = layer._q_scale_float
             k_scale = layer._k_scale_float
             v_scale = layer._v_scale_float
+
+            q_nope = static_per_tensor_quantize_tensor(
+                layer.kv_cache_quantized_dtype, q_nope, q_scale)
+            q_pe = static_per_tensor_quantize_tensor(
+                layer.kv_cache_quantized_dtype, q_pe, q_scale)
 
             kv_c_normed, _ = quantize_kv(layer.kv_cache_quantized_dtype,
                                          kv_c_normed,
