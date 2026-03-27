@@ -17,37 +17,15 @@ import os
 import random
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
+from benchmark_core import SampleRequest
 from transformers import PreTrainedTokenizerBase
 from vllm.inputs import MultiModalDataDict
-from vllm.lora.request import LoRARequest
 
 logger = logging.getLogger(__name__)
-
-# -----------------------------------------------------------------------------
-# Data Classes
-# -----------------------------------------------------------------------------
-
-
-@dataclass
-class SampleRequest:
-    """
-    Represents a single inference request for benchmarking.
-    """
-
-    prompt: Union[str, Any]
-    prompt_len: int
-    expected_output_len: int
-    multi_modal_data: Optional[Union[MultiModalDataDict, dict,
-                                     list[dict]]] = None
-    lora_request: Optional[LoRARequest] = None
-    completion: Optional[str] = None
-    request_id: Optional[str] = None
-
 
 # -----------------------------------------------------------------------------
 # Benchmark Dataset Base Class
