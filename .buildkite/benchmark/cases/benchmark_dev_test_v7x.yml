@@ -1,0 +1,45 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+env:
+  GCP_PROJECT_ID: "cloud-tpu-inference-test"
+  GCP_REGION: "southamerica-west1"
+  GCS_BUCKET: "vllm-cb-storage2"
+  ARTIFACT_REPO: "vllm-tpu-bm-bk"
+  GCP_INSTANCE_ID: "vllm-bm-inst"
+  GCP_DATABASE_ID: "vllm-bm-bk-runs"
+
+definitions:
+  benchmark_env_0: &benchmark_env_0
+    MODEL: "Qwen/Qwen3-4B"
+    MAX_NUM_SEQS: "512"
+    MAX_NUM_BATCHED_TOKENS: "4096"
+    TENSOR_PARALLEL_SIZE: "2"
+    DATASET: "bench-custom-token"
+    NUM_PROMPTS: "1000"
+    MODELTAG: "NEW"
+    ADDITIONAL_CONFIG: '{"quantization": { "qwix": { "rules": [{ "module_path": ".*", "weight_qtype": "float8_e4m3fn", "act_qtype": "float8_e4m3fn"}]}}}'
+    EXTRA_ARGS: '--kv-cache-dtype=fp8 --gpu-memory-utilization=0.98'
+
+steps:
+  - label: "Benchmark - Qwen/Qwen3-4B-datset_bench-custom-token-inlen_4096-outlen_1024"
+    agents:
+      queue: "tpu_v7x_2_queue"
+    command: ".buildkite/benchmark/scripts/run_job.sh"
+    env:
+      DEVICE: "tpu7x-2"
+      INPUT_LEN: "4096"
+      OUTPUT_LEN: "1024"
+      MAX_MODEL_LEN: "5120"
+      PREFIX_LEN: "3600"
+      <<: *benchmark_env_0
