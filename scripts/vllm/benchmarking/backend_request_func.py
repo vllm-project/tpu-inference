@@ -7,18 +7,21 @@ This file implements the request logic needed for serving benchmark requests.
 """
 
 import json
+import logging
 import os
 import sys
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 
 import aiohttp
 import huggingface_hub.constants
 from tqdm.asyncio import tqdm
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
+
+logger = logging.getLogger(__name__)
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
@@ -55,13 +58,26 @@ class RequestFuncOutput:
     input_request: Optional[RequestFuncInput] = None
 
 
+async def start_stop_profile(base_url: str, action: Literal["start", "stop"]):
+    """A start / stop profile utility for vLLM server."""
+    api_url = base_url + f"/{action}_profile"
+
+    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
+
+        async with session.post(url=api_url) as response:
+            if (code := response.status) != 200:
+                logger.warning(f"{action=} profile failed: {code=}")
+                return False
+            return True
+
+
 async def async_request_openai_completions(
     request_func_input: RequestFuncInput,
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
-    assert api_url.endswith(("completions", "profile")), (
-        "OpenAI Completions API URL must end with 'completions' or 'profile'.")
+    assert api_url.endswith("completions"), (
+        "OpenAI Completions API URL must end with 'completions'")
 
     async with aiohttp.ClientSession(trust_env=True,
                                      timeout=AIOHTTP_TIMEOUT) as session:
