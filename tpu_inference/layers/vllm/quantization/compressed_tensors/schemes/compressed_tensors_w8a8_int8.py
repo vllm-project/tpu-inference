@@ -151,6 +151,16 @@ class VllmCompressedTensorsW8A8Int8(CompressedTensorsW8A8Int8):
             )
 
         weights = process_int8_linear_weights(weight, weight_scale, bias)
+
+        if self.linear_config.enable_quantized_matmul_kernel and weights.weight_scale.ndim == 2:
+            if weights.weight_scale.shape[0] > 1 and weights.weight_scale.shape[1] > 1:
+                # The quantized_matmul_kernel expects weight scales shaped (n_blocks, 1, n_out_features) for blockwisze quantization.
+                # Original weight_scale is (n_out_features, n_blocks)
+                weights.weight_scale = jnp.expand_dims(
+                    jnp.transpose(weights.weight_scale),
+                    axis=1,
+                )
+
         weights = torch_view(
             shard_linear_weights(
                 weights,
