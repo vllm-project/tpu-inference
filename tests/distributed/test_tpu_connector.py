@@ -118,10 +118,12 @@ class TestTPUConnectorScheduler(unittest.TestCase):
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.kv_transfer_config.is_kv_producer = False
 
-        with patch("tpu_inference.distributed.tpu_connector.get_kv_ips",
-                   return_value="1.1.1.1"), patch(
-                       "tpu_inference.distributed.tpu_connector.get_kv_ports",
-                       return_value=12345):
+        with patch(
+                "tpu_inference.distributed.tpu_connector.dist_utils.get_kv_ips",
+                return_value="1.1.1.1"
+        ), patch(
+                "tpu_inference.distributed.tpu_connector.dist_utils.get_kv_ports",
+                return_value=12345):
             self.scheduler = tpu_connector.TPUConnectorScheduler(
                 self.vllm_config)
 
@@ -296,15 +298,16 @@ class TestTPUConnectorWorker(unittest.TestCase):
             "jax":
             patch('tpu_inference.distributed.tpu_connector.jax'),
             "get_host_ip":
-            patch('tpu_inference.distributed.tpu_connector.get_host_ip',
-                  return_value='127.0.0.1'),
+            patch(
+                'tpu_inference.distributed.tpu_connector.dist_utils.get_host_ip',
+                return_value='127.0.0.1'),
             "get_kv_transfer_port":
             patch(
-                'tpu_inference.distributed.tpu_connector.get_kv_transfer_port',
+                'tpu_inference.distributed.tpu_connector.dist_utils.get_kv_transfer_port',
                 return_value=10000),
             "get_side_channel_port":
             patch(
-                'tpu_inference.distributed.tpu_connector.get_side_channel_port',
+                'tpu_inference.distributed.tpu_connector.dist_utils.get_side_channel_port',
                 return_value=20000),
             "start_transfer_server":
             patch(

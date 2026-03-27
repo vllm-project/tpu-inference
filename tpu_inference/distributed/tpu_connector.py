@@ -85,11 +85,8 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
+import tpu_inference.distributed.utils as dist_utils
 from tpu_inference import envs
-from tpu_inference.distributed.utils import (get_host_ip, get_kv_ips,
-                                             get_kv_ports,
-                                             get_kv_transfer_port,
-                                             get_side_channel_port)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 from tpu_inference.utils import device_array
@@ -256,8 +253,8 @@ class TPUConnectorScheduler():
         # each request that finished prefilling will be added to it.
         self.reqs_to_load: dict[ReqId, LoadMeta] = {}
 
-        self.kv_ip = get_kv_ips()
-        self.kv_port = get_kv_ports()
+        self.kv_ip = dist_utils.get_kv_ips()
+        self.kv_port = dist_utils.get_kv_ports()
         logger.info(
             f"TPUConnectorScheduler --> kv_ip={self.kv_ip} | kv_port={self.kv_port}"
         )
@@ -459,9 +456,9 @@ class TPUConnectorWorker:
         # this map will use the uuid to query the original request id
         self.kv_pull_uuid_to_req_id_map: dict[int, ReqId] = {}
 
-        self.host_ip = get_host_ip()
-        self.kv_transfer_port = get_kv_transfer_port()
-        self.side_channel_port = get_side_channel_port()
+        self.host_ip = dist_utils.get_host_ip()
+        self.kv_transfer_port = dist_utils.get_kv_transfer_port()
+        self.side_channel_port = dist_utils.get_side_channel_port()
 
         self.kv_transfer_server = None
         self.zmq_cxt = zmq.Context()
@@ -525,13 +522,13 @@ class TPUConnectorWorker:
         self.kv_transfer_server = start_transfer_server(
             jax.local_devices()[0].client,
             server_addr,
-            [transport_addr],
+            [transport_addr] * dist_utils.get_transfer_channel_number(),
             max_num_parallel_copies=8,
             transfer_size=256 * 1024 * 1024,
             use_raw_buffers=False,
         )
         logger.info(
-            f"TPUConnector Worker {self.node_id} --> KV start_transfer_server | addr={self.kv_transfer_server.address()}"
+            f"TPUConnector Worker {self.node_id} --> KV start_transfer_server | addr={self.kv_transfer_server.address()} | channel number={dist_utils.get_transfer_channel_number()}"
         )
 
     def _pull_notify_listener(self, ready_event: threading.Event):
@@ -612,24 +609,22 @@ class TPUConnectorWorker:
         # TODO(xiang): pad block_ids to avoid recompilation
         indices = device_array(self.mesh, np.array(local_block_ids))
         kv = select_from_kv_caches(self.runner.kv_caches, indices)
-        start_time = time.perf_counter()
-        # (mrjunwan): we directly put the kv to host memory to reduce the memory pressure on device
-        # add time log here to monitor the transfer speed.
-        kv_dram = jax.device_put(kv, self.host_sharding)
-        end_time = time.perf_counter()
-        kv_size_mb = sum(k.nbytes for k in kv) / (1024 * 1024)
-        logger.info(
-            f"Worker {self.node_id} --> D2H kv load  | done put req_id={req_id} | duration={(end_time - start_time) * 1000:.2f}ms | size={kv_size_mb:.2f}MB"
-        )
+        if dist_utils.get_enable_d2h_transfer():
+            # (mrjunwan): we directly put the kv to host memory to reduce the memory pressure on device
+            # add time log here to monitor the transfer speed.
+            logger.info(
+                f"Worker {self.node_id} --> Doing D2H kv transfer for req_id={req_id}"
+            )
+            kv = jax.device_put(kv, self.host_sharding)
 
         # NOTE(xiang): We need to manually store the kv because:
         # Although we can set use_raw_buffers=True to let kv be safely destroyed after
         # calling await_pull, it could be a stranding buffer if D never pulls it.
         # So we have to set use_raw_buffers=False and stores the kv, then the kv buffer
         # will be safely destroyed by either D notifying or expiration.
-        self.reqs_wait_pull[req_id] = [kv_dram, req_meta.expiration_time]
+        self.reqs_wait_pull[req_id] = [kv, req_meta.expiration_time]
         self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
-        self.kv_transfer_server.await_pull(req_meta.uuid, kv_dram)
+        self.kv_transfer_server.await_pull(req_meta.uuid, kv)
 
     def _maybe_build_kv_connection(self, req_meta: LoadMeta) -> Any:
         if isinstance(req_meta.remote_host, list):
@@ -664,11 +659,18 @@ class TPUConnectorWorker:
         )
         start_time = time.perf_counter()
         kv = conn.pull(req_meta.uuid, kv_spec)
-        end_time = time.perf_counter()
         kv_size_mb = sum(k.nbytes for k in kv) / (1024 * 1024)
+        end_time_0, end_time_1 = time.perf_counter(), None
+        if dist_utils.get_enable_block_kv_transfer():
+            jax.block_until_ready(kv)
+            end_time_1 = time.perf_counter()
+        prepare_time_ms = (end_time_0 - start_time) * 1000
+        pull_time_ms = (end_time_1 -
+                        end_time_0) * 1000 if end_time_1 is not None else 0.0
         logger.info(
-            f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | uuid={req_meta.uuid} | duration={(end_time - start_time) * 1000:.2f}ms | size={kv_size_mb:.2f}MB"
-        )
+            f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | "
+            f"uuid={req_meta.uuid} | prepare time={prepare_time_ms:.2f}ms | "
+            f"pull time={pull_time_ms:.2f}ms | size={kv_size_mb:.2f}MB")
         return kv, indices
 
     def _get_kv_spec(self, num_blocks: int) -> list[jax.ShapeDtypeStruct]:
