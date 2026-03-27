@@ -362,122 +362,63 @@ class KVCacheManager:
         # If this is true, then we'll initialize a new KV cache for each layer in "shared_by"
         # instead of the default behavior of initializing a single KV cache for each of the
         # shared layers
-        duplicate_shared_layers = False
-        if not duplicate_shared_layers:
-            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                if any(
-                        isinstance(layer_name_to_spec[layer_name], MambaSpec)
-                        for layer_name in kv_cache_tensor.shared_by):
-                    # TODO (jacobplatin): we should not be replicating the kv cache for each layer and instead
-                    # should follow the native GPU/Torch approach where every group of layers (shared_by)
-                    # shares the same underlying raw tensor.
-                    logger.warning_once(
-                        "MambaSpec does not support shared layers for now, defaulting to single KV cache per layer..."
-                    )
-                    duplicate_shared_layers = True
-                    # assert that each kv_cache_tensor in kv_cache_config.kv_cache_tensors has the same number of shared layers
-                    # This is needed for models like Qwen3.5 where every 4 layers share the same KV cache (3 linear attn and 1 full attn)
-                    num_shared_layers = len(
-                        kv_cache_config.kv_cache_tensors[0].shared_by)
-                    for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                        assert len(
-                            kv_cache_tensor.shared_by
-                        ) == num_shared_layers, f"Expected all kv_cache_tensors to have the same number of shared layers {num_shared_layers}, but found {len(kv_cache_tensor.shared_by)}"
+        for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
+
+            # 1. FIND THE FULL ATTENTION SPEC IN THIS SHARED GROUP
+            # We want to allocate the memory based on the Full Attention shape,
+            # because the padded page size is unified to fit it.
+            group_attn_spec = None
+            for layer_name in kv_cache_tensor.shared_by:
+                layer_spec = layer_name_to_spec[layer_name]
+                if not isinstance(layer_spec, MambaSpec):
+                    group_attn_spec = layer_spec
                     break
 
-        for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
+            if group_attn_spec is None:
+                raise ValueError(
+                    "Expected at least one Attention layer in the shared KV group."
+                )
+
+            # 2. ALLOCATE EXACTLY ONE ARRAY FOR THE ENTIRE GROUP
+            page_size_bytes = group_attn_spec.page_size_bytes
+            assert kv_cache_tensor.size % page_size_bytes == 0
+            num_blocks = kv_cache_tensor.size // page_size_bytes
+
+            dp_size = self.runner.vllm_config.sharding_config.total_dp_size
+            num_blocks = (num_blocks // dp_size) * dp_size
+
+            if self.use_mla:
+                head_size = self.runner.model_config.hf_config.kv_lora_rank + \
+                            self.runner.model_config.hf_config.qk_rope_head_dim
+            else:
+                head_size = group_attn_spec.head_size
+
+            # Allocate the single shared canonical array
+            shared_kv_cache = create_kv_caches(
+                num_blocks=num_blocks,
+                block_size=group_attn_spec.block_size,
+                num_kv_heads=group_attn_spec.num_kv_heads,
+                head_size=head_size,
+                mesh=self.runner.mesh,
+                layer_names=[f'kv_cache_tensor.{i}'],
+                cache_dtype=t2j_dtype(group_attn_spec.dtype),
+                use_mla=self.use_mla,
+            )[0]
+
+            kv_caches.append(shared_kv_cache)
+            num_blocks_list.append(num_blocks)
+
+            # Update Metadata for logging
+            metadata["regular_attn"].count += 1
+            if metadata["regular_attn"].shape is None:
+                metadata["regular_attn"].shape = shared_kv_cache.shape
+                metadata["regular_attn"].dtype = shared_kv_cache.dtype
+                metadata["regular_attn"].sharding = shared_kv_cache.sharding
+
+            # 3. MAP ALL 4 LAYERS (3 GDN + 1 ATTN) TO THIS SINGLE ARRAY
             for j, layer_name in enumerate(kv_cache_tensor.shared_by):
-                layer_spec = layer_name_to_spec[layer_name]
-
-                page_size_bytes = layer_spec.page_size_bytes
-                assert kv_cache_tensor.size % page_size_bytes == 0
-                num_blocks = kv_cache_tensor.size // page_size_bytes
-                if duplicate_shared_layers:
-                    num_blocks //= num_shared_layers
-                dp_size = self.runner.vllm_config.sharding_config.total_dp_size
-                # num_blocks must be a multiple of dp_size
-                num_blocks = (num_blocks // dp_size) * dp_size
-
-                if isinstance(layer_spec, MambaSpec):
-                    mamba_states = []
-                    for state_index, (shape, dtype) in enumerate(
-                            zip(layer_spec.shapes, layer_spec.dtypes)):
-                        jax_dtype = t2j_dtype(dtype)
-                        cache_shape = (num_blocks, *shape)
-                        if state_index == 0:
-                            # conv_state: [num_blocks, conv_kernel_size, intermediate_size]
-                            spec = PartitionSpec(None, None,
-                                                 ShardingAxisName.ATTN_HEAD)
-                        elif state_index == 1:
-                            # ssm_state: [num_blocks, num_heads, head_dim, state_size]
-                            spec = PartitionSpec(None,
-                                                 ShardingAxisName.ATTN_HEAD,
-                                                 None, None)
-                        else:
-                            spec = PartitionSpec(
-                                None, *([None] * (len(cache_shape) - 1)))
-
-                        sharding = NamedSharding(self.runner.mesh, spec)
-
-                        # NOTE: conv state will always be BF16 and SSM state will always be FP32
-                        # regardless of the `kv-cache-dtype` (as is in upstream vLLM)
-                        def _allocate_mamba(c_shape=cache_shape,
-                                            c_dtype=jax_dtype):
-                            return jnp.empty(shape=c_shape, dtype=c_dtype)
-
-                        mamba_allocate = jax.jit(_allocate_mamba,
-                                                 out_shardings=sharding)
-                        mamba_states.append(mamba_allocate())
-
-                    metadata["mamba"].count += 1
-                    if metadata["mamba"].shape is None:
-                        # Mamba is a tuple of arrays, so we store a tuple of their metadata
-                        metadata["mamba"].shape = tuple(s.shape
-                                                        for s in mamba_states)
-                        metadata["mamba"].dtype = tuple(s.dtype
-                                                        for s in mamba_states)
-                        metadata["mamba"].sharding = tuple(
-                            s.sharding for s in mamba_states)
-
-                    kv_caches.append(tuple(mamba_states))
-                else:
-                    # We should only init a new kv cache for the first layer in shared_by
-                    # if duplicate_shared_layers is False.  Otherwise, if duplicate_shared_layers
-                    # is True, we should init a new kv cache for each layer in shared_by
-                    if j == 0 or duplicate_shared_layers:
-                        # NOTE: we'll multiply the num_kv_heads by 2 in the function
-                        if self.use_mla:
-                            head_size = self.runner.model_config.hf_config.kv_lora_rank + \
-                                self.runner.model_config.hf_config.qk_rope_head_dim
-                        else:
-                            head_size = layer_spec.head_size
-                        kv_cache = create_kv_caches(
-                            num_blocks=num_blocks,
-                            block_size=layer_spec.block_size,
-                            num_kv_heads=layer_spec.num_kv_heads,
-                            head_size=head_size,
-                            mesh=self.runner.mesh,
-                            layer_names=[f'kv_cache_tensor.{i}'],
-                            cache_dtype=t2j_dtype(layer_spec.dtype),
-                            use_mla=self.use_mla,
-                        )[0]
-                        kv_caches.append(kv_cache)
-
-                        # Update Regular Attention Metadata
-                        metadata["regular_attn"].count += 1
-                        if metadata["regular_attn"].shape is None:
-                            metadata["regular_attn"].shape = kv_cache.shape
-                            metadata["regular_attn"].dtype = kv_cache.dtype
-                            metadata[
-                                "regular_attn"].sharding = kv_cache.sharding
-                # We should only add the blocks for the first layer in shared_by
-                # if duplicate_shared_layers is False.  Otherwise, if duplicate_shared_layers
-                # is True, we should add the blocks for each layer in shared_by.
-                if j == 0 or duplicate_shared_layers:
-                    num_blocks_list.append(num_blocks)
-                layer_idx = (i * num_shared_layers
-                             ) + j if duplicate_shared_layers else i
-                self.runner.layer_name_to_kvcache_index[layer_name] = layer_idx
+                # They all point to the exact same index `i` in kv_caches
+                self.runner.layer_name_to_kvcache_index[layer_name] = i
         if self.shared_kv_cache_layers:
             for layer_name, target_layer_name in self.shared_kv_cache_layers.items(
             ):

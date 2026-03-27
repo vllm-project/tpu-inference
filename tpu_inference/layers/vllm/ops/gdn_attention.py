@@ -452,7 +452,42 @@ def gdn_attention_core_tpu(
     j_dt_bias = jax_view(layer_module.dt_bias)
 
     layer_idx = vllm_context.layer_name_to_kvcache_index[layer_name]
-    conv_state, recurrent_state = vllm_context.kv_caches[layer_idx]
+
+    # This is the canonical array allocated for the Full Attention layer
+    # Shape is likely: (num_blocks, block_size, num_kv_heads, head_size)
+    shared_cache = vllm_context.kv_caches[layer_idx]
+    num_blocks = shared_cache.shape[0]
+
+    # Calculate exactly how many elements the GDN states need per block
+    # (Adjust these shapes to match your exact Mamba/GDN state dimensions)
+    conv_dim = j_mixed_qkv.shape[-1]
+    conv_shape = (num_blocks, kernel_size - 1, conv_dim)
+
+    # The recurrent state uses the expanded value heads (n_v), not n_kq
+    rec_shape = (num_blocks, n_v, d_k, d_v)
+
+    import math
+    conv_elements = math.prod(conv_shape[1:])
+    rec_elements = math.prod(rec_shape[1:])
+
+    comp_dtype = j_mixed_qkv.dtype
+    conv_itemsize = jnp.dtype(comp_dtype).itemsize
+    rec_itemsize = jnp.dtype(jnp.float32).itemsize
+
+    conv_bytes_len = conv_elements * conv_itemsize
+    rec_bytes_len = rec_elements * rec_itemsize
+
+    # View the cache as raw uint8 bytes and flatten
+    # Shape: (num_blocks, bytes_per_block)
+    byte_cache = shared_cache.view(jnp.uint8).reshape(num_blocks, -1)
+
+    # Slice out the states in bytes, view as correct dtype, and reshape
+    conv_state_bytes = byte_cache[:, :conv_bytes_len]
+    conv_state = conv_state_bytes.view(comp_dtype).reshape(conv_shape)
+
+    rec_state_bytes = byte_cache[:,
+                                 conv_bytes_len:conv_bytes_len + rec_bytes_len]
+    recurrent_state = rec_state_bytes.view(jnp.float32).reshape(rec_shape)
 
     # Map physical cache blocks
     flat_block_tables = jax_view(attn_metadata.block_tables)
@@ -523,7 +558,20 @@ def gdn_attention_core_tpu(
     (new_conv_state,
      new_recurrent_state), j_output = jax.lax.scan(scan_fn, carry_init, xs)
 
-    vllm_context.kv_caches[layer_idx] = (new_conv_state, new_recurrent_state)
+    flat_new_conv = new_conv_state.view(jnp.uint8).reshape(num_blocks, -1)
+    flat_new_rec = new_recurrent_state.view(jnp.uint8).reshape(num_blocks, -1)
+
+    updated_byte_cache = byte_cache.at[:, :conv_bytes_len].set(flat_new_conv)
+    updated_byte_cache = updated_byte_cache.at[:,
+                                               conv_bytes_len:conv_bytes_len +
+                                               rec_bytes_len].set(flat_new_rec)
+
+    # View back to the original cache dtype (e.g. FP8) and reshape to Full Attention Shape
+    updated_shared_cache = updated_byte_cache.view(shared_cache.dtype).reshape(
+        shared_cache.shape)
+
+    # Save it back to the context!
+    vllm_context.kv_caches[layer_idx] = updated_shared_cache
 
     j_output_flat = j_output.reshape(core_attn_out.shape)
     core_attn_out.copy_(torch_view(j_output_flat))
