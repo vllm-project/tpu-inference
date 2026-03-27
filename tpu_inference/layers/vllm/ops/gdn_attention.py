@@ -406,6 +406,75 @@ def _jax_gdn_attention_core(
     return output, new_conv_state, new_recurrent_state
 
 
+def run_jax_gdn_attention(
+    j_mixed_qkv: jnp.ndarray,
+    j_b: jnp.ndarray,
+    j_a: jnp.ndarray,
+    conv_state: jnp.ndarray,
+    recurrent_state: jnp.ndarray,
+    j_conv_weight: jnp.ndarray,
+    j_conv_bias: Optional[jnp.ndarray],
+    j_A_log: jnp.ndarray,
+    j_dt_bias: jnp.ndarray,
+    state_indices: jnp.ndarray,
+    req_indices: jnp.ndarray,
+    valid_mask: jnp.ndarray,
+    n_kq: int,
+    n_v: int,
+    d_k: int,
+    d_v: int,
+    kernel_size: int,
+) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
+    def scan_fn(carry, xs):
+        c_state_all, r_state_all = carry
+        curr_qkv, curr_b, curr_a, req_idx, is_valid = xs
+
+        # Reshape for single step computation: (B=1, T=1, D)
+        curr_qkv = curr_qkv[None, None, :]
+        curr_b = curr_b[None, None, :]
+        curr_a = curr_a[None, None, :]
+
+        # Fetch the current state for this specific request
+        state_idx = state_indices[req_idx]
+        c_state = c_state_all[state_idx][None, ...]
+        r_state = r_state_all[state_idx][None, ...]
+
+        # Run 1 recurrence step (works seamlessly for prefill or decode)
+        out, new_c, new_r = _jax_gdn_attention_core(curr_qkv,
+                                                    curr_b,
+                                                    curr_a,
+                                                    c_state,
+                                                    r_state,
+                                                    j_conv_weight,
+                                                    j_conv_bias,
+                                                    j_A_log,
+                                                    j_dt_bias,
+                                                    is_prefill=False,
+                                                    n_kq=n_kq,
+                                                    n_v=n_v,
+                                                    d_k=d_k,
+                                                    d_v=d_v,
+                                                    kernel_size=kernel_size)
+
+        # Conditionally update the global cache maps
+        c_state_all = jnp.where(is_valid,
+                                c_state_all.at[state_idx].set(new_c[0]),
+                                c_state_all)
+        r_state_all = jnp.where(is_valid,
+                                r_state_all.at[state_idx].set(new_r[0]),
+                                r_state_all)
+
+        return (c_state_all, r_state_all), out[0, 0]
+
+    carry_init = (conv_state, recurrent_state)
+    xs = (j_mixed_qkv, j_b, j_a, req_indices, valid_mask)
+
+    (new_conv_state,
+     new_recurrent_state), j_output = jax.lax.scan(scan_fn, carry_init, xs)
+
+    return (new_conv_state, new_recurrent_state), j_output
+
+
 def gdn_attention_core_tpu(
     mixed_qkv: torch.Tensor,
     b: torch.Tensor,
@@ -475,53 +544,10 @@ def gdn_attention_core_tpu(
     # Exclude trailing padding indices from mutating cache
     valid_mask = token_idx < q_loc[-1]
 
-    def scan_fn(carry, xs):
-        c_state_all, r_state_all = carry
-        curr_qkv, curr_b, curr_a, req_idx, is_valid = xs
-
-        # Reshape for single step computation: (B=1, T=1, D)
-        curr_qkv = curr_qkv[None, None, :]
-        curr_b = curr_b[None, None, :]
-        curr_a = curr_a[None, None, :]
-
-        # Fetch the current state for this specific request
-        state_idx = state_indices[req_idx]
-        c_state = c_state_all[state_idx][None, ...]
-        r_state = r_state_all[state_idx][None, ...]
-
-        # Run 1 recurrence step (works seamlessly for prefill or decode)
-        out, new_c, new_r = _jax_gdn_attention_core(curr_qkv,
-                                                    curr_b,
-                                                    curr_a,
-                                                    c_state,
-                                                    r_state,
-                                                    j_conv_weight,
-                                                    j_conv_bias,
-                                                    j_A_log,
-                                                    j_dt_bias,
-                                                    is_prefill=False,
-                                                    n_kq=n_kq,
-                                                    n_v=n_v,
-                                                    d_k=d_k,
-                                                    d_v=d_v,
-                                                    kernel_size=kernel_size)
-
-        # Conditionally update the global cache maps
-        c_state_all = jnp.where(is_valid,
-                                c_state_all.at[state_idx].set(new_c[0]),
-                                c_state_all)
-        r_state_all = jnp.where(is_valid,
-                                r_state_all.at[state_idx].set(new_r[0]),
-                                r_state_all)
-
-        return (c_state_all, r_state_all), out[0, 0]
-
-    carry_init = (conv_state, recurrent_state)
-    xs = (j_mixed_qkv, j_b, j_a, req_indices, valid_mask)
-
-    # XLA optimizes this loop natively via in-place updates.
-    (new_conv_state,
-     new_recurrent_state), j_output = jax.lax.scan(scan_fn, carry_init, xs)
+    (new_conv_state, new_recurrent_state), j_output = run_jax_gdn_attention(
+        j_mixed_qkv, j_b, j_a, conv_state, recurrent_state, j_conv_weight,
+        j_conv_bias, j_A_log, j_dt_bias, state_indices, req_indices,
+        valid_mask, n_kq, n_v, d_k, d_v, kernel_size)
 
     vllm_context.kv_caches[layer_idx] = (new_conv_state, new_recurrent_state)
 
