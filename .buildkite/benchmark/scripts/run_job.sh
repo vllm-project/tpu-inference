@@ -115,7 +115,7 @@ export BENCHMARK_DOCKER_ARGS_STR
 DATASETS=("custom-token" "mmlu" "mlperf" "bench-custom-token" "math500" "bench-custom-mm")
 if [[ " ${DATASETS[*]} " == *" $DATASET "* ]]; then
   echo "--- Syncing dataset for $DATASET"
-  DATASET_DIR="./artifacts/dataset"
+  DATASET_DIR="$ARTIFACT_FOLDER/dataset"
   mkdir -p "$DATASET_DIR"
   case "$DATASET" in
     "custom-token") gsutil -m cp gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/*.* "$DATASET_DIR/" ;;
