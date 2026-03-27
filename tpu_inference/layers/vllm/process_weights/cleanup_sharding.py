@@ -54,6 +54,23 @@ def shard_model_to_tpu(model: torch.nn.Module,
     with jax.default_device(jax.devices("cpu")[0]):
         _shard_module_to_tpu(model, mesh)
 
+        import gc
+        device = jax.devices()[0]
+        try:
+            mem_before = device.memory_stats()["bytes_in_use"] / (1024**3)
+            logger.info(f"Memory before GC: {mem_before:.2f} GB in use on {device}")
+        except Exception:
+            pass
+
+        gc.collect()
+        jax.clear_caches()
+
+        try:
+            mem_after = device.memory_stats()["bytes_in_use"] / (1024**3)
+            logger.info(f"Memory after GC/clear: {mem_after:.2f} GB in use on {device}")
+        except Exception:
+            pass
+
         params, buffers = _extract_all_params_buffers(model)
 
         # For other weight tensors, repliate them on all the TPU chips.
