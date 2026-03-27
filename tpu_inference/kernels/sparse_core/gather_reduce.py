@@ -54,11 +54,11 @@ def sc_gather_reduce(
     single_sc: bool = False,
     col_chunk_size: int = int(3.5 * 1024),  # half a row
     row_chunk_size: int = 16,  # writing back 2 rows given reduce size of 8
-    loop_unroll_factor_1: int = 8, # 8, # 8,
-    loop_unroll_factor_2: int = 2, #2, # 4,
-    loop_unroll_factor_3: int = 8, # 4, # 4,
+    loop_unroll_factor_1: int = 8,
+    loop_unroll_factor_2: int = 2,
+    loop_unroll_factor_3: int = 8,
     loop_parallel_access_1: bool = True,
-    loop_parallel_access_2: bool = True, # True,
+    loop_parallel_access_2: bool = True,
     loop_parallel_access_3: bool = False,
 ) -> jax.Array:
   """Performs a gather-reduce operation on SparseCore.
