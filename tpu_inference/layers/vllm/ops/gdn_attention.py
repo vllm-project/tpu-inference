@@ -573,8 +573,8 @@ def gdn_attention_core_tpu(
     vllm_context = get_vllm_model_wrapper_context()
 
     tp_size = layer_module.tp_size
-    n_kq = layer_module.num_k_heads // tp_size
-    n_v = layer_module.num_v_heads // tp_size
+    n_kq = layer_module.num_k_heads
+    n_v = layer_module.num_v_heads
     d_k = layer_module.head_k_dim
     d_v = layer_module.head_v_dim
     kernel_size = layer_module.conv_kernel_size
