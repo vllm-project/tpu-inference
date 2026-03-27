@@ -446,6 +446,9 @@ class TPUConnectorWorker:
         self.reqs_wait_pull: dict[ReqId, list[list[jax.Array], float]] = {}
         # req_id: thread_future
         self.reqs_pulling: dict[ReqId, Future] = {}
+        # req_id: (kv, indices)
+        self.reqs_ready_to_scatter: dict[ReqId, tuple[list[jax.Array],
+                                                      jax.Array]] = {}
         # the KV cache strafer uuid to request mapping
         # the reason is vllm add prefix + external uuid suffix for each request id
         # for example: prefill req_id:cmpl-cd70b21e-0f2b-46ed-910c-9525f706389a-0-99ae74c8
@@ -596,6 +599,11 @@ class TPUConnectorWorker:
                 self.reqs_pulling[req_id] = self.pull_executor.submit(
                     self._pull_kv, req_id, conn, req_meta, indices)
             else:
+                if req_id in self.reqs_ready_to_scatter:
+                    kv, indices = self.reqs_ready_to_scatter.pop(req_id)
+                    self.runner.kv_caches = scatter_kv_slices(
+                        self.runner.kv_caches, kv, indices)
+
                 # The request has finished pulling the KV from remote, or it has full local
                 # prefix cache, need to notify P to let it free blocks.
                 socket = self._maybe_build_notif_socket(req_meta)
@@ -722,11 +730,8 @@ class TPUConnectorWorker:
         for req_id in list(self.reqs_pulling.keys()):
             future = self.reqs_pulling[req_id]
             if future.done():
-                # NOTE(xiang): we do the scatter in main thread to avoid data racing.
-                # The data racing is not for the kv_caches buffer, it's for the runner.kv_caches ref.
                 kv, indices = future.result()
-                self.runner.kv_caches = scatter_kv_slices(
-                    self.runner.kv_caches, kv, indices)
+                self.reqs_ready_to_scatter[req_id] = (kv, indices)
                 del self.reqs_pulling[req_id]
                 done_recving.add(req_id)
 
