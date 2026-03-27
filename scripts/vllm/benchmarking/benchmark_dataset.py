@@ -642,12 +642,10 @@ class MMMUProDataset(BenchmarkDataset):
     def __init__(
         self,
         subset: str = "vision",
-        use_chat_template: bool = True,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self.subset = subset
-        self.use_chat_template = use_chat_template
         self.load_data()
 
     def load_data(self) -> None:
@@ -728,33 +726,19 @@ class MMMUProDataset(BenchmarkDataset):
 
             mm_content = self._images_to_mm_content(images or [])
 
-            if self.use_chat_template:
-                # Build message content: images first, then question text.
-                content: list = mm_content
-                content.append({"type": "text", "text": question_text})
-                messages = [{
-                    "role": "user",
-                    "content": content,
-                }]
-                try:
-                    prompt = tokenizer.apply_chat_template(
-                        messages, tokenize=False, add_generation_prompt=True)
-                except Exception as e:
-                    logger.error(
-                        "Could not apply chat template: %s. "
-                        "Falling back to raw prompt.", e)
-                    prompt = question_text
-            else:
-                prompt = question_text
+            # Build message content: images first, then question text.
+            content: list = mm_content
+            content.append({"type": "text", "text": question_text})
+            messages = [{
+                "role": "user",
+                "content": content,
+            }]
 
-            prompt_ids = tokenizer(prompt).input_ids
-            prompt_len = len(prompt_ids)
             new_output_len = output_len if output_len is not None else 16
 
             samples.append(
                 SampleRequest(
-                    prompt=prompt,
-                    prompt_len=prompt_len,
+                    messages=messages,
                     expected_output_len=new_output_len,
                     multi_modal_data=mm_content,
                     completion=answer,
