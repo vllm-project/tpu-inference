@@ -1,0 +1,235 @@
+"""Tests for Gather Reduce Kernel."""
+
+import contextlib
+import os
+import functools
+import logging
+import time
+
+from absl.testing import absltest
+from absl.testing import parameterized
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+from tpu_inference.kernels.sparse_core import gather_reduce as gather_reduce_sc
+try:
+    import xprof
+except ImportError:
+    xprof = None
+
+os.environ["LIBTPU_INIT_ARGS"] = "--xla_tpu_use_tc_device_shape_on_sc=true"
+_XPROF_TRACING_ENABLED = True
+
+
+def _snr(signal, grnd_truth):
+  error = signal - grnd_truth
+  return jnp.log(1 + jnp.sum(signal**2) / (jnp.sum(error**2) + 1e-6))
+
+
+@contextlib.contextmanager
+def _maybe_xprof_session(**kwargs):
+  """A context manager that enables xprof tracing only if the flag is set."""
+  if _XPROF_TRACING_ENABLED and xprof is not None:
+    try:
+        with xprof.session(**kwargs) as session:
+          yield session
+    except (AttributeError, TypeError, ImportError):
+        yield None
+  else:
+    yield None
+
+
+class ScatterReduceScTest(parameterized.TestCase):
+
+  @parameterized.product(
+      shape_idx_size=[
+          ((128 * 1024, 7 * 1024), 128 * 1024, 8),
+      ],
+      data_type=[
+          "random_int",
+          # "debug",
+      ],
+  )
+  def test_column(self, shape_idx_size, data_type):
+    rows, cols = shape_idx_size[0]
+
+    if data_type == "random_int":
+      # Use numpy for faster data generation on CPU, then transfer to device.
+      rng_inputs = np.random.RandomState(42)
+      inputs = rng_inputs.randint(0, 1024, shape_idx_size[0]).astype(jnp.float32)
+
+      rng_others = np.random.RandomState(43)
+      idx = rng_others.randint(
+          0, shape_idx_size[0][0], (shape_idx_size[1],), dtype=np.int32
+      )
+    elif data_type == "debug":
+
+      # Create inputs with structured, semi-unique small numbers.
+      # Each row ascends from 0 to cols-1, with a decimal part indicating the
+      # row index.
+      base = jnp.tile(jnp.arange(cols, dtype=jnp.bfloat16), (rows, 1))
+      offset = jnp.arange(rows, dtype=jnp.bfloat16)[:, None] * 0.01
+      inputs = base + offset
+
+      # Structure indices to be ascending from 0.
+      idx = jnp.arange(shape_idx_size[1], dtype=jnp.int32)
+    else:
+      raise ValueError("Unsupported data type: " + data_type)
+
+    def _run_nojit(op, idx):
+      group_size = shape_idx_size[2]
+      gathered = op[idx, :]
+      gathered = jnp.reshape(gathered, (-1, group_size, op.shape[1]))
+      return jnp.sum(gathered.astype(jnp.float32), axis=1).astype(jnp.bfloat16)
+
+    kernel = functools.partial(
+        gather_reduce_sc.sc_gather_reduce,
+        reduce_group_size=shape_idx_size[2],
+        single_sc=True,
+        col_chunk_size=3584,
+        loop_unroll_factor_1= 2,
+        loop_unroll_factor_2= 2,
+        loop_unroll_factor_3= 8,
+        loop_parallel_access_1=True,
+        loop_parallel_access_2=False,
+        loop_parallel_access_3=False,
+    )
+
+    @jax.jit
+    def _run_sc(
+        op,
+        idx,
+    ):
+      return kernel(op, idx)
+
+    maybe_compile_sc = _run_sc.lower(
+        inputs,
+        idx,
+    ).compile()
+
+    out = _run_nojit(inputs, idx)
+
+    with _maybe_xprof_session(
+        trace_python=True, trace_mode="TRACE_COMPUTE_AND_SYNC"
+    ) as url:
+      for _ in range(5):
+        out_sc = jax.block_until_ready(
+            maybe_compile_sc(
+                inputs,
+                idx,
+            )
+        )
+
+    np.testing.assert_array_equal(out_sc, out)
+    if url:
+        logging.info("Xprof session: %s", url[0])
+
+  @parameterized.product(
+      shape_idx_size=[
+          ((128 * 1024, 7 * 1024), 128 * 1024, 8),
+      ],
+  )
+  def test_topk_mult(self, shape_idx_size):
+    timings = {}
+    start_time = time.time()
+
+    # Use numpy for faster data generation on CPU, then transfer to device.
+    rng_inputs = np.random.RandomState(42)
+    inputs = rng_inputs.randint(
+        0, 1024, shape_idx_size[0]
+    ).astype(jnp.bfloat16)
+
+    rng_others = np.random.RandomState(43)
+    topk_wgt = rng_others.standard_normal(shape_idx_size[1]).astype(jnp.bfloat16)
+
+    idx = rng_others.randint(
+        0, shape_idx_size[0][0], (shape_idx_size[1],), dtype=np.int32
+    )
+
+    for ci, rnd_idx in enumerate([89, 129, 257, 7, 90]):
+      inputs[rnd_idx, :] = np.nan
+      inds_nan = np.where(idx == rnd_idx)
+      topk_wgt[inds_nan] = 0.0
+      if len(inds_nan) == 0:
+        idx[ci] = rnd_idx
+
+
+    topk_wgt = (
+        topk_wgt
+        .reshape(-1, 128)
+        .astype(jnp.bfloat16)
+    )
+
+    timings['data_creation'] = time.time() - start_time
+
+    def _run_nojit(op, idx, topk_wgt_local):
+      group_size = 8 
+      gathered = op[idx, :]
+      if topk_wgt_local is not None:
+        flat_weights = topk_wgt_local.flatten()
+        weights_for_mul = flat_weights[:, None].astype(jnp.float32)
+        gathered_f32 = gathered.astype(jnp.float32)
+        gathered = jnp.where(
+            weights_for_mul == 0, 0.0, gathered_f32 * weights_for_mul
+        )
+      gathered = jnp.reshape(gathered, (-1, group_size, op.shape[1]))
+      return jnp.sum(gathered.astype(jnp.float32), axis=1).astype(jnp.bfloat16)
+
+    kernel = functools.partial(
+        gather_reduce_sc.sc_gather_reduce,
+        reduce_group_size=shape_idx_size[2],
+        single_sc=True,
+        col_chunk_size=3584,
+        loop_unroll_factor_1= 2,
+        loop_unroll_factor_2= 2,
+        loop_unroll_factor_3= 8,
+        loop_parallel_access_1=True,
+        loop_parallel_access_2=False,
+        loop_parallel_access_3=False,
+    )
+
+    @jax.jit
+    def _run_sc(
+        op,
+        idx,
+        topk_wgt_local,
+    ):
+      return kernel(op, idx, topk_weights=topk_wgt_local)
+
+    start_time = time.time()
+    maybe_compile_sc = _run_sc.lower(
+        inputs,
+        idx,
+        topk_wgt,
+    ).compile()
+    timings['compilation'] = time.time() - start_time
+
+    start_time = time.time()
+    out = _run_nojit(inputs, idx, topk_wgt)
+    timings['baseline'] = time.time() - start_time
+
+    with _maybe_xprof_session(
+        trace_python=True, trace_mode="TRACE_COMPUTE_AND_SYNC"
+    ) as url:
+      start_time = time.time()
+      for _ in range(5):
+        out_sc = jax.block_until_ready(
+            maybe_compile_sc(
+                inputs,
+                idx,
+                topk_wgt,
+            )
+        )
+      timings['kernel_execution'] = time.time() - start_time
+
+    for k, v in timings.items():
+      print(f"{k} took: {v:.4f}s")
+
+    np.testing.assert_allclose(out_sc, out, rtol=0.08) # we do it in fp32 on SC
+    if url:
+        logging.info("Xprof session: %s", url[0])
+
+
+if __name__ == "__main__":
+  absltest.main()
