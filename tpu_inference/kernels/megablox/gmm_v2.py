@@ -13,9 +13,9 @@
 # limitations under the License.
 
 import dataclasses
-import enum
 import functools
 from abc import ABC, abstractmethod
+from enum import StrEnum, auto
 from typing import Any, Callable, Tuple
 
 import jax
@@ -27,13 +27,10 @@ from jax.experimental.pallas import tpu as pltpu
 # Enums.
 
 
-class ActivationFn(str, enum.Enum):
-    SILU = "silu"
-    GELU = "gelu"
-    SWIGLUOAI = "swigluoai"
-
-    def __str__(self) -> str:
-        return self.value
+class ActivationFn(StrEnum):
+    SILU = auto()
+    GELU = auto()
+    SWIGLUOAI = auto()
 
 
 # Util.
@@ -79,7 +76,8 @@ def apply_act_fn(acc: jax.Array, fuse_act: ActivationFn | None):
         case ActivationFn.SILU:
             return jax.nn.silu(acc_gate) * acc_up
         case ActivationFn.GELU:
-            return jax.nn.gelu(acc_gate, approximate=True) * acc_up
+            # default is approximate GELU
+            return jax.nn.gelu(acc_gate) * acc_up
         case ActivationFn.SWIGLUOAI:
             return swigluoai(acc_gate, acc_up)
         case _:
@@ -986,8 +984,17 @@ def get_cost_estimate(cfgs: GmmConfigs):
     rhs_bits = jax.dtypes.itemsize_bits(rhs_dtype)
     fp32_bytes = jnp.dtype(jnp.float32).itemsize
 
-    # TODO(kyuyeunk): Add compute flops for quant, dequant, and bias.
     flops = 2 * dims.size_m * dims.size_k * dims.size_n
+    if cfgs.rhs_cfgs.has_bias:
+        flops += dims.size_m * dims.size_n
+    if cfgs.lhs_cfgs.quant_dtype is not None:
+        flops += 2 * dims.size_m * dims.size_k
+        lhs_num_blocks = pl.cdiv(dims.size_k, cfgs.lhs_cfgs.quant_block_size)
+        flops += dims.size_m * dims.size_n * lhs_num_blocks
+    if cfgs.rhs_cfgs.has_scale:
+        # Apply rhs scale
+        rhs_num_blocks = pl.cdiv(dims.size_k, cfgs.rhs_cfgs.quant_block_size)
+        flops += dims.size_m * dims.size_n * rhs_num_blocks
 
     lhs_bytes = dims.size_m * dims.size_k * lhs_dtype.itemsize
 
@@ -1163,7 +1170,7 @@ def gmm_v2(
     acc_dtype: jnp.dtype | None = None,
     maybe_quantize_lhs: bool = True,
     zero_initialize: bool = True,
-    fuse_act: ActivationFn | str | None = None,
+    fuse_act: ActivationFn | None = None,
 ) -> jax.Array:
     """GMM kernel implemented with emit_pipeline.
 
