@@ -37,7 +37,7 @@ from typing import Optional
 import numpy as np
 from backend_request_func import (ASYNC_REQUEST_FUNCS,
                                   OPENAI_COMPATIBLE_BACKENDS, RequestFuncInput,
-                                  RequestFuncOutput)
+                                  RequestFuncOutput, start_stop_profile)
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 
@@ -307,20 +307,7 @@ async def benchmark(
 
     if profile:
         print("Starting profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            model_name=model_name,
-            prompt=test_prompt,
-            api_url=base_url + "/start_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-            multi_modal_content=test_mm_content,
-            ignore_eos=ignore_eos,
-            extra_body=extra_body,
-        )
-        profile_output = await request_func(request_func_input=profile_input)
-        if profile_output.success:
+        if await start_stop_profile(base_url, "start"):
             print("Profiler started")
 
     distribution = "Poisson process" if burstiness == 1.0 else "Gamma distribution"
@@ -387,16 +374,7 @@ async def benchmark(
 
     if profile:
         print("Stopping profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_prompt,
-            api_url=base_url + "/stop_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-        )
-        profile_output = await request_func(request_func_input=profile_input)
-        if profile_output.success:
+        if await start_stop_profile(base_url, "stop"):
             print("Profiler stopped")
 
     if pbar is not None:
