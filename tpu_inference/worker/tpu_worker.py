@@ -384,8 +384,8 @@ class TPUWorker(WorkerBase):
         # deliberate, temporary compromise for the same reasons outlined in
         # the `get_kv_cache_spec` method.
         # NOTE: delete profile code before merging the branch
-        # if self.step_counter == 1:
-        #     self.profile(is_start=True)
+        if self.step_counter == 19:
+            self.profile(is_start=True)
         if self.parallel_config.pipeline_parallel_size == 1 or self.rank == 0:
             intermediate_tensors = None
         else:
@@ -414,9 +414,10 @@ class TPUWorker(WorkerBase):
             return None
         else:
             self.step_counter += 1
+            logger.info(f"---jcgu---:{self.step_counter}")
             # NOTE: delete profile code before merging the branch
-            # if self.step_counter == 10:
-            #     self.profile(is_start=False)
+            if self.step_counter == 25: 
+                self.profile(is_start=False)
             # With a connector, the scheduler expects output from all workers
             # TODO(mrjunwan): Figure out if this is ok after https://github.com/vllm-project/vllm/pull/26866
             if has_kv_transfer_group():
