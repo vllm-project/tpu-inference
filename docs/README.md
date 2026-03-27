@@ -22,7 +22,7 @@ vLLM TPU is now powered by `tpu-inference`, an expressive and powerful new hardw
 
 Although vLLM TPU’s new unified backend makes out-of-the-box high performance serving possible with any model supported in vLLM, the reality is that we're still in the process of implementing a few core components.
 
-For this reason, we’ve provided a **[Recommended Models and Features](recommended_models_features.md)** page detailing the models and features that are validated through unit, integration, and performance testing.
+For this reason, we’ve provided a **[Recommended Models and Features](basic_usage/recommended_models.md)** page detailing the models and features that are validated through unit, integration, and performance testing.
 
 ## Getting Started
 
@@ -44,8 +44,8 @@ Tested end-to-end guides for hosting specific models on specific TPU generations
 
 If you are interested in contributing to the project or want to learn more about the internals, check out our developer guides:
 
-- **[JAX Model Development](developer_guides/jax_model_development.md)**
-- **[Torch Model Development](developer_guides/torchax_model_development.md)**
+- **[JAX Model Development](advanced_usage/jax_model_development.md)**
+- **[Torch Model Development](advanced_usage/torchax_model_development.md)**
 
 ## Contribute
 
