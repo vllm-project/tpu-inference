@@ -71,13 +71,25 @@ def shard_model_to_tpu(model: torch.nn.Module,
         except Exception:
             pass
 
-        params, buffers = _extract_all_params_buffers(model)
-
-        # For other weight tensors, repliate them on all the TPU chips.
-        params, buffers = pytree.tree_map_only(
-            _tensor_is_in_cpu,
-            lambda tensor: _shard_tensor_to_tpu_replicated(tensor, mesh),
-            (params, buffers))
+        params = {}
+        # Iterate through parameters and shard them one by one to avoid peak memory.
+        for name, param in model.named_parameters():
+            if _tensor_is_in_cpu(param):
+                sharded = _shard_tensor_to_tpu_replicated(param, mesh)
+                # Synchronize to ensure HBM is allocated and freed cleanly.
+                jax.block_until_ready(jax_view(sharded))
+                params[name] = sharded
+            else:
+                params[name] = param
+        
+        buffers = {}
+        for name, buffer in model.named_buffers():
+            if _tensor_is_in_cpu(buffer):
+                sharded = _shard_tensor_to_tpu_replicated(buffer, mesh)
+                jax.block_until_ready(jax_view(sharded))
+                buffers[name] = sharded
+            else:
+                buffers[name] = buffer
 
         return {**params, **buffers}
 
