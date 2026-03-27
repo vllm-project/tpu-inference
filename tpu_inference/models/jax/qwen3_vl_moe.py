@@ -599,6 +599,7 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 self.mesh,
                 hf_key,
                 env.t2j_copy(hf_weight),
+                keep_hf_weight_suffix_when_match=[],
             )
 
         self._finalize_loaded_expert_modules(loaded_expert_modules)
