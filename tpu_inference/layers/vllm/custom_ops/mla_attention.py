@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import jax
 import jax.numpy as jnp
 import torch
 import torchax
@@ -117,7 +118,6 @@ class VllmMLAAttention(MLAAttention):
             
             # Force JAX to execute graph to free any intermediate allocations 
             # (e.g., dequantized dense KV cache weights) before processing next layer.
-            import jax
             jax.block_until_ready(jax_view(self.W_UK_T))
 
     def forward(self, q: torch.Tensor, kv_c_normed: torch.Tensor,
