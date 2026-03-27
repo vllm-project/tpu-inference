@@ -87,8 +87,9 @@ if TYPE_CHECKING:
 
 from tpu_inference import envs
 from tpu_inference.distributed.utils import (
-    get_enable_d2h_transfer, get_host_ip, get_kv_ips, get_kv_ports,
-    get_kv_transfer_port, get_side_channel_port, get_transfer_channel_number)
+    get_enable_block_kv_transfer, get_enable_d2h_transfer, get_host_ip,
+    get_kv_ips, get_kv_ports, get_kv_transfer_port, get_side_channel_port,
+    get_transfer_channel_number)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 from tpu_inference.utils import device_array
@@ -661,13 +662,18 @@ class TPUConnectorWorker:
         )
         start_time = time.perf_counter()
         kv = conn.pull(req_meta.uuid, kv_spec)
-        end_time_0 = time.perf_counter()
-        jax.block_until_ready(kv)
-        end_time_1 = time.perf_counter()
         kv_size_mb = sum(k.nbytes for k in kv) / (1024 * 1024)
+        end_time_0, end_time_1 = time.perf_counter(), None
+        if get_enable_block_kv_transfer():
+            jax.block_until_ready(kv)
+            end_time_1 = time.perf_counter()
+        prepare_time_ms = (end_time_0 - start_time) * 1000
+        pull_time_ms = (end_time_1 -
+                        end_time_0) * 1000 if end_time_1 is not None else 0.0
         logger.info(
-            f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | uuid={req_meta.uuid} | prepare time={(end_time_0 - start_time) * 1000:.2f}ms | pull time={(end_time_1 - end_time_0) * 1000:.2f}ms | duration={(end_time_1 - start_time) * 1000:.2f}ms | size={kv_size_mb:.2f}MB"
-        )
+            f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | "
+            f"uuid={req_meta.uuid} | prepare time={prepare_time_ms:.2f}ms | "
+            f"pull time={pull_time_ms:.2f}ms | size={kv_size_mb:.2f}MB")
         return kv, indices
 
     def _get_kv_spec(self, num_blocks: int) -> list[jax.ShapeDtypeStruct]:

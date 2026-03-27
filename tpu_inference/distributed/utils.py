@@ -79,6 +79,12 @@ def get_enable_d2h_transfer() -> bool:
     return enable_str in ("true", "1", "yes")
 
 
+def get_enable_block_kv_transfer() -> bool:
+    """Check if we block the KV-cache transfer until it is ready via environment variable."""
+    enable_str = os.getenv("TPU_ENABLE_BLOCK_KV_TRANSFER", "true").lower()
+    return enable_str in ("true", "1", "yes")
+
+
 def get_device_topology_order_id(local_devices, global_devices) -> int:
     """
     Calculates the topology order ID for the local device set within the global topology.
