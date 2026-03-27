@@ -24,6 +24,7 @@ from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional, Tuple
+import numpy as np
 
 import jax
 import jax.numpy as jnp
@@ -84,6 +85,11 @@ def print_param_info(param: nnx.Param, name: str):
 def transpose_params(param_key: str, param_tensor: jax.Array, transpose_map):
     for key, value in transpose_map.items():
         if key in param_key:
+            if hasattr(param_tensor, "numpy"):
+                if "uint16" in str(param_tensor.dtype) or "bfloat16" in str(param_tensor.dtype):
+                    param_tensor = param_tensor.detach().cpu().to(torch.float32).numpy()
+                else:
+                    param_tensor = param_tensor.detach().cpu().numpy()
             return jnp.transpose(param_tensor, value)
     return param_tensor  # Base case / no-op
 
@@ -91,6 +97,11 @@ def transpose_params(param_key: str, param_tensor: jax.Array, transpose_map):
 def reshape_params(param_key: str, param_tensor: jax.Array, shape_map):
     for key, new_shape in shape_map.items():
         if key in param_key:
+            if hasattr(param_tensor, "numpy"):
+                if "uint16" in str(param_tensor.dtype) or "bfloat16" in str(param_tensor.dtype):
+                    param_tensor = param_tensor.detach().cpu().to(torch.float32).numpy()
+                else:
+                    param_tensor = param_tensor.detach().cpu().numpy()
             try:
                 #TODO:(gpolovets) Add validation on whether reshape preserves data layout.
                 return jnp.reshape(param_tensor, new_shape)
@@ -127,11 +138,26 @@ def convert_torch_to_jax_with_view(loaded_weight: torch.Tensor,
     Converts a PyTorch tensor to a JAX array by reinterpreting its
     bit representation using a dtype view map.
     """
-    torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+
+    if isinstance(sharding_names, jax.sharding.Sharding):
+        out_sharding = sharding_names
+    else:
+        spec = sharding_names if isinstance(sharding_names, P) else P(*sharding_names)
+        out_sharding = NamedSharding(mesh, spec)
     
-    loaded_weight = jnp.array(
-        loaded_weight.view(torch_view_type).numpy(), NamedSharding(mesh, P(*sharding_names))).view(cast_type)
-    return loaded_weight
+    if isinstance(loaded_weight, (np.ndarray, jax.Array)):
+        return jax.device_put(loaded_weight, out_sharding).astype(cast_type)
+
+    if hasattr(loaded_weight, "view"):
+        if "uint16" in str(loaded_weight.dtype) or "bfloat16" in str(loaded_weight.dtype):
+            # return jax.device_put(loaded_weight.detach().cpu().to(torch.float32).numpy(), out_sharding).astype(cast_type)
+            cpu_data = loaded_weight.detach().cpu().to(torch.float32).numpy()
+            return jax.device_put(cpu_data, out_sharding).astype(cast_type)
+        torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
+        return jnp.array(
+            loaded_weight.view(torch_view_type).numpy(), out_sharding).view(cast_type)
+    
+    return jax.device_put(jnp.array(loaded_weight), out_sharding).astype(cast_type)
 
 
 ############ END Used by llama4, deepseek only for now END ############

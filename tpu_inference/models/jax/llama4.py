@@ -17,6 +17,7 @@ import re
 from itertools import islice
 from typing import Any, List, Optional, Tuple
 import numpy as np
+import torch
 
 import jax
 import jax.numpy as jnp
@@ -196,10 +197,14 @@ class Llama4WeightLoader(BaseWeightLoader):
                                  loaded_weight: jax.Array):
         """HF's gate_up_proj is a fused tensor of gate and up projections. It needs to be split."""
 
-        if hasattr(loaded_weight, "numpy"): # Torch tensor
-            split_weights = [w.cpu().numpy() for w in loaded_weight.chunk(2, dim=-1)]
+        if hasattr(loaded_weight, "chunk"):  # PyTorch Tensor
+            cpu_weight = loaded_weight.detach().cpu().to(torch.float32)
+            split_weights = [w.numpy() for w in cpu_weight.chunk(2, dim=-1)]
+        # elif hasattr(loaded_weight, "split"): # NumPy or others
+        #     split_weights = np.split(loaded_weight, 2, axis=-1)
         else:
-            split_weights = np.split(loaded_weight, 2, axis=-1)
+            # JAX array
+            split_weights = jnp.split(loaded_weight, 2, axis=-1)
         layer_num = self._get_layer_num(loaded_name)
 
         for split_type in ["gate", "up"]:
@@ -221,18 +226,20 @@ class Llama4WeightLoader(BaseWeightLoader):
                 continue
             mapped_model_weight = get_param(model_params, mapped_name)
 
+            # print(f"DEBUG: Name={split_loaded_name}, Type={type(loaded_weight)}")
+            # if hasattr(loaded_weight, 'dtype'):
+            #     print(f"DEBUG: Dtype={loaded_weight.dtype}")
+
+            cast_type = jnp.dtype(jnp.bfloat16)
+            # loaded_weight is a jax.Array when framework="flax", otherwise it's bfloat16
+            loaded_weight = convert_torch_to_jax_with_view(
+                        loaded_weight, cast_type, mapped_model_weight.out_sharding, model_for_loading.mesh)
+                
             if mapped_model_weight.value.shape != loaded_weight.shape:
                 raise ValueError(
                     f"Loaded shape for {split_loaded_name}: {loaded_weight.shape} "
                     f"does not match model shape for {mapped_name}: {mapped_model_weight.value.shape}!"
                 )
-            
-            cast_type = jnp.dtype(jnp.bfloat16)
-            # loaded_weight is a jax.Array when framework="flax", otherwise it's bfloat16
-            if not isinstance(loaded_weight, jax.Array):
-                loaded_weight = convert_torch_to_jax_with_view(
-                            loaded_weight, cast_type, mapped_model_weight.out_sharding, model_for_loading.mesh)
-
             mapped_model_weight.value = loaded_weight
             logger.debug(
                 f"{split_loaded_name}: {loaded_weight.shape}  -->  {mapped_name}: {mapped_model_weight.value.shape}"
@@ -337,12 +344,8 @@ class Llama4WeightLoader(BaseWeightLoader):
                                                      self._transpose_map)
                     
                 cast_type = model_weight.value.dtype
-                if not isinstance(loaded_weight, jax.Array):
-                    logger.debug(
-                        f"Converting PyTorch tensor {loaded_name} to JAX {cast_type}"
-                    )
-                    loaded_weight = convert_torch_to_jax_with_view(
-                        loaded_weight, cast_type, model_weight.out_sharding, model_for_loading.mesh)
+                loaded_weight = convert_torch_to_jax_with_view(
+                    loaded_weight, cast_type, model_weight.out_sharding, model_for_loading.mesh)
                     
                 if model_weight.value.shape != loaded_weight.shape:
                     raise ValueError(
@@ -352,9 +355,7 @@ class Llama4WeightLoader(BaseWeightLoader):
                 logger.debug(
                     f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
                 )
-                model_weight.value = shard_put(loaded_weight,
-                                               model_weight.sharding,
-                                               mesh=model_for_loading.mesh)
+                model_weight.value = loaded_weight
                 if self.is_verbose:
                     print_param_info(model_weight, loaded_name)
             with jax.default_device(jax.devices("cpu")[0]):
