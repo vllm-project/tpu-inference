@@ -80,7 +80,14 @@ class VllmMLAAttention(MLAAttention):
 
             # quantize W_UK_T, W_UV back to cache type and transfer
             # `W_UK_T`, `W_UV` to TPUs
-            mesh = self.kv_b_proj.quant_method.linear_config.mesh
+            if hasattr(self.kv_b_proj, "scheme"):
+                mesh = self.kv_b_proj.scheme.linear_config.mesh
+            elif hasattr(self.kv_b_proj.quant_method, "linear_config"):
+                mesh = self.kv_b_proj.quant_method.linear_config.mesh
+            else:
+                raise ValueError(f"Cannot find linear_config for kv_b_proj {self.kv_b_proj}")
+
+
             sharding = NamedSharding(mesh, P(ShardingAxisName.ATTN_HEAD, ))
             self.W_UK_T, self.W_UK_T_scale = quantize_tensor(
                 self.kv_cache_quantized_dtype, jax_view(self.W_UK_T), axis=1)
