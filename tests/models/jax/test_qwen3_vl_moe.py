@@ -642,6 +642,65 @@ class TestQwen3VLMoeForConditionalGeneration:
             expected_down,
         )
 
+    @patch('tpu_inference.models.jax.qwen3_vl_moe.assign_and_shard_param')
+    @patch('tpu_inference.models.jax.qwen3_vl_moe.torchax.default_env')
+    def test_load_moe_expert_weight_fused_uses_torchax_conversion(
+        self,
+        mock_default_env: MagicMock,
+        mock_assign: MagicMock,
+        mock_vllm_config: MockMoeVllmConfig,
+        rng: PRNGKey,
+        mesh: Mesh,
+    ):
+        with patch(
+                'tpu_inference.models.jax.qwen3_vl_moe.Qwen3VLVisionTransformer',
+                autospec=True) as MockVision:
+            mock_visual = MockVision.return_value
+            mock_visual.dtype = mock_vllm_config.model_config.dtype
+            mock_visual.config = mock_vllm_config.model_config.hf_config.vision_config
+            mock_visual.spatial_merge_size = (
+                mock_vllm_config.model_config.hf_config.vision_config
+                .spatial_merge_size)
+            model = Qwen3VLMoeForConditionalGeneration(mock_vllm_config, rng,
+                                                       mesh)
+
+        layer = model.language_model.layers[0]
+        experts = layer.mlp.experts
+        hidden_size = mock_vllm_config.model_config.hf_config.hidden_size
+        moe_intermediate_size = (
+            mock_vllm_config.model_config.hf_config.moe_intermediate_size)
+        num_experts = mock_vllm_config.model_config.hf_config.num_experts
+
+        gate_up = torch.arange(
+            num_experts * 2 * moe_intermediate_size * hidden_size,
+            dtype=torch.float32).reshape(num_experts, 2 * moe_intermediate_size,
+                                         hidden_size)
+
+        env = MagicMock()
+        env.t2j_copy.side_effect = lambda tensor: jnp.asarray(
+            tensor.detach().cpu().numpy())
+        mock_default_env.return_value = env
+
+        model._load_moe_expert_weight(
+            "model.language_model.layers.0.mlp.experts.gate_up_proj",
+            gate_up,
+            {},
+        )
+
+        assert env.t2j_copy.call_count == 2
+        np.testing.assert_array_equal(
+            np.array(mock_assign.call_args_list[0].args[1], dtype=np.float32),
+            np.array(gate_up[:, :moe_intermediate_size, :].permute(0, 2, 1),
+                     dtype=np.float32),
+        )
+        np.testing.assert_array_equal(
+            np.array(mock_assign.call_args_list[1].args[1], dtype=np.float32),
+            np.array(gate_up[:, moe_intermediate_size:, :].permute(0, 2, 1),
+                     dtype=np.float32),
+        )
+        assert mock_assign.call_args_list[0].args[0] is experts.kernel_gating_EDF
+        assert mock_assign.call_args_list[1].args[0] is experts.kernel_up_proj_EDF
+
     @patch('tpu_inference.models.jax.qwen3_vl_moe.model_weights_generator')
     def test_load_moe_expert_weights_releases_indexed_buffers_after_sharding(
         self,

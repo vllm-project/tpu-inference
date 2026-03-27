@@ -40,7 +40,6 @@ from tpu_inference.models.jax.utils.weight_utils import (
     assign_and_shard_param,
     check_all_loaded,
     get_default_maps,
-    jax_array_from_reshaped_torch,
     model_weights_generator,
 )
 
@@ -415,6 +414,7 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
 
         experts = layer.mlp.experts
         loaded_expert_modules[layer_idx] = experts
+        env = torchax.default_env()
 
         if indexed_match:
             expert_suffix = indexed_match.group(2)
@@ -442,8 +442,8 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                         f"source {source_shape} vs target {target_shape}")
             assign_and_shard_param(
                 experts.kernel_down_proj_EFD,
-                jax_array_from_reshaped_torch(hf_weight,
-                                              permute_dims=permute_dims),
+                jnp.transpose(env.t2j_copy(hf_weight), permute_dims)
+                if permute_dims is not None else env.t2j_copy(hf_weight),
                 param_name=(
                     f"language_model.layers.{layer_idx}.mlp.experts.down_proj"),
             )
@@ -465,14 +465,15 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         gate_proj, up_proj = hf_weight.chunk(2, dim=chunk_dim)
         assign_and_shard_param(
             experts.kernel_gating_EDF,
-            jax_array_from_reshaped_torch(gate_proj,
-                                          permute_dims=permute_dims),
+            jnp.transpose(env.t2j_copy(gate_proj), permute_dims)
+            if permute_dims is not None else env.t2j_copy(gate_proj),
             param_name=(
                 f"language_model.layers.{layer_idx}.mlp.experts.gate_proj"),
         )
         assign_and_shard_param(
             experts.kernel_up_proj_EDF,
-            jax_array_from_reshaped_torch(up_proj, permute_dims=permute_dims),
+            jnp.transpose(env.t2j_copy(up_proj), permute_dims)
+            if permute_dims is not None else env.t2j_copy(up_proj),
             param_name=(
                 f"language_model.layers.{layer_idx}.mlp.experts.up_proj"),
         )
