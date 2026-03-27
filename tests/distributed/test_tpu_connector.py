@@ -359,7 +359,7 @@ class TestTPUConnectorWorker(unittest.TestCase):
         self.all_mocks["zmq"].Context.assert_called_once()
         self.all_mocks["threading"].Thread.assert_not_called()
         self.all_mocks["ThreadPoolExecutor"].assert_called_once_with(
-            max_workers=64)
+            max_workers=128)
         self.assertFalse(worker.is_producer)
 
     def test_register_runner(self):

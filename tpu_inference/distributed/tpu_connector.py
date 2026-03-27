@@ -98,10 +98,6 @@ ReqId = str
 # 2. partial pulling (like RDMA)
 # 3. non-blocking jax array read/write
 
-# The await pull KV cache will be cleared after
-# this time (in seconds) if no pulling occurred on it.
-P2P_WAIT_PULL_TIMEOUT = 120
-
 logger = init_logger(__name__)
 
 
@@ -412,7 +408,8 @@ class TPUConnectorScheduler():
         delay_free_blocks = len(computed_block_ids) > 0
         if delay_free_blocks:
             uuid = get_uuid()
-            expiration_time = time.perf_counter() + P2P_WAIT_PULL_TIMEOUT
+            expiration_time = time.perf_counter(
+            ) + dist_utils.get_p2p_wait_pull_timeout()
             self.reqs_to_send[request.request_id] = SendMeta(
                 uuid=uuid,
                 local_block_ids=computed_block_ids,
@@ -472,7 +469,7 @@ class TPUConnectorWorker:
             self.pull_notify_listener_t.start()
             ready_event.wait()
         else:
-            self.pull_executor = ThreadPoolExecutor(max_workers=64)
+            self.pull_executor = ThreadPoolExecutor(max_workers=128)
             self.pull_conns: dict[str, Any] = {}
             self.notif_sockets: dict[str, zmq.Socket] = {}
 
@@ -662,8 +659,15 @@ class TPUConnectorWorker:
         kv_size_mb = sum(k.nbytes for k in kv) / (1024 * 1024)
         end_time_0, end_time_1 = time.perf_counter(), None
         if dist_utils.get_enable_block_kv_transfer():
-            jax.block_until_ready(kv)
-            end_time_1 = time.perf_counter()
+            while True:
+                end_time_1 = time.perf_counter()
+                if all(
+                        chunk.is_ready() for chunk in kv
+                ) or end_time_1 - end_time_0 > dist_utils.get_p2p_wait_pull_timeout(
+                ):
+                    break
+                time.sleep(0.001)
+
         prepare_time_ms = (end_time_0 - start_time) * 1000
         pull_time_ms = (end_time_1 -
                         end_time_0) * 1000 if end_time_1 is not None else 0.0

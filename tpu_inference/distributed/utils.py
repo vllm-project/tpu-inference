@@ -85,6 +85,12 @@ def get_enable_block_kv_transfer() -> bool:
     return enable_str in ("true", "1", "yes")
 
 
+def get_p2p_wait_pull_timeout() -> int:
+    """KV-cache transfer timeout in seconds."""
+    timeout_str = os.getenv("TPU_P2P_WAIT_PULL_TIMEOUT", "30")
+    return int(timeout_str)
+
+
 def get_device_topology_order_id(local_devices, global_devices) -> int:
     """
     Calculates the topology order ID for the local device set within the global topology.
