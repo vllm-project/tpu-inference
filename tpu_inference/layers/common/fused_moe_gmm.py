@@ -381,7 +381,7 @@ def fused_moe_func(
                 token_indices_sorted,
                 start_idx=shard_output_start,
                 end_idx=shard_output_end,
-                block_size=128,
+                block_size=64,
             )
         else:
             x = hidden_states_local[token_indices_sorted]

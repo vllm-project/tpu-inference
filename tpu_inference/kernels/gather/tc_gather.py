@@ -312,11 +312,7 @@ def tensorcore_gather(
             "dtype": str(dtype),
             "num_buffers": str(_NUM_BUFFERS),
         },
-        compiler_params=pltpu.CompilerParams(
-            vmem_limit_bytes=int(pltpu.get_tpu_info().vmem_capacity_bytes *
-                                 0.7),
-            disable_bounds_checks=True,
-        ),
+        compiler_params=pltpu.CompilerParams(disable_bounds_checks=True),
     )(
         to_arr(num_blocks),
         to_arr(aligned_start),
