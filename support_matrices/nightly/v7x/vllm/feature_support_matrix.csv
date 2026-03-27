@@ -11,7 +11,7 @@ Feature,CorrectnessTest,PerformanceTest
 "Speculative Decoding: Eagle3",❌ Failing,❓ Untested
 "Speculative Decoding: Ngram",✅ Passing,✅ Passing
 "async scheduler",✅ Passing,✅ Passing
-"hybrid kv cache",❌ Failing,❓ Untested
+"hybrid kv cache",✅ Passing,❓ Untested
 "multi-host",✅ Passing,❓ Untested
 "runai_model_streamer_loader",✅ Passing,❓ Untested
 "sampling_params",✅ Passing,❓ Untested
