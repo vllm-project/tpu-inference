@@ -129,15 +129,24 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         # layer.w2_weight: [num_experts, hidden_size, moe_intermediate_size]
         # layer.w2_weight_scale: [num_experts, hidden_size, 1]
         w13_weight = t2j(layer.w13_weight, use_dlpack=False)
+        delattr(layer, "w13_weight")
         w13_weight_scale = t2j(layer.w13_weight_scale, use_dlpack=False)
+        delattr(layer, "w13_weight_scale")
         w2_weight = t2j(layer.w2_weight, use_dlpack=False)
+        delattr(layer, "w2_weight")
         w2_weight_scale = t2j(layer.w2_weight_scale, use_dlpack=False)
+        delattr(layer, "w2_weight_scale")
 
         if self.moe.has_bias:
             w13_bias = t2j(layer.w13_bias, use_dlpack=False)
+            delattr(layer, "w13_bias")
             w2_bias = t2j(layer.w2_bias, use_dlpack=False)
+            delattr(layer, "w2_bias")
         else:
             w13_bias = w2_bias = None
+
+        import gc
+        gc.collect()
 
         @jax.jit
         def process_fp8_moe_weights(
@@ -174,8 +183,9 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
             w2_weight_scale,
             w2_bias,
         )
-        weights = torch_view(
-            shard_moe_weights(weights, self.moe_backend, self.mesh))
+        weights = shard_moe_weights(weights, self.moe_backend, self.mesh)
+        jax.block_until_ready(weights.w13_weight)
+        weights = torch_view(weights)
 
         layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
         layer.w2_weight = Parameter(weights.w2_weight, requires_grad=False)
@@ -188,6 +198,8 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         if self.moe.has_bias:
             layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
             layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
+
+        gc.collect()
 
     def apply_monolithic(
         self,
