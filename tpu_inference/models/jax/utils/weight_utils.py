@@ -779,12 +779,15 @@ def assign_and_shard_param(jax_param: nnx.Param,
     elif isinstance(spec, SingleDeviceSharding):
         spec = ()
     param_mesh = jax_param.get_metadata().get("mesh") or mesh
+    shape = jax_weight.shape
     try:
         jax_param.value = shard_put(jax_weight, spec, mesh=param_mesh)
         jax_param.set_metadata("_is_loaded", True)
+        del jax_weight
+        jax.clear_caches()
     except Exception as e:
         raise RuntimeError(
-            f"Failed to load weight '{param_name}' with shape {jax_weight.shape} into param with shape {jax_param.value.shape}"
+            f"Failed to load weight '{param_name}' with shape {shape} into param with shape {jax_param.value.shape}"
         ) from e
 
 
@@ -880,6 +883,7 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         if (quant_method := getattr(module, 'quant_method', None)) is not None:
             assert isinstance(quant_method, QuantizeMethodBase)
             loaded = quant_method.process_weights_after_loading(module)
+            jax.clear_caches()
             assert isinstance(loaded, bool)
             self._process_weights_after_loading_per_module[
                 base_prefix] = loaded
