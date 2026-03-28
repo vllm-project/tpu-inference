@@ -9,6 +9,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
+from jax._src import test_util as jtu
 import numpy as np
 
 from tpu_inference.kernels.gather import gather_reduce as gather_reduce_sc
@@ -51,7 +52,7 @@ class ScatterReduceScTest(parameterized.TestCase):
   )
   def test_column(self, shape_idx_size, data_type):
     if not jtu.is_device_tpu_at_least(version=7):
-      pytest.skip("Expect TPUv7+")
+      self.skipTest("Expect TPUv7+")
     rows, cols = shape_idx_size[0]
 
     if data_type == "random_int":
@@ -132,7 +133,7 @@ class ScatterReduceScTest(parameterized.TestCase):
   )
   def test_topk_mult(self, shape_idx_size):
     if not jtu.is_device_tpu_at_least(version=7):
-      pytest.skip("Expect TPUv7+")
+      self.skipTest("Expect TPUv7+")
     timings = {}
     start_time = time.time()
 
