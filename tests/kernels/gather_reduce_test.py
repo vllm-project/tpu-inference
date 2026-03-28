@@ -1,7 +1,6 @@
 """Tests for Gather Reduce Kernel."""
 
 import contextlib
-import os
 import functools
 import logging
 import time
@@ -18,7 +17,6 @@ try:
 except ImportError:
     xprof = None
 
-os.environ["LIBTPU_INIT_ARGS"] = "--xla_tpu_use_tc_device_shape_on_sc=true"
 _XPROF_TRACING_ENABLED = True
 
 
@@ -52,6 +50,8 @@ class ScatterReduceScTest(parameterized.TestCase):
       ],
   )
   def test_column(self, shape_idx_size, data_type):
+    if not jtu.is_device_tpu_at_least(version=7):
+      pytest.skip("Expect TPUv7+")
     rows, cols = shape_idx_size[0]
 
     if data_type == "random_int":
@@ -131,6 +131,8 @@ class ScatterReduceScTest(parameterized.TestCase):
       ],
   )
   def test_topk_mult(self, shape_idx_size):
+    if not jtu.is_device_tpu_at_least(version=7):
+      pytest.skip("Expect TPUv7+")
     timings = {}
     start_time = time.time()
 

@@ -120,19 +120,22 @@ def moe_gmm_local(
         w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
     gmm1_res = gmm1_res[:, :w2.shape[1]]  # trim to hidden size if padded
 
+    local_group_size = w1.shape[0]
+    if local_group_size < group_sizes.size:
+        mask = valid_rows_mask(
+            gmm1_res.shape[0],
+            group_sizes,
+            group_offset,
+            group_offset + local_group_size,
+        )[topk_argsort_revert_indices]
 
-    if gmm1_res.shape[0] > sc_kernel_threshold:
+
+    if gmm1_res.shape[0] > sc_kernel_threshold and jax.devices()[0].device_kind == 'TPU7x':
         gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
-                            group_offset, preferred_element_type=jnp.dtype(jnp.float32))
+                            group_offset, preferred_element_type=jnp.float32.dtype)
 
-        local_group_size = w1.shape[0]
         if local_group_size < group_sizes.size:
-            mask = valid_rows_mask(
-                gmm2_res.shape[0],
-                group_sizes,
-                group_offset,
-                group_offset + local_group_size,
-            )[topk_argsort_revert_indices].reshape(-1, topk)
+            mask = mask.reshape(-1, topk)
             topk_weights = jnp.where(mask, topk_weights, 0)
 
         inds = topk_argsort_revert_indices
@@ -155,14 +158,8 @@ def moe_gmm_local(
         token_topk_hidden = token_topk_hidden * jnp.expand_dims(topk_weights,
                                                                 axis=-1)
 
-        local_group_size = w1.shape[0]
         if local_group_size < group_sizes.size:
-            mask = valid_rows_mask(
-                gmm2_res.shape[0],
-                group_sizes,
-                group_offset,
-                group_offset + local_group_size,
-            )[topk_argsort_revert_indices].reshape(-1, topk, 1)
+            mask = mask.reshape(-1, topk, 1)
             token_topk_hidden = jnp.where(mask, token_topk_hidden, 0.0)
 
         token_hidden = token_topk_hidden.sum(axis=-2)
