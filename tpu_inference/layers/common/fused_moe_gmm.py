@@ -20,11 +20,10 @@ from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
+from tpu_inference.kernels.gather import gather_reduce as gather_reduce_sc
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
-
-from tpu_inference.kernels.gather import gather_reduce as gather_reduce_sc
 
 
 def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
@@ -129,11 +128,15 @@ def moe_gmm_local(
             group_offset + local_group_size,
         )[topk_argsort_revert_indices]
 
-
-    if gather_reduce_sc.is_supported_by_sc_gather_reduce(gmm1_res.shape[0],
-        sc_kernel_threshold):
-        gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
-                            group_offset, preferred_element_type=jnp.float32.dtype)
+    if gather_reduce_sc.is_supported_by_sc_gather_reduce(
+            gmm1_res.shape[0], sc_kernel_threshold):
+        gmm2_res = gmm_wrapper(gmm1_res,
+                               w2,
+                               w2_scale,
+                               w2_bias,
+                               group_sizes,
+                               group_offset,
+                               preferred_element_type=jnp.float32.dtype)
 
         if local_group_size < group_sizes.size:
             mask = mask.reshape(-1, topk)
@@ -150,8 +153,13 @@ def moe_gmm_local(
             col_chunk_size=sc_kernel_col_chunk_size,
         )
     else:
-        gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
-                            group_offset, preferred_element_type=x.dtype)
+        gmm2_res = gmm_wrapper(gmm1_res,
+                               w2,
+                               w2_scale,
+                               w2_bias,
+                               group_sizes,
+                               group_offset,
+                               preferred_element_type=x.dtype)
 
         # First run local reduction on topk experts owned by the rank for all tokens
         token_topk_hidden = gmm2_res[topk_argsort_revert_indices].reshape(
