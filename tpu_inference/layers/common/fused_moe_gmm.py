@@ -17,6 +17,7 @@ from typing import Literal
 
 import jax
 from jax import numpy as jnp
+import jax.experimental.pallas.tpu as pltpu
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
@@ -73,6 +74,11 @@ def valid_rows_mask(batch_size: int, group_sizes: jax.Array,
     return jnp.where(jnp.logical_and(token_start <= index, index < token_end),
                      True, False)
 
+def is_supported_by_sc_gather_reduce(x_shape: bool,
+                                      sc_kernel_threshold: bool) -> bool: 
+    if x_shape > sc_kernel_threshold and pltpu.get_tpu_info().generation == 7: 
+        return True
+    return False
 
 def moe_gmm_local(
     x: jax.Array,
@@ -130,7 +136,7 @@ def moe_gmm_local(
         )[topk_argsort_revert_indices]
 
 
-    if gmm1_res.shape[0] > sc_kernel_threshold and jax.devices()[0].device_kind == 'TPU7x':
+    if is_supported_by_sc_gather_reduce(gmm1_res.shape[0], sc_kernel_threshold):
         gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
                             group_offset, preferred_element_type=jnp.float32.dtype)
 
