@@ -985,16 +985,16 @@ def get_cost_estimate(cfgs: GmmConfigs):
     fp32_bytes = jnp.dtype(jnp.float32).itemsize
 
     flops = 2 * dims.size_m * dims.size_k * dims.size_n
-    if cfgs.rhs_cfgs.has_bias:
-        flops += dims.size_m * dims.size_n
-    if cfgs.lhs_cfgs.quant_dtype is not None:
-        flops += 2 * dims.size_m * dims.size_k
-        lhs_num_blocks = pl.cdiv(dims.size_k, cfgs.lhs_cfgs.quant_block_size)
-        flops += dims.size_m * dims.size_n * lhs_num_blocks
-    if cfgs.rhs_cfgs.has_scale:
-        # Apply rhs scale
-        rhs_num_blocks = pl.cdiv(dims.size_k, cfgs.rhs_cfgs.quant_block_size)
-        flops += dims.size_m * dims.size_n * rhs_num_blocks
+    # if cfgs.rhs_cfgs.has_bias:
+    #     flops += dims.size_m * dims.size_n
+    # if cfgs.lhs_cfgs.quant_dtype is not None:
+    #     flops += 2 * dims.size_m * dims.size_k
+    #     lhs_num_blocks = pl.cdiv(dims.size_k, cfgs.lhs_cfgs.quant_block_size)
+    #     flops += dims.size_m * dims.size_n * lhs_num_blocks
+    # if cfgs.rhs_cfgs.has_scale:
+    #     # Apply rhs scale
+    #     rhs_num_blocks = pl.cdiv(dims.size_k, cfgs.rhs_cfgs.quant_block_size)
+    #     flops += dims.size_m * dims.size_n * rhs_num_blocks
 
     lhs_bytes = dims.size_m * dims.size_k * lhs_dtype.itemsize
 
@@ -1010,22 +1010,22 @@ def get_cost_estimate(cfgs: GmmConfigs):
 
     total_bytes = lhs_bytes + rhs_bytes + out_bytes
     transcendentals = 0
-    if cfgs.fuse_act is not None:
-        # gelu is 1 because approximate=true (tanh) vs (1/x, exp)
-        transcendentals_multiplier = 1 if cfgs.fuse_act == ActivationFn.GELU else 2
-        act_transcendentals = dims.size_m * cfgs.out_size_n
-        act_transcendentals *= transcendentals_multiplier
-        transcendentals += act_transcendentals
-        act_alu_flops = {
-            ActivationFn.SILU: 5,  # -, +, /, *, *
-            ActivationFn.GELU: 8,  # *,*,*,*,+,*,+,*
-            ActivationFn.SWIGLUOAI: 7,  # *,-,+,/,*,+,*
-        }
-        flops += act_alu_flops[cfgs.fuse_act] * dims.size_m * cfgs.out_size_n
-    if cfgs.lhs_cfgs.quant_dtype is not None:
-        # every block inverse scale
-        transcendentals += dims.size_m * (dims.size_k //
-                                          cfgs.lhs_cfgs.quant_block_size)
+    # if cfgs.fuse_act is not None:
+    #     # gelu is 1 because approximate=true (tanh) vs (1/x, exp)
+    #     transcendentals_multiplier = 1 if cfgs.fuse_act == ActivationFn.GELU else 2
+    #     act_transcendentals = dims.size_m * cfgs.out_size_n
+    #     act_transcendentals *= transcendentals_multiplier
+    #     transcendentals += act_transcendentals
+    #     act_alu_flops = {
+    #         ActivationFn.SILU: 5,  # -, +, /, *, *
+    #         ActivationFn.GELU: 8,  # *,*,*,*,+,*,+,*
+    #         ActivationFn.SWIGLUOAI: 7,  # *,-,+,/,*,+,*
+    #     }
+    #     flops += act_alu_flops[cfgs.fuse_act] * dims.size_m * cfgs.out_size_n
+    # if cfgs.lhs_cfgs.quant_dtype is not None:
+    #     # every block inverse scale
+    #     transcendentals += dims.size_m * (dims.size_k //
+    #                                       cfgs.lhs_cfgs.quant_block_size)
     return pl.CostEstimate(
         flops=flops,
         bytes_accessed=total_bytes,
