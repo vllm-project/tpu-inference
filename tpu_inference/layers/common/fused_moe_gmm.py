@@ -17,7 +17,6 @@ from typing import Literal
 
 import jax
 from jax import numpy as jnp
-import jax.experimental.pallas.tpu as pltpu
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 

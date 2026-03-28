@@ -4,6 +4,7 @@ from typing import Any
 import jax
 from jax import core
 from jax._src.pallas.mosaic.tpu_info import get_tpu_info
+import jax.experimental.pallas.tpu as pltpu
 from jax.experimental import mosaic
 from jax.experimental.mosaic.dialects import tpu
 import jax.numpy as jnp
@@ -351,12 +352,6 @@ def sc_gather_reduce(
         lin_idx = arith.ori(
             arith.andi(lin_idx, const_lut(7)),
             arith.shli(arith.shrui(lin_idx, const_lut(4)), const_lut(3)),
-        )
-
-        is_parity = arith.cmpi(
-            arith.CmpIPredicate.eq,
-            parity,
-            const_lut(1),
         )
 
         # lin_idx is index type, cast to i32
