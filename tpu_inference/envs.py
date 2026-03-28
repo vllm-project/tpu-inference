@@ -35,6 +35,8 @@ if TYPE_CHECKING:
     USE_JAX_PROFILER_SERVER: bool = False
     JAX_PROFILER_SERVER_PORT: int = 9999
     USE_BATCHED_RPA_KERNEL: bool = False
+    JITTED_MM_MODULE_KEYS: list[str] = []
+    REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
 
 
 def env_with_choices(
@@ -110,6 +112,25 @@ def env_bool(env_name: str, default: bool = False) -> Callable[[], bool]:
                 f"Valid options: '0', '1', 'true', 'false', 'True', 'False'.")
 
     return _get_bool_env
+
+
+def env_str_list(env_name: str) -> Callable[[], list[str]]:
+    """
+    Accepts a comma-separated string and returns a list of strings.
+
+    Args:
+        env_name: Name of the environment variable
+        default: Default list of strings if not set
+    """
+
+    def _get_str_list_env() -> list[str]:
+        value = os.getenv(env_name)
+        if value is None or value == "":
+            return []
+
+        return [v.strip() for v in value.split(",")]
+
+    return _get_str_list_env
 
 
 environment_variables: dict[str, Callable[[], Any]] = {
@@ -204,6 +225,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("JAX_PROFILER_SERVER_PORT") or "9999"),
     "USE_BATCHED_RPA_KERNEL":
     env_bool("USE_BATCHED_RPA_KERNEL"),
+    "JITTED_MM_MODULE_KEYS":
+    env_str_list("JITTED_MM_MODULE_KEYS"),
+    "REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES":
+    env_str_list("REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES"),
 }
 
 
