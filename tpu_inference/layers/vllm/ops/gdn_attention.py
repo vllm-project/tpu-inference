@@ -26,8 +26,8 @@ from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-from jax.sharding import PartitionSpec as P
 import torch
+from jax.sharding import PartitionSpec as P
 from torchax.interop import jax_view, torch_view
 from vllm.forward_context import get_forward_context
 
@@ -409,76 +409,6 @@ def _jax_gdn_attention_core(
     return output, new_conv_state, new_recurrent_state
 
 
-def run_jax_gdn_attention_local(
-    j_mixed_qkv: jnp.ndarray,
-    j_b: jnp.ndarray,
-    j_a: jnp.ndarray,
-    conv_state: jnp.ndarray,
-    recurrent_state: jnp.ndarray,
-    j_conv_weight: jnp.ndarray,
-    j_conv_bias: Optional[jnp.ndarray],
-    j_A_log: jnp.ndarray,
-    j_dt_bias: jnp.ndarray,
-    req_indices: jnp.ndarray,
-    valid_mask: jnp.ndarray,
-    state_indices: jnp.ndarray,
-    n_kq: int,
-    n_v: int,
-    d_k: int,
-    d_v: int,
-    kernel_size: int,
-    mesh: Optional[jax.sharding.Mesh] = None,
-) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
-    attn_head_axis_size = jax.lax.axis_size("model")
-    n_kq = n_kq // attn_head_axis_size
-    n_v = n_v // attn_head_axis_size
-    
-    def scan_fn(carry, xs):
-        c_state_all, r_state_all = carry
-        curr_qkv, curr_b, curr_a, req_idx, is_valid = xs
-
-        curr_qkv = curr_qkv[None, None, :]
-        curr_b = curr_b[None, None, :]
-        curr_a = curr_a[None, None, :]
-
-        state_idx = state_indices[req_idx]
-        c_state = c_state_all[state_idx][None, ...]
-        r_state = r_state_all[state_idx][None, ...]
-
-        out, new_c, new_r = _jax_gdn_attention_core(curr_qkv,
-                                                    curr_b,
-                                                    curr_a,
-                                                    c_state,
-                                                    r_state,
-                                                    j_conv_weight,
-                                                    j_conv_bias,
-                                                    j_A_log,
-                                                    j_dt_bias,
-                                                    is_prefill=False,
-                                                    n_kq=n_kq,
-                                                    n_v=n_v,
-                                                    d_k=d_k,
-                                                    d_v=d_v,
-                                                    kernel_size=kernel_size)
-
-        c_state_all = jnp.where(is_valid,
-                                c_state_all.at[state_idx].set(new_c[0]),
-                                c_state_all)
-        r_state_all = jnp.where(is_valid,
-                                r_state_all.at[state_idx].set(new_r[0]),
-                                r_state_all)
-
-        return (c_state_all, r_state_all), out[0, 0]
-
-    carry_init = (conv_state, recurrent_state)
-    xs = (j_mixed_qkv, j_b, j_a, req_indices, valid_mask)
-
-    (new_conv_state,
-     new_recurrent_state), j_output = jax.lax.scan(scan_fn, carry_init, xs)
-
-    return (new_conv_state, new_recurrent_state), j_output
-
-
 def run_jax_gdn_attention(
     j_mixed_qkv: jnp.ndarray,
     j_b: jnp.ndarray,
@@ -499,48 +429,149 @@ def run_jax_gdn_attention(
     kernel_size: int,
     mesh: jax.sharding.Mesh,
 ) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
-    bias_spec = P(ShardingAxisName.ATTN_HEAD) if j_conv_bias is not None else None
-    
+    key_dim = n_kq * d_k
+
+    # NOTE: we pre-split Q, K, and V BEFORE passing to shard map,
+    # otherwise, jax.shard_map splits across C dimension
+    j_q = j_mixed_qkv[..., :key_dim]
+    j_k = j_mixed_qkv[..., key_dim:key_dim * 2]
+    j_v = j_mixed_qkv[..., key_dim * 2:]
+
+    cs_q = conv_state[..., :key_dim]
+    cs_k = conv_state[..., key_dim:key_dim * 2]
+    cs_v = conv_state[..., key_dim * 2:]
+
+    cw_q = j_conv_weight[:key_dim, ...]
+    cw_k = j_conv_weight[key_dim:key_dim * 2, ...]
+    cw_v = j_conv_weight[key_dim * 2:, ...]
+
+    if j_conv_bias is not None:
+        cb_q = j_conv_bias[:key_dim]
+        cb_k = j_conv_bias[key_dim:key_dim * 2]
+        cb_v = j_conv_bias[key_dim * 2:]
+        bias_spec = P(ShardingAxisName.ATTN_HEAD)
+    else:
+        cb_q = cb_k = cb_v = None
+        bias_spec = None
+
+    def run_jax_gdn_attention_local(l_q, l_k, l_v, l_b, l_a, l_cs_q, l_cs_k,
+                                    l_cs_v, l_rs, l_cw_q, l_cw_k, l_cw_v,
+                                    l_cb_q, l_cb_k, l_cb_v, l_A_log, l_dt_bias,
+                                    l_req_idx, l_valid, l_state_idx):
+        attn_head_axis_size = jax.lax.axis_size("model")
+        local_n_kq = n_kq // attn_head_axis_size
+        local_n_v = n_v // attn_head_axis_size
+
+        curr_mixed_qkv = jnp.concatenate([l_q, l_k, l_v], axis=-1)
+        curr_conv_state = jnp.concatenate([l_cs_q, l_cs_k, l_cs_v], axis=-1)
+        curr_conv_weight = jnp.concatenate([l_cw_q, l_cw_k, l_cw_v], axis=0)
+
+        if l_cb_q is not None:
+            curr_conv_bias = jnp.concatenate([l_cb_q, l_cb_k, l_cb_v], axis=0)
+        else:
+            curr_conv_bias = None
+
+        def scan_fn(carry, xs):
+            c_state_all, r_state_all = carry
+            curr_qkv, curr_b, curr_a, req_idx, is_valid = xs
+
+            curr_qkv = curr_qkv[None, None, :]
+            curr_b = curr_b[None, None, :]
+            curr_a = curr_a[None, None, :]
+
+            state_idx = l_state_idx[req_idx]
+            c_state = c_state_all[state_idx][None, ...]
+            r_state = r_state_all[state_idx][None, ...]
+
+            out, new_c, new_r = _jax_gdn_attention_core(
+                curr_qkv,
+                curr_b,
+                curr_a,
+                c_state,
+                r_state,
+                curr_conv_weight,
+                curr_conv_bias,
+                l_A_log,
+                l_dt_bias,
+                is_prefill=False,
+                n_kq=local_n_kq,
+                n_v=local_n_v,
+                d_k=d_k,
+                d_v=d_v,
+                kernel_size=kernel_size)
+
+            c_state_all = jnp.where(is_valid,
+                                    c_state_all.at[state_idx].set(new_c[0]),
+                                    c_state_all)
+            r_state_all = jnp.where(is_valid,
+                                    r_state_all.at[state_idx].set(new_r[0]),
+                                    r_state_all)
+
+            return (c_state_all, r_state_all), out[0, 0]
+
+        carry_init = (curr_conv_state, l_rs)
+        xs = (curr_mixed_qkv, l_b, l_a, l_req_idx, l_valid)
+
+        (new_conv_state,
+         new_recurrent_state), j_output = jax.lax.scan(scan_fn, carry_init, xs)
+
+        # NOTE: split back local staate to preserve global Q, K, V boundaries
+        local_key_dim = local_n_kq * d_k
+        new_cs_q = new_conv_state[..., :local_key_dim]
+        new_cs_k = new_conv_state[..., local_key_dim:local_key_dim * 2]
+        new_cs_v = new_conv_state[..., local_key_dim * 2:]
+
+        return (new_cs_q, new_cs_k, new_cs_v, new_recurrent_state), j_output
+
     in_specs = (
-        P(None, ShardingAxisName.ATTN_HEAD),  # j_mixed_qkv: (num_tokens, C)
-        P(None, ShardingAxisName.ATTN_HEAD),  # j_b: (num_tokens, n_v)
-        P(None, ShardingAxisName.ATTN_HEAD),  # j_a: (num_tokens, n_v)
-        P(None, None, ShardingAxisName.ATTN_HEAD),  # conv_state: (num_blocks, kernel_size-1, C)
-        P(None, ShardingAxisName.ATTN_HEAD, None, None),  # recurrent_state: (num_blocks, n_v, d_k, d_v)
-        P(ShardingAxisName.ATTN_HEAD, None, None),  # j_conv_weight: (C, 1, kernel_size)
-        bias_spec,  # j_conv_bias: (C,)
-        P(ShardingAxisName.ATTN_HEAD),  # j_A_log: (n_v,)
-        P(ShardingAxisName.ATTN_HEAD),  # j_dt_bias: (n_v,)
-        P(),  # req_indices: (num_tokens,)
-        P(),  # valid_mask: (num_tokens,)
-        P(),  # state_indices: (num_reqs,)
-        None,  # n_kq
-        None,  # n_v
-        None,  # d_k
-        None,  # d_v
-        None,  # kernel_size
+        P(None, ShardingAxisName.ATTN_HEAD),  # j_q
+        P(None, ShardingAxisName.ATTN_HEAD),  # j_k
+        P(None, ShardingAxisName.ATTN_HEAD),  # j_v
+        P(None, ShardingAxisName.ATTN_HEAD),  # j_b
+        P(None, ShardingAxisName.ATTN_HEAD),  # j_a
+        P(None, None, ShardingAxisName.ATTN_HEAD),  # cs_q
+        P(None, None, ShardingAxisName.ATTN_HEAD),  # cs_k
+        P(None, None, ShardingAxisName.ATTN_HEAD),  # cs_v
+        P(None, ShardingAxisName.ATTN_HEAD, None, None),  # recurrent_state
+        P(ShardingAxisName.ATTN_HEAD, None, None),  # cw_q
+        P(ShardingAxisName.ATTN_HEAD, None, None),  # cw_k
+        P(ShardingAxisName.ATTN_HEAD, None, None),  # cw_v
+        bias_spec,
+        bias_spec,
+        bias_spec,  # cb_q, cb_k, cb_v
+        P(ShardingAxisName.ATTN_HEAD),  # j_A_log
+        P(ShardingAxisName.ATTN_HEAD),  # j_dt_bias
+        P(),  # req_indices
+        P(),  # valid_mask
+        P(),  # state_indices
     )
-    
+
     out_specs = (
         (
-            P(None, None, ShardingAxisName.ATTN_HEAD),
-            P(None, ShardingAxisName.ATTN_HEAD, None, None)),  # (new_conv_state, new_recurrent_state)
-        P(None, ShardingAxisName.ATTN_HEAD),  # j_output: (num_tokens, n_v * d_v)
+            P(None, None, ShardingAxisName.ATTN_HEAD),  # new_cs_q
+            P(None, None, ShardingAxisName.ATTN_HEAD),  # new_cs_k
+            P(None, None, ShardingAxisName.ATTN_HEAD),  # new_cs_v
+            P(None, ShardingAxisName.ATTN_HEAD, None, None),  # new_rs
+        ),
+        P(None, ShardingAxisName.ATTN_HEAD),  # j_output
     )
-    
+
     mapped_fn = jax.shard_map(
         run_jax_gdn_attention_local,
         mesh=mesh,
         in_specs=in_specs,
         out_specs=out_specs,
     )
-    
-    return mapped_fn(
-        j_mixed_qkv, j_b, j_a, conv_state, recurrent_state,
-        j_conv_weight, j_conv_bias, j_A_log, j_dt_bias,
-        req_indices, valid_mask, state_indices,
-        n_kq, n_v, d_k, d_v, kernel_size,
-    )
+
+    (new_cs_q, new_cs_k, new_cs_v,
+     new_rs), j_output = mapped_fn(j_q, j_k, j_v, j_b, j_a, cs_q, cs_k, cs_v,
+                                   recurrent_state, cw_q, cw_k, cw_v, cb_q,
+                                   cb_k, cb_v, j_A_log, j_dt_bias, req_indices,
+                                   valid_mask, state_indices)
+
+    new_conv_state = jnp.concatenate([new_cs_q, new_cs_k, new_cs_v], axis=-1)
+
+    return (new_conv_state, new_rs), j_output
 
 
 def gdn_attention_core_tpu(
@@ -572,7 +603,6 @@ def gdn_attention_core_tpu(
     layer_module = fc.no_compile_layers[layer_name]
     vllm_context = get_vllm_model_wrapper_context()
 
-    tp_size = layer_module.tp_size
     n_kq = layer_module.num_k_heads
     n_v = layer_module.num_v_heads
     d_k = layer_module.head_k_dim
@@ -614,12 +644,24 @@ def gdn_attention_core_tpu(
     valid_mask = token_idx < q_loc[-1]
 
     (new_conv_state,
-     new_recurrent_state), j_output = run_jax_gdn_attention(
-         j_mixed_qkv, j_b, j_a, conv_state, recurrent_state,
-         j_conv_weight, j_conv_bias, j_A_log, j_dt_bias,
-         state_indices, req_indices, valid_mask,
-         n_kq, n_v, d_k, d_v, kernel_size, mesh=mesh
-     )
+     new_recurrent_state), j_output = run_jax_gdn_attention(j_mixed_qkv,
+                                                            j_b,
+                                                            j_a,
+                                                            conv_state,
+                                                            recurrent_state,
+                                                            j_conv_weight,
+                                                            j_conv_bias,
+                                                            j_A_log,
+                                                            j_dt_bias,
+                                                            state_indices,
+                                                            req_indices,
+                                                            valid_mask,
+                                                            n_kq,
+                                                            n_v,
+                                                            d_k,
+                                                            d_v,
+                                                            kernel_size,
+                                                            mesh=mesh)
 
     vllm_context.kv_caches[layer_idx] = (new_conv_state, new_recurrent_state)
 
