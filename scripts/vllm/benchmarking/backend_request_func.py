@@ -12,11 +12,11 @@ import os
 import sys
 import time
 import traceback
-from dataclasses import dataclass, field
-from typing import Literal, Optional, Union
+from typing import Any, Literal, Optional, Protocol, Union
 
 import aiohttp
 import huggingface_hub.constants
+from benchmark_core import BenchmarkContext, RequestFuncOutput, SampleRequest
 from tqdm.asyncio import tqdm
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
@@ -24,38 +24,6 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
 logger = logging.getLogger(__name__)
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
-
-
-@dataclass
-class RequestFuncInput:
-    prompt: str
-    api_url: str
-    prompt_len: int
-    output_len: int
-    model: str
-    model_name: Optional[str] = None
-    logprobs: Optional[int] = None
-    extra_body: Optional[dict] = None
-    multi_modal_content: Optional[dict | list[dict]] = None
-    ignore_eos: bool = False
-    language: Optional[str] = None
-    request_id: Optional[str] = None
-    completion: str = ""
-
-
-@dataclass
-class RequestFuncOutput:
-    generated_text: str = ""
-    success: bool = False
-    latency: float = 0.0
-    output_tokens: int = 0
-    ttft: float = 0.0  # Time to first token
-    itl: list[float] = field(
-        default_factory=list)  # list of inter-token latencies
-    tpot: float = 0.0  # avg next-token latencies
-    prompt_len: int = 0
-    error: str = ""
-    input_request: Optional[RequestFuncInput] = None
 
 
 async def start_stop_profile(base_url: str, action: Literal["start", "stop"]):
@@ -72,52 +40,118 @@ async def start_stop_profile(base_url: str, action: Literal["start", "stop"]):
 
 
 async def async_request_openai_completions(
-    request_func_input: RequestFuncInput,
+    ctx: BenchmarkContext,
+    request_func_input: SampleRequest,
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
-    api_url = request_func_input.api_url
+    api_url = ctx.api_url
     assert api_url.endswith("completions"), (
         "OpenAI Completions API URL must end with 'completions'")
 
+    payload = {
+        "model": ctx.model_name if ctx.model_name else ctx.model,
+        "prompt": request_func_input.prompt,
+        "temperature": 0.0,
+        "repetition_penalty": 1.0,
+        "max_tokens": request_func_input.expected_output_len,
+        "logprobs": ctx.logprobs,
+        "stream": True,
+        "stream_options": {
+            "include_usage": True,
+        },
+    }
+    if ctx.ignore_eos:
+        payload["ignore_eos"] = ctx.ignore_eos
+    if ctx.extra_body:
+        payload.update(ctx.extra_body)
+
+    output = await _openai_fetch(
+        ctx=ctx,
+        payload=payload,
+        extract_from=lambda choices: choices[0].get("text"),
+    )
+
+    # XXX: not a good pattern to mutate the field after object creation.
+    output.input_request = request_func_input
+
+    if pbar:
+        pbar.update(1)
+
+    return output
+
+
+async def async_request_openai_chat_completions(
+    ctx: BenchmarkContext,
+    request_func_input: SampleRequest,
+    pbar: Optional[tqdm] = None,
+) -> RequestFuncOutput:
+
+    # Note: the major difference from openai_completions are
+    # - different api_url suffix checking.
+    # - "messages" field in payload instead of "prompt".
+    # - the extraction logic on "choices" field of response
+
+    api_url = ctx.api_url
+    assert api_url.endswith("chat/completions"), (
+        "OpenAI Chat Completions API URL must end with 'chat/completions'")
+
+    payload = {
+        "model": ctx.model_name if ctx.model_name else ctx.model,
+        "messages": request_func_input.messages,
+        "temperature": 0.0,
+        "repetition_penalty": 1.0,
+        "max_tokens": request_func_input.expected_output_len,
+        "logprobs": ctx.logprobs,
+        "stream": True,
+        "stream_options": {
+            "include_usage": True,
+        },
+    }
+    if ctx.ignore_eos:
+        payload["ignore_eos"] = ctx.ignore_eos
+    if ctx.extra_body:
+        payload.update(ctx.extra_body)
+
+    output = await _openai_fetch(
+        ctx=ctx,
+        payload=payload,
+        extract_from=lambda choices: choices[0]["delta"]["content"],
+    )
+
+    # XXX: not a good pattern to mutate the field after object creation.
+    output.input_request = request_func_input
+
+    if pbar:
+        pbar.update(1)
+
+    return output
+
+
+class _ExtractFunc(Protocol):
+
+    def __call__(self, choices) -> str:
+        """Given the "choices" field, extract the message payload."""
+        ...
+
+
+async def _openai_fetch(
+    ctx: BenchmarkContext,
+    payload: Any,
+    extract_from: _ExtractFunc,
+) -> RequestFuncOutput:
+    headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
+
     async with aiohttp.ClientSession(trust_env=True,
                                      timeout=AIOHTTP_TIMEOUT) as session:
-        payload = {
-            "model":
-            request_func_input.model_name
-            if request_func_input.model_name else request_func_input.model,
-            "prompt":
-            request_func_input.prompt,
-            "temperature":
-            0.0,
-            "repetition_penalty":
-            1.0,
-            "max_tokens":
-            request_func_input.output_len,
-            "logprobs":
-            request_func_input.logprobs,
-            "stream":
-            True,
-            "stream_options": {
-                "include_usage": True,
-            },
-        }
-        if request_func_input.ignore_eos:
-            payload["ignore_eos"] = request_func_input.ignore_eos
-        if request_func_input.extra_body:
-            payload.update(request_func_input.extra_body)
-        headers = {
-            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
-        }
 
         output = RequestFuncOutput()
-        output.input_request = request_func_input
-        output.prompt_len = request_func_input.prompt_len
 
         generated_text = ""
         st = time.perf_counter()
         most_recent_timestamp = st
         try:
-            async with session.post(url=api_url, json=payload,
+            async with session.post(url=ctx.api_url,
+                                    json=payload,
                                     headers=headers) as response:
                 if response.status == 200:
                     first_chunk_received = False
@@ -137,7 +171,7 @@ async def async_request_openai_completions(
                             if choices := data.get("choices"):
                                 # Note that text could be empty here
                                 # e.g. for special tokens
-                                text = choices[0].get("text")
+                                text = extract_from(choices)
                                 timestamp = time.perf_counter()
                                 # First token
                                 if not first_chunk_received:
@@ -172,8 +206,6 @@ async def async_request_openai_completions(
             exc_info = sys.exc_info()
             output.error = "".join(traceback.format_exception(*exc_info))
 
-    if pbar:
-        pbar.update(1)
     return output
 
 
@@ -229,9 +261,10 @@ def get_tokenizer(
 
 ASYNC_REQUEST_FUNCS = {
     "vllm": async_request_openai_completions,
+    "vllm-chat": async_request_openai_chat_completions,
 }
 
 OPENAI_COMPATIBLE_BACKENDS = [
-    k for k, v in ASYNC_REQUEST_FUNCS.items()
-    if v in (async_request_openai_completions, )
+    "vllm",
+    "vllm-chat",
 ]
