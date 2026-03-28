@@ -7,7 +7,10 @@ import os
 # This prevents errors when trying to create CUDA streams on TPU hardware
 # The issue was introduced by vllm-project/vllm#26440
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
-os.environ["LIBTPU_INIT_ARGS"] = "--xla_tpu_use_tc_device_shape_on_sc=true"
+
+new_args = "--xla_tpu_use_tc_device_shape_on_sc=true --xla_tpu_scheduler_percent_shared_memory_limit=1000"
+existing_args = os.environ.get("LIBTPU_INIT_ARGS", "")
+os.environ["LIBTPU_INIT_ARGS"] = f"{existing_args} {new_args}".strip()
 
 # Monkeypatch vLLM to avoid ImportError: cannot import name 'SamplingParams' from 'vllm'
 # in vllm/v1/... submodules due to circular imports or lazy loading failures.
