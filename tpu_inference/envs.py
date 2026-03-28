@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     FORCE_MOE_RANDOM_ROUTING: bool = False
     SC_KERNEL_THRESHOLD: int = 16777216
     SC_KERNEL_COL_CHUNK_SIZE: int = 1024
+    SC_PSUM_NUM_CHUNKS: int = 4
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
 
@@ -243,6 +244,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_str_list("JITTED_MM_MODULE_KEYS"),
     "REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES":
     env_str_list("REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES"),
+    "SC_PSUM_NUM_CHUNKS":
+    lambda: int(os.getenv("SC_PSUM_NUM_CHUNKS") or "4"),
 }
 
 

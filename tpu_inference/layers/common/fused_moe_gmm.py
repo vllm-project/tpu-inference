@@ -120,6 +120,7 @@ def moe_gmm_local(
     parallelism: Literal["tp", "ep"],
     sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
+    sc_psum_num_chunks: int,
 ) -> jax.Array:
     """Main MoE logic on a local shard can run in TP or EP mode.
 
@@ -157,6 +158,9 @@ def moe_gmm_local(
             group_offset + local_group_size,
         )[topk_argsort_revert_indices]
 
+    reduction_axis = (ShardingAxisName.MLP_TENSOR
+                      if parallelism == "tp" else ShardingAxisName.EXPERT)
+
     if gather_reduce_sc.is_supported_by_sc_gather_reduce(
             gmm1_res.shape[0], sc_kernel_threshold):
         gmm2_res = gmm_wrapper(gmm1_res,
@@ -174,13 +178,71 @@ def moe_gmm_local(
         inds = topk_argsort_revert_indices
         topk_weights = topk_weights.flatten().reshape(-1, 128)
 
-        token_hidden = gather_reduce_sc.sc_gather_reduce(
+        chunk_size = gmm2_res.shape[0] // sc_psum_num_chunks
+        inds_reshaped = inds.reshape(sc_psum_num_chunks, chunk_size)
+        topk_weights_reshaped = topk_weights.reshape(sc_psum_num_chunks,
+                                                     chunk_size // 128, 128)
+
+        # Pre-allocate output buffer to save memory and avoids list accumulation
+        # The shape is (inds.shape[0] // 8, hidden_size)
+        token_hidden = jnp.zeros((inds.shape[0] // 8, gmm2_res.shape[-1]),
+                                 dtype=jnp.bfloat16)
+
+        # Prologue: Execute the first kernel chunk
+        chunk_out_prev = gather_reduce_sc.sc_gather_reduce(
             op=gmm2_res,
-            idx=inds,
+            idx=inds_reshaped[0],
             reduce_group_size=topk,
-            topk_weights=topk_weights,
+            topk_weights=topk_weights_reshaped[0],
             col_chunk_size=sc_kernel_col_chunk_size,
         )
+
+        chunk_out_reduced = None
+
+        for i in range(1, sc_psum_num_chunks):
+            weights_chunk = topk_weights_reshaped[i]
+
+            # Optimization barrier to ensure SC_i and TC_{i-1} start in parallel
+            if i == 1:
+                idx_chunk_barriered, chunk_out_prev_barriered = jax.lax.optimization_barrier(
+                    (inds_reshaped[i], chunk_out_prev))
+            else:
+                idx_chunk_barriered, chunk_out_prev_barriered, _ = jax.lax.optimization_barrier(
+                    (inds_reshaped[i], chunk_out_prev, chunk_out_reduced))
+
+            # Start SC kernel using the barriered index
+            chunk_out = gather_reduce_sc.sc_gather_reduce(
+                op=gmm2_res,
+                idx=idx_chunk_barriered,
+                reduce_group_size=topk,
+                topk_weights=weights_chunk,
+                col_chunk_size=sc_kernel_col_chunk_size,
+            )
+
+            # psum on the previous chunk output
+            chunk_out_reduced = jax.lax.psum(chunk_out_prev_barriered,
+                                             axis_name=reduction_axis)
+
+            # In-place update of the pre-allocated buffer
+            token_hidden = jax.lax.dynamic_update_slice(
+                token_hidden, chunk_out_reduced,
+                ((i - 1) * (chunk_size // 8), 0))
+
+            chunk_out_prev = chunk_out
+
+        # Epilogue: Perform psum on the last kernel output
+        if sc_psum_num_chunks > 1:
+            chunk_out_prev_barriered, _ = jax.lax.optimization_barrier(
+                (chunk_out_prev, chunk_out_reduced))
+        else:
+            chunk_out_prev_barriered = jax.lax.optimization_barrier(
+                (chunk_out_prev, ))[0]
+
+        chunk_out_reduced_final = jax.lax.psum(chunk_out_prev_barriered,
+                                               axis_name=reduction_axis)
+        token_hidden = jax.lax.dynamic_update_slice(
+            token_hidden, chunk_out_reduced_final,
+            ((sc_psum_num_chunks - 1) * (chunk_size // 8), 0))
     else:
         gmm2_res = gmm_wrapper(gmm1_res,
                                w2,
@@ -202,10 +264,11 @@ def moe_gmm_local(
 
         token_hidden = token_topk_hidden.sum(axis=-2)
 
-    reduction_axis = (ShardingAxisName.MLP_TENSOR
-                      if parallelism == "tp" else ShardingAxisName.EXPERT)
-    # Then global reduction on all ranks for all tokens and all experts
-    return jax.lax.psum(token_hidden, axis_name=reduction_axis).astype(x.dtype)
+        # Then global reduction on all ranks for all tokens and all experts
+        token_hidden = jax.lax.psum(token_hidden,
+                                    axis_name=reduction_axis).astype(x.dtype)
+
+    return token_hidden
 
 
 def tensor_parallel_gmm(
@@ -225,6 +288,7 @@ def tensor_parallel_gmm(
     mesh: Mesh,
     sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
+    sc_psum_num_chunks: int,
 ) -> jax.Array:
     data_p_spec = P(ShardingAxisName.MLP_DATA)
     group_offset = jnp.array([0])
@@ -250,6 +314,7 @@ def tensor_parallel_gmm(
             parallelism="tp",
             sc_kernel_threshold=sc_kernel_threshold,
             sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
+            sc_psum_num_chunks=sc_psum_num_chunks,
         ),
         mesh=mesh,
         in_specs=(
@@ -299,6 +364,7 @@ def expert_parallel_gmm(
     mesh: Mesh,
     sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
+    sc_psum_num_chunks: int,
 ) -> jax.Array:
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
@@ -321,6 +387,7 @@ def expert_parallel_gmm(
             parallelism="ep",
             sc_kernel_threshold=sc_kernel_threshold,
             sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
+            sc_psum_num_chunks=sc_psum_num_chunks,
         ),
         mesh=mesh,
         in_specs=(
@@ -362,6 +429,7 @@ def expert_parallel_gmm(
     "scoring_fn",
     "sc_kernel_threshold",
     "sc_kernel_col_chunk_size",
+    "sc_psum_num_chunks",
 ))
 def fused_moe_func(
     hidden_states: jax.Array,
@@ -380,6 +448,7 @@ def fused_moe_func(
     scoring_fn: str,
     sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
+    sc_psum_num_chunks: int,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -512,6 +581,7 @@ def fused_moe_func(
             mesh=mesh,
             sc_kernel_threshold=sc_kernel_threshold,
             sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
+            sc_psum_num_chunks=sc_psum_num_chunks,
         )
     else:
         x = tensor_parallel_gmm(
@@ -530,6 +600,7 @@ def fused_moe_func(
             mesh=mesh,
             sc_kernel_threshold=sc_kernel_threshold,
             sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
+            sc_psum_num_chunks=sc_psum_num_chunks,
         )
 
     return x[:num_tokens, :hidden_size]
