@@ -656,7 +656,31 @@ def gdn_in_proj_tpu(
     mixed_qkvz, _ = layer_module.in_proj_qkvz(hidden_states)
     ba, _ = layer_module.in_proj_ba(hidden_states)
 
-    return mixed_qkvz, ba
+
+    j_mixed_qkvz = jax_view(mixed_qkvz)
+    j_ba = jax_view(ba)
+
+    from tpu_inference.layers.common.utils import slice_sharded_tensor_for_concatenation, reorder_concatenated_tensor_for_sharding
+
+    
+    # j_mixed_qkvz = reorder_concatenated_tensor_for_sharding(j_mixed_qkvz, [2048, 2048, 4096, 4096], 8, -1)
+    # j_ba = reorder_concatenated_tensor_for_sharding(j_ba, [32, 32], 8, -1)
+
+    #jq, jk, jv, jz = slice_sharded_tensor_for_concatenation(j_mixed_qkvz, [2048, 2048, 4096, 4096], 8)
+    jq, jk, jv, jz = slice_sharded_tensor_for_concatenation(j_mixed_qkvz, [2048, 2048, 8192, 8192], 8)
+    #jb, ja = slice_sharded_tensor_for_concatenation(j_ba, [32, 32], 8)
+    jb, ja = slice_sharded_tensor_for_concatenation(j_ba, [64, 64], 8)
+
+    j_mixed_qkv = jnp.concatenate([jq, jk, jv], axis=-1)
+    #j_mixed_qkv = reorder_concatenated_tensor_for_sharding(j_mixed_qkv, [2048, 2048, 4096], 8, -1)
+    j_mixed_qkv = reorder_concatenated_tensor_for_sharding(j_mixed_qkv, [2048, 2048, 8192], 8, -1)
+
+    mixed_qkv = torch_view(j_mixed_qkv)
+    z = torch_view(jz)
+    b = torch_view(jb)
+    a = torch_view(ja)
+
+    return mixed_qkvz, ba, mixed_qkv, z, b, a
 
 
 def apply_gated_delta_net_torch_ops_patch(mesh: jax.sharding.Mesh) -> None:
