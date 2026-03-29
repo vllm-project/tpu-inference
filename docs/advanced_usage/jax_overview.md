@@ -1,0 +1,3 @@
+# A mental model how JAX-based vLLM model runs on TPU
+
+...

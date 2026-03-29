@@ -1,0 +1,7 @@
+# How to contribute
+
+...
+
+## CoC
+
+...
