@@ -1859,7 +1859,7 @@ def ragged_paged_attention(
                 kv_cache.dtype,
                 actual_num_q_heads,
                 actual_num_kv_heads,
-                head_dim,
+                actual_head_dim,
                 page_size,
                 max_num_tokens,
                 max_num_seqs,

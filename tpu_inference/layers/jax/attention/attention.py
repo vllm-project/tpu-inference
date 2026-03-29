@@ -24,8 +24,8 @@ from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
 from tpu_inference import utils
-from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
-    ragged_paged_attention
+from tpu_inference.kernels.ragged_paged_attention.v3.kernel import (
+    ragged_paged_attention)
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -198,6 +198,7 @@ class Attention(nnx.Module):
         q_scale: float | None = None,
         k_scale: float | None = None,
         v_scale: float | None = None,
+        m_block_sizes: Any = None,
     ) -> Tuple[KVCache, jax.Array]:
         """Performs scaled dot-product attention and updates the KV cache.
 
@@ -247,6 +248,8 @@ class Attention(nnx.Module):
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
+                m_block_sizes=m_block_sizes,
+                p_block_sizes=m_block_sizes,
             )
 
         output_TNH, kv_cache = jax.jit(
