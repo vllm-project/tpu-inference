@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 from typing import Optional, Union
 
 import jax
 import jax.numpy as jnp
 import torch
-from jax.sharding import Mesh, PartitionSpec
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
@@ -35,16 +36,15 @@ from vllm.model_executor.layers.quantization.base_config import \
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
+from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.layers.common.process_weights.linear_weights import (
-    LinearWeights, process_linear_weights, shard_linear_weights,
-    to_parameter_list)
+    LinearWeights, process_linear_weights, to_parameter_list)
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_moe_weights, shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import AWQ
 from tpu_inference.layers.common.quantization import awq_u32_unpack_u4
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.common.utils import \
-    slice_sharded_tensor_for_concatenation
+from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.layers.vllm.interface.moe import (
     MoEBackend, select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import (
@@ -57,6 +57,34 @@ from tpu_inference.utils import get_mesh_shape_product, t2j
 P = PartitionSpec
 
 logger = init_logger(__name__)
+
+
+def _dense_gmm_local(x, weight, scale, *, group_size):
+    """Run GMM kernel on a local shard for dense matmul.
+
+    Treats the dense linear as a single-group GMM, allowing the kernel
+    to handle int8 weights with subchannel scale application.
+
+    Args:
+        x: Input activations, shape (batch, K_local).
+        weight: Int8 weight (zero-point subtracted), shape (K_local, N_local).
+        scale: Per-group scales, shape (num_groups_local, N_local).
+        group_size: Number of input channels per quantization group.
+    """
+    batch = x.shape[0]
+    rhs = weight[jnp.newaxis, :, :]  # (1, K_local, N_local)
+    rhs_scale = scale[jnp.newaxis, :,
+                      jnp.newaxis, :]  # (1, G_local, 1, N_local)
+    group_sizes = jnp.array([batch], dtype=jnp.int32)
+
+    return gmm_v2(
+        lhs=x,
+        rhs=rhs,
+        rhs_scale=rhs_scale,
+        group_sizes=group_sizes,
+        zero_initialize=False,
+        maybe_quantize_lhs=False,
+    )
 
 
 @register_quantization_config(AWQ)
@@ -116,54 +144,124 @@ class VllmAWQLinearMethod(AWQLinearMethod):
             bias = None
 
         @jax.jit
-        def process_awq_linear_weights(
+        def process_awq_gmm_weights(
             weight: jax.Array,
             weight_scale: jax.Array,
             zero_point: jax.Array,
             bias: jax.Array | None,
         ) -> LinearWeights:
+            # Unpack uint4 from int32
             weight = awq_u32_unpack_u4(weight)
-            group_size = self.quant_config.group_size
-            weight = weight.reshape((-1, group_size, weight.shape[-1]))
-
             zero_point = awq_u32_unpack_u4(zero_point)
+
+            group_size = self.quant_config.group_size
+
+            # Reshape weight to (num_groups, group_size, N), subtract zero
+            # point per group, then flatten back to (K, N) int8.
+            weight = weight.reshape((-1, group_size, weight.shape[-1]))
+            zero_point = zero_point[:, jnp.newaxis, :]  # (num_groups, 1, N)
+            weight = weight.astype(jnp.int8) - zero_point.astype(jnp.int8)
+            weight = weight.reshape((-1, weight.shape[-1]))
+
+            # weight is now (K, N) int8, zero-adjusted.
+            # weight_scale is (num_groups, N) float32 -- maps directly to
+            # GMM subchannel quantization parameters.
 
             return process_linear_weights(
                 LinearWeights(
                     weight=weight,
                     weight_scale=weight_scale,
-                    zero_point=zero_point,
+                    zero_point=None,
                     bias=bias,
                 ),
-                fused=self.linear_config.fuse_matmuls,
+                fused=False,  # Always split to avoid VMEM OOM on large N
                 output_sizes=self.linear_config.output_sizes,
                 reorder_size=self.linear_config.n_shards,
                 transposed=False,
             )
 
-        weights = process_awq_linear_weights(weight, weight_scale, zero_point,
-                                             bias)
-        weights = torch_view(
-            shard_linear_weights(
-                weights,
-                mesh=self.linear_config.mesh,
-                weight_p_spec=self.linear_config.weight_sharding,
-                bias_p_spec=self.linear_config.bias_sharding,
-                transposed=False,
-            ))
+        weights = process_awq_gmm_weights(weight, weight_scale, zero_point,
+                                          bias)
 
-        if self.linear_config.fuse_matmuls:
-            layer.qweight = Parameter(weights.weight, requires_grad=False)
-            layer.scales = Parameter(weights.weight_scale, requires_grad=False)
-            layer.qzeros = Parameter(weights.zero_point, requires_grad=False)
-            if bias is not None:
-                layer.bias = Parameter(weights.bias, requires_grad=False)
+        # Manually shard weights. shard_linear_weights does not correctly
+        # handle 2D scale tensors with transposed=False.
+        mesh = self.linear_config.mesh
+        orig_p_spec = self.linear_config.weight_sharding
+        # Reverse for non-transposed layout: (K, N) instead of (N, K)
+        weight_p_spec = P(*orig_p_spec[::-1])
+        weight_sharding = NamedSharding(mesh, weight_p_spec)
+        scale_sharding = NamedSharding(mesh, weight_p_spec)
+        bias_p_spec = P(weight_p_spec[-1])
+        bias_sharding = NamedSharding(mesh, bias_p_spec)
+
+        def shard(arr, sharding):
+            if arr is None:
+                return None
+            if isinstance(arr, list):
+                return [general_device_put(a, sharding) for a in arr]
+            return general_device_put(arr, sharding)
+
+        sharded_weight = shard(weights.weight, weight_sharding)
+        sharded_scale = shard(weights.weight_scale, scale_sharding)
+        sharded_bias = shard(weights.bias, bias_sharding)
+
+        # Always use split path
+        layer.weight = to_parameter_list(
+            [torch_view(w) for w in sharded_weight])
+        layer.weight_scale = to_parameter_list(
+            [torch_view(s) for s in sharded_scale])
+        if sharded_bias is not None:
+            layer.bias = to_parameter_list(
+                [torch_view(b) for b in sharded_bias])
+
+    def _get_tp_axis(self):
+        """Determine which mesh axis is used for tensor parallelism."""
+        p_spec = self.linear_config.weight_sharding
+        for axis in p_spec:
+            if axis is not None:
+                return axis
+        return None
+
+    def _is_row_parallel(self):
+        """Check if this is a row-parallel linear (K dimension sharded)."""
+        p_spec = self.linear_config.weight_sharding
+        return p_spec[0] is None and p_spec[1] is not None
+
+    def _gmm_matmul(self, x_jax: jax.Array, weight: jax.Array,
+                    scale: jax.Array) -> jax.Array:
+        """Perform quantized matmul using GMM V2 kernel via shard_map."""
+        mesh = self.linear_config.mesh
+        tp_axis = self._get_tp_axis()
+        is_row_parallel = self._is_row_parallel()
+
+        weight_p_spec = P(*self.linear_config.weight_sharding[::-1])
+
+        if is_row_parallel:
+            x_p_spec = P(None, tp_axis)
+            scale_p_spec = P(tp_axis, None)
+            out_p_spec = P()
+
+            def _local_fn(x, w, s):
+                out = _dense_gmm_local(x,
+                                       w,
+                                       s,
+                                       group_size=self.quant_config.group_size)
+                return jax.lax.psum(out, axis_name=tp_axis)
         else:
-            layer.qweight = to_parameter_list(weights.weight)
-            layer.scales = to_parameter_list(weights.weight_scale)
-            layer.qzeros = to_parameter_list(weights.zero_point)
-            if bias is not None:
-                layer.bias = to_parameter_list(weights.bias)
+            x_p_spec = P()
+            scale_p_spec = P(None, tp_axis)
+            out_p_spec = P(None, tp_axis)
+
+            _local_fn = functools.partial(
+                _dense_gmm_local, group_size=self.quant_config.group_size)
+
+        return jax.shard_map(
+            _local_fn,
+            mesh=mesh,
+            in_specs=(x_p_spec, weight_p_spec, scale_p_spec),
+            out_specs=out_p_spec,
+            check_vma=False,
+        )(x_jax, weight, scale)
 
     def apply(self,
               layer: torch.nn.Module,
@@ -171,58 +269,20 @@ class VllmAWQLinearMethod(AWQLinearMethod):
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
         with jax.named_scope(layer._get_name()):
-            if self.linear_config.fuse_matmuls:
-                out = self._apply_fused(layer, x, bias)
-            else:
-                out = self._apply_split(layer, x, bias)
+            out = self._apply_split(layer, x, bias)
 
         return out
-
-    def _apply_fused(self,
-                     layer: torch.nn.Module,
-                     x: torch.Tensor,
-                     bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        x_jax = jax_view(x)
-
-        qweight = jax_view(layer.qweight)
-        qzeros = jnp.expand_dims(jax_view(layer.qzeros), 1)
-        scales = jnp.expand_dims(jax_view(layer.scales), 1)
-
-        qweight = qweight.astype(jnp.int8)
-        qzeros = qzeros.astype(jnp.int8)
-
-        weight = (qweight - qzeros) * scales
-        weight = weight.reshape((-1, weight.shape[-1]))
-        outs = jnp.einsum("bd,df->bf", x_jax, weight)
-
-        if bias is not None and not layer.skip_bias_add:
-            outs += bias.jax()
-
-        outs = slice_sharded_tensor_for_concatenation(
-            outs, self.linear_config.output_sizes, self.linear_config.n_shards)
-        out = jnp.concatenate(outs, axis=-1)
-        return torch_view(out)
 
     def _apply_split(self,
                      layer: torch.nn.Module,
                      x: torch.Tensor,
                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        assert isinstance(layer.qweight, torch.nn.ParameterList)
+        assert isinstance(layer.weight, torch.nn.ParameterList)
 
         x_jax = jax_view(x)
-        params = zip(layer.qweight, layer.qzeros, layer.scales)
         outs = []
-        for i, (qweight, qzeros, scales) in enumerate(params):
-            qweight = jax_view(qweight)
-            scales = jnp.expand_dims(jax_view(scales), 1)
-            qzeros = jnp.expand_dims(jax_view(qzeros), 1)
-
-            qweight = qweight.astype(jnp.int8)
-            qzeros = qzeros.astype(jnp.int8)
-
-            weight = (qweight - qzeros) * scales
-            weight = weight.reshape((-1, weight.shape[-1]))
-            out = jnp.einsum("bd,df->bf", x_jax, weight)
+        for i, (w, s) in enumerate(zip(layer.weight, layer.weight_scale)):
+            out = self._gmm_matmul(x_jax, jax_view(w), jax_view(s))
 
             if bias is not None and not layer.skip_bias_add:
                 out += jax_view(bias[i])
