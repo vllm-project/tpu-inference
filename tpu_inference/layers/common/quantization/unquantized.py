@@ -68,7 +68,7 @@ class UnquantizedLinearMethod:
         return out
 
 
-@jax.jit
+@jax.jit(static_argnames=('mesh', 'activation', 'moe_backend'))
 def process_unquantized_moe_weights(
     *,
     mesh: Mesh,
