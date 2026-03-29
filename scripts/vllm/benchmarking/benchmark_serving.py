@@ -483,6 +483,13 @@ def main(args: argparse.Namespace):
         trust_remote_code=args.trust_remote_code,
     )
 
+    if args.dataset_name == "mmmu_pro":
+        message = (
+            "MMMU-Pro must use --backend vllm-chat "
+            "and should also use --endpoint=/v1/chat/completions."
+        )
+        assert args.backend == "vllm-chat", message
+
     if args.dataset_name is None:
         raise ValueError(
             "Please specify '--dataset-name' and the corresponding "
@@ -549,7 +556,6 @@ def main(args: argparse.Namespace):
                 random_seed=args.seed,
                 dataset_path=args.dataset_path,
                 subset=args.mmmu_pro_subset,
-                use_chat_template=args.mmmu_pro_use_chat_template,
             ).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
@@ -873,11 +879,6 @@ if __name__ == "__main__":
         type=int,
         default=16,
         help="Output length for each request. Default is 16 (single-letter answer).",
-    )
-    mmmu_pro_group.add_argument(
-        "--mmmu-pro-use-chat-template",
-        action="store_true",
-        help="Whether to format MMMU-Pro prompts using the tokenizer's chat template.",
     )
 
     sonnet_group = parser.add_argument_group("sonnet dataset options")
