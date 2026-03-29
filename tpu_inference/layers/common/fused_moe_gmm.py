@@ -20,6 +20,7 @@ from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
+import tpu_inference.envs as envs
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
@@ -331,7 +332,17 @@ def fused_moe_func(
     assert gating_output.shape == (num_tokens, global_num_experts)
 
     topk_weights = apply_scoring_fn(scoring_fn, gating_output)
-    topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
+    if envs.FORCE_MOE_RANDOM_ROUTING:
+        # Forcing random routing is useful to get rid of the effect
+        # of routing imbalance during performance debugging.
+        rng_key = jax.random.PRNGKey(0)
+        topk_indices = jax.vmap(lambda key: jax.random.choice(
+            key, global_num_experts, shape=(topk, ), replace=False))(
+                jax.random.split(rng_key, num_tokens))
+        topk_weights = topk_weights[jnp.arange(num_tokens)[:, None],
+                                    topk_indices]
+    else:
+        topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
     topk_weights = topk_weights.astype(dtype)
