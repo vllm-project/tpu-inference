@@ -444,13 +444,16 @@ class TestTPUConnectorWorker(unittest.TestCase):
 
         worker.runner = MagicMock()
         original_kv_caches = worker.runner.kv_caches
+        worker.sharding = MagicMock()
+        worker.sharding.spec = "mock_spec"
+        worker.mesh = "mock_mesh"
         worker.reqs_ready_to_scatter = {"req1": ("kv_data", "indices")}
         self.all_mocks['scatter_kv_slices'].return_value = "new_kv_caches"
 
         worker.process_send_load(meta)
 
         self.all_mocks['scatter_kv_slices'].assert_called_once_with(
-            original_kv_caches, "kv_data", "indices")
+            original_kv_caches, "kv_data", "indices", "mock_mesh", "mock_spec")
         self.assertEqual(worker.runner.kv_caches, "new_kv_caches")
         self.assertNotIn("req1", worker.reqs_ready_to_scatter)
         worker._maybe_build_notif_socket.assert_called_once_with(load_meta)
