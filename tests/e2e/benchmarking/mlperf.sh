@@ -151,14 +151,15 @@ fi
 if [ "$USE_V6E8_QUEUE" == "True" ]; then
     # Set to 8 if job is in 8 chips queue.
     # TODO (Qiliang Cui) Rename USE_V6E8_QUEUE to USE_8_CHIPS_QUEUE
-    extra_serve_args+=(--tensor-parallel-size 8)
+    DEVICE_COUNT=8
 elif [ "$TPU_VERSION" == "tpu7x" ]; then
     # Set the default value to 2 for tpu v7x
     # TODO (Qiliang Cui) Investigate why tensor-parallel-size=1 breaks in tpu7x
-    extra_serve_args+=(--tensor-parallel-size 2)
+    DEVICE_COUNT=2
 else
-    extra_serve_args+=(--tensor-parallel-size 1)
+    DEVICE_COUNT=1
 fi
+extra_serve_args+=(--tensor-parallel-size "${DEVICE_COUNT}")
 
 
 echo extra_serve_args: "${extra_serve_args[@]}"
@@ -277,29 +278,37 @@ for model_name in $model_list; do
     # Define model-specific arguments
     current_serve_args=("${extra_serve_args[@]}")
     max_batched_tokens=8192
+    served_name=$model_name
+
     if [ "$USE_V6E8_QUEUE" == "True" ]; then
         max_batched_tokens=1024
         if [ "$model_name" == "meta-llama/Llama-4-Scout-17B-16E-Instruct" ]; then
             current_serve_args+=(--hf-overrides '{"architectures": ["Llama4ForCausalLM"]}')
-        elif [ "$model_name" == "jrplatin/DeepSeek-R1-1D-Subchannel-256" ]; then
-            current_serve_args+=(--hf_overrides '{"num_hidden_layers": 12}')
+        fi
+    else
+        if [[ "${model_name,,}" == *"deepseek"* ]]; then
+            max_batched_tokens=64
+            served_name=deepseek-ai/DeepSeek-R1
+            current_serve_args+=(--served-model-name "${served_name}"  --load-format=runai_streamer   --trust-remote-code --kv-cache-dtype=fp8 )
+            current_serve_args+=(--hf_overrides '{"num_hidden_layers": 5}' )
+            current_serve_args+=(--additional_config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true, "expert_parallelism": '"${DEVICE_COUNT}"', "tensor_parallelism": 1}}, "replicate_attn_weights": "True", "sparse_matmul": "True"}')
         fi
     fi
 
     # Spin up the vLLM server
     echo "Spinning up the vLLM server..."
-    (vllm serve "$model_name" --max-model-len=1024 --max-num-batched-tokens "$max_batched_tokens" "${current_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
+    (vllm serve "$model_name" --max-model-len 1024 --max-num-batched-tokens "$max_batched_tokens" "${current_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
 
     # Set initial trap to ensure cleanup happens even on immediate exit
     trap 'cleanUp "$model_name"' EXIT
 
     waitForServerReady
 
-    echo "Starting the benchmark for $model_name..."
+    echo "Starting the benchmark for $served_name..."
     echo "Current working directory: $(pwd)"
     python benchmarks/benchmark_serving.py \
     --backend vllm \
-    --model "$model_name" \
+    --model "$served_name" \
     --dataset-name "$dataset_name" \
     --dataset-path "$dataset_path" \
     --num-prompts "$num_prompts" \
