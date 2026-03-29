@@ -84,6 +84,38 @@ class MultiModalManager:
 
                 mrope_pos_ptr += completion_part_len
 
+    def calc_mm_prefix_ranges(self,
+                              max_mm_prefix_ranges: int) -> jnp.ndarray | None:
+        is_mm_prefix = getattr(self.runner.model_config, "is_mm_prefix_lm",
+                               None)
+        if not is_mm_prefix or max_mm_prefix_ranges <= 0:
+            return None
+
+        req_doc_ranges = [[[-1, -1] for _ in range(max_mm_prefix_ranges)]
+                          for _ in range(self.runner.max_num_reqs)]
+
+        for index, req_id in enumerate(self.runner.input_batch.req_ids):
+            req_state = self.runner.requests[req_id]
+
+            image_doc_ranges = []
+            for mm_feature in req_state.mm_features:
+                pos_info = mm_feature.mm_position
+                img_doc_range = pos_info.extract_embeds_range()
+                image_doc_ranges.extend(img_doc_range)
+
+            if len(image_doc_ranges) > max_mm_prefix_ranges:
+                raise ValueError(
+                    f"Request {req_id} contains {len(image_doc_ranges)} "
+                    f"multimodal prefix ranges, which exceeds the configured "
+                    f"limit of {max_mm_prefix_ranges}.")
+
+            for r, (start, end) in enumerate(image_doc_ranges):
+                req_doc_ranges[index][r][0] = start
+                req_doc_ranges[index][r][1] = end
+
+        return jnp.array(req_doc_ranges, dtype=jnp.int32)
+
+
     def execute_mm_encoder(self, scheduler_output: "VllmSchedulerOutput"):
         import torch
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs

@@ -339,6 +339,7 @@ def sharded_ragged_paged_attention(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    mm_prefix_range: jax.Array | None = None,
 ):
     """Shards along KV heads."""
     # Handle GQA/MQA where num_kv_heads < tp_size
@@ -383,6 +384,10 @@ def sharded_ragged_paged_attention(
 
         in_specs += (P(ShardingAxisName.ATTN_HEAD), )
         args += (attention_sink, )
+
+    if mm_prefix_range is not None:
+        in_specs += (P(ShardingAxisName.ATTN_DATA), )
+        args += (mm_prefix_range, )
 
     def _ragged_paged_attention(*args):
         return func(
@@ -455,6 +460,7 @@ def attention(
         q_scale=q_scale,
         k_scale=k_scale,
         v_scale=v_scale,
+        mm_prefix_range=md.mm_prefix_range,
     )
 
     return kv_cache, output
