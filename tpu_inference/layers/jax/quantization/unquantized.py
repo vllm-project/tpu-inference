@@ -116,8 +116,8 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
                         layer.kernel_down_proj_EFD
                     ]):
                 return False
-            w_gate = layer.kernel_gating_EDF.value
-            w_up = layer.kernel_up_proj_EDF.value
+            w_gate = layer.kernel_gating_EDF.get_value()
+            w_up = layer.kernel_up_proj_EDF.get_value()
 
             # Fuse the weights into w13: [Gate, Up]
             w13_val = jnp.concatenate([w_gate, w_up], axis=1)
@@ -128,16 +128,18 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
                 activation=layer.activation,
                 w13_weight=w13_val,
                 w13_bias=None,
-                w2_weight=layer.kernel_down_proj_EFD.value,
+                w2_weight=layer.kernel_down_proj_EFD.get_value(),
                 w2_bias=None,
             )
 
             # TODO (jacobplatin): we probably want to make the sharding configurable
-            layer.kernel_gating_upproj_EDF.value = weights.w13_weight
-            layer.kernel_down_proj_EFD.value = weights.w2_weight
+            layer.kernel_gating_upproj_EDF = nnx.Param(weights.w13_weight)
+            layer.kernel_down_proj_EFD = nnx.Param(weights.w2_weight)
 
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
+            del weights
+            del w13_val
 
         return True
 
