@@ -876,10 +876,15 @@ class DPScheduler(SchedulerInterface):
         """Forward request finish signals to the appropriate DP rank schedulers."""
         if isinstance(request_ids, str):
             request_ids = [request_ids]
+        elif request_ids is None:
+            # None means finish all requests (matches base scheduler behavior)
+            request_ids = list(self.assigned_dp_rank.keys())
 
         # Route finish signals to appropriate schedulers
         rank_request_ids = defaultdict(list)
         for req_id in request_ids:
+            if req_id not in self.assigned_dp_rank:
+                continue
             rank = self.assigned_dp_rank[req_id]
             rank_request_ids[rank].append(req_id)
 
