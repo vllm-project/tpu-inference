@@ -84,7 +84,6 @@ def scaled_dot_product_attention(
 
     return out
 
-
 def vllm_vit_sdpa(
     query,
     key,
