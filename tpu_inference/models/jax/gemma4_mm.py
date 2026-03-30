@@ -735,10 +735,6 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                 # PyTorch (2, 10240, hidden) -> JAX (10240, 2, hidden)
                 return tensor.transpose(0, 1)
 
-            # Gemma 4: Unit-offset for ALL RMSNorms
-            if "norm" in mapped_name:
-                return 1.0 + tensor
-
             return tensor
 
         def filter_weights(weights_iterator):
