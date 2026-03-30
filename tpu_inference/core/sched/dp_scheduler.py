@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import atexit
 import copy
 import multiprocessing
 import multiprocessing.reduction
+import os
+import signal
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from enum import Enum
@@ -251,7 +254,11 @@ def _scheduler_worker_process(
                     logger.info(f"Rank {rank}: Shutting down")
                     scheduler.shutdown()
                     _send_result(None)  # Signal completion
-                    break
+                    # Use os._exit to avoid atexit handlers. Forked
+                    # processes inherit the parent's
+                    # multiprocessing._exit_function which tries to
+                    # join sibling worker processes, causing a deadlock.
+                    os._exit(0)
                 case _:
                     error = SchedulerWorkerError(
                         rank, f"Unknown command: {command}")
@@ -265,7 +272,8 @@ def _scheduler_worker_process(
                 scheduler.shutdown()
             except Exception:
                 pass
-            break
+            # Use os._exit to avoid atexit deadlock (see SHUTDOWN case).
+            os._exit(0)
 
         except Exception as e:
             logger.error(
@@ -401,6 +409,32 @@ class DPScheduler(SchedulerInterface):
             f"Per-rank limits: max_seqs={self.vllm_config.scheduler_config.max_num_seqs}, "
             f"max_tokens={self.vllm_config.scheduler_config.max_num_batched_tokens}"
         )
+
+        # Register an atexit handler that runs *before* multiprocessing's
+        # _exit_function (atexit handlers run LIFO). This ensures our
+        # workers are terminated and joined before _exit_function tries
+        # to join them, preventing the hang on os.waitpid().
+        self._atexit_registered = True
+        atexit.register(self._atexit_cleanup)
+
+    def _atexit_cleanup(self) -> None:
+        """Atexit handler to terminate worker processes before
+        multiprocessing's _exit_function tries to join them."""
+        if not self._atexit_registered:
+            return
+        # Use SIGKILL instead of SIGTERM to avoid triggering native
+        # signal handlers (e.g. abseil/glog) that dump noisy stack
+        # traces. At atexit time, graceful shutdown is not needed.
+        for process in self.processes:
+            if process.is_alive():
+                try:
+                    os.kill(process.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        for process in self.processes:
+            process.join(timeout=5.0)
+        # Clear the active children list so _exit_function is a no-op
+        multiprocessing.active_children()
 
     def _create_per_rank_configs(self, kv_cache_config: KVCacheConfig) -> None:
         self.per_rank_kv_cache_configs: List[KVCacheConfig] = []
@@ -1043,6 +1077,10 @@ class DPScheduler(SchedulerInterface):
 
     def shutdown(self) -> None:
         """Shutdown all DP rank scheduler worker processes."""
+        # Disable atexit handler since we're cleaning up explicitly
+        self._atexit_registered = False
+        atexit.unregister(self._atexit_cleanup)
+
         # Send shutdown command to all workers, skipping dead ones
         for rank in range(self.dp_size):
             if not self.processes[rank].is_alive():
@@ -1067,8 +1105,19 @@ class DPScheduler(SchedulerInterface):
         for process in self.processes:
             process.join(timeout=5.0)
             if process.is_alive():
-                process.terminate()
-                process.join()
+                # Use SIGKILL to avoid native signal handler stack traces
+                try:
+                    os.kill(process.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                process.join(timeout=5.0)
+
+        # Deregister children from multiprocessing's active list so that
+        # the atexit _exit_function won't try to join them again (which
+        # would hang on os.waitpid for already-exited processes).
+        # Calling active_children() has the side-effect of joining and
+        # removing any finished processes from the internal list.
+        multiprocessing.active_children()
 
         # Close all pipe connections
         for rank in range(self.dp_size):
