@@ -819,8 +819,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
         allowed_layers = set(f"layers.{i}."
                              for i in range(len(self.model.layers)))
         stripped_weights = (
-            (clean_name, 1.0 + tensor if "norm" in clean_name else tensor)
-            for name, tensor in weights
+            (clean_name, tensor) for name, tensor in weights
             if (clean_name := name.replace("language_model.", "")).startswith((
                 "model.", "lm_head")) and
             "vision" not in clean_name  # Exclude vision tower weights for now
