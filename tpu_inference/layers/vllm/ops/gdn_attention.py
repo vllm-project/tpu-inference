@@ -420,8 +420,7 @@ def run_jax_gdn_attention(
     j_A_log: jnp.ndarray,
     j_dt_bias: jnp.ndarray,
     state_indices: jnp.ndarray,
-    req_indices: jnp.ndarray,
-    valid_mask: jnp.ndarray,
+    q_loc: jnp.ndarray,
     n_kq: int,
     n_v: int,
     d_k: int,
@@ -429,7 +428,53 @@ def run_jax_gdn_attention(
     kernel_size: int,
     mesh: jax.sharding.Mesh,
 ) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
+    """Runs the Jax GDN attention mechanism.
+
+    Args:
+        j_mixed_qkv: Input tensor of shape `(num_tokens, dim)`.
+        j_b: Input tensor of shape `(num_tokens, n_v)`.
+        j_a: Input tensor of shape `(num_tokens, n_v)`.
+        conv_state: Convolutional state tensor of shape
+          `(max_reqs, kernel_size - 1, dim)`.
+        recurrent_state: Recurrent state tensor of shape
+          `(max_reqs, n_v, d_k, d_v)`.
+        j_conv_weight: Convolutional weight tensor of shape
+          `(dim, 1, kernel_size)`.
+        j_conv_bias: Optional convolutional bias tensor of shape `(dim,)`.
+        j_A_log: Log of A parameter tensor of shape `(n_v,)`.
+        j_dt_bias: Delta T bias tensor of shape `(n_v,)`.
+        state_indices: Tensor of shape `(max_reqs,)` mapping request index to
+          state index.
+        q_loc: Tensor of shape `(num_seqs,)` with start locations of each
+          sequence.
+        n_kq: Number of key/query heads.
+        n_v: Number of value heads.
+        d_k: Dimension of key.
+        d_v: Dimension of value.
+        kernel_size: Convolution kernel size.
+        mesh: The device mesh for distributed computation.
+
+    Returns:
+        A tuple containing the new states and the output.
+        - A tuple of (new_conv_state, new_recurrent_state).
+          - new_conv_state: `(max_reqs, kernel_size - 1, dim)`
+          - new_recurrent_state: `(max_reqs, n_v, d_k, d_v)`
+        - The output tensor of shape `(num_tokens, n_v * d_v)`.
+    """
     key_dim = n_kq * d_k
+
+    # Ensure q_loc is monotonically increasing to handle padded slots
+    q_loc = jnp.maximum.accumulate(q_loc)
+
+    num_tokens = j_mixed_qkv.shape[0]
+    token_idx = jnp.arange(num_tokens)
+    max_reqs = state_indices.shape[0]
+
+    req_indices = jnp.sum(token_idx[:, None] >= q_loc[None, :], axis=1) - 1
+    req_indices = jnp.clip(req_indices, 0, max_reqs - 1)
+
+    # Exclude trailing padding indices from mutating cache
+    valid_mask = token_idx < q_loc[-1]
 
     # NOTE: we pre-split Q, K, and V BEFORE passing to shard map,
     # otherwise, jax.shard_map splits across C dimension
@@ -632,16 +677,6 @@ def gdn_attention_core_tpu(
 
     # Map tokens to their respective requests
     q_loc = jax_view(attn_metadata.query_start_loc)
-    # Ensure q_loc is monotonically increasing to handle padded slots
-    q_loc = jnp.maximum.accumulate(q_loc)
-    num_tokens = j_mixed_qkv.shape[0]
-
-    token_idx = jnp.arange(num_tokens)
-    req_indices = jnp.sum(token_idx[:, None] >= q_loc[None, :], axis=1) - 1
-    req_indices = jnp.clip(req_indices, 0, max_reqs - 1)
-
-    # Exclude trailing padding indices from mutating cache
-    valid_mask = token_idx < q_loc[-1]
 
     (new_conv_state,
      new_recurrent_state), j_output = run_jax_gdn_attention(j_mixed_qkv,
@@ -654,8 +689,7 @@ def gdn_attention_core_tpu(
                                                             j_A_log,
                                                             j_dt_bias,
                                                             state_indices,
-                                                            req_indices,
-                                                            valid_mask,
+                                                            q_loc,
                                                             n_kq,
                                                             n_v,
                                                             d_k,
