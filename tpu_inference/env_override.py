@@ -8,9 +8,28 @@ import os
 # The issue was introduced by vllm-project/vllm#26440
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-new_args = "--xla_tpu_use_tc_device_shape_on_sc=true --xla_tpu_scheduler_percent_shared_memory_limit=1000"
-existing_args = os.environ.get("LIBTPU_INIT_ARGS", "")
-os.environ["LIBTPU_INIT_ARGS"] = f"{existing_args} {new_args}".strip()
+# Fetch the existing args, default to an empty string if it doesn't exist
+current_args = os.environ.get("LIBTPU_INIT_ARGS", "")
+
+# Keep a list of missing arguments we need to add
+args_to_append = []
+
+# Check for the first flag
+if "xla_tpu_use_tc_device_shape_on_sc" not in current_args:
+    args_to_append.append("--xla_tpu_use_tc_device_shape_on_sc=true")
+
+# Check for the second flag
+if "xla_tpu_scheduler_percent_shared_memory_limit" not in current_args:
+    args_to_append.append(
+        "--xla_tpu_scheduler_percent_shared_memory_limit=1000")
+
+# If we found any missing flags, append them to the environment variable
+if args_to_append:
+    # Join our new args with a space
+    new_args_str = " ".join(args_to_append)
+
+    # Combine the old and new args, stripping any leading/trailing spaces
+    os.environ["LIBTPU_INIT_ARGS"] = f"{current_args} {new_args_str}".strip()
 
 # Monkeypatch vLLM to avoid ImportError: cannot import name 'SamplingParams' from 'vllm'
 # in vllm/v1/... submodules due to circular imports or lazy loading failures.

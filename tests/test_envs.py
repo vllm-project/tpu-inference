@@ -306,3 +306,19 @@ def test_cache_preserves_values_across_env_changes(
 
     # Now it should reflect the new value
     assert envs.JAX_PLATFORMS == "cpu"
+
+
+def test_env_libtpu_default(monkeypatch: pytest.MonkeyPatch):
+    assert "xla_tpu_use_tc_device_shape_on_sc=true" in envs.LIBTPU_INIT_ARGS
+    assert "xla_tpu_scheduler_percent_shared_memory_limit=1000" in envs.LIBTPU_INIT_ARGS
+    print('hey clem1')
+
+
+def test_env_libtpu_overwrite(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(
+        "LIBTPU_INIT_ARGS",
+        "--xla_tpu_use_tc_device_shape_on_sc=false --xla_tpu_scheduler_percent_shared_memory_limit=3000"
+    )
+    assert "xla_tpu_use_tc_device_shape_on_sc=false" in envs.LIBTPU_INIT_ARGS
+    assert "xla_tpu_scheduler_percent_shared_memory_limit=3000" in envs.LIBTPU_INIT_ARGS
+    print('hey clem1')
