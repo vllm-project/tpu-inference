@@ -45,7 +45,7 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (
     BaseWeightLoader, _is_pp_missing_layer, convert_torch_to_jax_with_view,
-    get_param, print_param_info, reshape_params, transpose_params)
+    get_param, print_param_info, reshape_params, transpose_params, verify_sharding, log_hbm_usage)
 
 logger = init_logger(__name__)
 
@@ -67,6 +67,8 @@ class Llama4WeightLoader(BaseWeightLoader):
                                            "quantization_config", None)
         self.expert_weights_buffer = {}
         self.expert_prefix = "shared_expert."
+
+        self.last_logged_layer = -1
 
         transpose_mappings_to_quantization = {
             "down_proj": (1, 0),
@@ -241,6 +243,17 @@ class Llama4WeightLoader(BaseWeightLoader):
                     f"does not match model shape for {mapped_name}: {mapped_model_weight.value.shape}!"
                 )
             mapped_model_weight.value = loaded_weight
+
+            # --- NEW LOGGING ---
+            verify_sharding(mapped_model_weight.value, mapped_name)
+            
+            # Log HBM after finishing a transformer block
+            layer_num = self._get_layer_num(loaded_name)
+            if layer_num is not None and layer_num != self.last_logged_layer:
+                log_hbm_usage(f"Finished loading Layer {layer_num} (Gate/Up)")
+                self.last_logged_layer = layer_num
+            # -------------------
+
             logger.debug(
                 f"{split_loaded_name}: {loaded_weight.shape}  -->  {mapped_name}: {mapped_model_weight.value.shape}"
             )
@@ -356,6 +369,17 @@ class Llama4WeightLoader(BaseWeightLoader):
                     f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
                 )
                 model_weight.value = loaded_weight
+
+                # --- NEW LOGGING ---
+                verify_sharding(model_weight.value, mapped_name)
+                
+                # Log HBM after finishing a transformer block
+                current_layer = self._get_layer_num(loaded_name)
+                if current_layer is not None and current_layer != self.last_logged_layer:
+                    log_hbm_usage(f"Finished loading Layer {current_layer}")
+                    self.last_logged_layer = current_layer
+                # -------------------
+
                 if self.is_verbose:
                     print_param_info(model_weight, loaded_name)
             with jax.default_device(jax.devices("cpu")[0]):
@@ -392,6 +416,10 @@ class Llama4WeightLoader(BaseWeightLoader):
                             aggregated_weight,
                             model_weight.array.scale.sharding,
                             mesh=model_for_loading.mesh)
+                        
+                        # --- NEW LOGGING ---
+                        verify_sharding(model_weight.array.scale.value, f"{buffer_key}_aggregated")
+                        # -------------------
 
                     elif aggregated_weight.itemsize < 2:  # check model weight elem nbits < 16
                         loaded_name = f"{base_mapped_name}.array.qvalue.value"
@@ -406,6 +434,10 @@ class Llama4WeightLoader(BaseWeightLoader):
                             model_weight.array.qvalue.sharding,
                             mesh=model_for_loading.mesh)
 
+                        # --- NEW LOGGING ---
+                        verify_sharding(model_weight.array.scale.value, f"{buffer_key}_aggregated")
+                        # -------------------
+
                     logger.debug(
                         f"Aggregated and loaded {loaded_name}: {aggregated_weight.shape}"
                     )
@@ -413,6 +445,7 @@ class Llama4WeightLoader(BaseWeightLoader):
                     if self.is_verbose:
                         print_param_info(model_weight, loaded_name)
 
+        log_hbm_usage("Weight Loading Complete")
         nnx.update(model_for_loading, model_params)
 
 

@@ -159,6 +159,41 @@ def convert_torch_to_jax_with_view(loaded_weight: torch.Tensor,
     
     return jax.device_put(jnp.array(loaded_weight), out_sharding).astype(cast_type)
 
+def log_hbm_usage(context_name: str):
+    """Logs the current HBM utilization on the TPU."""
+    try:
+        # Get memory stats for the default backend (TPU)
+        stats = jax.devices()[0].memory_stats()
+        bytes_in_use = stats['bytes_in_use']
+        limit = stats['bytes_limit']
+        util_pct = (bytes_in_use / limit) * 100
+        
+        logger.info(
+            f"--- HBM Usage [{context_name}] --- "
+            f"Used: {bytes_in_use / 1024**3:.2f}GB / "
+            f"Total: {limit / 1024**3:.2f}GB ({util_pct:.2f}%)"
+        )
+    except Exception as e:
+        logger.debug(f"Could not log HBM stats: {e}")
+
+def verify_sharding(array: jax.Array, name: str):
+    """Verifies if a JAX array is properly sharded across multiple devices."""
+    if not isinstance(array, jax.Array):
+        return
+    
+    sharding = array.sharding
+    num_devices = len(sharding.device_set)
+    
+    # In a sharded setup, the addressable shards should be 1/N of the total shape 
+    # (assuming Tensor Parallelism is active)
+    is_sharded = num_devices > 1
+    
+    if is_sharded:
+        logger.debug(f"Weight '{name}' successfully sharded across {num_devices} devices.")
+    else:
+        # Warning: if your TP size > 1 and this triggers, the weight is replicated (bad for memory)
+        logger.warning(f"Weight '{name}' is REPLICATED on a single device or TP is not active.")
+
 
 ############ END Used by llama4, deepseek only for now END ############
 
