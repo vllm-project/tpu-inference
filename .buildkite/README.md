@@ -21,7 +21,7 @@ Besides continuous integration and continuous delivery, a major goal of our pipe
 - kernel support matrix (microbenchmarks)
 - parallelism support matrix
 - quantization support matrix
-- RL support matrix
+- rl support matrix
 
 To support this requirement, each model and feature will go through a series of stages of testing, and the test results will be used to generate the support matrices automatically.
 
@@ -66,7 +66,7 @@ The python script takes the following arguments:
   - `"parallelism support matrix"`
   - `"quantization support matrix"`
   - `"kernel support matrix microbenchmarks"`
-  - `"RL support matrix"`
+  - `"rl support matrix"`
 - **--group**: [OPTIONAL] This argument is **required** only when the category is `"kernel support matrix microbenchmarks"`. The group name should be the name of the kernel you are testing (e.g., `all_gather_matmul`). Its purpose is to organize all related microbenchmark tests for that specific kernel into a single directory.
 
   For example, if you are adding multiple tests for the `all_gather_matmul` kernel (e.g., one for `w4a4` quantization and another for `w8a8`), you would use `--group "all_gather_matmul"` for all of them. The script will then create a directory at `.buildkite/kernel_microbenchmarks/all_gather_matmul/` and place the generated YAML test files inside. In this scenario, the `--feature-name` would describe the specific configuration being tested, like `'w4a4'` or `'w8a8'`.
