@@ -20,5 +20,4 @@ bash "${NIGHTLY_SCRIPT}" \
   --dataset-name "random" \
   --run-type "DAILY" \
   --device "tpu7x-16" \
-  --code-hash "a4047d4-cf732f1-" \
   --created-by "bm-scheduler"

@@ -21,7 +21,6 @@ bash "${NIGHTLY_SCRIPT}" \
   --dataset-name "random" \
   --run-type "DAILY" \
   --device "tpu7x-16" \
-  --code-hash "deepseek-hash-placeholder" \
   --created-by "bm-scheduler" \
   --new-model-design "1" \
   --gpu-memory-utilization "0.92" \
