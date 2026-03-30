@@ -263,7 +263,8 @@ def get_flax_model(
     mesh: Mesh,
     is_draft_model: bool = False,
 ) -> nnx.Module:
-    model_dtype = to_jax_dtype(vllm_config.model_config.dtype)
+    original_dtype = vllm_config.model_config.dtype
+    model_dtype = to_jax_dtype(original_dtype)
     vllm_config.model_config.dtype = model_dtype
     vllm_config.quant_config = get_tpu_quantization_config(vllm_config)
 
@@ -278,6 +279,7 @@ def get_flax_model(
         model_class = _get_model_architecture(
             vllm_config.model_config.hf_config)
     jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
+    vllm_config.model_config.dtype = original_dtype
     kv_cache_sharding = NamedSharding(
         mesh,
         PartitionSpec(ShardingAxisName.ATTN_DATA, None,

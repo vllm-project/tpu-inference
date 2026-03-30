@@ -577,6 +577,12 @@ class Gemma4VisionModel(JaxModule):
         # 3. Vision Exit (Spatial Pooling)
         self.vision_exit = VisionExit(config, dtype)
 
+        # Gemma 4 standardization parameters for Vision Model outputs
+        self.std_bias = nnx.Param(
+            jnp.zeros((config.hidden_size, ), dtype=dtype))
+        self.std_scale = nnx.Param(
+            jnp.ones((config.hidden_size, ), dtype=dtype))
+
     def __call__(
         self,
         pixel_values: jax.Array,
@@ -597,6 +603,8 @@ class Gemma4VisionModel(JaxModule):
         # 3. Forward through Transformer Layers
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states = layer(hidden_states, positions_xy, input_mask)
+        # Apply standardization
+        hidden_states = hidden_states * self.std_scale.value + self.std_bias.value
 
         # 4. Forward through Exit (Pooling)
         outputs = self.vision_exit(hidden_states, positions_xy)
@@ -628,18 +636,9 @@ class Gemma4MultimodalEmbedder(JaxModule):
             quant_config=quant_config,
             prefix=prefix + ".embedding_projection",
         )
-        self.norm = JaxRmsNorm(text_hidden_size,
-                               epsilon=rms_norm_eps,
-                               param_dtype=dtype,
-                               use_scale=False,
-                               scale_init=None,
-                               rngs=rng,
-                               quant_config=quant_config,
-                               prefix=prefix + ".norm" if prefix else "norm")
 
     def __call__(self, x: jax.Array) -> jax.Array:
         x = self.embedding_projection(x)
-        x = self.norm(x)
         return x
 
 
@@ -1005,7 +1004,6 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         *args,
     ) -> Tuple[List[jax.Array], jax.Array | Any, List[jax.Array]]:
 
-        per_layer_inputs = None
         multimodal_embeddings = getattr(attention_metadata,
                                         "multimodal_embeddings", None)
 
@@ -1025,7 +1023,6 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             attention_metadata,
             inputs_embeds,
             layer_name_to_kv_cache=layer_name_to_kv_cache,
-            per_layer_inputs=per_layer_inputs,
         )
 
         if not is_last_rank:
