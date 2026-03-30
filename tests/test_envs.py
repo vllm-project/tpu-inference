@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the tpu-inference project
 
+import importlib
+import os
+
 import pytest
 
+import tpu_inference.env_override
 import tpu_inference.envs as envs
 from tpu_inference.envs import enable_envs_cache, environment_variables
 
@@ -309,14 +313,22 @@ def test_cache_preserves_values_across_env_changes(
 
 
 def test_env_libtpu_default(monkeypatch: pytest.MonkeyPatch):
-    assert "xla_tpu_use_tc_device_shape_on_sc=true" in envs.LIBTPU_INIT_ARGS
-    assert "xla_tpu_scheduler_percent_shared_memory_limit=1000" in envs.LIBTPU_INIT_ARGS
+    LIBTPU_INIT_ARGS = os.environ.get("LIBTPU_INIT_ARGS", "")
+
+    assert "xla_tpu_use_tc_device_shape_on_sc=true" in LIBTPU_INIT_ARGS
+    assert "xla_tpu_scheduler_percent_shared_memory_limit=1000" in LIBTPU_INIT_ARGS
 
 
 def test_env_libtpu_overwrite(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv(
-        "LIBTPU_INIT_ARGS",
-        "--xla_tpu_use_tc_device_shape_on_sc=false --xla_tpu_scheduler_percent_shared_memory_limit=3000"
-    )
-    assert "xla_tpu_use_tc_device_shape_on_sc=false" in envs.LIBTPU_INIT_ARGS
-    assert "xla_tpu_scheduler_percent_shared_memory_limit=3000" in envs.LIBTPU_INIT_ARGS
+    os.environ[
+        "LIBTPU_INIT_ARGS"] = "--xla_tpu_use_tc_device_shape_on_sc=false --xla_tpu_scheduler_percent_shared_memory_limit=3000"
+
+    importlib.reload(tpu_inference.env_override)
+
+    actual_args = os.environ.get("LIBTPU_INIT_ARGS", "")
+
+    assert "--xla_tpu_use_tc_device_shape_on_sc=false" in actual_args
+    assert "--xla_tpu_scheduler_percent_shared_memory_limit=3000" in actual_args
+
+    assert "--xla_tpu_use_tc_device_shape_on_sc=true" not in actual_args
+    assert "--xla_tpu_scheduler_percent_shared_memory_limit=1000" not in actual_args
