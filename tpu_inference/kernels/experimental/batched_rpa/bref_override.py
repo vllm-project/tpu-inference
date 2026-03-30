@@ -49,7 +49,8 @@ class KVBufferedRef(pipeline.BufferedRef):
     page_size_mask: int = dataclasses.field(metadata={"static": True})
 
     def __post_init__(self):
-        # Override to bypass the buffer_count > 2 check for output refs
+        # pallas doesn't allow you to set n_buffer > 2 for output refs, so
+        # we override to bypass this check.
         pass
 
     @classmethod

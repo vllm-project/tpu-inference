@@ -84,6 +84,9 @@ class RPAConfig:
     vmem_limit_bytes: int | None = None
     case: RpaCase = RpaCase.MIXED
     n_buffer: int = 2
+    out_dtype: Any = jnp.bfloat16
+    fuse_accum: bool = False
+    mask_v: bool = True
 
     @property
     def bkv_p_cache(self) -> int:
@@ -108,6 +111,13 @@ class RPAConfig:
     @property
     def page_size_mask(self) -> int:
         return self.page_size - 1
+
+    @property
+    def int_ty(self) -> Any:
+        if (get_dtype_packing(self.q_dtype) != 1
+                and pltpu.get_tpu_info().generation >= 6):
+            return jnp.int16
+        return jnp.int32
 
 
 def get_dtype_bitwidth(dtype):
@@ -241,8 +251,17 @@ class RPASchedule:
         )
 
     @classmethod
-    def test_specs(cls, config: RPAConfig):
-        """Returns a Pytree of BlockSpecs matching the output structure."""
+    def hbm_specs(cls, config: RPAConfig):
+        """Returns a Pytree of BlockSpecs in HBM matching the output structure."""
+
+        def wrapper(shape, is_smem=False):
+            return pl.BlockSpec(memory_space=pltpu.HBM, block_shape=shape)
+
+        return cls._map_shapes(config, wrapper)
+
+    @classmethod
+    def kernel_in_specs(cls, config: RPAConfig):
+        """Returns a Pytree of BlockSpecs for passing schedule to kernel."""
 
         def wrapper(shape, is_smem=False):
             memory_space = pltpu.SMEM if is_smem else pltpu.HBM
@@ -267,15 +286,35 @@ class RPASchedule:
 
 
 def rpa_metadata_schedule_kernel(
+    ## HBM inputs
     cu_q_lens_ref,
     kv_lens_ref,
     distribution_ref,
+    # output
+    schedule_hbm: RPASchedule,
+    # scratch
     schedule: RPASchedule,
     lane_lengths_ref,
+    dma_sem,
     *,
     config: RPAConfig,
 ):
-    """Generates metadata for RPA scheduling."""
+    """Generates the HBM-to-VMEM DMA schedule
+
+  This kernel:
+  1. Iterates through each (potentially ragged) sequence
+  2. Breaks Queries (Q) and Key-Values (KV) into blocks (bq_sz, bkv_sz).
+  3. Assigns tasks to 'lanes' (TPU batch items) based on current lane occupancy
+     to ensure balanced execution across the batch dimension.
+  4. Encodes DMA offsets:
+     - dma_q: HBM start index and size for Query blocks.
+     - dma_kv_cache: Paged indices for existing KV tokens.
+     - dma_kv_new: offsets for new tokens being added to the cache.
+     - do_writeback: boolean flag indicating if a block should be flushed to
+     HBM (ie does this block contain new tokens to add to KV cache).
+
+  Check bref_override.py to check usage of the schedule.
+  """
     for b in range(config.batch_size):
         lane_lengths_ref[b] = 0
 
@@ -335,8 +374,10 @@ def rpa_metadata_schedule_kernel(
                     3) + target_lane * (config.bkv_p_cache * 3)
                 for i in range(config.bkv_p_cache):
                     sz = jnp.clip(
-                        kv_left_frm_cache - (i << config.page_size_log2), 0,
-                        config.page_size)
+                        kv_left_frm_cache - (i << config.page_size_log2),
+                        0,
+                        config.page_size,
+                    )
                     p_idx = jnp.minimum(p_offset + i,
                                         config.num_page_indices - 1)
 
@@ -374,7 +415,7 @@ def rpa_metadata_schedule_kernel(
                     global_p_idx = s_idx * config.pages_per_seq + p_idx
 
                     schedule.dma_kv_new[kv_new_base + 0] = (
-                        (global_p_idx << config.page_size_log2) | p_off)
+                        global_p_idx << config.page_size_log2) | p_off
                     schedule.dma_kv_new[kv_new_base +
                                         1] = q_end - kv_left_frm_new
                     schedule.dma_kv_new[kv_new_base + 2] = start_in_slot
@@ -398,7 +439,7 @@ def rpa_metadata_schedule_kernel(
 
                         base_i = kv_new_base + i * 4
                         schedule.dma_kv_new[base_i + 0] = (
-                            (global_p_idx << config.page_size_log2) | p_off)
+                            global_p_idx << config.page_size_log2) | p_off
                         schedule.dma_kv_new[base_i +
                                             1] = q_end - kv_left_frm_new
                         schedule.dma_kv_new[base_i + 2] = start_in_slot
@@ -420,6 +461,9 @@ def rpa_metadata_schedule_kernel(
                               lane_lengths_ref[b], max_steps)
     schedule.actual_steps[0] = max_steps
 
+    safe_max_steps = jnp.minimum(max_steps + config.n_buffer + 1,
+                                 config.max_steps_ub)
+
     def mask_lane(b, _):
         start_step = lane_lengths_ref[b]
 
@@ -433,6 +477,7 @@ def rpa_metadata_schedule_kernel(
             schedule.is_last_k[idx] = 0
             schedule.do_writeback[idx] = 0
 
+            # TODO: theoretically we just need to zero out the size, check later
             q_base = step * config.batch_size * 2 + b * 2
             schedule.dma_q[q_base + 0] = 0
             schedule.dma_q[q_base + 1] = 0
@@ -454,9 +499,40 @@ def rpa_metadata_schedule_kernel(
                 schedule.dma_kv_new[base_i + 2] = 0
                 schedule.dma_kv_new[base_i + 3] = 0
 
-        jax.lax.fori_loop(start_step, max_steps, mask_step, None)
+        jax.lax.fori_loop(start_step, safe_max_steps, mask_step, None)
 
     jax.lax.fori_loop(0, config.batch_size, mask_lane, None)
+
+    flat_hbm = jax.tree_util.tree_leaves(schedule_hbm)
+    flat_smem = jax.tree_util.tree_leaves(schedule)
+    dma_list = []
+    sem = dma_sem.at[0]
+
+    for h, s in zip(flat_hbm, flat_smem):
+        if h.shape[0] != 1:
+            multiplier = h.shape[0] // config.max_steps_ub
+            fetch_size = multiplier * safe_max_steps
+            # Ensure fetch_size is at most h.shape[0] to prevent out-of-bounds DMA
+            fetch_size = pl.cdiv(fetch_size, 1024) * 1024
+
+            copy = pltpu.make_async_copy(
+                s.at[pl.ds(0, fetch_size)],
+                h.at[pl.ds(0, fetch_size)],
+                sem,
+            )
+            copy.start()
+            dma_list.append(copy)
+        else:
+            copy = pltpu.make_async_copy(
+                s,
+                h,
+                sem,
+            )
+            copy.start()
+            dma_list.append(copy)
+
+    for copy in dma_list:
+        copy.wait()
 
 
 def generate_rpa_metadata(
@@ -467,14 +543,20 @@ def generate_rpa_metadata(
     *,
     interpret=False,
 ):
+    scratch_shapes = [
+        RPASchedule.smem_specs(config),
+        pltpu.SMEM((config.batch_size, ), jnp.int32),
+        pltpu.SemaphoreType.DMA((1, )),
+    ]
+
     return pl.pallas_call(
         functools.partial(rpa_metadata_schedule_kernel, config=config),
         out_shape=RPASchedule.out_shape(config),
         grid_spec=pltpu.PrefetchScalarGridSpec(
-            num_scalar_prefetch=3,  # cu_q_lens, kv_lens, distribution
+            num_scalar_prefetch=3,
             in_specs=[],
-            out_specs=RPASchedule.out_specs(config),
-            scratch_shapes=[pltpu.SMEM((config.batch_size, ), jnp.int32)],
+            out_specs=RPASchedule.hbm_specs(config),
+            scratch_shapes=scratch_shapes,
         ),
         interpret=interpret,
         name="rpa_metadata_schedule",
