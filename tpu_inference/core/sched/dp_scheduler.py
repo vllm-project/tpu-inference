@@ -254,10 +254,6 @@ def _scheduler_worker_process(
                     logger.info(f"Rank {rank}: Shutting down")
                     scheduler.shutdown()
                     _send_result(None)  # Signal completion
-                    # Use os._exit to avoid atexit handlers. Forked
-                    # processes inherit the parent's
-                    # multiprocessing._exit_function which tries to
-                    # join sibling worker processes, causing a deadlock.
                     os._exit(0)
                 case _:
                     error = SchedulerWorkerError(
@@ -272,7 +268,6 @@ def _scheduler_worker_process(
                 scheduler.shutdown()
             except Exception:
                 pass
-            # Use os._exit to avoid atexit deadlock (see SHUTDOWN case).
             os._exit(0)
 
         except Exception as e:
@@ -411,20 +406,12 @@ class DPScheduler(SchedulerInterface):
         )
 
         # Register an atexit handler that runs *before* multiprocessing's
-        # _exit_function (atexit handlers run LIFO). This ensures our
-        # workers are terminated and joined before _exit_function tries
-        # to join them, preventing the hang on os.waitpid().
-        self._atexit_registered = True
+        # _exit_function (atexit handlers run LIFO). This kills workers
+        # if shutdown() was never called (e.g. unhandled exception).
         atexit.register(self._atexit_cleanup)
 
     def _atexit_cleanup(self) -> None:
-        """Atexit handler to terminate worker processes before
-        multiprocessing's _exit_function tries to join them."""
-        if not self._atexit_registered:
-            return
-        # Use SIGKILL instead of SIGTERM to avoid triggering native
-        # signal handlers (e.g. abseil/glog) that dump noisy stack
-        # traces. At atexit time, graceful shutdown is not needed.
+        """Kill worker processes if shutdown() was not called."""
         for process in self.processes:
             if process.is_alive():
                 try:
@@ -433,7 +420,6 @@ class DPScheduler(SchedulerInterface):
                     pass
         for process in self.processes:
             process.join(timeout=5.0)
-        # Clear the active children list so _exit_function is a no-op
         multiprocessing.active_children()
 
     def _create_per_rank_configs(self, kv_cache_config: KVCacheConfig) -> None:
@@ -1077,8 +1063,6 @@ class DPScheduler(SchedulerInterface):
 
     def shutdown(self) -> None:
         """Shutdown all DP rank scheduler worker processes."""
-        # Disable atexit handler since we're cleaning up explicitly
-        self._atexit_registered = False
         atexit.unregister(self._atexit_cleanup)
 
         # Send shutdown command to all workers, skipping dead ones
@@ -1105,19 +1089,11 @@ class DPScheduler(SchedulerInterface):
         for process in self.processes:
             process.join(timeout=5.0)
             if process.is_alive():
-                # Use SIGKILL to avoid native signal handler stack traces
                 try:
                     os.kill(process.pid, signal.SIGKILL)
                 except OSError:
                     pass
-                process.join(timeout=5.0)
-
-        # Deregister children from multiprocessing's active list so that
-        # the atexit _exit_function won't try to join them again (which
-        # would hang on os.waitpid for already-exited processes).
-        # Calling active_children() has the side-effect of joining and
-        # removing any finished processes from the internal list.
-        multiprocessing.active_children()
+                process.join(timeout=1.0)
 
         # Close all pipe connections
         for rank in range(self.dp_size):
