@@ -23,6 +23,7 @@ from tpu_inference.kernels.experimental.batched_rpa import (bref_override,
                                                             flash_attention)
 from tpu_inference.kernels.experimental.batched_rpa import \
     schedule as schedule_lib
+from tpu_inference.kernels.experimental.batched_rpa import utils
 
 
 def make_rpa_kernel(config: schedule_lib.RPAConfig):
@@ -87,29 +88,6 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
             o_vref,
         ):
 
-            def strided_load(ref, start_row, num_rows, step, *, dtype=None):
-                """Loads data from HBM with strided access, handling 128-lane alignment."""
-                _, row_width = ref.shape
-                num_sub_lanes = row_width // 128
-                ref_flat = ref.reshape(-1, 128)
-
-                # scale indices to match flattened arraw.
-                v_start = start_row * num_sub_lanes
-                v_num = num_rows * num_sub_lanes
-                v_step = step * num_sub_lanes
-
-                # Gather the chunks into the original head dimension.
-                chunks = [
-                    ref_flat[pl.ds(v_start + i, v_num // v_step, v_step)]
-                    for i in range(num_sub_lanes)
-                ]
-                vec = jnp.concat(chunks, axis=1)
-
-                return pltpu.bitcast(vec, dtype) if dtype is not None else vec
-
-            def get_dtype_bitwidth(dtype):
-                return jax._src.dtypes.itemsize_bits(dtype)
-
             def _strided_load_bkv(b_idx, start):
                 assert start % kv_packing == 0
                 start //= kv_packing
@@ -117,14 +95,14 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
                     config.bkv_sz * bkv_stride, config.head_dim))
 
                 if kv_packing == 1:
-                    k = strided_load(
+                    k = utils.strided_load(
                         kv_ref,
                         start,
                         config.bkv_sz * bkv_stride,
                         bkv_stride,
                         dtype=config.kv_dtype,
                     )
-                    v = strided_load(
+                    v = utils.strided_load(
                         kv_ref,
                         start + 1,
                         config.bkv_sz * bkv_stride,
@@ -133,54 +111,12 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
                     )
                     return [(k, v)]
 
-                kv = strided_load(kv_ref, start, config.bkv_sz * bkv_stride,
-                                  bkv_stride)
+                kv = utils.strided_load(kv_ref, start,
+                                        config.bkv_sz * bkv_stride, bkv_stride)
                 bitwidth = 32 // kv_packing
 
-                # If we want to convert 32-bits into 32//N number of N-bits value, naive
-                # approach would be to perform 32//N number of 32-bits to N-bits conversion.
-                # However, we can reduce number of instructions by utilizing binary tree.
-                # 0: [32]
-                # 1: [16, 16]
-                # ...
-                # log2(32//N): [N, N, ... N]
-
-                def _convert_to_target_bitwidth(val, target_bitwidth: int):
-                    curr_dtype = val.dtype
-                    curr_bitwidth = get_dtype_bitwidth(curr_dtype)
-                    assert target_bitwidth != curr_bitwidth, "No conversion is needed."
-
-                    # We split val into two vals (left and right) where each have half of the
-                    # original bitwidth.
-                    next_bitwidth = curr_bitwidth // 2
-                    next_dtype = jnp.dtype(f"uint{next_bitwidth}")
-
-                    left = val.astype(next_dtype)
-
-                    # Bitwise shift is only supported in uint32.
-                    val_u32 = pltpu.bitcast(val, jnp.uint32)
-                    val_u32_shifted = val_u32 >> next_bitwidth
-                    # Convert back to original dtype.
-                    val_shifted = pltpu.bitcast(val_u32_shifted, curr_dtype)
-                    right = val_shifted.astype(next_dtype)
-
-                    if next_bitwidth == target_bitwidth:
-                        k = pltpu.bitcast(left, config.kv_dtype)
-                        v = pltpu.bitcast(right, config.kv_dtype)
-                        return [(k, v)]
-                    else:
-                        left_out = _convert_to_target_bitwidth(
-                            left,
-                            target_bitwidth=target_bitwidth,
-                        )
-                        right_out = _convert_to_target_bitwidth(
-                            right,
-                            target_bitwidth=target_bitwidth,
-                        )
-                        return left_out + right_out
-
-                return _convert_to_target_bitwidth(kv,
-                                                   target_bitwidth=bitwidth)
+                return utils.convert_to_target_bitwidth(
+                    kv, target_bitwidth=bitwidth, kv_dtype=config.kv_dtype)
 
             step = pl.program_id(0)
 
@@ -218,26 +154,26 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
                 l_scratch[b] = jnp.where(reset_cond, 0.0, l_scratch[b])
                 acc_scratch[b] = jnp.where(reset_cond, 0.0, acc_scratch[b])
 
-            def load_q_batch(b_idx):
-                q_p = config.num_q_heads_per_kv_head // q_packing
-                q_ref = (q_vref.bitcast(jnp.uint32).at[b_idx].reshape(
-                    -1, config.head_dim))
-                q_loaded = strided_load(
-                    q_ref,
-                    0,
-                    config.num_kv_heads * config.bq_sz * q_p,
-                    1,
-                    dtype=config.q_dtype,
-                )
-                return q_loaded.reshape(
-                    config.num_kv_heads,
-                    config.bq_sz * config.num_q_heads_per_kv_head,
-                    config.head_dim,
-                )
+            q_p = config.num_q_heads_per_kv_head // q_packing
+            q_ref = q_vref.bitcast(jnp.uint32).reshape(-1, config.head_dim)
+            q_loaded = utils.strided_load(
+                q_ref,
+                0,
+                config.batch_size * config.num_kv_heads * config.bq_sz * q_p,
+                1,
+                dtype=config.q_dtype,
+            )
+            q = q_loaded.reshape(
+                config.batch_size,
+                config.num_kv_heads,
+                config.bq_sz * config.num_q_heads_per_kv_head,
+                config.head_dim,
+            )
 
-            q_flat = jnp.stack(
-                [load_q_batch(b) for b in range(config.batch_size)], axis=0)
-
+            # We want to load k, v from (batch, bkv_sz, bkv_stride, kv_packing, d)
+            # where bkv_stride ~= num_kv_heads * 2 // kv_packing
+            # to 2x (batch, num_kv_heads, bkv_sz, d)
+            # We use strided_load to avoid the expensive transpose.
             k_b = []
             v_b = []
             for b in range(config.batch_size):
@@ -260,7 +196,6 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
                 v = v[:config.num_kv_heads]
                 k_b.append(k)
                 v_b.append(v)
-
             # Stack to (batch, num_heads, bkv_sz, 128)
             k = jnp.stack(k_b, axis=0)
             v = jnp.stack(v_b, axis=0)
@@ -270,7 +205,7 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
             acc_val = acc_scratch[...]
 
             m_next, l_next, o_next = flash_attention.flash_attention(
-                q_flat[...],
+                q,
                 k,
                 v,
                 acc_val,
@@ -285,27 +220,10 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
             l_scratch[...] = l_next
             acc_scratch[...] = o_next
 
-            def strided_store(ref, start, sz, step, val):
-                assert schedule_lib.get_dtype_packing(ref.dtype) == 1
-                assert ref.dtype == val.dtype
-                assert ref.shape == val.shape
-                assert len(ref.shape) == 2
-                r, l = ref.shape  # noqa
-                assert l % 128 == 0
-                folds = l // 128
-                ref = ref.reshape(r * folds, 128)
-                start *= folds
-                sz *= folds
-                step *= folds
-                assert sz % step == 0
-                for i in range(folds):
-                    ref[pl.ds(start + i, sz // step,
-                              step)] = val[:, i * 128:(i + 1) * 128]
-
             @pl.loop(0, config.batch_size, unroll=True)
             def _for_each_row(b):
 
-                def _compute():
+                def _accum():
                     o = acc_scratch[b]
                     l_ = l_scratch[b]
                     l_ = jnp.tile(l_, (o.shape[-1] // l_.shape[-1], ))
@@ -325,14 +243,19 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
                     ))
                     out = pltpu.bitcast(out,
                                         out_ref.dtype).reshape(out_ref.shape)
-                    strided_store(out_ref, 0, out_ref.shape[0], 1, out)
+                    utils.strided_store(out_ref, 0, out_ref.shape[0], 1, out)
 
+                # Adding a conditional causes a scheduling barrier. In prefill, we often
+                # use small block sizes, so it's not worth executing the accumulation
+                # on every block. In decode, because of the large block sizes / and or
+                # batch sizes, we almost always use accumulation on every block. Please
+                # tune `fuse_accum` for your use case.
                 if not config.fuse_accum:
                     idx = step * config.batch_size + b
                     is_last_k = schedule.is_last_k[idx] == 1
-                    jax.lax.cond(is_last_k, _compute, lambda: None)
+                    jax.lax.cond(is_last_k, _accum, lambda: None)
                 else:
-                    _compute()
+                    _accum()
 
         kv_cache_spec = pl.BlockSpec(
             block_shape=kv_vmem_shape,
@@ -390,6 +313,9 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
             safe_steps = jnp.minimum(actual_steps, config.max_steps_ub)
             grid = (safe_steps, )
 
+            # Transfer schedule from HBM to SMEM --- we only copy what we need. Since
+            # we almost always over-allocate schedule size, we only want to copy a small
+            # portion of it from HBM to SMEM.
             sem = dma_sem.at[0]
             flat_hbm = jax.tree_util.tree_leaves(schedule_hbm)
             flat_smem = jax.tree_util.tree_leaves(schedule)
@@ -408,9 +334,7 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
                     copy.start()
                     dma_list.append(copy)
 
-            # Zero-initialize KV cache buffer
-            # we do this weird dma thing to overlap with HBM -> SMEM fetch
-
+            # Initialize KV cache to zeros
             kv_alloc = final_allocs[1]
             num_lanes = pltpu.get_tpu_info().num_lanes
             kv_ref_flat = kv_alloc.window_ref.bitcast(jnp.uint32).reshape(
@@ -444,8 +368,6 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
     num_pages = config.num_seq * config.pages_per_seq
     if config.total_num_pages is not None:
         num_pages = config.total_num_pages
-    q_packing = schedule_lib.get_dtype_packing(config.q_dtype)
-    kv_packing = schedule_lib.get_dtype_packing(config.kv_dtype)
     num_kv_heads_x2_packed = (config.num_kv_heads * 2 + kv_packing -
                               1) // kv_packing
 

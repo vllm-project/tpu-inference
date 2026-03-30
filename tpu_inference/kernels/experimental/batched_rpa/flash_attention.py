@@ -14,25 +14,10 @@
 
 import jax.numpy as jnp
 from jax import lax
-from jax.experimental import pallas as pl
 
 from tpu_inference.kernels.experimental.batched_rpa import \
     schedule as rpa_schedule
-
-
-def align_to(a, b):
-    return pl.cdiv(a, b) * b
-
-
-def broadcast_minor(src, shape):
-    if src.shape == shape:
-        return src
-    assert src.shape[:-1] == shape[:-1]
-    assert src.shape[-1] % 128 == 0
-    target_minor = align_to(shape[-1], src.shape[-1])
-    # no-op concatenation.
-    return jnp.concatenate([src for _ in range(target_minor // src.shape[-1])],
-                           axis=-1)[..., :shape[-1]]
+from tpu_inference.kernels.experimental.batched_rpa import utils
 
 
 def flash_attention(
@@ -116,7 +101,7 @@ def flash_attention(
 
     m_curr = jnp.max(qk, axis=-1, keepdims=True)
     m_next = jnp.maximum(m_prev, m_curr)
-    p = jnp.exp(qk - broadcast_minor(m_next, qk.shape))
+    p = jnp.exp(qk - utils.broadcast_minor(m_next, qk.shape))
 
     pv = lax.dot_general(
         p.reshape((b * k_heads, tq, s)),
@@ -133,6 +118,6 @@ def flash_attention(
     alpha = jnp.exp(m_prev - m_next)
     l_next = alpha * l_prev + p_rowsum
 
-    o_next = broadcast_minor(alpha, o_prev.shape) * o_prev + pv
+    o_next = utils.broadcast_minor(alpha, o_prev.shape) * o_prev + pv
 
     return m_next, l_next, o_next

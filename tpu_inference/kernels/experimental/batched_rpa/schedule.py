@@ -27,10 +27,10 @@ from jax.experimental.pallas import tpu as pltpu
 class RpaCase(Enum):
     """Represents the different cases for Ragged Paged Attention.
 
-    - DECODE: Sequences are in decode-only mode (q_len = 1).
-    - PREFILL: Sequences are in prefill-only mode (q_len > 1, static).
-    - MIXED: Sequences can be a mix of prefill and decode (q_len > 1, dynamic).
-    """
+  - DECODE: Sequences are in decode-only mode (q_len = 1).
+  - PREFILL: Sequences are in prefill-only mode (q_len > 1, static).
+  - MIXED: Sequences can be a mix of prefill and decode (q_len > 1, dynamic).
+  """
 
     DECODE = 0
     PREFILL = 1
@@ -301,20 +301,20 @@ def rpa_metadata_schedule_kernel(
 ):
     """Generates the HBM-to-VMEM DMA schedule
 
-    This kernel:
-    1. Iterates through each (potentially ragged) sequence
-    2. Breaks Queries (Q) and Key-Values (KV) into blocks (bq_sz, bkv_sz).
-    3. Assigns tasks to 'lanes' (TPU batch items) based on current lane occupancy
-        to ensure balanced execution across the batch dimension.
-    4. Encodes DMA offsets:
-        - dma_q: HBM start index and size for Query blocks.
-        - dma_kv_cache: Paged indices for existing KV tokens.
-        - dma_kv_new: offsets for new tokens being added to the cache.
-        - do_writeback: boolean flag indicating if a block should be flushed to
-        HBM (ie does this block contain new tokens to add to KV cache).
+  This kernel:
+  1. Iterates through each (potentially ragged) sequence
+  2. Breaks Queries (Q) and Key-Values (KV) into blocks (bq_sz, bkv_sz).
+  3. Assigns tasks to 'lanes' (TPU batch items) based on current lane occupancy
+     to ensure balanced execution across the batch dimension.
+  4. Encodes DMA offsets:
+     - dma_q: HBM start index and size for Query blocks.
+     - dma_kv_cache: Paged indices for existing KV tokens.
+     - dma_kv_new: offsets for new tokens being added to the cache.
+     - do_writeback: boolean flag indicating if a block should be flushed to
+     HBM (ie does this block contain new tokens to add to KV cache).
 
-    Check bref_override.py to check usage of the schedule.
-    """
+  Check bref_override.py to check usage of the schedule.
+  """
     for b in range(config.batch_size):
         lane_lengths_ref[b] = 0
 
@@ -350,6 +350,7 @@ def rpa_metadata_schedule_kernel(
             end_k_idx = jnp.minimum(n_k, end_k_idx_causal)
 
             def k_loop(k_idx, curr_ptr):
+
                 idx = curr_ptr * config.batch_size + target_lane
                 schedule.s_idx[idx] = s_idx
                 schedule.q_idx[idx] = q_idx
