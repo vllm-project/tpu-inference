@@ -505,8 +505,6 @@ class VllmModelWrapper:
                 call_kwargs = {
                     "is_multimodal": torch_view(is_multimodal),
                 }
-                if handle_oov_mm_token:
-                    call_kwargs["handle_oov_mm_token"] = handle_oov_mm_token
 
                 output_from_torch = torch.func.functional_call(
                     self.model,
@@ -531,7 +529,6 @@ class VllmModelWrapper:
             mm_embeds: list[jax.Array] | jax.Array | None = None,
             *,
             is_multimodal: jax.Array | None = None,
-            handle_oov_mm_token: bool = False,
         ) -> jax.Array:
             with torchax.default_env():
                 if mm_embeds is not None:
@@ -546,8 +543,6 @@ class VllmModelWrapper:
                 call_kwargs = {
                     "is_multimodal": torch_view(is_multimodal),
                 }
-                if handle_oov_mm_token:
-                    call_kwargs["handle_oov_mm_token"] = handle_oov_mm_token
 
                 output_from_torch = torch.func.functional_call(
                     self.model,
