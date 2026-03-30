@@ -93,23 +93,28 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes):
         },
     }
 
-    # --- Run Inference ---
-    print("Running inference...")
-    outputs = llm.generate(inputs, sampling_params)
+    # --- Run Inference (twice to show XLA compilation speedup) ---
+    import time
 
-    # --- Verification ---
-    generated_text = outputs[0].outputs[0].text.strip()
+    for i in range(1, 3):
+        print(f"Running inference (run {i}/2)...")
+        t0 = time.perf_counter()
+        outputs = llm.generate(inputs, sampling_params)
+        elapsed = time.perf_counter() - t0
 
-    print("-" * 50)
-    print("Generated Text:")
-    print(generated_text)
-    print("-" * 50)
+        generated_text = outputs[0].outputs[0].text.strip()
 
-    # Check output
-    similarity_score = difflib.SequenceMatcher(None, generated_text,
-                                               EXPECTED_TEXT).ratio()
-    print(f"Similarity Score: {similarity_score:.4f}")
-    assert similarity_score >= 0.85, (
-        f"Text similarity too low ({similarity_score:.2f}).\n"
-        f"Expected: {EXPECTED_TEXT}\n"
-        f"Actual:   {generated_text}")
+        print("-" * 50)
+        print(f"Run {i} elapsed: {elapsed:.2f}s")
+        print(f"Generated Text: {generated_text}")
+        print("-" * 50)
+
+        # Only verify output correctness on run 1; run 2 is for timing only.
+        if i == 1:
+            similarity_score = difflib.SequenceMatcher(None, generated_text,
+                                                       EXPECTED_TEXT).ratio()
+            print(f"Similarity Score: {similarity_score:.4f}")
+            assert similarity_score >= 0.85, (
+                f"Text similarity too low ({similarity_score:.2f}).\n"
+                f"Expected: {EXPECTED_TEXT}\n"
+                f"Actual:   {generated_text}")
