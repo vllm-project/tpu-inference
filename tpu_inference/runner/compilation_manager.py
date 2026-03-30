@@ -127,7 +127,6 @@ class CompilationManager:
         import functools
         for num_tokens in self.runner.num_tokens_paddings:
             hidden_size = self.runner.vllm_config.model_config.get_hidden_size()
-            print(f">>> CRASH DEBUG: base get_hidden_size() = {hidden_size}")
             hf_conf = self.runner.vllm_config.model_config.hf_config
             
             # Text hidden size for dummy padding masks, etc.
