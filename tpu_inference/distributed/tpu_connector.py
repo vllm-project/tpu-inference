@@ -87,6 +87,7 @@ if TYPE_CHECKING:
 
 import tpu_inference.distributed.utils as dist_utils
 from tpu_inference import envs
+from tpu_inference.distributed.kv_transfer import multi_layer_copy
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 from tpu_inference.utils import device_array
@@ -602,7 +603,8 @@ class TPUConnectorWorker:
                 if req_id in self.reqs_ready_to_scatter:
                     kv, indices = self.reqs_ready_to_scatter.pop(req_id)
                     self.runner.kv_caches = scatter_kv_slices(
-                        self.runner.kv_caches, kv, indices)
+                        self.runner.kv_caches, kv, indices, self.mesh,
+                        self.sharding.spec)
 
                 # The request has finished pulling the KV from remote, or it has full local
                 # prefix cache, need to notify P to let it free blocks.
@@ -769,19 +771,28 @@ def select_from_kv_caches(kv_caches: list[jax.Array],
 @functools.partial(
     jax.jit,
     donate_argnames=("kv_caches", ),
+    static_argnames=("mesh", "spec"),
 )
 def scatter_kv_slices(kv_caches: list[jax.Array], kv_slices: list[jax.Array],
-                      indices: list[jax.Array]) -> list[jax.Array]:
-    num_indices = indices.shape[0]
+                      indices: jax.Array, mesh: jax.sharding.Mesh,
+                      spec) -> list[jax.Array]:
     num_slices = kv_slices[0].shape[0]
-    # indices might be padded
-    assert num_slices <= num_indices
+    src_offsets = jnp.arange(num_slices, dtype=jnp.int32)
+    dest_offsets = indices
+    chunk_sizes = jnp.ones(num_slices, dtype=jnp.int32)
+    num_chunks = jnp.array([num_slices], dtype=jnp.int32)
 
-    new_kv_caches = []
-    for cache, slice in zip(kv_caches, kv_slices):
-        if num_slices < num_indices:
-            slice = jnp.pad(slice, ((0, num_indices - num_slices), (0, 0),
-                                    (0, 0), (0, 0)))
-        new_cache = cache.at[indices].set(slice)
-        new_kv_caches.append(new_cache)
-    return new_kv_caches
+    replicated_spec = jax.sharding.PartitionSpec()
+
+    return multi_layer_copy(
+        src_array=kv_slices,
+        dest_array=kv_caches,
+        src_offsets=src_offsets,
+        dest_offsets=dest_offsets,
+        chunk_sizes=chunk_sizes,
+        num_chunks=num_chunks,
+        mesh=mesh,
+        src_sharding_spec=spec,
+        dest_sharding_spec=spec,
+        replicated_sharding_spec=replicated_spec,
+    )
