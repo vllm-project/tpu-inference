@@ -28,8 +28,8 @@ if args_to_append:
     # Join our new args with a space
     new_args_str = " ".join(args_to_append)
 
-    # Combine the old and new args, stripping any leading/trailing spaces
-    os.environ["LIBTPU_INIT_ARGS"] = f"{current_args} {new_args_str}".strip()
+    # Combine the old and new args
+    os.environ["LIBTPU_INIT_ARGS"] = f"{current_args} {new_args_str}"
 
 # Monkeypatch vLLM to avoid ImportError: cannot import name 'SamplingParams' from 'vllm'
 # in vllm/v1/... submodules due to circular imports or lazy loading failures.
