@@ -194,6 +194,8 @@ class GmmTest(jtu.JaxTestCase):
 
     group_sizes = get_group_sizes(batch_size, num_groups)
     group_offset = jnp.array(group_offset, dtype=jnp.int32)
+    # print(f'xw32 test_gmm_basic {lhs.shape=}, {rhs.shape=}, {group_sizes=}, {group_offset=}')
+    # Prints out: xw32 test_gmm_basic lhs.shape=(128, 512), rhs.shape=(16, 512, 512), group_sizes=Array([14, 14,  5,  7,  8,  2,  4, 10, 11,  2, 14,  0,  9,  8, 13,  7],      dtype=int32), group_offset=Array(0, dtype=int32)
 
     expected, reference_vjpfunc = jax.vjp(
         functools.partial(

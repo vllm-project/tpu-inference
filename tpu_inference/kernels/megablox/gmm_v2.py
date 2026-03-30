@@ -59,7 +59,9 @@ class Dimensions:
   size_m: int
   size_k: int
   size_n: int
+  # size_group=w.shape[0](or num_actual_groups)
   size_group: int
+  # size_lhs_group=group_sizes.shape[0]
   size_lhs_group: int
   # xw32 NB: Compared with v1, v2 introduces 'size_lhs_sublane' — the TPU sublane tiling size (hardware-dependent). LHS and output are reshaped to '(-1, size_lhs_sublane, ...)' so DMA sizes are dynamic and aligned to sublane boundaries. This avoids loading/storing unnecessary rows. The 'BoundedSlice' mechanism (line 151) enables variable-size DMA.
   # xw32q: but why does it avoid loading/storing unnecessary rows?
@@ -277,6 +279,24 @@ def inner_kernel(
       acc_ref: Reference to the accumulator.
       metadata_ref: Reference to the metadata.
       cfgs: GmmConfigs.
+  """
+  # What is the relationship bewteen "size_lhs_sublane" and "tile_m"?
+  """
+  - 'size_lhs_sublane' is the TPU sublane tiling size — a
+  hardware-dependent constant (e.g., 8 for bf16). It's the
+  smallest addressable unit along the row dimension for DMA
+  transfers.
+  - 'tile_m' is the logical tile size along the M dimension
+  (e.g., 128).
+
+  The LHS and output arrays are reshaped from '(tile_m, ...)' to
+   '(tile_m // size_lhs_sublane, size_lhs_sublane, ...)', i.e.,
+  the M dimension is split into sublane-sized chunks. This makes
+   the first dimension count in units of sublane rows.
+
+  So 'tile_m' is always a multiple of 'size_lhs_sublane', and
+  'tile_m // size_lhs_sublane' gives the number of sublane-rows
+  per tile.
   """
 
   def _matmul(is_first_k_step: bool, is_last_k_step: bool):
@@ -752,6 +772,32 @@ def kernel_main(
 
   # Bounded slice requires second last dim to be aligned to the sublane size.
   # rhs_ref uses static tiling thus reshape is not needed.
+  # xw32q: why is it necessary to do a reshape and put "size_lhs_sublane" to the second last dimension?
+  """
+  TPU DMA alignment constraint. On TPU, DMA transfers must be
+  aligned to sublane boundaries — the smallest addressable unit
+  along the row dimension. The reshape to (-1, size_lhs_sublane,
+   ...) makes the first dimension count in units of sublane
+  rows, so that pl.ds(row_start, row_size) in the index maps
+  (lines 85-86) produces DMA addresses that are always
+  sublane-aligned.
+
+  The reshape itself is not the optimization — dynamic slicing
+  is. The reshape just makes dynamic slicing legal on TPU
+  hardware:
+
+  1. Dynamic slice (pl.ds with variable row_size) avoids loading
+   unnecessary rows — the actual performance win.
+  2. Sublane-aware reshape ensures the dynamic slice addresses
+  are hardware-aligned — without it, arbitrary row slices could
+  produce misaligned DMA requests that the hardware doesn't
+  support.
+
+  For example, with size_lhs_sublane=8 and a group of 20 rows:
+  instead of loading a fixed tile_m=128 rows (v1 behavior), v2
+  loads only cdiv(20, 8) = 3 sublane-rows = 24 rows — much
+  closer to the actual 20 needed.
+  """
   lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, lhs_ref.shape[-1])
   out_in = out_ref.reshape(-1, cfgs.dims.size_lhs_sublane, out_ref.shape[-1])
   scratches = [partial_out_ref, acc_ref, metadata_ref]
@@ -1113,6 +1159,7 @@ def _gmm_v2_impl(
     rhs_bias_spec = pl.BlockSpec(memory_space=pltpu.HBM)
 
   # Initialize scratch shapes.
+  # NB: dims.size_group=rhs.shape
   max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
 
   scratch_shapes = [
@@ -1241,8 +1288,102 @@ def make_tgmm_configs(
       # GMM's 'zero_init' zeros unvisited m-rows via DMA, which doesn't apply to tgmm's [num_groups, k, n] output. The actual zero-initialization for tgmm accumulation happens at the 'pallas_call' level
       zero_init=False,
   )
-  
 
+
+def tgmm_inner_kernel():
+  pass
+
+class TgmmIndexMaps:
+
+  def __init__(self, metadata_ref: MetadataRef, cfgs: GmmConfigs):
+    self.metadata_ref = metadata_ref
+    self.cfgs = cfgs
+
+  def lhs_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array):
+    m_start = self.metadata_ref.gm_id_to_m_offset[gm_id]
+    m_end = self.metadata_ref.gm_id_to_m_offset[gm_id + 1]
+
+    row_start = m_start // self.cfgs.dims.size_lhs_sublane
+    row_end = pl.cdiv(m_end, self.cfgs.dims.size_lhs_sublane)
+    row_size = row_end - row_start
+    return (pl.ds(row_start, row_size), 0, k_id)
+  
+  def rhs_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array):
+    m_start = self.metadata_ref.gm_id_to_m_offset[gm_id]
+    m_end = self.metadata_ref.gm_id_to_m_offset[gm_id + 1]
+
+    row_start = m_start // self.cfgs.dims.size_lhs_sublane
+    row_end = pl.cdiv(m_end, self.cfgs.dims.size_lhs_sublane)
+    row_size = row_end - row_start
+    return (pl.ds(row_start, row_size), 0, n_id)
+  
+  def out_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array):
+    group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
+    return (group_id, k_id, n_id)
+
+def generate_tgmm_block_specs(
+        metadata_ref: MetadataRef, cfgs: GmmConfigs
+) -> Tuple[Tuple[pl.BlockSpec, pl.BlockSpec], pl.BlockSpec]:
+  """Generates block specs for the given lhs, rhs, and out refs."""
+  index_map = TgmmIndexMaps(metadata_ref, cfgs)
+  # NB: in tgmm, LHS is reshaped from (M, K) to (-1, size_lhs_sublane, K) so that DMA transfers are aligned to sublane boundaries. The first dimension after this reshape has size tile_m // size_lhs_sublane — i.e., the number of "sublane-rows" in a tile.
+  bounded_slice_gm = pl.BoundedSlice(cfgs.tiles.tile_m //
+                                     cfgs.dims.size_lhs_sublane)
+  lhs_block_spec = pl.BlockSpec(
+      (bounded_slice_gm, cfgs.dims.size_lhs_sublane, cfgs.tiles.tile_k),
+      index_map.lhs_index_map,
+  )
+  rhs_block_spec = pl.BlockSpec(
+      (bounded_slice_gm, cfgs.dims.size_lhs_sublane, cfgs.tiles.tile_n),
+      index_map.rhs_index_map,
+  )
+  # xw32q: do I need `cfgs.tiles.tile_k // cfgs.rhs_cfgs.packing` as in the function "generate_block_specs"?
+  out_block_spec = pl.BlockSpec(
+      (None, cfgs.tiles.tile_k, cfgs.tiles.tile_n),
+      index_map.out_index_map,
+  )
+
+  return (lhs_block_spec, rhs_block_spec), out_block_spec
+
+
+def tgmm_kernel_main(
+    lhs_group_sizes_ref,  # int32[size_lhs_group]
+    group_offset_ref,  # int32[1]
+    lhs_ref,  # [m, k]
+    rhs_ref,  # [m, n]
+    out_ref,  # [num_groups, k, n]
+    # scratch memory
+    partial_out_ref: jax.Array,  # 
+    acc_ref: jax.Array,  # 
+    metadata_ref, # contains gm_id_to_group_id and gm_id_to_m_offset in SMEM.
+    *, cfgs,
+):
+  num_k = pl.cdiv(cfgs.dims.size_k, cfgs.tiles.tile_k)
+  num_n = pl.cdiv(cfgs.dims.size_n, cfgs.tiles.tile_n)
+  num_gm = fill_metadata(
+      lhs_group_sizes_ref,
+      group_offset_ref,
+      metadata_ref,
+      cfgs=cfgs,
+  )
+  # 3. Prepare grid, block specs, scratch shapes, etc.
+  # grid doesn't need to have a dimension num_groups because it can be determined by "group_ids[grid_id] - group_offset[0]"
+  # grid = (n, k, gm)
+  # lhs_block_spec=((k_blk, m_blk), (n_i, k_i, gm_i)->(k_i, pl.ds(row_start, row_size)))
+  # rhs_block_spec=((m_blk, n_blk), (n_i, k_i, gm_i)->(pl.ds(row_start, row_size), n_i))
+  # out_block_spec((None, k_blk, n_blk), (n_i, k_i, gm_i)->(group_ids[grid_id] - group_offset[0], k_blk, n_blk))
+  # out_shape=(ng, k, n)
+  in_specs, out_specs = generate_tgmm_block_specs(metadata_ref, cfgs)
+  pipeline_fn = pltpu.emit_pipeline(
+      functools.partial(tgmm_inner_kernel, cfgs=cfgs),
+      grid=(num_n, num_k, num_gm),
+      in_specs=in_specs,
+      out_specs=out_specs,
+  )
+  lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, lhs_ref.shape[-1])
+  rhs_in = rhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, rhs_ref.shape[-1])
+  scratches = [partial_out_ref, acc_ref, metadata_ref]
+  pipeline_fn(lhs_in, rhs_in, out_ref, scratches=scratches)
 
 @functools.partial(
     jax.jit,
@@ -1258,7 +1399,7 @@ def make_tgmm_configs(
     ],
 )
 def _tgmm_v2_impl(
-    lhs: jax.Array,  # [size_k, size_m]
+    lhs: jax.Array,  # [size_m, size_k]
     rhs: jax.Array,  # [size_m, size_n]
     group_sizes: jax.Array,
     num_actual_groups: int,
@@ -1302,16 +1443,49 @@ def _tgmm_v2_impl(
       out_dtype=preferred_element_type,
       acc_dtype=acc_dtype,
   )
-  print(f'xw32 {cfgs=}')
-  # TODO(xw32): continue
-  
+  dims = cfgs.dims
+  tiles = cfgs.tiles
+  # print(f'xw32 {cfgs=}')
+  # cfgs=GmmConfigs(tiles=TileSizes(tile_m=128, tile_k=512, tile_n=512), dims=Dimensions(size_m=128, size_k=512, size_n=512, size_group=16, size_lhs_group=16, size_lhs_sublane=16), lhs_cfgs=InputConfigs(quant_dtype=None, quant_block_size=-1, dtype=dtype(bfloat16), has_bias=False, has_scale=False, packing=1, num_quant_blocks=1), rhs_cfgs=InputConfigs(quant_dtype=None, quant_block_size=-1, dtype=dtype(bfloat16), has_bias=False, has_scale=False, packing=1, num_quant_blocks=1), out_dtype=dtype(bfloat16), acc_dtype=dtype(bfloat16), zero_init=False)
 
-  # 3. Prepare block specs, scratch shapes, etc.
   # 4. Form pl.pallas_call calling tgmm_kernel_main
-  # ...
+  num_lanes = pltpu.get_tpu_info().num_lanes
+  aligned_n = align_to(dims.size_n, num_lanes)
+  out_init = jax.ShapeDtypeStruct((num_actual_groups, dims.size_k, aligned_n), cfgs.out_dtype)
+  max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
+  scratch_shapes = [
+      # partial_out_ref
+      pltpu.VMEM((dims.size_lhs_sublane, tiles.tile_n), cfgs.out_dtype),
+      # acc_ref
+      pltpu.VMEM((tiles.tile_m, tiles.tile_n), cfgs.acc_dtype),
+      # metadata_ref
+      MetadataRef(
+          gm_id_to_group_id=pltpu.SMEM((max_num_gm, ), jnp.int32),
+          gm_id_to_m_offset=pltpu.SMEM((max_num_gm + 1, ), jnp.int32),
+      ),
+  ]
+  
+  return pl.pallas_call(
+      functools.partial(tgmm_kernel_main, cfgs=cfgs),
+      out_shape=out_init,
+      grid_spec=pltpu.PrefetchScalarGridSpec(
+          num_scalar_prefetch=2,
+          in_specs=[
+              pl.BlockSpec(memory_space=pltpu.HBM), # x
+              pl.BlockSpec(memory_space=pltpu.HBM), # dout
+          ],
+          out_specs=pl.BlockSpec(memory_space=pltpu.HBM),
+          scratch_shapes=scratch_shapes,
+      ),
+      compiler_params=pltpu.CompilerParams(
+          vmem_limit_bytes=vmem_limit_bytes,
+          disable_bounds_checks=True,
+      ),
+      name=get_scope_name(dims, tiles),
+      # the metadata here is for profiling, debugging, and cost modeling. It does not affect the kernel's computation.
+      metadata=get_metadata(cfgs),
+  )(group_sizes, group_offset, lhs, rhs)[:, :, :dims.size_n]
 
-
-  return jnp.zeros((num_groups, size_k, size_n))
 
 @functools.partial(jax.custom_vjp, nondiff_argnames=("tile_info", "vmem_limit_bytes", "precision", "preferred_element_type", "acc_dtype", "maybe_quantize_lhs", "zero_initialize"))
 def gmm_v2(
@@ -1394,7 +1568,7 @@ def _gmm_v2_bwd(
     zero_initialize=zero_initialize
   )
   grad_rhs = _tgmm_v2_impl(
-    lhs.swapaxes(0, 1),  # [k, m]
+    lhs,  # [m, k]
     grad,  # [m, n]
     group_sizes,
     num_actual_groups,
