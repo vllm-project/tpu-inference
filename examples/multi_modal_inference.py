@@ -271,6 +271,11 @@ def main(args):
     engine_args = asdict(req_data.engine_args)
     if args.seed is not None:
         engine_args["seed"] = args.seed
+
+    if engine_args.get("compilation_config") is None:
+        engine_args["compilation_config"] = {}
+    engine_args["compilation_config"]["cudagraph_capture_sizes"] = []
+        
     llm = LLM(**engine_args)
 
     # Don't want to check the flag multiple times, so just hijack `prompts`.
