@@ -118,10 +118,12 @@ class TestTPUConnectorScheduler(unittest.TestCase):
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.kv_transfer_config.is_kv_producer = False
 
-        with patch("tpu_inference.distributed.tpu_connector.get_kv_ips",
-                   return_value="1.1.1.1"), patch(
-                       "tpu_inference.distributed.tpu_connector.get_kv_ports",
-                       return_value=12345):
+        with patch(
+                "tpu_inference.distributed.tpu_connector.dist_utils.get_kv_ips",
+                return_value="1.1.1.1"
+        ), patch(
+                "tpu_inference.distributed.tpu_connector.dist_utils.get_kv_ports",
+                return_value=12345):
             self.scheduler = tpu_connector.TPUConnectorScheduler(
                 self.vllm_config)
 
@@ -296,15 +298,16 @@ class TestTPUConnectorWorker(unittest.TestCase):
             "jax":
             patch('tpu_inference.distributed.tpu_connector.jax'),
             "get_host_ip":
-            patch('tpu_inference.distributed.tpu_connector.get_host_ip',
-                  return_value='127.0.0.1'),
+            patch(
+                'tpu_inference.distributed.tpu_connector.dist_utils.get_host_ip',
+                return_value='127.0.0.1'),
             "get_kv_transfer_port":
             patch(
-                'tpu_inference.distributed.tpu_connector.get_kv_transfer_port',
+                'tpu_inference.distributed.tpu_connector.dist_utils.get_kv_transfer_port',
                 return_value=10000),
             "get_side_channel_port":
             patch(
-                'tpu_inference.distributed.tpu_connector.get_side_channel_port',
+                'tpu_inference.distributed.tpu_connector.dist_utils.get_side_channel_port',
                 return_value=20000),
             "start_transfer_server":
             patch(
@@ -356,7 +359,7 @@ class TestTPUConnectorWorker(unittest.TestCase):
         self.all_mocks["zmq"].Context.assert_called_once()
         self.all_mocks["threading"].Thread.assert_not_called()
         self.all_mocks["ThreadPoolExecutor"].assert_called_once_with(
-            max_workers=64)
+            max_workers=128)
         self.assertFalse(worker.is_producer)
 
     def test_register_runner(self):
@@ -439,8 +442,20 @@ class TestTPUConnectorWorker(unittest.TestCase):
                                            remote_port=123)
         meta.reqs_to_load = {"req1": load_meta}
 
+        worker.runner = MagicMock()
+        original_kv_caches = worker.runner.kv_caches
+        worker.sharding = MagicMock()
+        worker.sharding.spec = "mock_spec"
+        worker.mesh = "mock_mesh"
+        worker.reqs_ready_to_scatter = {"req1": ("kv_data", "indices")}
+        self.all_mocks['scatter_kv_slices'].return_value = "new_kv_caches"
+
         worker.process_send_load(meta)
 
+        self.all_mocks['scatter_kv_slices'].assert_called_once_with(
+            original_kv_caches, "kv_data", "indices", "mock_mesh", "mock_spec")
+        self.assertEqual(worker.runner.kv_caches, "new_kv_caches")
+        self.assertNotIn("req1", worker.reqs_ready_to_scatter)
         worker._maybe_build_notif_socket.assert_called_once_with(load_meta)
         worker._notify_pull_done.assert_called_once_with(
             "socket", "req1", uuid)
@@ -450,7 +465,6 @@ class TestTPUConnectorWorker(unittest.TestCase):
         self.vllm_config.kv_transfer_config.is_kv_producer = False
         worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
         worker.runner = MagicMock()
-        original_kv_caches = worker.runner.kv_caches
 
         mock_future = MagicMock()
         mock_future.done.return_value = True
@@ -462,8 +476,10 @@ class TestTPUConnectorWorker(unittest.TestCase):
         self.assertEqual(done_sending, set())
         self.assertEqual(done_recving, {'req1'})
         self.assertNotIn('req1', worker.reqs_pulling)
-        self.all_mocks['scatter_kv_slices'].assert_called_once_with(
-            original_kv_caches, 'kv_data', 'indices')
+        self.assertIn('req1', worker.reqs_ready_to_scatter)
+        self.assertEqual(worker.reqs_ready_to_scatter['req1'],
+                         ('kv_data', 'indices'))
+        self.all_mocks['scatter_kv_slices'].assert_not_called()
 
     def test_get_finished_sending_expired(self):
         """Tests get_finished for a request that has expired."""
