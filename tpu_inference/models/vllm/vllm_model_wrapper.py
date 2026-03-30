@@ -14,6 +14,7 @@
 
 import copy
 import functools
+import inspect
 import time
 from collections.abc import Sequence
 from contextlib import nullcontext
@@ -141,7 +142,7 @@ class VllmModelWrapper:
 
         register_torch_dispatch_op(
             torch.ops.vllm.torch_sdpa_wrapper,
-            functools.partial(patch_ops.vllm_vit_sdpa, mesh=self.mesh),
+            functools.partial(patch_ops.scaled_dot_product_attention.vllm_vit_sdpa, mesh=self.mesh),
             is_jax_function=True,
             needs_env=False,
         )
@@ -444,11 +445,22 @@ class VllmModelWrapper:
             if not supports_image_grid_thw:
                 del image_grid_thw
 
-            def move(v: torch.Tensor) -> torch.Tensor:
-                if not isinstance(v, torch.Tensor):
-                    logger.warning(f"Expect torch.Tensor, got {type(v)}")
-                    return v
-                return v.to(device="jax")
+            def move(v: Any) -> Any:
+                import numpy as np
+                if isinstance(v, np.ndarray):
+                    if str(v.dtype) == "bfloat16":
+                        v = torch.from_numpy(v.view(np.int16)).view(torch.bfloat16)
+                    else:
+                        v = torch.from_numpy(v)
+                elif not isinstance(v, torch.Tensor) and type(v) not in (int, float, bool, str, list, tuple, dict):
+                    try:
+                        v = torch_view(v)
+                    except Exception:
+                        pass
+                
+                if isinstance(v, torch.Tensor):
+                    return v.to(device="jax")
+                return v
 
             with torchax.default_env():
                 # Ensure all tensors are moved into accelerator so the
@@ -494,6 +506,10 @@ class VllmModelWrapper:
                         torch_mm_embeds = [torch_view(x) for x in mm_embeds]
                     else:
                         torch_mm_embeds = torch_view(mm_embeds)
+                    
+                    if type(self.model.vllm_model).__name__ == "Qwen3VLForConditionalGeneration" and not isinstance(torch_mm_embeds, list):
+                        torch_mm_embeds = [torch_mm_embeds]
+                                
                     call_args = (torch_view(input_ids), torch_mm_embeds)
                 else:
                     call_args = (torch_view(input_ids), )
