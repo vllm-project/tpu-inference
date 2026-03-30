@@ -170,6 +170,7 @@ steps:
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
@@ -196,6 +197,7 @@ steps:
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
         commands:
@@ -255,6 +257,7 @@ steps:
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
           TEST_LORA_TP: "True"
           VLLM_LOG_LEVEL: "INFO"
         agents:
@@ -283,6 +286,7 @@ steps:
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
           USE_V6E8_QUEUE: "True"
           VLLM_LOG_LEVEL: "INFO"
         agents:
@@ -497,6 +501,7 @@ steps:
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}" # Using a queue with more devices for distributed tests
         commands:

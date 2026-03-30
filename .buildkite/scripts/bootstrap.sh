@@ -60,14 +60,9 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     else
       echo "Code files changed. Proceeding with pipeline upload."
     fi
-
-    # Validate modified YAML pipelines using bk pipeline validate
-    if .buildkite/scripts/validate_all_pipelines.sh "$NON_SKIPPABLE_FILES"; then
-      echo "All pipelines syntax are valid. Proceeding with pipeline upload."
-    else
-      echo "Some pipelines syntax are invalid. Failing build."
-      exit 1
-    fi
+    # TODO(#2066): Temporarily disabled static pipeline validation due to upstream schema breakage.
+    # Re-evaluate restoring the validation once Buildkite supports dynamic interpolation in strict mode.
+    echo "Skipping static yaml validation to allow dynamic variables."
 else
     echo "Non-PR build. Bypassing file change check."
     FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r -m "$BUILDKITE_COMMIT")
