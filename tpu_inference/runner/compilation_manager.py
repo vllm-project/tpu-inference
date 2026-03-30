@@ -149,13 +149,18 @@ class CompilationManager:
                         # Qwen2-VL or other models might not use deepstack concat mapping identically
                         pass
 
-            sharding = NamedSharding(self.runner.mesh, PartitionSpec())
+            sharding = NamedSharding(
+                self.runner.mesh,
+                PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+            input_sharding = NamedSharding(
+                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
+            
             dummy_multimodal_embeddings = self._create_dummy_tensor(
                 (1, num_tokens, mm_hidden_size),
                 self.runner.vllm_config.model_config.dtype,
                 sharding=sharding)
-            dummy_input_ids = self._create_dummy_tensor((num_tokens, ),
-                                                        jnp.int32)
+            dummy_input_ids = self._create_dummy_tensor(
+                (num_tokens, ), jnp.int32, sharding=input_sharding)
             dummy_is_multimodal = self._create_dummy_tensor((num_tokens, ),
                                                             jnp.bool_)
 
@@ -307,17 +312,21 @@ class CompilationManager:
                  padded_token_in_tpu_pre_next_tokens_indices) = device_array(
                      self.runner.mesh,
                      (padded_token_in_tpu_cur_input_indices,
-                      padded_token_in_tpu_pre_next_tokens_indices))
+                      padded_token_in_tpu_pre_next_tokens_indices),
+                     sharding=NamedSharding(self.runner.mesh,
+                                            PartitionSpec(None)))
 
                 input_ids = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32, dp_sharding)
-                # Need align to the sampling output
+                # Need align to the sampling output sharding (sharded by ATTN_DATA in DP)
                 next_tokens = self._create_dummy_tensor(
                     (num_reqs, ),
                     jnp.int32,
-                    sharding=NamedSharding(self.runner.mesh, PartitionSpec()),
-                )
-                placeholder_num = 1
+                    sharding=NamedSharding(
+                        self.runner.mesh,
+                        PartitionSpec(ShardingAxisName.ATTN_DATA)))
+
+                placeholder_num = jnp.asarray(1, dtype=jnp.int32)
                 self._run_compilation(
                     "_substitute_placeholder_token_fn",
                     self.runner._substitute_placeholder_token_fn,
@@ -337,17 +346,25 @@ class CompilationManager:
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
             input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32,
                                                   dp_sharding)
-            positions = self._create_dummy_tensor((num_tokens, ), jnp.int32,
-                                                  dp_sharding)
+            if self.runner.uses_mrope:
+                positions = self._create_dummy_tensor((3, num_tokens),
+                                                      jnp.int32, dp_sharding)
+            else:
+                positions = self._create_dummy_tensor((num_tokens, ),
+                                                      jnp.int32, dp_sharding)
             is_first_rank = self.runner.is_first_rank
             is_last_rank = self.runner.is_last_rank
             if is_first_rank:
                 intermediate_tensors = None
             else:
+                sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.ATTN_DATA, None))
                 hidden_states = self._create_dummy_tensor(
-                    (num_tokens, hidden_size), jnp.bfloat16)
+                    (num_tokens, hidden_size), jnp.bfloat16, sharding=sharding)
                 residual = self._create_dummy_tensor((num_tokens, hidden_size),
-                                                     jnp.bfloat16)
+                                                     jnp.bfloat16,
+                                                     sharding=sharding)
                 intermediate_tensors = JaxIntermediateTensors(
                     tensors={
                         "hidden_states": hidden_states,
@@ -371,21 +388,30 @@ class CompilationManager:
         
         dtype = self.runner.model_config.dtype
         for num_tokens in self.runner.num_tokens_paddings:
+            sharding = NamedSharding(
+                self.runner.mesh,
+                PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+            input_sharding = NamedSharding(
+                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
+
             inputs_embeds = self._create_dummy_tensor(
-                (num_tokens, hidden_size), dtype)
+                (num_tokens, hidden_size), dtype, sharding=sharding)
             if self.runner.uses_mrope:
                 positions = self._create_dummy_tensor((3, num_tokens),
-                                                      jnp.int32)
+                                                      jnp.int32,
+                                                      sharding=sharding)
             else:
                 positions = self._create_dummy_tensor((num_tokens, ),
-                                                      jnp.int32)
+                                                      jnp.int32,
+                                                      sharding=input_sharding)
             is_first_rank = self.runner.is_first_rank
             is_last_rank = self.runner.is_last_rank
             if not is_first_rank:
                 hidden_states = self._create_dummy_tensor(
-                    (num_tokens, hidden_size), jnp.bfloat16)
+                    (num_tokens, hidden_size), jnp.bfloat16, sharding=sharding)
                 residual = self._create_dummy_tensor((num_tokens, hidden_size),
-                                                     jnp.bfloat16)
+                                                     jnp.bfloat16,
+                                                     sharding=sharding)
                 intermediate_tensors = JaxIntermediateTensors(
                     tensors={
                         "hidden_states": hidden_states,
@@ -610,10 +636,12 @@ class CompilationManager:
             # Prevent the slices from getting freed by insert before finishing this operation
             for layer_cache in kv_cache_slices:
                 layer_cache.block_until_ready()
-            self.runner.kv_caches = self.runner.kv_cache_manager._jitted_insert_continuous_kv_cache(
+            self.runner.kv_caches = self.runner.kv_cache_manager._jitted_insert_continuous_kv_cache_from_slice(
                 block_size,
+                num_blocks,
                 self.runner.kv_caches,
                 kv_cache_slices,
+                0,
                 block_numbers[0],
             )
             for layer_cache in self.runner.kv_caches:

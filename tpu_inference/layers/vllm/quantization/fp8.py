@@ -38,7 +38,7 @@ from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_fp8_moe_weights, shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import FP8
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
-from tpu_inference.layers.vllm.moe import (
+from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
@@ -62,32 +62,35 @@ class VllmFp8Config(vllm_fp8.Fp8Config, VllmQuantConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional[Union[vllm_linear.LinearMethodBase, QuantizeMethodBase]]:
-        if isinstance(layer, vllm_linear.LinearBase):
-            linear_config = self.get_linear_config(layer)
-            if is_layer_skipped(
-                    prefix=prefix,
-                    ignored_layers=self.ignored_layers,
-                    fused_mapping=self.packed_modules_mapping,
-            ):
-                return VllmUnquantizedLinearMethod(linear_config)
-            return VllmFp8LinearMethod(self, linear_config)
-        elif isinstance(layer, FusedMoE):
-            if is_layer_skipped(
-                    prefix=prefix,
-                    ignored_layers=self.ignored_layers,
-                    fused_mapping=self.packed_modules_mapping,
-            ):
-                return VllmUnquantizedFusedMoEMethod(layer.moe_config)
-            if self.is_checkpoint_fp8_serialized:
-                layer.moe_config = self.get_moe_config(layer)
-                return VllmFp8MoEMethod(self, layer, self.mesh)
-            else:
-                raise NotImplementedError(
-                    "FP8OnelineMoEMethod is not supported.")
-        elif isinstance(layer, Attention):
-            logger.warning_once("FP8KVCacheMethod is not implemented. "
-                                "Skipping quantization for this layer.")
-        return None
+        match layer:
+            case vllm_linear.LinearBase():
+                linear_config = self.get_linear_config(layer)
+                if is_layer_skipped(
+                        prefix=prefix,
+                        ignored_layers=self.ignored_layers,
+                        fused_mapping=self.packed_modules_mapping,
+                ):
+                    return VllmUnquantizedLinearMethod(linear_config)
+                return VllmFp8LinearMethod(self, linear_config)
+            case FusedMoE():
+                if is_layer_skipped(
+                        prefix=prefix,
+                        ignored_layers=self.ignored_layers,
+                        fused_mapping=self.packed_modules_mapping,
+                ):
+                    return VllmUnquantizedFusedMoEMethod(layer.moe_config)
+                if self.is_checkpoint_fp8_serialized:
+                    layer.moe_config = self.get_moe_config(layer)
+                    return VllmFp8MoEMethod(self, layer, self.mesh)
+                else:
+                    raise NotImplementedError(
+                        "FP8OnelineMoEMethod is not supported.")
+            case Attention():
+                logger.warning_once("FP8KVCacheMethod is not implemented. "
+                                    "Skipping quantization for this layer.")
+                return None
+            case _:
+                return None
 
 
 class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
@@ -98,7 +101,17 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
         quant_config: VllmFp8Config,
         linear_config: VllmQuantLinearConfig,
     ):
+
+        # Per https://github.com/vllm-project/vllm/pull/32929,
+        # init_fp8_linear_kernel is now called by super().__init__
+        # but does not support TPU backends as expected.
+        # use_marlin was also changed to be determined via isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel).
+        # We need to monkeypatch init_fp8_linear_kernel and explicitly set use_marlin = True
+        # in order to bypass using native vLLM's vllm/vllm/model_executor/layers/quantization/utils/quant_utils.py:scaled_quantize.
+        vllm_fp8.init_fp8_linear_kernel = lambda *args, **kwargs: None
         super().__init__(quant_config)
+        self.use_marlin = True
+
         self.linear_config = linear_config
         if self.linear_config.enable_quantized_matmul_kernel and not self.linear_config.requant_block_size:
             raise ValueError(

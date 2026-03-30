@@ -30,9 +30,7 @@ from jax.sharding import Sharding
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
 from tpu_inference import envs
 from tpu_inference.kernels.flash_attention.kernel import flash_attention
-from tpu_inference.kernels.mla.v1.kernel import mla_ragged_paged_attention
-from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
-    get_tuned_block_sizes
+from tpu_inference.kernels.mla.v2.kernel import mla_ragged_paged_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
@@ -521,16 +519,9 @@ def mla_attention(
     )
 
     def _mla_ragged_paged_attention(q, q_rope, k, k_rope, cache, *args):
-        max_num_tokens = q.shape[0]
-        max_num_seqs = md.seq_lens.shape[0]
-        pages_per_seq = md.block_tables.shape[0] // max_num_seqs
-
-        bkv_p, bq_sz = get_tuned_block_sizes(q.dtype, cache.dtype,
-                                             num_attention_heads, 1,
-                                             qk_nope_head_dim, cache.shape[1],
-                                             max_num_tokens, pages_per_seq)
-        num_kv_pages_per_block = min(min(pages_per_seq, bkv_p), 4)
-        num_queries_per_block = min(min(max_num_tokens, bq_sz), 4)
+        # TODO: use auto tuner to find the best block sizes.
+        num_kv_pages_per_block = 3
+        num_queries_per_block = 1
 
         out, new_cache = mla_ragged_paged_attention(
             q,

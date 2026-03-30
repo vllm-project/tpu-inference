@@ -451,8 +451,8 @@ def _load_and_shard_weight(vllm_config,
         assert model_weight.value.shape == hf_weight.shape, f"{hf_key}: {model_weight.value.shape} != {hf_weight.shape}"
 
     # Update the model weight
-    spec = model_weight.sharding.spec if isinstance(
-        model_weight.sharding, NamedSharding) else model_weight.sharding
+    spec = model_sharding.spec if isinstance(model_sharding,
+                                             NamedSharding) else model_sharding
     model_weight.value = shard(hf_weight, spec)
 
 
@@ -763,27 +763,31 @@ def jax_array_from_reshaped_torch(
 
 def assign_and_shard_param(jax_param: nnx.Param,
                            jax_weight: jax.Array,
-                           param_name: str = "Unknown") -> None:
+                           param_name: str = "Unknown",
+                           mesh: Optional[Mesh] = None) -> None:
     """Distributes a JAX array across devices according to the `nnx.Param`'s sharding metadata, assigns it to the parameter, and marks it as loaded.
 
     Args:
         jax_param: The target nnx.Param to assign the weight to.
         jax_weight: The JAX array containing the weight data.
         param_name: The name of the parameter, used for error logging.
+        mesh: The device mesh to shard the parameter on.
     """
     spec = jax_param.get_metadata().get("sharding", ())
     if isinstance(spec, NamedSharding):
         spec = spec.spec
     elif isinstance(spec, SingleDeviceSharding):
         spec = ()
-    mesh = jax_param.get_metadata().get("mesh", None)
-
+    param_mesh = jax_param.get_metadata().get("mesh") or mesh
+    shape = jax_weight.shape
     try:
-        jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
+        jax_param.value = shard_put(jax_weight, spec, mesh=param_mesh)
         jax_param.set_metadata("_is_loaded", True)
+        del jax_weight
+        jax.clear_caches()
     except Exception as e:
         raise RuntimeError(
-            f"Failed to load weight '{param_name}' with shape {jax_weight.shape} into param with shape {jax_param.value.shape}"
+            f"Failed to load weight '{param_name}' with shape {shape} into param with shape {jax_param.value.shape}"
         ) from e
 
 
@@ -879,6 +883,7 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         if (quant_method := getattr(module, 'quant_method', None)) is not None:
             assert isinstance(quant_method, QuantizeMethodBase)
             loaded = quant_method.process_weights_after_loading(module)
+            jax.clear_caches()
             assert isinstance(loaded, bool)
             self._process_weights_after_loading_per_module[
                 base_prefix] = loaded
@@ -914,7 +919,9 @@ class JaxDummyModelLoader(DummyModelLoader):
     def load_weights(self, model: JaxModule,
                      model_config: ModelConfig) -> None:
         weight_loading_start_counter = time.perf_counter()
-        for param_name, param in model.named_parameters():
+        mesh = jax.sharding.get_mesh()
+
+        def _load_dummy_weight_on_thread(param_name, param):
             with cpu_mesh_context():
                 is_moe = hasattr(param, "_weights_to_load")
                 param_shape = param.value.shape
@@ -942,7 +949,19 @@ class JaxDummyModelLoader(DummyModelLoader):
                     param._weights_to_load[:] = jnp.vsplit(
                         dummy_weight, indices_or_sections=num_experts)
 
-            assign_and_shard_param(param, dummy_weight, param_name)
+            # We must explicitly pass the `mesh` captured from the main thread
+            # into the worker threads. JAX mesh contexts are thread-local, so
+            # worker threads do not inherit the active TPU mesh.
+            assign_and_shard_param(param, dummy_weight, param_name, mesh=mesh)
+
+        with ThreadPoolExecutor(max_workers=64) as executor:
+            futures = [
+                executor.submit(_load_dummy_weight_on_thread, param_name,
+                                param)
+                for param_name, param in model.named_parameters()
+            ]
+            for future in futures:
+                future.result()
 
         self._process_weights_after_loading(model)
         logger.info_once(

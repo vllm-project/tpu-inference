@@ -1528,9 +1528,9 @@ def get_default_block_sizes(
 
     return {
         "bq_sz": max(1, bq_sz),
-        "bkv_sz": max(page_size, bkv_sz),
+        "bkv_sz": align_to(bkv_sz, page_size),
         "bq_csz": max(1, bq_csz),
-        "bkv_csz": max(page_size, bkv_csz),
+        "bkv_csz": align_to(bkv_csz, page_size),
     }
 
 

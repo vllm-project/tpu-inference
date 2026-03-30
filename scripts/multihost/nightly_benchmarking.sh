@@ -69,6 +69,7 @@ export RUN_ACCURACY=""
 export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=vllm"
 export USE_UNFUSED_MEGABLOCKS_ENV=""
 export HF_CONFIG=""
+export USE_VLLM_LKG="true"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -275,7 +276,8 @@ EOF
 fi
 
 # Upload vllm_serve.log to GCS
-LOG_GCS_URI="gs://tpu-commons-ci/logs/${MODEL_NAME}_${INPUT_LEN}_${OUTPUT_LEN}_${JOB_REFERENCE}_vllm_serve.log"
+IMPL_TYPE="${MODEL_IMPL_TYPE_ENV#*=}"
+LOG_GCS_URI="gs://tpu-commons-ci/logs/${MODEL_NAME}_${INPUT_LEN}_${OUTPUT_LEN}_${IMPL_TYPE}_${JOB_REFERENCE}_vllm_serve.log"
 if [ -f "/tmp/vllm_serve.log" ]; then
   echo "Uploading vllm_serve.log to $LOG_GCS_URI"
   gsutil cp /tmp/vllm_serve.log "$LOG_GCS_URI" || echo "Warning: Failed to upload vllm_serve.log"
