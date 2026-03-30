@@ -14,6 +14,7 @@
 """TPU-Friendly MLA Ragged Paged Attention kernel."""
 
 import functools
+from enum import Enum
 
 import jax
 import jax.numpy as jnp
@@ -59,6 +60,27 @@ def get_kv_cache_shape(
     )
 
 
+class MlaCase(Enum):
+    """Represents the different cases for MLA.
+
+  - DECODE: Sequences are in decode-only mode (q_len = 1).
+  - PREFILL: Sequences are in prefill-only mode (q_len > 1, static).
+  - MIXED: Sequences can be a mix of prefill and decode (q_len > 1, dynamic).
+  """
+
+    DECODE = 0
+    PREFILL = 1
+    MIXED = 2
+
+    @property
+    def symbol(self):
+        return {
+            MlaCase.DECODE: "d",
+            MlaCase.PREFILL: "p",
+            MlaCase.MIXED: "m",
+        }[self]
+
+
 # Expect to run this validation during compile time.
 def static_validate_inputs(
     ql_nope: jax.Array,  # [max_num_tokens, actual_num_q_heads, actual_lkv_dim]
@@ -82,8 +104,8 @@ def static_validate_inputs(
     # Kernel optimization params.
     chunk_prefill_size: int | None = None,
     # Kernel tuning params.
-    num_kv_pages_per_block: int | None = None,
-    num_queries_per_block: int | None = None,
+    num_kv_pages_per_blocks: tuple[int, int, int] | None = None,
+    num_queries_per_blocks: tuple[int, int, int] | None = None,
     vmem_limit_bytes: int | None = None,
     # Debug params.
     debug_mode: bool = False,
@@ -181,12 +203,15 @@ def static_validate_inputs(
         raise ValueError(f"{soft_cap=} must not be 0.0.")
     if chunk_prefill_size is not None and chunk_prefill_size <= 0:
         raise ValueError(f"{chunk_prefill_size=} must be positive.")
-    if num_kv_pages_per_block is not None:
-        if num_kv_pages_per_block <= 0:
-            raise ValueError(f"{num_kv_pages_per_block=} must be positive.")
-    if num_queries_per_block is not None:
-        if num_queries_per_block <= 0:
-            raise ValueError(f"{num_queries_per_block=} must be positive.")
+    if num_kv_pages_per_blocks is not None:
+        for num_kv_pages_per_block in num_kv_pages_per_blocks:
+            if num_kv_pages_per_block <= 0:
+                raise ValueError(
+                    f"{num_kv_pages_per_block=} must be positive.")
+    if num_queries_per_blocks is not None:
+        for num_queries_per_block in num_queries_per_blocks:
+            if num_queries_per_block <= 0:
+                raise ValueError(f"{num_queries_per_block=} must be positive.")
     if vmem_limit_bytes is not None and vmem_limit_bytes <= 0:
         raise ValueError(f"{vmem_limit_bytes=} must be positive.")
 
@@ -204,7 +229,7 @@ def _mla_ragged_paged_attention_kernel(
     kv_lens_ref,  # [max_num_seqs]
     page_indices_ref,  # [max_num_seqs * pages_per_seq]
     cu_q_lens_ref,  # [max_num_seqs + 1]
-    distribution_ref,  # [3] (decode_end, prefill_end, mixed_end)
+    start_end_seq_idx_ref,  # [2] (start_seq_idx, end_seq_idx)
     sem_ids_ref,  # [3] (bq_sem_idx, bkv_sem_idx, bo_sem_idx)
     bo_ids_ref,  # [4] (bo_sem_0_seq_idx, bo_sem_1_seq_idx, bo_sem_0_bo_idx, bo_sem_1_bo_idx)
     bkv_update_ids_ref,  # [6] (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz)
@@ -228,6 +253,7 @@ def _mla_ragged_paged_attention_kernel(
     m_ref,  # [bq_sz * num_q_heads, 128],
     acc_ref,  # [bq_sz * num_q_heads, lkv_dim],
     *,
+    static_q_len: int,
     sm_scale: float,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
@@ -235,7 +261,6 @@ def _mla_ragged_paged_attention_kernel(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
-    chunk_prefill_size: int | None = None,
     bkv_p,
     bq_sz,
     debug_mode: bool = False,
@@ -268,12 +293,10 @@ def _mla_ragged_paged_attention_kernel(
     bkv_sz_per_kv_packing = bkv_p * page_size_per_kv_packing
     bkv_sz = bkv_sz_per_kv_packing * kv_packing
     page_size = page_size_per_kv_packing * kv_packing
-    seq_idx = pl.program_id(0)
-    num_seqs = pl.num_programs(0)
-    decode_end = distribution_ref[0]
-    prefill_end = distribution_ref[1]
-    mixed_end = distribution_ref[2]
 
+    start_seq_idx = start_end_seq_idx_ref[0]
+    end_seq_idx = start_end_seq_idx_ref[1]
+    seq_idx = pl.program_id(0) + start_seq_idx
     q_start = cu_q_lens_ref[seq_idx]
     q_end = cu_q_lens_ref[seq_idx + 1]
     q_len = q_end - q_start
@@ -284,10 +307,8 @@ def _mla_ragged_paged_attention_kernel(
             pl.debug_print(msg, *args)
 
     debug_print("[RPA debug] ======= In loop seq_idx={}", seq_idx)
-    debug_print("[RPA debug] num_seqs={}", num_seqs)
-    debug_print("[RPA debug] decode_end={}", decode_end)
-    debug_print("[RPA debug] prefill_end={}", prefill_end)
-    debug_print("[RPA debug] mixed_end={}", mixed_end)
+    debug_print("[RPA debug] start_seq_idx={}", start_seq_idx)
+    debug_print("[RPA debug] end_seq_idx={}", end_seq_idx)
     debug_print("[RPA debug] bkv_p={}", bkv_p)
     debug_print("[RPA debug] page_size={}", page_size)
     debug_print("[RPA debug] pages_per_seq={}", pages_per_seq)
@@ -975,7 +996,7 @@ def _mla_ragged_paged_attention_kernel(
             [src for _ in range(target_minor // src.shape[-1])],
             axis=-1)[..., :shape[-1]]
 
-    def process(static_q_len=None):
+    def process():
         num_bkv = cdiv(kv_len, bkv_sz)
         if static_q_len is None:
             actual_bq_sz = bq_sz
@@ -1015,7 +1036,7 @@ def _mla_ragged_paged_attention_kernel(
                 seq_idx, bq_idx, bq_sem_idx)
 
             # Prefetch next bq
-            @pl.when(next_seq_idx < num_seqs)
+            @pl.when(next_seq_idx < end_seq_idx)
             def prefetch_next_bq():
                 sem_ids_ref[0] = next_bq_sem_idx
                 start_fetch_bq(next_seq_idx, next_bq_idx, next_bq_sem_idx)
@@ -1028,7 +1049,7 @@ def _mla_ragged_paged_attention_kernel(
                     seq_idx, bq_idx, bkv_idx, bkv_sem_idx)
 
                 # Prefetch next bkv
-                @pl.when(next_seq_idx < num_seqs)
+                @pl.when(next_seq_idx < end_seq_idx)
                 def prefetch_next_bkv():
                     sem_ids_ref[1] = next_bkv_sem_idx
                     start_fetch_bkv(next_seq_idx, next_bkv_idx,
@@ -1119,9 +1140,9 @@ def _mla_ragged_paged_attention_kernel(
 
     ### ------- Kernel start ------- ###
 
-    @pl.when(seq_idx == 0)
+    @pl.when(seq_idx == start_seq_idx)
     def prologue():
-        start_fetch_bq(0, 0, 0)
+        start_fetch_bq(start_seq_idx, 0, 0)
 
         # Initialize bkvc_x2_ref and bkpe_x2_ref to zeros to avoid NaN issues from accessing
         # uninitialized memory. Bitcast into int32 to avoid tiling issues.
@@ -1135,23 +1156,13 @@ def _mla_ragged_paged_attention_kernel(
         # To pipeline VST and DMA, we divide the initialization into two steps.
         bkvc_x2_int32_ref[0] = bkvc_zeros
         bkpe_x2_int32_ref[0] = bkpe_zeros
-        start_fetch_bkv(0, 0, 0)
+        start_fetch_bkv(start_seq_idx, 0, 0)
         bkvc_x2_int32_ref[1] = bkvc_zeros
         bkpe_x2_int32_ref[1] = bkpe_zeros
 
-    @pl.when(seq_idx < decode_end)
-    def process_decode():
-        process(static_q_len=1)
+    process()
 
-    @pl.when(jnp.logical_and(decode_end <= seq_idx, seq_idx < prefill_end))
-    def process_prefill():
-        process(static_q_len=chunk_prefill_size)
-
-    @pl.when(jnp.logical_and(prefill_end <= seq_idx, seq_idx < mixed_end))
-    def process_mixed():
-        process()
-
-    @pl.when(seq_idx == num_seqs - 1)
+    @pl.when(seq_idx == end_seq_idx - 1)
     def epilogue():
         for i in range(2):
             wait_send_bo(i)
@@ -1260,9 +1271,10 @@ def mla_ragged_paged_attention(
     v_scale: float | None = None,
     # Kernel optimization params.
     chunk_prefill_size: int | None = None,
-    # Kernel tuning params.
-    num_kv_pages_per_block: int | None = None,
-    num_queries_per_block: int | None = None,
+    # Kernel tuning params for decode, prefill, and mixed cases.
+    # If passsed in as int, all cases are the same.
+    num_kv_pages_per_block: tuple[int, int, int] | int | None = None,
+    num_queries_per_block: tuple[int, int, int] | int | None = None,
     vmem_limit_bytes: int | None = None,
     # Debug params.
     debug_mode: bool = False,
@@ -1294,9 +1306,11 @@ def mla_ragged_paged_attention(
     k_scale: the scale for the key cache.
     v_scale: the scale for the value cache.
     num_kv_pages_per_block: number of kv pages to be processed in one flash
-      attention block in the pallas kernel.
-    num_queries_per_block: number of kv pages to be processed in one flash
-      attention block in the pallas kernel.
+      attention block in the pallas kernel. This is a tuple of (decode, prefill,
+      mixed) cases.
+    num_queries_per_block: number of queries to be processed in one flash
+      attention block in the pallas kernel. This is a tuple of (decode, prefill,
+      mixed) cases.
     vmem_limit_bytes: the vmem limit for the pallas kernel.
     debug_mode: if true, RPA does not issue any DMAs or run flash attention but
       print debug info. Need to compile with `--xla_tpu_enable_log_recorder`.
@@ -1308,6 +1322,16 @@ def mla_ragged_paged_attention(
         raise ValueError(
             "num_kv_pages_per_block and num_queries_per_block must be specified."
         )
+    if isinstance(num_kv_pages_per_block, int):
+        num_kv_pages_per_blocks = [num_kv_pages_per_block for _ in range(3)]
+    else:
+        num_kv_pages_per_blocks = num_kv_pages_per_block
+
+    if isinstance(num_queries_per_block, int):
+        num_queries_per_blocks = [num_queries_per_block for _ in range(3)]
+    else:
+        num_queries_per_blocks = num_queries_per_block
+
     static_validate_inputs(
         ql_nope,
         q_pe,
@@ -1326,8 +1350,8 @@ def mla_ragged_paged_attention(
         k_scale=k_scale,
         v_scale=v_scale,
         chunk_prefill_size=chunk_prefill_size,
-        num_kv_pages_per_block=num_kv_pages_per_block,
-        num_queries_per_block=num_queries_per_block,
+        num_kv_pages_per_blocks=num_kv_pages_per_blocks,
+        num_queries_per_blocks=num_queries_per_blocks,
         vmem_limit_bytes=vmem_limit_bytes,
         debug_mode=debug_mode,
     )
@@ -1354,150 +1378,206 @@ def mla_ragged_paged_attention(
     assert num_page_indices % max_num_seqs == 0
     num_q_heads = num_q_heads_per_q_packing * q_packing
 
-    bkv_p = num_kv_pages_per_block
-    bq_sz = num_queries_per_block
-    bkv_sz_per_kv_packing = bkv_p * page_size_per_kv_packing
-    # Add 2 additional words of buffering to accommodate misaligned new KV.
-    # We need two additional words because the beginning and end of the new KV may
-    # both not be aligned to kv_packing boundaries.
-    # Example:
-    #
-    # T0 T4     K2  K6
-    # T1        K3
-    # T2    K0  K4
-    # T3    K1  K5
-    #
-    # - Ti is existing KV tokens and Ki is the new KV.
-    # - Each column is a 32-bit word.
-    # - KV packing is 4
-    #
-    # We have 12 total tokens, so normally we would only allocate 12/4=3 words
-    # But due to misalignment, we need to allocate 5 words.
-    bkv_buf_sz_per_kv_packing = bkv_sz_per_kv_packing + 2
-    grid = (distribution[2], )
+    def run_mla_kernel(
+        ql_nope: jax.
+        Array,  # [max_num_tokens, actual_num_q_heads, actual_lkv_dim]
+        q_pe: jax.Array,  # [max_num_tokens, actual_num_q_heads, actual_r_dim]
+        new_kv_c: jax.Array,  # [max_num_tokens, actual_lkv_dim]
+        new_k_pe: jax.Array,  # [max_num_tokens, actual_r_dim]
+        cache_kv: jax.
+        Array,  # [total_num_pages, page_size_per_kv_packing, kv_packing, align_to(lkv_dim, 128)]
+        kv_lens: jax.Array,  # i32[max_num_seqs]
+        page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
+        cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
+        start_seq_idx: jax.Array,  # i32
+        end_seq_idx: jax.Array,  # i32
+        static_q_len: int | None,
+        num_kv_pages_per_block: int,
+        num_queries_per_block: int,
+        case: MlaCase = MlaCase.MIXED,
+    ):
 
-    in_specs = [
-        pl.BlockSpec(memory_space=pltpu.HBM),  # ql_nope
-        pl.BlockSpec(memory_space=pltpu.HBM),  # q_pe
-        pl.BlockSpec(memory_space=pltpu.HBM),  # new_kv_c
-        pl.BlockSpec(memory_space=pltpu.HBM),  # new_k_pe
-        pl.BlockSpec(memory_space=pltpu.HBM),  # cache_kv
-    ]
+        bkv_p = num_kv_pages_per_block
+        bq_sz = num_queries_per_block
+        bkv_sz_per_kv_packing = bkv_p * page_size_per_kv_packing
+        # Add 2 additional words of buffering to accommodate misaligned new KV.
+        # We need two additional words because the beginning and end of the new KV may
+        # both not be aligned to kv_packing boundaries.
+        # Example:
+        #
+        # T0 T4     K2  K6
+        # T1        K3
+        # T2    K0  K4
+        # T3    K1  K5
+        #
+        # - Ti is existing KV tokens and Ki is the new KV.
+        # - Each column is a 32-bit word.
+        # - KV packing is 4
+        #
+        # We have 12 total tokens, so normally we would only allocate 12/4=3 words
+        # But due to misalignment, we need to allocate 5 words.
+        bkv_buf_sz_per_kv_packing = bkv_sz_per_kv_packing + 2
+        grid = (end_seq_idx - start_seq_idx, )
 
-    out_specs = [
-        pl.BlockSpec(memory_space=pltpu.HBM),  # o
-        pl.BlockSpec(memory_space=pltpu.HBM),  # updated_cache_kv
-    ]
+        in_specs = [
+            pl.BlockSpec(memory_space=pltpu.HBM),  # ql_nope
+            pl.BlockSpec(memory_space=pltpu.HBM),  # q_pe
+            pl.BlockSpec(memory_space=pltpu.HBM),  # new_kv_c
+            pl.BlockSpec(memory_space=pltpu.HBM),  # new_k_pe
+            pl.BlockSpec(memory_space=pltpu.HBM),  # cache_kv
+        ]
 
-    bkvc_double_buf = pltpu.VMEM(
-        (2, bkv_buf_sz_per_kv_packing, kv_packing, lkv_dim),
-        cache_kv.dtype,
-    )
+        out_specs = [
+            pl.BlockSpec(memory_space=pltpu.HBM),  # o
+            pl.BlockSpec(memory_space=pltpu.HBM),  # updated_cache_kv
+        ]
 
-    bkpe_double_buf = pltpu.VMEM(
-        (2, bkv_buf_sz_per_kv_packing, kv_packing, r_dim),
-        cache_kv.dtype,
-    )
-    bq_nope_double_buf = pltpu.VMEM(
-        (2, bq_sz, num_q_heads_per_q_packing, q_packing, lkv_dim),
-        ql_nope.dtype,
-    )
+        bkvc_double_buf = pltpu.VMEM(
+            (2, bkv_buf_sz_per_kv_packing, kv_packing, lkv_dim),
+            cache_kv.dtype,
+        )
 
-    bq_rope_double_buf = pltpu.VMEM(
-        (2, bq_sz, num_q_heads_per_q_packing, q_packing, r_dim),
-        q_pe.dtype,
-    )
+        bkpe_double_buf = pltpu.VMEM(
+            (2, bkv_buf_sz_per_kv_packing, kv_packing, r_dim),
+            cache_kv.dtype,
+        )
+        bq_nope_double_buf = pltpu.VMEM(
+            (2, bq_sz, num_q_heads_per_q_packing, q_packing, lkv_dim),
+            ql_nope.dtype,
+        )
 
-    bo_double_buf = bq_nope_double_buf
+        bq_rope_double_buf = pltpu.VMEM(
+            (2, bq_sz, num_q_heads_per_q_packing, q_packing, r_dim),
+            q_pe.dtype,
+        )
 
-    l_scratch = pltpu.VMEM(
-        (bq_sz * num_q_heads, 128),
-        jnp.float32,
-    )
-    m_scratch = l_scratch
+        bo_double_buf = bq_nope_double_buf
 
-    acc_scratch = pltpu.VMEM(
-        (bq_sz * num_q_heads, lkv_dim),
-        jnp.float32,
-    )
+        l_scratch = pltpu.VMEM(
+            (bq_sz * num_q_heads, 128),
+            jnp.float32,
+        )
+        m_scratch = l_scratch
 
-    scratch_shapes = [
-        bkvc_double_buf,
-        bkpe_double_buf,
-        bq_nope_double_buf,
-        bq_rope_double_buf,
-        bo_double_buf,  # Double buffering for output block.
-        # Semaphores for double buffering of bkv, bq, bo and bkv_update.
-        pltpu.SemaphoreType.DMA((4, 2)),
-        # Intermediate buffers per kv head for flash attention.
-        l_scratch,
-        m_scratch,
-        acc_scratch,
-    ]
+        acc_scratch = pltpu.VMEM(
+            (bq_sz * num_q_heads, lkv_dim),
+            jnp.float32,
+        )
 
-    scalar_prefetches = (
-        kv_lens,
-        page_indices,
-        cu_q_lens,
-        distribution,
-        # (bq_sem_idx, bkv_sem_idx, bo_sem_idx)
-        jnp.zeros((3, ), jnp.int32),
-        # (bo_sem_0_seq_idx, bo_sem_1_seq_idx, bo_sem_0_bo_idx, bo_sem_1_bo_idx)
-        jnp.full((4, ), -1, jnp.int32),
-        # (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz)
-        jnp.full((6, ), -1, jnp.int32),
-    )
+        scratch_shapes = [
+            bkvc_double_buf,
+            bkpe_double_buf,
+            bq_nope_double_buf,
+            bq_rope_double_buf,
+            bo_double_buf,  # Double buffering for output block.
+            # Semaphores for double buffering of bkv, bq, bo and bkv_update.
+            pltpu.SemaphoreType.DMA((4, 2)),
+            # Intermediate buffers per kv head for flash attention.
+            l_scratch,
+            m_scratch,
+            acc_scratch,
+        ]
 
-    scope_name = f"MLA-RPA-bq_{bq_sz}-bkvp_{bkv_p}-p_{page_size}"
-    kernel = jax.named_scope(scope_name)(
-        pl.pallas_call(
-            functools.partial(
-                _mla_ragged_paged_attention_kernel,
-                sm_scale=sm_scale,
-                sliding_window=sliding_window,
-                soft_cap=soft_cap,
-                mask_value=mask_value,
-                q_scale=q_scale,
-                k_scale=k_scale,
-                v_scale=v_scale,
-                chunk_prefill_size=chunk_prefill_size,
-                bq_sz=bq_sz,
-                bkv_p=bkv_p,
-                debug_mode=debug_mode,
-            ),
-            grid_spec=pltpu.PrefetchScalarGridSpec(
-                num_scalar_prefetch=len(scalar_prefetches),
-                in_specs=in_specs,
-                out_specs=out_specs,
-                grid=grid,
-                scratch_shapes=scratch_shapes,
-            ),
-            compiler_params=pltpu.CompilerParams(
-                dimension_semantics=("arbitrary", ),
-                vmem_limit_bytes=vmem_limit_bytes,
-            ),
-            out_shape=[
-                jax.ShapeDtypeStruct(shape=ql_nope.shape, dtype=ql_nope.dtype),
-                jax.ShapeDtypeStruct(shape=cache_kv.shape,
-                                     dtype=cache_kv.dtype),
-            ],
-            input_output_aliases={
-                7: 0,  # Alias output activation with ql_nope
-                11: 1,  # Aliasing cache_kv with updated_cache_kv
-            },
-            name=scope_name,
-        ))
+        scalar_prefetches = (
+            kv_lens,
+            page_indices,
+            cu_q_lens,
+            jnp.array([start_seq_idx, end_seq_idx], jnp.int32),
+            # (bq_sem_idx, bkv_sem_idx, bo_sem_idx)
+            jnp.zeros((3, ), jnp.int32),
+            # (bo_sem_0_seq_idx, bo_sem_1_seq_idx, bo_sem_0_bo_idx, bo_sem_1_bo_idx)
+            jnp.full((4, ), -1, jnp.int32),
+            # (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz)
+            jnp.full((6, ), -1, jnp.int32),
+        )
 
-    output, updated_kv = kernel(
-        *scalar_prefetches,
+        scope_name = f"MLA-{case.symbol}-bq_{bq_sz}-bkvp_{bkv_p}-p_{page_size}"
+        kernel = jax.named_scope(scope_name)(
+            pl.pallas_call(
+                functools.partial(
+                    _mla_ragged_paged_attention_kernel,
+                    sm_scale=sm_scale,
+                    sliding_window=sliding_window,
+                    soft_cap=soft_cap,
+                    mask_value=mask_value,
+                    q_scale=q_scale,
+                    k_scale=k_scale,
+                    v_scale=v_scale,
+                    static_q_len=static_q_len,
+                    bq_sz=bq_sz,
+                    bkv_p=bkv_p,
+                    debug_mode=debug_mode,
+                ),
+                grid_spec=pltpu.PrefetchScalarGridSpec(
+                    num_scalar_prefetch=len(scalar_prefetches),
+                    in_specs=in_specs,
+                    out_specs=out_specs,
+                    grid=grid,
+                    scratch_shapes=scratch_shapes,
+                ),
+                compiler_params=pltpu.CompilerParams(
+                    dimension_semantics=("arbitrary", ),
+                    vmem_limit_bytes=vmem_limit_bytes,
+                ),
+                out_shape=[
+                    jax.ShapeDtypeStruct(shape=ql_nope.shape,
+                                         dtype=ql_nope.dtype),
+                    jax.ShapeDtypeStruct(shape=cache_kv.shape,
+                                         dtype=cache_kv.dtype),
+                ],
+                input_output_aliases={
+                    7: 0,  # Alias output activation with ql_nope
+                    11: 1,  # Aliasing cache_kv with updated_cache_kv
+                },
+                name=scope_name,
+            ))
+        return kernel(
+            *scalar_prefetches,
+            ql_nope,
+            q_pe,
+            new_kv_c,
+            new_k_pe,
+            cache_kv,
+        )
+
+    # Decode-only
+    ql_nope, updated_kv = run_mla_kernel(
         ql_nope,
         q_pe,
         new_kv_c,
         new_k_pe,
         cache_kv,
+        kv_lens,
+        page_indices,
+        cu_q_lens,
+        num_kv_pages_per_block=num_kv_pages_per_blocks[0],
+        num_queries_per_block=num_queries_per_blocks[0],
+        start_seq_idx=jnp.array(0),
+        end_seq_idx=distribution[0],
+        static_q_len=1,
+        case=MlaCase.DECODE,
+    )
+    # TODO: evaluate if chunk-prefill-only branch is needed
+
+    # Mixed
+    ql_nope, updated_kv = run_mla_kernel(
+        ql_nope,
+        q_pe,
+        new_kv_c,
+        new_k_pe,
+        updated_kv,
+        kv_lens,
+        page_indices,
+        cu_q_lens,
+        num_kv_pages_per_block=num_kv_pages_per_blocks[2],
+        num_queries_per_block=num_queries_per_blocks[2],
+        start_seq_idx=distribution[1],
+        end_seq_idx=distribution[2],
+        static_q_len=None,
+        case=MlaCase.MIXED,
     )
     output = prepare_outputs(
-        output, actual_num_q_heads,
+        ql_nope, actual_num_q_heads,
         actual_lkv_dim)  # [max_num_tokens, actual_num_q_heads, actual_lkv_dim]
 
     return output, updated_kv

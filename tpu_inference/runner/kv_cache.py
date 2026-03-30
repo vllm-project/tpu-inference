@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+from dataclasses import dataclass
 from typing import List
 
 import jax
@@ -31,6 +31,19 @@ from tpu_inference.utils import to_jax_dtype
 logger = init_logger(__name__)
 
 DEFAULT_KV_CACHE_DTYPE = jnp.bfloat16
+
+
+@dataclass
+class KVCacheMetadata:
+    """
+    Used to store metadata about the KV cache for logging in the KV cache manager.
+    Specifcally, with Hybrid KV cache, we can have multiple KV cache types
+    so we need to store the metadata for each KV cache type separately
+    """
+    count: int = 0
+    shape: tuple = None
+    dtype: jnp.dtype = None
+    sharding: NamedSharding = None
 
 
 def get_kv_cache_shape_with_mesh(mesh: Mesh,

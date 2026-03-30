@@ -26,6 +26,7 @@ On the client side, run:
 
 import argparse
 import asyncio
+import contextlib
 import gc
 import random
 import time
@@ -36,8 +37,8 @@ from typing import Optional
 
 import numpy as np
 from backend_request_func import (ASYNC_REQUEST_FUNCS,
-                                  OPENAI_COMPATIBLE_BACKENDS, RequestFuncInput,
-                                  RequestFuncOutput)
+                                  OPENAI_COMPATIBLE_BACKENDS,
+                                  RequestFuncOutput, start_stop_profile)
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 
@@ -52,9 +53,9 @@ except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
 # yapf: disable
+from benchmark_core import BenchmarkContext, SampleRequest
 from benchmark_dataset import (GPQADataset, MLPerfDataset, MMLUDataset,
-                               MMMUProDataset, RandomDataset, SampleRequest,
-                               SonnetDataset)
+                               MMMUProDataset, RandomDataset, SonnetDataset)
 # yapf: disable
 from benchmark_utils import (eval_benchmark_dataset_result,
                              sample_warmup_requests)
@@ -268,6 +269,15 @@ async def benchmark(
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
+    ctx = BenchmarkContext(
+        api_url=api_url,
+        model=model_id,
+        model_name=model_name,
+        logprobs=logprobs,
+        ignore_eos=ignore_eos,
+        extra_body=extra_body,
+    )
+
     warmup_requests = None
     if args.warmup_mode == "full":
         warmup_requests = input_requests
@@ -277,28 +287,8 @@ async def benchmark(
     if warmup_requests:
         print(f"Warmup (mode: {args.warmup_mode}) is starting.")
         for warmup_request in tqdm(warmup_requests):
-            test_prompt, test_prompt_len, test_output_len, test_mm_content = (
-                warmup_request.prompt,
-                warmup_request.prompt_len,
-                warmup_request.expected_output_len,
-                warmup_request.multi_modal_data,
-            )
 
-            assert test_mm_content is None or isinstance(test_mm_content, (dict, list))
-            test_input = RequestFuncInput(
-                model=model_id,
-                model_name=model_name,
-                prompt=test_prompt,
-                api_url=api_url,
-                prompt_len=test_prompt_len,
-                output_len=test_output_len,
-                logprobs=logprobs,
-                multi_modal_content=test_mm_content,
-                ignore_eos=ignore_eos,
-                extra_body=extra_body,
-            )
-
-            test_output = await request_func(request_func_input=test_input)
+            test_output = await request_func(ctx=ctx, request_func_input=warmup_request)
             if not test_output.success:
                 raise ValueError(
                     "Warmup failed - Please make sure benchmark arguments "
@@ -307,20 +297,7 @@ async def benchmark(
 
     if profile:
         print("Starting profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            model_name=model_name,
-            prompt=test_prompt,
-            api_url=base_url + "/start_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-            multi_modal_content=test_mm_content,
-            ignore_eos=ignore_eos,
-            extra_body=extra_body,
-        )
-        profile_output = await request_func(request_func_input=profile_input)
-        if profile_output.success:
+        if await start_stop_profile(base_url, "start"):
             print("Profiler started")
 
     distribution = "Poisson process" if burstiness == 1.0 else "Gamma distribution"
@@ -331,72 +308,30 @@ async def benchmark(
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
-    # This can be used once the minimum Python version is 3.10 or higher,
-    # and it will simplify the code in limited_request_func.
-    #    semaphore = (asyncio.Semaphore(max_concurrency)
-    #                 if max_concurrency else contextlib.nullcontext())
-    semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else None
+    semaphore = asyncio.Semaphore(max_concurrency) \
+                    if max_concurrency else contextlib.nullcontext()
 
     async def limited_request_func(request_func_input, pbar):
-        if semaphore is None:
-            return await request_func(request_func_input=request_func_input,
-                                      pbar=pbar)
         async with semaphore:
-            return await request_func(request_func_input=request_func_input,
-                                      pbar=pbar)
+            return await request_func(
+                ctx=ctx,
+                request_func_input=request_func_input,
+                pbar=pbar,
+            )
 
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
     async for request in get_request(input_requests, request_rate, burstiness):
-        prompt, prompt_len, output_len, mm_content = (
-            request.prompt,
-            request.prompt_len,
-            request.expected_output_len,
-            request.multi_modal_data,
-        )
-        req_model_id, req_model_name = model_id, model_name
-
-        request_kwargs = dict(
-            model=req_model_id,
-            model_name=req_model_name,
-            prompt=prompt,
-            api_url=api_url,
-            prompt_len=prompt_len,
-            output_len=output_len,
-            logprobs=logprobs,
-            multi_modal_content=mm_content,
-            ignore_eos=ignore_eos,
-            extra_body=extra_body,
-        )
-
-        # For MMLMDataset, MLPerfDataset
-        if request.completion is not None:
-            request_kwargs["completion"] = request.completion
-
-        # For Random (synthetic), Sonnet
-        if request.request_id is not None:
-            request_kwargs["request_id"] = request.request_id
-
-        request_func_input = RequestFuncInput(**request_kwargs)
 
         tasks.append(
             asyncio.create_task(
-                limited_request_func(request_func_input=request_func_input,
+                limited_request_func(request_func_input=request,
                                      pbar=pbar)))
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
     if profile:
         print("Stopping profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_prompt,
-            api_url=base_url + "/stop_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-        )
-        profile_output = await request_func(request_func_input=profile_input)
-        if profile_output.success:
+        if await start_stop_profile(base_url, "stop"):
             print("Profiler stopped")
 
     if pbar is not None:
@@ -440,7 +375,7 @@ async def benchmark(
         metrics.request_goodput if goodput_config_dict else None,
         "output_throughput": metrics.output_throughput,
         "total_token_throughput": metrics.total_token_throughput,
-        "input_lens": [output.prompt_len for output in outputs],
+        "input_lens": [output.input_request.prompt_len for output in outputs],
         "output_lens": actual_output_lens,
         "ttfts": [output.ttft for output in outputs],
         "itls": [output.itl for output in outputs],
@@ -548,6 +483,13 @@ def main(args: argparse.Namespace):
         trust_remote_code=args.trust_remote_code,
     )
 
+    if args.dataset_name == "mmmu_pro":
+        message = (
+            "MMMU-Pro must use --backend vllm-chat "
+            "and should also use --endpoint=/v1/chat/completions."
+        )
+        assert args.backend == "vllm-chat", message
+
     if args.dataset_name is None:
         raise ValueError(
             "Please specify '--dataset-name' and the corresponding "
@@ -614,7 +556,6 @@ def main(args: argparse.Namespace):
                 random_seed=args.seed,
                 dataset_path=args.dataset_path,
                 subset=args.mmmu_pro_subset,
-                use_chat_template=args.mmmu_pro_use_chat_template,
             ).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
@@ -938,11 +879,6 @@ if __name__ == "__main__":
         type=int,
         default=16,
         help="Output length for each request. Default is 16 (single-letter answer).",
-    )
-    mmmu_pro_group.add_argument(
-        "--mmmu-pro-use-chat-template",
-        action="store_true",
-        help="Whether to format MMMU-Pro prompts using the tokenizer's chat template.",
     )
 
     sonnet_group = parser.add_argument_group("sonnet dataset options")

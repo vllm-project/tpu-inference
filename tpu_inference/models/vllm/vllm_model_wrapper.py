@@ -131,11 +131,14 @@ class VllmModelWrapper:
         # Patch sdpa from torch ops to flash attention to prevent OOM
         register_torch_function_op(
             torch.nn.functional.scaled_dot_product_attention,
-            functools.partial(patch_ops.scaled_dot_product_attention,
+            functools.partial(patch_ops.scaled_dot_product_attention.
+                              scaled_dot_product_attention,
                               mesh=self.mesh),
             is_jax_function=True,
             needs_env=False,
         )
+
+        patch_ops.gdn_attention.apply_gated_delta_net_torch_ops_patch()
 
     def _apply_pp_patch(self):
         # patch `get_pp_group` in vLLM to jax's get_pp_group.

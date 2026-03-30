@@ -35,6 +35,9 @@ if TYPE_CHECKING:
     USE_JAX_PROFILER_SERVER: bool = False
     JAX_PROFILER_SERVER_PORT: int = 9999
     USE_BATCHED_RPA_KERNEL: bool = False
+    FORCE_MOE_RANDOM_ROUTING: bool = False
+    SC_KERNEL_THRESHOLD: int = 8192
+    SC_KERNEL_COL_CHUNK_SIZE: int = 3072
 
 
 def env_with_choices(
@@ -204,6 +207,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("JAX_PROFILER_SERVER_PORT") or "9999"),
     "USE_BATCHED_RPA_KERNEL":
     env_bool("USE_BATCHED_RPA_KERNEL"),
+    # Force random expert routing in MoE layers (for testing purposes only)
+    "FORCE_MOE_RANDOM_ROUTING":
+    env_bool("FORCE_MOE_RANDOM_ROUTING", default=False),
+    "SC_KERNEL_THRESHOLD":
+    lambda: int(os.getenv("SC_KERNEL_THRESHOLD") or "8192"),
+    "SC_KERNEL_COL_CHUNK_SIZE":
+    lambda: int(os.getenv("SC_KERNEL_COL_CHUNK_SIZE") or "3072"),
 }
 
 
