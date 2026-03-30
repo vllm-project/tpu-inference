@@ -419,7 +419,7 @@ class DPScheduler(SchedulerInterface):
                 except OSError:
                     pass
         for process in self.processes:
-            process.join(timeout=5.0)
+            process.join(timeout=1.0)
         multiprocessing.active_children()
 
     def _create_per_rank_configs(self, kv_cache_config: KVCacheConfig) -> None:
