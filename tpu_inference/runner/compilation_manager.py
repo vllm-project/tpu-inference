@@ -298,7 +298,7 @@ class CompilationManager:
                     jnp.int32,
                     sharding=NamedSharding(
                         self.runner.mesh,
-                        PartitionSpec(ShardingAxisName.ATTN_DATA)))
+                        PartitionSpec()))
 
                 placeholder_num = jnp.asarray(1, dtype=jnp.int32)
                 self._run_compilation(
