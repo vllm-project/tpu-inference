@@ -71,8 +71,7 @@ def _load_weight_for_layer(
     tensor = getattr(layer, param_name)
 
     if not vllm_envs.VLLM_TPU_USING_PATHWAYS:
-        jax_tensor = t2j(tensor, use_dlpack=False)
-        return general_device_put(jax_tensor, sharding)
+        return t2j(tensor, use_dlpack=False)
 
     if is_pathways_dummy_load():
         # Dummy weights are created directly on the TPU mesh, no CPU→TPU transfer needed
@@ -138,15 +137,16 @@ class VllmUnquantizedEmbeddingMethod(UnquantizedEmbeddingMethod):
         self.mesh = mesh
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        weight_sharding = NamedSharding(self.mesh,
-                                        P(ShardingAxisName.MLP_TENSOR, None))
-        weight = _load_weight_for_layer(layer, "weight", weight_sharding)
+        weight = t2j(layer.weight, use_dlpack=False)
+        weight = general_device_put(
+            weight,
+            NamedSharding(self.mesh, P(ShardingAxisName.MLP_TENSOR, None)))
         layer.weight = Parameter(torch_view(weight), requires_grad=False)
 
         if isinstance(layer, ParallelLMHead) and layer.bias is not None:
-            bias_sharding = NamedSharding(self.mesh,
-                                          P(ShardingAxisName.MLP_TENSOR))
-            bias = _load_weight_for_layer(layer, "bias", bias_sharding)
+            bias = t2j(layer.bias, use_dlpack=False)
+            bias = general_device_put(
+                bias, NamedSharding(self.mesh, P(ShardingAxisName.MLP_TENSOR)))
             layer.bias = Parameter(torch_view(bias), requires_grad=False)
 
 
