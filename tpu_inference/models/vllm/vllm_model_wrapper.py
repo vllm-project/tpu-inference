@@ -138,7 +138,8 @@ class VllmModelWrapper:
             needs_env=False,
         )
 
-        patch_ops.gdn_attention.apply_gated_delta_net_torch_ops_patch(mesh=self.mesh)
+        patch_ops.gdn_attention.apply_gated_delta_net_torch_ops_patch(
+            mesh=self.mesh)
 
     def _apply_pp_patch(self):
         # patch `get_pp_group` in vLLM to jax's get_pp_group.

@@ -366,8 +366,7 @@ def run_jax_gdn_attention_local(
     token_idx = jnp.arange(num_tokens)
     max_reqs = l_state_indices.shape[0]
 
-    req_indices = jnp.sum(token_idx[:, None] >= l_q_loc[None, :],
-                          axis=1) - 1
+    req_indices = jnp.sum(token_idx[:, None] >= l_q_loc[None, :], axis=1) - 1
     req_indices = jnp.clip(req_indices, 0, max_reqs - 1)
 
     # Exclude trailing padding indices from mutating cache
@@ -415,7 +414,8 @@ def run_jax_gdn_attention_local(
         B, T, _ = mixed_qkv.shape
         key_dim = local_n_kq * d_k
         query = mixed_qkv[..., :key_dim].reshape(B, T, local_n_kq, d_k)
-        key = mixed_qkv[..., key_dim:key_dim * 2].reshape(B, T, local_n_kq, d_k)
+        key = mixed_qkv[...,
+                        key_dim:key_dim * 2].reshape(B, T, local_n_kq, d_k)
         value = mixed_qkv[..., key_dim * 2:].reshape(B, T, local_n_v, d_v)
 
         # 3. Compute continuous decay (g) and input gate (beta)
@@ -441,8 +441,12 @@ def run_jax_gdn_attention_local(
         key = _l2_normalize(key)
 
         # 5. Delta Rule Recurrence
-        output, new_r = _recurrent_gated_delta_rule_step(
-            query, key, value, g, beta, state=r_state)
+        output, new_r = _recurrent_gated_delta_rule_step(query,
+                                                         key,
+                                                         value,
+                                                         g,
+                                                         beta,
+                                                         state=r_state)
 
         # Output back to (B, T, H, d_v) -> (B, T, H * d_v)
         output = jnp.transpose(output, (0, 2, 1, 3)).astype(mixed_qkv.dtype)
@@ -473,6 +477,7 @@ def run_jax_gdn_attention_local(
     ) = jax.lax.scan(scan_fn, carry_init, xs)
 
     return (new_cs_q, new_cs_k, new_cs_v, new_recurrent_state), j_output
+
 
 def run_jax_gdn_attention(
     j_mixed_qkv: jnp.ndarray,
@@ -598,11 +603,9 @@ def run_jax_gdn_attention(
         out_specs=out_specs,
     )
 
-    (new_cs_q, new_cs_k, new_cs_v,
-     new_rs), j_output = mapped_fn(j_q, j_k, j_v, j_b, j_a, cs_q, cs_k, cs_v,
-                                   recurrent_state, cw_q, cw_k, cw_v, cb_q,
-                                   cb_k, cb_v, j_A_log, j_dt_bias, q_loc,
-                                   state_indices)
+    (new_cs_q, new_cs_k, new_cs_v, new_rs), j_output = mapped_fn(
+        j_q, j_k, j_v, j_b, j_a, cs_q, cs_k, cs_v, recurrent_state, cw_q, cw_k,
+        cw_v, cb_q, cb_k, cb_v, j_A_log, j_dt_bias, q_loc, state_indices)
 
     new_conv_state = jnp.concatenate([new_cs_q, new_cs_k, new_cs_v], axis=-1)
 
