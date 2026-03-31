@@ -50,61 +50,6 @@ def _l2_normalize(x: jnp.ndarray, eps: float = 1e-6) -> jnp.ndarray:
     return x / norm
 
 
-def _causal_conv1d(
-    x: jnp.ndarray,
-    conv_weight: jnp.ndarray,
-    conv_bias: Optional[jnp.ndarray] = None,
-    kernel_size: int = 4,
-) -> jnp.ndarray:
-    """Apply causal depthwise 1D convolution.
-
-    Needed because Delta Networks usually prepend a
-    sliding-window Conv1D before the recurrent mechanism to mix local token
-    context efficiently. This function handles the parallelized computation
-    over the entire sequence during the `prefill` phase.
-
-
-    Args:
-        x: (B, T, C) input
-        conv_weight: (C, 1, kernel_size) depthwise kernel (PyTorch Conv1d format)
-        conv_bias: optional (C,) bias
-        kernel_size: convolution kernel size
-
-    Returns:
-        (B, T, C) output (same length due to causal padding)
-    """
-    _, _, C = x.shape
-
-    # Left-pad by (kernel_size - 1) for causal
-    x_padded = jnp.pad(x, ((0, 0), (kernel_size - 1, 0), (0, 0)))
-
-    # Transpose to (B, C, T_padded) for conv
-    x_t = jnp.transpose(x_padded, (0, 2, 1))
-
-    # Ensure weight shape: (C, 1, kernel_size) for depthwise
-    if conv_weight.ndim == 2:
-        w = jnp.transpose(conv_weight, (1, 0))[:, jnp.newaxis, :]
-    else:
-        w = conv_weight  # already (C, 1, kernel_size)
-
-    # Depthwise conv: feature_group_count = C
-    out = jax.lax.conv_general_dilated(
-        x_t,
-        w,
-        window_strides=(1, ),
-        padding="VALID",
-        feature_group_count=C,
-    )
-
-    # Transpose back: (B, C, T) → (B, T, C)
-    out = jnp.transpose(out, (0, 2, 1))
-
-    if conv_bias is not None:
-        out = out + conv_bias[jnp.newaxis, jnp.newaxis, :]
-
-    return out
-
-
 def _causal_conv1d_step(
     x_new: jnp.ndarray,
     conv_state: jnp.ndarray,
