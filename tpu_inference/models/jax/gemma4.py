@@ -250,11 +250,11 @@ class Gemma4MoE(JaxMoE):
                     self.kernel_down_proj_EFD.value, 1, 2)
             elif name.endswith("gate_up_proj"):
                 F = tensor.shape[1] // 2
-                load_nnx_param_from_reshaped_torch(self.kernel_up_proj_EDF,
+                load_nnx_param_from_reshaped_torch(self.kernel_gating_EDF,
                                                    tensor[:, :F, :],
                                                    permute_dims=(0, 2, 1),
                                                    param_name=name)
-                load_nnx_param_from_reshaped_torch(self.kernel_gating_EDF,
+                load_nnx_param_from_reshaped_torch(self.kernel_up_proj_EDF,
                                                    tensor[:, F:, :],
                                                    permute_dims=(0, 2, 1),
                                                    param_name=name)

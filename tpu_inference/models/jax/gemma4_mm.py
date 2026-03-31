@@ -772,21 +772,6 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                                     v_weight)
                             continue
 
-                # Handle packed Gate-Up weights for the text tower
-                if "gate_up_proj" in mapped_name:
-                    intermediate_size = weight.shape[0] // 2
-                    gate_weight = weight[:intermediate_size]
-                    up_weight = weight[intermediate_size:]
-                    yield mapped_name.replace(
-                        "gate_up_proj", "gate_proj"), process_tensor(
-                            mapped_name.replace("gate_up_proj", "gate_proj"),
-                            gate_weight)
-                    yield mapped_name.replace(
-                        "gate_up_proj", "up_proj"), process_tensor(
-                            mapped_name.replace("gate_up_proj", "up_proj"),
-                            up_weight)
-                    continue
-
                 yield mapped_name, process_tensor(mapped_name, weight)
 
         return super().load_weights(filter_weights(weights))
