@@ -299,116 +299,6 @@ def _recurrent_gated_delta_rule_step(
     return output, new_state
 
 
-def _jax_gdn_attention_core(
-    mixed_qkv: jnp.ndarray,
-    b: jnp.ndarray,
-    a: jnp.ndarray,
-    conv_state: jnp.ndarray,
-    recurrent_state: jnp.ndarray,
-    conv_weight: jnp.ndarray,
-    conv_bias: jnp.ndarray,
-    A_log: jnp.ndarray,
-    dt_bias: jnp.ndarray,
-    is_prefill: bool,
-    n_kq: int,
-    n_v: int,
-    d_k: int,
-    d_v: int,
-    kernel_size: int,
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Pure JAX implementation of the GDN sequence and recurrence logic.
-
-    Args:
-        mixed_qkv: (B, T, C)
-        b: (B, T, n_v)
-        a: (B, T, n_v)
-        conv_state: (B, T, C)
-        recurrent_state: (B, H, d_k, d_v)
-        conv_weight: (C, 1, kernel_size)
-        conv_bias: (C,)
-        A_log: (n_v,)
-        dt_bias: (n_v,)
-        is_prefill: bool
-        n_kq: int
-        n_v: int
-        d_k: int
-        d_v: int
-        kernel_size: int
-
-    Returns:
-        output: (B, T, n_v * d_v)
-        new_conv_state: (B, T, C)
-        new_recurrent_state: (B, H, d_k, d_v)
-
-    """
-    B, T, _ = mixed_qkv.shape
-    key_dim = n_kq * d_k
-
-    # 1. Causal Conv1D
-    if is_prefill:
-        # new_conv_state = mixed_qkv[:, -(kernel_size - 1):, :]
-        T_conv = kernel_size - 1
-        new_conv_state = mixed_qkv[:, -T_conv:, :]
-        if new_conv_state.shape[1] < T_conv:
-            pad_len = T_conv - new_conv_state.shape[1]
-            new_conv_state = jnp.pad(new_conv_state,
-                                     ((0, 0), (pad_len, 0), (0, 0)))
-        mixed_qkv = _causal_conv1d(mixed_qkv, conv_weight, conv_bias,
-                                   kernel_size)
-    else:
-        mixed_qkv, new_conv_state = _causal_conv1d_step(
-            mixed_qkv, conv_state, conv_weight, conv_bias)
-    mixed_qkv = jax.nn.silu(mixed_qkv)
-
-    # 2. Split Q, K, V
-    query = mixed_qkv[..., :key_dim].reshape(B, T, n_kq, d_k)
-    key = mixed_qkv[..., key_dim:key_dim * 2].reshape(B, T, n_kq, d_k)
-    value = mixed_qkv[..., key_dim * 2:].reshape(B, T, n_v, d_v)
-
-    # 3. Compute continuous decay (g) and input gate (beta)
-    beta = jax.nn.sigmoid(b)
-    g = -jnp.exp(A_log.astype(jnp.float32)) * jax.nn.softplus(
-        a.astype(jnp.float32) + dt_bias.astype(jnp.float32))
-
-    # 4. Head Expansion (GQA -> MHA logic)
-    repeat_factor = n_v // n_kq
-    if repeat_factor > 1:
-        query = jnp.repeat(query, repeat_factor, axis=2)
-        key = jnp.repeat(key, repeat_factor, axis=2)
-
-    # Transpose to (B, H, T, dim)
-    query = jnp.transpose(query, (0, 2, 1, 3)).astype(jnp.float32)
-    key = jnp.transpose(key, (0, 2, 1, 3)).astype(jnp.float32)
-    value = jnp.transpose(value, (0, 2, 1, 3)).astype(jnp.float32)
-    beta = jnp.transpose(beta, (0, 2, 1)).astype(jnp.float32)
-    g = jnp.transpose(g, (0, 2, 1)).astype(jnp.float32)
-
-    # L2 normalize Q, K
-    query = _l2_normalize(query)
-    key = _l2_normalize(key)
-
-    # 5. Delta Rule Recurrence
-    if is_prefill:
-        output, new_recurrent_state = _chunk_gated_delta_rule(
-            query,
-            key,
-            value,
-            g,
-            beta,
-            chunk_size=64,
-            initial_state=recurrent_state,
-            output_final_state=True)
-    else:
-        output, new_recurrent_state = _recurrent_gated_delta_rule_step(
-            query, key, value, g, beta, state=recurrent_state)
-
-    # Output back to (B, T, H, d_v) -> (B, T, H * d_v)
-    output = jnp.transpose(output, (0, 2, 1, 3)).astype(mixed_qkv.dtype)
-    output = output.reshape(B, T, -1)
-
-    return output, new_conv_state, new_recurrent_state
-
-
 def run_jax_gdn_attention_local(
     l_query: jnp.ndarray,
     l_key: jnp.ndarray,
@@ -434,7 +324,8 @@ def run_jax_gdn_attention_local(
     d_k: int,
     d_v: int,
     kernel_size: int,
-) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray], jnp.ndarray]:
+) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray],
+           jnp.ndarray]:
     """Runs the local JAX GDN attention mechanism.
 
     Args:
@@ -485,70 +376,103 @@ def run_jax_gdn_attention_local(
     local_n_kq = n_kq // attn_head_axis_size
     local_n_v = n_v // attn_head_axis_size
 
-    curr_mixed_qkv = jnp.concatenate([l_query, l_key, l_value], axis=-1)
-    curr_conv_state = jnp.concatenate(
-        [l_conv_state_q, l_conv_state_k, l_conv_state_v], axis=-1)
-    curr_conv_weight = jnp.concatenate(
-        [l_conv_weight_q, l_conv_weight_k, l_conv_weight_v], axis=0)
-
-    if l_conv_bias_q is not None:
-        curr_conv_bias = jnp.concatenate(
-            [l_conv_bias_q, l_conv_bias_k, l_conv_bias_v], axis=0)
-    else:
-        curr_conv_bias = None
-
     def scan_fn(carry, xs):
-        c_state_all, r_state_all = carry
-        curr_qkv, curr_b, curr_a, req_idx, is_valid = xs
+        c_state_q, c_state_k, c_state_v, r_state_all = carry
+        (
+            curr_q,
+            curr_k,
+            curr_v,
+            curr_b,
+            curr_a,
+            req_idx,
+            is_valid,
+        ) = xs
 
-        curr_qkv = curr_qkv[None, None, :]
+        curr_q = curr_q[None, None, :]
+        curr_k = curr_k[None, None, :]
+        curr_v = curr_v[None, None, :]
         curr_b = curr_b[None, None, :]
         curr_a = curr_a[None, None, :]
 
         state_idx = l_state_indices[req_idx]
-        c_state = c_state_all[state_idx][None, ...]
+        cs_q = c_state_q[state_idx][None, ...]
+        cs_k = c_state_k[state_idx][None, ...]
+        cs_v = c_state_v[state_idx][None, ...]
         r_state = r_state_all[state_idx][None, ...]
 
-        out, new_c, new_r = _jax_gdn_attention_core(
-            curr_qkv,
-            curr_b,
-            curr_a,
-            c_state,
-            r_state,
-            curr_conv_weight,
-            curr_conv_bias,
-            l_A_log,
-            l_dt_bias,
-            is_prefill=False,
-            n_kq=local_n_kq,
-            n_v=local_n_v,
-            d_k=d_k,
-            d_v=d_v,
-            kernel_size=kernel_size)
+        # 1. Causal Conv1D
+        q_conv, new_cs_q = _causal_conv1d_step(curr_q, cs_q, l_conv_weight_q,
+                                               l_conv_bias_q)
+        k_conv, new_cs_k = _causal_conv1d_step(curr_k, cs_k, l_conv_weight_k,
+                                               l_conv_bias_k)
+        v_conv, new_cs_v = _causal_conv1d_step(curr_v, cs_v, l_conv_weight_v,
+                                               l_conv_bias_v)
 
-        c_state_all = jnp.where(is_valid,
-                                c_state_all.at[state_idx].set(new_c[0]),
-                                c_state_all)
+        mixed_qkv = jnp.concatenate([q_conv, k_conv, v_conv], axis=-1)
+        mixed_qkv = jax.nn.silu(mixed_qkv)
+
+        # 2. Split Q, K, V
+        B, T, _ = mixed_qkv.shape
+        key_dim = local_n_kq * d_k
+        query = mixed_qkv[..., :key_dim].reshape(B, T, local_n_kq, d_k)
+        key = mixed_qkv[..., key_dim:key_dim * 2].reshape(B, T, local_n_kq, d_k)
+        value = mixed_qkv[..., key_dim * 2:].reshape(B, T, local_n_v, d_v)
+
+        # 3. Compute continuous decay (g) and input gate (beta)
+        beta = jax.nn.sigmoid(curr_b)
+        g = -jnp.exp(l_A_log.astype(jnp.float32)) * jax.nn.softplus(
+            curr_a.astype(jnp.float32) + l_dt_bias.astype(jnp.float32))
+
+        # 4. Head Expansion (GQA -> MHA logic)
+        repeat_factor = local_n_v // local_n_kq
+        if repeat_factor > 1:
+            query = jnp.repeat(query, repeat_factor, axis=2)
+            key = jnp.repeat(key, repeat_factor, axis=2)
+
+        # Transpose to (B, H, T, dim)
+        query = jnp.transpose(query, (0, 2, 1, 3)).astype(jnp.float32)
+        key = jnp.transpose(key, (0, 2, 1, 3)).astype(jnp.float32)
+        value = jnp.transpose(value, (0, 2, 1, 3)).astype(jnp.float32)
+        beta = jnp.transpose(beta, (0, 2, 1)).astype(jnp.float32)
+        g = jnp.transpose(g, (0, 2, 1)).astype(jnp.float32)
+
+        # L2 normalize Q, K
+        query = _l2_normalize(query)
+        key = _l2_normalize(key)
+
+        # 5. Delta Rule Recurrence
+        output, new_r = _recurrent_gated_delta_rule_step(
+            query, key, value, g, beta, state=r_state)
+
+        # Output back to (B, T, H, d_v) -> (B, T, H * d_v)
+        output = jnp.transpose(output, (0, 2, 1, 3)).astype(mixed_qkv.dtype)
+        output = output.reshape(B, T, -1)
+
+        c_state_q = jnp.where(is_valid,
+                              c_state_q.at[state_idx].set(new_cs_q[0]),
+                              c_state_q)
+        c_state_k = jnp.where(is_valid,
+                              c_state_k.at[state_idx].set(new_cs_k[0]),
+                              c_state_k)
+        c_state_v = jnp.where(is_valid,
+                              c_state_v.at[state_idx].set(new_cs_v[0]),
+                              c_state_v)
         r_state_all = jnp.where(is_valid,
                                 r_state_all.at[state_idx].set(new_r[0]),
                                 r_state_all)
 
-        return (c_state_all, r_state_all), out[0, 0]
+        return (c_state_q, c_state_k, c_state_v, r_state_all), output[0, 0]
 
-    carry_init = (curr_conv_state, l_recurrent_state)
-    xs = (curr_mixed_qkv, l_b, l_a, req_indices, valid_mask)
+    carry_init = (l_conv_state_q, l_conv_state_k, l_conv_state_v,
+                  l_recurrent_state)
+    xs = (l_query, l_key, l_value, l_b, l_a, req_indices, valid_mask)
 
-    (new_conv_state,
-     new_recurrent_state), j_output = jax.lax.scan(scan_fn, carry_init, xs)
-
-    # NOTE: split back local staate to preserve global Q, K, V boundaries
-    local_key_dim = local_n_kq * d_k
-    new_cs_q = new_conv_state[..., :local_key_dim]
-    new_cs_k = new_conv_state[..., local_key_dim:local_key_dim * 2]
-    new_cs_v = new_conv_state[..., local_key_dim * 2:]
+    (
+        (new_cs_q, new_cs_k, new_cs_v, new_recurrent_state),
+        j_output,
+    ) = jax.lax.scan(scan_fn, carry_init, xs)
 
     return (new_cs_q, new_cs_k, new_cs_v, new_recurrent_state), j_output
-
 
 def run_jax_gdn_attention(
     j_mixed_qkv: jnp.ndarray,
