@@ -40,8 +40,6 @@ from tpu_inference.models.jax.utils.weight_utils import assign_and_shard_param
 
 logger = init_logger(__name__)
 
-# ---- helpers ----------------------------------------------------------------
-
 _LOW = -1e-3
 _HIGH = 1e-3
 _SEED = 1234
@@ -77,9 +75,6 @@ def create_dummy_weights_on_tpu(
 
     tpu_array = _generate(key)
     return tpu_array
-
-
-# ---- JAX / flax_nnx backend ------------------------------------------------
 
 
 def load_dummy_weights_jax(model, mesh: Mesh) -> None:
@@ -143,9 +138,6 @@ def _process_weights_after_loading_jax(module) -> None:
     else:
         for _name, sub_module in module.named_children():
             _process_weights_after_loading_jax(sub_module)
-
-
-# ---- registered model loader -----------------------------------------------
 
 
 @register_model_loader("pathways_dummy")

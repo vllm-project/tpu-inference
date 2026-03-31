@@ -33,7 +33,6 @@ from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
 from torchax.ops.ops_registry import register_torch_function_op
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
-from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.model_loader import get_model as vllm_get_model
@@ -194,8 +193,6 @@ class VllmModelWrapper:
         if use_pathways_dummy:
             logger.info("Pathways dummy mode: will generate random weights "
                         "directly on TPU, skipping CPU allocation.")
-            # Ensure the loader is registered before use.
-            import tpu_inference.models.common.pathways_dummy_loader  # noqa: F401
             vllm_config_for_load.load_config.load_format = "pathways_dummy"
         elif use_random_weights:
             logger.info(
@@ -479,27 +476,4 @@ def load_lora_model(model: torch.nn.Module, vllm_config: VllmConfig,
     return lora_manager, lora_manager.create_lora_manager(model)
 
 
-# The reason why replace the method is that the set_lora and reset_lora need to
-# run under torchax env.
-def replace_set_lora(model):
-
-    def _tpu_set_lora(
-        self,
-        index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
-    ):
-        with torchax.default_env():
-            self._original_set_lora(index, lora_a, lora_b)
-
-    def _tpu_reset_lora(self, index: int):
-        with torchax.default_env():
-            self._original_reset_lora(index)
-
-    for _, module in model.named_modules():
-        if isinstance(module, BaseLayerWithLoRA):
-            module._original_set_lora = module.set_lora
-            module._original_reset_lora = module.reset_lora
-            module.set_lora = _tpu_set_lora.__get__(module, module.__class__)
-            module.reset_lora = _tpu_reset_lora.__get__(
-                module, module.__class__)
+# The reason why replace the method is that the set_lora and re

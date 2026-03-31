@@ -103,6 +103,11 @@ def _convert_to_torchax_and_shard(tensor: torch.Tensor,
                     weight_shape=tuple(tensor.shape),
                     weight_dtype=to_jax_dtype(tensor.dtype),
                 ))
+        else:
+            dtype = to_jax_dtype(tensor.dtype)
+            np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
+            return torch_view(
+                jax.device_put(np_tensor, sharding).astype(dtype))
     if isinstance(tensor, torchax.tensor.Tensor):
         tensor = jax_view(tensor)
     else:
