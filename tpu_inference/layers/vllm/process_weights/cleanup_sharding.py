@@ -56,61 +56,13 @@ def shard_model_to_tpu(model: torch.nn.Module,
     with jax.default_device(jax.devices("cpu")[0]):
         _shard_module_to_tpu(model, mesh)
 
-        import gc
-        device = jax.devices()[0]
-        try:
-            mem_before = device.memory_stats()["bytes_in_use"] / (1024**3)
-            logger.info(f"Memory before GC: {mem_before:.2f} GB in use on {device}")
-        except Exception:
-            pass
+        params, buffers = _extract_all_params_buffers(model)
 
-        gc.collect()
-        jax.clear_caches()
-
-        try:
-            mem_after = device.memory_stats()["bytes_in_use"] / (1024**3)
-            logger.info(f"Memory after GC/clear: {mem_after:.2f} GB in use on {device}")
-            
-            # Dump the exact memory contents to disk for analysis
-            prof_path = "/home/karangoel_google_com/tpu-inference/memory.prof"
-            jax.profiler.save_device_memory_profile(prof_path)
-            logger.info(f"Saved JAX memory profile to {prof_path}")
-        except Exception as e:
-            logger.error(f"Failed to save memory profile: {e}")
-
-        params = {}
-        total_replicated_bytes = 0
-        total_sharded_bytes = 0
-        
-        # Iterate through parameters and shard them one by one to avoid peak memory.
-        for name, param in model.named_parameters():
-            if _tensor_is_in_cpu(param):
-                # Calculate size for logging
-                size_mb = param.numel() * param.element_size() / (1024**2)
-                if size_mb > 100:
-                    logger.info(f"Replicating LARGE tensor: {name} | Shape: {param.shape} | Size: {size_mb:.2f} MB")
-                
-                sharded = _shard_tensor_to_tpu_replicated(param, mesh)
-                # Synchronize to ensure HBM is allocated and freed cleanly.
-                jax.block_until_ready(jax_view(sharded))
-                params[name] = sharded
-                total_replicated_bytes += param.numel() * param.element_size()
-            else:
-                params[name] = param
-                # Note: JAX array size is per-device if sharded
-                total_sharded_bytes += (jax_view(param).nbytes * jax.device_count())
-
-        logger.info(f"Total Replicated Memory: {total_replicated_bytes / (1024**3):.2f} GB")
-        logger.info(f"Total Sharded Memory (Global): {total_sharded_bytes / (1024**3):.2f} GB")
-        
-        buffers = {}
-        for name, buffer in model.named_buffers():
-            if _tensor_is_in_cpu(buffer):
-                sharded = _shard_tensor_to_tpu_replicated(buffer, mesh)
-                jax.block_until_ready(jax_view(sharded))
-                buffers[name] = sharded
-            else:
-                buffers[name] = buffer
+        # For other weight tensors, repliate them on all the TPU chips.
+        params, buffers = pytree.tree_map_only(
+            _tensor_is_in_cpu,
+            lambda tensor: _shard_tensor_to_tpu_replicated(tensor, mesh),
+            (params, buffers))
 
         return {**params, **buffers}
 
@@ -240,26 +192,9 @@ MODULE_TYPE_TO_SHARDING_FUNC = [
 
 
 def _shard_module_to_tpu(model: torch.nn.Module, mesh: Mesh) -> None:
-    device = jax.devices()[0]
-    last_mem = 0
-    try:
-        last_mem = device.memory_stats()["bytes_in_use"]
-    except Exception:
-        pass
-
     for path, module in model.named_modules():
         for module_type, sharding_func in MODULE_TYPE_TO_SHARDING_FUNC:
             if type(module) is module_type:
                 logger.debug("shard %s with %s", path, sharding_func)
                 sharding_func(module, mesh)
-                
-                # Log memory growth for large layers
-                try:
-                    curr_mem = device.memory_stats()["bytes_in_use"]
-                    diff_gb = (curr_mem - last_mem) / (1024**3)
-                    if diff_gb > 0.5: # Log anything adding > 500MB
-                         logger.info(f"Layer {path} added {diff_gb:.2f} GB to HBM (Total: {curr_mem/(1024**3):.2f} GB)")
-                    last_mem = curr_mem
-                except Exception:
-                    pass
                 break
