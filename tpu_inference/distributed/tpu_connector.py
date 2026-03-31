@@ -59,7 +59,6 @@ D workflow:
 """
 
 import copy
-import functools
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -448,8 +447,8 @@ class TPUConnectorWorker:
         # req_id: thread_future
         self.reqs_pulling: dict[ReqId, Future] = {}
         # req_id: (kv, indices)
-        self.reqs_ready_to_scatter: dict[ReqId, tuple[list[jax.Array],
-                                                      jax.Array]] = {}
+        self.reqs_ready_to_insert: dict[ReqId, tuple[list[jax.Array],
+                                                     jax.Array]] = {}
         # the KV cache strafer uuid to request mapping
         # the reason is vllm add prefix + external uuid suffix for each request id
         # for example: prefill req_id:cmpl-cd70b21e-0f2b-46ed-910c-9525f706389a-0-99ae74c8
@@ -600,11 +599,13 @@ class TPUConnectorWorker:
                 self.reqs_pulling[req_id] = self.pull_executor.submit(
                     self._pull_kv, req_id, conn, req_meta, indices)
             else:
-                if req_id in self.reqs_ready_to_scatter:
-                    kv, indices = self.reqs_ready_to_scatter.pop(req_id)
-                    self.runner.kv_caches = scatter_kv_slices(
-                        self.runner.kv_caches, kv, indices, self.mesh,
-                        self.sharding.spec)
+                if req_id in self.reqs_ready_to_insert:
+                    kv, indices, block_numbers = self.reqs_ready_to_insert.pop(
+                        req_id)
+                    if len(block_numbers) > 0:
+                        self.runner.kv_caches = insert_kv_chunks(
+                            self.runner.kv_caches, kv, block_numbers,
+                            self.mesh, self.sharding.spec)
 
                 # The request has finished pulling the KV from remote, or it has full local
                 # prefix cache, need to notify P to let it free blocks.
@@ -685,7 +686,7 @@ class TPUConnectorWorker:
             f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | "
             f"uuid={req_meta.uuid} | prepare time={prepare_time_ms:.2f}ms | "
             f"pull time={pull_time_ms:.2f}ms | size={kv_size_mb:.2f}MB")
-        return kv, indices
+        return kv, indices, req_meta.local_block_ids
 
     def _get_kv_spec(self, num_blocks: int) -> list[jax.ShapeDtypeStruct]:
         assert num_blocks <= self.shape[0]
@@ -732,8 +733,9 @@ class TPUConnectorWorker:
         for req_id in list(self.reqs_pulling.keys()):
             future = self.reqs_pulling[req_id]
             if future.done():
-                kv, indices = future.result()
-                self.reqs_ready_to_scatter[req_id] = (kv, indices)
+                kv, indices, block_numbers = future.result()
+                self.reqs_ready_to_insert[req_id] = (kv, indices,
+                                                     block_numbers)
                 del self.reqs_pulling[req_id]
                 done_recving.add(req_id)
 
@@ -768,29 +770,49 @@ def select_from_kv_caches(kv_caches: list[jax.Array],
     return selected
 
 
-@functools.partial(
-    jax.jit,
-    donate_argnames=("kv_caches", ),
-    static_argnames=("mesh", "spec"),
-)
-def scatter_kv_slices(kv_caches: list[jax.Array], kv_slices: list[jax.Array],
-                      indices: jax.Array, mesh: jax.sharding.Mesh,
-                      spec) -> list[jax.Array]:
-    num_slices = kv_slices[0].shape[0]
-    src_offsets = jnp.arange(num_slices, dtype=jnp.int32)
-    dest_offsets = indices
-    chunk_sizes = jnp.ones(num_slices, dtype=jnp.int32)
-    num_chunks = jnp.array([num_slices], dtype=jnp.int32)
+def insert_kv_chunks(kv_caches: list[jax.Array], kv_slices: list[jax.Array],
+                     block_numbers: list[int], mesh: jax.sharding.Mesh,
+                     spec) -> list[jax.Array]:
+    src_offsets = []
+    dest_offsets = []
+    chunk_sizes = []
+
+    start_idx = 0
+    for i in range(1, len(block_numbers) + 1):
+        if i == len(block_numbers) or block_numbers[i] != block_numbers[i -
+                                                                        1] + 1:
+            start_block = block_numbers[start_idx]
+            chunk_size = i - start_idx
+
+            src_offsets.append(start_idx)
+            dest_offsets.append(start_block)
+            chunk_sizes.append(chunk_size)
+
+            start_idx = i
+
+    num_chunks = len(src_offsets)
+    total_len = len(block_numbers)
+
+    # Pad to total_len to avoid recompilation
+    while len(src_offsets) < total_len:
+        src_offsets.append(0)
+        dest_offsets.append(0)
+        chunk_sizes.append(0)
+
+    src_offsets_arr = jnp.array(src_offsets, dtype=jnp.int32)
+    dest_offsets_arr = jnp.array(dest_offsets, dtype=jnp.int32)
+    chunk_sizes_arr = jnp.array(chunk_sizes, dtype=jnp.int32)
+    num_chunks_arr = jnp.array([num_chunks], dtype=jnp.int32)
 
     replicated_spec = jax.sharding.PartitionSpec()
 
     return multi_layer_copy(
         src_array=kv_slices,
         dest_array=kv_caches,
-        src_offsets=src_offsets,
-        dest_offsets=dest_offsets,
-        chunk_sizes=chunk_sizes,
-        num_chunks=num_chunks,
+        src_offsets=src_offsets_arr,
+        dest_offsets=dest_offsets_arr,
+        chunk_sizes=chunk_sizes_arr,
+        num_chunks=num_chunks_arr,
         mesh=mesh,
         src_sharding_spec=spec,
         dest_sharding_spec=spec,
