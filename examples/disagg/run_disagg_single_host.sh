@@ -18,6 +18,8 @@
 set -e
 
 MODEL="Qwen/Qwen3-0.6B"
+PROFILER_DIR=gs://shenyang-cloud/vllm
+PROFILER_CONFIG_JSON='{"profiler": "torch", "torch_profiler_dir": "'"${PROFILER_DIR}"'"}'
 
 NUM_PREFILL_INSTANCES=1
 NUM_DECODE_INSTANCES=1
@@ -63,7 +65,7 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     \
     TPU_KV_TRANSFER_PORT=$KV_PORT \
     TPU_SIDE_CHANNEL_PORT=$SIDE_PORT \
-    SKIP_JAX_PRECOMPILE=1 \
+    SKIP_JAX_PRECOMPILE=0 \
     \
     vllm serve $MODEL \
     --port $PORT \
@@ -72,6 +74,7 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     --block-size 128 \
     --no-enable-prefix-caching \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
+    --profiler-config "$PROFILER_CONFIG_JSON" \
     --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}" \
     > $HOME/logs/prefill_$i.txt 2>&1 &
 
@@ -106,6 +109,7 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     --max-num-batched-tokens 1024 \
     --block-size 128 \
     --tensor-parallel-size $DECODER_TP_SIZE \
+    --profiler-config "$PROFILER_CONFIG_JSON" \
     --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}" \
     > $HOME/logs/decode_$i.txt 2>&1 &
 
@@ -151,7 +155,7 @@ vllm bench serve \
 --ignore-eos \
 --host=localhost \
 --port 8000 \
---request-rate 4 \
+--request-rate 30 \
 >> $LOG_FILE 2>&1
 
 echo -e "\n\n--- Running Non-Disagg Benchmark ---" >> $LOG_FILE
@@ -166,7 +170,7 @@ vllm bench serve \
 --ignore-eos \
 --host=localhost \
 --port 9400 \
---request-rate 4 \
+--request-rate 30 \
 >> $LOG_FILE 2>&1
 set +x
 

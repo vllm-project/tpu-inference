@@ -31,7 +31,11 @@ def set_node_kv_ip_port(ip_port: tuple[int, str, int]):
     _NODES_KV_IP_PORT[node_id] = (ip, port)
 
 
-def get_kv_ips() -> str:
+def get_kv_ips() -> str | list[str]:
+    override_ip = os.getenv("TPU_KV_PRODUCER_IP")
+    if override_ip:
+        return [override_ip]
+
     if envs.TPU_MULTIHOST_BACKEND == "ray":
         num_nodes = len(_NODES_KV_IP_PORT)
         ips = []

@@ -500,6 +500,8 @@ class TPUConnectorWorker:
         # Get the spec of the kv_caches
         kv_caches = runner.kv_caches
         kv_layer = kv_caches[0]
+        if isinstance(kv_layer, (tuple, list)):
+            kv_layer = kv_layer[0]
         self.num_layers = len(kv_caches)
         self.shape = list(kv_layer.shape)
         self.dtype = kv_layer.dtype

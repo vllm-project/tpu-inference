@@ -154,7 +154,7 @@ if [ "$RUN_IN_BUILDKITE" = "false" ]; then
 fi
 
 # General configs
-HOST_HF_HOME="/mnt/disks/persist/models"
+HOST_HF_HOME="$HOME/huggingface"
 COMMON_SIDE_PORT=8900
 
 # v6ex has 4 hosts with 4 TPUs, while v7x has 2 hosts with 2 TPU chips (4 cores). Adjust configs accordingly.
@@ -163,9 +163,11 @@ TPU_PROCESS_BOUNDS="2,2,1"
 PREFILL_TPU_PORTS=(8476 8477 8478 8479)
 DECODE_TPU_PORTS=(9476 9477 9478 9479)
 
+TPU_CHIPS_PER_PROCESS="1,1,1"
 if [ "$TPU_VERSION" = "tpu7x" ]; then
     NUM_HOSTS_PER_INSTANCE=2
-    TPU_PROCESS_BOUNDS="1,2,1"
+    TPU_PROCESS_BOUNDS="2,2,1"  # 4 chips per prefill/decode instance
+    TPU_CHIPS_PER_PROCESS="1,2,1"  # 2 chips per process
     PREFILL_TPU_PORTS=(8476 8477)
     DECODE_TPU_PORTS=(9476 9477)
 fi
@@ -192,6 +194,12 @@ for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
     KV_PORT=$((8200 + i))
     SIDE_PORT=$((COMMON_SIDE_PORT + i))
 
+    if [ "$TPU_VERSION" = "tpu7x-16" ]; then
+        tpu_visible_chips="$((i*2)),$((i*2+1))"
+    else
+        tpu_visible_chips="${i}"
+    fi
+
     set -x
     docker run -d \
         --privileged \
@@ -206,9 +214,9 @@ for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
         -e RAY_DEDUP_LOGS="0" \
         -e SKIP_JAX_PRECOMPILE="1" \
         \
-        -e TPU_CHIPS_PER_PROCESS_BOUNDS="1,1,1" \
+        -e TPU_CHIPS_PER_PROCESS_BOUNDS="${TPU_CHIPS_PER_PROCESS}" \
         -e TPU_PROCESS_BOUNDS="${TPU_PROCESS_BOUNDS}" \
-        -e TPU_VISIBLE_CHIPS="${i}" \
+        -e TPU_VISIBLE_CHIPS="${tpu_visible_chips}" \
         -e CLOUD_TPU_TASK_ID="${i}" \
         -e TPU_PROCESS_ADDRESSES="${PREFILL_TPU_ADDRS}" \
         -e TPU_PROCESS_PORT="${tpu_port}" \
@@ -265,6 +273,13 @@ for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
     KV_PORT=$((9200 + i))
     SIDE_PORT=$((COMMON_SIDE_PORT + i))
 
+    if [ "$TPU_VERSION" = "tpu7x-16" ]; then
+        # Decode uses the next set of chips after prefill
+        tpu_visible_chips="$((4 + i*2)),$((4 + i*2+1))"
+    else
+        tpu_visible_chips="${tpu_index}"
+    fi
+
     set -x
     docker run -d \
         --privileged \
@@ -279,9 +294,9 @@ for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
         -e RAY_DEDUP_LOGS="0" \
         -e SKIP_JAX_PRECOMPILE="1" \
         \
-        -e TPU_CHIPS_PER_PROCESS_BOUNDS="1,1,1" \
+        -e TPU_CHIPS_PER_PROCESS_BOUNDS="${TPU_CHIPS_PER_PROCESS}" \
         -e TPU_PROCESS_BOUNDS="${TPU_PROCESS_BOUNDS}" \
-        -e TPU_VISIBLE_CHIPS="${tpu_index}" \
+        -e TPU_VISIBLE_CHIPS="${tpu_visible_chips}" \
         -e CLOUD_TPU_TASK_ID="${i}" \
         -e TPU_PROCESS_ADDRESSES="${DECODE_TPU_ADDRS}" \
         -e TPU_PROCESS_PORT="${tpu_port}" \
