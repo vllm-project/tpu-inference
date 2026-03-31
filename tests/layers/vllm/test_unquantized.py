@@ -43,7 +43,7 @@ from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.unquantized import (
     VllmUnquantizedConfig, VllmUnquantizedFusedMoEMethod,
-    VllmUnquantizedLinearMethod, _torch_to_jax)
+    VllmUnquantizedLinearMethod, _load_weight_for_layer)
 
 P = PartitionSpec
 MODELS = ["Qwen/Qwen2-1.5B-Instruct"]
@@ -676,16 +676,25 @@ def test_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
         )
 
 
-# --- _torch_to_jax tests ---
+# --- _load_weight_for_layer tests ---
+
+
+def _make_layer_with_weight(shape, dtype):
+    """Create a simple torch.nn.Module with a 'weight' attribute."""
+    layer = torch.nn.Module()
+    layer.weight = torch.randn(shape, dtype=dtype)
+    return layer
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
-def test_torch_to_jax_non_pathways(dtype):
-    """_torch_to_jax falls back to t2j when not using Pathways."""
-    tensor = torch.randn(4, 8, dtype=dtype)
-    result = _torch_to_jax(tensor)
-    expected = t2j(tensor, use_dlpack=False)
+def test_load_weight_for_layer_non_pathways(dtype):
+    """_load_weight_for_layer falls back to t2j when not using Pathways."""
+    layer = _make_layer_with_weight((4, 8), dtype)
+    mesh = test_utils.get_spmd_mesh(1)
+    sharding = NamedSharding(mesh, P(None, None))
+    result = _load_weight_for_layer(layer, "weight", sharding)
+    expected = t2j(layer.weight, use_dlpack=False)
     assert result.shape == expected.shape
     assert result.dtype == expected.dtype
     import numpy as np
@@ -693,35 +702,34 @@ def test_torch_to_jax_non_pathways(dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
-def test_torch_to_jax_non_pathways_ignores_sharding(dtype):
-    """_torch_to_jax ignores sharding arg when not using Pathways."""
+@patch("tpu_inference.layers.vllm.quantization.unquantized.is_pathways_dummy_load",
+       return_value=False)
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
+def test_load_weight_for_layer_pathways_real_weights(_, dtype):
+    """_load_weight_for_layer converts via numpy + device_put under Pathways (real weights)."""
+    layer = _make_layer_with_weight((4, 8), dtype)
     mesh = test_utils.get_spmd_mesh(1)
     sharding = NamedSharding(mesh, P(None, None))
-    tensor = torch.randn(4, 8, dtype=dtype)
-    result = _torch_to_jax(tensor, sharding=sharding)
-    expected = t2j(tensor, use_dlpack=False)
-    assert result.shape == expected.shape
-
-
-@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
-def test_torch_to_jax_pathways_requires_sharding():
-    """_torch_to_jax raises when sharding is None under Pathways."""
-    tensor = torch.randn(4, 8)
-    with pytest.raises(AssertionError, match="sharding must be provided"):
-        _torch_to_jax(tensor)
-
-
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
-def test_torch_to_jax_pathways_with_sharding(dtype):
-    """_torch_to_jax converts via numpy + device_put under Pathways."""
-    mesh = test_utils.get_spmd_mesh(1)
-    sharding = NamedSharding(mesh, P(None, None))
-    tensor = torch.randn(4, 8, dtype=dtype)
-    result = _torch_to_jax(tensor, sharding=sharding)
+    result = _load_weight_for_layer(layer, "weight", sharding)
     # Check shape and values are preserved (converted through float32 intermediate)
     assert result.shape == (4, 8)
     # Under Pathways path the dtype is converted via to_jax_dtype
     from tpu_inference.utils import to_jax_dtype
     assert result.dtype == to_jax_dtype(dtype)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@patch("tpu_inference.layers.vllm.quantization.unquantized.is_pathways_dummy_load",
+       return_value=True)
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
+def test_load_weight_for_layer_pathways_dummy(_, dtype):
+    """_load_weight_for_layer creates dummy weights on TPU when in pathways dummy mode."""
+    layer = _make_layer_with_weight((4, 8), dtype)
+    mesh = test_utils.get_spmd_mesh(1)
+    sharding = NamedSharding(mesh, P(None, None))
+    result = _load_weight_for_layer(layer, "weight", sharding)
+    assert result.shape == (4, 8)
+    from tpu_inference.utils import to_jax_dtype
+    assert result.dtype == to_jax_dtype(dtype)
+    # The original tensor's storage should have been freed
+    assert layer.weight.untyped_storage().size() == 0

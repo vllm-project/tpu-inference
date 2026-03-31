@@ -43,7 +43,6 @@ from tpu_inference.layers.common.quant_methods import UNQUANTIZED
 from tpu_inference.layers.common.quantization import \
     unquantized as common_unquantized
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
@@ -53,35 +52,41 @@ from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product, to_jax_dtype
-
+from tpu_inference.models.common.pathways_dummy_loader import \
+            create_dummy_weights_on_tpu, is_pathways_dummy_load
 P = PartitionSpec
 
 logger = init_logger(__name__)
 
 
-def _torch_to_jax(tensor: torch.Tensor,
-                  sharding: NamedSharding | None = None) -> jax.Array:
-    """Convert a torch tensor to a JAX array.
-
-    Under Pathways there is no local CPU device, so we convert via numpy
-    and use ``jax.device_put`` with *sharding* to place data directly onto the
-    TPU mesh from host memory, avoiding a full-size copy on a single device.
-
-    Outside Pathways, ``t2j`` works fine because the caller sets
-    ``jax.default_device(cpu)``.
-
-    Args:
-        tensor: The PyTorch tensor to convert.
-        sharding: Target sharding for direct placement.  Required under
-            Pathways; ignored otherwise.
+def _load_weight_for_layer(
+    layer: torch.nn.Module,
+    param_name: str,
+    sharding: NamedSharding,
+) -> jax.Array:
+    """Load a layer's weight parameter onto the TPU mesh.
     """
-    if vllm_envs.VLLM_TPU_USING_PATHWAYS:
-        assert sharding is not None, (
-            "_torch_to_jax: sharding must be provided under Pathways")
-        dtype = to_jax_dtype(tensor.dtype)
-        np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
-        return jax.device_put(np_tensor, sharding).astype(dtype)
-    return t2j(tensor, use_dlpack=False)
+    tensor = getattr(layer, param_name)
+
+    if not vllm_envs.VLLM_TPU_USING_PATHWAYS:
+        return t2j(tensor, use_dlpack=False)
+
+    if is_pathways_dummy_load():
+        # Dummy weights are created directly on the TPU mesh, no CPU→TPU transfer needed
+        tensor_shape = tuple(tensor.shape)
+        tensor_dtype = tensor.dtype
+        tensor.untyped_storage().resize_(0)
+        dtype = to_jax_dtype(tensor_dtype)
+        return create_dummy_weights_on_tpu(
+            sharding=sharding,
+            weight_shape=tensor_shape,
+            weight_dtype=dtype,
+        )
+
+    # Pathways real-weight path 
+    dtype = to_jax_dtype(tensor.dtype)
+    np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
+    return jax.device_put(np_tensor, sharding).astype(dtype)
 
 
 @register_quantization_config(UNQUANTIZED)
@@ -131,14 +136,14 @@ class VllmUnquantizedEmbeddingMethod(UnquantizedEmbeddingMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = t2j(layer.weight, use_dlpack=False)
-        weight = general_device_put(
+        weight = jax.device_put(
             weight,
             NamedSharding(self.mesh, P(ShardingAxisName.MLP_TENSOR, None)))
         layer.weight = Parameter(torch_view(weight), requires_grad=False)
 
         if isinstance(layer, ParallelLMHead) and layer.bias is not None:
             bias = t2j(layer.bias, use_dlpack=False)
-            bias = general_device_put(
+            bias = jax.device_put(
                 bias, NamedSharding(self.mesh, P(ShardingAxisName.MLP_TENSOR)))
             layer.bias = Parameter(torch_view(bias), requires_grad=False)
 
@@ -180,7 +185,7 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
         # placing a full unsharded copy on a single device (OOM).
         weight_sharding = NamedSharding(self.linear_config.mesh,
                                         self.linear_config.weight_sharding)
-        weight = _torch_to_jax(layer.weight, sharding=weight_sharding)
+        weight = _load_weight_for_layer(layer, "weight", weight_sharding)
 
         # Free CPU memory immediately
         layer.weight.untyped_storage().resize_(0)
@@ -190,7 +195,7 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
                 logger.warning_once("Bias might return incorrect value.")
             bias_sharding = NamedSharding(self.linear_config.mesh,
                                           self.linear_config.bias_sharding)
-            bias = _torch_to_jax(layer.bias, sharding=bias_sharding)
+            bias = _load_weight_for_layer(layer, "bias", bias_sharding)
             layer.bias.untyped_storage().resize_(0)
             delattr(layer, 'bias')
         else:
@@ -315,8 +320,8 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         # Under Pathways, shard weights directly onto the TPU mesh to avoid
         # placing a full unsharded copy on a single device (OOM for large MoE).
         ep_sharding = NamedSharding(self.mesh, P(ShardingAxisName.EXPERT))
-        w13_weight = _torch_to_jax(layer.w13_weight, sharding=ep_sharding)
-        w2_weight = _torch_to_jax(layer.w2_weight, sharding=ep_sharding)
+        w13_weight = _load_weight_for_layer(layer, "w13_weight", ep_sharding)
+        w2_weight = _load_weight_for_layer(layer, "w2_weight", ep_sharding)
         # Free CPU memory immediately
         layer.w13_weight.untyped_storage().resize_(0)
         layer.w2_weight.untyped_storage().resize_(0)
@@ -324,8 +329,8 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         delattr(layer, 'w2_weight')
 
         if self.moe.has_bias:
-            w13_bias = _torch_to_jax(layer.w13_bias, sharding=ep_sharding)
-            w2_bias = _torch_to_jax(layer.w2_bias, sharding=ep_sharding)
+            w13_bias = _load_weight_for_layer(layer, "w13_bias", ep_sharding)
+            w2_bias = _load_weight_for_layer(layer, "w2_bias", ep_sharding)
             layer.w13_bias.untyped_storage().resize_(0)
             layer.w2_bias.untyped_storage().resize_(0)
             delattr(layer, 'w13_bias')
