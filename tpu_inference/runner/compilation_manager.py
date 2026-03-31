@@ -124,25 +124,49 @@ class CompilationManager:
         self.runner.vllm_config.compilation_config.compilation_time += elapsed
 
     def _precompile_input_embeddings_merger(self) -> None:
+        import functools
         for num_tokens in self.runner.num_tokens_paddings:
-            hidden_size = self.runner.vllm_config.model_config.get_hidden_size(
-            )
+            hidden_size = self.runner.vllm_config.model_config.get_hidden_size()
+            hf_conf = self.runner.vllm_config.model_config.hf_config
+            
+            # Text hidden size for dummy padding masks, etc.
+            if hidden_size == 0 and hasattr(hf_conf, "text_config"):
+                hidden_size = getattr(hf_conf.text_config, "hidden_size", 0)
+            if hidden_size == 0 and hasattr(hf_conf, "hidden_size"):
+                hidden_size = hf_conf.hidden_size
+                
+            # Identify multimodal embedding size
+            mm_hidden_size = hidden_size
+            if hasattr(hf_conf, "vision_config"):
+                vision_config = hf_conf.vision_config
+                if hasattr(vision_config, "out_hidden_size"):
+                    visual_dim = vision_config.out_hidden_size
+                    deepstack_levels = len(getattr(vision_config, "deepstack_visual_indexes", []))
+                    if getattr(hf_conf, "model_type", "") == "qwen3_vl" or hasattr(vision_config, "deepstack_visual_indexes"):
+                        mm_hidden_size = visual_dim * (1 + deepstack_levels)
+                    else:
+                        # Qwen2-VL or other models might not use deepstack concat mapping identically
+                        pass
+
             sharding = NamedSharding(
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.ATTN_DATA, None))
             input_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
-
+            
             dummy_multimodal_embeddings = self._create_dummy_tensor(
-                (num_tokens, hidden_size),
+                (1, num_tokens, mm_hidden_size),
                 self.runner.vllm_config.model_config.dtype,
                 sharding=sharding)
             dummy_input_ids = self._create_dummy_tensor(
                 (num_tokens, ), jnp.int32, sharding=input_sharding)
+            dummy_is_multimodal = self._create_dummy_tensor((num_tokens, ),
+                                                            jnp.bool_)
 
             self._run_compilation(
                 "input_embeddings_merger",
-                self.runner.embed_input_ids_fn,
+                functools.partial(self.runner.embed_input_ids_fn,
+                                  is_multimodal=dummy_is_multimodal),
                 self.runner.state,
                 dummy_input_ids,
                 dummy_multimodal_embeddings,
@@ -151,7 +175,8 @@ class CompilationManager:
 
             self._run_compilation(
                 "input_embeddings_merger_text_only",
-                self.runner.embed_input_ids_fn,
+                functools.partial(self.runner.embed_input_ids_fn,
+                                  is_multimodal=None),
                 self.runner.state,
                 dummy_input_ids,
                 None,
@@ -355,6 +380,11 @@ class CompilationManager:
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
+        if hidden_size == 0 and hasattr(self.runner.model_config.hf_config, "text_config"):
+            hidden_size = getattr(self.runner.model_config.hf_config.text_config, "hidden_size", 0)
+        if hidden_size == 0 and hasattr(self.runner.model_config.hf_config, "hidden_size"):
+            hidden_size = self.runner.model_config.hf_config.hidden_size
+        
         dtype = self.runner.model_config.dtype
         for num_tokens in self.runner.num_tokens_paddings:
             sharding = NamedSharding(

@@ -16,6 +16,7 @@ from typing import Dict
 
 import jax
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
+from vllm.utils.func_utils import supports_kw
 
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
@@ -176,16 +177,30 @@ class PersistentBatchManager:
 
                 hf_config = self.model_config.hf_config
 
-                self.requests[req_id].mrope_positions, self.requests[
-                    req_id].mrope_position_delta = get_mrope_input_positions_fn(
-                        self.requests[req_id].prompt_token_ids,
-                        hf_config=hf_config,
-                        image_grid_thw=image_grid_thw,
-                        video_grid_thw=video_grid_thw,
-                        second_per_grid_ts=second_per_grid_ts,
-                        audio_feature_lengths=audio_feature_lengths,
-                        use_audio_in_video=use_audio_in_video,
-                    )
+                # Qwen3-VL uses a different method signature and takes in mm_features as an argument.
+                import inspect
+                takes_mm_features = "mm_features" in inspect.signature(get_mrope_input_positions_fn).parameters
+
+                if takes_mm_features:
+                    self.requests[req_id].mrope_positions, self.requests[
+                        req_id].mrope_position_delta = get_mrope_input_positions_fn(
+                            self.requests[req_id].prompt_token_ids,
+                            mm_features=self.requests[req_id].mm_features
+                        )
+                else:
+                    kwargs = {
+                        "image_grid_thw": image_grid_thw,
+                        "video_grid_thw": video_grid_thw,
+                        "second_per_grid_ts": second_per_grid_ts,
+                        "audio_feature_lengths": audio_feature_lengths,
+                        "use_audio_in_video": use_audio_in_video,
+                        "hf_config": hf_config,
+                    }
+                    self.requests[req_id].mrope_positions, self.requests[
+                        req_id].mrope_position_delta = get_mrope_input_positions_fn(
+                            self.requests[req_id].prompt_token_ids,
+                            **kwargs
+                        )
 
         # Update the states of the running/resumed requests.
         req_data = scheduler_output.scheduled_cached_reqs
