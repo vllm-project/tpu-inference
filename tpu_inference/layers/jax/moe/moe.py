@@ -170,7 +170,7 @@ class JaxMoE(JaxModule):
     quant_config: Optional[QuantizationConfig] = None
     prefix: str = ""
 
-    def __call__(self, x_TD: Float):
+    def __call__(self, x_TD: jax.Array) -> jax.Array:
         """Performs the forward pass of the MoE layer.
 
         Args:
@@ -180,7 +180,10 @@ class JaxMoE(JaxModule):
             Output array of shape (sequence_length, d_model) after passing through MoE.
         """
         if self.quant_method is not None:
-            return self.quant_method.apply_jax(self, x_TD)
+            router_logits = self.router(x_TD)
+            return self.quant_method.apply_jax(self,
+                                               x_TD,
+                                               router_logits=router_logits)
         raise ValueError("Expected quant_method to be set!")
 
     def __post_init__(self, rngs: nnx.Rngs):
