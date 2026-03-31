@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: RL_Integration
-# pipeline-type: RL support matrix
+# pipeline-name: rl_Integration
+# pipeline-type: rl support matrix
 # RL (Reinforcement Learning) integration tests verify features critical for
 # training-inference pipelines: HBM KV-cache delete/reinitialise, log-prob
 # correctness without recompilation, log-prob latency overhead, and group
@@ -22,21 +22,21 @@ steps:
   # ------------------------------------------------------------------
   # Correctness tests
   # ------------------------------------------------------------------
-  - label: "${TPU_VERSION:-tpu6e} Correctness tests for RL_Integration"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for rl_integration"
     key: "${TPU_VERSION:-tpu6e}_rl_integration_CorrectnessTest"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_rl_integration.py::TestDeleteReinitializeHBM /workspace/tpu_inference/tests/e2e/test_rl_integration.py::TestLogprobsNoRecompilation
-  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for RL_Integration"
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for rl_integration"
     key: "${TPU_VERSION:-tpu6e}_record_rl_integration_CorrectnessTest"
     depends_on: "${TPU_VERSION:-tpu6e}_rl_integration_CorrectnessTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-      CI_TARGET: "RL_Integration"
+      CI_TARGET: "rl_integration"
       CI_STAGE: "CorrectnessTest"
-      CI_CATEGORY: "RL support matrix"
+      CI_CATEGORY: "rl support matrix"
     agents:
       queue: cpu
     commands:
@@ -46,7 +46,7 @@ steps:
   # ------------------------------------------------------------------
   # Performance tests
   # ------------------------------------------------------------------
-  - label: "${TPU_VERSION:-tpu6e} Performance tests for RL_Integration"
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for rl_integration"
     key: "${TPU_VERSION:-tpu6e}_rl_integration_PerformanceTest"
     depends_on: "${TPU_VERSION:-tpu6e}_record_rl_integration_CorrectnessTest"
     soft_fail: true
@@ -54,14 +54,14 @@ steps:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_rl_integration.py::TestLogprobsLatency /workspace/tpu_inference/tests/e2e/test_rl_integration.py::TestGroupSamplingPrefixCache
-  - label: "${TPU_VERSION:-tpu6e} Record performance test result for RL_Integration"
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for rl_integration"
     key: "${TPU_VERSION:-tpu6e}_record_rl_integration_PerformanceTest"
     depends_on: "${TPU_VERSION:-tpu6e}_rl_integration_PerformanceTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-      CI_TARGET: "RL_Integration"
+      CI_TARGET: "rl_integration"
       CI_STAGE: "PerformanceTest"
-      CI_CATEGORY: "RL support matrix"
+      CI_CATEGORY: "rl support matrix"
     agents:
       queue: cpu
     commands:

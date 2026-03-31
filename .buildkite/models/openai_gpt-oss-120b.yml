@@ -18,7 +18,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for openai/gpt-oss-120b"
     key: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_UnitTest"
     agents:
-      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+      queue: cpu  # TODO: replace with execution environment
     soft_fail: true
     commands:
       - |
@@ -41,7 +41,7 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_Accuracy"
     depends_on: "${TPU_VERSION:-tpu6e}_record_openai_gpt-oss-120b_UnitTest"
     agents:
-      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+      queue: cpu  # TODO: replace with execution environment
     soft_fail: true
     commands:
       - |
@@ -64,7 +64,7 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_Benchmark"
     depends_on: "${TPU_VERSION:-tpu6e}_record_openai_gpt-oss-120b_Accuracy"
     agents:
-      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+      queue: cpu  # TODO: replace with execution environment
     soft_fail: true
     commands:
       - |
