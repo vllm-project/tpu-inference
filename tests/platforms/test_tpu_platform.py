@@ -265,28 +265,3 @@ class TestTpuPlatform:
     def test_update_block_size_for_backend(self, vllm_config):
         # Current implementation explicitly performs 'pass'. Ensure it returns safely.
         TpuPlatform.update_block_size_for_backend(vllm_config)
-
-    def test_update_block_size_for_backend_align_hybrid_block_size(
-            self, vllm_config):
-        vllm_config.model_config.architecture = "Qwen3_5ForConditionalGeneration"
-        vllm_config.model_config.is_hybrid = True
-        vllm_config.model_config.get_num_kv_heads.return_value = 2
-        vllm_config.model_config.get_head_size.return_value = 256
-        vllm_config.model_config.dtype = torch.uint8
-        vllm_config.parallel_config.tensor_parallel_size = 8
-        vllm_config.cache_config.block_size = -1
-
-        mock_backend = MagicMock()
-        mock_backend.get_mamba_state_shape_from_config.return_value = ((3,
-                                                                        1536),
-                                                                       (8, 128,
-                                                                        128))
-        mock_backend.get_mamba_state_dtype_from_config.return_value = (
-            torch.bfloat16, torch.float32)
-        mock_backend.get_supported_kernel_block_sizes.return_value = [256]
-
-        with patch.object(TpuPlatform, '_find_non_ssm_backend', return_value=mock_backend), \
-             patch('vllm.model_executor.models.ModelRegistry.resolve_model_cls', return_value=(mock_backend, MagicMock())):
-            TpuPlatform.update_block_size_for_backend(vllm_config)
-
-        assert vllm_config.cache_config.block_size == 1280

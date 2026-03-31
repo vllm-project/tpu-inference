@@ -282,15 +282,7 @@ class TpuPlatform(Platform):
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         # TODO: TPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
-
-        # Align block/mamba sizes for hybrid model (may override user settings).
-        if vllm_config.model_config.is_hybrid:
-            backend_cls = cls._find_non_ssm_backend(vllm_config)
-            if backend_cls is None:
-                return
-            cls._align_hybrid_block_size(vllm_config, backend_cls)
-
-        return
+        pass
 
     @classmethod
     def is_pin_memory_available(cls):
