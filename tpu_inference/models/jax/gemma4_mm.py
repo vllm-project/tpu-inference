@@ -791,10 +791,10 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
         return super().load_weights(filter_weights(weights))
 
-    def embed_input_ids(
-            self,
-            input_ids: jax.Array,
-            multimodal_embeddings: Optional[jax.Array] = None) -> jax.Array:
+    def embed_input_ids(self,
+                        input_ids: jax.Array,
+                        multimodal_embeddings: Optional[jax.Array] = None,
+                        **kwargs) -> jax.Array:
         # 1. Standard Token Embedding
         inputs_embeds = self.model.embed_tokens(input_ids)
         target_dtype = inputs_embeds.dtype
