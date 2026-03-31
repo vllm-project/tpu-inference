@@ -138,14 +138,14 @@ class VllmUnquantizedEmbeddingMethod(UnquantizedEmbeddingMethod):
         self.mesh = mesh
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        weight_sharding = NamedSharding(
-            self.mesh, P(ShardingAxisName.MLP_TENSOR, None))
+        weight_sharding = NamedSharding(self.mesh,
+                                        P(ShardingAxisName.MLP_TENSOR, None))
         weight = _load_weight_for_layer(layer, "weight", weight_sharding)
         layer.weight = Parameter(torch_view(weight), requires_grad=False)
 
         if isinstance(layer, ParallelLMHead) and layer.bias is not None:
-            bias_sharding = NamedSharding(
-                self.mesh, P(ShardingAxisName.MLP_TENSOR))
+            bias_sharding = NamedSharding(self.mesh,
+                                          P(ShardingAxisName.MLP_TENSOR))
             bias = _load_weight_for_layer(layer, "bias", bias_sharding)
             layer.bias = Parameter(torch_view(bias), requires_grad=False)
 
@@ -384,4 +384,20 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         self,
         layer: FusedMoE,
         x: torch.Tensor,
-        router_logits: 
+        router_logits: torch.Tensor,
+    ) -> torch.Tensor:
+
+        weights = FusedMoEWeights(
+            w13_weight=jax_view(layer.w13_weight),
+            w13_weight_scale=None,
+            w13_bias=jax_view(layer.w13_bias) if self.moe.has_bias else None,
+            w2_weight=jax_view(layer.w2_weight),
+            w2_weight_scale=None,
+            w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
+        )
+
+        return vllm_moe_apply(layer=layer,
+                              weights=weights,
+                              quant_method_instance=self,
+                              x=x,
+                              router_logits=router_logits)
