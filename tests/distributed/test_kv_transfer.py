@@ -205,6 +205,10 @@ class KVTransferTest(jtu.JaxTestCase):
             dest_offsets=dest_offsets,
             chunk_sizes=chunk_sizes,
             num_chunks=num_chunks_array,
+            mesh=mesh,
+            src_sharding_spec=partition_spec,
+            dest_sharding_spec=partition_spec,
+            replicated_sharding_spec=P(),
         )
         for _y in y:
             _y.block_until_ready()

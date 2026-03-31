@@ -1,0 +1,92 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# pipeline-name: zai-org/GLM-5
+# pipeline-type: text-only
+steps:
+  - label: "${TPU_VERSION:-tpu6e} Unit tests for zai-org/GLM-5"
+    key: "${TPU_VERSION:-tpu6e}_zai-org_GLM-5_UnitTest"
+    soft_fail: true
+    agents:
+      queue: cpu  # TODO: replace with execution environment
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_zai-org_GLM-5_UnitTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record unit test result for zai-org/GLM-5"
+    key: "${TPU_VERSION:-tpu6e}_record_zai-org_GLM-5_UnitTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_zai-org_GLM-5_UnitTest"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "zai-org/GLM-5"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "text-only"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_zai-org_GLM-5_UnitTest
+
+  - label: "${TPU_VERSION:-tpu6e} Accuracy for zai-org/GLM-5"
+    key: "${TPU_VERSION:-tpu6e}_zai-org_GLM-5_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_zai-org_GLM-5_UnitTest"
+    soft_fail: true
+    agents:
+      queue: cpu  # TODO: replace with execution environment
+    env:
+      TEST_MODEL: zai-org/GLM-5
+      TENSOR_PARALLEL_SIZE: 1
+      MINIMUM_ACCURACY_THRESHOLD: 0  # TODO : replace 0 with your accuracy threshold
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_zai-org_GLM-5_Accuracy" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record accuracy result for zai-org/GLM-5"
+    key: "${TPU_VERSION:-tpu6e}_record_zai-org_GLM-5_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_zai-org_GLM-5_Accuracy"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "zai-org/GLM-5"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "text-only"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_zai-org_GLM-5_Accuracy
+
+  - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for zai-org/GLM-5"
+    key: "${TPU_VERSION:-tpu6e}_zai-org_GLM-5_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_zai-org_GLM-5_Accuracy"
+    soft_fail: true
+    agents:
+      queue: cpu  # TODO: replace with execution environment
+    env:
+      TEST_MODEL: zai-org/GLM-5
+      TENSOR_PARALLEL_SIZE: 1
+      MINIMUM_THROUGHPUT_THRESHOLD: 0  # TODO : replace 0 with your performance threshold
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_zai-org_GLM-5_Benchmark" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for zai-org/GLM-5"
+    key: "${TPU_VERSION:-tpu6e}_record_zai-org_GLM-5_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_zai-org_GLM-5_Benchmark"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "zai-org/GLM-5"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_zai-org_GLM-5_Benchmark

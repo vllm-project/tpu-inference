@@ -286,17 +286,19 @@ class CompilationManager:
                  padded_token_in_tpu_pre_next_tokens_indices) = device_array(
                      self.runner.mesh,
                      (padded_token_in_tpu_cur_input_indices,
-                      padded_token_in_tpu_pre_next_tokens_indices))
+                      padded_token_in_tpu_pre_next_tokens_indices),
+                     sharding=NamedSharding(self.runner.mesh,
+                                            PartitionSpec(None)))
 
                 input_ids = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32, dp_sharding)
-                # Need align to the sampling output
+                # Need align to the sampling output sharding (sharded by ATTN_DATA in DP)
                 next_tokens = self._create_dummy_tensor(
                     (num_reqs, ),
                     jnp.int32,
                     sharding=NamedSharding(self.runner.mesh, PartitionSpec()))
 
-                placeholder_num = 1
+                placeholder_num = jnp.asarray(1, dtype=jnp.int32)
                 self._run_compilation(
                     "_substitute_placeholder_token_fn",
                     self.runner._substitute_placeholder_token_fn,

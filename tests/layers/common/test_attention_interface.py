@@ -367,6 +367,6 @@ def test_mla_attention(monkeypatch, mesh):
     assert jnp.array_equal(final_kv_cache, expected_new_cache)
 
     _, kernel_kwargs = mock_mla_kernel.call_args
-    assert kernel_kwargs["num_kv_pages_per_block"] == 3
-    assert kernel_kwargs["num_queries_per_block"] == 1
+    assert kernel_kwargs["num_kv_pages_per_block"] == (3, 1, 1)
+    assert kernel_kwargs["num_queries_per_block"] == (1, 16, 16)
     assert kernel_kwargs["sm_scale"] == 0.1
