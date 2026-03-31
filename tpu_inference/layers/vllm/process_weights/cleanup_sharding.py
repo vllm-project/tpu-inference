@@ -29,6 +29,8 @@ from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 
 from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common.pathways_dummy_loader import (
+    create_dummy_weights_on_tpu, is_pathways_dummy_load)
 from tpu_inference.utils import t2j, to_jax_dtype
 
 P = PartitionSpec
@@ -92,15 +94,25 @@ def _tensor_is_in_cpu(tensor: torch.tensor) -> bool:
 def _convert_to_torchax_and_shard(tensor: torch.Tensor,
                                   sharding: NamedSharding) -> torch.Tensor:
     if vllm_envs.VLLM_TPU_USING_PATHWAYS and isinstance(tensor, torch.Tensor):
-        np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
-        dtype = to_jax_dtype(tensor.dtype)
-        return torch_view(jax.device_put(np_tensor, sharding).astype(dtype))
-    else:
-        if isinstance(tensor, torchax.tensor.Tensor):
-            tensor = jax_view(tensor)
+        if is_pathways_dummy_load():
+            # Generate random values directly on TPU.
+            tensor.untyped_storage().resize_(0)
+            return torch_view(
+                create_dummy_weights_on_tpu(
+                    sharding=sharding,
+                    weight_shape=tuple(tensor.shape),
+                    weight_dtype=to_jax_dtype(tensor.dtype),
+                ))
         else:
-            tensor = t2j(tensor)
-        return torch_view(general_device_put(tensor, sharding))
+            dtype = to_jax_dtype(tensor.dtype)
+            np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
+            return torch_view(
+                jax.device_put(np_tensor, sharding).astype(dtype))
+    if isinstance(tensor, torchax.tensor.Tensor):
+        tensor = jax_view(tensor)
+    else:
+        tensor = t2j(tensor)
+    return torch_view(general_device_put(tensor, sharding))
 
 
 def _shard_tensor_to_tpu_replicated(tensor: torch.Tensor,
