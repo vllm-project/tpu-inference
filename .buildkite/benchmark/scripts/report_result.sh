@@ -41,6 +41,21 @@ LOG_FOLDER=${LOG_FOLDER:-"artifacts/temp_logs"}
 # REMOTE_LOG_ROOT="gs://$GCS_BUCKET/job_logs/$RECORD_ID/"
 REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
 
+# Metadata Extraction from Commands
+# If DB_FIELDS_JSON exists (passed from run_bm.sh), we use it to override
+# environment variables. This ensures the DB reflects the actual CLI arguments used.
+if [ -n "${DB_FIELDS_JSON:-}" ]; then
+  echo "--- [INFO] Extracting metadata from parsed commands via jq"
+  MODEL=$(echo "$DB_FIELDS_JSON" | jq -r '.model // empty')
+  INPUT_LEN=$(echo "$DB_FIELDS_JSON" | jq -r '.input_len // empty')
+  OUTPUT_LEN=$(echo "$DB_FIELDS_JSON" | jq -r '.output_len // empty')
+  PREFIX_LEN=$(echo "$DB_FIELDS_JSON" | jq -r '.prefix_len // 0')
+  TENSOR_PARALLEL_SIZE=$(echo "$DB_FIELDS_JSON" | jq -r '.tensor_parallel_size // 1')
+  MAX_MODEL_LEN=$(echo "$DB_FIELDS_JSON" | jq -r '.max_model_len // empty')
+  MAX_NUM_SEQS=$(echo "$DB_FIELDS_JSON" | jq -r '.max_num_seqs // empty')
+  MAX_NUM_BATCHED_TOKENS=$(echo "$DB_FIELDS_JSON" | jq -r '.max_num_batched_tokens // empty')
+fi
+
 (
   printf "[DEBUG] Start scan artifacts folder...\n"
   printf "[DEBUG] ls artifacts/temp_logs=\n%s\n" "$(ls artifacts/temp_logs)"

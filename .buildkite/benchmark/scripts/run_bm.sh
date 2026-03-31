@@ -36,6 +36,14 @@ printf "[INFO] %-25s = %s\n" "VLLM_LOG" "$VLLM_LOG"
 printf "[INFO] %-25s = %s\n" "BM_LOG" "$BM_LOG"
 printf "[INFO] %-25s = %s\n" "DOCKER_ARTIFACT_FOLDER" "$DOCKER_ARTIFACT_FOLDER"
 
+echo "--- Parsing raw commands for DB record"
+DB_FIELDS_JSON=$(python3 .buildkite/benchmark/scripts/cmd_parser.py \
+    --serve "$VLLM_SERVE_CMD" \
+    --client "$BENCHMARK_CMD")
+
+# Export for report_result.sh to consume
+export DB_FIELDS_JSON
+
 # Helper function to check if a value is in an array
 contains_element () {
   local e match="$1"
