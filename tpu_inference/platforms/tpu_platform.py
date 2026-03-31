@@ -11,6 +11,53 @@ from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 
+# TODO(weiyulin): These dummy ops bypass vLLM's eager CUDA-specific imports during
+# Sequence Parallelism initialization. Our TPU SP implementation (see
+# vllmQuantLinearConfig) is independent of upstream compilation logic.
+# Revisit to see if these imports can be guarded or disabled for TPU.
+
+try:
+    import vllm._C  # noqa: F401
+except ImportError:
+    # Ensure the _C namespace exists
+    if not hasattr(torch.ops, "_C"):
+        torch.library.define("_C::dummy", "() -> ()")
+
+    def _register_dummy(name: str, schema: str):
+        if not hasattr(torch.ops._C, name):
+            torch.library.define(f"_C::{name}", schema)
+            torch.library.impl(f"_C::{name}", "default",
+                               lambda *args, **kwargs: None)
+
+    # Register the ops vLLM expects
+    _register_dummy("rms_norm",
+                    "(Tensor input, Tensor weight, float epsilon) -> Tensor")
+    _register_dummy(
+        "fused_add_rms_norm",
+        "(Tensor input, Tensor residual, Tensor weight, float epsilon) -> (Tensor, Tensor)"
+    )
+    _register_dummy(
+        "rotary_embedding",
+        "(Tensor positions, Tensor query, Tensor key, int head_size, Tensor cos_sin_cache, bool is_neox) -> ()"
+    )
+    _register_dummy("static_scaled_fp8_quant",
+                    "(Tensor input, Tensor scale) -> Tensor")
+    _register_dummy("dynamic_scaled_fp8_quant",
+                    "(Tensor input, Tensor scale) -> Tensor")
+    _register_dummy("dynamic_per_token_scaled_fp8_quant",
+                    "(Tensor input, Tensor scale) -> Tensor")
+    _register_dummy("silu_and_mul", "(Tensor input) -> Tensor")
+    _register_dummy(
+        "rms_norm_static_fp8_quant",
+        "(Tensor input, Tensor weight, Tensor scale, float epsilon) -> Tensor")
+    _register_dummy(
+        "fused_add_rms_norm_static_fp8_quant",
+        "(Tensor input, Tensor residual, Tensor weight, Tensor scale, float epsilon) -> (Tensor, Tensor)"
+    )
+    _register_dummy(
+        "rms_norm_dynamic_per_token_quant",
+        "(Tensor input, Tensor weight, Tensor scale, float epsilon) -> Tensor")
+
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.config.cache import BlockSize
@@ -58,6 +105,8 @@ class TpuPlatform(Platform):
         "VLLM_DISABLE_SHARED_EXPERTS_STREAM",
         "MOE_REQUANTIZE_BLOCK_SIZE",
         "MOE_REQUANTIZE_WEIGHT_DTYPE",
+        "USE_JAX_PROFILER_SERVER",
+        "JAX_PROFILER_SERVER_PORT",
     ]
 
     @classmethod
@@ -66,8 +115,6 @@ class TpuPlatform(Platform):
                              **kwargs) -> str:
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-        # Invoke @register_backend in the module.
-        import tpu_inference.layers.vllm.backends  # noqa: F401
         use_mla = attn_selector_config.use_mla
         if use_mla:
             selected_backend = AttentionBackendEnum.FLASH_ATTN_MLA
@@ -165,19 +212,25 @@ class TpuPlatform(Platform):
         # For v0, the default block size is 16.
         if cache_config and not cache_config.user_specified_block_size:
             if vllm_config.model_config:
-                from tpu_inference.layers.vllm.backends.flash_attn import \
-                    PallasAttentionBackend
-                cache_config.block_size = PallasAttentionBackend.get_page_size(
-                    vllm_config)  # type: ignore[assignment]
-                min_page_size = PallasAttentionBackend.get_min_page_size(
-                    vllm_config)
-                if min_page_size > cache_config.block_size:
-                    logger.warning(
-                        "Increase the page size from %s to %s to avoid SMEM OOM",
-                        cache_config.block_size,
-                        min_page_size,
-                    )
-                    cache_config.block_size = min_page_size  # type: ignore[assignment]
+                if vllm_config.model_config.use_mla:
+                    from tpu_inference.layers.vllm.backends.flash_attn_mla import \
+                        PallasMLAttentionBackend
+                    cache_config.block_size = PallasMLAttentionBackend.get_page_size(
+                        vllm_config)  # type: ignore[assignment]
+                else:
+                    from tpu_inference.layers.vllm.backends.flash_attn import \
+                        PallasAttentionBackend
+                    cache_config.block_size = PallasAttentionBackend.get_page_size(
+                        vllm_config)  # type: ignore[assignment]
+                    min_page_size = PallasAttentionBackend.get_min_page_size(
+                        vllm_config)
+                    if min_page_size > cache_config.block_size:
+                        logger.warning(
+                            "Increase the page size from %s to %s to avoid SMEM OOM",
+                            cache_config.block_size,
+                            min_page_size,
+                        )
+                        cache_config.block_size = min_page_size  # type: ignore[assignment]
             logger.info(
                 f"Using KV cache block size: {cache_config.block_size}")
 
@@ -277,3 +330,16 @@ class TpuPlatform(Platform):
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True
+
+    @classmethod
+    def current_device(cls) -> torch.device:
+        """
+        Get the current device for the current platform.
+
+        This is mostly a placeholder since this method isn't
+        currently called from TPU Inference but instead
+        from upstream vLLM.  This won't be an issue,
+        however, because we'll manually place tensors
+        on the TPU device(s).
+        """
+        return torch.device("cpu")

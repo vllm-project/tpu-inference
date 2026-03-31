@@ -128,8 +128,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             raise NotImplementedError("Alibi slopes is not supported.")
         self.kv_cache_quantized_dtype = None
         if kv_cache_dtype != "auto":
-            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
-                kv_cache_dtype)
+            self.kv_cache_quantized_dtype = utils.to_jax_dtype(kv_cache_dtype)
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
@@ -246,8 +245,6 @@ def _jax_attn_func(
     v_scale: float | None = None,
     sliding_window: int | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
-    del scale  # Unused for now, as the attention function applies a default scale.
-
     # Get shapes from vllm
     q_len = q.shape[0]
     k_len = k.shape[0]
@@ -264,6 +261,7 @@ def _jax_attn_func(
         v,
         attention_metadata,
         mesh,
+        sm_scale=scale,
         q_scale=q_scale,
         k_scale=k_scale,
         v_scale=v_scale,

@@ -16,7 +16,8 @@ import asyncio
 import copy
 import os
 from collections import defaultdict
-from typing import Dict, List, Optional
+from concurrent.futures import Future
+from typing import Dict, List, Optional, Union
 
 import ray
 import vllm.envs as envs
@@ -24,22 +25,42 @@ from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
+from vllm.sequence import IntermediateTensors
 from vllm.utils.network_utils import (get_distributed_init_method, get_ip,
                                       get_open_port)
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.ray_distributed_executor import \
     RayDistributedExecutor as RayDistributedExecutorV1
 from vllm.v1.executor.ray_executor import RayWorkerMetaData
 from vllm.v1.executor.ray_utils import RayWorkerWrapper as RayWorkerWrapperV1
 from vllm.v1.executor.ray_utils import _wait_until_pg_ready
+from vllm.v1.outputs import ModelRunnerOutput
 
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.distributed.utils import set_node_kv_ip_port
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.runner.tpu_runner import AsyncTPUModelRunnerOutput
 
 logger = init_logger(__name__)
+
+
+class AsyncResultFuture(Future):
+
+    def __init__(self, result_ids_ref, workers):
+        super().__init__()
+        self.result_ids_ref = result_ids_ref
+        self.workers = workers
+
+    def result(self, timeout=None):
+        result_ids = ray.get(self.result_ids_ref, timeout=timeout)
+        ret_refs = []
+        for result_id, worker in zip(result_ids, self.workers):
+            ret_refs.append(
+                worker.execute_method.remote("get_execute_model_output",
+                                             result_id))
+        return ray.get(ret_refs[0], timeout=timeout)
 
 
 class RayDistributedExecutor(RayDistributedExecutorV1):
@@ -58,6 +79,13 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
        This set TPU resources when create each worker.
        And we omit the driver worker related logic.
     """
+
+    @classmethod
+    def supports_async_scheduling(cls) -> bool:
+        """
+        Whether the executor supports async scheduling.
+        """
+        return True
 
     def _init_executor(self) -> None:
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
@@ -340,10 +368,13 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
             destination="workers")
 
         # Copy existing env vars to each worker's args
-        for args in all_args_to_update_environment_variables:
+        for i, args in enumerate(all_args_to_update_environment_variables):
             for name in env_vars_to_copy:
                 if name in os.environ:
                     args[name] = os.environ[name]
+            logger.debug(
+                f"RayDistributedExecutor | Worker {i} environment variables: {args}"
+            )
 
         self._env_vars_for_all_workers = (
             all_args_to_update_environment_variables)
@@ -423,6 +454,29 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
     def get_kv_connector_handshake_metadata(self) -> None:
         pass
 
+    # Override the execute_model method to suppprt async scheduling.
+    # Once the vLLM V1 Ray executor supports async scheduling natively,
+    # we can remove this method.
+    def _execute_dag(
+        self,
+        scheduler_output: SchedulerOutput,
+        grammar_output: "GrammarOutput | None",
+        non_block: bool = False,
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        if not self.scheduler_config.async_scheduling:
+            return super()._execute_dag(scheduler_output, grammar_output,
+                                        non_block)
+
+        assert non_block
+        # Build the compiled DAG for the first time.
+        if self.forward_dag is None:  # type: ignore
+            self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
+
+        refs = self.forward_dag.execute(
+            (scheduler_output, grammar_output))  # type: ignore
+        assert not self.has_connector, "async scheduling with connector not yet supported"
+        return AsyncResultFuture(refs, self.workers)
+
 
 class RayWorkerWrapper(RayWorkerWrapperV1):
     """
@@ -434,8 +488,61 @@ class RayWorkerWrapper(RayWorkerWrapperV1):
     _is_last_rank: check whether this Ray worker is the last PP stage.
     """
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        #  `_execute_model_outputs` is used to store the actual outputs
+        #  for async scheduling, with result_id as the key.
+        self._execute_model_outputs = dict()  # type: ignore
+        self.result_id = int(0)
+
     def _is_intermediate_tensors(self, output) -> bool:
         return isinstance(output, JaxIntermediateTensors)
 
     def _is_last_rank(self) -> bool:
         return get_pp_group().is_last_rank
+
+    # Override the execute_model method to suppprt async scheduling.
+    # Once the vLLM V1 Ray executor supports async scheduling natively,
+    # we can remove this method.
+    def execute_model_ray(
+        self,
+        execute_model_input: tuple["SchedulerOutput", "GrammarOutput"]
+        | tuple["SchedulerOutput", "GrammarOutput", "IntermediateTensors"],
+    ) -> Union[
+            "ModelRunnerOutput",
+            tuple["SchedulerOutput", "GrammarOutput", "IntermediateTensors"],
+            int,  # result_id for async scheduling
+    ]:
+        assert self.vllm_config is not None
+        if not self.vllm_config.scheduler_config.async_scheduling:
+            return super().execute_model_ray(execute_model_input)
+
+        # This method is used by Ray Compiled Graph to execute the model,
+        # and it needs a special logic of self.setup_device_if_necessary()
+        self.setup_device_if_necessary()
+        assert self.worker is not None, "Worker is not initialized"
+        if len(execute_model_input) == 3:
+            scheduler_output, grammar_output, intermediate_tensors = (
+                execute_model_input)
+        else:
+            scheduler_output, grammar_output = execute_model_input
+            intermediate_tensors = None
+        assert self.worker.model_runner is not None
+        output = self.worker.model_runner.execute_model(
+            scheduler_output, intermediate_tensors)
+        assert self._is_last_rank()
+        if output is None:
+            output = self.worker.model_runner.sample_tokens(grammar_output)
+        self.result_id += 1
+        self._execute_model_outputs[self.result_id] = output
+        return self.result_id
+
+    # Method to get the actual output for async scheduling.
+    def get_execute_model_output(self, result_id) -> ModelRunnerOutput:
+        assert (self.vllm_config
+                and self.vllm_config.scheduler_config.async_scheduling)
+        output = self._execute_model_outputs.pop(result_id, None)
+        assert output is not None, f"No output found for result_id {result_id}"
+        if isinstance(output, AsyncTPUModelRunnerOutput):
+            return output.get_output()
+        return output

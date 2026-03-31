@@ -113,6 +113,7 @@ cleanup() {
   fi
 
   echo "   -> Cleaning Head Node..."
+  docker cp node:/root/vllm_serve.log /tmp/vllm_serve.log >/dev/null 2>&1 || true
   docker stop node >/dev/null 2>&1 || true
   docker rm -f node >/dev/null 2>&1 || true
   rm -f /root/vllm_serve.log || true
@@ -260,7 +261,7 @@ VLLM_SERVE_CMD="vllm serve ${MODEL} \
   --trust-remote-code \
   --no-enable-prefix-caching \
   --kv_cache_dtype=fp8 \
-  --no-async-scheduling \
+  --async-scheduling \
   --load-format=runai_streamer \
   --max-model-len 1024"
 

@@ -21,7 +21,6 @@ bash "${NIGHTLY_SCRIPT}" \
   --dataset-name "random" \
   --run-type "DAILY" \
   --device "tpu7x-16" \
-  --code-hash "deepseek-hash-placeholder" \
   --created-by "bm-scheduler" \
   --new-model-design "1" \
   --gpu-memory-utilization "0.92" \
@@ -31,6 +30,4 @@ bash "${NIGHTLY_SCRIPT}" \
   --generation-config "gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1" \
   --vllm-mla-disable "0" \
   --moe-requantize-block-size "512" \
-  --moe-requantize-weight-dtype "fp4" \
-  --phased-profiling-dir "gs://tpu-commons-ci/xprof/deepseek-r1/8k-1k" \
-  --skip-db-upload
+  --moe-requantize-weight-dtype "fp4"

@@ -119,7 +119,7 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
                 x, w_q, w_scale_xla, quantize_activation=quantize_activation)
         else:
             expected = reference_block_quantized_matmul(
-                x, w_q, w_scale, block_size, q_dtype)
+                x, w_q, w_scale, block_size, x_q_dtype)
 
         self.assertAllClose(output,
                             expected,
@@ -265,8 +265,6 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
             quantize_activation=True,
             tuned_value=TunedValue(512, 512, 512, 2),
             block_size=512,
-            atol=6,
-            rtol=0.5,
             x_q_dtype=jnp.float8_e4m3fn,
         )
 
@@ -300,8 +298,6 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
             quantize_activation=True,
             tuned_value=TunedValue(512, 512, 512, 2),
             block_size=512,
-            atol=6,
-            rtol=0.5,
             x_q_dtype=jnp.float8_e4m3fn,
         )
 

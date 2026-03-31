@@ -74,21 +74,31 @@ class Fp8LinearMethod:
         return jnp.concatenate(outs, axis=-1)
 
 
-@jax.jit(static_argnames=('linear_config', 'weight_block_size'))
+@jax.jit(static_argnames=(
+    'weight_block_size',
+    'requant_block_size',
+    'output_sizes',
+    'requant_weight_dtype',
+    'fuse_matmuls',
+    'n_shards',
+))
 def process_blockwise_fp8_linear_weights(
     weight: jax.Array,
     weight_scale: jax.Array,
     *,
     bias: jax.Array | None,
     weight_block_size: Sequence[int],
-    linear_config,
+    requant_block_size,
+    output_sizes,
+    requant_weight_dtype,
+    fuse_matmuls,
+    n_shards,
 ) -> LinearWeights:
     weights = []
     weight_scales = []
     original_block_size = weight_block_size[0]
-    requant_block_size = linear_config.requant_block_size
     start = 0
-    for output_size in linear_config.output_sizes:
+    for output_size in output_sizes:
         end = start + output_size
 
         weight_slice = weight[start:end]
@@ -101,7 +111,7 @@ def process_blockwise_fp8_linear_weights(
             block_size=weight_block_size,
         )
         weight_slice, weight_scale_slice = quantize_tensor(
-            linear_config.requant_weight_dtype,
+            requant_weight_dtype,
             dequantized_weight,
             block_size=requant_block_size)
 
@@ -120,7 +130,7 @@ def process_blockwise_fp8_linear_weights(
             zero_point=None,
             bias=bias,
         ),
-        fused=linear_config.fuse_matmuls,
-        output_sizes=linear_config.output_sizes,
-        reorder_size=linear_config.n_shards,
+        fused=fuse_matmuls,
+        output_sizes=output_sizes,
+        reorder_size=n_shards,
     )

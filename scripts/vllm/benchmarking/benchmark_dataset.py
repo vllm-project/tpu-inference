@@ -17,37 +17,15 @@ import os
 import random
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
+from benchmark_core import SampleRequest
 from transformers import PreTrainedTokenizerBase
-from vllm.lora.request import LoRARequest
-from vllm.multimodal import MultiModalDataDict
+from vllm.inputs import MultiModalDataDict
 
 logger = logging.getLogger(__name__)
-
-# -----------------------------------------------------------------------------
-# Data Classes
-# -----------------------------------------------------------------------------
-
-
-@dataclass
-class SampleRequest:
-    """
-    Represents a single inference request for benchmarking.
-    """
-
-    prompt: Union[str, Any]
-    prompt_len: int
-    expected_output_len: int
-    multi_modal_data: Optional[Union[MultiModalDataDict, dict,
-                                     list[dict]]] = None
-    lora_request: Optional[LoRARequest] = None
-    completion: Optional[str] = None
-    request_id: Optional[str] = None
-
 
 # -----------------------------------------------------------------------------
 # Benchmark Dataset Base Class
@@ -624,6 +602,150 @@ class RandomDataset(BenchmarkDataset):
                 ))
 
         return requests
+
+
+# -----------------------------------------------------------------------------
+# MMMU-Pro Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class MMMUProDataset(BenchmarkDataset):
+    """
+    Implements the MMMU-Pro dataset for multimodal benchmarking.
+    Dataset: https://huggingface.co/datasets/MMMU/MMMU_Pro
+
+    Subsets:
+      - 'vision': Questions are visually encoded in images (requires images).
+      - 'standard (10 options)': Text questions with associated images and
+        10 answer options.
+    """
+
+    IS_MULTIMODAL = True
+
+    OPTION_LETTERS = "ABCDEFGHIJ"
+
+    PROMPT_FOOTER = (
+        "Try to reason about the question step by step. Don't give a final"
+        " answer without reasoning. Output the final answer in the format"
+        " 'Final Answer: (X)' where X is the correct letter choice. Answer:")
+
+    QUERY_TEMPLATE_VISION = """{options_text}
+
+""" + PROMPT_FOOTER
+
+    QUERY_TEMPLATE_STANDARD = """{question}
+
+{options_text}
+
+""" + PROMPT_FOOTER
+
+    def __init__(
+        self,
+        subset: str = "vision",
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.subset = subset
+        self.load_data()
+
+    def load_data(self) -> None:
+        try:
+            from datasets import load_dataset
+        except ImportError as err:
+            raise ImportError(
+                "The 'datasets' package is required for MMMUProDataset. "
+                "Install it with: pip install datasets") from err
+
+        dataset_path = self.dataset_path or "MMMU/MMMU_Pro"
+        hf_dataset = load_dataset(dataset_path, self.subset, split="test")
+
+        mmmu_pro_data = []
+        for row in hf_dataset:
+            options = row.get("options", [])
+            if isinstance(options, str):
+                import ast
+                options = ast.literal_eval(options)
+
+            option_letters = self.OPTION_LETTERS[:len(options)]
+            options_text = "\n".join(
+                f"({letter}) {opt}"
+                for letter, opt in zip(option_letters, options))
+
+            answer = row.get("answer", "A")
+
+            # Collect images (image_1 through image_7).
+            images = []
+            for i in range(1, 8):
+                img = row.get(f"image_{i}")
+                if img is not None:
+                    images.append(img)
+
+            if self.subset == "vision":
+                question_text = self.QUERY_TEMPLATE_VISION.format(
+                    options_text=options_text)
+            else:
+                question_text = self.QUERY_TEMPLATE_STANDARD.format(
+                    question=row.get("question", ""),
+                    options_text=options_text)
+
+            mmmu_pro_data.append((question_text, answer, images))
+
+        self.data = mmmu_pro_data
+        print(f"Loaded {len(self.data)} examples from MMMU-Pro "
+              f"({self.subset}) dataset")
+
+    def _images_to_mm_content(self, images: list) -> list[dict]:
+        """Convert PIL images to OpenAI-style image_url content blocks."""
+        import base64
+        import io
+
+        content = []
+        for img in images:
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/png;base64,{b64}"
+                },
+            })
+        return content
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        **kwargs,
+    ) -> list:
+        samples: list = []
+        for question_text, answer, images in self.data:
+            if len(samples) >= num_requests:
+                break
+
+            mm_content = self._images_to_mm_content(images or [])
+
+            # Build message content: images first, then question text.
+            content: list = mm_content
+            content.append({"type": "text", "text": question_text})
+            messages = [{
+                "role": "user",
+                "content": content,
+            }]
+
+            new_output_len = output_len if output_len is not None else 16
+
+            samples.append(
+                SampleRequest(
+                    messages=messages,
+                    expected_output_len=new_output_len,
+                    multi_modal_data=mm_content,
+                    completion=answer,
+                ))
+
+        self.maybe_oversample_requests(samples, num_requests)
+        return samples
 
 
 # -----------------------------------------------------------------------------

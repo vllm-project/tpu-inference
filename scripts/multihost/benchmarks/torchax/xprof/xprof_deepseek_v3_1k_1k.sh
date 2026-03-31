@@ -4,7 +4,7 @@
 # Nightly benchmark wrapper for DeepSeek V3 (1k input, 8k output).
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
-NIGHTLY_SCRIPT="${SCRIPT_DIR}/../../nightly_benchmarking.sh"
+NIGHTLY_SCRIPT="${SCRIPT_DIR}/../../../nightly_benchmarking.sh"
 
 # Adjust model-path, max-seqs, and code-hash below when officially serving DeepSeek.
 bash "${NIGHTLY_SCRIPT}" \
@@ -21,7 +21,6 @@ bash "${NIGHTLY_SCRIPT}" \
   --dataset-name "random" \
   --run-type "DAILY" \
   --device "tpu7x-16" \
-  --code-hash "deepseek-hash-placeholder" \
   --created-by "bm-scheduler" \
   --new-model-design "1" \
   --gpu-memory-utilization "0.92" \
@@ -32,5 +31,5 @@ bash "${NIGHTLY_SCRIPT}" \
   --vllm-mla-disable "0" \
   --moe-requantize-block-size "512" \
   --moe-requantize-weight-dtype "fp4" \
-  --phased-profiling-dir "gs://tpu-commons-ci/xprof/deepseek-r1/1k-1k" \
+  --phased-profiling-dir "gs://tpu-commons-ci/xprof/deepseek-r1/torchax/1k-1k" \
   --skip-db-upload

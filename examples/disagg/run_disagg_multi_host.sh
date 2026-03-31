@@ -18,20 +18,58 @@
 
 set -e
 
+# Function to print logs on exit
+print_logs_on_exit() {
+  echo "--- Script exiting, displaying logs ---"
+
+  # The logs are written inside containers to /root/logs, which is mapped from $LOG_DIR on the host.
+  LOG_DIR=$HOME/logs
+
+  if [ -d "$LOG_DIR" ]; then
+    echo "--- Contents of $LOG_DIR/prefill.txt ---"
+    if [ -f "$LOG_DIR/prefill.txt" ]; then
+      cat "$LOG_DIR/prefill.txt"
+    else
+      echo "File not found."
+    fi
+
+    echo "--- Contents of $LOG_DIR/decode.txt ---"
+    if [ -f "$LOG_DIR/decode.txt" ]; then
+      cat "$LOG_DIR/decode.txt"
+    else
+      echo "File not found."
+    fi
+
+    echo "--- Contents of $LOG_DIR/benchmark.txt ---"
+    if [ -f "$LOG_DIR/benchmark.txt" ]; then
+      cat "$LOG_DIR/benchmark.txt"
+    else
+      echo "File not found."
+    fi
+  else
+    echo "Log directory '$LOG_DIR' not found."
+  fi
+  echo "--- End of logs ---"
+}
+
+# Register the cleanup function to be called on script exit (normal or error)
+trap print_logs_on_exit EXIT
+
+
 # Parameters may come from external
 # docker related
 CONTAINER_PREFIX=${CONTAINER_PREFIX:="disagg-node"}
 RUN_IN_BUILDKITE=${RUN_IN_BUILDKITE:=false}
-TPU_VERSION=${TPU_VERSION:=tpu6e}
+TPU_VERSION=${TPU_VERSION:=tpu7x}
 MODEL=${MODEL:="Qwen/Qwen3-0.6B"}
 DOCKER_IMAGE=${DOCKER_IMAGE:="vllm-tpu:000"}
 
 # benchmark related
 INPUT_LEN=${INPUT_LEN:=128}
 OUTPUT_LEN=${OUTPUT_LEN:=20}
-NUM_PROMPTS=${NUM_PROMPTS:=10}
+NUM_PROMPTS=${NUM_PROMPTS:=100}
 RANDOM_SEED=${RANDOM_SEED:=10}
-MAX_CONCURRENCY=${MAX_CONCURRENCY:=1}
+MAX_CONCURRENCY=${MAX_CONCURRENCY:=10}
 TEST_MODE=${TEST_MODE:=1} # if 1, run benchmark; if 2, run correctness; if 3, run both
 ############################
 
@@ -194,7 +232,8 @@ set -x
 docker exec -d ${CONTAINER_PREFIX}-0 /bin/bash -c \
     "vllm serve $MODEL \
     --port ${PREFILL_VLLM_PORT} \
-    --gpu-memory-utilization 0.3 \
+    --gpu-memory-utilization 0.8 \
+    --max-num-batched-tokens 1024 \
     --tensor-parallel-size 4 \
     --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}' \
     --no-async-scheduling \
@@ -266,7 +305,8 @@ set -x
 docker exec -d ${CONTAINER_PREFIX}-2-0 /bin/bash -c \
     "vllm serve $MODEL \
     --port ${DECODE_VLLM_PORT} \
-    --gpu-memory-utilization 0.3 \
+    --gpu-memory-utilization 0.8 \
+    --max-num-batched-tokens 1024 \
     --tensor-parallel-size 4 \
     --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}' \
     --no-async-scheduling \

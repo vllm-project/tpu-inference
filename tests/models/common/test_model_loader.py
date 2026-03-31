@@ -272,7 +272,7 @@ def test_get_flax_model(vllm_config, mesh, tie_word_embeddings):
                                     world_size=1,
                                     device=jax.devices()[0],
                                     need_pp=False)
-    with jax.set_mesh(mesh):
+    with jax.set_mesh(mesh), set_current_vllm_config(vllm_config):
         model_fn, compute_logits_fn, *_ = model_loader.get_flax_model(
             vllm_config, rng, mesh)
 

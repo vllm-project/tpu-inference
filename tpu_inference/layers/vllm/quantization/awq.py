@@ -20,7 +20,6 @@ import torch
 from jax.sharding import Mesh, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
-from torchax.ops.mappings import t2j
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.layer import \
@@ -46,14 +45,14 @@ from tpu_inference.layers.common.quantization import awq_u32_unpack_u4
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
-from tpu_inference.layers.vllm.moe import (
+from tpu_inference.layers.vllm.interface.moe import (
     MoEBackend, select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedLinearMethod
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_mesh_shape_product
+from tpu_inference.utils import get_mesh_shape_product, t2j
 
 P = PartitionSpec
 
@@ -76,15 +75,17 @@ class VllmAWQConfig(AWQConfig, VllmQuantConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional[Union["LinearMethodBase", "QuantizeMethodBase"]]:
-        if isinstance(layer, LinearBase):
-            linear_config = self.get_linear_config(layer)
-            if is_layer_skipped(prefix, self.modules_to_not_convert):
-                return VllmUnquantizedLinearMethod(linear_config)
-            return VllmAWQLinearMethod(self, linear_config)
-        elif isinstance(layer, FusedMoE):
-            layer.moe_config = self.get_moe_config(layer)
-            return VllmAWQMoEMethod(self, layer, self.mesh)
-        return None
+        match layer:
+            case LinearBase():
+                linear_config = self.get_linear_config(layer)
+                if is_layer_skipped(prefix, self.modules_to_not_convert):
+                    return VllmUnquantizedLinearMethod(linear_config)
+                return VllmAWQLinearMethod(self, linear_config)
+            case FusedMoE():
+                layer.moe_config = self.get_moe_config(layer)
+                return VllmAWQMoEMethod(self, layer, self.mesh)
+            case _:
+                return None
 
 
 class VllmAWQLinearMethod(AWQLinearMethod):

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import copy
+import functools
 import time
 from collections.abc import Sequence
 from contextlib import nullcontext
@@ -29,11 +30,11 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
-from vllm.config import VllmConfig
+from torchax.ops.ops_registry import register_torch_function_op
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
-from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
@@ -46,8 +47,7 @@ from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm.mla_attention import \
-    VllmTPUMultiHeadLatentAttentionWrapper
+from tpu_inference.layers.vllm import ops as patch_ops
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     shard_model_to_tpu
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
@@ -74,6 +74,12 @@ class _VllmRunner(torch.nn.Module):
     def forward(self, **kwargs) -> torch.Tensor:
         if "hidden_state" in kwargs:
             return self.compute_logits(kwargs["hidden_state"])
+        elif "call_method" in kwargs:
+            method_name = kwargs["call_method"]
+            call_args = kwargs.get("call_args", tuple())
+            call_kwargs = kwargs.get("call_kwargs", {})
+            method = getattr(self.vllm_model, method_name)
+            return method(*call_args, **call_kwargs)
         else:
             return self.compute_hidden_state(
                 kwargs["input_ids"],
@@ -112,9 +118,27 @@ class VllmModelWrapper:
         self.vllm_config.quant_config = get_tpu_quantization_config(
             self.vllm_config, self.mesh)
         self._apply_pp_patch()
+        self._patch_vllm_ops()
 
-        MultiHeadLatentAttentionWrapper.register_oot(
-            VllmTPUMultiHeadLatentAttentionWrapper)
+    def _patch_vllm_ops(self):
+        # Caution: there is no public api for restore the ops.
+        # It need to patched again if the ops are jitted and mesh is change.
+        # The overwritten ops should not be called after the end of model wrapper.
+
+        # Import the registered ops at first and then we can overwrite them.
+        import torchax.ops.jtorch  # noqa: F401
+
+        # Patch sdpa from torch ops to flash attention to prevent OOM
+        register_torch_function_op(
+            torch.nn.functional.scaled_dot_product_attention,
+            functools.partial(patch_ops.scaled_dot_product_attention.
+                              scaled_dot_product_attention,
+                              mesh=self.mesh),
+            is_jax_function=True,
+            needs_env=False,
+        )
+
+        patch_ops.gdn_attention.apply_gated_delta_net_torch_ops_patch()
 
     def _apply_pp_patch(self):
         # patch `get_pp_group` in vLLM to jax's get_pp_group.
@@ -183,7 +207,9 @@ class VllmModelWrapper:
             [0]) if not vllm_envs.VLLM_TPU_USING_PATHWAYS else nullcontext()
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
-        with load_context, jax_context:
+
+        with load_context, jax_context, set_current_vllm_config(
+                self.vllm_config):
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:
@@ -269,7 +295,7 @@ class VllmModelWrapper:
                         "input_ids": torch_view(input_ids),
                         "positions": torch_view(input_positions),
                         "intermediate_tensors": intermediate_tensors,
-                        "inputs_embeds": None,
+                        "inputs_embeds": torch_view(input_embeds),
                     },
                     tie_weights=False,
                 )
@@ -287,8 +313,90 @@ class VllmModelWrapper:
 
         return step_fun
 
+    def wrap_embed_multimodal_func(self):
+        if not self.vllm_config.model_config.is_multimodal_model:
+            return None
+
+        # The function cannot be JITted directly due to its dynamic implementation
+        def embed_multimodal_func(
+            params_and_buffers: Any,
+            image_grid_thw: Any,
+            **kwargs,
+        ) -> Any:
+            # TODO: b/494300919 - Historical arg, need to be removed.
+            del image_grid_thw
+
+            def move(v: torch.Tensor) -> torch.Tensor:
+                if not isinstance(v, torch.Tensor):
+                    logger.warning(f"Expect torch.Tensor, got {type(v)}")
+                    return v
+                return v.to(device="jax")
+
+            with torchax.default_env():
+                # Ensure all tensors are moved into accelerator so the
+                # computation with weights can work properly.
+                call_kwargs = {
+                    k: jax.tree.map(move, v)
+                    for k, v in kwargs.items()
+                }
+                output_from_torch = torch.func.functional_call(
+                    self.model,
+                    torch_view(params_and_buffers),
+                    kwargs={
+                        "call_method": "embed_multimodal",
+                        "call_args": (),
+                        "call_kwargs": call_kwargs,
+                    },
+                    tie_weights=False,
+                )
+
+                return jax_view(output_from_torch)
+
+        return embed_multimodal_func
+
+    def wrap_embed_input_ids_func(self):
+        if not self.vllm_config.model_config.is_multimodal_model:
+            return None
+
+        # The function cannot be JITted directly due to its dynamic implementation
+        def embed_input_ids_func(
+            params_and_buffers: Any,
+            input_ids: jax.Array,
+            mm_embeds: list[jax.Array] | jax.Array | None = None,
+            *,
+            is_multimodal: jax.Array | None = None,
+        ) -> jax.Array:
+            with torchax.default_env():
+                if mm_embeds is not None:
+                    if isinstance(mm_embeds, list):
+                        torch_mm_embeds = [torch_view(x) for x in mm_embeds]
+                    else:
+                        torch_mm_embeds = torch_view(mm_embeds)
+                    call_args = (torch_view(input_ids), torch_mm_embeds)
+                else:
+                    call_args = (torch_view(input_ids), )
+
+                output_from_torch = torch.func.functional_call(
+                    self.model,
+                    torch_view(params_and_buffers),
+                    kwargs={
+                        "call_method": "embed_input_ids",
+                        "call_args": call_args,
+                        "call_kwargs": {
+                            "is_multimodal": torch_view(is_multimodal),
+                        },
+                    },
+                    tie_weights=False,
+                )
+
+                return jax_view(output_from_torch)
+
+        return embed_input_ids_func
+
     def jit_compute_logits_func(self):
 
+        # TODO(gxd3): revisit if the sharding below is the best way to shard the
+        # output logits.
         @jax.jit(out_shardings=(NamedSharding(
             self.mesh,
             PartitionSpec(ShardingAxisName.MLP_DATA,

@@ -138,7 +138,8 @@ def _get_nnx_model(
                                             apply_to_abstract_model=False)
         return model
 
-    if vllm_config.load_config.load_format == "dummy":
+    if vllm_config.load_config.load_format == "dummy" and not issubclass(
+            model_class, LoadableWithIterator):
         # Create a sharded model with random inited weights.
         # TODO: currently Qwen2ForCausalLM is using legacy model implementation
         # will merge the random init logic when all model are migrated to new model implementation
@@ -166,7 +167,7 @@ def _get_nnx_model(
 
         @jax.jit
         def create_sharded_model():
-            model = model_class(vllm_config, rng, mesh)
+            model = create_abstract_model()
             state = nnx.state(model)
             pspecs = nnx.get_partition_spec(state)
             sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
@@ -213,6 +214,8 @@ def _get_nnx_model(
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
         with jax.set_mesh(mesh):
+            if vllm_config.load_config.load_format == "dummy":
+                vllm_config.load_config.load_format = "jax_dummy"
             loader = get_model_loader(vllm_config.load_config)
             if isinstance(model, LoadableWithIterator):
                 assert isinstance(model, JaxModule)
@@ -366,9 +369,21 @@ def get_vllm_model(
     jit_model = model.jit_step_func()
     compute_logits_fn = model.jit_compute_logits_func()
     pooler_fn = model.build_pooler_func()
+
+    multimodal_fns = {
+        "precompile_vision_encoder_fn":
+        getattr(model.model.vllm_model, "precompile_vision_encoder", None),
+        "embed_multimodal_fn":
+        model.wrap_embed_multimodal_func(),
+        "embed_input_ids_fn":
+        model.wrap_embed_input_ids_func(),
+        "get_mrope_input_positions_fn":
+        getattr(model.model.vllm_model, "get_mrope_input_positions", None),
+    }
+
     # the model needs to be returned because lora weights are neither torch.nn.parameter nor torch.nn.buffer. After we load the lora weights and set it to the torch.nn.Module, we can shard it and move it to TPU.
     combine_hidden_states_fn = None
-    return jit_model, compute_logits_fn, pooler_fn, combine_hidden_states_fn, None, params, lora_manager, model
+    return jit_model, compute_logits_fn, pooler_fn, combine_hidden_states_fn, multimodal_fns, params, lora_manager, model
 
 
 def get_model(
