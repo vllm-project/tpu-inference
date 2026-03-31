@@ -356,7 +356,7 @@ def run_jax_gdn_attention_local(
 
     Returns:
         A tuple containing the new states and the output.
-        - A tuple of (new_cs_q, new_cs_k, new_cs_v, new_recurrent_state).
+        - A tuple of (new_conv_state_q, new_conv_state_k, new_conv_state_v, new_recurrent_state).
         - The output tensor of shape `(num_tokens, local_n_v * d_v)`.
     """
     # Ensure q_loc is monotonically increasing to handle padded slots
@@ -376,15 +376,15 @@ def run_jax_gdn_attention_local(
     local_n_v = n_v // attn_head_axis_size
 
     def scan_fn(carry, xs):
-        c_state_q, c_state_k, c_state_v, r_state_all = carry
+        conv_state_q, conv_state_k, conv_state_v, recurrent_state_all = carry
         (
             curr_q,
             curr_k,
             curr_v,
             curr_b,
             curr_a,
-            req_idx,
-            is_valid,
+            request_index,
+            is_valid_token,
         ) = xs
 
         curr_q = curr_q[None, None, :]
@@ -393,21 +393,22 @@ def run_jax_gdn_attention_local(
         curr_b = curr_b[None, None, :]
         curr_a = curr_a[None, None, :]
 
-        state_idx = l_state_indices[req_idx]
-        cs_q = c_state_q[state_idx][None, ...]
-        cs_k = c_state_k[state_idx][None, ...]
-        cs_v = c_state_v[state_idx][None, ...]
-        r_state = r_state_all[state_idx][None, ...]
+        state_index = l_state_indices[request_index]
+        cs_q = conv_state_q[state_index][None, ...]
+        cs_k = conv_state_k[state_index][None, ...]
+        cs_v = conv_state_v[state_index][None, ...]
+        recurrent_state = recurrent_state_all[state_index][None, ...]
 
         # 1. Causal Conv1D
-        q_conv, new_cs_q = _causal_conv1d_step(curr_q, cs_q, l_conv_weight_q,
-                                               l_conv_bias_q)
-        k_conv, new_cs_k = _causal_conv1d_step(curr_k, cs_k, l_conv_weight_k,
-                                               l_conv_bias_k)
-        v_conv, new_cs_v = _causal_conv1d_step(curr_v, cs_v, l_conv_weight_v,
-                                               l_conv_bias_v)
+        query_conv, new_conv_state_q = _causal_conv1d_step(
+            curr_q, cs_q, l_conv_weight_q, l_conv_bias_q)
+        key_conv, new_conv_state_k = _causal_conv1d_step(
+            curr_k, cs_k, l_conv_weight_k, l_conv_bias_k)
+        value_conv, new_conv_state_v = _causal_conv1d_step(
+            curr_v, cs_v, l_conv_weight_v, l_conv_bias_v)
 
-        mixed_qkv = jnp.concatenate([q_conv, k_conv, v_conv], axis=-1)
+        mixed_qkv = jnp.concatenate([query_conv, key_conv, value_conv],
+                                    axis=-1)
         mixed_qkv = jax.nn.silu(mixed_qkv)
 
         # 2. Split Q, K, V
@@ -441,42 +442,45 @@ def run_jax_gdn_attention_local(
         key = _l2_normalize(key)
 
         # 5. Delta Rule Recurrence
-        output, new_r = _recurrent_gated_delta_rule_step(query,
-                                                         key,
-                                                         value,
-                                                         g,
-                                                         beta,
-                                                         state=r_state)
+        output, new_recurrent_state = _recurrent_gated_delta_rule_step(
+            query, key, value, g, beta, state=recurrent_state)
 
         # Output back to (B, T, H, d_v) -> (B, T, H * d_v)
         output = jnp.transpose(output, (0, 2, 1, 3)).astype(mixed_qkv.dtype)
         output = output.reshape(B, T, -1)
 
-        c_state_q = jnp.where(is_valid,
-                              c_state_q.at[state_idx].set(new_cs_q[0]),
-                              c_state_q)
-        c_state_k = jnp.where(is_valid,
-                              c_state_k.at[state_idx].set(new_cs_k[0]),
-                              c_state_k)
-        c_state_v = jnp.where(is_valid,
-                              c_state_v.at[state_idx].set(new_cs_v[0]),
-                              c_state_v)
-        r_state_all = jnp.where(is_valid,
-                                r_state_all.at[state_idx].set(new_r[0]),
-                                r_state_all)
+        conv_state_q = jnp.where(
+            is_valid_token,
+            conv_state_q.at[state_index].set(new_conv_state_q[0]),
+            conv_state_q)
+        conv_state_k = jnp.where(
+            is_valid_token,
+            conv_state_k.at[state_index].set(new_conv_state_k[0]),
+            conv_state_k)
+        conv_state_v = jnp.where(
+            is_valid_token,
+            conv_state_v.at[state_index].set(new_conv_state_v[0]),
+            conv_state_v)
+        recurrent_state_all = jnp.where(
+            is_valid_token,
+            recurrent_state_all.at[state_index].set(new_recurrent_state[0]),
+            recurrent_state_all)
 
-        return (c_state_q, c_state_k, c_state_v, r_state_all), output[0, 0]
+        return (conv_state_q, conv_state_k, conv_state_v,
+                recurrent_state_all), output[0, 0]
 
     carry_init = (l_conv_state_q, l_conv_state_k, l_conv_state_v,
                   l_recurrent_state)
     xs = (l_query, l_key, l_value, l_b, l_a, req_indices, valid_mask)
 
     (
-        (new_cs_q, new_cs_k, new_cs_v, new_recurrent_state),
-        j_output,
+        (new_conv_state_q, new_conv_state_k, new_conv_state_v,
+         new_recurrent_state),
+        output,
     ) = jax.lax.scan(scan_fn, carry_init, xs)
 
-    return (new_cs_q, new_cs_k, new_cs_v, new_recurrent_state), j_output
+    return (new_conv_state_q, new_conv_state_k, new_conv_state_v,
+            new_recurrent_state), output
 
 
 def run_jax_gdn_attention(
@@ -535,43 +539,43 @@ def run_jax_gdn_attention(
 
     # NOTE: we pre-split Q, K, and V BEFORE passing to shard map,
     # otherwise, jax.shard_map splits across C dimension
-    j_q = j_mixed_qkv[..., :key_dim]
-    j_k = j_mixed_qkv[..., key_dim:key_dim * 2]
-    j_v = j_mixed_qkv[..., key_dim * 2:]
+    j_query = j_mixed_qkv[..., :key_dim]
+    j_key = j_mixed_qkv[..., key_dim:key_dim * 2]
+    j_value = j_mixed_qkv[..., key_dim * 2:]
 
-    cs_q = conv_state[..., :key_dim]
-    cs_k = conv_state[..., key_dim:key_dim * 2]
-    cs_v = conv_state[..., key_dim * 2:]
+    conv_state_query = conv_state[..., :key_dim]
+    conv_state_key = conv_state[..., key_dim:key_dim * 2]
+    conv_state_value = conv_state[..., key_dim * 2:]
 
-    cw_q = j_conv_weight[:key_dim, ...]
-    cw_k = j_conv_weight[key_dim:key_dim * 2, ...]
-    cw_v = j_conv_weight[key_dim * 2:, ...]
+    conv_weight_query = j_conv_weight[:key_dim, ...]
+    conv_weight_key = j_conv_weight[key_dim:key_dim * 2, ...]
+    conv_weight_value = j_conv_weight[key_dim * 2:, ...]
 
     if j_conv_bias is not None:
-        cb_q = j_conv_bias[:key_dim]
-        cb_k = j_conv_bias[key_dim:key_dim * 2]
-        cb_v = j_conv_bias[key_dim * 2:]
+        conv_bias_query = j_conv_bias[:key_dim]
+        conv_bias_key = j_conv_bias[key_dim:key_dim * 2]
+        conv_bias_value = j_conv_bias[key_dim * 2:]
         bias_spec = P(ShardingAxisName.ATTN_HEAD)
     else:
-        cb_q = cb_k = cb_v = None
+        conv_bias_query = conv_bias_key = conv_bias_value = None
         bias_spec = None
 
     in_specs = (
-        P(None, ShardingAxisName.ATTN_HEAD),  # j_q
-        P(None, ShardingAxisName.ATTN_HEAD),  # j_k
-        P(None, ShardingAxisName.ATTN_HEAD),  # j_v
+        P(None, ShardingAxisName.ATTN_HEAD),  # j_query
+        P(None, ShardingAxisName.ATTN_HEAD),  # j_key
+        P(None, ShardingAxisName.ATTN_HEAD),  # j_value
         P(None, ShardingAxisName.ATTN_HEAD),  # j_b
         P(None, ShardingAxisName.ATTN_HEAD),  # j_a
-        P(None, None, ShardingAxisName.ATTN_HEAD),  # cs_q
-        P(None, None, ShardingAxisName.ATTN_HEAD),  # cs_k
-        P(None, None, ShardingAxisName.ATTN_HEAD),  # cs_v
+        P(None, None, ShardingAxisName.ATTN_HEAD),  # conv_state_query
+        P(None, None, ShardingAxisName.ATTN_HEAD),  # conv_state_key
+        P(None, None, ShardingAxisName.ATTN_HEAD),  # conv_state_value
         P(None, ShardingAxisName.ATTN_HEAD, None, None),  # recurrent_state
-        P(ShardingAxisName.ATTN_HEAD, None, None),  # cw_q
-        P(ShardingAxisName.ATTN_HEAD, None, None),  # cw_k
-        P(ShardingAxisName.ATTN_HEAD, None, None),  # cw_v
+        P(ShardingAxisName.ATTN_HEAD, None, None),  # conv_weight_query
+        P(ShardingAxisName.ATTN_HEAD, None, None),  # conv_weight_key
+        P(ShardingAxisName.ATTN_HEAD, None, None),  # conv_weight_value
         bias_spec,
         bias_spec,
-        bias_spec,  # cb_q, cb_k, cb_v
+        bias_spec,  # conv_bias_query, conv_bias_key, conv_bias_value
         P(ShardingAxisName.ATTN_HEAD),  # j_A_log
         P(ShardingAxisName.ATTN_HEAD),  # j_dt_bias
         P(),  # q_loc
@@ -580,12 +584,13 @@ def run_jax_gdn_attention(
 
     out_specs = (
         (
-            P(None, None, ShardingAxisName.ATTN_HEAD),  # new_cs_q
-            P(None, None, ShardingAxisName.ATTN_HEAD),  # new_cs_k
-            P(None, None, ShardingAxisName.ATTN_HEAD),  # new_cs_v
-            P(None, ShardingAxisName.ATTN_HEAD, None, None),  # new_rs
+            P(None, None, ShardingAxisName.ATTN_HEAD),  # new_conv_state_q
+            P(None, None, ShardingAxisName.ATTN_HEAD),  # new_conv_state_k
+            P(None, None, ShardingAxisName.ATTN_HEAD),  # new_conv_state_v
+            P(None, ShardingAxisName.ATTN_HEAD, None,
+              None),  # new_recurrent_state
         ),
-        P(None, ShardingAxisName.ATTN_HEAD),  # j_output
+        P(None, ShardingAxisName.ATTN_HEAD),  # output
     )
 
     p_run_jax_gdn_attention_local = functools.partial(
@@ -603,13 +608,20 @@ def run_jax_gdn_attention(
         out_specs=out_specs,
     )
 
-    (new_cs_q, new_cs_k, new_cs_v, new_rs), j_output = mapped_fn(
-        j_q, j_k, j_v, j_b, j_a, cs_q, cs_k, cs_v, recurrent_state, cw_q, cw_k,
-        cw_v, cb_q, cb_k, cb_v, j_A_log, j_dt_bias, q_loc, state_indices)
+    (
+        (new_conv_state_q, new_conv_state_k, new_conv_state_v,
+         new_recurrent_state),
+        output,
+    ) = mapped_fn(j_query, j_key, j_value, j_b, j_a, conv_state_query,
+                  conv_state_key, conv_state_value, recurrent_state,
+                  conv_weight_query, conv_weight_key, conv_weight_value,
+                  conv_bias_query, conv_bias_key, conv_bias_value, j_A_log,
+                  j_dt_bias, q_loc, state_indices)
 
-    new_conv_state = jnp.concatenate([new_cs_q, new_cs_k, new_cs_v], axis=-1)
+    new_conv_state = jnp.concatenate(
+        [new_conv_state_q, new_conv_state_k, new_conv_state_v], axis=-1)
 
-    return (new_conv_state, new_rs), j_output
+    return (new_conv_state, new_recurrent_state), output
 
 
 def gdn_attention_core_tpu(
