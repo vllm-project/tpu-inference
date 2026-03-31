@@ -26,9 +26,9 @@ from jax.sharding import (Mesh, NamedSharding, PartitionSpec,
 
 from tpu_inference.layers.jax import JaxModule, JaxModuleList
 from tpu_inference.models.common.pathways_dummy_loader import (
-    _HIGH, _LOW, PathwaysDummyModelLoader,
-    _process_weights_after_loading_jax, create_dummy_weights_on_tpu,
-    is_pathways_dummy_load, load_dummy_weights_jax)
+    _HIGH, _LOW, PathwaysDummyModelLoader, _process_weights_after_loading_jax,
+    create_dummy_weights_on_tpu, is_pathways_dummy_load,
+    load_dummy_weights_jax)
 
 # ==============================================================================
 # >> Fixtures
