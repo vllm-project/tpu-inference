@@ -24,21 +24,19 @@ import time
 import jax
 import jax.numpy as jnp
 import torch.nn
-from jax.sharding import Mesh, NamedSharding
-from vllm.config import ModelConfig, VllmConfig
+from jax.sharding import (Mesh, NamedSharding, PartitionSpec,
+                          SingleDeviceSharding)
+from vllm import envs as vllm_envs
+from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.utils import (initialize_model,
-                                                     process_weights_after_loading)
+from vllm.model_executor.model_loader.utils import (
+    initialize_model, process_weights_after_loading)
 from vllm.utils.torch_utils import set_default_torch_dtype
-from vllm import envs as vllm_envs
-from tpu_inference.logger import init_logger
-from vllm.config import get_current_vllm_config
-from jax.sharding import PartitionSpec, SingleDeviceSharding
 
-from tpu_inference.models.jax.utils.weight_utils import (
-    assign_and_shard_param)
+from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.utils.weight_utils import assign_and_shard_param
 
 logger = init_logger(__name__)
 
@@ -47,6 +45,7 @@ logger = init_logger(__name__)
 _LOW = -1e-3
 _HIGH = 1e-3
 _SEED = 1234
+
 
 def is_pathways_dummy_load() -> bool:
     if not vllm_envs.VLLM_TPU_USING_PATHWAYS:
@@ -96,7 +95,8 @@ def load_dummy_weights_jax(model, mesh: Mesh) -> None:
         elif isinstance(spec, SingleDeviceSharding):
             spec = ()
 
-        sharding = NamedSharding(mesh, spec if isinstance(spec, PartitionSpec) else PartitionSpec())
+        sharding = NamedSharding(
+            mesh, spec if isinstance(spec, PartitionSpec) else PartitionSpec())
 
         is_moe = hasattr(param, "_weights_to_load")
         param_shape = param.value.shape

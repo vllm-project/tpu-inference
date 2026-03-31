@@ -702,8 +702,9 @@ def test_load_weight_for_layer_non_pathways(dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@patch("tpu_inference.layers.vllm.quantization.unquantized.is_pathways_dummy_load",
-       return_value=False)
+@patch(
+    "tpu_inference.layers.vllm.quantization.unquantized.is_pathways_dummy_load",
+    return_value=False)
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
 def test_load_weight_for_layer_pathways_real_weights(_, dtype):
     """_load_weight_for_layer converts via numpy + device_put under Pathways (real weights)."""
@@ -719,8 +720,9 @@ def test_load_weight_for_layer_pathways_real_weights(_, dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@patch("tpu_inference.layers.vllm.quantization.unquantized.is_pathways_dummy_load",
-       return_value=True)
+@patch(
+    "tpu_inference.layers.vllm.quantization.unquantized.is_pathways_dummy_load",
+    return_value=True)
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
 def test_load_weight_for_layer_pathways_dummy(_, dtype):
     """_load_weight_for_layer creates dummy weights on TPU when in pathways dummy mode."""

@@ -51,9 +51,10 @@ from tpu_inference.layers.vllm.quantization.base import VllmQuantizationMethod
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common.pathways_dummy_loader import (
+    create_dummy_weights_on_tpu, is_pathways_dummy_load)
 from tpu_inference.utils import get_mesh_shape_product, to_jax_dtype
-from tpu_inference.models.common.pathways_dummy_loader import \
-            create_dummy_weights_on_tpu, is_pathways_dummy_load
+
 P = PartitionSpec
 
 logger = init_logger(__name__)
@@ -83,7 +84,7 @@ def _load_weight_for_layer(
             weight_dtype=dtype,
         )
 
-    # Pathways real-weight path 
+    # Pathways real-weight path
     dtype = to_jax_dtype(tensor.dtype)
     np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
     return jax.device_put(np_tensor, sharding).astype(dtype)

@@ -29,8 +29,10 @@ from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 
 from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common.pathways_dummy_loader import (
+    create_dummy_weights_on_tpu, is_pathways_dummy_load)
 from tpu_inference.utils import t2j, to_jax_dtype
-from tpu_inference.models.common.pathways_dummy_loader import create_dummy_weights_on_tpu, is_pathways_dummy_load
+
 P = PartitionSpec
 
 logger = init_logger(__name__)
@@ -95,11 +97,12 @@ def _convert_to_torchax_and_shard(tensor: torch.Tensor,
         if is_pathways_dummy_load():
             # Generate random values directly on TPU.
             tensor.untyped_storage().resize_(0)
-            return torch_view(create_dummy_weights_on_tpu(
-                sharding=sharding,
-                weight_shape=tuple(tensor.shape),
-                weight_dtype=to_jax_dtype(tensor.dtype),
-            ))
+            return torch_view(
+                create_dummy_weights_on_tpu(
+                    sharding=sharding,
+                    weight_shape=tuple(tensor.shape),
+                    weight_dtype=to_jax_dtype(tensor.dtype),
+                ))
     if isinstance(tensor, torchax.tensor.Tensor):
         tensor = jax_view(tensor)
     else:

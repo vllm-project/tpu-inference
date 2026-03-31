@@ -13,7 +13,7 @@
 # limitations under the License.
 """Unit tests for pathways_dummy_loader module."""
 
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import jax
 import jax.numpy as jnp
@@ -21,20 +21,14 @@ import numpy as np
 import pytest
 import torch
 from flax import nnx
-from jax.sharding import Mesh, NamedSharding, PartitionSpec, SingleDeviceSharding
+from jax.sharding import (Mesh, NamedSharding, PartitionSpec,
+                          SingleDeviceSharding)
 
 from tpu_inference.layers.jax import JaxModule, JaxModuleList
 from tpu_inference.models.common.pathways_dummy_loader import (
-    _HIGH,
-    _LOW,
-    _SEED,
-    PathwaysDummyModelLoader,
-    create_dummy_weights_on_tpu,
-    is_pathways_dummy_load,
-    load_dummy_weights_jax,
-    _process_weights_after_loading_jax,
-)
-
+    _HIGH, _LOW, PathwaysDummyModelLoader,
+    _process_weights_after_loading_jax, create_dummy_weights_on_tpu,
+    is_pathways_dummy_load, load_dummy_weights_jax)
 
 # ==============================================================================
 # >> Fixtures
@@ -51,8 +45,8 @@ def mesh() -> Mesh:
 @pytest.fixture
 def single_device_mesh() -> Mesh:
     """Provides a 1-device mesh with standard axis names."""
-    devices = np.array(jax.devices()[:1]).reshape((1,))
-    return Mesh(devices, axis_names=("model",))
+    devices = np.array(jax.devices()[:1]).reshape((1, ))
+    return Mesh(devices, axis_names=("model", ))
 
 
 # ==============================================================================
@@ -69,7 +63,9 @@ class TestIsPathwaysDummyLoad:
         mock_envs.VLLM_TPU_USING_PATHWAYS = False
         assert is_pathways_dummy_load() is False
 
-    @patch("tpu_inference.models.common.pathways_dummy_loader.get_current_vllm_config")
+    @patch(
+        "tpu_inference.models.common.pathways_dummy_loader.get_current_vllm_config"
+    )
     @patch("tpu_inference.models.common.pathways_dummy_loader.vllm_envs")
     def test_returns_true_for_dummy_format(self, mock_envs, mock_get_config):
         """Should return True when using Pathways with load_format='dummy'."""
@@ -79,9 +75,12 @@ class TestIsPathwaysDummyLoad:
         mock_get_config.return_value = mock_config
         assert is_pathways_dummy_load() is True
 
-    @patch("tpu_inference.models.common.pathways_dummy_loader.get_current_vllm_config")
+    @patch(
+        "tpu_inference.models.common.pathways_dummy_loader.get_current_vllm_config"
+    )
     @patch("tpu_inference.models.common.pathways_dummy_loader.vllm_envs")
-    def test_returns_true_for_pathways_dummy_format(self, mock_envs, mock_get_config):
+    def test_returns_true_for_pathways_dummy_format(self, mock_envs,
+                                                    mock_get_config):
         """Should return True when using Pathways with load_format='pathways_dummy'."""
         mock_envs.VLLM_TPU_USING_PATHWAYS = True
         mock_config = MagicMock()
@@ -89,9 +88,12 @@ class TestIsPathwaysDummyLoad:
         mock_get_config.return_value = mock_config
         assert is_pathways_dummy_load() is True
 
-    @patch("tpu_inference.models.common.pathways_dummy_loader.get_current_vllm_config")
+    @patch(
+        "tpu_inference.models.common.pathways_dummy_loader.get_current_vllm_config"
+    )
     @patch("tpu_inference.models.common.pathways_dummy_loader.vllm_envs")
-    def test_returns_false_for_other_load_formats(self, mock_envs, mock_get_config):
+    def test_returns_false_for_other_load_formats(self, mock_envs,
+                                                  mock_get_config):
         """Should return False for non-dummy load formats even with Pathways."""
         mock_envs.VLLM_TPU_USING_PATHWAYS = True
         mock_config = MagicMock()
@@ -112,26 +114,26 @@ class TestCreateDummyWeightsOnTpu:
         """Generated array should have the requested shape."""
         shape = (4, 8)
         sharding = NamedSharding(mesh, PartitionSpec())
-        result = create_dummy_weights_on_tpu(
-            sharding=sharding, weight_shape=shape, weight_dtype=jnp.float32
-        )
+        result = create_dummy_weights_on_tpu(sharding=sharding,
+                                             weight_shape=shape,
+                                             weight_dtype=jnp.float32)
         assert result.shape == shape
 
     def test_returns_correct_dtype(self, mesh):
         """Generated array should have the requested dtype."""
         sharding = NamedSharding(mesh, PartitionSpec())
         for dtype in [jnp.float32, jnp.bfloat16, jnp.float16]:
-            result = create_dummy_weights_on_tpu(
-                sharding=sharding, weight_shape=(2, 3), weight_dtype=dtype
-            )
+            result = create_dummy_weights_on_tpu(sharding=sharding,
+                                                 weight_shape=(2, 3),
+                                                 weight_dtype=dtype)
             assert result.dtype == dtype
 
     def test_values_within_range(self, mesh):
         """All values should be in [_LOW, _HIGH]."""
         sharding = NamedSharding(mesh, PartitionSpec())
-        result = create_dummy_weights_on_tpu(
-            sharding=sharding, weight_shape=(100, 100), weight_dtype=jnp.float32
-        )
+        result = create_dummy_weights_on_tpu(sharding=sharding,
+                                             weight_shape=(100, 100),
+                                             weight_dtype=jnp.float32)
         values = np.array(result)
         assert np.all(values >= _LOW)
         assert np.all(values <= _HIGH)
@@ -139,38 +141,38 @@ class TestCreateDummyWeightsOnTpu:
     def test_deterministic_with_same_seed(self, mesh):
         """Calling twice should produce identical results (fixed seed)."""
         sharding = NamedSharding(mesh, PartitionSpec())
-        a = create_dummy_weights_on_tpu(
-            sharding=sharding, weight_shape=(4, 4), weight_dtype=jnp.float32
-        )
-        b = create_dummy_weights_on_tpu(
-            sharding=sharding, weight_shape=(4, 4), weight_dtype=jnp.float32
-        )
+        a = create_dummy_weights_on_tpu(sharding=sharding,
+                                        weight_shape=(4, 4),
+                                        weight_dtype=jnp.float32)
+        b = create_dummy_weights_on_tpu(sharding=sharding,
+                                        weight_shape=(4, 4),
+                                        weight_dtype=jnp.float32)
         np.testing.assert_array_equal(np.array(a), np.array(b))
 
     def test_sharding_is_applied(self, mesh):
         """Result should carry the requested sharding."""
         spec = PartitionSpec("data", "model")
         sharding = NamedSharding(mesh, spec)
-        result = create_dummy_weights_on_tpu(
-            sharding=sharding, weight_shape=(4, 8), weight_dtype=jnp.float32
-        )
+        result = create_dummy_weights_on_tpu(sharding=sharding,
+                                             weight_shape=(4, 8),
+                                             weight_dtype=jnp.float32)
         assert result.sharding == sharding
 
     def test_scalar_shape(self, mesh):
         """Should handle scalar (empty-tuple) shapes."""
         sharding = NamedSharding(mesh, PartitionSpec())
-        result = create_dummy_weights_on_tpu(
-            sharding=sharding, weight_shape=(), weight_dtype=jnp.float32
-        )
+        result = create_dummy_weights_on_tpu(sharding=sharding,
+                                             weight_shape=(),
+                                             weight_dtype=jnp.float32)
         assert result.shape == ()
 
     def test_1d_shape(self, single_device_mesh):
         """Should handle 1-D shapes."""
         sharding = NamedSharding(single_device_mesh, PartitionSpec("model"))
-        result = create_dummy_weights_on_tpu(
-            sharding=sharding, weight_shape=(16,), weight_dtype=jnp.float32
-        )
-        assert result.shape == (16,)
+        result = create_dummy_weights_on_tpu(sharding=sharding,
+                                             weight_shape=(16, ),
+                                             weight_dtype=jnp.float32)
+        assert result.shape == (16, )
 
 
 # ==============================================================================
@@ -207,7 +209,6 @@ class _NestedModel(JaxModule):
         return x
 
 
-
 class TestLoadDummyWeightsJax:
     """Tests for load_dummy_weights_jax()."""
 
@@ -218,7 +219,7 @@ class TestLoadDummyWeightsJax:
         assert np.all(np.array(model.weight.value) == 0.0)
 
         with patch(
-            "tpu_inference.models.common.pathways_dummy_loader._process_weights_after_loading_jax"
+                "tpu_inference.models.common.pathways_dummy_loader._process_weights_after_loading_jax"
         ):
             load_dummy_weights_jax(model, mesh)
 
@@ -233,7 +234,7 @@ class TestLoadDummyWeightsJax:
         model = _NestedModel()
 
         with patch(
-            "tpu_inference.models.common.pathways_dummy_loader._process_weights_after_loading_jax"
+                "tpu_inference.models.common.pathways_dummy_loader._process_weights_after_loading_jax"
         ):
             load_dummy_weights_jax(model, mesh)
 
@@ -247,7 +248,7 @@ class TestLoadDummyWeightsJax:
         model = _SimpleLinear(4, 8)
 
         with patch(
-            "tpu_inference.models.common.pathways_dummy_loader._process_weights_after_loading_jax"
+                "tpu_inference.models.common.pathways_dummy_loader._process_weights_after_loading_jax"
         ) as mock_process:
             load_dummy_weights_jax(model, mesh)
             mock_process.assert_called_once_with(model)
@@ -257,7 +258,7 @@ class TestLoadDummyWeightsJax:
         model = _SimpleLinear(4, 8, dtype=jnp.bfloat16)
 
         with patch(
-            "tpu_inference.models.common.pathways_dummy_loader._process_weights_after_loading_jax"
+                "tpu_inference.models.common.pathways_dummy_loader._process_weights_after_loading_jax"
         ):
             load_dummy_weights_jax(model, mesh)
 
@@ -270,7 +271,7 @@ class TestLoadDummyWeightsJax:
         model.weight.set_metadata("sharding", sharding)
 
         with patch(
-            "tpu_inference.models.common.pathways_dummy_loader._process_weights_after_loading_jax"
+                "tpu_inference.models.common.pathways_dummy_loader._process_weights_after_loading_jax"
         ):
             load_dummy_weights_jax(model, mesh)
 
@@ -284,7 +285,7 @@ class TestLoadDummyWeightsJax:
         model.weight.set_metadata("sharding", SingleDeviceSharding(device))
 
         with patch(
-            "tpu_inference.models.common.pathways_dummy_loader._process_weights_after_loading_jax"
+                "tpu_inference.models.common.pathways_dummy_loader._process_weights_after_loading_jax"
         ):
             load_dummy_weights_jax(model, mesh)
 
@@ -306,10 +307,13 @@ class TestProcessWeightsAfterLoadingJax:
 
         # Create a concrete subclass of QuantizeMethodBase so isinstance checks pass
         class FakeQuantMethod(QuantizeMethodBase):
+
             def create_weights(self, *args, **kwargs):
                 pass
+
             def apply(self, *args, **kwargs):
                 pass
+
             def process_weights_after_loading(self, module):
                 pass
 
@@ -322,7 +326,8 @@ class TestProcessWeightsAfterLoadingJax:
 
         _process_weights_after_loading_jax(module)
 
-        mock_quant.process_weights_after_loading.assert_called_once_with(module)
+        mock_quant.process_weights_after_loading.assert_called_once_with(
+            module)
 
     def test_recurses_through_jax_module_list(self):
         """Should recursively process children in JaxModuleList."""
@@ -375,11 +380,11 @@ class TestPathwaysDummyModelLoader:
         model = _SimpleLinear(4, 8)
 
         with patch(
-            "tpu_inference.models.common.pathways_dummy_loader.load_dummy_weights_jax"
+                "tpu_inference.models.common.pathways_dummy_loader.load_dummy_weights_jax"
         ) as mock_load_jax:
             with patch(
-                "tpu_inference.models.common.pathways_dummy_loader.jax.sharding.get_mesh",
-                return_value=mesh,
+                    "tpu_inference.models.common.pathways_dummy_loader.jax.sharding.get_mesh",
+                    return_value=mesh,
             ):
                 loader.load_weights(model, model_config=MagicMock())
 
@@ -394,7 +399,7 @@ class TestPathwaysDummyModelLoader:
         model = MagicMock()  # Not a JaxModule
 
         with patch(
-            "tpu_inference.models.common.pathways_dummy_loader.load_dummy_weights_jax"
+                "tpu_inference.models.common.pathways_dummy_loader.load_dummy_weights_jax"
         ) as mock_load_jax:
             loader.load_weights(model, model_config=MagicMock())
             mock_load_jax.assert_not_called()
@@ -406,8 +411,8 @@ class TestPathwaysDummyModelLoader:
         model = _SimpleLinear(4, 8)
 
         with patch(
-            "tpu_inference.models.common.pathways_dummy_loader.jax.sharding.get_mesh",
-            return_value=None,
+                "tpu_inference.models.common.pathways_dummy_loader.jax.sharding.get_mesh",
+                return_value=None,
         ):
             with pytest.raises(RuntimeError, match="active JAX mesh"):
                 loader.load_weights(model, model_config=MagicMock())
@@ -429,11 +434,11 @@ class TestPathwaysDummyModelLoader:
         mock_model.eval.return_value = mock_model
 
         with patch(
-            "tpu_inference.models.common.pathways_dummy_loader.initialize_model",
-            return_value=mock_model,
+                "tpu_inference.models.common.pathways_dummy_loader.initialize_model",
+                return_value=mock_model,
         ) as mock_init:
             with patch(
-                "tpu_inference.models.common.pathways_dummy_loader.process_weights_after_loading"
+                    "tpu_inference.models.common.pathways_dummy_loader.process_weights_after_loading"
             ) as mock_process:
                 result = loader.load_model(
                     vllm_config=mock_vllm_config,
