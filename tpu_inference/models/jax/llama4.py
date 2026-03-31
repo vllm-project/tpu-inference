@@ -236,6 +236,9 @@ class Llama4WeightLoader(BaseWeightLoader):
             # loaded_weight is a jax.Array when framework="flax", otherwise it's bfloat16
             loaded_weight = convert_torch_to_jax_with_view(
                         loaded_weight, cast_type, mapped_model_weight.out_sharding, model_for_loading.mesh)
+
+            logger.info(f"Checking Sharding for {split_loaded_name} (Layer {layer_num})")
+            logger.info(f"  Target Sharding: {mapped_model_weight.out_sharding}")
                 
             if mapped_model_weight.value.shape != loaded_weight.shape:
                 raise ValueError(
@@ -248,10 +251,7 @@ class Llama4WeightLoader(BaseWeightLoader):
             verify_sharding(mapped_model_weight.value, mapped_name)
             
             # Log HBM after finishing a transformer block
-            layer_num = self._get_layer_num(loaded_name)
-            if layer_num is not None and layer_num != self.last_logged_layer:
-                log_hbm_usage(f"Finished loading Layer {layer_num} (Gate/Up)")
-                self.last_logged_layer = layer_num
+            log_hbm_usage(f"After loading {split_type}_proj for Layer {layer_num}")
             # -------------------
 
             logger.debug(

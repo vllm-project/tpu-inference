@@ -146,33 +146,40 @@ def convert_torch_to_jax_with_view(loaded_weight: torch.Tensor,
         out_sharding = NamedSharding(mesh, spec)
     
     if isinstance(loaded_weight, (np.ndarray, jax.Array)):
-        return jax.device_put(loaded_weight, out_sharding).astype(cast_type)
+        res = jax.device_put(loaded_weight, out_sharding).astype(cast_type)
+        return res.block_until_ready()
 
     if hasattr(loaded_weight, "view"):
         if "uint16" in str(loaded_weight.dtype) or "bfloat16" in str(loaded_weight.dtype):
-            # return jax.device_put(loaded_weight.detach().cpu().to(torch.float32).numpy(), out_sharding).astype(cast_type)
             cpu_data = loaded_weight.detach().cpu().to(torch.float32).numpy()
-            return jax.device_put(cpu_data, out_sharding).astype(cast_type)
+            res = jax.device_put(cpu_data, out_sharding).astype(cast_type)
+            return res.block_until_ready()
+        
         torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
-        return jnp.array(
+        res = jnp.array(
             loaded_weight.view(torch_view_type).numpy(), out_sharding).view(cast_type)
+        return res.block_until_ready()
     
-    return jax.device_put(jnp.array(loaded_weight), out_sharding).astype(cast_type)
+    res = jax.device_put(jnp.array(loaded_weight), out_sharding).astype(cast_type)
+    return res.block_until_ready()
 
 def log_hbm_usage(context_name: str):
-    """Logs the current HBM utilization on the TPU."""
+    """Logs the HBM utilization for all local TPU devices."""
     try:
-        # Get memory stats for the default backend (TPU)
-        stats = jax.devices()[0].memory_stats()
-        bytes_in_use = stats['bytes_in_use']
-        limit = stats['bytes_limit']
-        util_pct = (bytes_in_use / limit) * 100
+        local_devices = jax.local_devices()
+        log_msg = f"--- HBM Usage [{context_name}] ---\n"
         
-        logger.info(
-            f"--- HBM Usage [{context_name}] --- "
-            f"Used: {bytes_in_use / 1024**3:.2f}GB / "
-            f"Total: {limit / 1024**3:.2f}GB ({util_pct:.2f}%)"
-        )
+        for d in local_devices:
+            stats = d.memory_stats()
+            bytes_in_use = stats['bytes_in_use']
+            limit = stats['bytes_limit']
+            util_pct = (bytes_in_use / limit) * 100
+            
+            log_msg += (f" Device {d.id} ({d.device_kind}): "
+                        f"{bytes_in_use / 1024**3:.2f}GB / "
+                        f"{limit / 1024**3:.2f}GB ({util_pct:.2f}%)\n")
+        
+        logger.info(log_msg)
     except Exception as e:
         logger.debug(f"Could not log HBM stats: {e}")
 
@@ -292,21 +299,32 @@ def shard_put(x: jax.Array,
         x_mesh = x.sharding.mesh
 
     if math.prod(mesh.axis_sizes) == 1:
-        return jax.device_put(x, mesh.devices.flatten()[0])
+        # return jax.device_put(x, mesh.devices.flatten()[0])
+        res = jax.device_put(x, mesh.devices.flatten()[0])
+        return res.block_until_ready()
 
     if shardings is None:
         shardings = ()
 
     if isinstance(shardings, tuple):
-        return general_device_put(x,
-                                  NamedSharding(mesh, P(*shardings)),
-                                  source_mesh=x_mesh)
+        # return general_device_put(x,
+        #                           NamedSharding(mesh, P(*shardings)),
+        #                           source_mesh=x_mesh)
+        res = general_device_put(x,
+                                 NamedSharding(mesh, P(*shardings)),
+                                 source_mesh=x_mesh)
     elif isinstance(shardings, P):
-        return general_device_put(x,
-                                  NamedSharding(mesh, shardings),
-                                  source_mesh=x_mesh)
+        # return general_device_put(x,
+        #                           NamedSharding(mesh, shardings),
+        #                           source_mesh=x_mesh)
+        res = general_device_put(x,
+                                 NamedSharding(mesh, shardings),
+                                 source_mesh=x_mesh)
     else:
-        return general_device_put(x, shardings, source_mesh=x_mesh)
+        # return general_device_put(x, shardings, source_mesh=x_mesh)
+        res = general_device_put(x, shardings, source_mesh=x_mesh)
+    
+    return res.block_until_ready()
 
 
 def get_default_maps(model_config, mesh: Mesh,
