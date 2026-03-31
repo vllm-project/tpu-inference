@@ -36,13 +36,27 @@ printf "[INFO] %-25s = %s\n" "VLLM_LOG" "$VLLM_LOG"
 printf "[INFO] %-25s = %s\n" "BM_LOG" "$BM_LOG"
 printf "[INFO] %-25s = %s\n" "DOCKER_ARTIFACT_FOLDER" "$DOCKER_ARTIFACT_FOLDER"
 
-echo "--- Parsing raw commands for DB record"
-DB_FIELDS_JSON=$(python3 .buildkite/benchmark/scripts/cmd_parser.py \
-    --serve "$VLLM_SERVE_CMD" \
-    --client "$BENCHMARK_CMD")
+echo "--- Parsing and Validating Commands"
 
-# Export for report_result.sh to consume
-export DB_FIELDS_JSON
+# Ensure the log folder exists
+mkdir -p "$DOCKER_LOG_FOLDER"
+
+# Run the parser and save output to a JSON file in the log folder.
+if ! python3 .buildkite/benchmark/scripts/cmd_parser.py \
+    --serve "$VLLM_SERVE_CMD" \
+    --client "$BENCHMARK_CMD" > "$DOCKER_LOG_FOLDER/db_metadata.json"; then
+    echo "❌ Command validation failed!"
+    exit 1
+fi
+
+echo "✅ Metadata extracted and saved to $DOCKER_LOG_FOLDER/db_metadata.json"
+
+# Extract variables from the JSON file to keep compatibility with existing logic
+MODEL=$(jq -r '.model' "$DOCKER_LOG_FOLDER/db_metadata.json")
+INPUT_LEN=$(jq -r '.input_len' "$DOCKER_LOG_FOLDER/db_metadata.json")
+OUTPUT_LEN=$(jq -r '.output_len' "$DOCKER_LOG_FOLDER/db_metadata.json")
+PREFIX_LEN=$(jq -r '.prefix_len // 0' "$DOCKER_LOG_FOLDER/db_metadata.json")
+TENSOR_PARALLEL_SIZE=$(jq -r '.tensor_parallel_size // 1' "$DOCKER_LOG_FOLDER/db_metadata.json")
 
 # Helper function to check if a value is in an array
 contains_element () {

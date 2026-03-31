@@ -37,6 +37,7 @@ fi
 RECORD_ID="$1"
 RESULT_FILE="artifacts/${RECORD_ID}.result"
 LOG_FOLDER=${LOG_FOLDER:-"artifacts/temp_logs"}
+METADATA_FILE="$LOG_FOLDER/db_metadata.json"
 # Temp write to another bucket
 # REMOTE_LOG_ROOT="gs://$GCS_BUCKET/job_logs/$RECORD_ID/"
 REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
@@ -44,16 +45,16 @@ REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
 # Metadata Extraction from Commands
 # If DB_FIELDS_JSON exists (passed from run_bm.sh), we use it to override
 # environment variables. This ensures the DB reflects the actual CLI arguments used.
-if [ -n "${DB_FIELDS_JSON:-}" ]; then
-  echo "--- [INFO] Extracting metadata from parsed commands via jq"
-  MODEL=$(echo "$DB_FIELDS_JSON" | jq -r '.model // empty')
-  INPUT_LEN=$(echo "$DB_FIELDS_JSON" | jq -r '.input_len // empty')
-  OUTPUT_LEN=$(echo "$DB_FIELDS_JSON" | jq -r '.output_len // empty')
-  PREFIX_LEN=$(echo "$DB_FIELDS_JSON" | jq -r '.prefix_len // 0')
-  TENSOR_PARALLEL_SIZE=$(echo "$DB_FIELDS_JSON" | jq -r '.tensor_parallel_size // 1')
-  MAX_MODEL_LEN=$(echo "$DB_FIELDS_JSON" | jq -r '.max_model_len // empty')
-  MAX_NUM_SEQS=$(echo "$DB_FIELDS_JSON" | jq -r '.max_num_seqs // empty')
-  MAX_NUM_BATCHED_TOKENS=$(echo "$DB_FIELDS_JSON" | jq -r '.max_num_batched_tokens // empty')
+if [ -f "$METADATA_FILE" ]; then
+  echo "--- [INFO] Extracting metadata from $METADATA_FILE via jq"
+  MODEL=$(jq -r '.model // empty' "$METADATA_FILE")
+  INPUT_LEN=$(jq -r '.input_len // empty' "$METADATA_FILE")
+  OUTPUT_LEN=$(jq -r '.output_len // empty' "$METADATA_FILE")
+  PREFIX_LEN=$(jq -r '.prefix_len // 0' "$METADATA_FILE")
+  TENSOR_PARALLEL_SIZE=$(jq -r '.tensor_parallel_size // 1' "$METADATA_FILE")
+  MAX_MODEL_LEN=$(jq -r '.max_model_len // empty' "$METADATA_FILE")
+  MAX_NUM_SEQS=$(jq -r '.max_num_seqs // empty' "$METADATA_FILE")
+  MAX_NUM_BATCHED_TOKENS=$(jq -r '.max_num_batched_tokens // empty' "$METADATA_FILE")
 fi
 
 (
