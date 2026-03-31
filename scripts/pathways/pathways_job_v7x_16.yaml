@@ -59,26 +59,25 @@ spec:
                   # Environment variables
                   export VLLM_ENABLE_V1_MULTIPROCESSING=0
                   export HF_TOKEN=${HF_TOKEN}
-                  export PHASED_PROFILING_DIR=gs://wenxindong-cloud-tpu-inference-test/profiling/vllm_qwen3_235b_a22b_instruct_2507/dp32/mar20
+                  export PHASED_PROFILING_DIR=gs://wenxindong-cloud-tpu-inference-test/profiling/vllm_qwen3_235b_a22b_instruct_2507/mar30/30b/dp8/2
                   export VLLM_ENGINE_READY_TIMEOUT_S=7200
                   export MODEL_IMPL_TYPE=vllm
                   export NEW_MODEL_DESIGN=1
                   # export SKIP_JAX_PRECOMPILE=1
 
-                  # Clear potentially corrupted model streamer cache
-                  # rm -rf /root/.cache/vllm/assets/model_streamer
+                  pip install jax==0.9.1 jaxlib==0.9.1
 
                   # Launch vllm serve via Pathways
                   JAX_PLATFORMS=proxy,cpu \
                   JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 \
-                  vllm serve Qwen/Qwen3-235B-A22B \
-                    --tensor-parallel-size 8 \
-                    --data-parallel-size 2 \
+                  vllm serve Qwen/Qwen3-30B-A3B \
+                    --tensor-parallel-size 2 \
+                    --data-parallel-size 8 \
                     --api-server-count 1 \
-                    --max-model-len 5120 \
+                    --max-model-len 8704 \
                     --gpu-memory-utilization 0.95 \
                     --no-enable-prefix-caching \
-                    --max-num-seqs 256 \
+                    --max-num-seqs 128 \
                     --max-num-batched-tokens 4096 \
                     --enable-expert-parallel \
                     --load-format dummy
@@ -141,7 +140,7 @@ spec:
                     fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
               - name: TPU_SKIP_MDS_QUERY
                 value: "true"
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server:latest
               imagePullPolicy: Always
               name: pathways-rm
               ports:
@@ -164,7 +163,7 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_proxy_server:latest
               imagePullPolicy: Always
               name: pathways-proxy
               ports:
@@ -235,7 +234,7 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server:latest
               imagePullPolicy: Always
               name: pathways-worker
               ports:

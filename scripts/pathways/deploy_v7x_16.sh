@@ -49,6 +49,7 @@ while true; do
   sleep 2
 done
 
+sleep 3
 echo "=== Following logs of pod ${POD_NAME} ==="
 kubectl logs -f "${POD_NAME}" -c jax-tpu
 

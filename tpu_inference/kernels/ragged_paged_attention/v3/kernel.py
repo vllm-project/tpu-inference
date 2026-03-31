@@ -1499,6 +1499,9 @@ def get_default_block_sizes(
 
     min_bkv_sz_to_peak = (16 * 1024 * 1024 * kv_packing // 4 // head_dim //
                           num_kv_heads_x2)
+    # Cap the decode bkv size to avoid excessively large blocks for models
+    # with few KV heads (e.g. GQA/MQA with low num_kv_heads per TP shard).
+    # min_bkv_sz_to_peak = min(min_bkv_sz_to_peak, 2048)
 
     match tpu_version:
         case 5 | 6:

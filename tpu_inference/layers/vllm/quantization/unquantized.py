@@ -108,56 +108,30 @@ def _load_weight_for_layer(
 def _load_weight_for_layer(
     layer: torch.nn.Module,
     param_name: str,
-    tpu_sharding: NamedSharding,
+    sharding: NamedSharding,
 ) -> jax.Array:
     """Load a layer's weight parameter onto the TPU mesh.
-
-    Behaviour depends on the environment:
-
-    * **Outside Pathways** — delegates to ``_torch_to_jax``.
-    * **Pathways + pathways_dummy load format** — ALL parameters (merged
-      and non-merged) are generated as small random values directly on the
-      TPU mesh via :func:`create_dummy_weights_on_tpu`.  No colocated CPU
-      allocation or CPU→TPU transfer is needed.
-    Args:
-        layer: The ``torch.nn.Module`` owning the weight.
-        param_name: Name of the parameter (e.g. ``"weight"`` or ``"bias"``).
-        tpu_sharding: Target ``NamedSharding`` for the TPU mesh.
-
-    Returns:
-        A ``jax.Array`` sharded on the TPU mesh.
     """
     tensor = getattr(layer, param_name)
 
     if not vllm_envs.VLLM_TPU_USING_PATHWAYS:
-        return _torch_to_jax(tensor, sharding=tpu_sharding)
-
-    use_dummy = _is_pathways_dummy_load()
-
-    if use_dummy:
-        from tpu_inference.models.common.pathways_dummy_loader import \
-            create_dummy_weights_on_tpu
-        # ---- Dummy path ----
-        # All parameters (merged and non-merged) become small random values
-        # created directly on the TPU mesh.  Only shape/dtype are read from
-        # the tensor metadata — no CPU allocation or CPU→TPU transfer.
+        return t2j(tensor, use_dlpack=False)
+    if is_pathways_dummy_load():
+        # Dummy weights are created directly on the TPU mesh, no CPU→TPU transfer needed
         tensor_shape = tuple(tensor.shape)
         tensor_dtype = tensor.dtype
-        # Free CPU storage eagerly — we only needed shape/dtype.
         tensor.untyped_storage().resize_(0)
         dtype = to_jax_dtype(tensor_dtype)
-        logger.info(
-            "Dummy TPU-direct loading for '%s' shape=%s dtype=%s",
-            param_name, tensor_shape, dtype)
         return create_dummy_weights_on_tpu(
-            tpu_sharding=tpu_sharding,
+            sharding=sharding,
             weight_shape=tensor_shape,
             weight_dtype=dtype,
         )
 
-    # ---- Pathways real-weight path ----
-    # Colocated-python weight loading (not dummy).
-    return _torch_to_jax(tensor, sharding=tpu_sharding)
+    # Pathways real-weight path
+    dtype = to_jax_dtype(tensor.dtype)
+    np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
+    return jax.device_put(np_tensor, sharding).astype(dtype)
 
 
 @register_quantization_config(UNQUANTIZED)

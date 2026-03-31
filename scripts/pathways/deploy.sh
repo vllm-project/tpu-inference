@@ -12,9 +12,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-YAML_FILE="${SCRIPT_DIR}/pathways_job.yaml"
+YAML_FILE="${SCRIPT_DIR}/pathways_job_new_cluster.yaml"
 
-GCS_BUCKET="gs://wenxindong-cloud-tpu-inference-test"
+GCS_BUCKET="gs://wenxindong-multipod-dev"
 GCS_PATCH_PATH="${GCS_BUCKET}/patches/tpu-inference.tar.gz"
 
 JOBSET_NAME="wenxindong-test"
