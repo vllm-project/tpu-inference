@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from enum import Enum
-from typing import TYPE_CHECKING, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -77,8 +77,6 @@ def moe_apply(
     moe_backend: MoEBackend,
     mesh: Mesh,
     extra_backend_kwargs: dict,
-    *,
-    per_expert_scale: Optional[jax.Array] = None,
 ) -> jax.Array:
 
     with jax.named_scope(layer._get_name()):

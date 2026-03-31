@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import functools
-from typing import Literal, Optional
+from typing import Literal
 
 import jax
 from jax import numpy as jnp
