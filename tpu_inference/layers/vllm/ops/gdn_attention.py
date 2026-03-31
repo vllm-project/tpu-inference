@@ -245,25 +245,25 @@ def _recurrent_gated_delta_rule_step(
 
 
 def run_jax_gdn_attention_local(
-    l_query: jnp.ndarray,
-    l_key: jnp.ndarray,
-    l_value: jnp.ndarray,
-    l_b: jnp.ndarray,
-    l_a: jnp.ndarray,
-    l_conv_state_q: jnp.ndarray,
-    l_conv_state_k: jnp.ndarray,
-    l_conv_state_v: jnp.ndarray,
-    l_recurrent_state: jnp.ndarray,
-    l_conv_weight_q: jnp.ndarray,
-    l_conv_weight_k: jnp.ndarray,
-    l_conv_weight_v: jnp.ndarray,
-    l_conv_bias_q: jnp.ndarray,
-    l_conv_bias_k: jnp.ndarray,
-    l_conv_bias_v: jnp.ndarray,
-    l_A_log: jnp.ndarray,
-    l_dt_bias: jnp.ndarray,
-    l_q_loc: jnp.ndarray,
-    l_state_indices: jnp.ndarray,
+    query: jnp.ndarray,
+    key: jnp.ndarray,
+    value: jnp.ndarray,
+    b: jnp.ndarray,
+    a: jnp.ndarray,
+    conv_state_q: jnp.ndarray,
+    conv_state_k: jnp.ndarray,
+    conv_state_v: jnp.ndarray,
+    recurrent_state: jnp.ndarray,
+    conv_weight_q: jnp.ndarray,
+    conv_weight_k: jnp.ndarray,
+    conv_weight_v: jnp.ndarray,
+    conv_bias_q: jnp.ndarray,
+    conv_bias_k: jnp.ndarray,
+    conv_bias_v: jnp.ndarray,
+    A_log: jnp.ndarray,
+    dt_bias: jnp.ndarray,
+    q_loc: jnp.ndarray,
+    state_indices: jnp.ndarray,
     n_kq: int,
     n_v: int,
     d_k: int,
@@ -274,25 +274,25 @@ def run_jax_gdn_attention_local(
     """Runs the local JAX GDN attention mechanism.
 
     Args:
-        l_query: Query tensor of shape `(num_tokens, local_n_kq * d_k)`.
-        l_key: Key tensor of shape `(num_tokens, local_n_kq * d_k)`.
-        l_value: Value tensor of shape `(num_tokens, local_n_v * d_v)`.
-        l_b: B tensor of shape `(num_tokens, local_n_v)`.
-        l_a: A tensor of shape `(num_tokens, local_n_v)`.
-        l_conv_state_q: Convolutional state for query of shape `(max_reqs, kernel_size - 1, local_n_kq * d_k)`.
-        l_conv_state_k: Convolutional state for key of shape `(max_reqs, kernel_size - 1, local_n_kq * d_k)`.
-        l_conv_state_v: Convolutional state for value of shape `(max_reqs, kernel_size - 1, local_n_v * d_v)`.
-        l_recurrent_state: Recurrent state of shape `(max_reqs, local_n_v, d_k, d_v)`.
-        l_conv_weight_q: Convolutional weight for query of shape `(local_n_kq * d_k, 1, kernel_size)`.
-        l_conv_weight_k: Convolutional weight for key of shape `(local_n_kq * d_k, 1, kernel_size)`.
-        l_conv_weight_v: Convolutional weight for value of shape `(local_n_v * d_v, 1, kernel_size)`.
-        l_conv_bias_q: Convolutional bias for query of shape `(local_n_kq * d_k,)`.
-        l_conv_bias_k: Convolutional bias for key of shape `(local_n_kq * d_k,)`.
-        l_conv_bias_v: Convolutional bias for value of shape `(local_n_v * d_v,)`.
-        l_A_log: Log of A parameter of shape `(local_n_v,)`.
-        l_dt_bias: Delta T bias of shape `(local_n_v,)`.
-        l_q_loc: Tensor of shape `(num_seqs,)` with start locations of each sequence.
-        l_state_indices: Tensor of shape `(max_reqs,)` mapping request index to state index.
+        query: Query tensor of shape `(num_tokens, n_kq * d_k)`.
+        key: Key tensor of shape `(num_tokens, n_kq * d_k)`.
+        value: Value tensor of shape `(num_tokens, n_v * d_v)`.
+        b: B tensor of shape `(num_tokens, n_v)`.
+        a: A tensor of shape `(num_tokens, n_v)`.
+        conv_state_q: Convolutional state for query of shape `(max_reqs, kernel_size - 1, n_kq * d_k)`.
+        conv_state_k: Convolutional state for key of shape `(max_reqs, kernel_size - 1, n_kq * d_k)`.
+        conv_state_v: Convolutional state for value of shape `(max_reqs, kernel_size - 1, n_v * d_v)`.
+        recurrent_state: Recurrent state of shape `(max_reqs, n_v, d_k, d_v)`.
+        conv_weight_q: Convolutional weight for query of shape `(n_kq * d_k, 1, kernel_size)`.
+        conv_weight_k: Convolutional weight for key of shape `(n_kq * d_k, 1, kernel_size)`.
+        conv_weight_v: Convolutional weight for value of shape `(n_v * d_v, 1, kernel_size)`.
+        conv_bias_q: Convolutional bias for query of shape `(n_kq * d_k,)`.
+        conv_bias_k: Convolutional bias for key of shape `(n_kq * d_k,)`.
+        conv_bias_v: Convolutional bias for value of shape `(n_v * d_v,)`.
+        A_log: Log of A parameter of shape `(n_v,)`.
+        dt_bias: Delta T bias of shape `(n_v,)`.
+        q_loc: Tensor of shape `(num_seqs,)` with start locations of each sequence.
+        state_indices: Tensor of shape `(max_reqs,)` mapping request index to state index.
         n_kq: Number of key/query heads.
         n_v: Number of value heads.
         d_k: Dimension of key.
@@ -302,23 +302,20 @@ def run_jax_gdn_attention_local(
     Returns:
         A tuple containing the new states and the output.
         - A tuple of (new_conv_state_q, new_conv_state_k, new_conv_state_v, new_recurrent_state).
-        - The output tensor of shape `(num_tokens, local_n_v * d_v)`.
+        - The output tensor of shape `(num_tokens, n_v * d_v)`.
     """
     # Ensure q_loc is monotonically increasing to handle padded slots
-    l_q_loc = jnp.maximum.accumulate(l_q_loc)
+    q_loc = jnp.maximum.accumulate(q_loc)
 
-    num_tokens = l_query.shape[0]
+    num_tokens = query.shape[0]
     token_idx = jnp.arange(num_tokens)
-    max_reqs = l_state_indices.shape[0]
+    max_reqs = state_indices.shape[0]
 
-    req_indices = jnp.sum(token_idx[:, None] >= l_q_loc[None, :], axis=1) - 1
+    req_indices = jnp.sum(token_idx[:, None] >= q_loc[None, :], axis=1) - 1
     req_indices = jnp.clip(req_indices, 0, max_reqs - 1)
 
     # Exclude trailing padding indices from mutating cache
-    valid_mask = token_idx < l_q_loc[-1]
-    attn_head_axis_size = jax.lax.axis_size("model")
-    local_n_kq = n_kq // attn_head_axis_size
-    local_n_v = n_v // attn_head_axis_size
+    valid_mask = token_idx < q_loc[-1]
 
     def scan_fn(carry, xs):
         conv_state_q, conv_state_k, conv_state_v, recurrent_state_all = carry
@@ -338,7 +335,7 @@ def run_jax_gdn_attention_local(
         curr_b = curr_b[None, None, :]
         curr_a = curr_a[None, None, :]
 
-        state_index = l_state_indices[request_index]
+        state_index = state_indices[request_index]
         cs_q = conv_state_q[state_index][None, ...]
         cs_k = conv_state_k[state_index][None, ...]
         cs_v = conv_state_v[state_index][None, ...]
@@ -346,11 +343,11 @@ def run_jax_gdn_attention_local(
 
         # 1. Causal Conv1D
         query_conv, new_conv_state_q = _causal_conv1d_step(
-            curr_q, cs_q, l_conv_weight_q, l_conv_bias_q)
+            curr_q, cs_q, conv_weight_q, conv_bias_q)
         key_conv, new_conv_state_k = _causal_conv1d_step(
-            curr_k, cs_k, l_conv_weight_k, l_conv_bias_k)
+            curr_k, cs_k, conv_weight_k, conv_bias_k)
         value_conv, new_conv_state_v = _causal_conv1d_step(
-            curr_v, cs_v, l_conv_weight_v, l_conv_bias_v)
+            curr_v, cs_v, conv_weight_v, conv_bias_v)
 
         mixed_qkv = jnp.concatenate([query_conv, key_conv, value_conv],
                                     axis=-1)
@@ -358,19 +355,18 @@ def run_jax_gdn_attention_local(
 
         # 2. Split Q, K, V
         B, T, _ = mixed_qkv.shape
-        key_dim = local_n_kq * d_k
-        query = mixed_qkv[..., :key_dim].reshape(B, T, local_n_kq, d_k)
-        key = mixed_qkv[...,
-                        key_dim:key_dim * 2].reshape(B, T, local_n_kq, d_k)
-        value = mixed_qkv[..., key_dim * 2:].reshape(B, T, local_n_v, d_v)
+        key_dim = n_kq * d_k
+        query = mixed_qkv[..., :key_dim].reshape(B, T, n_kq, d_k)
+        key = mixed_qkv[..., key_dim:key_dim * 2].reshape(B, T, n_kq, d_k)
+        value = mixed_qkv[..., key_dim * 2:].reshape(B, T, n_v, d_v)
 
         # 3. Compute continuous decay (g) and input gate (beta)
         beta = jax.nn.sigmoid(curr_b)
-        g = -jnp.exp(l_A_log.astype(jnp.float32)) * jax.nn.softplus(
-            curr_a.astype(jnp.float32) + l_dt_bias.astype(jnp.float32))
+        g = -jnp.exp(A_log.astype(jnp.float32)) * jax.nn.softplus(
+            curr_a.astype(jnp.float32) + dt_bias.astype(jnp.float32))
 
         # 4. Head Expansion (GQA -> MHA logic)
-        repeat_factor = local_n_v // local_n_kq
+        repeat_factor = n_v // n_kq
         if repeat_factor > 1:
             query = jnp.repeat(query, repeat_factor, axis=2)
             key = jnp.repeat(key, repeat_factor, axis=2)
@@ -414,9 +410,8 @@ def run_jax_gdn_attention_local(
         return (conv_state_q, conv_state_k, conv_state_v,
                 recurrent_state_all), output[0, 0]
 
-    carry_init = (l_conv_state_q, l_conv_state_k, l_conv_state_v,
-                  l_recurrent_state)
-    xs = (l_query, l_key, l_value, l_b, l_a, req_indices, valid_mask)
+    carry_init = (conv_state_q, conv_state_k, conv_state_v, recurrent_state)
+    xs = (query, key, value, b, a, req_indices, valid_mask)
 
     (
         (new_conv_state_q, new_conv_state_k, new_conv_state_v,
@@ -538,10 +533,12 @@ def run_jax_gdn_attention(
         P(None, ShardingAxisName.ATTN_HEAD),  # output
     )
 
+    tp_size = mesh.shape[ShardingAxisName.ATTN_HEAD]
+
     p_run_jax_gdn_attention_local = functools.partial(
         run_jax_gdn_attention_local,
-        n_kq=n_kq,
-        n_v=n_v,
+        n_kq=n_kq // tp_size,
+        n_v=n_v // tp_size,
         d_k=d_k,
         d_v=d_v,
         kernel_size=kernel_size)
