@@ -34,7 +34,7 @@ from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import (
     initialize_model, process_weights_after_loading)
 from vllm.utils.torch_utils import set_default_torch_dtype
-
+from vllm import envs as vllm_envs
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import assign_and_shard_param
 
