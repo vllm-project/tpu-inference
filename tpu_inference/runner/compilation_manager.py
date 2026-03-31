@@ -296,9 +296,7 @@ class CompilationManager:
                 next_tokens = self._create_dummy_tensor(
                     (num_reqs, ),
                     jnp.int32,
-                    sharding=NamedSharding(
-                        self.runner.mesh,
-                        PartitionSpec(ShardingAxisName.ATTN_DATA)))
+                    sharding=NamedSharding(self.runner.mesh, PartitionSpec()))
 
                 placeholder_num = jnp.asarray(1, dtype=jnp.int32)
                 self._run_compilation(
