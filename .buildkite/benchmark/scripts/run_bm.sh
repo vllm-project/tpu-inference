@@ -73,8 +73,8 @@ echo "Launching vllm..."
 echo "Logging to $VLLM_LOG"
 
 if [ -z "$VLLM_SERVE_CMD" ]; then
-    echo "[ERROR] VLLM_SERVE_CMD is empty. Please check your YAML configuration and Parser."
-    exit 1
+  echo "[ERROR] VLLM_SERVE_CMD is empty. Please check your YAML configuration and Parser."
+  exit 1
 fi
 
 # Execute the parsed full command in background
@@ -84,18 +84,18 @@ eval "$VLLM_SERVE_CMD > \"$VLLM_LOG\" 2>&1 &"
 echo "Waiting for vLLM Server Ready (up to 60 minutes).."
 echo
 for _ in {1..360}; do
-    # TODO: detect other type of errors.
-    if grep -Fq "raise RuntimeError" "$VLLM_LOG"; then
-        echo "Detected RuntimeError, exiting."
-        cat "$VLLM_LOG"
-        exit 1
-    elif grep -Fq "Application startup complete" "$VLLM_LOG"; then
-        echo "Application started"
-        break
-    else
-        echo "wait for 10 seconds..."
-        sleep 10
-    fi
+  # TODO: detect other type of errors.
+  if grep -Fq "raise RuntimeError" "$VLLM_LOG"; then
+    echo "Detected RuntimeError, exiting."
+    cat "$VLLM_LOG"
+    exit 1
+  elif grep -Fq "Application startup complete" "$VLLM_LOG"; then
+    echo "Application started"
+    break
+  else
+    echo "wait for 10 seconds..."
+    sleep 10
+  fi
 done
 
 # Resolve DATASET_PATH
@@ -140,14 +140,14 @@ case "${DATASET}" in
 esac
 
 if [ -z "$BENCHMARK_CMD" ]; then
-    echo "[ERROR] BENCHMARK_CMD is empty. Please check your YAML configuration and Parser."
-    exit 1
+  echo "[ERROR] BENCHMARK_CMD is empty. Please check your YAML configuration and Parser."
+  exit 1
 fi
 
 # Check original request rate
 ORIGINAL_RATE=$(echo "$BENCHMARK_CMD" | grep -oE '--request-rate +[^ ]+' | awk '{print $2}' || echo "")
 if [ -n "$ORIGINAL_RATE" ] && [ "$ORIGINAL_RATE" != "inf" ]; then
-    echo "[WARNING] User provided --request-rate $ORIGINAL_RATE in BENCHMARK_CMD. Ignoring and substituting dynamically during benchmark."
+  echo "[WARNING] User provided --request-rate $ORIGINAL_RATE in BENCHMARK_CMD. Ignoring and substituting dynamically during benchmark."
 fi
 
 run_benchmark(){
@@ -158,11 +158,10 @@ run_benchmark(){
   # Replace --request-rate <value> (e.g., inf) dynamically with the current rate ($request_rate)
   local CURRENT_CMD
   CURRENT_CMD=$(echo "$BENCHMARK_CMD" | sed -E "s/--request-rate +[^ ]+/--request-rate $request_rate/g")
-
+  CURRENT_CMD="${CURRENT_CMD//\$DATASET_PATH/$DATASET_PATH}"
+  
   echo "Executing: $CURRENT_CMD > \"$BM_LOG\" 2>&1"
-
-  # Execute the benchmark command
-  eval "$CURRENT_CMD > \"$BM_LOG\" 2>&1"
+  $CURRENT_CMD > "$BM_LOG" 2>&1
 
   local throughput
   local p99_e2el
