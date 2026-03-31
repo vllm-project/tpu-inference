@@ -520,8 +520,8 @@ def mla_attention(
 
     def _mla_ragged_paged_attention(q, q_rope, k, k_rope, cache, *args):
         # TODO: use auto tuner to find the best block sizes.
-        num_kv_pages_per_block = 3
-        num_queries_per_block = 1
+        num_kv_pages_per_block = (3, 1, 1)
+        num_queries_per_block = (1, 16, 16)
 
         out, new_cache = mla_ragged_paged_attention(
             q,

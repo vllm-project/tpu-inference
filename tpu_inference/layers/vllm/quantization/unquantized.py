@@ -43,6 +43,7 @@ from tpu_inference.layers.common.quant_methods import UNQUANTIZED
 from tpu_inference.layers.common.quantization import \
     unquantized as common_unquantized
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
@@ -130,14 +131,14 @@ class VllmUnquantizedEmbeddingMethod(UnquantizedEmbeddingMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = t2j(layer.weight, use_dlpack=False)
-        weight = jax.device_put(
+        weight = general_device_put(
             weight,
             NamedSharding(self.mesh, P(ShardingAxisName.MLP_TENSOR, None)))
         layer.weight = Parameter(torch_view(weight), requires_grad=False)
 
         if isinstance(layer, ParallelLMHead) and layer.bias is not None:
             bias = t2j(layer.bias, use_dlpack=False)
-            bias = jax.device_put(
+            bias = general_device_put(
                 bias, NamedSharding(self.mesh, P(ShardingAxisName.MLP_TENSOR)))
             layer.bias = Parameter(torch_view(bias), requires_grad=False)
 
