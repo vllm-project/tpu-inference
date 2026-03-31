@@ -766,7 +766,7 @@ def get_uuid() -> int:
 @jax.jit
 def select_from_kv_caches(kv_caches: list[jax.Array],
                           indices: list[jax.Array]) -> list[jax.Array]:
-    selected = [cache.at[indices].get() for cache in kv_caches]
+    selected = [(cache[0] if isinstance(cache, (tuple, list)) else cache).at[indices].get() for cache in kv_caches]
     return selected
 
 
