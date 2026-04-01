@@ -44,6 +44,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 
+from tpu_inference import envs
 from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -58,6 +59,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.models.vllm.experimental.model_patcher import patch_mm_model
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_inference.runner.lora_utils import replace_lora_metadata
@@ -234,6 +236,19 @@ class VllmModelWrapper:
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
 
         self._pooler: Pooler | None = self.model.pooler
+
+        if self.vllm_config.model_config.is_multimodal_model:
+            # NOTE: It patch mm models to be JITtable within some submodule.
+            # Caution: the submodule params_and_buffers would be put into
+            # the wrapper directly. params_and_buffers should be sharded to tpu
+            # and would not be used in the function args.
+            self.model, params_and_buffers = patch_mm_model(
+                self.model,
+                params_and_buffers,
+                jitted_mm_module_keys=envs.JITTED_MM_MODULE_KEYS,
+                register_mm_module_custom_pytree_classes=envs.
+                REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES,
+            )
 
         loading_end = time.time()
         total_loading_time = loading_end - loading_start
