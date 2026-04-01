@@ -25,6 +25,7 @@ from jax.sharding import Mesh
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
 from vllm.config import VllmConfig
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 
 from tpu_inference import utils as utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
@@ -799,7 +800,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
-        mm_features: list,
+        mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[jax.Array, int]:
         """Get mrope input positions and delta value."""
 
