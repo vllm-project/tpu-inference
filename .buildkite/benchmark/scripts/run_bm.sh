@@ -15,6 +15,15 @@
 
 set -euo pipefail
 
+# Ensure all artifacts (logs, datasets, etc.) are deletable by the host user upon exit
+cleanup_permissions() {
+  echo "Ensuring all artifacts in $DOCKER_ARTIFACT_FOLDER are deletable by host..."
+  chmod -R 777 "$DOCKER_ARTIFACT_FOLDER" || true
+}
+trap cleanup_permissions EXIT
+
+cleanup_permissions
+
 # Strip quotes from environment variables which doesn't strip quotes like bash 'source' does.
 for var in MODEL DATASET NUM_PROMPTS INPUT_LEN OUTPUT_LEN EXPECTED_ETEL TENSOR_PARALLEL_SIZE MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS MAX_MODEL_LEN PREFIX_LEN ADDITIONAL_CONFIG EXTRA_ARGS; do
   if [ -n "${!var:-}" ]; then
@@ -92,6 +101,9 @@ if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
   mkdir -p "$GENERATION_CONFIG_FOLDER"
   gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/* "$GENERATION_CONFIG_FOLDER" || echo "Warning: failed to sync generation configs"
 fi
+
+# Ensure we can delete the files outside the container
+chmod -R 777 "$DOCKER_ARTIFACT_FOLDER"
 
 # Run accuracy benchmark via lm_eval
 if contains_element "$DATASET" "${LM_EVAL_DATASETS[@]}"; then
