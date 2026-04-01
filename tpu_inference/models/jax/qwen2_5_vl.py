@@ -799,16 +799,26 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
-        hf_config,
-        image_grid_thw,
-        video_grid_thw,
-        second_per_grid_ts: list[float],
-        context_len: int = 0,
-        seq_len: int | None = None,
-        audio_feature_lengths=None,
-        use_audio_in_video: bool = False,
+        mm_features: list,
     ) -> tuple[jax.Array, int]:
         """Get mrope input positions and delta value."""
+
+        image_grid_thw = []
+        video_grid_thw = []
+        second_per_grid_ts = []
+        for mm_feature in mm_features:
+            item = mm_feature.data
+            if item is None:
+                continue
+            mm_input = item.get_data()
+            if mm_input.get("image_grid_thw") is not None:
+                image_grid_thw.append(mm_input["image_grid_thw"].tolist())
+            if mm_input.get("video_grid_thw") is not None:
+                video_grid_thw.append(mm_input["video_grid_thw"].tolist())
+            if mm_input.get("second_per_grid_ts") is not None:
+                second_per_grid_ts.append(mm_input["second_per_grid_ts"])
+
+        hf_config = self.config
 
         image_token_id = hf_config.image_token_id
         video_token_id = hf_config.video_token_id
@@ -912,7 +922,6 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
                                         axis=1).reshape(3, -1)
         mrope_position_delta = (llm_positions.max() + 1 -
                                 len(input_tokens)).item()
-        llm_positions = llm_positions[:, context_len:seq_len]
 
         return llm_positions, mrope_position_delta
 
