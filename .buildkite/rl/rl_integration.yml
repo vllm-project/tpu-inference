@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: rl_Integration
+# pipeline-name: rl_integration
 # pipeline-type: rl support matrix
 # RL (Reinforcement Learning) integration tests verify features critical for
 # training-inference pipelines: HBM KV-cache delete/reinitialise, log-prob
