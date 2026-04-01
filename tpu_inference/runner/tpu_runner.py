@@ -27,6 +27,7 @@ import vllm.envs as vllm_envs
 from flax import nnx
 from jax._src import mesh as mesh_lib
 from jax._src.pallas.utils import next_power_of_2
+from jax.experimental import colocated_python
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -321,6 +322,28 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         logger.info(f"Init mesh | mesh={self.mesh}")
 
+        # Initialize colocated CPU mesh for Pathways optimization.
+        # When running on Pathways, we can offload device_put to colocated
+        # CPUs to avoid the Pathways head becoming a data transfer bottleneck.
+        self._colocated_cpu_mesh = None
+        if vllm_envs.VLLM_TPU_USING_PATHWAYS:
+            try:
+                tpu_devices = list(self.mesh.devices.flat)
+                cpu_devices = colocated_python.colocated_cpu_devices(
+                    tpu_devices)
+                # Create a colocated CPU mesh with the same shape as the TPU mesh
+                self._colocated_cpu_mesh = jax.sharding.Mesh(
+                    np.array(cpu_devices).reshape(self.mesh.devices.shape),
+                    self.mesh.axis_names,
+                )
+                logger.info(
+                    "Initialized colocated CPU mesh for Pathways optimization."
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to initialize colocated CPU mesh, "
+                    "falling back to standard device_put: %s", e)
+                self._colocated_cpu_mesh = None
     def _create_new_model_mesh(self) -> jax.sharding.Mesh:
         num_slices = envs.NUM_SLICES
 
@@ -554,6 +577,44 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # See page 5 of https://arxiv.org/abs/2409.12191
         self.mrope_positions_cpu = np.zeros((3, self.max_num_tokens),
                                             dtype=np.int64)
+
+    def _device_array_via_colocated(
+        self,
+        numpy_arrays: tuple,
+        tpu_sharding: NamedSharding,
+    ) -> tuple:
+        """Transfer numpy arrays to TPU via colocated CPU devices.
+
+        On Pathways, the standard device_array() path sends data from the
+        Pathways head through RPC to TPU workers, which becomes a bottleneck
+        when many/large arrays need to be transferred every step.
+
+        This method instead:
+        1. Puts numpy arrays onto colocated CPU devices (fast, distributed)
+        2. Transfers from colocated CPU → TPU via fast local interconnect
+
+        This bypasses the Pathways head for the heavy data transfer, reducing
+        CPU pressure on the head node.
+        """
+        colocated_cpu_sharding = NamedSharding(
+            self._colocated_cpu_mesh,
+            tpu_sharding.spec,
+        )
+
+        # Step 1: Put numpy arrays onto colocated CPU devices.
+        # This distributes the data to the CPU hosts co-located with TPUs.
+        cpu_arrays = jax.device_put(numpy_arrays, colocated_cpu_sharding)
+
+        # Step 2: Transfer from colocated CPU → TPU via fast local path.
+        # Use transfer guards to ensure the transfer goes through the direct
+        # colocated CPU ↔ TPU interconnect, not through the Pathways head.
+        with (
+            jax.transfer_guard_device_to_host("disallow_explicit"),
+            jax.transfer_guard_host_to_device("disallow_explicit"),
+        ):
+            tpu_arrays = jax.device_put(cpu_arrays, tpu_sharding)
+
+        return tpu_arrays
 
     def load_model(self):
         with set_current_vllm_config(self.vllm_config):
@@ -1502,13 +1563,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logits_indices_cpu = logits_indices
         seq_lens_cpu = seq_lens
 
-        (input_ids, positions, query_start_loc, seq_lens, logits_indices,
-         request_distribution) = device_array(
-             self.mesh,
-             (input_ids, positions, query_start_loc, seq_lens, logits_indices,
-              request_distribution),
-             sharding=data_parallel_attn_sharding,
-         )
+        if self._colocated_cpu_mesh is not None:
+            # Pathways optimization: transfer via colocated CPUs to avoid
+            # the Pathways head becoming a data transfer bottleneck.
+            (input_ids, positions, query_start_loc, seq_lens, logits_indices,
+             request_distribution) = self._device_array_via_colocated(
+                 (input_ids, positions, query_start_loc, seq_lens,
+                  logits_indices, request_distribution),
+                 tpu_sharding=data_parallel_attn_sharding,
+             )
+        else:
+            (input_ids, positions, query_start_loc, seq_lens, logits_indices,
+             request_distribution) = device_array(
+                 self.mesh,
+                 (input_ids, positions, query_start_loc, seq_lens,
+                  logits_indices, request_distribution),
+                 sharding=data_parallel_attn_sharding,
+             )
 
         def build_block_table(kv_cache_gid: int) -> jax.Array:
             block_tables = self.block_tables_cpu[kv_cache_gid][:self.
