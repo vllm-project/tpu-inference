@@ -177,11 +177,6 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
             delattr(layer, "input_scale")
             layer.input_scale = input_scale
 
-        if isinstance(layer.weight, torch.nn.ParameterList):
-            jax.block_until_ready(jax_view(layer.weight[0]))
-        else:
-            jax.block_until_ready(jax_view(layer.weight))
-
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         with jax.named_scope(layer._get_name()):
@@ -195,6 +190,12 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
         x_jax = jax_view(x)
         weight_jax = jax_view(layer.weight)
         weight_scale_jax = jax_view(layer.weight_scale)
+
+        if weight_scale_jax.ndim == 2:
+          num_blocks_n, num_blocks_k = weight_scale_jax.shape
+          out_features = weight_jax.shape[0]
+          block_size_n = out_features // num_blocks_n # e.g., 128
+          weight_scale_jax = jnp.repeat(weight_scale_jax, block_size_n, axis=0).T[:, None, :]
 
         if self.is_static_input_scheme:
             # TODO(kyuyeunk): Add kernel support for static quant

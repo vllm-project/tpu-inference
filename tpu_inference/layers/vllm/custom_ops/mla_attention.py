@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import jax
 import jax.numpy as jnp
 import torch
 import torchax
@@ -78,16 +77,12 @@ class VllmMLAAttention(MLAAttention):
 
             # NOTE: vLLM dequantizes kv_b_proj weights which causes more memory
             # usage than expected.
-
-            # quantize W_UK_T, W_UV back to cache type and transfer
-            # `W_UK_T`, `W_UV` to TPUs
             if hasattr(self.kv_b_proj, "scheme"):
                 mesh = self.kv_b_proj.scheme.linear_config.mesh
             elif hasattr(self.kv_b_proj.quant_method, "linear_config"):
                 mesh = self.kv_b_proj.quant_method.linear_config.mesh
             else:
                 raise ValueError(f"Cannot find linear_config for kv_b_proj {self.kv_b_proj}")
-
 
             sharding = NamedSharding(mesh, P(ShardingAxisName.ATTN_HEAD, ))
             self.W_UK_T, self.W_UK_T_scale = quantize_tensor(
@@ -115,10 +110,6 @@ class VllmMLAAttention(MLAAttention):
             kv_b_proj_params = dict(self.kv_b_proj.named_parameters())
             for key in kv_b_proj_params.keys():
                 delattr(self.kv_b_proj, key)
-            
-            # Force JAX to execute graph to free any intermediate allocations 
-            # (e.g., dequantized dense KV cache weights) before processing next layer.
-            jax.block_until_ready(jax_view(self.W_UK_T))
 
     def forward(self, q: torch.Tensor, kv_c_normed: torch.Tensor,
                 k_pe: torch.Tensor, **kwargs) -> torch.Tensor:
