@@ -82,6 +82,7 @@ steps:
       MAX_MODEL_LEN: 2048
       MAX_NUM_SEQS: 94
       MAX_NUM_BATCHED_TOKENS: 1024
+      MODEL_IMPL_TYPE: vllm
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
