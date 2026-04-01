@@ -673,7 +673,7 @@ def gdn_attention_core_tpu(
     # E.g. they are in [Q Q | K K | V V] layout. We need [Q K | Q K | Q K] layout.
     # Use reorder_concatenated_tensor_for_sharding to reorder into correct layout
     key_dim = n_kq * d_k
-    value_dim = n_v * d_k
+    value_dim = n_v * d_v
     tp_size = mesh.shape[ShardingAxisName.ATTN_HEAD]
     j_mixed_qkv = reorder_concatenated_tensor_for_sharding(
         j_mixed_qkv, [key_dim, key_dim, value_dim], tp_size, -1)
