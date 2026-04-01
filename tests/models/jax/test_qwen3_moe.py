@@ -37,8 +37,8 @@ class TestQwen3MoeForCausalLM:
     ])
     @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
                                                        (3, 4)])
-    @pytest.mark.parametrize("load_format",
-                             ["skip_layers_model_loader_for_test"])
+    @pytest.mark.parametrize(
+        "load_format", ["skip_layers_model_loader_for_test", "jax_dummy"])
     def test_model_loading(
             self,
             model_name,

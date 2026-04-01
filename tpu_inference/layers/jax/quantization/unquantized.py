@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 from typing import Optional
 
 import jax
@@ -118,9 +119,15 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
                 return False
             w_gate = layer.kernel_gating_EDF.get_value()
             w_up = layer.kernel_up_proj_EDF.get_value()
+            w2_val = layer.kernel_down_proj_EFD.get_value()
+
+            # Free old params before processing to reduce peak memory.
+            del layer.kernel_gating_EDF
+            del layer.kernel_up_proj_EDF
 
             # Fuse the weights into w13: [Gate, Up]
             w13_val = jnp.concatenate([w_gate, w_up], axis=1)
+            del w_gate, w_up
 
             weights = jax_common.process_unquantized_moe_weights(
                 mesh=jax.sharding.get_mesh(),
@@ -128,7 +135,7 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
                 activation=layer.activation,
                 w13_weight=w13_val,
                 w13_bias=None,
-                w2_weight=layer.kernel_down_proj_EFD.get_value(),
+                w2_weight=w2_val,
                 w2_bias=None,
             )
 
@@ -136,10 +143,14 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             layer.kernel_gating_upproj_EDF = nnx.Param(weights.w13_weight)
             layer.kernel_down_proj_EFD = nnx.Param(weights.w2_weight)
 
-            del layer.kernel_gating_EDF
-            del layer.kernel_up_proj_EDF
             del weights
             del w13_val
+            del w2_val
+
+            # Break reference cycles between JAX arrays and flax nnx.Param
+            # objects created during weight processing. Without this, stale
+            # arrays accumulate across MoE layers and inflate peak memory.
+            gc.collect()
 
         return True
 
