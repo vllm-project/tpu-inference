@@ -25,7 +25,6 @@ from vllm.model_executor.layers import linear as vllm_linear
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   UnquantizedFusedMoEMethod)
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import (
@@ -38,7 +37,7 @@ from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_moe_weights, shard_moe_weights)
+    FusedMoEWeights, shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import UNQUANTIZED
 from tpu_inference.layers.common.quantization import \
     unquantized as common_unquantized
@@ -54,7 +53,7 @@ from tpu_inference.layers.vllm.quantization.configs import (
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.pathways_dummy_loader import (
     create_dummy_weights_on_tpu, is_pathways_dummy_load)
-from tpu_inference.utils import get_mesh_shape_product, to_jax_dtype
+from tpu_inference.utils import to_jax_dtype
 
 P = PartitionSpec
 
@@ -340,37 +339,14 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         else:
             w13_bias = w2_bias = None
 
-        @jax.jit
-        def process_unquantized_moe_weights(
-            w13_weight: jax.Array,
-            w13_bias: jax.Array | None,
-            w2_weight: jax.Array,
-            w2_bias: jax.Array | None,
-        ) -> FusedMoEWeights:
-            w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
-            w13_reorder_size = get_mesh_shape_product(
-                self.mesh, ShardingAxisName.MLP_TENSOR)
-
-            return process_moe_weights(
-                FusedMoEWeights(
-                    w13_weight=w13_weight,
-                    w13_weight_scale=None,
-                    w13_bias=w13_bias,
-                    w2_weight=w2_weight,
-                    w2_weight_scale=None,
-                    w2_bias=w2_bias,
-                ),
-                moe_backend=self.moe_backend,
-                w13_reorder_size=w13_reorder_size,
-                w13_interleave=w13_interleave,
-            )
-
-        weights = process_unquantized_moe_weights(
-            w13_weight,
-            w13_bias,
-            w2_weight,
-            w2_bias,
-        )
+        weights = common_unquantized.process_unquantized_moe_weights(
+            mesh=self.mesh,
+            moe_backend=self.moe_backend,
+            activation=layer.activation,
+            w13_weight=w13_weight,
+            w13_bias=w13_bias,
+            w2_weight=w2_weight,
+            w2_bias=w2_bias)
         weights = torch_view(
             shard_moe_weights(weights, self.moe_backend, self.mesh))
         layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)

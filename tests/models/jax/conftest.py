@@ -28,6 +28,8 @@ from vllm.config import ModelConfig
 from vllm.model_executor.model_loader import LoadConfig, register_model_loader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 
+from tpu_inference.layers.jax import JaxModule
+
 logger = logging.getLogger(__name__)
 
 GBYTES = 1024 * 1024 * 1024
@@ -103,12 +105,12 @@ class SkipLayersModelLoaderForTest(DefaultModelLoader):
             yield name, param
 
 
-def count_model_param_bytes(model) -> int:
+def count_model_param_bytes(model: JaxModule) -> int:
     """Count total bytes of all parameters in a model."""
     total = 0
     for _, param in model.named_parameters():
-        if hasattr(param, 'value') and hasattr(param.value, 'nbytes'):
-            total += param.value.nbytes
+        if hasattr(param.get_value(), 'nbytes'):
+            total += param.get_value().nbytes
     return total
 
 
