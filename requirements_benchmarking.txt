@@ -7,3 +7,4 @@ rouge-score
 scikit-learn
 pandas
 gdown
+gsutil
