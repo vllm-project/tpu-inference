@@ -60,21 +60,6 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-def _is_pathways_dummy_load() -> bool:
-    """Return True when the current load format is pathways-dummy.
-
-    This is the case when ``--load-format dummy`` is used under Pathways:
-    the format is remapped to ``"pathways_dummy"`` on the config copy that
-    drives the model loader, while the outer ``set_current_vllm_config``
-    still has ``"dummy"``.  We accept both values here so callers work
-    regardless of which config is currently active.
-    """
-    from vllm.config import get_current_vllm_config
-    load_format = get_current_vllm_config().load_config.load_format
-    print("Current load format:", load_format)
-    return load_format in ("dummy", "pathways_dummy")
-
-
 def _load_weight_for_layer(
     layer: torch.nn.Module,
     param_name: str,
@@ -87,35 +72,6 @@ def _load_weight_for_layer(
     if not vllm_envs.VLLM_TPU_USING_PATHWAYS:
         return t2j(tensor, use_dlpack=False)
 
-    if is_pathways_dummy_load():
-        # Dummy weights are created directly on the TPU mesh, no CPU→TPU transfer needed
-        tensor_shape = tuple(tensor.shape)
-        tensor_dtype = tensor.dtype
-        tensor.untyped_storage().resize_(0)
-        dtype = to_jax_dtype(tensor_dtype)
-        return create_dummy_weights_on_tpu(
-            sharding=sharding,
-            weight_shape=tensor_shape,
-            weight_dtype=dtype,
-        )
-
-    # Pathways real-weight path
-    dtype = to_jax_dtype(tensor.dtype)
-    np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
-    return jax.device_put(np_tensor, sharding).astype(dtype)
-
-
-def _load_weight_for_layer(
-    layer: torch.nn.Module,
-    param_name: str,
-    sharding: NamedSharding,
-) -> jax.Array:
-    """Load a layer's weight parameter onto the TPU mesh.
-    """
-    tensor = getattr(layer, param_name)
-
-    if not vllm_envs.VLLM_TPU_USING_PATHWAYS:
-        return t2j(tensor, use_dlpack=False)
     if is_pathways_dummy_load():
         # Dummy weights are created directly on the TPU mesh, no CPU→TPU transfer needed
         tensor_shape = tuple(tensor.shape)
