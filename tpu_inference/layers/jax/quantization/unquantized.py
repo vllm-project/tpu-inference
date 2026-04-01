@@ -128,18 +128,21 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
 
         return True
 
-    def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
-        assert isinstance(layer, JaxMoE)
-
+    def apply_jax(self, layer: JaxMoE, x: jax.Array, *,
+                  router_logits: jax.Array) -> jax.Array:
+        """Forward pass for MoE layer.
+        Args:
+            layer: The MoE layer to apply.
+            x: The input activations to the MoE layer, of shape [seq_len, hidden_size].
+            router_logits: The routing logits for the MoE layer, of shape [seq_len, num_experts].
+        """
         x_TD = jnp.asarray(x, layer.dtype)
         x_TD = jax.lax.with_sharding_constraint(
             x_TD, NamedSharding(layer.mesh, P(*layer.activation_ffw_td)))
 
-        router_logits = None
         # Fused weight backends
         if layer.moe_backend in MoEBackend.fused_moe_backends():
-            # of shape TE, only 1D in this case
-            router_logits = layer.router(x_TD)
+            # router_logits is of shape TE, only 1D in this case
 
             w13_weight = layer.kernel_gating_upproj_E2DF.value if layer.moe_backend == MoEBackend.FUSED_MOE else layer.kernel_gating_upproj_EDF.value
             w2_weight = layer.kernel_down_proj_EFD.value
@@ -157,8 +160,7 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
         elif layer.moe_backend in [
                 MoEBackend.DENSE_MAT, MoEBackend.MEGABLX_GMM
         ]:
-            # Composed of weights_TX and indices_TX, so 2D in this case
-            router_logits = layer.router(x_TD)
+            # router_logits is composed of weights_TX and indices_TX, so 2D in this case
             # TODO (jacobplatin/bzgoogle): we should support bias
             weights = UnfusedMoEWeights(
                 w1_weight=layer.kernel_gating_EDF.value,
