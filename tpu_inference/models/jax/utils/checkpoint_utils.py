@@ -73,7 +73,7 @@ def save_checkpoint(
     # Convert nnx.State to a plain dict/PyTree for Orbax if needed.
     # StandardCheckpointer handles PyTrees.
     if isinstance(state, nnx.State):
-        save_state = state.flat()
+        save_state = state.to_pure_dict()
     else:
         save_state = state
 
@@ -124,7 +124,7 @@ def load_checkpoint(
     is_nnx = isinstance(abstract_state, nnx.State)
     if is_nnx:
         # StandardRestore expects a PyTree of ShapeDtypeStruct
-        restore_abstract = abstract_state.flat()
+        restore_abstract = abstract_state.to_pure_dict()
     else:
         restore_abstract = abstract_state
 
