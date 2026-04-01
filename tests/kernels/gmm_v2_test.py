@@ -223,6 +223,9 @@ class GmmTest(jtu.JaxTestCase):
     self.assertArraysAllClose(grad_lhs, expected_grad_lhs)
     self.assertArraysAllClose(grad_rhs, expected_grad_rhs)
 
+  # pytest -s -v tests/kernels/gmm_v2_test.py -k test_tgmm
+  # blaze test -c opt //experimental/users/kyuyeunk/vllm/tests:gmm_test_gf --test_filter=test_tgmm
+  # blaze test -c opt //experimental/users/kyuyeunk/vllm/tests:gmm_test_gf --test_filter=test_tgmm  --test_arg=--xla_tpu_enable_log_recorder
   @parameterized.product(
       batch_size=[128],
       in_size=[512],
@@ -231,18 +234,18 @@ class GmmTest(jtu.JaxTestCase):
       group_offset=[0],
   )
   def test_tgmm(self, batch_size, in_size, out_size, num_groups, group_offset):
-    num_actual_groups = num_groups - group_offset
+    num_local_groups = num_groups - group_offset
     key = jax.random.key(0)
     key1, key2 = jax.random.split(key, 2)
-    lhs = jax.random.normal(key1, (batch_size, in_size), dtype=jnp.bfloat16)
-    grad = jax.random.normal(key2, (batch_size, out_size), dtype=jnp.bfloat16)
+    lhs = jax.random.normal(key1, (batch_size, in_size), dtype=jnp.bfloat16) # [m, k]
+    grad = jax.random.normal(key2, (batch_size, out_size), dtype=jnp.bfloat16) # [m, n]
     group_sizes = get_group_sizes(batch_size, num_groups)
+    # if batch_size=128, num_groups=16, an example group_size is group_sizes=Array([14, 14,  5,  7,  8,  2,  4, 10, 11,  2, 14,  0,  9,  8, 13,  7].
     group_offset = jnp.array(group_offset, dtype=jnp.int32)
 
     lhs_t = lhs.swapaxes(0, 1)  # [k, m]
-
-    expected = reference_tgmm(lhs_t, grad, group_sizes, num_actual_groups, group_offset=group_offset)
-    actual = _tgmm_v2_impl(lhs_t, grad, group_sizes, num_actual_groups, group_offset=group_offset)
+    expected = reference_tgmm(lhs_t, grad, group_sizes, num_local_groups, group_offset=group_offset)
+    actual = _tgmm_v2_impl(lhs, grad, group_sizes, num_local_groups, group_offset=group_offset)
 
     self.assertArraysAllClose(actual, expected)
 

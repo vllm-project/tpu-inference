@@ -1253,8 +1253,8 @@ def _gmm_v2_impl(
   )(group_sizes, group_offset, lhs, rhs_weights)[:, :dims.size_n]
 
 def make_tgmm_configs(
-    lhs: jax.Array,
-    rhs: jax.Array,
+    lhs: jax.Array,  # [m, k]
+    rhs: jax.Array,  # [m, n]
     group_sizes: jax.Array,
     num_actual_groups: int,
     *,
@@ -1265,8 +1265,8 @@ def make_tgmm_configs(
 ):
   """Fills the GMM config for the TGMM kernel."""
   # dims = validate_inputs(lhs, rhs, None, None, group_sizes, group_offset)
-  assert lhs.shape[1] == rhs.shape[0], f'lhs and rhs m-dim mismatch: {lhs.shape} vs {rhs.shape}'
-  size_k, size_m = lhs.shape
+  assert lhs.shape[0] == rhs.shape[0], f'lhs and rhs m-dim mismatch: {lhs.shape} vs {rhs.shape}'
+  size_m, size_k = lhs.shape
   _, size_n = rhs.shape
   # xw32q: when do we use size_lhs_sublane?
   size_lhs_sublane = pltpu.get_tpu_info().get_sublane_tiling(lhs.dtype)
@@ -1410,7 +1410,7 @@ def generate_tgmm_block_specs(
 def tgmm_kernel_main(
     lhs_group_sizes_ref,  # int32[size_lhs_group]
     group_offset_ref,  # int32[1]
-    lhs_ref,  # [m, k]
+    lhs_ref,  # [k, m]
     rhs_ref,  # [m, n]
     out_ref,  # [num_groups, k, n]
     # scratch memory
@@ -1475,11 +1475,8 @@ def _tgmm_v2_impl(
     maybe_quantize_lhs: bool = True,
     zero_initialize: bool = True,
 ):
-  # Compute grad_rhs=lhs[:, sizes[i-1]:sizes[i]] @ rhs[sizes[i-1]:sizes[i], :]
+  # Compute grad_rhs=lhs[sizes[i-1]:sizes[i], :].T @ rhs[sizes[i-1]:sizes[i], :]
   # aka grad_rhs = lhs.T @ grad
-  num_groups = group_sizes.shape[0]
-  size_k, size_m = lhs.shape
-  _, size_n = rhs.shape
   
   # Step 1. delete precision, normalize group_offset, set vmem_limit_bytes
   del precision
@@ -1630,7 +1627,7 @@ def _gmm_v2_bwd(
     zero_initialize=zero_initialize
   )
   grad_rhs = _tgmm_v2_impl(
-    lhs,  # [m, k]
+    lhs, # [m, k]
     grad,  # [m, n]
     group_sizes,
     num_actual_groups,
