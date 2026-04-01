@@ -298,8 +298,31 @@ def inner_kernel(
   'tile_m // size_lhs_sublane' gives the number of sublane-rows
   per tile.
   """
+  
+  # xw32: How are `acc_ref` and `partial_out_ref` used?
+  """
+  # - 'acc_ref' (line 259) — [tile_m, tile_n] accumulator across K steps:
+  When the K dimension is tiled (i.e., multiple K steps), the matmul result
+  from each K step needs to be accumulated. On non-last K steps (line 467:
+  acc_ref[...] = acc), the partial result is stored into 'acc_ref'. On
+  subsequent K steps (line 416-417), the previous accumulation is loaded
+  back and added: acc += acc_ref[...]. On the last K step, the final
+  accumulated result is written to 'tiled_out_ref' instead. So 'acc_ref' is
+  scratch VMEM that bridges partial results across K loop iterations.
+  - This handles the case where group boundaries don't align with sublane
+  boundaries. Consider the example in the comment (line 450-452):
+  | 0 0 1 2 | 2 2 2 2 | 3 3 4 4 |   (size_lhs_sublane = 4)
+  Group 1 only occupies part of a sublane row. Its output is written to
+  'tiled_out_ref[0]', but the next group (2) shares the same sublane row.
+  When group 2 is processed, it reads 'partial_out_ref' and adds it to its
+  first sublane row (line 447-448), so the contributions from group 1 aren't
+   lost. After each group, the last sublane row is saved to
+  'partial_out_ref' (lines 460-465) if the group doesn't end on a sublane
+  boundary.
+  """
 
   def _matmul(is_first_k_step: bool, is_last_k_step: bool):
+    # Convert tile_lhs from [tile_m // size_lhs_sublane, size_lhs_sublane, tile_k] back to [tile_m, tile_k]
     tiled_lhs = tiled_lhs_ref.reshape(-1, cfgs.tiles.tile_k)[...]
     tiled_rhs = tiled_rhs_ref.weight[...]
 
@@ -1290,8 +1313,46 @@ def make_tgmm_configs(
   )
 
 
-def tgmm_inner_kernel():
-  pass
+def tgmm_inner_kernel(
+    tiled_lhs_ref: jax.Array, # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_k]
+    tiled_rhs_ref: jax.Array, # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_n]
+    tiled_out_ref: jax.Array, # [None, tile_k, tile_n]
+    # scratch
+    partial_out_ref: jax.Array,  # probably we dont need it. delete it later.
+    acc_ref: jax.Array,  # for accumulation.
+    metadata_ref: MetadataRef, # contains gm_id_to_group_id and gm_id_to_m_offset in SMEM.
+    *,
+    cfgs: GmmConfigs,
+):
+  # NB: grid=(num_n, num_k, num_gm)
+  tiled_lhs_ref = tiled_lhs_ref.reshape(-1, tiled_lhs_ref.shape[-1])
+  tiled_rhs_ref = tiled_rhs_ref.reshape(-1, tiled_rhs_ref.shape[-1])
+  
+  # Now we compute a mask to zero out invalid rows in the LHS/RHS tiles.
+  # Why it's needed: The DMA loads tiles aligned to sublane boundaries, but the actual group data may not start/end on those boundaries. For example, with 'size_lhs_sublane=8' and a group spanning rows 5-20:
+  # - DMA loads rows 0-23 (aligned to sublane boundary: 0 = 5 - 5%8, 24 = cdiv(20,8)*8)
+  # - Rows 0-4 and 20-23 contain data from other groups and must be masked out.
+  gm_id = pl.program_id(2)
+  m_start = metadata_ref.gm_id_to_m_offset[gm_id]
+  m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
+  m_offset = m_start - m_start % cfgs.dims.size_lhs_sublane
+  m_start_local = m_start - m_offset
+  m_end_local = m_end - m_offset
+  lhs_iota = lax.broadcasted_iota(jnp.int32, tiled_lhs_ref.shape, 0)
+  lhs_mask = jnp.logical_and(m_start_local <= lhs_iota, lhs_iota < m_end_local)
+  lhs_masked = jnp.where(lhs_mask, tiled_lhs_ref[...], 0)
+  rhs_iota = lax.broadcasted_iota(jnp.int32, tiled_rhs_ref.shape, 0)
+  rhs_mask = jnp.logical_and(m_start_local <= rhs_iota, rhs_iota < m_end_local)
+  rhs_masked = jnp.where(rhs_mask, tiled_rhs_ref[...], 0)
+
+  result = jax.lax.dot_general(
+      lhs_masked,
+      rhs_masked,
+      (((0,), (0,)), ((), ())),
+      preferred_element_type=jnp.float32,
+  )
+  tiled_out_ref[...] = (tiled_out_ref[...].astype(jnp.float32) + result).astype(tiled_out_ref.dtype)
+  
 
 class TgmmIndexMaps:
 
@@ -1360,6 +1421,7 @@ def tgmm_kernel_main(
 ):
   num_k = pl.cdiv(cfgs.dims.size_k, cfgs.tiles.tile_k)
   num_n = pl.cdiv(cfgs.dims.size_n, cfgs.tiles.tile_n)
+  # xw32: is the num_gm here within the limit?
   num_gm = fill_metadata(
       lhs_group_sizes_ref,
       group_offset_ref,
