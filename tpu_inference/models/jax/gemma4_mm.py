@@ -267,7 +267,7 @@ class Gemma4VisionFlashAttention(JaxModule):
 
 class VisionEntry(JaxModule):
     """
-    Handles converting input [B, H, W, C] to patches [B, L, D], 
+    Handles converting input [B, H, W, C] to patches [B, L, D],
     adding factorized positional embeddings.
     """
 
@@ -296,31 +296,6 @@ class VisionEntry(JaxModule):
             jax.random.normal(rngs.params(), (10240, 2, config.hidden_size),
                               dtype=dtype))
 
-    def _patchify(self, images: jax.Array) -> Tuple[jax.Array, jax.Array]:
-        b, h, w, c = images.shape
-        p = self.patch_size
-        h_p, w_p = h // p, w // p
-
-        # Reshape to separate patches
-        # From [B, H, W, C] to [B, H_p, P, W_p, P, C]
-        patches = images.reshape((b, h_p, p, w_p, p, c))
-
-        # Transpose to [B, H_p, W_p, P_y, P_x, C]
-        # This aligns the elements within each patch as (P_y, P_x, C), perfectly matching PyTorch's nn.Linear weights.
-        patches = patches.transpose((0, 1, 3, 2, 4, 5))
-
-        # Flatten patches into [B, L, D] where D = P * P * C
-        patches = patches.reshape((b, h_p * w_p, p * p * c))
-
-        x_coords = jnp.arange(w_p)
-        y_coords = jnp.arange(h_p)
-        xy = jnp.meshgrid(x_coords, y_coords, indexing='xy')
-        positions_xy = jnp.stack(xy, axis=-1)
-        positions_xy = positions_xy.reshape((-1, 2))
-
-        positions_xy = jnp.broadcast_to(positions_xy, (b, *positions_xy.shape))
-        return patches, positions_xy
-
     def _factorized_posemb(self, positions_xy: jax.Array) -> jax.Array:
         posemb = self.position_embedding_table.value
         one_hot = jax.nn.one_hot(positions_xy,
@@ -338,18 +313,14 @@ class VisionEntry(JaxModule):
 
     def __call__(
         self,
-        images_or_patches: jax.Array,
+        patches: jax.Array,
         positions_xy: Optional[jax.Array] = None,
     ) -> jax.Array:
-        if images_or_patches.ndim == 4:
-            patches, positions_xy = self._patchify(images_or_patches)
-        else:
-            patches = images_or_patches
-            if patches.ndim != 3:
-                raise ValueError(
-                    f"Expected patches to be 3D or images to be 4D, but got shape {patches.shape} with ndim {patches.ndim}"
-                )
-            assert positions_xy is not None
+        if patches.ndim != 3:
+            raise ValueError(
+                f"Expected patches to be 3D or images to be 4D, but got shape {patches.shape} with ndim {patches.ndim}"
+            )
+        assert positions_xy is not None
 
         jax.debug.print(
             "[VISION TRACE] VisionEntry patches shape: {s}, mean: {m}",
@@ -562,7 +533,7 @@ class Gemma4VisionModel(JaxModule):
         self.dtype = dtype
         self.mesh = mesh
 
-        # 1. Vision Entry (Patchify + Positional Embeddings)
+        # 1. Vision Entry (Positional Embeddings)
         self.patch_embedder = VisionEntry(config, dtype, rng, quant_config)
 
         # 2. Transformer Blocks
@@ -592,11 +563,6 @@ class Gemma4VisionModel(JaxModule):
         """
         Forward pass for the complete Vision Encoder.
         """
-        # 1. Forward through Entry
-        # FIX: Ensure the generated positions_xy is actually assigned to the variable
-        if pixel_values.ndim == 4 and positions_xy is None:
-            _, positions_xy = self.patch_embedder._patchify(pixel_values)
-
         # This now receives the newly generated positions_xy instead of None
         hidden_states = self.patch_embedder(pixel_values, positions_xy)
 
@@ -835,7 +801,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
     def _parse_and_validate_image_input(self,
                                         **kwargs: object) -> Optional[dict]:
         pixel_values = kwargs.pop("pixel_values", None)
-        positions_xy = kwargs.pop("positions_xy", None)
+        positions_xy = kwargs.pop("pixel_position_ids", None)
         patches_per_image = kwargs.pop("patches_per_image", None)
 
         if pixel_values is None:
@@ -847,20 +813,8 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         jax_dtype = utils.get_jax_dtype_from_str_dtype(dtype_str)
         pixel_values = jnp.asarray(pixel_values, dtype=jax_dtype)
 
-        if pixel_values.ndim == 5:  # (batch, num_images, H, W, C)
-            pixel_values = pixel_values.reshape(-1, *pixel_values.shape[2:])
-        elif pixel_values.ndim == 4 and pixel_values.shape[
-                -1] != 3 and pixel_values.shape[1] == 1:  # (batch, 1, seq, dim)
-            pixel_values = pixel_values.reshape(-1, *pixel_values.shape[2:])
-
-        if pixel_values.ndim == 4 and pixel_values.shape[1] == 3:
-            pixel_values = jnp.transpose(pixel_values, (0, 2, 3, 1))
-
         if positions_xy is not None:
             positions_xy = jnp.asarray(positions_xy, dtype=jnp.int32)
-            if positions_xy.ndim == 4:  # (batch, 1, seq, 2)
-                positions_xy = positions_xy.reshape(-1,
-                                                    *positions_xy.shape[2:])
 
         return {
             "type": "pixel_values",
