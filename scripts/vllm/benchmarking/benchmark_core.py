@@ -15,8 +15,8 @@
 from dataclasses import dataclass, field
 from typing import Any
 
-from vllm.inputs import MultiModalDataDict
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MultiModalDataDict
 
 
 @dataclass
