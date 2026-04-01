@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict
+from typing import Dict, Union
 
 import jax
+import torch
+from vllm.utils.func_utils import supports_kw
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
 from tpu_inference.logger import init_logger
@@ -77,6 +79,67 @@ class PersistentBatchManager:
 
         return swap_cnt
 
+    def _get_mrope_positions(
+        self, req_state: CachedRequestState, get_mrope_input_positions_fn,
+        mrope_fn_takes_mm_features: bool
+    ) -> tuple[Union[torch.Tensor, jax.Array], int]:
+        """Adapter to bridge `get_mrope_input_positions_fn` signatures.
+
+        `get_mrope_input_positions_fn` is a model-specific function that
+        computes the M-RoPE positions based on the prompt tokens and multimodal
+        features. Different models may have different signatures.
+        This adapter function extracts the necessary information from the
+        `CachedRequestState` and calls the `get_mrope_input_positions_fn` with
+        the appropriate arguments.
+
+        Args:
+            req_state: The CachedRequestState containing prompt tokens and multimodal features.
+            get_mrope_input_positions_fn: The model's M-RoPE function.
+            mrope_fn_takes_mm_features: Whether the function takes `mm_features` directly as an input argument.
+        Returns:
+            A tuple of (M-RoPE positions array, position delta integer).
+        """
+        prompt_token_ids = req_state.prompt_token_ids
+        mm_features = req_state.mm_features
+
+        kwargs = {}
+        if mrope_fn_takes_mm_features:
+            kwargs["mm_features"] = mm_features
+        else:
+            # Fallback to legacy argument extraction
+            image_grid_thw = []
+            video_grid_thw = []
+            second_per_grid_ts = []
+            audio_feature_lengths = []
+            use_audio_in_video = False
+
+            for mm_feature in mm_features:
+                item = mm_feature.data
+                if item is None:
+                    continue
+                mm_input = item.get_data()
+                if (grid := mm_input.get("image_grid_thw")) is not None:
+                    image_grid_thw.append(grid.tolist())
+                if (grid := mm_input.get("video_grid_thw")) is not None:
+                    video_grid_thw.append(grid.tolist())
+                if (ts := mm_input.get("second_per_grid_ts")) is not None:
+                    second_per_grid_ts.append(ts)
+                if (lens := mm_input.get("audio_feature_lengths")) is not None:
+                    audio_feature_lengths.append(lens)
+                if mm_input.get("use_audio_in_video"):
+                    use_audio_in_video = True
+
+            kwargs.update({
+                "hf_config": self.model_config.hf_config,
+                "image_grid_thw": image_grid_thw,
+                "video_grid_thw": video_grid_thw,
+                "second_per_grid_ts": second_per_grid_ts,
+                "audio_feature_lengths": audio_feature_lengths,
+                "use_audio_in_video": use_audio_in_video,
+            })
+
+        return get_mrope_input_positions_fn(prompt_token_ids, **kwargs)
+
     def update_states(self, scheduler_output: "VllmSchedulerOutput",
                       get_mrope_input_positions_fn) -> bool:
         """Update the cached states and the persistent batch with the scheduler
@@ -126,13 +189,18 @@ class PersistentBatchManager:
             assert req_index is not None
             removed_req_indices.append(req_index)
 
+        mrope_fn_takes_mm_features = False
+        if self.uses_mrope and get_mrope_input_positions_fn is not None:
+            mrope_fn_takes_mm_features = supports_kw(
+                get_mrope_input_positions_fn, "mm_features")
+
         req_ids_to_add: list[str] = []
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
             sampling_params = new_req_data.sampling_params
 
-            self.requests[req_id] = CachedRequestState(
+            req_state = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
                 mm_features=new_req_data.mm_features,
@@ -144,48 +212,14 @@ class PersistentBatchManager:
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
             )
-
+            self.requests[req_id] = req_state
             req_ids_to_add.append(req_id)
 
-            # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+            # Only relevant for models using M-RoPE (e.g, Qwen2-VL, Qwen3-VL)
             if self.uses_mrope:
-                image_grid_thw = []
-                video_grid_thw = []
-                second_per_grid_ts = []
-                audio_feature_lengths = []
-                use_audio_in_video = False
-                for mm_feature in self.requests[req_id].mm_features:
-                    item = mm_feature.data
-                    if item is None:
-                        continue
-                    mm_input = item.get_data()
-                    if mm_input.get("image_grid_thw") is not None:
-                        image_grid_thw.append(
-                            mm_input["image_grid_thw"].tolist())
-                    if mm_input.get("video_grid_thw") is not None:
-                        video_grid_thw.append(
-                            mm_input["video_grid_thw"].tolist())
-                    if mm_input.get("second_per_grid_ts") is not None:
-                        second_per_grid_ts.append(
-                            mm_input["second_per_grid_ts"])
-                    if mm_input.get("audio_feature_lengths") is not None:
-                        audio_feature_lengths.append(
-                            mm_input["audio_feature_lengths"])
-                    if mm_input.get("use_audio_in_video") is True:
-                        use_audio_in_video = True
-
-                hf_config = self.model_config.hf_config
-
-                self.requests[req_id].mrope_positions, self.requests[
-                    req_id].mrope_position_delta = get_mrope_input_positions_fn(
-                        self.requests[req_id].prompt_token_ids,
-                        hf_config=hf_config,
-                        image_grid_thw=image_grid_thw,
-                        video_grid_thw=video_grid_thw,
-                        second_per_grid_ts=second_per_grid_ts,
-                        audio_feature_lengths=audio_feature_lengths,
-                        use_audio_in_video=use_audio_in_video,
-                    )
+                req_state.mrope_positions, req_state.mrope_position_delta = self._get_mrope_positions(
+                    req_state, get_mrope_input_positions_fn,
+                    mrope_fn_takes_mm_features)
 
         # Update the states of the running/resumed requests.
         req_data = scheduler_output.scheduled_cached_reqs
