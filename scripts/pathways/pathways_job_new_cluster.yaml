@@ -3,6 +3,8 @@ kind: JobSet
 metadata:
   annotations:
     jobset.sigs.k8s.io/hack: "true"
+  labels:
+    kueue.x-k8s.io/queue-name: lq
   name: wenxindong-test # Change to your favorite run name (please use your ldap)
   namespace: default
 spec:
@@ -22,8 +24,6 @@ spec:
       metadata:
         annotations:
           alpha.jobset.sigs.k8s.io/exclusive-topology: kubernetes.io/hostname
-        labels:
-          kueue.x-k8s.io/queue-name: lq
       spec:
         backoffLimit: 0
         completionMode: Indexed
@@ -81,7 +81,7 @@ spec:
                     JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 \
                     vllm serve Qwen/Qwen3-235B-A22B \
                       --tensor-parallel-size 8 \
-                      --data-parallel-size 32 \
+                      --data-parallel-size 16 \
                       --api-server-count 1 \
                       --max-model-len 5120 \
                       --gpu-memory-utilization 0.95 \
@@ -196,8 +196,6 @@ spec:
       metadata:
         annotations:
           cloud.google.com/gke-tpu-slice-topology: 4x4x4 # Use your favorite 4m x 4n x 4k topology
-        labels:
-          kueue.x-k8s.io/queue-name: lq
       spec:
         backoffLimit: 0
         completionMode: Indexed
@@ -208,8 +206,9 @@ spec:
             annotations:
               cloud.google.com/gke-tpu-slice-topology: 4x4x4 # same as above
               kueue.k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
-              kueue.x-k8s.io/podset-slice-size: "16"
+              kueue.x-k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
               kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-partition-4x4x4-id
+              kueue.x-k8s.io/podset-slice-size: "16"
               cloud.google.com/skip-tpu-webhook-check: "true"
           spec:
             affinity:
@@ -312,7 +311,7 @@ spec:
                 path: /tmp
                 type: DirectoryOrCreate
   startupPolicy:
-    startupPolicyOrder: InOrder
+    startupPolicyOrder: AnyOrder
   successPolicy:
     operator: All
     targetReplicatedJobs:
