@@ -66,8 +66,7 @@ from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.checkpoint_utils import (load_checkpoint,
-                                                         save_checkpoint,
-                                                         save_lora_checkpoint)
+                                                         save_checkpoint)
 from tpu_inference.models.jax.utils.weight_utils import (
     shard_put, transfer_state_with_mappings)
 from tpu_inference.runner import utils as runner_utils
