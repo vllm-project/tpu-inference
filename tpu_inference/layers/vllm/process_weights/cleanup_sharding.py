@@ -59,12 +59,44 @@ def shard_model_to_tpu(model: torch.nn.Module,
         params, buffers = _extract_all_params_buffers(model)
 
         # For other weight tensors, repliate them on all the TPU chips.
-        params, buffers = pytree.tree_map_only(
-            _tensor_is_in_cpu,
-            lambda tensor: _shard_tensor_to_tpu_replicated(tensor, mesh),
-            (params, buffers))
+        # params, buffers = pytree.tree_map_only(
+        #     _tensor_is_in_cpu,
+        #     lambda tensor: _shard_tensor_to_tpu_replicated(tensor, mesh),
+        #     (params, buffers))
 
-        return {**params, **buffers}
+        vllm_model = getattr(model, 'vllm_model', model)
+        print(f"{vllm_model=}")
+        hf_config = getattr(vllm_model, 'config', None)
+        print(f"{hf_config=}")
+        print(f"{hf_config.text_config.num_hidden_layers=}")
+        num_hidden_layers = hf_config.text_config.num_hidden_layers
+        print(f"{num_hidden_layers=}")
+
+        def is_valid_index(name: str) -> bool:
+          parts = name.split('.')
+          for i, part in enumerate(parts):
+            if part == 'layers' and i + 1 < len(parts) and parts[i+1].isdigit():
+              if int(parts[i+1]) >= num_hidden_layers:
+                return False
+          return True
+
+        final_params_buffers = {}
+        for collection_name, collection in [("params", params), ("buffers", buffers)]:
+          for name, tensor in collection.items():
+            # Apply index filtering
+            if not is_valid_index(name):
+                print(f"DEBUG: Filtering out {collection_name} '{name}' (index >= {num_hidden_layers})")
+                continue
+
+            # Check if tensor is on CPU and shard if necessary
+            if _tensor_is_in_cpu(tensor):
+              print(f"DEBUG: Tensor '{name}' is on CPU (unsharded). Shape: {tensor.shape}")
+              final_params_buffers[name] = _shard_tensor_to_tpu_replicated(tensor, mesh)
+            else:
+              print(f"DEBUG: Tensor '{name}' is NOT on CPU. Shape: {tensor.shape}")
+              final_params_buffers[name] = tensor
+
+        return final_params_buffers
 
 
 def update_lora(model: torch.nn.Module,
