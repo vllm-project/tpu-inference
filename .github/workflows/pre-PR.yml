@@ -15,18 +15,33 @@
 name: Apply Conditional PR Template
 
 on:
-  pull_request:
+  # Use pull_request_target instead of pull_request because:
+  # pull_request gives read-only GITHUB_TOKEN for fork PRs, causing 403 on PR body update.
+  # pull_request_target runs in base branch context, granting read/write GITHUB_TOKEN.
+  pull_request_target:
     types: [opened, reopened]
 
 jobs:
   apply-template:
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+      contents: read
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           # Fetches all history so git diff can be used locally
           fetch-depth: 0
+
+      - name: Fetch PR source branch
+        # pull_request_target only checks out base branch by default.
+        # Manually fetch PR branch so git diff can compare BASE_SHA and HEAD_SHA.
+        run: |
+          git fetch https://github.com/${{ github.event.pull_request.head.repo.full_name }}.git \
+          ${{ github.event.pull_request.head.ref }}
 
       - name: Determine changed paths
         id: changed-files
