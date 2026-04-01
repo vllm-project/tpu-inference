@@ -71,6 +71,7 @@ mkdir -p "$PROFILE_FOLDER"
 echo "--- Configuring Docker Arguments for benchmark"
 # Prepare environment variables for the Docker container.
 declare -a BENCHMARK_DOCKER_ARGS=(
+  "-v" "/etc/boto.cfg:/etc/boto.cfg"
   "-v" "$ARTIFACT_FOLDER:/workspace/artifacts"
   "-v" "/dev/shm:/dev/shm"
   "-e" "DOCKER_ARTIFACT_FOLDER=/workspace/artifacts"
