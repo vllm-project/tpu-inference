@@ -58,6 +58,41 @@ contains_element () {
   return 1
 }
 
+# Download Datasets
+DATASET_DIR="$DOCKER_ARTIFACT_FOLDER/dataset"
+mkdir -p "$DATASET_DIR"
+
+DATASETS=("custom-token" "mmlu" "mlperf" "bench-custom-token" "math500" "bench-custom-mm")
+if contains_element "$DATASET" "${DATASETS[@]}"; then
+  echo "Syncing dataset for $DATASET"
+  case "$DATASET" in
+    "custom-token")
+      gsutil -m cp gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/*.* "$DATASET_DIR/" || echo "Warning: failed to sync dataset"
+      ;;
+    "mmlu")
+      gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/mmlu/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset"
+      ;;
+    "mlperf")
+      gsutil -m cp gs://vllm-cb-storage2/dataset/mlperf/mlperf_shuffled.jsonl "$DATASET_DIR/mlperf.jsonl" || echo "Warning: failed to sync dataset"
+      ;;
+    "math500")
+      gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/math500/math500.jsonl "$DATASET_DIR/" || echo "Warning: failed to sync dataset"
+      ;;
+    "bench-custom-token"|"bench-custom-mm")
+      echo "test download dataset in docker container.............."
+      gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/bench-dataset/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset"
+      ;;
+  esac
+fi
+
+# Prep specialized configurations (DeepSeek)
+if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
+  echo "Syncing generation configs for DeepSeek-R1"
+  GENERATION_CONFIG_FOLDER="$DOCKER_ARTIFACT_FOLDER/generation_configs"
+  mkdir -p "$GENERATION_CONFIG_FOLDER"
+  gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/* "$GENERATION_CONFIG_FOLDER" || echo "Warning: failed to sync generation configs"
+fi
+
 # Run accuracy benchmark via lm_eval
 if contains_element "$DATASET" "${LM_EVAL_DATASETS[@]}"; then
   echo "DATASET ($DATASET) is an accuracy benchmark. Running lm_eval path."

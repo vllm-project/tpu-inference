@@ -111,28 +111,8 @@ fi
 BENCHMARK_DOCKER_ARGS_STR="$(printf '%s\n' "${BENCHMARK_DOCKER_ARGS[@]}")"
 export BENCHMARK_DOCKER_ARGS_STR
 
-# Sync datasets (Copied from original logic)
-DATASETS=("custom-token" "mmlu" "mlperf" "bench-custom-token" "math500" "bench-custom-mm")
-if [[ " ${DATASETS[*]} " == *" $DATASET "* ]]; then
-  echo "--- Syncing dataset for $DATASET"
-  DATASET_DIR="$ARTIFACT_FOLDER/dataset"
-  mkdir -p "$DATASET_DIR"
-  case "$DATASET" in
-    "custom-token") gsutil -m cp gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/*.* "$DATASET_DIR/" ;;
-    "mmlu")         gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/mmlu/* "$DATASET_DIR/" ;;
-    "mlperf")       gsutil -m cp gs://vllm-cb-storage2/dataset/mlperf/mlperf_shuffled.jsonl "$DATASET_DIR/mlperf.jsonl" ;;
-    "math500")      gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/math500/math500.jsonl "$DATASET_DIR/" ;;
-    "bench-custom-token"|"bench-custom-mm") gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/bench-dataset/* "$DATASET_DIR/" ;;
-  esac
-fi
-
 # Prep specialized configurations (DeepSeek)
-if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
-  GENERATION_CONFIG_FOLDER="$ARTIFACT_FOLDER/generation_configs"
-  export GENERATION_CONFIG_FOLDER
-  mkdir -p "$GENERATION_CONFIG_FOLDER"
-  gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/* "$GENERATION_CONFIG_FOLDER"
-fi
+# Moved to run_bm.sh to run inside docker
 
 echo "--- Running job in docker via run_in_docker.sh"
 BM_JOB_STATUS=$EXIT_SUCCESS
