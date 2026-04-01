@@ -165,32 +165,40 @@ def process_w13_for_gmm(tensor,
                         name: str = "w13"):
     """helper to split, pad, concatenate, and reorder w13 tensors."""
 
-    ratio = (2 * config.intermediate_size) // tensor.shape[-1]
-    
-    intermediate_size = config.intermediate_size // ratio
-    local_intermediate_size = config.local_intermediate_size // ratio
-    pad_amount = config.pad_amount // ratio
-    padded_intermediate_size = config.padded_intermediate_size // ratio
-
     # 1. Split into W1 and W3
-    w1 = tensor[..., :intermediate_size]
-    w3 = tensor[..., intermediate_size:]
+    w1 = tensor[..., :config.intermediate_size]
+    w3 = tensor[..., config.intermediate_size:]
 
     # 2. Pad the intermediate dimension
     def _pad_tensor(t):
         dims = t.shape[:-1]
+        
+        # If the last dimension doesn't match the expected intermediate_size
+        # (e.g. for blockwise scales where the last dim is block_size/K), skip padding
+        if t.shape[-1] != config.local_intermediate_size:
+            logger.info(f"Skipping padding for tensor with shape {t.shape} "
+                        f"(expected last dim {config.local_intermediate_size})")
+            
+            # The GMM kernel expects scales in the format: (size_group, num_quant_blocks, 1, size_n)
+            # If we are processing scales (which we infer by it not matching local_intermediate_size),
+            # we need to ensure it has 4 dimensions. For 3D scales like (size_group, num_blocks, size_n),
+            # we expand dims at axis=-2.
+            if t.ndim == 3:
+                return jnp.expand_dims(t, axis=-2)
+            return t
+            
         # Reshape to expose local_intermediate_size
         t = t.reshape(*dims, config.w13_reorder_size,
-                      local_intermediate_size)
+                      config.local_intermediate_size)
 
         # Dynamically create pad widths based on the reshaped tensor's rank
         pad_widths = [(0, 0)] * t.ndim
         # Padding for the last dimension
-        pad_widths[-1] = (0, pad_amount)
+        pad_widths[-1] = (0, config.pad_amount)
         t = jnp.pad(t, pad_widths)
 
         # Reshape back
-        return t.reshape(*dims, padded_intermediate_size)
+        return t.reshape(*dims, config.padded_intermediate_size)
 
     # Apply padding
     padded_w1 = _pad_tensor(w1)
@@ -202,10 +210,9 @@ def process_w13_for_gmm(tensor,
     # 3. Concatenate and Reorder for avoiding TP sharding comms
     w13_concat = jnp.concatenate([padded_w1, padded_w3], axis=concat_dim)
     if padded_output_sizes is not None:
-        scaled_padded_output_sizes = [s // ratio for s in padded_output_sizes]
         return reorder_concatenated_tensor_for_sharding(
             w13_concat,
-            scaled_padded_output_sizes,
+            padded_output_sizes,
             config.w13_reorder_size,
             dim=concat_dim,
         )

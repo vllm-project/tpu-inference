@@ -174,9 +174,8 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
             w2_weight_scale,
             w2_bias,
         )
-        weights = shard_moe_weights(weights, self.moe_backend, self.mesh)
-        jax.block_until_ready(weights.w13_weight)
-        weights = torch_view(weights)
+        weights = torch_view(
+            shard_moe_weights(weights, self.moe_backend, self.mesh))
 
         layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
         layer.w2_weight = Parameter(weights.w2_weight, requires_grad=False)
