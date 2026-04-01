@@ -18,7 +18,10 @@ import numpy as np
 from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
+                                                      compute_processed_logprobs,
                                                       gather_logprobs)
+from tpu_inference.layers.jax.sample.sampling_metadata import \
+    TPUSupportedSamplingMetadata
 
 
 class TestSampling:
@@ -113,3 +116,102 @@ class TestSampling:
         assert result.logprob_token_ids[0, 0] == 1
         top_k_indices = sorted(result.logprob_token_ids[0, 1:].tolist())
         assert top_k_indices == [0, 1, 2] or top_k_indices == [0, 1, 3]
+
+
+class TestProcessedLogprobs:
+    """Tests for the processed_logprobs mode (logprobs computed after
+    temperature / top-k / top-p transforms)."""
+
+    @staticmethod
+    def _make_sampling_metadata(
+        batch_size,
+        temperature=0.7,
+        top_k=0,
+        top_p=1.0,
+        do_sampling=True,
+    ):
+        """Helper to build a TPUSupportedSamplingMetadata for testing."""
+        return TPUSupportedSamplingMetadata(
+            temperature=jnp.full((batch_size, ), temperature,
+                                 dtype=jnp.float32),
+            top_k=jnp.full((batch_size, ), top_k, dtype=jnp.int32),
+            top_p=jnp.full((batch_size, ), top_p, dtype=jnp.float32),
+            _cache_collision_dummy=None,
+            do_sampling=do_sampling,
+            logprobs=True,
+        )
+
+    def test_processed_logprobs_with_temperature(self):
+        """Temperature scaling should change the logprobs distribution."""
+        logits = jnp.array([[1.0, 2.0, 3.0]], dtype=jnp.float32)
+
+        raw_logprobs = compute_logprobs(logits)
+
+        metadata = self._make_sampling_metadata(1, temperature=0.5)
+        processed = compute_processed_logprobs(logits, metadata)
+
+        # With temperature < 1, processed logprobs should be more peaked
+        # (higher max, lower others) compared to raw logprobs.
+        assert not np.allclose(raw_logprobs, processed, atol=1e-4)
+        # The argmax should still be the same token.
+        assert np.argmax(processed[0]) == np.argmax(raw_logprobs[0])
+        # The max logprob should be closer to 0 (more confident).
+        assert float(jnp.max(processed[0])) > float(jnp.max(raw_logprobs[0]))
+
+    def test_processed_logprobs_matches_manual_temperature(self):
+        """Verify processed_logprobs produces the same result as manually
+        dividing by temperature then computing log_softmax."""
+        logits = jnp.array([[1.0, 2.0, 3.0, 0.5]], dtype=jnp.float32)
+        temperature = 0.8
+
+        metadata = self._make_sampling_metadata(1, temperature=temperature)
+        processed = compute_processed_logprobs(logits, metadata)
+
+        expected = jnp.log(
+            jnp.exp(logits / temperature) /
+            jnp.sum(jnp.exp(logits / temperature), axis=-1, keepdims=True))
+        assert np.allclose(processed, expected, atol=1e-5)
+
+    def test_processed_logprobs_with_topk(self):
+        """After top-k masking, tokens outside top-k should get -inf logprobs."""
+        logits = jnp.array([[1.0, 5.0, 3.0, 2.0, 4.0]], dtype=jnp.float32)
+
+        metadata = self._make_sampling_metadata(
+            1, temperature=1.0, top_k=2)
+        processed = compute_processed_logprobs(logits, metadata)
+
+        # Top-2 tokens are indices 1 (5.0) and 4 (4.0).
+        # After masking, only those two should have non-tiny logprobs.
+        processed_np = np.array(processed[0])
+        top2_indices = set(np.argsort(processed_np)[-2:])
+        assert top2_indices == {1, 4}
+        # Masked tokens should have very negative logprobs.
+        for i in range(5):
+            if i not in top2_indices:
+                assert processed_np[i] < -10.0
+
+    def test_processed_logprobs_with_topp(self):
+        """After top-p filtering, low-probability tokens should be masked."""
+        # Make logits where one token dominates.
+        logits = jnp.array([[10.0, 1.0, 0.0, -1.0]], dtype=jnp.float32)
+
+        metadata = self._make_sampling_metadata(
+            1, temperature=1.0, top_p=0.5)
+        processed = compute_processed_logprobs(logits, metadata)
+
+        # Token 0 has very high probability and should remain.
+        processed_np = np.array(processed[0])
+        assert processed_np[0] > -0.1  # close to 0 = probability close to 1
+
+    def test_processed_logprobs_greedy_fallback(self):
+        """For greedy requests (temperature < eps), processed logprobs should
+        match raw logprobs."""
+        logits = jnp.array([[1.0, 2.0, 3.0]], dtype=jnp.float32)
+
+        raw_logprobs = compute_logprobs(logits)
+
+        # Temperature < _SAMPLING_EPS (1e-5)
+        metadata = self._make_sampling_metadata(1, temperature=1e-7)
+        processed = compute_processed_logprobs(logits, metadata)
+
+        assert np.allclose(raw_logprobs, processed, atol=1e-6)

@@ -26,6 +26,43 @@ from tpu_inference.layers.jax.sample.sampling_metadata import \
 _SAMPLING_EPS = 1e-5
 
 
+def _apply_sampling_transforms(
+    logits: jax.Array,
+    tpu_sampling_metadata: TPUSupportedSamplingMetadata,
+) -> jax.Array:
+    """Apply temperature scaling, top-k, and top-p filtering to logits.
+
+    This extracts the common logit processing logic used by both the sampling
+    path and the processed-logprobs path so that the transformations are
+    applied identically.
+
+    Args:
+        logits: (B, vocab_size) raw logits in float32.
+        tpu_sampling_metadata: Sampling parameters (temperature, top_k, top_p).
+
+    Returns:
+        Processed logits with temperature, top-k, and top-p applied.
+    """
+    # Temperature scaling
+    temperatures = tpu_sampling_metadata.temperature.astype(logits.dtype)
+    temperatures = jnp.expand_dims(temperatures, axis=-1)
+    logits = logits / temperatures
+
+    # Only apply top-k masking if k > 0 for each token
+    top_k = tpu_sampling_metadata.top_k
+    should_apply_topk = jnp.expand_dims(top_k > 0, axis=-1)
+    topk_masked = topk_mask(logits, top_k, replace_val=-1e12)
+    logits = jnp.where(should_apply_topk, topk_masked, logits)
+
+    # Only apply top-p masking if p < 1.0 for each token
+    top_p = tpu_sampling_metadata.top_p
+    should_apply_topp = jnp.expand_dims(top_p < 1.0, axis=-1)
+    topp_masked = topp_mask(logits, top_p, replace_val=-1e12)
+    logits = jnp.where(should_apply_topp, topp_masked, logits)
+
+    return logits
+
+
 @jax.jit(static_argnames=["mesh"])
 def sample(
     rng: jax.Array,
@@ -51,22 +88,23 @@ def sample(
 
     logits = logits.astype(jnp.float32)
 
-    # Temperature scaling
-    temperatures = tpu_sampling_metadata.temperature.astype(logits.dtype)
-    temperatures = jnp.expand_dims(temperatures, axis=-1)
-    logits /= temperatures
+    # # Temperature scaling
+    # temperatures = tpu_sampling_metadata.temperature.astype(logits.dtype)
+    # temperatures = jnp.expand_dims(temperatures, axis=-1)
+    # logits /= temperatures
 
-    # Only apply top-k masking if k > 0 for each token
-    top_k = tpu_sampling_metadata.top_k
-    should_apply_topk = jnp.expand_dims(top_k > 0, axis=-1)
-    topk_masked = topk_mask(logits, top_k, replace_val=-1e12)
-    logits = jnp.where(should_apply_topk, topk_masked, logits)
+    # # Only apply top-k masking if k > 0 for each token
+    # top_k = tpu_sampling_metadata.top_k
+    # should_apply_topk = jnp.expand_dims(top_k > 0, axis=-1)
+    # topk_masked = topk_mask(logits, top_k, replace_val=-1e12)
+    # logits = jnp.where(should_apply_topk, topk_masked, logits)
 
-    # Only apply top-p masking if p < 1.0 for each token
-    top_p = tpu_sampling_metadata.top_p
-    should_apply_topp = jnp.expand_dims(top_p < 1.0, axis=-1)
-    topp_masked = topp_mask(logits, top_p, replace_val=-1e12)
-    logits = jnp.where(should_apply_topp, topp_masked, logits)
+    # # Only apply top-p masking if p < 1.0 for each token
+    # top_p = tpu_sampling_metadata.top_p
+    # should_apply_topp = jnp.expand_dims(top_p < 1.0, axis=-1)
+    # topp_masked = topp_mask(logits, top_p, replace_val=-1e12)
+    # logits = jnp.where(should_apply_topp, topp_masked, logits)
+    logits = _apply_sampling_transforms(logits, tpu_sampling_metadata)
 
     # (batch_size,)
     next_tokens = jax.random.categorical(rng, logits)
@@ -83,6 +121,45 @@ def sample(
 
 def compute_logprobs(logits: jax.Array) -> jax.Array:
     return jax.nn.log_softmax(logits, axis=-1)
+
+
+def compute_processed_logprobs(
+    logits: jax.Array,
+    tpu_sampling_metadata: TPUSupportedSamplingMetadata,
+) -> jax.Array:
+    """Compute logprobs from logits after applying sampling transforms.
+
+    This applies temperature scaling, top-k, and top-p filtering to the
+    raw logits before computing log_softmax, aligning with the GPU
+    ``processed_logprobs`` mode.  The transforms applied here are identical
+    to those used in :func:`sample` (via :func:`_apply_sampling_transforms`).
+    For greedy requests (temperature < _SAMPLING_EPS) the raw logprobs are
+    returned unchanged because no sampling transforms are meaningful.
+
+    Args:
+        logits: (B, vocab_size) raw logits (any dtype – will be cast to f32).
+        tpu_sampling_metadata: Sampling parameters.
+        
+    Returns:
+        (B, vocab_size) log-probabilities computed on the processed logits.
+    """
+    logits = logits.astype(jnp.float32)
+
+    if not tpu_sampling_metadata.do_sampling:
+        # All requests are greedy – no transforms to apply.
+        return jax.nn.log_softmax(logits, axis=-1)
+
+    raw_logprobs = jax.nn.log_softmax(logits, axis=-1)
+
+    processed_logits = _apply_sampling_transforms(
+        logits, tpu_sampling_metadata)
+    processed_logprobs = jax.nn.log_softmax(processed_logits, axis=-1)
+
+    # For greedy requests (temperature < eps), fall back to raw logprobs
+    # because the temperature division would produce garbage.
+    is_greedy = jnp.expand_dims(
+        tpu_sampling_metadata.temperature < _SAMPLING_EPS, axis=-1)
+    return jnp.where(is_greedy, raw_logprobs, processed_logprobs)
 
 
 def gather_logprobs(

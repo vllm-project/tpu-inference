@@ -64,6 +64,8 @@ def main(args: dict):
         sampling_params.top_p = top_p
     if top_k is not None:
         sampling_params.top_k = top_k
+    
+    sampling_params.logprobs = 1
 
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
