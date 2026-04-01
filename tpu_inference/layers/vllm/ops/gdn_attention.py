@@ -44,7 +44,7 @@ def _l2_normalize(x: jnp.ndarray, eps: float = 1e-6) -> jnp.ndarray:
     Args:
         x: input to normalize
         eps: epsilon for numerical stability
-  
+
     Returns:
         normalized x
     """
@@ -67,13 +67,12 @@ def _chunk_gated_delta_rule(
     By chunking here, we can effectively transform the purely sequential
     RNN recurrence into a block-parallel operation. It processes tokens in chunks
     and then only passes the recurrent state sequentially between chunks.
-  
+
     One detail worth pointing out is that the continuous decay mask (`g`) is
-    cumulative, so
-    Applying the triangular mask *before* exponentiation is key here to prevent
-    NaNs
-    when dealing with large sequence lengths.
-  
+    cumulative, so the upper triangle of the pairwise differences (`g[i] - g[j]`
+    for `i < j`) can overflow.  Thus, we apply the the triangular mask
+    NaNs exponentiation to prevent NaNs when dealing with longer seq lens.
+
     Args:
         query: (B, H, T, d_k) — already L2-normed
         key: (B, H, T, d_k) — already L2-normed
@@ -82,7 +81,7 @@ def _chunk_gated_delta_rule(
         beta: (B, H, T) — input gate (after sigmoid)
         chunk_size: chunk processing size
         initial_state: (B, H, d_k, d_v) or None
-  
+
     Returns:
         output: (B, H, T, d_v)
         final_state: (B, H, d_k, d_v) or None
@@ -191,7 +190,7 @@ def _recurrent_gated_delta_rule_step(
         g: (B, H, T)
         beta: (B, H, T)
         state: (B, H, d_k, d_v)
-  
+
     Returns:
         output: (B, H, T, d_v)
         new_state: (B, H, d_k, d_v)
@@ -233,7 +232,7 @@ def ragged_conv1d(
       state_indices: Tensor of shape `(max_reqs,)` mapping request index to state
         index.
       kernel_size: The size of the convolution kernel.
-  
+
     Returns:
       A tuple containing:
       - output: The output tensor of shape `(num_tokens, dim)`.
@@ -475,7 +474,7 @@ def run_jax_gdn_attention_local(
         d_k: Dimension of key.
         d_v: Dimension of value.
         kernel_size: Convolution kernel size.
-  
+
     Returns:
         A tuple containing the new states and the output.
         - A tuple of (new_conv_state, new_recurrent_state).
