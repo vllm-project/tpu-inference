@@ -1351,8 +1351,24 @@ def tgmm_inner_kernel(
       (((0,), (0,)), ((), ())),
       preferred_element_type=jnp.float32,
   )
-  tiled_out_ref[...] = (tiled_out_ref[...].astype(jnp.float32) + result).astype(tiled_out_ref.dtype)
-  
+
+  prev_gm_id = jnp.where(gm_id > 0, gm_id - 1, 0)
+  is_first_gm = gm_id == 0
+  group_id_changed = (
+      metadata_ref.gm_id_to_group_id[gm_id]
+      != metadata_ref.gm_id_to_group_id[prev_gm_id]
+  )
+  initialize_tiled_out = jnp.logical_or(is_first_gm, group_id_changed)
+
+  @pl.when(initialize_tiled_out)
+  def _():
+    pl.debug_print("xw32line1342 tiled_lhs_ref={}", tiled_lhs_ref[...])
+    tiled_out_ref[...] = jnp.zeros_like(tiled_out_ref)
+
+  tiled_out_ref[...] = (tiled_out_ref[...].astype(jnp.float32) + result).astype(
+      tiled_out_ref.dtype
+  )
+
 
 class TgmmIndexMaps:
 
@@ -1410,13 +1426,13 @@ def generate_tgmm_block_specs(
 def tgmm_kernel_main(
     lhs_group_sizes_ref,  # int32[size_lhs_group]
     group_offset_ref,  # int32[1]
-    lhs_ref,  # [k, m]
+    lhs_ref,  # [m, k]
     rhs_ref,  # [m, n]
     out_ref,  # [num_groups, k, n]
     # scratch memory
     partial_out_ref: jax.Array,  # 
     acc_ref: jax.Array,  # 
-    metadata_ref, # contains gm_id_to_group_id and gm_id_to_m_offset in SMEM.
+    metadata_ref: MetadataRef, # contains gm_id_to_group_id and gm_id_to_m_offset in SMEM.
     *, cfgs,
 ):
   num_k = pl.cdiv(cfgs.dims.size_k, cfgs.tiles.tile_k)
@@ -1428,10 +1444,25 @@ def tgmm_kernel_main(
       metadata_ref,
       cfgs=cfgs,
   )
+
+  # debug_print metadata begins.
+  jax.debug.print('xw32 line1419 num_gm={}', num_gm)  # num_gm=3
+  def print_metadata(i, _):
+    jax.debug.print(
+        'xw32 line1419 i={} group_id={} m_offset={}',
+        i,
+        metadata_ref.gm_id_to_group_id[i],
+        metadata_ref.gm_id_to_m_offset[i]
+    )
+    return _
+
+  jax.lax.fori_loop(0, num_gm, print_metadata, None)
+  # debug_print metadata ends.
+
   # 3. Prepare grid, block specs, scratch shapes, etc.
   # grid doesn't need to have a dimension num_groups because it can be determined by "group_ids[grid_id] - group_offset[0]"
   # grid = (n, k, gm)
-  # lhs_block_spec=((k_blk, m_blk), (n_i, k_i, gm_i)->(k_i, pl.ds(row_start, row_size)))
+  # lhs_block_spec=((m_blk, k_blk), (n_i, k_i, gm_i)->(k_i, pl.ds(row_start, row_size)))
   # rhs_block_spec=((m_blk, n_blk), (n_i, k_i, gm_i)->(pl.ds(row_start, row_size), n_i))
   # out_block_spec((None, k_blk, n_blk), (n_i, k_i, gm_i)->(group_ids[grid_id] - group_offset[0], k_blk, n_blk))
   # out_shape=(ng, k, n)
@@ -1447,19 +1478,20 @@ def tgmm_kernel_main(
   scratches = [partial_out_ref, acc_ref, metadata_ref]
   pipeline_fn(lhs_in, rhs_in, out_ref, scratches=scratches)
 
-@functools.partial(
-    jax.jit,
-    static_argnames=[
-        "num_actual_groups",
-        "tile_info",
-        "vmem_limit_bytes",
-        "precision",
-        "preferred_element_type",
-        "acc_dtype",
-        "maybe_quantize_lhs",
-        "zero_initialize", # xw32q: do we need this? No, we dont.
-    ],
-)
+# TODO(xw32): Add back jax.jit.
+# @functools.partial(
+#     jax.jit,
+#     static_argnames=[
+#         "num_actual_groups",
+#         "tile_info",
+#         "vmem_limit_bytes",
+#         "precision",
+#         "preferred_element_type",
+#         "acc_dtype",
+#         "maybe_quantize_lhs",
+#         "zero_initialize", # xw32q: do we need this? No, we dont.
+#     ],
+# )
 def _tgmm_v2_impl(
     lhs: jax.Array,  # [size_m, size_k]
     rhs: jax.Array,  # [size_m, size_n]
@@ -1504,12 +1536,14 @@ def _tgmm_v2_impl(
   )
   dims = cfgs.dims
   tiles = cfgs.tiles
-  # print(f'xw32 {cfgs=}')
+  jax.debug.print("xw32 line1508 dims={}", dims)
+  jax.debug.print("xw32 line1509 tiles={}", tiles)
   # cfgs=GmmConfigs(tiles=TileSizes(tile_m=128, tile_k=512, tile_n=512), dims=Dimensions(size_m=128, size_k=512, size_n=512, size_group=16, size_lhs_group=16, size_lhs_sublane=16), lhs_cfgs=InputConfigs(quant_dtype=None, quant_block_size=-1, dtype=dtype(bfloat16), has_bias=False, has_scale=False, packing=1, num_quant_blocks=1), rhs_cfgs=InputConfigs(quant_dtype=None, quant_block_size=-1, dtype=dtype(bfloat16), has_bias=False, has_scale=False, packing=1, num_quant_blocks=1), out_dtype=dtype(bfloat16), acc_dtype=dtype(bfloat16), zero_init=False)
 
   # 4. Form pl.pallas_call calling tgmm_kernel_main
   num_lanes = pltpu.get_tpu_info().num_lanes
   aligned_n = align_to(dims.size_n, num_lanes)
+  # xw32q: do I need to align size_k to sublane boundary? If not, why not?
   out_init = jax.ShapeDtypeStruct((num_actual_groups, dims.size_k, aligned_n), cfgs.out_dtype)
   max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
   scratch_shapes = [
@@ -1519,8 +1553,9 @@ def _tgmm_v2_impl(
       pltpu.VMEM((tiles.tile_m, tiles.tile_n), cfgs.acc_dtype),
       # metadata_ref
       MetadataRef(
-          gm_id_to_group_id=pltpu.SMEM((max_num_gm, ), jnp.int32),
-          gm_id_to_m_offset=pltpu.SMEM((max_num_gm + 1, ), jnp.int32),
+          gm_id_to_group_id=pltpu.SMEM((max_num_gm,), jnp.int32),
+          # xw32q: why +1?
+          gm_id_to_m_offset=pltpu.SMEM((max_num_gm + 1,), jnp.int32),
       ),
   ]
   
