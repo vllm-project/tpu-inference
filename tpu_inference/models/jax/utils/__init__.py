@@ -11,3 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from tpu_inference.models.jax.utils.checkpoint_utils import (load_checkpoint,
+                                                         save_checkpoint,
+                                                         save_lora_checkpoint)
+
+__all__ = ["load_checkpoint", "save_checkpoint", "save_lora_checkpoint"]

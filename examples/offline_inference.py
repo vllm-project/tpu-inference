@@ -54,6 +54,23 @@ def main(args: dict):
     # Create an LLM
     llm = LLM(**args)
 
+    # Verify checkpoint saving and loading
+    checkpoint_dir = "/tmp/vllm_orbax_checkpoint"
+    logger.info(f"Testing save_checkpoint to {checkpoint_dir}...")
+    # Access through collective_rpc which proxies to the worker
+    # NOTE: enable_colocated_python=False because the colocated Python
+    # sidecar image does not have orbax-checkpoint installed yet.
+    # Rebuild the sidecar image with `pip install orbax-checkpoint` to enable.
+    llm.collective_rpc("save_checkpoint",
+                       kwargs=dict(path=checkpoint_dir, step=1,
+                                   enable_colocated_python=False))
+
+    logger.info(f"Testing load_checkpoint from {checkpoint_dir}...")
+    llm.collective_rpc("load_checkpoint",
+                       kwargs=dict(path=checkpoint_dir, step=1,
+                                   enable_colocated_python=False))
+    logger.info("Checkpoint save/load verification completed.")
+
     # Create a sampling params object
     sampling_params = llm.get_default_sampling_params()
     if max_tokens is not None:
