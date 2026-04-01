@@ -969,6 +969,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         with self.maybe_forbid_compile:
             if tpu_sampling_metadata.logprobs:
+                # ====== DEBUG ======
+                print("\n" + "="*50, flush=True)
+                print("DEBUG: start Logprobs calculation", flush=True)
+                print(f"DEBUG: logits shape = {logits.shape}", flush=True)
+                print(f"DEBUG: next_tokens shape = {next_tokens.shape}", flush=True)
+                print(f"DEBUG: tpu_sampling_metadata.do_sampling = {tpu_sampling_metadata.do_sampling}", flush=True)
+                print(f"DEBUG: self.model_config.max_logprobs = {self.model_config.max_logprobs}", flush=True)
+
+                print(f"DEBUG: current input_batch.num_reqs = {self.input_batch.num_reqs}", flush=True)
+                print(f"DEBUG: get padded_num_reqs = {padded_num_reqs}", flush=True)
+                print("="*50 + "\n", flush=True)
+                # ====== DEBUG ======
                 # logprobs = self._compute_and_gather_logprobs(
                 #     logits, next_tokens, self.model_config.max_logprobs)
                 if self.model_config.logprobs_mode == "processed_logprobs":

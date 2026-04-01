@@ -658,11 +658,16 @@ class CompilationManager:
                     self.runner.mesh, (temperature, top_k, top_p),
                     sharding=sampling_metadata_sharding)
                 for do_sampling in (True, False):
+                    dummy_shape = (1,) 
+                    _cache_collision_dummy = jnp.zeros(dummy_shape, dtype=jnp.int32)
+                    _cache_collision_dummy = jax.device_put(
+                        _cache_collision_dummy, 
+                        NamedSharding(self.runner.mesh, PartitionSpec(None)))
                     sampling_metadata = TPUSupportedSamplingMetadata(
                         temperature=temperature,
                         top_k=top_k,
                         top_p=top_p,
-                        _cache_collision_dummy=None,
+                        _cache_collision_dummy=_cache_collision_dummy,
                         do_sampling=do_sampling,
                         logprobs=True)
                     self._run_compilation(

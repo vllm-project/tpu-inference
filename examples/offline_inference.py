@@ -3,6 +3,9 @@
 
 import json
 import os
+os.environ["JAX_TRACEBACK_FILTERING"] = "off"
+os.environ["JAX_LOG_COMPILES"] = "1"
+os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 
 from vllm import LLM, EngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -124,7 +127,16 @@ def main(args: dict):
                            chat_template_kwargs=chat_template_kwargs)
     else:
         logger.info("Using LLM generate API for inference")
-        outputs = llm.generate(prompts, sampling_params)
+        # outputs = llm.generate(prompts, sampling_params)
+        try:
+            outputs = llm.generate(prompts, sampling_params)
+        except Exception as e:
+            print("-" * 30)
+            print("捕获到崩溃！当前请求的具体参数如下：")
+            for i, p in enumerate(prompts):
+                print(f"请求 {i}: 长度 {len(p)} tokens")
+            print(f"采样设置: {sampling_params}")
+            raise e
 
     if profiler_config.profiler == "torch":
         llm.stop_profile()
