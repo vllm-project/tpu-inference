@@ -91,6 +91,18 @@ declare -a BENCHMARK_DOCKER_ARGS=(
   "-e" "PREFIX_LEN=$PREFIX_LEN"
   "-e" "ADDITIONAL_CONFIG=$ADDITIONAL_CONFIG"
   "-e" "EXTRA_ARGS=$EXTRA_ARGS"
+  "-e" "GCP_PROJECT_ID=${GCP_PROJECT_ID}"
+  "-e" "GCP_REGION=${GCP_REGION}"
+  "-e" "GCS_BUCKET=${GCS_BUCKET}"
+  "-e" "ARTIFACT_REPO=${ARTIFACT_REPO}"
+  "-e" "GCP_INSTANCE_ID=${GCP_INSTANCE_ID}"
+  "-e" "GCP_DATABASE_ID=${GCP_DATABASE_ID}"
+  "-e" "BUILDKITE_AGENT_NAME=${BUILDKITE_AGENT_NAME}"
+  "-e" "RUN_TYPE=$RUN_TYPE"
+  "-e" "CODE_HASH=${CODE_HASH}"
+  "-e" "JOB_REFERENCE=${JOB_REFERENCE}"
+  "-e" "BUILDKITE=${BUILDKITE}"
+  "-v" "/etc/boto.cfg:/etc/boto.cfg"
 )
 
 if [ -n "${EXTRA_ENVS:-}" ]; then
@@ -111,28 +123,7 @@ fi
 BENCHMARK_DOCKER_ARGS_STR="$(printf '%s\n' "${BENCHMARK_DOCKER_ARGS[@]}")"
 export BENCHMARK_DOCKER_ARGS_STR
 
-# Sync datasets (Copied from original logic)
-DATASETS=("custom-token" "mmlu" "mlperf" "bench-custom-token" "math500" "bench-custom-mm")
-if [[ " ${DATASETS[*]} " == *" $DATASET "* ]]; then
-  echo "--- Syncing dataset for $DATASET"
-  DATASET_DIR="$ARTIFACT_FOLDER/dataset"
-  mkdir -p "$DATASET_DIR"
-  case "$DATASET" in
-    "custom-token") gsutil -m cp gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/*.* "$DATASET_DIR/" ;;
-    "mmlu")         gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/mmlu/* "$DATASET_DIR/" ;;
-    "mlperf")       gsutil -m cp gs://vllm-cb-storage2/dataset/mlperf/mlperf_shuffled.jsonl "$DATASET_DIR/mlperf.jsonl" ;;
-    "math500")      gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/math500/math500.jsonl "$DATASET_DIR/" ;;
-    "bench-custom-token"|"bench-custom-mm") gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/bench-dataset/* "$DATASET_DIR/" ;;
-  esac
-fi
-
 # Prep specialized configurations (DeepSeek)
-if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
-  GENERATION_CONFIG_FOLDER="$ARTIFACT_FOLDER/generation_configs"
-  export GENERATION_CONFIG_FOLDER
-  mkdir -p "$GENERATION_CONFIG_FOLDER"
-  gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/* "$GENERATION_CONFIG_FOLDER"
-fi
 
 echo "--- Running job in docker via run_in_docker.sh"
 BM_JOB_STATUS=$EXIT_SUCCESS
@@ -144,9 +135,5 @@ BM_JOB_STATUS=$EXIT_SUCCESS
     echo "Error running benchmark job in docker."
     BM_JOB_STATUS=$EXIT_FAILURE
 }
-
-# report_result.sh determines whether to Insert or Update data by checking if the same RecordId already exists in the DB
-echo "--- Reporting result"
-.buildkite/benchmark/scripts/report_result.sh "$RECORD_ID"
 
 exit $BM_JOB_STATUS
