@@ -14,10 +14,9 @@
 
 from collections.abc import Callable
 from typing import Optional
-import functools
+
 import jax
 import jax.numpy as jnp
-from jax.experimental import pallas as pl
 import torch
 from compressed_tensors.quantization import ActivationOrdering
 from jax.sharding import PartitionSpec
@@ -48,156 +47,6 @@ logger = init_logger(__name__)
 
 WNA16_SUPPORTED_BITS = [4, 8]
 
-def _unpack_int4_to_bf16_pallas(w_packed_int32):
-    """Native bitwise unpacking inside TPU SRAM."""
-    shifts = jax.lax.iota(jnp.uint32, 8) * 4
-    w_expanded = jnp.expand_dims(w_packed_int32.astype(jnp.uint32), axis=1)
-    shifts_expanded = jnp.expand_dims(jnp.expand_dims(shifts, axis=0), axis=-1)
-
-    w_unpacked = (w_expanded >> shifts_expanded) & 0xF
-    w_unpacked = w_unpacked.reshape(-1, w_packed_int32.shape[-1])
-
-    return w_unpacked.astype(jnp.bfloat16) - 8.0
-
-def pallas_wna16_fused_matmul_kernel(
-    x_ref, w_packed_ref, w_scale_ref, out_ref,
-    *, BM, BK, BN, group_size, pack_factor
-):
-    # x_ref is passed in as [BM, K]
-    # w_packed_ref is passed in as [K // pack_factor, BN]
-    # w_scale_ref is passed in as [scale_K, BN]
-    
-    acc = jnp.zeros((BM, BN), dtype=jnp.float32)
-    num_k_blocks = x_ref.shape[1] // BK
-    packed_BK = BK // pack_factor
-
-    def body_fn(k_idx, acc_carry):
-        # We only need to slide along the K dimension inside the kernel
-        x_tile = x_ref[..., pl.ds(k_idx * BK, BK)]
-
-        w_packed_tile = w_packed_ref[
-            pl.ds(k_idx * packed_BK, packed_BK), ...]
-
-        if group_size == -1:
-            # Channel-wise scale: shape is [1, BN], load it entirely
-            w_scale_tile = w_scale_ref[...]
-        else:
-            # Group-wise scale: Load the packed block and repeat it
-            w_scale_block = w_scale_ref[
-                pl.ds(k_idx * packed_BK, packed_BK), ...]
-            w_scale_tile = jnp.repeat(w_scale_block, pack_factor, axis=0)
-
-        w_bf16_unpacked = _unpack_int4_to_bf16_pallas(w_packed_tile)
-        w_bf16 = w_bf16_unpacked * w_scale_tile
-
-        acc_carry += jax.lax.dot(
-            x_tile.astype(jnp.bfloat16), w_bf16,
-            preferred_element_type=jnp.float32)
-        return acc_carry
-
-    acc = jax.lax.fori_loop(0, num_k_blocks, body_fn, acc)
-
-    out_ref[...] = acc.astype(jnp.bfloat16)
-
-@functools.partial(jax.jit, static_argnames=['BM', 'BK', 'BN', 'group_size', 'pack_factor'])
-def apply_pallas_fused_linear(x, w_packed, w_scale, BM=32, BK=128, BN=128, group_size=-1, pack_factor=8):
-    """Wrapper using BlockSpec to strictly control TPU local memory allocations."""
-    M, K = x.shape
-    N = w_packed.shape[1]
-    
-    pad_m = (BM - (M % BM)) % BM
-    pad_k = (BK - (K % BK)) % BK
-    pad_n = (BN - (N % BN)) % BN
-    
-    # 1. Pad Activations
-    if pad_m > 0 or pad_k > 0:
-        x = jnp.pad(x, ((0, pad_m), (0, pad_k)))
-        
-    # 2. Pad Packed Weights
-    pad_k_packed = pad_k // pack_factor
-    if pad_k_packed > 0 or pad_n > 0:
-        w_packed = jnp.pad(w_packed, ((0, pad_k_packed), (0, pad_n)))
-        
-    # 3. Expand and Pad Scales
-    if group_size != -1:
-        repeat_factor = group_size // pack_factor
-        w_scale = jnp.repeat(w_scale, repeat_factor, axis=0)
-        if pad_k_packed > 0 or pad_n > 0:
-            w_scale = jnp.pad(w_scale, ((0, pad_k_packed), (0, pad_n)))
-        scale_k_dim = w_packed.shape[0]
-    else:
-        if pad_n > 0:
-            w_scale = jnp.pad(w_scale, ((0, 0), (0, pad_n)))
-        scale_k_dim = 1
-
-    padded_M = x.shape[0]
-    padded_K = x.shape[1]
-    padded_N = w_packed.shape[1]
-    
-    grid = (padded_M // BM, padded_N // BN)
-
-    # Use BlockSpec to map the (M, N) grid coordinates to the exact HBM slices
-    out = pl.pallas_call(
-        functools.partial(
-            pallas_wna16_fused_matmul_kernel,
-            BM=BM, BK=BK, BN=BN, group_size=group_size, pack_factor=pack_factor
-        ),
-        out_shape=jax.ShapeDtypeStruct((padded_M, padded_N), jnp.bfloat16),
-        in_specs=[
-            # x_ref gets [BM, padded_K]
-            pl.BlockSpec(block_shape=(BM, padded_K), index_map=lambda i, j: (i, 0)),
-            # w_packed_ref gets [padded_K // pack_factor, BN]
-            pl.BlockSpec(block_shape=(padded_K // pack_factor, BN), index_map=lambda i, j: (0, j)),
-            # w_scale_ref gets [scale_K, BN]
-            pl.BlockSpec(block_shape=(scale_k_dim, BN), index_map=lambda i, j: (0, j)),
-        ],
-        # out_ref maps to [BM, BN]
-        out_specs=pl.BlockSpec(block_shape=(BM, BN), index_map=lambda i, j: (i, j)),
-        grid=grid
-    )(x, w_packed, w_scale)
-    
-    return out[:M, :N]
-
-def _torch_unpack_from_int32(packed: torch.Tensor,
-                             num_bits: int) -> torch.Tensor:
-    """Unpack int32 values into individual n-bit values stored as uint8.
-
-    Each int32 contains (32 // num_bits) packed values.  The least-significant
-    bits correspond to the first logical element in the packed dimension.
-    """
-    pack_factor = 32 // num_bits
-    mask = (1 << num_bits) - 1
-    shifts = torch.arange(0, 32, num_bits, dtype=torch.int32,
-                          device=packed.device)
-    unpacked = torch.bitwise_and(
-        torch.bitwise_right_shift(packed.unsqueeze(-1), shifts), mask)
-    out_shape = list(packed.shape)
-    out_shape[-1] *= pack_factor
-    return unpacked.reshape(out_shape).to(torch.uint8)
-
-
-def _torch_repack_to_int32(unpacked: torch.Tensor,
-                           num_bits: int) -> torch.Tensor:
-    """Repack individual n-bit values (uint8) back into int32 containers.
-
-    Inverse of ``_torch_unpack_from_int32``.  Uses bitwise OR and left-shift
-    so no precision is lost.
-    """
-    pack_factor = 32 // num_bits
-    *leading, last = unpacked.shape
-    assert last % pack_factor == 0, (
-        f"Last dim {last} not divisible by pack_factor {pack_factor}")
-    grouped = unpacked.reshape(*leading, last // pack_factor,
-                               pack_factor).to(torch.int32)
-    shifts = torch.arange(0, 32, num_bits, dtype=torch.int32,
-                          device=unpacked.device)
-    packed = torch.zeros(*leading, last // pack_factor,
-                         dtype=torch.int32, device=unpacked.device)
-    for i in range(pack_factor):
-        packed = torch.bitwise_or(
-            packed,
-            torch.bitwise_left_shift(grouped[..., i], shifts[i]))
-    return packed
 
 class VllmCompressedTensorsWNA16(CompressedTensorsScheme):
 
@@ -222,12 +71,6 @@ class VllmCompressedTensorsWNA16(CompressedTensorsScheme):
             raise ValueError(
                 f"Unsupported num_bits = {num_bits}. "
                 f"Supported num_bits = {WNA16_SUPPORTED_BITS}")
-
-        if self.group_size == -1 and self.strategy != "channel":
-            raise ValueError(
-                "WNA16 requires group quantization or channelwise "
-                "quantization, but found no group size and strategy "
-                "is not channelwise.")
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -326,118 +169,137 @@ class VllmCompressedTensorsWNA16(CompressedTensorsScheme):
             )
             layer.register_parameter("weight_g_idx", weight_g_idx)
 
+    def _unpack_packed_tensor(self, packed: jax.Array) -> jax.Array:
+        """Unpack int32-packed weights to individual values."""
+        if self.num_bits == 4:
+            return ct_u32_unpack_u4(packed)
+        u8 = jax.lax.bitcast_convert_type(packed, jnp.uint8)
+        return jnp.reshape(u8, u8.shape[:-2] + (-1,))
+
+    def _pack_to_int32(self, unpacked: jax.Array) -> jax.Array:
+        """Pack individual values back into int32."""
+        out_features, in_features = unpacked.shape
+        if self.num_bits == 4:
+            # Reshape to [Out, In // 8, 8]
+            reshaped = unpacked.reshape(out_features, -1, 8).astype(jnp.uint32)
+            # Shift elements to their positions (LSB first)
+            shifts = jnp.arange(0, 32, 4, dtype=jnp.uint32)
+            packed = jnp.sum(reshaped << shifts, axis=-1).astype(jnp.int32)
+            return packed
+        else: # 8-bit
+            reshaped = unpacked.reshape(out_features, -1, 4).astype(jnp.uint32)
+            shifts = jnp.arange(0, 32, 8, dtype=jnp.uint32)
+            packed = jnp.sum(reshaped << shifts, axis=-1).astype(jnp.int32)
+            return packed
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # ----- 1. Pre-shuffle actorder weights (Unpack-Shuffle-Repack) -----
+        sort_indices = None
         if hasattr(layer, "weight_g_idx"):
-            g_idx = layer.weight_g_idx.data
-            if (g_idx >= 0).all():
-                input_size = g_idx.shape[0]
-                effective_gs = (input_size if self.group_size == -1
-                                else self.group_size)
-                expected = (torch.arange(input_size, dtype=g_idx.dtype,
-                                         device=g_idx.device)
-                            // effective_gs)
-
-                if not torch.equal(g_idx, expected):
-                    q_perm = torch.argsort(g_idx)
-
-                    # Unpack packed int32 → individual n-bit values (uint8)
-                    unpacked = _torch_unpack_from_int32(
-                        layer.weight_packed.data, self.num_bits)
-                    # Shuffle columns so column k ∈ group k//group_size
-                    unpacked = unpacked[:, q_perm]
-                    # Repack back into int32 containers
-                    repacked = _torch_repack_to_int32(unpacked, self.num_bits)
-                    layer.weight_packed.data.copy_(repacked)
-                    del unpacked, repacked
-
-                    # Store q_perm so apply_weights can permute activations
-                    # to match the shuffled column order.
-                    layer.register_buffer(
-                        "q_perm", q_perm.to(torch.int32))
-
-
+            g_idx_tensor = layer.weight_g_idx
+            if not (g_idx_tensor < 0).any():
+                g_idx = t2j(g_idx_tensor.to(torch.int32), use_dlpack=False)
+                # Optimization: Sort weights by group at load time
+                sort_indices = jnp.argsort(g_idx)
             delattr(layer, "weight_g_idx")
-            self.has_g_idx = False
 
         if hasattr(layer, "weight_shape"):
             delattr(layer, "weight_shape")
 
-        # ----- 2. Convert to JAX arrays -----
-        w_packed = t2j(layer.weight_packed, use_dlpack=False)
-        w_scale = t2j(layer.weight_scale, use_dlpack=False)
+        weight = t2j(layer.weight_packed, use_dlpack=False)
         delattr(layer, "weight_packed")
+
+        weight_scale = t2j(layer.weight_scale, use_dlpack=False)
         delattr(layer, "weight_scale")
 
+        zero_point = None
+        if not self.symmetric and hasattr(layer, "weight_zero_point"):
+            zero_point = t2j(layer.weight_zero_point, use_dlpack=False)
+            delattr(layer, "weight_zero_point")
+
         bias = None
-        if layer.bias is not None and not layer.skip_bias_add:
+        if (hasattr(layer, 'bias') and layer.bias is not None
+                and not layer.skip_bias_add):
             bias = t2j(layer.bias, use_dlpack=False)
             delattr(layer, "bias")
 
-        # ----- 3. Shard across the TPU mesh -----
         @jax.jit
-        def shard_and_prepare(weight, scale, bias):
-            lin_weights = LinearWeights(
-                weight=weight,
-                weight_scale=scale,
-                zero_point=None,
-                bias=bias,
+        def process_wna16_weights(weight, weight_scale, zero_point, bias, sort_indices):
+            # If actorder is present, we permute the weights once at load time.
+            # This allows the forward pass to avoid expensive g_idx lookups.
+            if sort_indices is not None:
+                unpacked = self._unpack_packed_tensor(weight)
+                # Permute columns to make groups contiguous
+                unpacked_permuted = unpacked[:, sort_indices]
+                weight = self._pack_to_int32(unpacked_permuted)
+
+            return process_linear_weights(
+                LinearWeights(
+                    weight=weight,
+                    weight_scale=weight_scale,
+                    zero_point=zero_point,
+                    bias=bias,
+                ),
+                fused=self.linear_config.fuse_matmuls,
+                output_sizes=self.linear_config.output_sizes,
+                reorder_size=self.linear_config.n_shards,
             )
-            return shard_linear_weights(
-                lin_weights,
+
+        weights = process_wna16_weights(weight, weight_scale, zero_point, bias, sort_indices)
+        weights = torch_view(
+            shard_linear_weights(
+                weights,
                 mesh=self.linear_config.mesh,
                 weight_p_spec=self.linear_config.weight_sharding,
                 bias_p_spec=self.linear_config.bias_sharding,
-            )
+            ))
 
-        sharded_weights = shard_and_prepare(w_packed, w_scale, bias)
-
-        # ----- 4. Re-register as PyTorch Parameters -----
         if self.linear_config.fuse_matmuls:
-            layer.weight_packed = Parameter(
-                torch_view(sharded_weights.weight), requires_grad=False)
-            layer.weight_scale = Parameter(
-                torch_view(sharded_weights.weight_scale),
-                requires_grad=False)
-            if bias is not None:
-                layer.bias = Parameter(
-                    torch_view(sharded_weights.bias), requires_grad=False)
+            layer.weight_packed = Parameter(weights.weight, requires_grad=False)
+            if weights.weight_scale is not None:
+                layer.weight_scale = Parameter(weights.weight_scale, requires_grad=False)
+            if weights.zero_point is not None:
+                layer.weight_zero_point = Parameter(weights.zero_point, requires_grad=False)
+            if weights.bias is not None:
+                layer.bias = Parameter(weights.bias, requires_grad=False)
         else:
-            layer.weight_packed = to_parameter_list(
-                torch_view(sharded_weights.weight))
-            layer.weight_scale = to_parameter_list(
-                torch_view(sharded_weights.weight_scale))
-            if bias is not None:
-                layer.bias = to_parameter_list(
-                    torch_view(sharded_weights.bias))
+            layer.weight_packed = to_parameter_list(weights.weight)
+            if weights.weight_scale is not None:
+                layer.weight_scale = to_parameter_list(weights.weight_scale)
+            if weights.zero_point is not None:
+                layer.weight_zero_point = to_parameter_list(weights.zero_point)
+            if weights.bias is not None:
+                layer.bias = to_parameter_list(weights.bias)
+                
+        # Save sort_indices to permute the input 'x' in the forward pass
+        if sort_indices is not None:
+            layer.sort_indices = Parameter(torch_view(sort_indices), requires_grad=False)
 
-    def _dequantize_on_the_fly_fallback(self, layer: torch.nn.Module) -> jax.Array:
-        """Standard JAX fallback for when Pallas cannot be used (e.g. actorder)."""
-        w_packed = jax_view(layer.weight_packed)
-        w_scale = jax_view(layer.weight_scale)
-        
-        weight = ct_u32_unpack_u4(w_packed)
+    def _dequantize_to_bf16(self, weight_packed: jax.Array, weight_scale: jax.Array, 
+                           zero_point_packed: Optional[jax.Array]) -> jax.Array:
+        """Standard sequential group dequantization."""
+        weight_int8 = self._unpack_packed_tensor(weight_packed)
+        out_features, in_features = weight_int8.shape
+        w_bf16 = weight_int8.astype(jnp.bfloat16)
 
-        input_size = weight.shape[1]
-        effective_group_size = input_size if self.group_size == -1 else self.group_size
-        num_groups = input_size // effective_group_size
-        weight = weight.reshape((weight.shape[0], num_groups, effective_group_size))
+        effective_gs = in_features if self.group_size == -1 else self.group_size
+        num_groups = in_features // effective_gs
 
-        scales = jnp.expand_dims(w_scale, -1)
-        weight_f = weight.astype(jnp.bfloat16)
+        # Reshape to expose the groups: (out_features, num_groups, group_size)
+        w_grouped = w_bf16.reshape((out_features, num_groups, effective_gs))
+        scale_expanded = jnp.expand_dims(weight_scale, -1)
 
-        if not self.symmetric and hasattr(layer, "weight_zero_point"):
-            zp_packed = jax_view(layer.weight_zero_point)
-            zero_point = ct_u32_unpack_u4(zp_packed)
-            zp = jnp.expand_dims(zero_point.astype(jnp.bfloat16), -1)
-            weight_deq = (weight_f - zp) * scales
+        if zero_point_packed is not None:
+            # Unpack zero points if asymmetric
+            # ZP is usually stored as [In/Pack, Out] or [Out, In/Pack]
+            zp_int8 = self._unpack_packed_tensor(zero_point_packed.T).T
+            zp_bf16 = jnp.expand_dims(zp_int8.astype(jnp.bfloat16), -1)
+            w_deq_grouped = (w_grouped - zp_bf16) * scale_expanded
         else:
+            # Shift by implicit offset if symmetric
             offset = jnp.array(1 << (self.num_bits - 1), dtype=jnp.bfloat16)
-            weight_deq = (weight_f - offset) * scales
-
-        weight_deq = weight_deq.reshape((weight_deq.shape[0], -1))
-
-        return weight_deq
+            w_deq_grouped = (w_grouped - offset) * scale_expanded
+        
+        return w_deq_grouped.reshape((out_features, in_features))
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
@@ -451,86 +313,49 @@ class VllmCompressedTensorsWNA16(CompressedTensorsScheme):
     def _apply_fused(self, layer: torch.nn.Module, x: torch.Tensor,
                      bias: Optional[torch.Tensor]) -> torch.Tensor:
         x_jax = jax_view(x)
-        bias_jax = jax_view(bias) if bias is not None else None
+        
+        # If we permuted weights at load time, we must permute x at runtime
+        if hasattr(layer, "sort_indices"):
+            sort_idx = jax_view(layer.sort_indices)
+            x_jax = x_jax[..., sort_idx]
 
-        # If weights were pre-shuffled (actorder), permute activations to
-        # match the new column order so the matmul remains correct.
-        if hasattr(layer, 'q_perm'):
-            x_jax = x_jax[:, jax_view(layer.q_perm)]
+        weight_packed = jax_view(layer.weight_packed)
+        w_scale = jax_view(layer.weight_scale)
+        zp = jax_view(layer.weight_zero_point) if hasattr(layer, "weight_zero_point") else None
+        
+        weight_bf16 = self._dequantize_to_bf16(weight_packed, w_scale, zp)
+        outs = jnp.einsum("bd,fd->bf", x_jax, weight_bf16)
 
-        # --- PALLAS KERNEL PATH ---
-        if (not self.has_g_idx
-            and self.symmetric
-            and self.num_bits == 4):
-            
-            w_packed = jax_view(layer.weight_packed)
-            # Transpose packed weights because PyTorch linear loads them as [Out, In], 
-            # but matmul expects [In, Out].
-            w_packed_t = w_packed.T
-            w_scale = jax_view(layer.weight_scale).T
-            
-            # Execute ultra-fast local memory kernel
-            outs = apply_pallas_fused_linear(
-                x_jax, w_packed_t, w_scale,
-                BM=16, BK=128, BN=128,
-                group_size=self.group_size,
-                pack_factor=self.pack_factor
-            )
-            
-            if bias_jax is not None and not layer.skip_bias_add:
-                outs += bias_jax
+        if bias is not None and not layer.skip_bias_add:
+            outs += jax_view(bias)
 
-        # --- JAX FALLBACK PATH ---
-        else:
-            weight_deq = self._dequantize_on_the_fly_fallback(layer)
-            lin_weights = process_linear_weights(
-                LinearWeights(
-                    weight=weight_deq,
-                    weight_scale=None,
-                    zero_point=None,
-                    bias=bias_jax,
-                ),
-                fused=True,
-                output_sizes=self.linear_config.output_sizes,
-                reorder_size=self.linear_config.n_shards,
-            )
-            outs = jnp.einsum("bd,fd->bf", x_jax, lin_weights.weight)
-            if lin_weights.bias is not None and not layer.skip_bias_add:
-                outs += lin_weights.bias
-
-        # Handle post-processing (TPU sharding/concatenation)
         outs = slice_sharded_tensor_for_concatenation(
-            outs, self.linear_config.output_sizes, self.linear_config.n_shards)
+            outs, self.linear_config.output_sizes,
+            self.linear_config.n_shards)
         out = jnp.concatenate(outs, axis=-1)
         return torch_view(out)
 
     def _apply_split(self, layer: torch.nn.Module, x: torch.Tensor,
                      bias: Optional[torch.Tensor]) -> torch.Tensor:
+        assert isinstance(layer.weight_packed, torch.nn.ParameterList)
         x_jax = jax_view(x)
-        bias_jax = jax_view(bias) if bias is not None else None
-
-        if hasattr(layer, 'q_perm'):
-            x_jax = x_jax[:, jax_view(layer.q_perm)]
-
-        weight_deq = self._dequantize_on_the_fly_fallback(layer)
-
-        lin_weights = process_linear_weights(
-            LinearWeights(
-                weight=weight_deq,
-                weight_scale=None,
-                zero_point=None,
-                bias=bias_jax,
-            ),
-            fused=False,
-            output_sizes=self.linear_config.output_sizes,
-            reorder_size=self.linear_config.n_shards,
-        )
+        
+        if hasattr(layer, "sort_indices"):
+            sort_idx = jax_view(layer.sort_indices)
+            x_jax = x_jax[..., sort_idx]
 
         outs = []
-        for i, weight in enumerate(lin_weights.weight):
-            out = jnp.einsum("bd,fd->bf", x_jax, weight)
-            if lin_weights.bias is not None and not layer.skip_bias_add:
-                out += lin_weights.bias[i]
+        for i in range(len(layer.weight_packed)):
+            weight_packed = jax_view(layer.weight_packed[i])
+            w_scale = jax_view(layer.weight_scale[i])
+            zp = jax_view(layer.weight_zero_point[i]) if hasattr(layer, "weight_zero_point") else None
+            
+            weight_bf16 = self._dequantize_to_bf16(weight_packed, w_scale, zp)
+            out = jnp.einsum("bd,fd->bf", x_jax, weight_bf16)
+
+            if bias is not None and not layer.skip_bias_add:
+                out += jax_view(bias[i])
+
             outs.append(out)
 
         out = jnp.concatenate(outs, axis=-1)
