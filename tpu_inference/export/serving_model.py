@@ -61,3 +61,25 @@ def load_native_model(nativemodel_path: str) -> dict[str, jax_export.Exported]:
             os.path.join(model_fn_dir, method_metadata["file_path"])
         )
     return model_fn_map
+
+
+def save_native_model(nativemodel_path: str,
+                      model_fn_map: dict[str, jax_export.Exported]) -> None:
+    """Saves the native model to the nativemodel_path."""
+    model_fn_dir = os.path.join(nativemodel_path, "model_fn")
+    os.makedirs(model_fn_dir, exist_ok=True)
+
+    metadata = {}
+    for method_key, exported in model_fn_map.items():
+        file_name = f"{method_key}.pb"
+        file_path = os.path.join(model_fn_dir, file_name)
+        save_jax_exported(exported, file_path)
+        metadata[method_key] = {
+            "file_path": file_name,
+            "calling_convention_version": exported.calling_convention_version
+        }
+
+    metadata_path = os.path.join(model_fn_dir, "metadata.json")
+    with open(metadata_path, "w") as f:
+        json.dump(metadata, f, indent=4)
+
