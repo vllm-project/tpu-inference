@@ -64,8 +64,6 @@ def main(args: dict):
         sampling_params.top_p = top_p
     if top_k is not None:
         sampling_params.top_k = top_k
-    
-    sampling_params.logprobs = 5
 
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
@@ -135,15 +133,6 @@ def main(args: dict):
         prompt = output.prompt
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
-        
-        generated_output = output.outputs[0]
-        if generated_output.logprobs is not None:
-            print("Logprobs for generated tokens:")
-            for i, logprob_info in enumerate(generated_output.logprobs):
-                print(f"  Token {i}:")
-                for token_id, logprob_obj in logprob_info.items():
-                    print(f"    - {logprob_obj.decoded_token!r}: {logprob_obj.logprob:.4f}")
-        
         print("-" * 50)
 
 
