@@ -24,6 +24,28 @@ from tpu_inference.logger import init_logger
 logger = init_logger(__name__)
 
 
+def create_checkpoint_mngr(path, enable_colocated_python: bool = False, enable_single_replica: bool = False) -> ocp.CheckpointManager:
+    item_handlers = {
+        "state": ocp.PyTreeCheckpointHandler(
+            use_ocdbt=True,
+            use_zarr3=True,
+        ),
+    }
+    options = ocp.CheckpointManagerOptions(
+        max_to_keep=3,
+        create=True,
+        enable_async_checkpointing=False,
+    )
+    mngr = ocp.CheckpointManager(
+        path,
+        options=options,
+        item_names=('state',),
+        item_handlers=item_handlers,
+    )
+    _maybe_register_colocated_python_handlers(
+        enable_colocated_python, enable_single_replica)
+    return mngr
+
 def _maybe_register_colocated_python_handlers(
     enable_colocated_python: bool,
     enable_single_replica: bool = False,
@@ -64,9 +86,6 @@ def save_checkpoint(
     """
     logger.info(f"Saving checkpoint to {path} (step {step})...")
 
-    _maybe_register_colocated_python_handlers(
-        enable_colocated_python, enable_single_replica)
-
     # Ensure the path exists
     os.makedirs(path, exist_ok=True)
 
@@ -77,16 +96,15 @@ def save_checkpoint(
     else:
         save_state = state
 
-    if use_checkpoint_manager:
-        options = ocp.CheckpointManagerOptions(max_to_keep=3)
-        mngr = ocp.CheckpointManager(path, options=options, item_names=('state',))
-        mngr.save(step, args=ocp.args.Composite(state=ocp.args.StandardSave(save_state)))
-        mngr.wait_until_finished()
-    else:
-        checkpointer = ocp.StandardCheckpointer()
-        save_path = os.path.join(path, f"checkpoint_{step}")
-        checkpointer.save(save_path, save_state, force=True)
-        checkpointer.wait_until_finished()
+    mngr = create_checkpoint_mngr(path, enable_colocated_python, enable_single_replica)
+
+    mngr.save(
+        step,
+        args=ocp.args.Composite(
+            state=ocp.args.PyTreeSave(save_state),
+        ),
+    )
+    mngr.wait_until_finished()
 
     logger.info(f"Checkpoint saved successfully to {path}")
 
@@ -118,34 +136,25 @@ def load_checkpoint(
     """
     logger.info(f"Loading checkpoint from {path}...")
 
-    _maybe_register_colocated_python_handlers(
-        enable_colocated_python, enable_single_replica)
-
     is_nnx = isinstance(abstract_state, nnx.State)
     if is_nnx:
         # StandardRestore expects a PyTree of ShapeDtypeStruct
         restore_abstract = abstract_state.to_pure_dict()
     else:
         restore_abstract = abstract_state
+    mngr = create_checkpoint_mngr(path, enable_colocated_python, enable_single_replica)
 
-    if use_checkpoint_manager:
-        mngr = ocp.CheckpointManager(path)
-        if step is None:
-            step = mngr.latest_step()
-        if step is None:
-            raise ValueError(f"No checkpoints found in {path}")
-        restored = mngr.restore(
-            step, args=ocp.args.Composite(state=ocp.args.StandardRestore(restore_abstract)))
-        restored_state = restored.state
-    else:
-        checkpointer = ocp.StandardCheckpointer()
-        if step is not None:
-            load_path = os.path.join(path, f"checkpoint_{step}")
-        else:
-            load_path = path
-
-        restored_state = checkpointer.restore(
-            load_path, target=restore_abstract)
+    if step is None:
+        step = mngr.latest_step()
+    if step is None:
+        raise ValueError(f"No checkpoints found in {path}")
+    restored = mngr.restore(
+        step,
+        args=ocp.args.Composite(
+            state=ocp.args.PyTreeRestore(restore_abstract),
+        ),
+    )
+    restored_state = restored.state
 
     if is_nnx:
         # Wrap back into nnx.State
