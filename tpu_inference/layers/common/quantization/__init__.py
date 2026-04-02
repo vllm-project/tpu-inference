@@ -70,6 +70,18 @@ def e8m0_to_fp32(u8: jax.Array) -> jax.Array:
     return jnp.ldexp(ones, exponents)
 
 
+def gptq_i32_unpack_u4(gptq_i32_packed: jax.Array) -> jax.Array:
+    """Unpack u4 tensor that was packed into i32 in standard sequential order (GPTQ)."""
+
+    # GPTQ stores weights as int32; reinterpret as uint32 for bitcast.
+    packed_u32 = gptq_i32_packed.view(jnp.uint32)
+    u4 = jax.lax.bitcast_convert_type(packed_u32, jnp.uint4)
+
+    # GPTQ uses standard sequential packing (0,1,2,...,7), so no reordering
+    # is needed (unlike AWQ which uses interleaved order).
+    return jnp.reshape(u4, u4.shape[:-2] + (-1, ))
+
+
 def awq_u32_unpack_u4(awq_u32_packed: jax.Array) -> jax.Array:
     """Unpack u4 tensor that was packed into u32 in awq ordering."""
 
