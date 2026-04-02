@@ -55,8 +55,8 @@ from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   ShardingAxisName,
                                                   ShardingConfigManager)
 from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
-from tpu_inference.layers.jax.sample.sampling import (
-    compute_logprobs, compute_processed_logprobs, gather_logprobs, sample)
+from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
+                                                      gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
@@ -928,7 +928,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if spec_decode_metadata is None:
             with self.maybe_forbid_compile:
-                next_tokens = sample(
+                next_tokens, processed_logits = sample(
                     step_rng,
                     self.mesh,
                     logits,
@@ -967,14 +967,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         with self.maybe_forbid_compile:
             if tpu_sampling_metadata.logprobs:
                 if self.model_config.logprobs_mode == "processed_logprobs":
-                    logprobs = \
-                        self._compute_and_gather_processed_logprobs(
-                            logits, next_tokens,
-                            self.model_config.max_logprobs,
-                            tpu_sampling_metadata)
+                    logits = processed_logits
                 else:
-                    logprobs = self._compute_and_gather_logprobs(
-                        logits, next_tokens, self.model_config.max_logprobs)
+                    logits = logits.astype(jnp.float32)
+                # --- DEBUG ---
+                run_max_logprobs = self.model_config.max_logprobs
+                print(f"\n[DEBUG-RUN] logits dtype: {logits.dtype}, shape: {logits.shape}")
+                print(f"[DEBUG-RUN] next_tokens dtype: {next_tokens.dtype}, shape: {next_tokens.shape}")
+                print(f"[DEBUG-RUN] max_logprobs: {run_max_logprobs}")
+                # --- DEBUG ---
+
+                logprobs = self._compute_and_gather_logprobs(
+                    logits, next_tokens, self.model_config.max_logprobs)
                 logprobs = _jax_logprobs_copy_to_host_async(logprobs)
             else:
                 logprobs = None
@@ -1141,14 +1145,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     @jax.jit(static_argnames=("max_logprobs", ))
     def _compute_and_gather_logprobs(logits, next_tokens, max_logprobs):
         logprobs = compute_logprobs(logits)
-        return gather_logprobs(logprobs, next_tokens, max_logprobs)
-
-    @staticmethod
-    @jax.jit(static_argnames=("max_logprobs", ))
-    def _compute_and_gather_processed_logprobs(logits, next_tokens,
-                                               max_logprobs,
-                                               tpu_sampling_metadata):
-        logprobs = compute_processed_logprobs(logits, tpu_sampling_metadata)
         return gather_logprobs(logprobs, next_tokens, max_logprobs)
 
     def _prepare_dp_input_metadata(self,

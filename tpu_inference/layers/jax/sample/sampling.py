@@ -86,65 +86,30 @@ def sample(
     if not tpu_sampling_metadata.do_sampling:
         return greedy_sampled
 
-    logits = logits.astype(jnp.float32)
+    logits_f32 = logits.astype(jnp.float32)
 
-    logits = _apply_sampling_transforms(logits, tpu_sampling_metadata)
+    processed_logits = _apply_sampling_transforms(logits_f32,
+                                                  tpu_sampling_metadata)
 
     # (batch_size,)
     next_tokens = jax.random.categorical(rng, logits)
     # Note: avoid using the sample result when temperature < _SAMPLING_EPS
     # If temperature < 0, logits /= temperatures will flip the result, causing error.
-    ret = jnp.where(tpu_sampling_metadata.temperature < _SAMPLING_EPS,
-                    greedy_sampled, next_tokens)
+    is_greedy = tpu_sampling_metadata.temperature < _SAMPLING_EPS
+    ret_tokens = jnp.where(is_greedy, greedy_sampled, next_tokens)
+    ret_logits = jnp.where(jnp.expand_dims(is_greedy, axis=-1), logits_f32,
+                           processed_logits)
     # Replicate the result so that in multi-controller jax setup
     # (i.e. Ray based multi-host setup), we won't hit error like
     # RuntimeError: Fetching value for `jax.Array` that spans non-addressable
     # (non process local) devices is not possible.
-    return jax.lax.with_sharding_constraint(ret, NamedSharding(mesh, P()))
+    return (jax.lax.with_sharding_constraint(ret_tokens,
+                                             NamedSharding(mesh,
+                                                           P())), ret_logits)
 
 
 def compute_logprobs(logits: jax.Array) -> jax.Array:
     return jax.nn.log_softmax(logits, axis=-1)
-
-
-def compute_processed_logprobs(
-    logits: jax.Array,
-    tpu_sampling_metadata: TPUSupportedSamplingMetadata,
-) -> jax.Array:
-    """Compute logprobs from logits after applying sampling transforms.
-
-    This applies temperature scaling, top-k, and top-p filtering to the
-    raw logits before computing log_softmax, aligning with the GPU
-    ``processed_logprobs`` mode.  The transforms applied here are identical
-    to those used in :func:`sample` (via :func:`_apply_sampling_transforms`).
-    For greedy requests (temperature < _SAMPLING_EPS) the raw logprobs are
-    returned unchanged because no sampling transforms are meaningful.
-
-    Args:
-        logits: (B, vocab_size) raw logits (any dtype – will be cast to f32).
-        tpu_sampling_metadata: Sampling parameters.
-        
-    Returns:
-        (B, vocab_size) log-probabilities computed on the processed logits.
-    """
-    logits = logits.astype(jnp.float32)
-
-    if not tpu_sampling_metadata.do_sampling:
-        # All requests are greedy – no transforms to apply.
-        return jax.nn.log_softmax(logits, axis=-1)
-
-    raw_logprobs = jax.nn.log_softmax(logits, axis=-1)
-
-    processed_logits = _apply_sampling_transforms(logits,
-                                                  tpu_sampling_metadata)
-    processed_logprobs = jax.nn.log_softmax(processed_logits, axis=-1)
-
-    # For greedy requests (temperature < eps), fall back to raw logprobs
-    # because the temperature division would produce garbage.
-    is_greedy = jnp.expand_dims(tpu_sampling_metadata.temperature
-                                < _SAMPLING_EPS,
-                                axis=-1)
-    return jnp.where(is_greedy, raw_logprobs, processed_logprobs)
 
 
 def gather_logprobs(

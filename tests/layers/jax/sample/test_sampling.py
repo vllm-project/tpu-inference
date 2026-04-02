@@ -13,12 +13,16 @@
 # limitations under the License.
 
 # /home/pooyam/tpu_inference/tests/models/jax/layers/test_sampling.py
+import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.experimental import mesh_utils
+from jax.sharding import Mesh
 from vllm.v1.outputs import LogprobsTensors
 
-from tpu_inference.layers.jax.sample.sampling import (
-    compute_logprobs, compute_processed_logprobs, gather_logprobs)
+from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
+                                                      gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
@@ -141,6 +145,15 @@ class TestProcessedLogprobs:
             logprobs=True,
         )
 
+    @staticmethod
+    def _get_fake_mesh():
+        """Create a fake mesh for testing purposes."""
+        devices = jax.devices("cpu")
+        mesh_shape = (1, )
+        axis_names = (ShardingAxisName.ATTN_DATA, )
+        device_mesh = mesh_utils.create_device_mesh(mesh_shape, devices)
+        return Mesh(device_mesh, axis_names)
+
     def test_processed_logprobs_with_temperature(self):
         """Temperature scaling should change the logprobs distribution."""
         logits = jnp.array([[1.0, 2.0, 3.0]], dtype=jnp.float32)
@@ -148,7 +161,9 @@ class TestProcessedLogprobs:
         raw_logprobs = compute_logprobs(logits)
 
         metadata = self._make_sampling_metadata(1, temperature=0.5)
-        processed = compute_processed_logprobs(logits, metadata)
+        _, processed_logits = sample(jax.random.PRNGKey(0),
+                                     self._get_fake_mesh(), logits, metadata)
+        processed = compute_logprobs(processed_logits)
 
         # With temperature < 1, processed logprobs should be more peaked
         # (higher max, lower others) compared to raw logprobs.
@@ -165,7 +180,10 @@ class TestProcessedLogprobs:
         temperature = 0.8
 
         metadata = self._make_sampling_metadata(1, temperature=temperature)
-        processed = compute_processed_logprobs(logits, metadata)
+        fake_mesh = self._get_fake_mesh()
+        _, processed_logits = sample(jax.random.PRNGKey(0), fake_mesh, logits,
+                                     metadata)
+        processed = compute_logprobs(processed_logits)
 
         expected = jnp.log(
             jnp.exp(logits / temperature) /
@@ -177,7 +195,9 @@ class TestProcessedLogprobs:
         logits = jnp.array([[1.0, 5.0, 3.0, 2.0, 4.0]], dtype=jnp.float32)
 
         metadata = self._make_sampling_metadata(1, temperature=1.0, top_k=2)
-        processed = compute_processed_logprobs(logits, metadata)
+        _, processed_logits = sample(jax.random.PRNGKey(0),
+                                     self._get_fake_mesh(), logits, metadata)
+        processed = compute_logprobs(processed_logits)
 
         # Top-2 tokens are indices 1 (5.0) and 4 (4.0).
         # After masking, only those two should have non-tiny logprobs.
@@ -195,7 +215,9 @@ class TestProcessedLogprobs:
         logits = jnp.array([[10.0, 1.0, 0.0, -1.0]], dtype=jnp.float32)
 
         metadata = self._make_sampling_metadata(1, temperature=1.0, top_p=0.5)
-        processed = compute_processed_logprobs(logits, metadata)
+        _, processed_logits = sample(jax.random.PRNGKey(0),
+                                     self._get_fake_mesh(), logits, metadata)
+        processed = compute_logprobs(processed_logits)
 
         # Token 0 has very high probability and should remain.
         processed_np = np.array(processed[0])
@@ -210,6 +232,8 @@ class TestProcessedLogprobs:
 
         # Temperature < _SAMPLING_EPS (1e-5)
         metadata = self._make_sampling_metadata(1, temperature=1e-7)
-        processed = compute_processed_logprobs(logits, metadata)
+        _, processed_logits = sample(jax.random.PRNGKey(0),
+                                     self._get_fake_mesh(), logits, metadata)
+        processed = compute_logprobs(processed_logits)
 
         assert np.allclose(raw_logprobs, processed, atol=1e-6)
