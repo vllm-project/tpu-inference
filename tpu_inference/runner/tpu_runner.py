@@ -513,8 +513,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         min_num_reqs = max(MIN_NUM_SEQS, next_power_of_2(self.dp_size))
         self.num_reqs_paddings = runner_utils.get_req_paddings(
             min_req_size=min_num_reqs, max_req_size=self.max_num_reqs)
-        if 1 not in self.num_reqs_paddings:
-            self.num_reqs_paddings = sorted(self.num_reqs_paddings + [1])
         self.num_reqs_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_reqs_paddings
         ]
@@ -969,20 +967,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         with self.maybe_forbid_compile:
             if tpu_sampling_metadata.logprobs:
-                # ====== DEBUG ======
-                print("\n" + "="*50, flush=True)
-                print("DEBUG: start Logprobs calculation", flush=True)
-                print(f"DEBUG: logits shape = {logits.shape}", flush=True)
-                print(f"DEBUG: next_tokens shape = {next_tokens.shape}", flush=True)
-                print(f"DEBUG: tpu_sampling_metadata.do_sampling = {tpu_sampling_metadata.do_sampling}", flush=True)
-                print(f"DEBUG: self.model_config.max_logprobs = {self.model_config.max_logprobs}", flush=True)
-
-                print(f"DEBUG: current input_batch.num_reqs = {self.input_batch.num_reqs}", flush=True)
-                print(f"DEBUG: get padded_num_reqs = {padded_num_reqs}", flush=True)
-                print("="*50 + "\n", flush=True)
-                # ====== DEBUG ======
-                # logprobs = self._compute_and_gather_logprobs(
-                #     logits, next_tokens, self.model_config.max_logprobs)
                 if self.model_config.logprobs_mode == "processed_logprobs":
                     logprobs = \
                         self._compute_and_gather_processed_logprobs(

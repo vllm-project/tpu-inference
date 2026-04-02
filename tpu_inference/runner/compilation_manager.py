@@ -528,8 +528,6 @@ class CompilationManager:
     def _precompile_sampling(self) -> None:
         logger.info("Compiling sampling with different input shapes.")
         hsize = self.runner.model_config.get_vocab_size()
-        if 1 not in self.runner.num_reqs_paddings:
-            self.runner.num_reqs_paddings = sorted([1] + list(self.runner.num_reqs_paddings))
         for num_reqs in self.runner.num_reqs_paddings:
             # `logits_sharding` need to be consistent with
             # compute_logits_fn's output sharding to avoid serving
@@ -621,8 +619,6 @@ class CompilationManager:
         hsize = self.runner.model_config.get_vocab_size()
         is_processed = (
             self.runner.model_config.logprobs_mode == "processed_logprobs")
-        if 1 not in self.runner.num_reqs_paddings:
-            self.runner.num_reqs_paddings = sorted([1] + list(self.runner.num_reqs_paddings))
         for num_reqs in self.runner.num_reqs_paddings:
             dp_size = self.runner.vllm_config.sharding_config.total_dp_size
             logits_sharding = NamedSharding(
@@ -658,6 +654,10 @@ class CompilationManager:
                     self.runner.mesh, (temperature, top_k, top_p),
                     sharding=sampling_metadata_sharding)
                 for do_sampling in (True, False):
+                    # JAX caches compiled functions based on Shape, Data Type, and Sharding.
+                    # Creating a dummy (1,) tensor ensure the Shape, Data Type, and Sharding matches.
+                    # The device_put with NamedSharding tells JAX exactly how the memory is laid out. 
+                    # If the layout during pre-compilation doesn't match the runtime layout, JAX will attempt to re-compile the function.
                     dummy_shape = (1,) 
                     _cache_collision_dummy = jnp.zeros(dummy_shape, dtype=jnp.int32)
                     _cache_collision_dummy = jax.device_put(
