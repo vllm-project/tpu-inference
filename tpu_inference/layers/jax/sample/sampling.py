@@ -82,30 +82,30 @@ def sample(
         # instead of being replicated.
         logits = jax.lax.with_sharding_constraint(
             logits, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
-    greedy_sampled = jnp.argmax(logits, axis=-1)
-    if not tpu_sampling_metadata.do_sampling:
-        return greedy_sampled
-
+        
+    greedy_tokens = jnp.argmax(logits, axis=-1)
     logits_f32 = logits.astype(jnp.float32)
-
-    processed_logits = _apply_sampling_transforms(logits_f32,
-                                                  tpu_sampling_metadata)
-
-    # (batch_size,)
-    next_tokens = jax.random.categorical(rng, logits)
-    # Note: avoid using the sample result when temperature < _SAMPLING_EPS
-    # If temperature < 0, logits /= temperatures will flip the result, causing error.
-    is_greedy = tpu_sampling_metadata.temperature < _SAMPLING_EPS
-    ret_tokens = jnp.where(is_greedy, greedy_sampled, next_tokens)
-    ret_logits = jnp.where(jnp.expand_dims(is_greedy, axis=-1), logits_f32,
-                           processed_logits)
+    if not tpu_sampling_metadata.do_sampling:
+        ret_tokens = greedy_tokens
+        ret_logits = logits_f32
+    else:
+        processed_logits = _apply_sampling_transforms(logits_f32,
+                                                    tpu_sampling_metadata)
+        # (batch_size,)
+        next_tokens = jax.random.categorical(rng, processed_logits)
+        # Note: avoid using the sample result when temperature < _SAMPLING_EPS
+        # If temperature < 0, logits /= temperatures will flip the result, causing error.
+        is_greedy = tpu_sampling_metadata.temperature < _SAMPLING_EPS
+        ret_tokens = jnp.where(is_greedy, greedy_tokens, next_tokens)
+        ret_logits = jnp.where(jnp.expand_dims(is_greedy, axis=-1), logits_f32,
+                            processed_logits)
     # Replicate the result so that in multi-controller jax setup
     # (i.e. Ray based multi-host setup), we won't hit error like
     # RuntimeError: Fetching value for `jax.Array` that spans non-addressable
     # (non process local) devices is not possible.
-    return (jax.lax.with_sharding_constraint(ret_tokens,
-                                             NamedSharding(mesh,
-                                                           P())), ret_logits)
+    next_tokens = jax.lax.with_sharding_constraint(
+        ret_tokens, NamedSharding(mesh, P()))
+    return next_tokens, ret_logits
 
 
 def compute_logprobs(logits: jax.Array) -> jax.Array:
