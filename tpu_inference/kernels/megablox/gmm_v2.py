@@ -1249,8 +1249,8 @@ def _gmm_v2_impl(
       pltpu.VMEM((tiles.tile_m, tiles.tile_n), cfgs.acc_dtype),
       # metadata_ref
       MetadataRef(
-          gm_id_to_group_id=pltpu.SMEM((max_num_gm, ), jnp.int32),
-          gm_id_to_m_offset=pltpu.SMEM((max_num_gm + 1, ), jnp.int32),
+          gm_id_to_group_id=pltpu.SMEM((max_num_gm,), jnp.int32),
+          gm_id_to_m_offset=pltpu.SMEM((max_num_gm + 1,), jnp.int32),
       ),
   ]
 
@@ -1352,7 +1352,7 @@ def make_tgmm_configs(
     out_dtype = lhs.dtype
 
   if acc_dtype is None:
-    acc_dtype = jnp.bfloat16.dtype
+    acc_dtype = jnp.float32.dtype
   if isinstance(tile_info, TileSizes):
     tiles = tile_info
   else:
@@ -1376,7 +1376,7 @@ def tgmm_inner_kernel(
     tiled_out_ref: jax.Array, # [None, tile_k, tile_n]
     # scratch
     partial_out_ref: jax.Array,  # probably we dont need it. delete it later.
-    acc_ref: jax.Array,  # for accumulation.
+    acc_ref: jax.Array,  # for accumulation [tile_k, tile_n]
     metadata_ref: MetadataRef, # contains gm_id_to_group_id and gm_id_to_m_offset in SMEM.
     *,
     cfgs: GmmConfigs,
@@ -1384,12 +1384,26 @@ def tgmm_inner_kernel(
   # NB: grid=(num_n, num_k, num_gm)
   tiled_lhs_ref = tiled_lhs_ref.reshape(-1, tiled_lhs_ref.shape[-1])
   tiled_rhs_ref = tiled_rhs_ref.reshape(-1, tiled_rhs_ref.shape[-1])
+  gm_id = pl.program_id(2)
   
+  prev_gm_id = jnp.where(gm_id > 0, gm_id - 1, 0)
+  is_first_gm = gm_id == 0
+  group_id_changed = (
+      metadata_ref.gm_id_to_group_id[gm_id]
+      != metadata_ref.gm_id_to_group_id[prev_gm_id]
+  )
+  new_group = jnp.logical_or(is_first_gm, group_id_changed)
+
+  @pl.when(new_group)
+  def _():
+    # pl.debug_print("xw32line1342 tiled_lhs_ref={}", tiled_lhs_ref[...])
+    acc_ref[...] = jnp.zeros_like(acc_ref)
+    print("xw32line1387 acc_ref.dtype={}", acc_ref.dtype)
+
   # Now we compute a mask to zero out invalid rows in the LHS/RHS tiles.
   # Why it's needed: The DMA loads tiles aligned to sublane boundaries, but the actual group data may not start/end on those boundaries. For example, with 'size_lhs_sublane=8' and a group spanning rows 5-20:
   # - DMA loads rows 0-23 (aligned to sublane boundary: 0 = 5 - 5%8, 24 = cdiv(20,8)*8)
   # - Rows 0-4 and 20-23 contain data from other groups and must be masked out.
-  gm_id = pl.program_id(2)
   m_start = metadata_ref.gm_id_to_m_offset[gm_id]
   m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
   m_offset = m_start - m_start % cfgs.dims.size_lhs_sublane
@@ -1402,29 +1416,35 @@ def tgmm_inner_kernel(
   rhs_mask = jnp.logical_and(m_start_local <= rhs_iota, rhs_iota < m_end_local)
   rhs_masked = jnp.where(rhs_mask, tiled_rhs_ref[...], 0)
 
-  result = jax.lax.dot_general(
+  acc_ref[...] += jax.lax.dot_general(
       lhs_masked,
       rhs_masked,
       (((0,), (0,)), ((), ())),
       preferred_element_type=jnp.float32,
   )
 
-  prev_gm_id = jnp.where(gm_id > 0, gm_id - 1, 0)
-  is_first_gm = gm_id == 0
-  group_id_changed = (
-      metadata_ref.gm_id_to_group_id[gm_id]
-      != metadata_ref.gm_id_to_group_id[prev_gm_id]
-  )
-  initialize_tiled_out = jnp.logical_or(is_first_gm, group_id_changed)
+  """
+      is_end_of_grid = grid_id == (pl.num_programs(2) - 1)
+    next_grid_id = jnp.where(is_end_of_grid, grid_id, grid_id + 1)
+    next_group = group_ids[next_grid_id]
 
-  @pl.when(initialize_tiled_out)
-  def _():
-    # pl.debug_print("xw32line1342 tiled_lhs_ref={}", tiled_lhs_ref[...])
-    tiled_out_ref[...] = jnp.zeros_like(tiled_out_ref)
+    group_is_changing = jnp.logical_or(is_end_of_grid, group != next_group)
 
-  tiled_out_ref[...] = (tiled_out_ref[...].astype(jnp.float32) + result).astype(
-      tiled_out_ref.dtype
-  )
+    @pl.when(group_is_changing)
+    def _store_accum():
+      to_store = acc_scratch[...]
+      if existing_out is not None:
+        to_store += existing_out[...].astype(jnp.float32)
+      out[...] = to_store.astype(preferred_element_type)
+  """
+  is_last_gm = gm_id == (pl.num_programs(2) - 1)
+  next_gm_id = jnp.where(is_last_gm, gm_id, gm_id + 1)
+  next_group_id = metadata_ref.gm_id_to_group_id[next_gm_id]
+  cur_group_id = metadata_ref.gm_id_to_group_id[gm_id]
+  group_is_changing = jnp.logical_or(is_last_gm, cur_group_id != next_group_id)
+  @pl.when(group_is_changing)
+  def _store_accum():
+    tiled_out_ref[...] = acc_ref[...].astype(tiled_out_ref.dtype)
 
 
 class TgmmIndexMaps:
@@ -1488,7 +1508,7 @@ def tgmm_kernel_main(
     out_ref,  # [num_groups, k, n]
     # scratch memory
     partial_out_ref: jax.Array,  # 
-    acc_ref: jax.Array,  # 
+    acc_ref: jax.Array,  # [tile_k, tile_n]
     metadata_ref: MetadataRef, # contains gm_id_to_group_id and gm_id_to_m_offset in SMEM.
     *, cfgs,
 ):
@@ -1514,7 +1534,7 @@ def tgmm_kernel_main(
     )
     return _
 
-  # jax.lax.fori_loop(0, num_gm, print_metadata, None)
+  jax.lax.fori_loop(0, num_gm, print_metadata, None)
   # debug_print metadata ends.
 
   # 3. Prepare grid, block specs, scratch shapes, etc.
@@ -1596,6 +1616,7 @@ def _tgmm_v2_impl(
   tiles = cfgs.tiles
   jax.debug.print("xw32 line1508 dims={}", dims)
   jax.debug.print("xw32 line1509 tiles={}", tiles)
+  jax.debug.print("xw32 line1510 cfgs={}", cfgs)
   # cfgs=GmmConfigs(tiles=TileSizes(tile_m=128, tile_k=512, tile_n=512), dims=Dimensions(size_m=128, size_k=512, size_n=512, size_group=16, size_lhs_group=16, size_lhs_sublane=16), lhs_cfgs=InputConfigs(quant_dtype=None, quant_block_size=-1, dtype=dtype(bfloat16), has_bias=False, has_scale=False, packing=1, num_quant_blocks=1), rhs_cfgs=InputConfigs(quant_dtype=None, quant_block_size=-1, dtype=dtype(bfloat16), has_bias=False, has_scale=False, packing=1, num_quant_blocks=1), out_dtype=dtype(bfloat16), acc_dtype=dtype(bfloat16), zero_init=False)
 
   # 4. Form pl.pallas_call calling tgmm_kernel_main
@@ -1608,7 +1629,7 @@ def _tgmm_v2_impl(
       # partial_out_ref
       pltpu.VMEM((dims.size_lhs_sublane, tiles.tile_n), cfgs.out_dtype),
       # acc_ref
-      pltpu.VMEM((tiles.tile_m, tiles.tile_n), cfgs.acc_dtype),
+      pltpu.VMEM((tiles.tile_k, tiles.tile_n), cfgs.acc_dtype),
       # metadata_ref
       MetadataRef(
           gm_id_to_group_id=pltpu.SMEM((max_num_gm,), jnp.int32),

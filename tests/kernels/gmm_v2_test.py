@@ -237,11 +237,11 @@ class GmmTest(jtu.JaxTestCase):
       out_size=[512, 1024],
       num_groups=[5, 16, 32],
       group_offset=[0, 2, 3],
-      # batch_size=[128],
+      # batch_size=[512],
       # in_size=[512],
       # out_size=[512],
-      # num_groups=[5],
-      # group_offset=[2],
+      # num_groups=[1],
+      # group_offset=[0],
   )
   def test_tgmm(self, batch_size, in_size, out_size, num_groups, group_offset):
     num_local_groups = num_groups - group_offset
@@ -250,7 +250,7 @@ class GmmTest(jtu.JaxTestCase):
     lhs = jax.random.normal(key1, (batch_size, in_size), dtype=jnp.bfloat16) # [m, k]
     grad = jax.random.normal(key2, (batch_size, out_size), dtype=jnp.bfloat16) # [m, n]
     group_sizes = get_group_sizes(batch_size, num_groups)
-    print("xw32 group_sizes={}", group_sizes)
+    print("xw32 test line241 group_sizes={}", group_sizes)
     # if batch_size=128, num_groups=3, an example group_size is group_sizes=Array([14, 14,  5,  7,  8,  2,  4, 10, 11,  2, 14,  0,  9,  8, 13,  7].
     group_offset = jnp.array(group_offset, dtype=jnp.int32)
 
