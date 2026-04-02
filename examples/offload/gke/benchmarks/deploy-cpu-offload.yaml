@@ -25,6 +25,12 @@ spec:
     metadata:
       labels:
         app: tpu-offline-inference
+      #  Uncomment we you need profiler. Export profiler reports to your GCS bucket
+      # annotations:
+      #   gke-gcsfuse/volumes: "true"
+      #   gke-gcsfuse/memory-limit: "50Gi"
+      #   gke-gcsfuse/cpu-limit: "2"
+      #   gke-gcsfuse/ephemeral-storage-limit: "200Gi"
     spec:
       nodeSelector:
         cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
@@ -37,17 +43,19 @@ spec:
             - |
               # WARNING: This changes the HOST memory settings, not just the container.
               # Required to prevent vLLM crashes due to memory mapping limits.
-              sysctl -w vm.max_map_count=8388608
+              sysctl -w vm.max_map_count=33554432
 
               # Check if the VFIO IOMMU module parameter exists, and if so, increase the
               # limit on DMA mappings. This allows the TPU driver to pin and map a
               # larger number of memory pages for direct hardware access.
               if [ -f /sys/module/vfio_iommu_type1/parameters/dma_entry_limit ]; then
-                echo 2000000 > /sys/module/vfio_iommu_type1/parameters/dma_entry_limit
-                echo "Successfully increased dma_entry_limit to 2000000"
+                echo 8000000 > /sys/module/vfio_iommu_type1/parameters/dma_entry_limit
+                echo "Successfully increased dma_entry_limit to 8000000"
               else
                 echo "Warning: vfio_iommu_type1 module parameter not found. Ensure the module is loaded."
               fi
+
+              echo "Final vm.max_map_count: $(cat /proc/sys/vm.max_map_count)"
           securityContext:
             privileged: true
       containers:
@@ -56,8 +64,31 @@ spec:
         imagePullPolicy: Always
         command: ["/bin/sh", "-c"]
         args:
-        - "vllm serve meta-llama/Llama-3.3-70B-Instruct --kv-transfer-config '{\"kv_connector\":\"TPUOffloadConnector\",\"kv_role\":\"kv_both\",\"kv_connector_module_path\":\"tpu_inference.offload.tpu_offload_connector\"}' --port 8000 --enable-chunked-prefill --tensor-parallel-size 8 --seed 42 --enable_prefix_caching --gpu-memory-utilization 0.9"
+        - |
+
+          mkdir -p /tmp/prometheus_multiproc
+          
+          # # Setup profiler directory dynamically
+          # profiler_dir="/mnt/gcs/benchmark_trace/${PROFILER_DIR_NAME}"
+          # mkdir -p "${profiler_dir}"
+          # PROFILER_CONFIG_JSON='{"profiler": "torch", "torch_profiler_dir": "'"${profiler_dir}"'"}'
+          
+          # Run vLLM
+          vllm serve Qwen/Qwen3-32B \
+            --kv-transfer-config '{"kv_connector":"TPUOffloadConnector","kv_connector_module_path":"tpu_inference.offload.tpu_offload_connector","kv_role":"kv_both"}' \
+            # --profiler-config "${PROFILER_CONFIG_JSON}" \
+            --port 8000 \
+            --enable-chunked-prefill \
+            --tensor-parallel-size 8 \
+            --seed 42 \
+            --enable_prefix_caching \
+            --gpu-memory-utilization 0.9 
         env:
+        # ADDED: Variable to control the profiler output directory
+        # - name: PROFILER_DIR_NAME
+        #   value: <your-profiler-dir>
+        - name: PROMETHEUS_MULTIPROC_DIR
+          value: "/tmp/prometheus_multiproc"
         - name: HUGGING_FACE_HUB_TOKEN
           valueFrom:
             secretKeyRef:
@@ -69,12 +100,6 @@ spec:
           value: "4096"
         - name: TPU_OFFLOAD_NUM_STAGING_BLOCKS
           value: "256"
-        # config the pre-mapped CPU buffer for TPUs
-        # https://docs.cloud.google.com/tpu/docs/performance-guide#tpu_model_performance
-        - name: TPU_PREMAPPED_BUFFER_SIZE
-          value: "68719476736"  # 64 GB
-        - name: TPU_PREMAPPED_BUFFER_TRANSFER_THRESHOLD_BYTES
-          value: "68719476736"  # 64 GB
         ports:
         - containerPort: 8000
         resources:
@@ -82,3 +107,14 @@ spec:
             google.com/tpu: 8
           limits:
             google.com/tpu: 8
+      #   volumeMounts:
+      #   - name: gcs-bucket
+      #     mountPath: /mnt/gcs
+      # serviceAccountName: kvcache-sa # Ensure this KSA is bound to your Workload Identity
+      # volumes:
+      # - name: gcs-bucket
+      #   csi:
+      #     driver: gcsfuse.csi.storage.gke.io
+      #     volumeAttributes:
+      #       bucketName: <your-gcs-bucket-name>
+      #       mountOptions: "implicit-dirs"
