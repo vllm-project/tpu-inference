@@ -107,6 +107,7 @@ class TpuPlatform(Platform):
         "MOE_REQUANTIZE_WEIGHT_DTYPE",
         "USE_JAX_PROFILER_SERVER",
         "JAX_PROFILER_SERVER_PORT",
+        "DRAFT_MODEL_IMPL_TYPE",
     ]
 
     @classmethod
