@@ -228,10 +228,14 @@ def main(args):
     req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
         req_data.engine_args.limit_mm_per_prompt or {})
 
-    engine_args = asdict(req_data.engine_args) | {
-        "seed": args.seed,
-        "disable_mm_preprocessor_cache": args.disable_mm_preprocessor_cache,
-    }
+    engine_args = asdict(req_data.engine_args)
+    if args.seed is not None:
+        engine_args["seed"] = args.seed
+
+    if engine_args.get("compilation_config") is None:
+        engine_args["compilation_config"] = {}
+    engine_args["compilation_config"]["cudagraph_capture_sizes"] = []
+
     llm = LLM(**engine_args)
 
     # Don't want to check the flag multiple times, so just hijack `prompts`.
