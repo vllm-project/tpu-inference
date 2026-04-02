@@ -946,7 +946,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 rejection_rng = step_rng
             bonus_logits = self._select_from_array_fn(
                 logits, spec_decode_metadata.bonus_logits_indices)
-            bonus_token_ids = sample(
+            bonus_token_ids, _ = sample(
                 bonus_rng,
                 self.mesh,
                 bonus_logits,
