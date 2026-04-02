@@ -626,21 +626,12 @@ class CompilationManager:
                 PartitionSpec(ShardingAxisName.MLP_DATA,
                               ShardingAxisName.MLP_TENSOR))
             token_ids_sharding = NamedSharding(
-                # self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA, ))
                 self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA, ))  if dp_size>1 else NamedSharding(
                 self.runner.mesh, PartitionSpec())
             logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
                                                logits_sharding)
             token_ids = self._create_dummy_tensor((num_reqs, ), jnp.int32,
                                                   token_ids_sharding)
-            # self._run_compilation(
-            #     f"worker{self.runner.rank} gather_logprobs",
-            #     self.runner._compute_and_gather_logprobs,
-            #     logits,
-            #     token_ids,
-            #     self.runner.model_config.max_logprobs,
-            #     num_reqs=num_reqs,
-            # )
             if is_processed:
                 # Precompile processed_logprobs path which needs
                 # sampling metadata to apply temperature/top-k/top-p.
