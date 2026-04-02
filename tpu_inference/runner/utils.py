@@ -150,6 +150,13 @@ class ForbidCompile:
         # Store the original function
         self._original_func = pxla._cached_lowering_to_hlo
         original_cached_func = self._original_func
+        # Prepare trackback such that when exception triggers,
+        # we can show where the call that triggered the compilation is.
+        tb = None
+        try:
+            raise Exception()
+        except Exception as e:
+            tb = e.__traceback__
 
         # Create a wrapper
         @functools.wraps(original_cached_func)
@@ -167,7 +174,7 @@ class ForbidCompile:
 
             # Check if a cache miss occurred
             if misses_after > misses_before:
-                raise RuntimeError(self.message)
+                raise RuntimeError(self.message).with_traceback(tb)
 
             return result
 
