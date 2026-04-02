@@ -15,70 +15,82 @@
 
 set -euo pipefail
 
-if ! command -v gcloud &> /dev/null; then
-  echo "gcloud not found. Installing Google Cloud SDK..."
+CASE_FILE="$1"
+TARGET_CASE_NAME=${2:-""}
+
+if [ -z "$CASE_FILE" ]; then
+    echo "Usage: $0 <case.json> [TARGET_CASE_NAME]"
+    exit 1
+fi
+
+if [[ "${BUILDKITE:-false}" == "true" ]]; then
   apt-get update && apt-get install -y gnupg curl
   echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
   curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
   apt-get update && apt-get install -y google-cloud-cli
+
+  # TODO: Move to image building.
+  # Ingore the error because in case of using uv, the packages are installed outside this script.
+  pip install evaluate==0.4.5 || true
+  pip install rouge-score==0.1.2 || true
+  # Install lm_eval with dependencies, version is same as https://github.com/vllm-project/vllm/blob/main/.buildkite/scripts/hardware_ci/run-tpu-v1-test.sh#L64
+  pip install "lm-eval[api,math]>=0.4.9.2" || true
 fi
 
-# Ensure all artifacts (logs, datasets, etc.) are deletable by the host user upon exit
-cleanup_permissions() {
-  # Fix permissions so the host can delete the mounted artifacts directory
-  if [[ -d "${DOCKER_ARTIFACT_FOLDER:-/workspace/artifacts}" ]]; then
-    chmod -R 777 "${DOCKER_ARTIFACT_FOLDER:-/workspace/artifacts}" || true
-  fi
-}
-trap cleanup_permissions EXIT
+if ! command -v gcloud &> /dev/null; then
+    echo "Error: gcloud is not installed and not running on Buildkite. Please install gcloud SDK manually."
+    exit 1
+fi
 
-cleanup_permissions
+# Set umask so that any newly created files/directories have 777/666 permissions by default.
+# This ensures that the host user can delete artifacts created by the docker root user.
+umask 000
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ARTIFACT_FOLDER is provided by Buildkite via environment variable. 
+# Default to a local path relative to the script for local runs.
+ARTIFACT_FOLDER="${ARTIFACT_FOLDER:-$SCRIPT_DIR/artifacts}"
+LOG_FOLDER="$ARTIFACT_FOLDER/temp_logs"
+PROFILE_FOLDER="$LOG_FOLDER/profile"
+export ARTIFACT_FOLDER
+export LOG_FOLDER
+export PROFILE_FOLDER
 
 report_and_exit() {
-  local exit_code=$1
+  local exit_code=${1:-0}
   local record_id="${RECORD_ID:-local}"
+  local report_exit_code
+
   echo "--- Calling report_result.sh for RECORD_ID=${record_id}"
-  bash .buildkite/benchmark/scripts/report_result.sh "$record_id" || echo "Warning: report_result.sh failed."
+  bash "$SCRIPT_DIR/report_result.sh" "$record_id"
+  report_exit_code=$?
 
-  cleanup_permissions
+  # Exit with the reporting script's failure code if it did not succeed.
+  if [ "$report_exit_code" -ne 0 ]; then
+    exit "$report_exit_code"
+  fi
 
+  # Exit with the originally provided exit code.
   exit "$exit_code"
 }
 
-# Strip quotes from environment variables which doesn't strip quotes like bash 'source' does.
-for var in MODEL DATASET NUM_PROMPTS INPUT_LEN OUTPUT_LEN EXPECTED_ETEL TENSOR_PARALLEL_SIZE MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS MAX_MODEL_LEN PREFIX_LEN ADDITIONAL_CONFIG EXTRA_ARGS; do
-  if [ -n "${!var:-}" ]; then
-    val="${!var}"
-    val="${val#\'}"
-    val="${val%\'}"
-    val="${val#\"}"
-    val="${val%\"}"
-    export "$var"="$val"
-  fi
-done
+echo "--- Preparing Local Artifacts Folder"
+mkdir -p "$ARTIFACT_FOLDER"
+mkdir -p "$LOG_FOLDER"
+mkdir -p "$PROFILE_FOLDER"
 
-# Datasets using lm-evaluation-harness `lm_eval`.
-LM_EVAL_DATASETS=("math500" "mmlu" "mlperf")
+PYTHON_PARSER="$SCRIPT_DIR/parser_case.py"
+# Evaluate the Python output to set variables in the current shell context
+eval "$(python3 "$PYTHON_PARSER" "$CASE_FILE" "$TARGET_CASE_NAME")"
 
-# All other datasets will use the standard `vllm bench serve` command.
-
-# TODO: Move to image building.
-# Ingore the error because in case of using uv, the packages are installed outside this script.
-pip install evaluate==0.4.5 || true
-pip install rouge-score==0.1.2 || true
-# Install lm_eval with dependencies, version is same as https://github.com/vllm-project/vllm/blob/main/.buildkite/scripts/hardware_ci/run-tpu-v1-test.sh#L64
-pip install "lm-eval[api,math]>=0.4.9.2" || true
-
-DOCKER_ARTIFACT_FOLDER=${DOCKER_ARTIFACT_FOLDER:-"artifacts"}
-DOCKER_LOG_FOLDER=${DOCKER_LOG_FOLDER:-"${DOCKER_ARTIFACT_FOLDER}/temp_logs"}
-
-VLLM_LOG="$DOCKER_LOG_FOLDER/vllm_log.txt"
-BM_LOG="$DOCKER_LOG_FOLDER/bm_log.txt"
-BEST_BM_LOG="$DOCKER_LOG_FOLDER/best_bm_log.txt"
-PROFILE_FOLDER="$DOCKER_LOG_FOLDER/profile"
+VLLM_LOG="$LOG_FOLDER/vllm_log.txt"
+BM_LOG="$LOG_FOLDER/bm_log.txt"
+BEST_BM_LOG="$LOG_FOLDER/best_bm_log.txt"
+VLLM_TORCH_PROFILER_DIR="$PROFILE_FOLDER"
+export VLLM_TORCH_PROFILER_DIR
 printf "[INFO] %-25s = %s\n" "VLLM_LOG" "$VLLM_LOG"
 printf "[INFO] %-25s = %s\n" "BM_LOG" "$BM_LOG"
-printf "[INFO] %-25s = %s\n" "DOCKER_ARTIFACT_FOLDER" "$DOCKER_ARTIFACT_FOLDER"
+printf "[INFO] %-25s = %s\n" "ARTIFACT_FOLDER" "$ARTIFACT_FOLDER"
 
 echo "model: $MODEL"
 
@@ -91,10 +103,10 @@ contains_element () {
 }
 
 # Download Datasets
-DATASET_DIR="$DOCKER_ARTIFACT_FOLDER/dataset"
+DATASET_DIR="$ARTIFACT_FOLDER/dataset"
 mkdir -p "$DATASET_DIR"
 
-DATASETS=("custom-token" "mmlu" "mlperf" "bench-custom-token" "math500" "bench-custom-mm")
+DATASETS=("custom" "custom-token" "mmlu" "mlperf" "math500" "sharegpt")
 # shellcheck disable=SC2153
 if contains_element "$DATASET" "${DATASETS[@]}"; then
   echo "Syncing dataset for $DATASET"
@@ -111,8 +123,11 @@ if contains_element "$DATASET" "${DATASETS[@]}"; then
     "math500")
       gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/math500/math500.jsonl "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
       ;;
-    "bench-custom-token"|"bench-custom-mm")
+    "custom")
       gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/bench-dataset/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
+      ;;
+    "sharegpt")
+      gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/sharegpt/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
       ;;
   esac
 fi
@@ -120,17 +135,12 @@ fi
 # Prep specialized configurations (DeepSeek)
 if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
   echo "Syncing generation configs for DeepSeek-R1"
-  GENERATION_CONFIG_FOLDER="$DOCKER_ARTIFACT_FOLDER/generation_configs"
+  GENERATION_CONFIG_FOLDER="$ARTIFACT_FOLDER/generation_configs"
   mkdir -p "$GENERATION_CONFIG_FOLDER"
   gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/* "$GENERATION_CONFIG_FOLDER" || echo "Warning: failed to sync generation configs ${DATASET}"
 fi
 
-# Ensure we can delete the files outside the container
-cleanup_permissions
-
-# Run accuracy benchmark via lm_eval
-if contains_element "$DATASET" "${LM_EVAL_DATASETS[@]}"; then
-  echo "DATASET ($DATASET) is an accuracy benchmark. Running lm_eval path."
+if [ "$COMMAND_TYPE" = "lm_eval" ]; then
   {
     ".buildkite/benchmark/lm_eval/$DATASET/run.sh"
     printf "AccuracyMetrics: "
@@ -141,6 +151,7 @@ if contains_element "$DATASET" "${LM_EVAL_DATASETS[@]}"; then
   report_and_exit 0
 fi
 
+# For Sonnet
 if [ "$DATASET" = "sonnet" ]; then
   echo "Create sonnet_4x.txt"
   echo "" > benchmarks/sonnet_4x.txt
@@ -157,55 +168,13 @@ echo "lanching vllm..."
 echo "logging to $VLLM_LOG"
 echo
 
-if [[ -z "${EXTRA_ARGS:-}" ]]; then
-  # If it is unset or empty, we initialize it as an empty string.
-  # This makes the append operation (+=) safe to use later.
-  EXTRA_ARGS=""
-fi
-
-if [[ "$MODEL" == "google/gemma-3-27b-it" ]]; then
-  echo "google/gemma-3-27b-it"
-  EXTRA_ARGS+=" --limit-mm-per-prompt {\"image\":0}"
-elif [[ "$MODEL" == "Qwen/Qwen2.5-VL-7B-Instruct" || "$MODEL" == "Qwen/Qwen2.5-VL-32B-Instruct" ]]; then
-  echo "$MODEL"
-  EXTRA_ARGS+=" --limit-mm-per-prompt {\"image\":1} --mm-processor-kwargs {\"max_pixels\":1024000}"
-elif [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
-  echo "deepseek-ai/DeepSeek-R1"
-  EXTRA_ARGS+=" --generation-config $DOCKER_ARTIFACT_FOLDER/generation_configs/DeepSeek-R1"
-fi
-
-if [[ -n "${ADDITIONAL_CONFIG:-}" ]]; then
-  printf -v quoted_config "%q" "$ADDITIONAL_CONFIG"
-  echo "Adding --additional_config=${quoted_config} to EXTRA_ARGS for running vllm serve ..."
-  EXTRA_ARGS+=" --additional_config=${quoted_config}"
-fi
-
-VLLM_ENVS="VLLM_USE_V1=1 VLLM_TORCH_PROFILER_DIR=\"$PROFILE_FOLDER\""
-
-if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
-  VLLM_ENVS+=" NEW_MODEL_DESIGN=1  TPU_BACKEND_TYPE=jax MODEL_IMPL_TYPE=vllm VLLM_MLA_DISABLE=0 MOE_REQUANTIZE_BLOCK_SIZE=512 MOE_REQUANTIZE_WEIGHT_DTYPE=fp4"
-fi
+# Command from parser case json
+echo "[INFO] Starting vLLM Server in background..."
 
 echo "Printing the vllm serve command used to start the server:"
-echo "$VLLM_ENVS vllm serve $MODEL \
- --seed 42 \
- --max-num-seqs $MAX_NUM_SEQS \
- --max-num-batched-tokens $MAX_NUM_BATCHED_TOKENS \
- --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
- --no-enable-prefix-caching \
- --max-model-len $MAX_MODEL_LEN $EXTRA_ARGS \
- --async-scheduling > \"$VLLM_LOG\" 2>&1 &"
+printf "[DEBUG] Executing server_cmd: %s\n" "${SERVER_CMD[*]} > \"$VLLM_LOG\" 2>&1 &"
 
-eval "$VLLM_ENVS vllm serve $MODEL \
- --seed 42 \
- --max-num-seqs $MAX_NUM_SEQS \
- --max-num-batched-tokens $MAX_NUM_BATCHED_TOKENS \
- --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
- --no-enable-prefix-caching \
- --max-model-len $MAX_MODEL_LEN $EXTRA_ARGS \
- --async-scheduling > \"$VLLM_LOG\" 2>&1 &"
-
-
+"${SERVER_CMD[@]}" > "$VLLM_LOG" 2>&1 &
 echo "wait for 60 minutes.."
 echo
 for _ in {1..360}; do
@@ -223,120 +192,45 @@ for _ in {1..360}; do
     fi
 done
 
+# Set Default
 EXPECTED_ETEL=${EXPECTED_ETEL:-3600000}
 NUM_PROMPTS=${NUM_PROMPTS:-1000}
 PREFIX_LEN=${PREFIX_LEN:-0}
-
-PROFILE_FLAG=()
-# Check if the PROFILE variable is numerically equal to 1
-if [[ "${PROFILE:-0}" -eq 1 ]]; then
-  PROFILE_FLAG=("--profile")
-fi
 
 run_benchmark(){
   echo "running benchmark..."
   echo "logging to $BM_LOG"
   echo
 
-  local request_rate="$1"
-  local command_to_run
-  local ARGS=()
+  local request_rate=${1:-""}
 
-  if [[ "$MODEL" == "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8" || "$MODEL" == "BCCard/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic" || "${USE_BENCHMARK_SERVING:-0}" == "1" ]]; then
-    command_to_run=("python3" "scripts/bench_serving/benchmark_serving.py")
-  else
-    command_to_run=("vllm" "bench" "serve")
+  if [[ -n "$request_rate" ]]; then
+    local found=false
+
+    # Iterate through array indices to find and update the parameter
+    for i in "${!CLIENT_CMD[@]}"; do
+      if [[ "${CLIENT_CMD[$i]}" == "--request-rate" ]]; then
+        # Update the next element (the value) for separated format: --flag value
+        CLIENT_CMD[i+1]="$request_rate"
+        found=true
+        break
+      elif [[ "${CLIENT_CMD[$i]}" == --request-rate=* ]]; then
+        # Update the element itself for combined format: --flag=value
+        CLIENT_CMD[i]="--request-rate=$request_rate"
+        found=true
+        break
+      fi
+    done
+
+    # Append the flag and value as separate array elements if not found
+    if [[ "$found" == false ]]; then
+      CLIENT_CMD+=( "--request-rate" "$request_rate" )
+    fi
   fi
 
-  # Common arguments
-  ARGS+=(
-    --backend vllm
-    --model "$MODEL"
-    --request-rate "$request_rate"
-    --dataset-name "$DATASET"
-    --num-prompts "$NUM_PROMPTS"
-    --percentile-metrics "ttft,tpot,itl,e2el"
-    --ignore-eos
-    "${PROFILE_FLAG[@]}"
-  )
-
-  # Dataset-specific arguments
-  case "$DATASET" in
-    sonnet)
-      ARGS+=(--dataset-path "benchmarks/sonnet_4x.txt" --sonnet-input-len "$INPUT_LEN" --sonnet-output-len "$OUTPUT_LEN")
-      ;;
-    random)
-      ARGS+=(--random-input-len "$INPUT_LEN" --random-output-len "$OUTPUT_LEN")
-      if [[ "$MODEL" == "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8" || "$MODEL" == "BCCard/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic" ]]; then
-        ARGS+=(--random-range-ratio 0.8 --max-concurrency 64)
-      fi
-      if [[ "$MODEL" == "Qwen/Qwen3-32B" && "${USE_BENCHMARK_SERVING:-0}" == "1" ]]; then
-        if [[ -z "${MAX_CONCURRENCY:-}" ]]; then
-          echo "Error: MAX_CONCURRENCY must be set for Qwen/Qwen3-32B with USE_BENCHMARK_SERVING=1" >&2
-          exit 1
-        fi
-        ARGS+=(--random-range-ratio 0.8 --max-concurrency "$MAX_CONCURRENCY")
-      fi
-      ;;
-    mmlu)
-      ARGS+=(--dataset-path "$DOCKER_ARTIFACT_FOLDER/dataset" --mmlu-num-shots 0 --mmlu-method "HELM")
-      ;;
-    mlperf)
-      ARGS+=(--dataset-path "$DOCKER_ARTIFACT_FOLDER/dataset/processed-data.pkl" --mlperf-input-len "$INPUT_LEN" --max-model-len "$MAX_MODEL_LEN")
-      ;;
-    custom-token)
-      local dataset_path="$DOCKER_ARTIFACT_FOLDER/dataset/${MODEL##*/}_${INPUT_LEN}_${OUTPUT_LEN}_tp${TENSOR_PARALLEL_SIZE}.json"
-      ARGS+=(--dataset-path "$dataset_path")
-      ;;
-    bench-custom-token)
-      local dataset_path="$DOCKER_ARTIFACT_FOLDER/dataset/${MODEL##*/}/inlen${INPUT_LEN}_outlen${OUTPUT_LEN}_prefixlen${PREFIX_LEN}.jsonl"
-      echo "dataset_path: $dataset_path" >&2
-      # The original script set dataset-name to 'custom' for this case
-      ARGS[7]="custom" # This replaces the --dataset-name value in the array
-      ARGS+=(--dataset-path "$dataset_path" --custom-output-len "$OUTPUT_LEN" --skip-chat-template)
-      ;;
-    bench-custom-mm)
-      DATA_DIR="$DOCKER_ARTIFACT_FOLDER/dataset/${MODEL##*/}"
-      local dataset_files=()
-      mapfile -d $'\0' dataset_files < <(find "$DATA_DIR" -name "inlen${INPUT_LEN}_outlen${OUTPUT_LEN}_prefixlen${PREFIX_LEN}*.jsonl" -print0)
-      if [ ${#dataset_files[@]} -ne 1 ]; then
-        echo "Error: Found ${#dataset_files[@]} matching datasets in $DATA_DIR, but expected 1."
-        echo "Matching files:"
-        printf " - %s\n" "${dataset_files[@]}"
-        exit 1
-      fi
-      local dataset_path="${dataset_files[0]}"
-      echo "multimodal dataset_path: $dataset_path" >&2
-      ARGS[1]="openai-chat" # Replaces --backend value
-      ARGS[7]="custom"      # Replaces --dataset-name value
-      ARGS+=(--dataset-path "$dataset_path" --custom-output-len "$OUTPUT_LEN" --custom-skip-chat-template --endpoint /v1/chat/completions)
-      ;;
-    sharegpt)
-      local dataset_path="$DOCKER_ARTIFACT_FOLDER/dataset/ShareGPT_V3_unfiltered_cleaned_split.json"
-      if [ "$INPUT_LEN" -gt 0 ]; then
-        echo "Please set INPUT_LEN to 0 for sharegpt dataset because it is not used." > "$BM_LOG" 2>&1
-        exit 1
-      fi
-      ARGS+=(--dataset-path "$dataset_path")
-      if [ "$OUTPUT_LEN" -ne 0 ]; then
-        ARGS+=(--sharegpt-output-len "$OUTPUT_LEN")
-      fi
-      ;;
-    hf)
-      # Override backend for this specific case
-      ARGS[1]="openai-chat" # Replaces --backend value
-      ARGS+=(--dataset-path "lmarena-ai/VisionArena-Chat" --endpoint "/v1/chat/completions")
-      ;;
-    *)
-      echo "Error: unsupported dataset '$DATASET'" > "$BM_LOG" 2>&1
-      exit 1
-      ;;
-  esac
-
-  printf "[DEBUG] Executing: %s %s\n" "${command_to_run[*]}" "${ARGS[*]}" >&2
-
-  # Execute the command
-  "${command_to_run[@]}" "${ARGS[@]}" > "$BM_LOG" 2>&1
+  echo "[DEBUG] Executing client_cmd: ${CLIENT_CMD[*]} > $BM_LOG" >&2
+  # Execute the array directly, preserving strict argument boundaries
+  "${CLIENT_CMD[@]}" > "$BM_LOG" 2>&1
 
   throughput=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
   p99_e2el=$(grep "P99 E2EL (ms):" "$BM_LOG" | awk '{print $NF}')
@@ -344,11 +238,12 @@ run_benchmark(){
   echo "$throughput $p99_e2el"
 }
 
-printf "[DEBUG] Checking folder structure in container...\n"
-printf "[DEBUG] pwd=%s\n\nls $DOCKER_ARTIFACT_FOLDER=\n%s\n" "$(pwd)" "$(ls "$DOCKER_ARTIFACT_FOLDER")" || true
-printf "[DEBUG] ls $DOCKER_ARTIFACT_FOLDER/temp_logs=\n%s\n" "$(ls "$DOCKER_ARTIFACT_FOLDER"/temp_logs)" || true
+printf "[DEBUG] Checking folder structure ...\n"
+printf "[DEBUG] pwd=%s\n\nls $ARTIFACT_FOLDER=\n%s\n" "$(pwd)" "$(ls "$ARTIFACT_FOLDER")" || true
+printf "[DEBUG] ls $ARTIFACT_FOLDER/temp_logs=\n%s\n" "$(ls "$ARTIFACT_FOLDER"/temp_logs)" || true
 
-read -r throughput p99_e2el < <(run_benchmark "inf" | tail -n 1)
+# request_rate use default value (inf)
+read -r throughput p99_e2el < <(run_benchmark | tail -n 1)
 
 echo "throughput:$throughput"
 echo "p99_e2el:$p99_e2el"

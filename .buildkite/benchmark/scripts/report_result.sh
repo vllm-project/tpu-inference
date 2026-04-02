@@ -34,11 +34,11 @@ if [ $# -ne 1 ]; then
   exit 1
 fi
 
-# Inside Docker: Use DOCKER_ARTIFACT_FOLDER and DOCKER_LOG_FOLDER
-# Outside Docker (Local): Default to 'artifacts' and 'artifacts/temp_logs'
-ARTIFACT_ROOT="${DOCKER_ARTIFACT_FOLDER:-artifacts}"
-RESULT_FILE="${ARTIFACT_ROOT}/${RECORD_ID}.result"
-LOG_FOLDER="${DOCKER_LOG_FOLDER:-artifacts/temp_logs}"
+RECORD_ID=$1
+RUN_TYPE="${RUN_TYPE:-DAILY}"
+
+# Define Result_file name
+RESULT_FILE="${ARTIFACT_FOLDER}/${RECORD_ID}.result"
 
 # Temp write to another bucket
 # REMOTE_LOG_ROOT="gs://$GCS_BUCKET/job_logs/$RECORD_ID/"
@@ -46,15 +46,13 @@ REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
 
 (
   printf "[DEBUG] Start scan artifacts folder...\n"
-  printf "[INFO] ARTIFACT_ROOT=\n%s\n" "$ARTIFACT_ROOT"
-  if [ -d "$ARTIFACT_ROOT" ]; then
-    printf "[DEBUG] ls $ARTIFACT_ROOT=\n%s\n" "$(ls "$ARTIFACT_ROOT")"
+  printf "[INFO] ARTIFACT_FOLDER=\n%s\n" "$ARTIFACT_FOLDER"
+  if [ -d "$ARTIFACT_FOLDER" ]; then
+    printf "[DEBUG] ls $ARTIFACT_FOLDER=\n%s\n" "$(ls "$ARTIFACT_FOLDER")"
   fi
   printf "[INFO] LOG_FOLDER=\n%s\n" "$LOG_FOLDER"
 
   # Handle log file
-  VLLM_LOG="$LOG_FOLDER/vllm_log.txt"
-  BM_LOG="$LOG_FOLDER/bm_log.txt"
   
   if [[ -n "${GCS_BUCKET:-}" ]]; then
     echo "gsutil cp $LOG_FOLDER/* $REMOTE_LOG_ROOT"
@@ -63,34 +61,14 @@ REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
     echo "Warning: GCS_BUCKET is not set. Skipping log upload to GCS."
   fi
 
-  if [[ "${BUILDKITE:-false}" == "true" ]]; then
-    # Upload vllm and bm log to Buildkite aritfact
-    ARTIFACT_VLLM="${RECORD_ID}_vllm_log.txt"
-    ARTIFACT_BM="${RECORD_ID}_bm_log.txt"
-
-    echo "Preparing Buildkite artifacts..."
-    cp "$VLLM_LOG" "$ARTIFACT_VLLM"
-    cp "$BM_LOG" "$ARTIFACT_BM"
-    echo "Uploading artifacts to Buildkite..."
-    buildkite-agent artifact upload "$ARTIFACT_VLLM"
-    buildkite-agent artifact upload "$ARTIFACT_BM"
-    echo "Cleaning up temporary artifact files..."
-    rm -f "$ARTIFACT_VLLM" "$ARTIFACT_BM"
-  else
-    echo "Not running on Buildkite or buildkite-agent not found. Skipping artifact upload."
-  fi
-
   # Metric data extraction from log file
-
-  # Set internal error handling for this scope
-  set -e
-
-  AccuracyMetricsJSON=$(grep -a "AccuracyMetrics:" "$BM_LOG" | sed 's/AccuracyMetrics: //')
-  echo "AccuracyMetricsJSON: $AccuracyMetricsJSON"
+  BM_LOG="$LOG_FOLDER/bm_log.txt"
 
   if [[ "$RUN_TYPE" == *"ACCURACY"* ]]; then
     # Accuracy run logic
     echo "Accuracy run ($RUN_TYPE) detected. Parsing accuracy metrics."
+    AccuracyMetricsJSON=$(grep -a "AccuracyMetrics:" "$BM_LOG" | sed 's/AccuracyMetrics: //' || true)
+    echo "AccuracyMetricsJSON: $AccuracyMetricsJSON"
     if [ -n "$AccuracyMetricsJSON" ]; then
       echo "AccuracyMetrics=$AccuracyMetricsJSON" > "$RESULT_FILE"
     else
@@ -99,14 +77,24 @@ REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
     fi
   else
     # Performance run logic
-    throughput=$(grep -i "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
+    throughput=$(grep -i "^Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g' || true)
     echo "throughput: $throughput"
 
-    output_token_throughput=$(grep -i "Output token throughput (tok/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
-    total_token_throughput=$(grep -i "Total Token throughput (tok/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
+    output_token_throughput=$(grep -i "^Output token throughput (tok/s):" "$BM_LOG" | sed 's/[^0-9.]//g' || true)
+    total_token_throughput=$(grep -i "^Total Token throughput (tok/s):" "$BM_LOG" | sed 's/[^0-9.]//g' || true)
 
     if [[ -z "$throughput" || ! "$throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
       echo "Failed to get the throughput and this is not an accuracy run."
+      exit 1
+    fi
+
+    if [[ -z "$output_token_throughput" || ! "$output_token_throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+      echo "Failed to get output_token_throughput."
+      exit 1
+    fi
+
+    if [[ -z "$total_token_throughput" || ! "$total_token_throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+      echo "Failed to get total_token_throughput."
       exit 1
     fi
 
@@ -149,10 +137,7 @@ REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
       "TotalTokenThroughput" "$total_token_throughput"
     ) >> "$RESULT_FILE"
   fi
-) || {
-  # Handle the error or log it before continuing
-  echo "Warning: Metric extraction block failed. Continuing with script execution."
-}
+)
 
 # Database Reporting Logic (ON CONFLICT (RecordId) DO UPDATE SET)
 if [[ -n "${GCP_DATABASE_ID:-}" && -n "${GCP_PROJECT_ID:-}" && -n "${GCP_INSTANCE_ID:-}" ]]; then
