@@ -314,8 +314,7 @@ class Gemma4Attention(JaxModule):
                 "rope_scaling", getattr(config, "rope_scaling", None))
             if not self.is_sliding:  # GLOBAL layer
                 self.rope_proportion = rope_parameters.get(
-                    "partial_rotary_factor",
-                    getattr(config, "global_partial_rotary_factor", 0.25))
+                    "global_partial_rotary_factor", 0.25)
             else:  # LOCAL layer
                 self.rope_proportion = rope_parameters.get(
                     "partial_rotary_factor", 1.0)
@@ -324,9 +323,7 @@ class Gemma4Attention(JaxModule):
             # Fallback for config backward compatibility
             self.rope_theta = config.rope_local_base_freq if self.is_sliding else config.rope_theta
             self.rope_scaling = getattr(config, "rope_scaling", None)
-            self.rope_proportion = getattr(
-                config, "global_partial_rotary_factor",
-                0.25) if not self.is_sliding else 1.0
+            self.rope_proportion = 0.25 if not self.is_sliding else 1.0
 
         # Gemma4: use different num_kv_heads and head_dim in GLOBAL/LOCAL layers
         if not self.is_sliding:
@@ -340,7 +337,7 @@ class Gemma4Attention(JaxModule):
         use_k_eq_v = ((not self.is_sliding)
                       and getattr(config, "attention_k_eq_v", False))
         if use_k_eq_v:
-            self.num_kv_heads = config.num_global_key_value_heads
+            self.num_kv_heads = config.num_global_key_value_heads or config.num_key_value_heads
         else:
             self.num_kv_heads = config.num_key_value_heads
 
@@ -412,7 +409,7 @@ class Gemma4Attention(JaxModule):
             quant_config=quant_config,
             prefix=prefix + ".k_norm",
         )
-        # Gemma4: Use value norm (need to disable scaling)
+        # V norm: no learnable scale (pure normalization only)
         self.v_norm = JaxRmsNorm(
             self.head_dim,
             epsilon=self.rms_norm_eps,

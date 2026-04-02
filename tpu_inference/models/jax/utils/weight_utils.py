@@ -877,14 +877,6 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         self._process_weights_after_loading_per_module = defaultdict(
             lambda: False)
 
-    def _add_loadable_non_param_tensors(self, module: JaxModule,
-                                        child_params: dict[str, Any]):
-        """
-        Add tensor names that are not in the model params that may be in the
-        safetensors, e.g., batch normalization stats and registered buffers.
-        """
-        ...
-
     def _load_module(self, base_prefix: str, module: JaxModule,
                      weights: Iterable) -> Iterable:
         yield from super()._load_module(base_prefix, module, weights)
