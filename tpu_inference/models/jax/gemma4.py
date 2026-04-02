@@ -146,6 +146,10 @@ class Gemma4Router(JaxModule):
             quant_config=quant_config,
             prefix=f"{prefix}.proj",
         )
+        self.per_expert_scale = nnx.Param(init_fn(rngs.params(),
+                                                  (config.num_experts, ),
+                                                  dtype),
+                                          eager_sharding=False)
 
     def __call__(self, x: jax.Array) -> jax.Array:
         """Returns raw router logits [T, E]."""
@@ -176,14 +180,6 @@ class Gemma4MoE(JaxMoE):
         quant_config,
         prefix: str = "",
     ) -> None:
-        # Per-expert output scale folded into routing weights so that
-        # FusedMoE's fused kernel computes: Σ_e (expert_e * w_e * scale_e)
-        kernel_key = rngs.params()
-        self.per_expert_scale = nnx.Param(init_fn(kernel_key,
-                                                  (config.num_experts, ),
-                                                  dtype),
-                                          eager_sharding=False)
-
         noop_router = JaxModule()
         noop_router.num_experts_per_tok = config.top_k_experts
 
@@ -193,7 +189,7 @@ class Gemma4MoE(JaxMoE):
             dtype=dtype,
             num_local_experts=config.num_experts,
             hidden_size=config.hidden_size,
-            intermediate_size_moe=config.expert_intermediate_size,
+            intermediate_size_moe=config.moe_intermediate_size,
             hidden_act="gelu",
             rngs=rngs,
             router=noop_router,
@@ -212,7 +208,7 @@ class Gemma4MoE(JaxMoE):
             "softmax",  # vLLM implementation has a custom routing function, here we just use "softmax" for MVP
             renormalize=True,
             quant_config=quant_config,
-            prefix=prefix + ".experts")
+            prefix=prefix)
 
     def __call__(self, x_TD: jax.Array, router_logits: jax.Array):
         """Performs the forward pass of the MoE layer.
@@ -268,11 +264,6 @@ class Gemma4MoE(JaxMoE):
                     self.kernel_up_proj_EDF.value, 1, 2)
                 self.kernel_gating_EDF.value = jnp.swapaxes(
                     self.kernel_gating_EDF.value, 1, 2)
-            elif name.endswith("per_expert_scale"):
-                load_nnx_param_from_reshaped_torch(self.per_expert_scale,
-                                                   tensor,
-                                                   param_name=name)
-                loaded.add("per_expert_scale")
         return loaded
 
 
@@ -590,12 +581,12 @@ class Gemma4DecoderLayer(JaxModule):
                 quant_config=quant_config,
                 prefix=prefix + ".router",
             )
-            self.moe = Gemma4MoE(config=text_config,
-                                 dtype=dtype,
-                                 mesh=mesh,
-                                 rngs=rng,
-                                 quant_config=quant_config,
-                                 prefix=prefix + ".moe")
+            self.experts = Gemma4MoE(config=text_config,
+                                     dtype=dtype,
+                                     mesh=mesh,
+                                     rngs=rng,
+                                     quant_config=quant_config,
+                                     prefix=prefix + ".experts")
             self.post_feedforward_layernorm_1 = JaxRmsNorm(
                 text_config.hidden_size,
                 epsilon=text_config.rms_norm_eps,
@@ -655,7 +646,7 @@ class Gemma4DecoderLayer(JaxModule):
             # norm + scale internally); experts see separately normed input
             router_logits = self.router(hidden_states)
             hidden_states_2 = self.pre_feedforward_layernorm_2(hidden_states)
-            hidden_states_2 = self.moe(hidden_states_2, router_logits)
+            hidden_states_2 = self.experts(hidden_states_2, router_logits)
             hidden_states_2 = self.post_feedforward_layernorm_2(
                 hidden_states_2)
 
