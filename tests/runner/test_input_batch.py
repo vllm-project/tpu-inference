@@ -261,6 +261,7 @@ def test_get_pooling_metadata(input_batch: InputBatch):
         PoolingMetadata(
             prompt_lens=torch.tensor([], dtype=torch.int32),
             prompt_token_ids=None,
+            prompt_token_ids_cpu=None,
             pooling_params=[],
             pooling_states=[],
         ),
@@ -281,6 +282,7 @@ def test_get_pooling_metadata(input_batch: InputBatch):
         PoolingMetadata(
             prompt_lens=torch.tensor([10], dtype=torch.int32),
             prompt_token_ids=None,
+            prompt_token_ids_cpu=None,
             pooling_params=[pooling_param],
             pooling_states=[pooling_state],
         ),
@@ -292,6 +294,7 @@ def test_get_pooling_metadata(input_batch: InputBatch):
         PoolingMetadata(
             prompt_lens=torch.tensor([], dtype=torch.int32),
             prompt_token_ids=None,
+            prompt_token_ids_cpu=None,
             pooling_params=[],
             pooling_states=[],
         ),
