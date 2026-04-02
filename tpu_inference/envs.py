@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     SKIP_JAX_PRECOMPILE: bool = False
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     MODEL_IMPL_TYPE: str = "auto"
+    DRAFT_MODEL_IMPL_TYPE: str = "auto"
     NEW_MODEL_DESIGN: bool = False
     PHASED_PROFILING_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
@@ -170,6 +171,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "MODEL_IMPL_TYPE":
     env_with_choices("MODEL_IMPL_TYPE", "auto",
                      ["auto", "vllm", "flax_nnx", "jetpack"]),
+    "DRAFT_MODEL_IMPL_TYPE":
+    env_with_choices("DRAFT_MODEL_IMPL_TYPE", "auto",
+                     ["auto", "vllm", "flax_nnx"]),
     # Enable 2D tensor parallelism, shard attention heads across multiple axes
     "USE_2D_TP":
     env_bool("USE_2D_TP", default=False),
