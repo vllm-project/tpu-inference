@@ -226,14 +226,22 @@ class GmmTest(jtu.JaxTestCase):
   # pytest -s -v tests/kernels/gmm_v2_test.py -k test_tgmm
   # blaze test -c opt //experimental/users/kyuyeunk/vllm/tests:gmm_test_gf --test_filter=test_tgmm
   # blaze test -c opt --test_output=errors  //experimental/users/kyuyeunk/vllm/tests:gmm_test_gf --test_filter=test_tgmm  --test_arg=--xla_tpu_enable_log_recorder
-  # Step 1: Make num_tile_m=num_tile_k=num_tile_n=1, make the test pass.
-  # Step 2: Make num_tile_m=num_tile_k=num_tile_n=2, make the test pass.
+  # Step 1: Make num_tile_m=num_tile_k=num_tile_n=1, 
+  #   make the test pass for various num_groups.
+  #   make the test pass for various group_offset.
+  # Step 2: Make num_tile_m=2, make sure the test pass.
+  # Step 3: Make num_tile_k=num_tile_n=2, make sure the test pass.
   @parameterized.product(
-      batch_size=[128],
-      in_size=[512],
-      out_size=[512],
-      num_groups=[16],
-      group_offset=[0],
+      batch_size=[128, 512],
+      in_size=[512, 1024],
+      out_size=[512, 1024],
+      num_groups=[5, 16, 32],
+      group_offset=[0, 2, 3],
+      # batch_size=[128],
+      # in_size=[512],
+      # out_size=[512],
+      # num_groups=[5],
+      # group_offset=[2],
   )
   def test_tgmm(self, batch_size, in_size, out_size, num_groups, group_offset):
     num_local_groups = num_groups - group_offset
@@ -252,6 +260,13 @@ class GmmTest(jtu.JaxTestCase):
     self.assertEqual(actual.shape, (num_local_groups, in_size, out_size))
     # self.assertArraysAllClose(actual[10], expected[10])
     # self.assertArraysAllClose(actual[11], expected[11])
+    diff = jnp.abs(expected - actual)
+    max_diff_idx = jnp.unravel_index(jnp.argmax(diff), diff.shape)
+    print(
+        f'Output max diff: {jnp.max(diff)} at index {max_diff_idx}')
+    print(
+        f'Output mean diff: {jnp.mean(jnp.abs(expected - actual))}'
+    )
     self.assertArraysAllClose(actual, expected)
 
   @parameterized.product(

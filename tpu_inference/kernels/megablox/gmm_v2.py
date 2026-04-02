@@ -534,6 +534,7 @@ def fill_metadata(
     metadata_ref: MetadataRef,
     *,
     cfgs: GmmConfigs,
+    process_empty_groups: bool = False,
 ) -> jax.Array:
   """Fills the metadata for the given lhs group sizes and group offset.
 
@@ -548,9 +549,63 @@ def fill_metadata(
       metadata_ref: Metadata that is used to determine the group id and m offsets
           for each gmm tile.
       cfgs: GmmConfigs.
+      process_empty_groups: Whether to process empty groups. If True, do not
+          squeeze tiles for empty groups out of the metadata. This is necessary
+          for tgmm, where we at least need to zero the output for each group.
 
   Returns:
       The number of gm tiles to process lhs with given group offset.
+  """
+
+  # xw32q: Why do we need to consider "size_lhs_sublane" which is related to the dtype of lhs?
+  """
+   The answer is that 'local_offset' on line 562 uses
+  'size_lhs_sublane' (not 'tile_m') because the DMA alignment constraint is
+  at the sublane boundary, not the tile boundary.
+
+  Why it matters
+
+  In v2, LHS is reshaped to '(-1, size_lhs_sublane, k)'. The DMA transfers
+  whole sublane-rows, so all offsets and slice boundaries must be
+  sublane-aligned. The 'size_lhs_sublane' depends on dtype because different
+   dtypes pack differently into the TPU's sublane hardware (e.g., bf16 has a
+   different sublane size than float32).
+
+  The concrete problem
+
+  Consider what happens if you used 'tile_m' instead of 'size_lhs_sublane'
+  for 'local_offset':
+
+  - Say 'tile_m = 128', 'size_lhs_sublane = 8', and a group starts at
+  m-offset 12.
+  - 'local_offset = 12 % 128 = 12' — this tells you position within the
+  tile, but it doesn't reflect the DMA alignment.
+  - 'local_offset = 12 % 8 = 4' — this tells you the offset within the
+  sublane-row, which is what actually determines whether you need an extra
+  DMA transfer.
+
+  Where it connects
+
+  The metadata computed here is consumed by the kernel's index maps (around
+  lines 85–89 in your comments):
+
+  row_start = m_start // size_lhs_sublane
+  row_end   = cdiv(m_end, size_lhs_sublane)
+  row_size  = row_end - row_start
+  pl.ds(row_start, row_size)   # DMA in units of sublane-rows
+
+  If 'fill_metadata' computed 'm_offset' values and tile counts based on
+  'tile_m' alignment, but the DMA operates in 'size_lhs_sublane' units,
+  you'd get a mismatch — the tile count could be wrong (too few tiles to
+  cover a group that straddles a sublane boundary).
+
+  In short
+
+  'tile_m' is a compute granularity (how many rows the MXU processes at
+  once). 'size_lhs_sublane' is a hardware/DMA granularity (the smallest
+  addressable row unit). The metadata must respect the DMA granularity
+  because that's what determines how many physical transfers — and thus how
+  many tiles — are needed.
   """
 
   group_offset = group_offset_ref[0]
@@ -600,7 +655,9 @@ def fill_metadata(
     # We need to handle cases where we should not process the group.
     # 1. Even if group_size is 0, if local_offset is not 0, cdiv will return 1.
     # 2. If group comes before the group_offset, we should not process it.
-    should_process = jnp.logical_and(group_size > 0, group_id >= 0)
+    should_process = jnp.logical_and(
+        jnp.logical_or(group_size > 0, process_empty_groups), group_id >= 0
+    )
     curr_num_gm = jnp.where(should_process, curr_num_gm, 0)
     next_num_gm = num_gm + curr_num_gm
 
@@ -1362,7 +1419,7 @@ def tgmm_inner_kernel(
 
   @pl.when(initialize_tiled_out)
   def _():
-    pl.debug_print("xw32line1342 tiled_lhs_ref={}", tiled_lhs_ref[...])
+    # pl.debug_print("xw32line1342 tiled_lhs_ref={}", tiled_lhs_ref[...])
     tiled_out_ref[...] = jnp.zeros_like(tiled_out_ref)
 
   tiled_out_ref[...] = (tiled_out_ref[...].astype(jnp.float32) + result).astype(
@@ -1443,6 +1500,7 @@ def tgmm_kernel_main(
       group_offset_ref,
       metadata_ref,
       cfgs=cfgs,
+      process_empty_groups=True,
   )
 
   # debug_print metadata begins.
@@ -1456,7 +1514,7 @@ def tgmm_kernel_main(
     )
     return _
 
-  jax.lax.fori_loop(0, num_gm, print_metadata, None)
+  # jax.lax.fori_loop(0, num_gm, print_metadata, None)
   # debug_print metadata ends.
 
   # 3. Prepare grid, block specs, scratch shapes, etc.
