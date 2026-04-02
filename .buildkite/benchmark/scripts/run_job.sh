@@ -18,22 +18,27 @@ set -euo pipefail
 readonly EXIT_SUCCESS=0
 readonly EXIT_FAILURE=1
 
+CASE_FILE="$1"
+TARGET_CASE_NAME=${2:-""}
+
+if [ -z "$CASE_FILE" ]; then
+    echo "Usage: $0 <case.json> [TARGET_CASE_NAME]"
+    exit 1
+fi
+
 echo "--- Generating Record ID"
 : "${BUILDKITE_STEP_ID:?[ERROR] The BUILDKITE_STEP_ID variable is missing or empty!}"
 # Use Buildkite step ID to ensure retries map to the same RecordId
 RECORD_ID="${BUILDKITE_STEP_ID}"
 export RECORD_ID
 
-: "${MODEL:?Error: Environment variable MODEL is strictly required but not set. Exiting.}"
-export MODEL
+echo "--- Prepare benchmark Record ID: ${RECORD_ID}"
 
-echo "--- Prepare benchmark Record ID: ${RECORD_ID}, Model: ${MODEL}"
-
-# --- Prepare Default Configuration ---
-export EXPECTED_ETEL="${EXPECTED_ETEL:-3600000}"
-export NUM_PROMPTS="${NUM_PROMPTS:-1000}"
-export MODELTAG="${MODELTAG:-PROD}"
-export PREFIX_LEN="${PREFIX_LEN:-0}"
+# # --- Prepare Default Configuration ---
+# export EXPECTED_ETEL="${EXPECTED_ETEL:-3600000}"
+# export NUM_PROMPTS="${NUM_PROMPTS:-1000}"
+# export MODELTAG="${MODELTAG:-PROD}"
+# export PREFIX_LEN="${PREFIX_LEN:-0}"
 
 CODE_HASH=$(buildkite-agent meta-data get "CODE_HASH")
 export CODE_HASH
@@ -45,85 +50,70 @@ export RUN_TYPE="${RUN_TYPE:-DAILY}"
 BK_RECORD_ID_LABEL=" RecordId: ${RECORD_ID}"
 buildkite-agent step update "label" "$BK_RECORD_ID_LABEL" --append
 
+# TODO: Checking
+echo "--- Verifying Submodule Commit"
+git submodule status
+
+# Device value convert to db value
+# Dynamic mapping for TPU version and chip count
+# This regex matches patterns like 'tpu_v7x_8_queue' or 'tpu_v6e_16_queue'
+if [[ "$BUILDKITE_AGENT_META_DATA_QUEUE" =~ ^tpu_v(7x|6e)_([0-9]+)_queue$ ]]; then
+    # Extract hardware version (7x or 6e) and chip count from regex capture groups
+    VERSION="${BASH_REMATCH[1]}"
+    COUNT="${BASH_REMATCH[2]}"
+    
+    if [ "$VERSION" == "7x" ]; then
+        # Map v7x patterns to "tpu7x-N"
+        DEVICE="tpu7x-$COUNT"
+    else
+        # Map v6e patterns to "v6e-N"
+        DEVICE="v6e-$COUNT"
+    fi
+elif [ "$BUILDKITE_AGENT_META_DATA_QUEUE" == "tpu_v6e_queue" ]; then
+    DEVICE="v6e-1"
+else
+    DEVICE="$BUILDKITE_AGENT_META_DATA_QUEUE"
+fi
+
+echo "[INFO] Dynamic mapping complete: $BUILDKITE_AGENT_META_DATA_QUEUE -> $DEVICE"
+
+echo "--- Configuring Docker Arguments for benchmark"
+
 ARTIFACT_FOLDER="$(pwd)/artifacts"
 LOG_FOLDER="${ARTIFACT_FOLDER}/temp_logs"
 PROFILE_FOLDER="${LOG_FOLDER}/profile"
-export ARTIFACT_FOLDER
-export LOG_FOLDER
-export PROFILE_FOLDER
 
+# Do cleanup before create config
 cleanup_artifact_log() {
   echo "deleting artifacts: $ARTIFACT_FOLDER"
   rm -rf "$ARTIFACT_FOLDER"
 }
-trap cleanup_artifact_log EXIT
-
-echo "--- Verifying Submodule Commit"
-git submodule status
-
-# Do cleanup before create config
 cleanup_artifact_log
+
 echo "--- Preparing Local Artifacts Folder"
 mkdir -p "$ARTIFACT_FOLDER"
 mkdir -p "$LOG_FOLDER"
 mkdir -p "$PROFILE_FOLDER"
+trap cleanup_artifact_log EXIT
 
-echo "--- Configuring Docker Arguments for benchmark"
 # Prepare environment variables for the Docker container.
 declare -a BENCHMARK_DOCKER_ARGS=(
-  "-v" "$ARTIFACT_FOLDER:/workspace/artifacts"
   "-v" "/dev/shm:/dev/shm"
-  "-e" "DOCKER_ARTIFACT_FOLDER=/workspace/artifacts"
-  "-e" "DOCKER_LOG_FOLDER=/workspace/artifacts/temp_logs"
-  "-e" "RECORD_ID=$RECORD_ID"
+  "-v" "/etc/boto.cfg:/etc/boto.cfg"
+  "-v" "$ARTIFACT_FOLDER:/workspace/tpu_inference/artifacts"
+  "-e" "ARTIFACT_FOLDER=/workspace/tpu_inference/artifacts"
   "-e" "DEVICE=$DEVICE"
-  "-e" "MODEL=$MODEL"
-  "-e" "MAX_NUM_SEQS=$MAX_NUM_SEQS"
-  "-e" "MAX_NUM_BATCHED_TOKENS=$MAX_NUM_BATCHED_TOKENS"
-  "-e" "TENSOR_PARALLEL_SIZE=$TENSOR_PARALLEL_SIZE"
-  "-e" "MAX_MODEL_LEN=$MAX_MODEL_LEN"
-  "-e" "DATASET=$DATASET"
-  "-e" "INPUT_LEN=$INPUT_LEN"
-  "-e" "OUTPUT_LEN=$OUTPUT_LEN"
-  "-e" "EXPECTED_ETEL=$EXPECTED_ETEL"
-  "-e" "NUM_PROMPTS=$NUM_PROMPTS"
-  "-e" "MODELTAG=$MODELTAG"
-  "-e" "PREFIX_LEN=$PREFIX_LEN"
-  "-e" "ADDITIONAL_CONFIG=$ADDITIONAL_CONFIG"
-  "-e" "EXTRA_ARGS=$EXTRA_ARGS"
-  "-e" "GCP_PROJECT_ID=${GCP_PROJECT_ID}"
-  "-e" "GCP_REGION=${GCP_REGION}"
-  "-e" "GCS_BUCKET=${GCS_BUCKET}"
-  "-e" "ARTIFACT_REPO=${ARTIFACT_REPO}"
-  "-e" "GCP_INSTANCE_ID=${GCP_INSTANCE_ID}"
-  "-e" "GCP_DATABASE_ID=${GCP_DATABASE_ID}"
-  "-e" "BUILDKITE_AGENT_NAME=${BUILDKITE_AGENT_NAME}"
+  "-e" "RECORD_ID=$RECORD_ID"
   "-e" "RUN_TYPE=$RUN_TYPE"
   "-e" "CODE_HASH=${CODE_HASH}"
   "-e" "JOB_REFERENCE=${JOB_REFERENCE}"
   "-e" "BUILDKITE=${BUILDKITE}"
-  "-v" "/etc/boto.cfg:/etc/boto.cfg"
+  "-e" "BUILDKITE_AGENT_NAME=${BUILDKITE_AGENT_NAME}"
+  "-e" "BUILDKITE_AGENT_META_DATA_QUEUE=${BUILDKITE_AGENT_META_DATA_QUEUE}"
 )
-
-if [ -n "${EXTRA_ENVS:-}" ]; then
-  echo "--- Parsing EXTRA_ENVS into Docker arguments"
-
-  # Strip leading and trailing single or double quotes
-  CLEANED_EXTRA_ENVS=$(printf "%s\n" "$EXTRA_ENVS" | sed -e "s/^'//" -e "s/'$//" -e 's/^"//' -e 's/"$//')
-  
-  IFS=';' read -ra ENV_PAIRS <<< "$CLEANED_EXTRA_ENVS"
-  
-  for pair in "${ENV_PAIRS[@]}"; do
-    if [ -n "$pair" ]; then
-      BENCHMARK_DOCKER_ARGS+=("-e" "$pair")
-    fi
-  done
-fi
 
 BENCHMARK_DOCKER_ARGS_STR="$(printf '%s\n' "${BENCHMARK_DOCKER_ARGS[@]}")"
 export BENCHMARK_DOCKER_ARGS_STR
-
-# Prep specialized configurations (DeepSeek)
 
 echo "--- Running job in docker via run_in_docker.sh"
 BM_JOB_STATUS=$EXIT_SUCCESS
@@ -131,9 +121,43 @@ BM_JOB_STATUS=$EXIT_SUCCESS
 .buildkite/scripts/run_in_docker.sh bash -c "
   echo always > /sys/kernel/mm/transparent_hugepage/enabled && \
   chmod +x .buildkite/benchmark/scripts/run_bm.sh && \
-  .buildkite/benchmark/scripts/run_bm.sh" || {
+  .buildkite/benchmark/scripts/run_bm.sh $CASE_FILE $TARGET_CASE_NAME" || {
     echo "Error running benchmark job in docker."
     BM_JOB_STATUS=$EXIT_FAILURE
+}
+
+
+(
+  # Handle log file
+  VLLM_LOG="$LOG_FOLDER/vllm_log.txt"
+  BM_LOG="$LOG_FOLDER/bm_log.txt"
+
+  # Upload vllm and bm log to Buildkite aritfact
+  ARTIFACT_VLLM="${RECORD_ID}_vllm_log.txt"
+  ARTIFACT_BM="${RECORD_ID}_bm_log.txt"
+
+  # Re-enable set -e inside the subshell because it is disabled by the || operator
+  set -e
+
+  echo "Preparing Buildkite artifacts..."
+  if [ -f "$VLLM_LOG" ]; then
+    cp "$VLLM_LOG" "$ARTIFACT_VLLM"
+    buildkite-agent artifact upload "$ARTIFACT_VLLM"
+    rm -f "$ARTIFACT_VLLM"
+  else
+    echo "Warning: $VLLM_LOG not found, skipping upload."
+  fi
+
+  if [ -f "$BM_LOG" ]; then
+    cp "$BM_LOG" "$ARTIFACT_BM"
+    buildkite-agent artifact upload "$ARTIFACT_BM"
+    rm -f "$ARTIFACT_BM"
+  else
+    echo "Warning: $BM_LOG not found, skipping upload."
+  fi
+) || {
+  echo "Error uploading artifacts to Buildkite."
+  BM_JOB_STATUS=$EXIT_FAILURE
 }
 
 exit $BM_JOB_STATUS
