@@ -3,7 +3,7 @@
     "VLLM_USE_V1": "1",
     "MODEL_IMPL_TYPE": "vllm"
   },
-  "tpu_type": ["v6e-1", "v7x-2"],
+  "tpu_type": ["cpu", "cpu_64_core"],
   "server_command_options": {
     "command_type": "vllm_serve",
     "args": {
