@@ -325,9 +325,9 @@ def get_flax_model(
 
     # Multi-modal support only
     # This function calculates the image token's embeddings by VIT
-    def run_embed_multimodal(graphdef, state, image_grid_thw, **kwargs):
+    def run_embed_multimodal(graphdef, state, **kwargs):
         model = nnx.merge(graphdef, state)
-        return model.embed_multimodal(image_grid_thw, **kwargs)
+        return model.embed_multimodal(**kwargs)
 
     embed_sharding = NamedSharding(mesh, PartitionSpec(None))
     # This function will calculates the embeddings of input texts and then merge with the image embeddings
