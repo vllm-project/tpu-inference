@@ -99,9 +99,9 @@ declare -a BENCHMARK_DOCKER_ARGS=(
   "-e" "GCP_DATABASE_ID=${GCP_DATABASE_ID}"
   "-e" "BUILDKITE_AGENT_NAME=${BUILDKITE_AGENT_NAME}"
   "-e" "RUN_TYPE=$RUN_TYPE"
-  "-e" "CODE_HASH=${CODE_HASH}"                                                                                                                                      │
-│ "-e" "JOB_REFERENCE=${JOB_REFERENCE}"                                                                                                                              │
-│ "-e" "BUILDKITE=${BUILDKITE}" 
+  "-e" "CODE_HASH=${CODE_HASH}"
+  "-e" "JOB_REFERENCE=${JOB_REFERENCE}"
+  "-e" "BUILDKITE=${BUILDKITE}"
   "-v" "/etc/boto.cfg:/etc/boto.cfg"
 )
 
