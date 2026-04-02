@@ -2538,6 +2538,7 @@ class TPUOffloadConnectorWorker:
 
         # Process each request that needs its KV cache loaded
         load_times = []
+        total_load_blocks = 0
         for meta in metadata.requests_meta:
             if not (meta.load_spec and meta.load_spec.can_load):
                 continue
@@ -2558,6 +2559,8 @@ class TPUOffloadConnectorWorker:
                 logger.info(
                     f"Request {meta.req_id}: No new tokens to load. Skipping.")
                 continue
+
+            total_load_blocks += num_blocks_to_load
 
             # Verify if dst_blocks is a contiguous subarray of meta.local_block_ids
             assert num_blocks_to_load > 0, f"Request({meta.req_id}) has no dst blocks to load."
@@ -2652,7 +2655,7 @@ class TPUOffloadConnectorWorker:
         if load_times:
             aggregate_load_time = sum(load_times)
             logger.info(
-                f"TPUOffloadConnectorWorker: Aggregate KV cache load time for {len(load_times)} requests: {aggregate_load_time:.4f} seconds"
+                f"TPUOffloadConnectorWorker: Aggregate KV cache load time for {len(load_times)} requests, {total_load_blocks} blocks: {aggregate_load_time:.4f} seconds"
             )
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
