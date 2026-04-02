@@ -91,6 +91,15 @@ declare -a BENCHMARK_DOCKER_ARGS=(
   "-e" "PREFIX_LEN=$PREFIX_LEN"
   "-e" "ADDITIONAL_CONFIG=$ADDITIONAL_CONFIG"
   "-e" "EXTRA_ARGS=$EXTRA_ARGS"
+  "-e" "GCP_PROJECT_ID=${GCP_PROJECT_ID}"
+  "-e" "GCP_REGION=${GCP_REGION}"
+  "-e" "GCS_BUCKET=${GCS_BUCKET}"
+  "-e" "ARTIFACT_REPO=${ARTIFACT_REPO}"
+  "-e" "GCP_INSTANCE_ID=${GCP_INSTANCE_ID}"
+  "-e" "GCP_DATABASE_ID=${GCP_DATABASE_ID}"
+  "-e" "BUILDKITE_AGENT_NAME=${BUILDKITE_AGENT_NAME}"
+  "-e" "RUN_TYPE=$RUN_TYPE"
+  "-v" "/etc/boto.cfg:/etc/boto.cfg"
 )
 
 if [ -n "${EXTRA_ENVS:-}" ]; then
@@ -144,9 +153,5 @@ BM_JOB_STATUS=$EXIT_SUCCESS
     echo "Error running benchmark job in docker."
     BM_JOB_STATUS=$EXIT_FAILURE
 }
-
-# report_result.sh determines whether to Insert or Update data by checking if the same RecordId already exists in the DB
-echo "--- Reporting result"
-.buildkite/benchmark/scripts/report_result.sh "$RECORD_ID"
 
 exit $BM_JOB_STATUS
