@@ -909,10 +909,11 @@ class CompilationManager:
                 input_ids,
                 draft_hidden_states,
                 attention_metadata,
+                layer_name_to_kvcache_index,
             ):
                 kv_caches, hidden_states, _ = self.runner.drafter.model_fn(
                     state, kv_caches, input_ids, draft_hidden_states,
-                    attention_metadata)
+                    attention_metadata, layer_name_to_kvcache_index)
                 self.runner.kv_caches = kv_caches
                 return hidden_states
 
@@ -933,6 +934,7 @@ class CompilationManager:
                 input_ids,
                 draft_hidden_states,
                 attention_metadata,
+                tuple(self.runner.layer_name_to_kvcache_index.items()),
                 num_tokens=num_tokens,
             )
             target_token_ids = self._create_dummy_tensor((num_tokens, ),
@@ -966,6 +968,7 @@ class CompilationManager:
                 input_ids_loop,
                 draft_hidden_state_loop,
                 attention_metadata,
+                tuple(self.runner.layer_name_to_kvcache_index.items()),
                 num_tokens=num_tokens,
             )
 
