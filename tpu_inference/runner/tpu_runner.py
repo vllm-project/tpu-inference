@@ -23,6 +23,7 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
+import orbax.checkpoint as ocp
 import vllm.envs as vllm_envs
 from flax import nnx
 from jax._src import mesh as mesh_lib
@@ -65,6 +66,8 @@ from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.models.jax.utils.checkpoint_utils import (load_checkpoint,
+                                                         save_checkpoint)
 from tpu_inference.models.jax.utils.weight_utils import (
     shard_put, transfer_state_with_mappings)
 from tpu_inference.runner import utils as runner_utils
@@ -1979,3 +1982,50 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         hasher = hashlib.sha1()
         hasher.update(unique_str.encode('utf-8'))
         return int.from_bytes(hasher.digest()[:8], 'big')
+
+    def save_checkpoint(
+        self,
+        path: str,
+        step: int = 0,
+        use_checkpoint_manager: bool = False,
+        enable_colocated_python: bool = False,
+        enable_single_replica: bool = False,
+    ):
+        """
+        Saves the current model state to an Orbax checkpoint.
+        """
+        save_checkpoint(
+            state=self.state,
+            path=path,
+            step=step,
+            use_checkpoint_manager=use_checkpoint_manager,
+            enable_colocated_python=enable_colocated_python,
+            enable_single_replica=enable_single_replica
+        )
+
+    def load_checkpoint(
+        self,
+        path: str,
+        step: Optional[int] = None,
+        use_checkpoint_manager: bool = False,
+        enable_colocated_python: bool = False,
+        enable_single_replica: bool = False,
+    ):
+        """
+        Loads the model state from an Orbax checkpoint.
+        """
+        # Create abstract state to guide loading
+        if isinstance(self.state, nnx.State):
+            abstract_state = self.state
+        else:
+            abstract_state = jax.tree_util.tree_map(
+                ocp.utils.to_shape_dtype_struct, self.state)
+
+        self.state = load_checkpoint(
+            path=path,
+            abstract_state=abstract_state,
+            step=step,
+            use_checkpoint_manager=use_checkpoint_manager,
+            enable_colocated_python=enable_colocated_python,
+            enable_single_replica=enable_single_replica
+        )

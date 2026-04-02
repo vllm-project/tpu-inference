@@ -484,6 +484,30 @@ class TPUWorker(WorkerBase):
     def reinitialize_kv_cache(self) -> None:
         self.model_runner.reinitialize_kv_cache()
 
+    def save_checkpoint(
+        self,
+        path: str,
+        step: int = 0,
+        use_checkpoint_manager: bool = False,
+        enable_colocated_python: bool = False,
+        enable_single_replica: bool = False,
+    ) -> None:
+        self.model_runner.save_checkpoint(
+            path, step, use_checkpoint_manager,
+            enable_colocated_python, enable_single_replica)
+
+    def load_checkpoint(
+        self,
+        path: str,
+        step: Optional[int] = None,
+        use_checkpoint_manager: bool = False,
+        enable_colocated_python: bool = False,
+        enable_single_replica: bool = False,
+    ) -> None:
+        self.model_runner.load_checkpoint(
+            path, step, use_checkpoint_manager,
+            enable_colocated_python, enable_single_replica)
+
     # Ray executor do not need handshake metadata
     # as we pass the kv_parameters through proxy server
     def get_kv_connector_handshake_metadata(self) -> None:
