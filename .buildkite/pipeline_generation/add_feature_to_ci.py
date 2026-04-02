@@ -26,7 +26,7 @@ class FeatureCategory(str, Enum):
     PARALLELISM = "parallelism support matrix"
     QUANTIZATION = "quantization support matrix"
     KERNEL_MICROBENCHMARKS = "kernel support matrix microbenchmarks"
-    RL = "RL support matrix"
+    RL = "rl support matrix"
 
 
 # Map categories to templates
@@ -46,7 +46,7 @@ CATEGORY_TO_DIR = {
     FeatureCategory.PARALLELISM.value: "parallelism",
     FeatureCategory.QUANTIZATION.value: "quantization",
     FeatureCategory.KERNEL_MICROBENCHMARKS.value: "kernel_microbenchmarks",
-    FeatureCategory.RL.value: "RL",
+    FeatureCategory.RL.value: "rl",
 }
 
 

@@ -34,7 +34,7 @@ def swigluoai(gate: jax.Array,
     """Activation used in some models such as GPT-OSS."""
 
     gate = jnp.clip(gate, a_max=limit)
-    up = jnp.clip(up, a_min=-limit, a_max=limit)
+    up = jnp.clip(up, min=-limit, max=limit)
     glu = gate * jax.nn.sigmoid(alpha * gate)
     return (up + 1.0) * glu
 

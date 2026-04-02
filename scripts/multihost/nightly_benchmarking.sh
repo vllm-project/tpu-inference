@@ -47,7 +47,9 @@ export TARGET_MODEL_PATH="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-Coder-480
 export TARGET_TOKENIZER="Qwen/Qwen3-Coder-480B-A35B-Instruct"
 export MODEL_NAME="Qwen3-Coder-480B-A35B-Instruct"
 export DEVICE="tpu7x-16"
-export CODE_HASH="a4047d4-cf732f1-"
+VLLM_COMMIT=$(cut -c 1-7 "${TOP_DIR}/.buildkite/vllm_lkg.version" 2>/dev/null || echo "unknown")
+TPU_INF_COMMIT=$(git -C "${TOP_DIR}" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+export CODE_HASH="${VLLM_COMMIT}-${TPU_INF_COMMIT}"
 export CREATED_BY="bm-scheduler"
 
 # New parameters for advanced/experimental models like DeepSeek
@@ -87,7 +89,6 @@ while [[ $# -gt 0 ]]; do
     --dataset-name) DATASET_NAME="$2"; shift 2 ;;
     --run-type) RUN_TYPE="$2"; shift 2 ;;
     --device) DEVICE="$2"; shift 2 ;;
-    --code-hash) CODE_HASH="$2"; shift 2 ;;
     --created-by) CREATED_BY="$2"; shift 2 ;;
     --new-model-design) NEW_MODEL_DESIGN="$2"; shift 2 ;;
     --gpu-memory-utilization) GPU_MEMORY_UTILIZATION="$2"; shift 2 ;;

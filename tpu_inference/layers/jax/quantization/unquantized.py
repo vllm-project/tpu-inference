@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 from typing import Optional
 
 import jax
@@ -110,41 +111,67 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
 
         elif layer.moe_backend in [MoEBackend.GMM_EP, MoEBackend.GMM_TP]:
             if any(
-                    any(w is None for w in param._weights_to_load) for param in
-                [layer.kernel_gating_EDF, layer.kernel_up_proj_EDF]):
+                    any(w is None for w in param._weights_to_load)
+                    for param in [
+                        layer.kernel_gating_EDF, layer.kernel_up_proj_EDF,
+                        layer.kernel_down_proj_EFD
+                    ]):
                 return False
-            w_gate = layer.kernel_gating_EDF.value
-            w_up = layer.kernel_up_proj_EDF.value
+            w_gate = layer.kernel_gating_EDF.get_value()
+            w_up = layer.kernel_up_proj_EDF.get_value()
+            w2_val = layer.kernel_down_proj_EFD.get_value()
 
-            # Fuse the weights into w13: [Gate, Up]
-            w13_val = jnp.concatenate([w_gate, w_up], axis=1)
-
-            # TODO (jacobplatin): we probably want to make the sharding configurable
-            layer.kernel_gating_upproj_EDF = nnx.Param(
-                shard_put(w13_val, shardings=layer.edf_sharding))
-
+            # Free old params before processing to reduce peak memory.
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
 
+            # Fuse the weights into w13: [Gate, Up]
+            w13_val = jnp.concatenate([w_gate, w_up], axis=1)
+            del w_gate, w_up
+
+            weights = jax_common.process_unquantized_moe_weights(
+                mesh=jax.sharding.get_mesh(),
+                moe_backend=layer.moe_backend,
+                activation=layer.activation,
+                w13_weight=w13_val,
+                w13_bias=None,
+                w2_weight=w2_val,
+                w2_bias=None,
+            )
+
+            # TODO (jacobplatin): we probably want to make the sharding configurable
+            layer.kernel_gating_upproj_EDF = nnx.Param(weights.w13_weight)
+            layer.kernel_down_proj_EFD = nnx.Param(weights.w2_weight)
+
+            del weights
+            del w13_val
+            del w2_val
+
+            # Break reference cycles between JAX arrays and flax nnx.Param
+            # objects created during weight processing. Without this, stale
+            # arrays accumulate across MoE layers and inflate peak memory.
+            gc.collect()
+
         return True
 
-    def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
-        assert isinstance(layer, JaxMoE)
-
+    def apply_jax(self, layer: JaxMoE, x: jax.Array, *,
+                  router_logits: jax.Array) -> jax.Array:
+        """Forward pass for MoE layer.
+        Args:
+            layer: The MoE layer to apply.
+            x: The input activations to the MoE layer, of shape [seq_len, hidden_size].
+            router_logits: The routing logits for the MoE layer, of shape [seq_len, num_experts].
+        """
         x_TD = jnp.asarray(x, layer.dtype)
         x_TD = jax.lax.with_sharding_constraint(
             x_TD, NamedSharding(layer.mesh, P(*layer.activation_ffw_td)))
 
-        router_logits = None
         # Fused weight backends
         if layer.moe_backend in MoEBackend.fused_moe_backends():
-            # of shape TE, only 1D in this case
-            router_logits = layer.router(x_TD)
+            # router_logits is of shape TE, only 1D in this case
 
             w13_weight = layer.kernel_gating_upproj_E2DF.value if layer.moe_backend == MoEBackend.FUSED_MOE else layer.kernel_gating_upproj_EDF.value
             w2_weight = layer.kernel_down_proj_EFD.value
-            w13_weight = jnp.swapaxes(w13_weight, 1, 2)
-            w2_weight = jnp.swapaxes(w2_weight, 1, 2)
             # TODO (jacobplatin/bzgoogle): we should support bias
             weights = FusedMoEWeights(
                 w13_weight=w13_weight,
@@ -157,8 +184,7 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
         elif layer.moe_backend in [
                 MoEBackend.DENSE_MAT, MoEBackend.MEGABLX_GMM
         ]:
-            # Composed of weights_TX and indices_TX, so 2D in this case
-            router_logits = layer.router(x_TD)
+            # router_logits is composed of weights_TX and indices_TX, so 2D in this case
             # TODO (jacobplatin/bzgoogle): we should support bias
             weights = UnfusedMoEWeights(
                 w1_weight=layer.kernel_gating_EDF.value,

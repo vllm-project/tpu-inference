@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import atexit
 import copy
 import multiprocessing
 import multiprocessing.reduction
+import os
+import signal
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from enum import Enum
@@ -251,7 +254,7 @@ def _scheduler_worker_process(
                     logger.info(f"Rank {rank}: Shutting down")
                     scheduler.shutdown()
                     _send_result(None)  # Signal completion
-                    break
+                    os._exit(0)
                 case _:
                     error = SchedulerWorkerError(
                         rank, f"Unknown command: {command}")
@@ -265,7 +268,7 @@ def _scheduler_worker_process(
                 scheduler.shutdown()
             except Exception:
                 pass
-            break
+            os._exit(0)
 
         except Exception as e:
             logger.error(
@@ -401,6 +404,23 @@ class DPScheduler(SchedulerInterface):
             f"Per-rank limits: max_seqs={self.vllm_config.scheduler_config.max_num_seqs}, "
             f"max_tokens={self.vllm_config.scheduler_config.max_num_batched_tokens}"
         )
+
+        # Register an atexit handler that runs *before* multiprocessing's
+        # _exit_function (atexit handlers run LIFO). This kills workers
+        # if shutdown() was never called (e.g. unhandled exception).
+        atexit.register(self._atexit_cleanup)
+
+    def _atexit_cleanup(self) -> None:
+        """Kill worker processes if shutdown() was not called."""
+        for process in self.processes:
+            if process.is_alive():
+                try:
+                    os.kill(process.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        for process in self.processes:
+            process.join(timeout=1.0)
+        multiprocessing.active_children()
 
     def _create_per_rank_configs(self, kv_cache_config: KVCacheConfig) -> None:
         self.per_rank_kv_cache_configs: List[KVCacheConfig] = []
@@ -856,10 +876,15 @@ class DPScheduler(SchedulerInterface):
         """Forward request finish signals to the appropriate DP rank schedulers."""
         if isinstance(request_ids, str):
             request_ids = [request_ids]
+        elif request_ids is None:
+            # None means finish all requests (matches base scheduler behavior)
+            request_ids = list(self.assigned_dp_rank.keys())
 
         # Route finish signals to appropriate schedulers
         rank_request_ids = defaultdict(list)
         for req_id in request_ids:
+            if req_id not in self.assigned_dp_rank:
+                continue
             rank = self.assigned_dp_rank[req_id]
             rank_request_ids[rank].append(req_id)
 
@@ -1043,6 +1068,8 @@ class DPScheduler(SchedulerInterface):
 
     def shutdown(self) -> None:
         """Shutdown all DP rank scheduler worker processes."""
+        atexit.unregister(self._atexit_cleanup)
+
         # Send shutdown command to all workers, skipping dead ones
         for rank in range(self.dp_size):
             if not self.processes[rank].is_alive():
@@ -1067,8 +1094,11 @@ class DPScheduler(SchedulerInterface):
         for process in self.processes:
             process.join(timeout=5.0)
             if process.is_alive():
-                process.terminate()
-                process.join()
+                try:
+                    os.kill(process.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                process.join(timeout=1.0)
 
         # Close all pipe connections
         for rank in range(self.dp_size):

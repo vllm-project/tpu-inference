@@ -200,7 +200,6 @@ class Eagle3LlamaModel(nnx.Module):
             attention_metadata,
         )
 
-        # TODO(ranlihao): Check if this residual connection is correct.
         hidden_states = hidden_states + residual
         residual = hidden_states
         hidden_states = self.norm(hidden_states)
@@ -302,6 +301,7 @@ class EagleLlama3ForCausalLM(nnx.Module):
         input_ids: jax.Array,
         hidden_states: jax.Array,
         attention_metadata: AttentionMetadata,
+        _layer_name_to_kv_cache=None,
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
         return self.model(
             kv_caches,

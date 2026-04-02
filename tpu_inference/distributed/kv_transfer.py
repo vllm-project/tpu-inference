@@ -369,3 +369,57 @@ def multi_layer_copy(
         num_chunks_sharding_spec=replicated_sharding_spec,
         num_chunks=num_chunks,
     )
+
+
+def _simple_copy_kernel(src_ref, host_ref_in, host_ref_out):
+    del host_ref_in
+
+    def body(sem):
+        pltpu.async_copy(src_ref, host_ref_out, sem).wait()
+
+    pl.run_scoped(body, pltpu.SemaphoreType.DMA)
+
+
+@functools.lru_cache(None)
+def _get_copy_to_dest_fn(mesh, sharding_spec, out_sharding, dtype,
+                         memory_kind):
+    """Returns a cached JIT-compiled copy function."""
+    memory_space = pltpu.HOST if memory_kind == 'pinned_host' else pltpu.HBM
+
+    def _copy_wrapped(src, dest):
+        return pl.pallas_call(
+            _simple_copy_kernel,
+            in_specs=[
+                pl.BlockSpec(memory_space=pl.ANY),
+                pl.BlockSpec(memory_space=memory_space),
+            ],
+            out_specs=pl.BlockSpec(memory_space=memory_space),
+            input_output_aliases={1: 0},
+            out_shape=memory_space(shape=dest.shape, dtype=dtype),
+        )(src, dest)
+
+    @functools.partial(jax.jit,
+                       out_shardings=out_sharding,
+                       donate_argnames=('dest', ))
+    def _copy(src, dest):
+        return jax.shard_map(
+            _copy_wrapped,
+            mesh=mesh,
+            in_specs=(sharding_spec, sharding_spec),
+            out_specs=sharding_spec,
+            check_vma=False,
+        )(src, dest)
+
+    return _copy
+
+
+def copy_to_host(src, dest, mesh, sharding_spec):
+    """"Copies from src to dest."""
+
+    out_sharding = dest.sharding
+    dtype = dest.dtype
+    memory_kind = out_sharding.memory_kind
+
+    _copy = _get_copy_to_dest_fn(mesh, sharding_spec, out_sharding, dtype,
+                                 memory_kind)
+    return _copy(src, dest)
