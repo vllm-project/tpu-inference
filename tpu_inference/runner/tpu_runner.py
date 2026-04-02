@@ -970,13 +970,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     logits = processed_logits
                 else:
                     logits = logits.astype(jnp.float32)
-                # --- DEBUG ---
-                run_max_logprobs = self.model_config.max_logprobs
-                print(f"\n[DEBUG-RUN] logits dtype: {logits.dtype}, shape: {logits.shape}")
-                print(f"[DEBUG-RUN] next_tokens dtype: {next_tokens.dtype}, shape: {next_tokens.shape}")
-                print(f"[DEBUG-RUN] max_logprobs: {run_max_logprobs}")
-                # --- DEBUG ---
-
                 logprobs = self._compute_and_gather_logprobs(
                     logits, next_tokens, self.model_config.max_logprobs)
                 logprobs = _jax_logprobs_copy_to_host_async(logprobs)

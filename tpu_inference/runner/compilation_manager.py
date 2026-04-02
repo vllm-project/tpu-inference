@@ -617,10 +617,6 @@ class CompilationManager:
     def _precompile_gather_logprobs(self) -> None:
         logger.info("Compiling gather_logprobs with different input shapes.")
         hsize = self.runner.model_config.get_vocab_size()
-        # --- DEBUG ---
-        warmup_max_logprobs = self.runner.model_config.max_logprobs
-        # --- DEBUG ---
-
         for num_reqs in self.runner.num_reqs_paddings:
             dp_size = self.runner.vllm_config.sharding_config.total_dp_size
             logits_sharding = NamedSharding(
@@ -635,11 +631,6 @@ class CompilationManager:
                                                logits_sharding)
             token_ids = self._create_dummy_tensor((num_reqs, ), jnp.int32,
                                                   token_ids_sharding)
-            # --- DEBUG ---
-            print(f"\n[DEBUG-WARMUP] num_reqs: {num_reqs}")
-            print(f"[DEBUG-WARMUP] logits dtype: {logits.dtype}, shape: {logits.shape}")
-            print(f"[DEBUG-WARMUP] max_logprobs: {warmup_max_logprobs}")
-            # --- DEBUG ---
             self._run_compilation(
                 f"worker{self.runner.rank} gather_logprobs",
                 self.runner._compute_and_gather_logprobs,
