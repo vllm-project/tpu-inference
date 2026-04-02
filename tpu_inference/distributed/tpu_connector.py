@@ -281,6 +281,12 @@ class TPUConnectorScheduler():
         if self.is_producer or not request.kv_transfer_params:
             return 0, False
 
+        if request.request_id in self.reqs_to_load:
+            logger.info(
+                f"TPUConnectorScheduler.get_num_new_matched_tokens: {request.request_id} is already in reqs_to_load, skipping."
+            )
+            return 0, False
+
         assert num_computed_tokens % self.block_size == 0
         # This rounding logic must be consistent with calculating
         # remote_block_ids in P's request_finished()
