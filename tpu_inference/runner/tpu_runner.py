@@ -55,9 +55,8 @@ from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   ShardingAxisName,
                                                   ShardingConfigManager)
 from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
-from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
-                                                      compute_processed_logprobs,
-                                                      gather_logprobs, sample)
+from tpu_inference.layers.jax.sample.sampling import (
+    compute_logprobs, compute_processed_logprobs, gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
@@ -975,8 +974,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                             tpu_sampling_metadata)
                 else:
                     logprobs = self._compute_and_gather_logprobs(
-                        logits, next_tokens,
-                        self.model_config.max_logprobs)
+                        logits, next_tokens, self.model_config.max_logprobs)
                 logprobs = _jax_logprobs_copy_to_host_async(logprobs)
             else:
                 logprobs = None
@@ -1144,7 +1142,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _compute_and_gather_logprobs(logits, next_tokens, max_logprobs):
         logprobs = compute_logprobs(logits)
         return gather_logprobs(logprobs, next_tokens, max_logprobs)
-    
+
     @staticmethod
     @jax.jit(static_argnames=("max_logprobs", ))
     def _compute_and_gather_processed_logprobs(logits, next_tokens,

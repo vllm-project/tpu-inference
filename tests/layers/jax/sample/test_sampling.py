@@ -17,9 +17,8 @@ import jax.numpy as jnp
 import numpy as np
 from vllm.v1.outputs import LogprobsTensors
 
-from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
-                                                      compute_processed_logprobs,
-                                                      gather_logprobs)
+from tpu_inference.layers.jax.sample.sampling import (
+    compute_logprobs, compute_processed_logprobs, gather_logprobs)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
@@ -132,7 +131,8 @@ class TestProcessedLogprobs:
     ):
         """Helper to build a TPUSupportedSamplingMetadata for testing."""
         return TPUSupportedSamplingMetadata(
-            temperature=jnp.full((batch_size, ), temperature,
+            temperature=jnp.full((batch_size, ),
+                                 temperature,
                                  dtype=jnp.float32),
             top_k=jnp.full((batch_size, ), top_k, dtype=jnp.int32),
             top_p=jnp.full((batch_size, ), top_p, dtype=jnp.float32),
@@ -176,8 +176,7 @@ class TestProcessedLogprobs:
         """After top-k masking, tokens outside top-k should get -inf logprobs."""
         logits = jnp.array([[1.0, 5.0, 3.0, 2.0, 4.0]], dtype=jnp.float32)
 
-        metadata = self._make_sampling_metadata(
-            1, temperature=1.0, top_k=2)
+        metadata = self._make_sampling_metadata(1, temperature=1.0, top_k=2)
         processed = compute_processed_logprobs(logits, metadata)
 
         # Top-2 tokens are indices 1 (5.0) and 4 (4.0).
@@ -195,8 +194,7 @@ class TestProcessedLogprobs:
         # Make logits where one token dominates.
         logits = jnp.array([[10.0, 1.0, 0.0, -1.0]], dtype=jnp.float32)
 
-        metadata = self._make_sampling_metadata(
-            1, temperature=1.0, top_p=0.5)
+        metadata = self._make_sampling_metadata(1, temperature=1.0, top_p=0.5)
         processed = compute_processed_logprobs(logits, metadata)
 
         # Token 0 has very high probability and should remain.

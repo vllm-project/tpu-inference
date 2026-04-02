@@ -135,14 +135,15 @@ def compute_processed_logprobs(
 
     raw_logprobs = jax.nn.log_softmax(logits, axis=-1)
 
-    processed_logits = _apply_sampling_transforms(
-        logits, tpu_sampling_metadata)
+    processed_logits = _apply_sampling_transforms(logits,
+                                                  tpu_sampling_metadata)
     processed_logprobs = jax.nn.log_softmax(processed_logits, axis=-1)
 
     # For greedy requests (temperature < eps), fall back to raw logprobs
     # because the temperature division would produce garbage.
-    is_greedy = jnp.expand_dims(
-        tpu_sampling_metadata.temperature < _SAMPLING_EPS, axis=-1)
+    is_greedy = jnp.expand_dims(tpu_sampling_metadata.temperature
+                                < _SAMPLING_EPS,
+                                axis=-1)
     return jnp.where(is_greedy, raw_logprobs, processed_logprobs)
 
 

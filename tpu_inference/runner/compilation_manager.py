@@ -626,8 +626,9 @@ class CompilationManager:
                 PartitionSpec(ShardingAxisName.MLP_DATA,
                               ShardingAxisName.MLP_TENSOR))
             token_ids_sharding = NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA, ))  if dp_size>1 else NamedSharding(
-                self.runner.mesh, PartitionSpec())
+                self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA, )
+            ) if dp_size > 1 else NamedSharding(self.runner.mesh,
+                                                PartitionSpec())
             logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
                                                logits_sharding)
             token_ids = self._create_dummy_tensor((num_reqs, ), jnp.int32,
@@ -641,18 +642,20 @@ class CompilationManager:
                 temperature = np.full((num_reqs, ), 0.7, dtype=np.float32)
                 top_k = np.full((num_reqs, ), 20, dtype=np.int32)
                 top_p = np.full((num_reqs, ), 0.8, dtype=np.float32)
-                (temperature, top_k, top_p) = device_array(
-                    self.runner.mesh, (temperature, top_k, top_p),
-                    sharding=sampling_metadata_sharding)
+                (temperature, top_k,
+                 top_p) = device_array(self.runner.mesh,
+                                       (temperature, top_k, top_p),
+                                       sharding=sampling_metadata_sharding)
                 for do_sampling in (True, False):
                     # JAX caches compiled functions based on Shape, Data Type, and Sharding.
                     # Creating a dummy (1,) tensor ensure the Shape, Data Type, and Sharding matches.
-                    # The device_put with NamedSharding tells JAX exactly how the memory is laid out. 
+                    # The device_put with NamedSharding tells JAX exactly how the memory is laid out.
                     # If the layout during pre-compilation doesn't match the runtime layout, JAX will attempt to re-compile the function.
-                    dummy_shape = (1,) 
-                    _cache_collision_dummy = jnp.zeros(dummy_shape, dtype=jnp.int32)
+                    dummy_shape = (1, )
+                    _cache_collision_dummy = jnp.zeros(dummy_shape,
+                                                       dtype=jnp.int32)
                     _cache_collision_dummy = jax.device_put(
-                        _cache_collision_dummy, 
+                        _cache_collision_dummy,
                         NamedSharding(self.runner.mesh, PartitionSpec(None)))
                     sampling_metadata = TPUSupportedSamplingMetadata(
                         temperature=temperature,
@@ -664,8 +667,7 @@ class CompilationManager:
                     self._run_compilation(
                         f"worker{self.runner.rank}"
                         " gather_processed_logprobs",
-                        self.runner
-                        ._compute_and_gather_processed_logprobs,
+                        self.runner._compute_and_gather_processed_logprobs,
                         logits,
                         token_ids,
                         self.runner.model_config.max_logprobs,
