@@ -85,7 +85,6 @@ class MultiModalManager:
                 mrope_pos_ptr += completion_part_len
 
     def execute_mm_encoder(self, scheduler_output: "VllmSchedulerOutput"):
-        import torch
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
             return
@@ -112,37 +111,6 @@ class MultiModalManager:
         encoder_outputs = []
         for _, num_items, mm_kwargs_group in group_and_batch_mm_kwargs(
                 mm_kwargs):
-            batched_mm_inputs = mm_kwargs_group
-            image_grid_thw = ()
-            # TODO: b/494300919 - QWen 2.5 VL specific logic, need to be moved.
-            if 'image_grid_thw' in batched_mm_inputs:
-                # Convert torch tensors to numpy arrays that JAX can handle.
-                if "pixel_values" in batched_mm_inputs and isinstance(
-                        batched_mm_inputs["pixel_values"], list):
-                    batched_mm_inputs["pixel_values"] = torch.cat(
-                        batched_mm_inputs["pixel_values"], dim=0)
-
-                for key, value in batched_mm_inputs.items():
-                    if isinstance(value, torch.Tensor):
-                        if key == 'image_grid_thw':
-                            # change it to tuple of tuples to make it hashable for JIT
-
-                            # Shape: (B, N, 3) -> (B*N, 3) -> tuple of tuples
-                            grid_thw_tensor = batched_mm_inputs[key]
-                            grid_thw_reshaped = grid_thw_tensor.reshape(-1, 3)
-                            image_grid_thw = tuple(
-                                tuple(row)
-                                for row in grid_thw_reshaped.tolist())
-
-                            continue
-
-                        if value.dtype == torch.bfloat16:
-                            batched_mm_inputs[key] = value.to(
-                                torch.float32).numpy().astype(jnp.bfloat16)
-                        else:
-                            batched_mm_inputs[key] = value.numpy()
-                batched_mm_inputs.pop('image_grid_thw')
-
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
             # 1. A tensor of shape (num_items, feature_size, hidden_size)
@@ -151,7 +119,7 @@ class MultiModalManager:
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
             curr_group_outputs = self.runner.embed_multimodal_fn(
-                self.runner.state, image_grid_thw, **batched_mm_inputs)
+                self.runner.state, **mm_kwargs_group)
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,

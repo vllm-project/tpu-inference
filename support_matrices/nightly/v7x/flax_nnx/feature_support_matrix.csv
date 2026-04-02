@@ -12,7 +12,7 @@ Feature,CorrectnessTest,PerformanceTest
 "Speculative Decoding: Ngram",✅ Passing,✅ Passing
 "async scheduler",❌ Failing,❓ Untested
 "hybrid kv cache",✅ Passing,❓ Untested
-"multi-host",✅ Passing,❓ Untested
+"multi-host",❌ Failing,❓ Untested
 "runai_model_streamer_loader",✅ Passing,❓ Untested
 "sampling_params",✅ Passing,❓ Untested
 "structured_decoding",✅ Passing,❓ Untested
