@@ -34,36 +34,51 @@ if [ $# -ne 1 ]; then
   exit 1
 fi
 
-RECORD_ID="$1"
-RESULT_FILE="artifacts/${RECORD_ID}.result"
-LOG_FOLDER=${LOG_FOLDER:-"artifacts/temp_logs"}
+# Inside Docker: Use DOCKER_ARTIFACT_FOLDER and DOCKER_LOG_FOLDER
+# Outside Docker (Local): Default to 'artifacts' and 'artifacts/temp_logs'
+ARTIFACT_ROOT="${DOCKER_ARTIFACT_FOLDER:-artifacts}"
+RESULT_FILE="${ARTIFACT_ROOT}/${RECORD_ID}.result"
+LOG_FOLDER="${DOCKER_LOG_FOLDER:-artifacts/temp_logs}"
+
 # Temp write to another bucket
 # REMOTE_LOG_ROOT="gs://$GCS_BUCKET/job_logs/$RECORD_ID/"
 REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
 
 (
   printf "[DEBUG] Start scan artifacts folder...\n"
-  printf "[DEBUG] ls artifacts/temp_logs=\n%s\n" "$(ls artifacts/temp_logs)"
+  printf "[INFO] ARTIFACT_ROOT=\n%s\n" "$ARTIFACT_ROOT"
+  if [ -d "$ARTIFACT_ROOT" ]; then
+    printf "[DEBUG] ls $ARTIFACT_ROOT=\n%s\n" "$(ls "$ARTIFACT_ROOT")"
+  fi
   printf "[INFO] LOG_FOLDER=\n%s\n" "$LOG_FOLDER"
 
   # Handle log file
   VLLM_LOG="$LOG_FOLDER/vllm_log.txt"
   BM_LOG="$LOG_FOLDER/bm_log.txt"
-  echo "gsutil cp $LOG_FOLDER/* $REMOTE_LOG_ROOT"
-  gsutil cp -r "$LOG_FOLDER"/* "$REMOTE_LOG_ROOT"
+  
+  if [[ -n "${GCS_BUCKET:-}" ]]; then
+    echo "gsutil cp $LOG_FOLDER/* $REMOTE_LOG_ROOT"
+    gsutil cp -r "$LOG_FOLDER"/* "$REMOTE_LOG_ROOT"
+  else
+    echo "Warning: GCS_BUCKET is not set. Skipping log upload to GCS."
+  fi
 
-  # Upload vllm and bm log to Buildkite aritfact
-  ARTIFACT_VLLM="${RECORD_ID}_vllm_log.txt"
-  ARTIFACT_BM="${RECORD_ID}_bm_log.txt"
+  if [[ "${BUILDKITE:-false}" == "true" ]]; then
+    # Upload vllm and bm log to Buildkite aritfact
+    ARTIFACT_VLLM="${RECORD_ID}_vllm_log.txt"
+    ARTIFACT_BM="${RECORD_ID}_bm_log.txt"
 
-  echo "Preparing Buildkite artifacts..."
-  cp "$VLLM_LOG" "$ARTIFACT_VLLM"
-  cp "$BM_LOG" "$ARTIFACT_BM"
-  echo "Uploading artifacts to Buildkite..."
-  buildkite-agent artifact upload "$ARTIFACT_VLLM"
-  buildkite-agent artifact upload "$ARTIFACT_BM"
-  echo "Cleaning up temporary artifact files..."
-  rm -f "$ARTIFACT_VLLM" "$ARTIFACT_BM"
+    echo "Preparing Buildkite artifacts..."
+    cp "$VLLM_LOG" "$ARTIFACT_VLLM"
+    cp "$BM_LOG" "$ARTIFACT_BM"
+    echo "Uploading artifacts to Buildkite..."
+    buildkite-agent artifact upload "$ARTIFACT_VLLM"
+    buildkite-agent artifact upload "$ARTIFACT_BM"
+    echo "Cleaning up temporary artifact files..."
+    rm -f "$ARTIFACT_VLLM" "$ARTIFACT_BM"
+  else
+    echo "Not running on Buildkite or buildkite-agent not found. Skipping artifact upload."
+  fi
 
   # Metric data extraction from log file
 
@@ -140,77 +155,87 @@ REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
 }
 
 # Database Reporting Logic (ON CONFLICT (RecordId) DO UPDATE SET)
-: "${BUILDKITE_AGENT_NAME:?Need to set BUILDKITE_AGENT_NAME}"
+if [[ -n "${GCP_DATABASE_ID:-}" && -n "${GCP_PROJECT_ID:-}" && -n "${GCP_INSTANCE_ID:-}" ]]; then
+  BUILDKITE_AGENT_NAME="${BUILDKITE_AGENT_NAME:-local-test}"
 
-# Parse metric assignments for dynamic columns
-FINAL_STATUS="FAILED"
-insert_cols=""
-insert_vals=""
-update_metrics=""
+  # Parse metric assignments for dynamic columns
+  FINAL_STATUS="FAILED"
+  insert_cols=""
+  insert_vals=""
+  update_metrics=""
 
-if [ -f "$RESULT_FILE" ]; then
-  while IFS='=' read -r key value; do
-    if [[ -n "$key" && -n "$value" ]]; then
-      insert_cols+=", $key"
-      if [[ "$key" == "AccuracyMetrics" ]]; then
-        val_str="JSON '${value}'"
-      elif [[ "$value" =~ ^[0-9.]+$ ]]; then
-        val_str="${value}"
-      else
-        val_str="'${value//\'/\'\'}'"
+  if [ -f "$RESULT_FILE" ]; then
+    while IFS='=' read -r key value; do
+      if [[ -n "$key" && -n "$value" ]]; then
+        insert_cols+=", $key"
+        if [[ "$key" == "AccuracyMetrics" ]]; then
+          val_str="JSON '${value}'"
+        elif [[ "$value" =~ ^[0-9.]+$ ]]; then
+          val_str="${value}"
+        else
+          val_str="'${value//\'/\'\'}'"
+        fi
+        insert_vals+=", $val_str"
+        # Use excluded keyword to refer to the proposed insert value
+        update_metrics+=", ${key}=excluded.${key}"
+        FINAL_STATUS="COMPLETED"
       fi
-      insert_vals+=", $val_str"
-      # Use excluded keyword to refer to the proposed insert value
-      update_metrics+=", ${key}=excluded.${key}"
-      FINAL_STATUS="COMPLETED"
-    fi
-  done < "$RESULT_FILE"
+    done < "$RESULT_FILE"
+  fi
+
+  # Prepare Base SQL Values
+  SQL_ADDITIONAL_CONFIG=$(prepare_sql_val "${ADDITIONAL_CONFIG:-}" "'{}'")
+  SQL_EXTRA_ARGS=$(prepare_sql_val "${EXTRA_ARGS:-}" "''")
+  SQL_EXTRA_ENVS=$(prepare_sql_val "${EXTRA_ENVS:-}" "''")
+  SQL_RECORD_ID=$(prepare_sql_val "$RECORD_ID" "")
+  SQL_STATUS=$(prepare_sql_val "$FINAL_STATUS" "FAILED")
+  SQL_USER=$(prepare_sql_val "${USER:-buildkite-agent}" "buildkite-agent")
+  SQL_JOB_REFERENCE=$(prepare_sql_val "${JOB_REFERENCE:-}" "")
+  SQL_AGENT_NAME=$(prepare_sql_val "${BUILDKITE_AGENT_NAME:-}" "")
+  SQL_DEVICE=$(prepare_sql_val "${DEVICE:-}" "")
+  SQL_MODEL=$(prepare_sql_val "${MODEL:-}" "")
+  SQL_RUN_TYPE=$(prepare_sql_val "${RUN_TYPE:-DAILY}" "DAILY")
+  SQL_CODE_HASH=$(prepare_sql_val "${CODE_HASH:-}" "")
+  SQL_DATASET=$(prepare_sql_val "${DATASET:-}" "")
+  SQL_MODELTAG=$(prepare_sql_val "${MODELTAG:-PROD}" "PROD")
+
+  # Construct the atomic Upsert (Insert or Update) SQL statement
+  SQL="INSERT INTO RunRecord (
+      RecordId, Status, CreatedTime, LastUpdate, CreatedBy, JobReference, RunBy,
+      Device, Model, RunType, CodeHash,
+      MaxNumSeqs, MaxNumBatchedTokens, TensorParallelSize, MaxModelLen,
+      Dataset, InputLen, OutputLen,
+      ExpectedETEL, NumPrompts, ModelTag, PrefixLen,
+      ExtraEnvs, AdditionalConfig, ExtraArgs, TryCount $insert_cols
+    ) VALUES (
+      $SQL_RECORD_ID, $SQL_STATUS, PENDING_COMMIT_TIMESTAMP(), PENDING_COMMIT_TIMESTAMP(), $SQL_USER, $SQL_JOB_REFERENCE, $SQL_AGENT_NAME,
+      $SQL_DEVICE, $SQL_MODEL, $SQL_RUN_TYPE, $SQL_CODE_HASH,
+      ${MAX_NUM_SEQS:-NULL}, ${MAX_NUM_BATCHED_TOKENS:-NULL}, ${TENSOR_PARALLEL_SIZE:-NULL}, ${MAX_MODEL_LEN:-NULL},
+      $SQL_DATASET, ${INPUT_LEN:-NULL}, ${OUTPUT_LEN:-NULL},
+      ${EXPECTED_ETEL:-3600000}, ${NUM_PROMPTS:-1000}, $SQL_MODELTAG, ${PREFIX_LEN:-0},
+      $SQL_EXTRA_ENVS, $SQL_ADDITIONAL_CONFIG, $SQL_EXTRA_ARGS, 1 $insert_vals
+    ) ON CONFLICT (RecordId) DO UPDATE SET
+      Status = excluded.Status,
+      LastUpdate = excluded.LastUpdate,
+      RunBy = excluded.RunBy,
+      TryCount = RunRecord.TryCount + 1
+      $update_metrics;"
+
+  echo "Executing Atomic Upsert SQL:"
+  echo "$SQL"
+
+  gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
+    --project="$GCP_PROJECT_ID" \
+    --instance="$GCP_INSTANCE_ID" \
+    --sql="$SQL"
+  echo "--- Reporting finished (DB written)"
+else
+  echo "--- Reporting finished (Local test scenario: GCP variables not set, skipping DB reporting)"
+  if [ -f "$RESULT_FILE" ]; then
+    echo "--- Final Benchmark Results ($RESULT_FILE) ---"
+    cat "$RESULT_FILE"
+    echo "------------------------------------------------"
+  else
+    echo "Warning: $RESULT_FILE not found. No results to display."
+  fi
 fi
-
-# Prepare Base SQL Values
-SQL_ADDITIONAL_CONFIG=$(prepare_sql_val "${ADDITIONAL_CONFIG:-}" "'{}'")
-SQL_EXTRA_ARGS=$(prepare_sql_val "${EXTRA_ARGS:-}" "''")
-SQL_EXTRA_ENVS=$(prepare_sql_val "${EXTRA_ENVS:-}" "''")
-SQL_RECORD_ID=$(prepare_sql_val "$RECORD_ID" "")
-SQL_STATUS=$(prepare_sql_val "$FINAL_STATUS" "FAILED")
-SQL_USER=$(prepare_sql_val "${USER:-buildkite-agent}" "buildkite-agent")
-SQL_JOB_REFERENCE=$(prepare_sql_val "${JOB_REFERENCE:-}" "")
-SQL_AGENT_NAME=$(prepare_sql_val "${BUILDKITE_AGENT_NAME:-}" "")
-SQL_DEVICE=$(prepare_sql_val "${DEVICE:-}" "")
-SQL_MODEL=$(prepare_sql_val "${MODEL:-}" "")
-SQL_RUN_TYPE=$(prepare_sql_val "${RUN_TYPE:-DAILY}" "DAILY")
-SQL_CODE_HASH=$(prepare_sql_val "${CODE_HASH:-}" "")
-SQL_DATASET=$(prepare_sql_val "${DATASET:-}" "")
-SQL_MODELTAG=$(prepare_sql_val "${MODELTAG:-PROD}" "PROD")
-
-# Construct the atomic Upsert (Insert or Update) SQL statement
-SQL="INSERT INTO RunRecord (
-    RecordId, Status, CreatedTime, LastUpdate, CreatedBy, JobReference, RunBy,
-    Device, Model, RunType, CodeHash,
-    MaxNumSeqs, MaxNumBatchedTokens, TensorParallelSize, MaxModelLen,
-    Dataset, InputLen, OutputLen,
-    ExpectedETEL, NumPrompts, ModelTag, PrefixLen,
-    ExtraEnvs, AdditionalConfig, ExtraArgs, TryCount $insert_cols
-  ) VALUES (
-    $SQL_RECORD_ID, $SQL_STATUS, PENDING_COMMIT_TIMESTAMP(), PENDING_COMMIT_TIMESTAMP(), $SQL_USER, $SQL_JOB_REFERENCE, $SQL_AGENT_NAME,
-    $SQL_DEVICE, $SQL_MODEL, $SQL_RUN_TYPE, $SQL_CODE_HASH,
-    ${MAX_NUM_SEQS:-NULL}, ${MAX_NUM_BATCHED_TOKENS:-NULL}, ${TENSOR_PARALLEL_SIZE:-NULL}, ${MAX_MODEL_LEN:-NULL},
-    $SQL_DATASET, ${INPUT_LEN:-NULL}, ${OUTPUT_LEN:-NULL},
-    ${EXPECTED_ETEL:-3600000}, ${NUM_PROMPTS:-1000}, $SQL_MODELTAG, ${PREFIX_LEN:-0},
-    $SQL_EXTRA_ENVS, $SQL_ADDITIONAL_CONFIG, $SQL_EXTRA_ARGS, 1 $insert_vals
-  ) ON CONFLICT (RecordId) DO UPDATE SET
-    Status = excluded.Status,
-    LastUpdate = excluded.LastUpdate,
-    RunBy = excluded.RunBy,
-    TryCount = RunRecord.TryCount + 1
-    $update_metrics;"
-
-echo "Executing Atomic Upsert SQL:"
-echo "$SQL"
-
-gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
-  --project="$GCP_PROJECT_ID" \
-  --instance="$GCP_INSTANCE_ID" \
-  --sql="$SQL"
-
-echo "--- Reporting finished"
