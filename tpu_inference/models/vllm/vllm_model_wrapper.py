@@ -351,10 +351,6 @@ class VllmModelWrapper:
                 vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
                 self._apply_qwen3_vl_patches(vllm_model)
 
-        with load_context, jax_context, set_current_vllm_config(
-                self.vllm_config):
-            vllm_model = vllm_get_model(vllm_config=vllm_config_for_load,
-                                        model_config=self.model_config)
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:
             # Replace layers in the model with LoRA layers.
