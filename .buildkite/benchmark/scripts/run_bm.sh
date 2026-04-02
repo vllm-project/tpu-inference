@@ -15,6 +15,36 @@
 
 set -euo pipefail
 
+if ! command -v gcloud &> /dev/null; then
+  echo "gcloud not found. Installing Google Cloud SDK..."
+  apt-get update && apt-get install -y gnupg curl
+  echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+  curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+  apt-get update && apt-get install -y google-cloud-cli
+fi
+
+# Ensure all artifacts (logs, datasets, etc.) are deletable by the host user upon exit
+cleanup_permissions() {
+  # Fix permissions so the host can delete the mounted artifacts directory
+  if [[ -d "${DOCKER_ARTIFACT_FOLDER:-/workspace/artifacts}" ]]; then
+    chmod -R 777 "${DOCKER_ARTIFACT_FOLDER:-/workspace/artifacts}" || true
+  fi
+}
+trap cleanup_permissions EXIT
+
+cleanup_permissions
+
+report_and_exit() {
+  local exit_code=$1
+  local record_id="${RECORD_ID:-local}"
+  echo "--- Calling report_result.sh for RECORD_ID=${record_id}"
+  bash .buildkite/benchmark/scripts/report_result.sh "$record_id" || echo "Warning: report_result.sh failed."
+
+  cleanup_permissions
+
+  exit "$exit_code"
+}
+
 # Strip quotes from environment variables which doesn't strip quotes like bash 'source' does.
 for var in MODEL DATASET NUM_PROMPTS INPUT_LEN OUTPUT_LEN EXPECTED_ETEL TENSOR_PARALLEL_SIZE MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS MAX_MODEL_LEN PREFIX_LEN ADDITIONAL_CONFIG EXTRA_ARGS; do
   if [ -n "${!var:-}" ]; then
@@ -39,11 +69,13 @@ pip install rouge-score==0.1.2 || true
 # Install lm_eval with dependencies, version is same as https://github.com/vllm-project/vllm/blob/main/.buildkite/scripts/hardware_ci/run-tpu-v1-test.sh#L64
 pip install "lm-eval[api,math]>=0.4.9.2" || true
 
+DOCKER_ARTIFACT_FOLDER=${DOCKER_ARTIFACT_FOLDER:-"artifacts"}
+DOCKER_LOG_FOLDER=${DOCKER_LOG_FOLDER:-"${DOCKER_ARTIFACT_FOLDER}/temp_logs"}
+
 VLLM_LOG="$DOCKER_LOG_FOLDER/vllm_log.txt"
 BM_LOG="$DOCKER_LOG_FOLDER/bm_log.txt"
 BEST_BM_LOG="$DOCKER_LOG_FOLDER/best_bm_log.txt"
 PROFILE_FOLDER="$DOCKER_LOG_FOLDER/profile"
-DOCKER_ARTIFACT_FOLDER=${DOCKER_ARTIFACT_FOLDER:-"/workspace/artifacts"}
 printf "[INFO] %-25s = %s\n" "VLLM_LOG" "$VLLM_LOG"
 printf "[INFO] %-25s = %s\n" "BM_LOG" "$BM_LOG"
 printf "[INFO] %-25s = %s\n" "DOCKER_ARTIFACT_FOLDER" "$DOCKER_ARTIFACT_FOLDER"
@@ -58,6 +90,44 @@ contains_element () {
   return 1
 }
 
+# Download Datasets
+DATASET_DIR="$DOCKER_ARTIFACT_FOLDER/dataset"
+mkdir -p "$DATASET_DIR"
+
+DATASETS=("custom-token" "mmlu" "mlperf" "bench-custom-token" "math500" "bench-custom-mm")
+# shellcheck disable=SC2153
+if contains_element "$DATASET" "${DATASETS[@]}"; then
+  echo "Syncing dataset for $DATASET"
+  case "$DATASET" in
+    "custom-token")
+      gsutil -m cp gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/*.* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
+      ;;
+    "mmlu")
+      gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/mmlu/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
+      ;;
+    "mlperf")
+      gsutil -m cp gs://vllm-cb-storage2/dataset/mlperf/mlperf_shuffled.jsonl "$DATASET_DIR/mlperf.jsonl" || echo "Warning: failed to sync dataset ${DATASET}"
+      ;;
+    "math500")
+      gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/math500/math500.jsonl "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
+      ;;
+    "bench-custom-token"|"bench-custom-mm")
+      gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/bench-dataset/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
+      ;;
+  esac
+fi
+
+# Prep specialized configurations (DeepSeek)
+if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
+  echo "Syncing generation configs for DeepSeek-R1"
+  GENERATION_CONFIG_FOLDER="$DOCKER_ARTIFACT_FOLDER/generation_configs"
+  mkdir -p "$GENERATION_CONFIG_FOLDER"
+  gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/* "$GENERATION_CONFIG_FOLDER" || echo "Warning: failed to sync generation configs ${DATASET}"
+fi
+
+# Ensure we can delete the files outside the container
+cleanup_permissions
+
 # Run accuracy benchmark via lm_eval
 if contains_element "$DATASET" "${LM_EVAL_DATASETS[@]}"; then
   echo "DATASET ($DATASET) is an accuracy benchmark. Running lm_eval path."
@@ -68,7 +138,7 @@ if contains_element "$DATASET" "${LM_EVAL_DATASETS[@]}"; then
     echo ""
   } >> "$BM_LOG"
   echo "Finished running $DATASET benchmark."
-  exit 0
+  report_and_exit 0
 fi
 
 if [ "$DATASET" = "sonnet" ]; then
@@ -289,7 +359,7 @@ goal_int=$(printf "%.0f" "$EXPECTED_ETEL")
 
 if (( p99_int <= goal_int )); then
   echo "Initial run: P99 E2EL ($p99_e2el ms) <= EXPECTED_ETEL ($EXPECTED_ETEL ms), good enough. Exiting 0."
-  exit 0
+  report_and_exit 0
 fi
 
 echo "Initial run failed: P99 E2EL ($p99_e2el ms) > EXPECTED_ETEL ($EXPECTED_ETEL ms)"
@@ -333,7 +403,7 @@ done
 
 if (( best_rate == 0 )); then
   echo "Could not find a valid request_rate >= 1 that meets EXPECTED_ETEL=$EXPECTED_ETEL" | tee -a "$BM_LOG"
-  exit 1
+  report_and_exit 1
 fi
 
 # Restore the best log to BM_LOG
@@ -345,3 +415,5 @@ echo "✓ Final best request_rate: $best_rate"
 echo "✓ Throughput: $best_throughput"
 echo "✓ P99 E2EL: $best_e2el"
 echo "======================================"
+
+report_and_exit 0
