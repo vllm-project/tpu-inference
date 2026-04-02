@@ -394,9 +394,19 @@ class KVCacheManager:
                 num_blocks = kv_cache_tensor.size // page_size_bytes
                 if duplicate_shared_layers:
                     num_blocks //= num_shared_layers
-                dp_size = self.runner.vllm_config.sharding_config.total_dp_size
-                # num_blocks must be a multiple of dp_size
-                num_blocks = (num_blocks // dp_size) * dp_size
+                sharding_config = self.runner.vllm_config.sharding_config
+                if self.use_mla and not self.runner.vllm_config.additional_config.get(
+                        "sharding", {}).get("sharding_strategy", {}).get(
+                            "enable_dp_attention", False):
+                    # MLA KV cache is sharded with MLP_TENSOR = (attn_dp, attn_dp_expert, model, expert)
+                    divisor = (sharding_config.attn_dp_size *
+                               sharding_config.attn_dp_expert_size *
+                               sharding_config.tp_size *
+                               sharding_config.expert_size)
+                else:
+                    divisor = sharding_config.total_dp_size
+                # num_blocks must be a multiple of the sharding divisor
+                num_blocks = (num_blocks // divisor) * divisor
 
                 if isinstance(layer_spec, MambaSpec):
                     mamba_states = []
