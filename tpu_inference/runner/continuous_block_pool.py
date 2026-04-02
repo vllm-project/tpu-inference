@@ -84,16 +84,19 @@ class ContinuousFreeQueue:
             self.intervals[idx] = (start, block_id - 1)
             self.intervals.insert(idx + 1, (block_id + 1, end))
 
-    def append_n(self, blocks: List):
+    def append_n(self, blocks: list):
+        logger.info(f"ContinuousFreeQueue.append_n: adding {len(blocks)} blocks. Current free={len(self.free_blocks)}")
         for b in blocks:
             if b.block_id not in self.free_blocks:
                 self.free_blocks.add(b.block_id)
                 self._add_to_intervals(b.block_id)
+        logger.info(f"ContinuousFreeQueue.append_n: after add: free={len(self.free_blocks)}, intervals={self.intervals}")
 
     def remove(self, block):
         if block.block_id in self.free_blocks:
             self.free_blocks.remove(block.block_id)
             self._remove_from_intervals(block.block_id)
+            logger.info(f"ContinuousFreeQueue.remove: removed block {block.block_id}. new intervals={self.intervals}")
 
     def popleft(self):
         # Always reserve 0 for the null_block if it is untouched during initialization
@@ -101,6 +104,9 @@ class ContinuousFreeQueue:
                 self.blocks_ref):
             block_id = 0
         else:
+            if not self.intervals:
+                logger.warning(f"ContinuousFreeQueue.popleft: intervals list is empty! "
+                               f"free_blocks count: {len(self.free_blocks)}")
             block_id = self.intervals[-1][1]
             # Avoid popping 0 as a normal block if there are other choices
             if block_id == 0 and len(self.intervals) > 1:
@@ -109,8 +115,8 @@ class ContinuousFreeQueue:
         self.free_blocks.remove(block_id)
         self._remove_from_intervals(block_id)
 
-        logger.debug(
-            f"ContinuousFreeQueue.popleft: Decode allocated 1 block at ID {block_id}"
+        logger.info(
+            f"ContinuousFreeQueue.popleft: Decode allocated 1 block at ID {block_id}. new intervals={self.intervals}"
         )
         return self.blocks_ref[block_id]
 
@@ -148,15 +154,15 @@ class ContinuousFreeQueue:
                 self.free_blocks.remove(b.block_id)
                 self._remove_from_intervals(b.block_id)
 
-            logger.debug(
+            logger.info(
                 f"ContinuousFreeQueue.popleft_n: Prefill Best-Fit allocated {num_blocks} contiguous blocks "
-                f"starting at ID {alloc_start} from free interval [{start}, {end}]"
+                f"starting at ID {alloc_start} from free interval [{start}, {end}]. new intervals={self.intervals}"
             )
             return allocated
         else:
-            # Fallback: Scattered allocation if no continuous range fits
-            logger.debug(
-                f"ContinuousFreeQueue.popleft_n: FALLBACK scattered allocation for {num_blocks} blocks"
+            logger.warning(
+                f"ContinuousFreeQueue.popleft_n: FALLBACK scattered allocation for {num_blocks} blocks. "
+                f"Free blocks: {len(self.free_blocks)}, intervals: {len(self.intervals)}"
             )
             allocated = []
             for _ in range(num_blocks):

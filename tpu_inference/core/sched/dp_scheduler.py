@@ -147,6 +147,14 @@ def _scheduler_worker_process(
         log_stats=log_stats,
     )
 
+    is_disaggregated = vllm_config.kv_transfer_config is not None
+    if is_disaggregated:
+        from tpu_inference.runner.continuous_block_pool import ContinuousFreeQueue
+        pool = scheduler.kv_cache_manager.block_pool
+        pool.free_block_queue = ContinuousFreeQueue(pool.blocks)
+        pool.null_block = pool.free_block_queue.popleft()
+        pool.null_block.is_null = True
+
     logger.debug(f"Scheduler worker process {rank} started")
 
     def _send_result(result):

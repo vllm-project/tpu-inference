@@ -803,7 +803,10 @@ def insert_kv_chunks(kv_caches: list[jax.Array], kv_slices: list[jax.Array],
     dest_offsets_arr = jnp.array(dest_offsets, dtype=jnp.int32)
     chunk_sizes_arr = jnp.array(chunk_sizes, dtype=jnp.int32)
     num_chunks_arr = jnp.array([num_chunks], dtype=jnp.int32)
-
+    logger.warning(f"insert_kv_chunks: src_offsets={src_offsets_arr}, "
+                   f"dest_offsets={dest_offsets_arr}, "
+                   f"chunk_sizes={chunk_sizes_arr}, "
+                   f"num_chunks={num_chunks_arr}")
     replicated_spec = jax.sharding.PartitionSpec()
 
     return multi_layer_copy(

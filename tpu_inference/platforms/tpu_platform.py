@@ -278,6 +278,12 @@ class TpuPlatform(Platform):
             update_vllm_config_for_dp_scheduler
         update_vllm_config_for_dp_scheduler(vllm_config)
 
+        from tpu_inference.core.sched.tpu_scheduler import \
+            update_vllm_config_for_tpu_scheduler
+        dp_size = vllm_config.sharding_config.total_dp_size
+        if dp_size == 1:
+            update_vllm_config_for_tpu_scheduler(vllm_config)
+
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         # TODO: TPU still sets block_size in check_and_update_config.
