@@ -479,13 +479,14 @@ class TestQwen2_5_VLForConditionalGeneration:
         pixel_values = np.ones((4, patch_dim))
 
         parsed = model._parse_and_validate_image_input(
-            grid, pixel_values=pixel_values)
+            image_grid_thw=grid, pixel_values=pixel_values)
         assert parsed is not None
         assert parsed['type'] == "pixel_values"
         assert parsed['pixel_values'].shape == (4, patch_dim)
         assert parsed['image_grid_thw'] == grid
 
-        parsed_none = model._parse_and_validate_image_input(grid)
+        parsed_none = model._parse_and_validate_image_input(
+            image_grid_thw=grid)
         assert parsed_none is None
 
     def test_parse_and_validate_multimodal_inputs(
@@ -496,11 +497,13 @@ class TestQwen2_5_VLForConditionalGeneration:
         pixel_values = np.ones((4, patch_dim))
 
         mm_inputs = model._parse_and_validate_multimodal_inputs(
-            grid, pixel_values=pixel_values)
+            image_grid_thw=grid, pixel_values=pixel_values)
         assert "image" in mm_inputs
         assert mm_inputs["image"]['type'] == "pixel_values"
+        assert mm_inputs["image"]['image_grid_thw'] == grid
 
-        mm_inputs_empty = model._parse_and_validate_multimodal_inputs(grid)
+        mm_inputs_empty = model._parse_and_validate_multimodal_inputs(
+            image_grid_thw=grid)
         assert not mm_inputs_empty
 
     def test_process_image_input_pixels(
@@ -537,14 +540,14 @@ class TestQwen2_5_VLForConditionalGeneration:
         with patch.object(model,
                           '_process_image_input',
                           return_value=(mock_vision_output, )) as mock_process:
-            mm_embeds = model.embed_multimodal(grid_thw,
+            mm_embeds = model.embed_multimodal(image_grid_thw=grid_thw,
                                                pixel_values=pixel_values)
             mock_process.assert_called_once()
             assert isinstance(mm_embeds, tuple)
             assert len(mm_embeds) == 1
             assert mm_embeds[0].shape == (tokens_per_image, vc.out_hidden_size)
 
-        mm_embeds_none = model.embed_multimodal(grid_thw)
+        mm_embeds_none = model.embed_multimodal(image_grid_thw=grid_thw)
         assert len(mm_embeds_none) == 0
 
     @patch('tpu_inference.models.jax.qwen2_5_vl.merge_multimodal_embeddings')
