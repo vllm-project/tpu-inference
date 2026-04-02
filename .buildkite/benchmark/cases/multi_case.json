@@ -10,7 +10,7 @@
   "benchmark_cases": [
     {
       "case_name": "Qwen3-4B-FP8-Quantized",
-      "tpu_type": ["v6e-1", "v7x-2"],
+      "tpu_type": ["cpu", "cpu_64_core"],
       "env": {
         "VLLM_USE_V1": "1",
         "MODEL_IMPL_TYPE": "vllm"
@@ -47,7 +47,7 @@
     },
     {
       "case_name": "Qwen3-4B-Baseline",
-      "tpu_type": ["v6e-1", "v7x-2"],
+      "tpu_type": ["cpu", "cpu_64_core"],
       "env": {
         "VLLM_USE_V1": "1",
         "MODEL_IMPL_TYPE": "vllm"
