@@ -1,11 +1,17 @@
-"""Unit test for serving model export."""
-
 import unittest
 import os
 import tempfile
 import json
 import jax
 import jax.numpy as jnp
+from unittest.mock import patch
+
+from jax.experimental import topologies
+from jax.experimental import pallas as pl
+from jax.experimental.pallas import tpu as pltpu
+from jax.sharding import Mesh
+from jax import shard_map
+from jax.sharding import PartitionSpec as P
 
 from tpu_inference.export import serving_model
 
@@ -57,7 +63,6 @@ class TestServingModelExport(unittest.TestCase):
 
     def test_save_native_model_tpu7_topology(self):
         """Test exporting a model using a fake TPU v7 topology on CPU."""
-        from jax.experimental import topologies
         
         topology_name = "tpu7x_2x4"
         
@@ -89,10 +94,6 @@ class TestServingModelExport(unittest.TestCase):
 
     def test_save_native_model_pallas_kernel(self):
         """Test exporting a model containing a Pallas kernel."""
-        from jax.experimental import pallas as pl
-        from jax.experimental.pallas import tpu as pltpu
-        from jax.experimental import topologies
-        from unittest.mock import patch
 
         def add_kernel(x_ref, y_ref, out_ref):
             out_ref[...] = x_ref[...] + y_ref[...]
@@ -114,14 +115,10 @@ class TestServingModelExport(unittest.TestCase):
         try:
             topology_desc = topologies.get_topology_desc(topology_name)
             devices = topology_desc.devices
-            from jax.sharding import Mesh
             mesh = Mesh(devices, ('x',))
             
             x = jnp.ones((128,), dtype=jnp.float32)
             y = jnp.ones((128,), dtype=jnp.float32)
-            
-            from jax import shard_map
-            from jax.sharding import PartitionSpec as P
             
             sharded_pallas_add = shard_map(
                 pallas_add,
