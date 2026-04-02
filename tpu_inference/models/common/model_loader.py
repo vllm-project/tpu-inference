@@ -166,6 +166,27 @@ def _get_nnx_model(
                                              use_qwix_on_abstract_model=True)
             return jit_model
 
+        if getattr(model_class, '_self_manages_sharding', False):
+            # `_self_manages_sharding` is a class-level boolean flag set to True
+            # by model classes (e.g. MaxText-backed models) that handle their own
+            # JIT-compiled, sharded weight initialization internally — typically by
+            # wrapping construction in jax.jit with explicit out_shardings. For
+            # these models, the standard path below (which wraps create_abstract_model
+            # + with_sharding_constraint in an outer @jax.jit) must be skipped:
+            # adding a second outer jit causes nested JIT inlining that re-traces
+            # and multiplies compilation time without benefit.
+            with mesh:
+                jit_model = model_class(vllm_config, rng, mesh)
+                jit_model = apply_qwix_quantization(
+                    vllm_config,
+                    jit_model,
+                    rng,
+                    mesh,
+                    apply_to_abstract_model=False)
+                if hasattr(jit_model, 'initialize_cache'):
+                    jit_model.initialize_cache()
+            return jit_model
+
         @jax.jit
         def create_sharded_model():
             model = create_abstract_model()
