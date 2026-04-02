@@ -34,26 +34,25 @@ def create_step_with_matrix(case_data, global_env, file_path):
 
     # Merge Environment Variables (Global + Case Specific)
     combined_env = {**global_env, **case_data.get("env", {})}
+    safe_key = case_name.replace("/", "-").replace(" ", "-")
 
     # Construct the Step dictionary
-    return {
-        "label": f"{{{{matrix.tpu}}}} {case_name}",
-        # "command": f"bash .buildkite/benchmark/scripts/run_job.sh {file_path}",
-        "command":
-        f"bash .buildkite/benchmark/scripts/test_run.sh {file_path}",
-        "env": {
-            **combined_env, "TARGET_CASE_NAME": case_name,
-            "TPU_TYPE": "{{matrix.tpu}}"
-        },
-        "matrix": {
-            "setup": {
-                "tpu": tpu_types
+    child_steps = []
+    for tpu in tpu_types:
+        child_steps.append({
+            "label": f"{tpu} {case_name}",
+            "command":
+            f"bash .buildkite/benchmark/scripts/test_run.sh {file_path}",
+            "env": {
+                **combined_env, "TARGET_CASE_NAME": case_name,
+                "TPU_TYPE": tpu
+            },
+            "agents": {
+                "queue": tpu
             }
-        },
-        "agents": {
-            "queue": "{{matrix.tpu}}"
-        }
-    }
+        })
+
+    return {"group": case_name, "key": safe_key, "steps": child_steps}
 
 
 def main():
