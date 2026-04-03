@@ -573,7 +573,8 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
 
         return True
 
-    def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
+    def apply_jax(self, layer: JaxModule, x: jax.Array, *,
+                  router_logits: jax.Array) -> jax.Array:
         """
         Run the forward pass of the MoE layer.
 
@@ -592,11 +593,9 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
             jax.sharding.NamedSharding(layer.mesh,
                                        P(*layer.activation_ffw_td)))
 
-        router_logits = None
         # Fused weight backends
         if layer.moe_backend in FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS:
-            # of shape TE -- we don't return the indices
-            router_logits = layer.router(x_TD)
+            # router_logits is of shape TE -- we don't return the indices
 
             if layer.moe_backend == MoEBackend.FUSED_MOE:
                 w13_weight = layer.kernel_gating_upproj_E2DF[...]

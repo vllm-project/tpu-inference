@@ -582,10 +582,29 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.rng_params_for_sampling = nnx.Rngs(
             jax.random.key(self.model_config.seed)).params()
+
+        # This allows a multi-modal model to be used as text-only, assuming the user
+        # passes the following to vLLM (on the CLI):
+        # --limit-mm-per-prompt '{"image": 0, "video": 0}'
+        disable_mm_from_limits = False
+        if self.model_config.is_multimodal_model:
+            mm_limits = self.model_config.multimodal_config.limit_per_prompt
+            image_limit = mm_limits.get("image")
+            video_limit = mm_limits.get("video")
+            image_count = image_limit.count if image_limit else 0
+            video_count = video_limit.count if video_limit else 0
+            disable_mm_from_limits = image_count == 0 and video_count == 0
+
+            if disable_mm_from_limits:
+                logger.info(
+                    "Disabling multi-modality for model because limits are set to 0."
+                )
+
         self.is_multimodal_model = (self.model_config.is_multimodal_model
                                     and self.embed_multimodal_fn is not None
                                     and hasattr(self.model_config.hf_config,
-                                                "architectures"))
+                                                "architectures")
+                                    and not disable_mm_from_limits)
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
@@ -914,7 +933,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if spec_decode_metadata is None:
             with self.maybe_forbid_compile:
-                next_tokens = sample(
+                next_tokens, processed_logits = sample(
                     step_rng,
                     self.mesh,
                     logits,
@@ -932,7 +951,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 rejection_rng = step_rng
             bonus_logits = self._select_from_array_fn(
                 logits, spec_decode_metadata.bonus_logits_indices)
-            bonus_token_ids = sample(
+            bonus_token_ids, _ = sample(
                 bonus_rng,
                 self.mesh,
                 bonus_logits,
@@ -952,6 +971,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         with self.maybe_forbid_compile:
             if tpu_sampling_metadata.logprobs:
+                if self.model_config.logprobs_mode == "processed_logprobs":
+                    logits = processed_logits
+                else:
+                    logits = logits.astype(jnp.float32)
                 logprobs = self._compute_and_gather_logprobs(
                     logits, next_tokens, self.model_config.max_logprobs)
                 logprobs = _jax_logprobs_copy_to_host_async(logprobs)
@@ -1248,7 +1271,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         idx_pad_len = len(input_ids) - len(token_in_tpu_cur_input_indices)
 
         # Pad according to the instructions written inside self._substitute_placeholder_token_fn
-        full_range = np.arange(0, len(input_ids))
+        full_range = np.arange(0, len(input_ids), dtype=np.int32)
         missing_values = np.setdiff1d(full_range,
                                       token_in_tpu_cur_input_indices)
         padded_token_in_tpu_cur_input_indices = np.concatenate(
@@ -1257,7 +1280,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         padded_token_in_tpu_pre_next_tokens_indices = np.pad(
             token_in_tpu_pre_next_tokens_indices, (0, idx_pad_len),
             mode='constant',
-            constant_values=-1)
+            constant_values=-1).astype(np.int32)
 
         (padded_token_in_tpu_cur_input_indices,
          padded_token_in_tpu_pre_next_tokens_indices) = device_array(
@@ -1269,7 +1292,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 input_ids, padded_token_in_tpu_cur_input_indices,
                 padded_token_in_tpu_pre_next_tokens_indices,
                 self._pre_async_results.next_tokens,
-                len(token_in_tpu_cur_input_indices))
+                jnp.asarray(len(token_in_tpu_cur_input_indices),
+                            dtype=jnp.int32))
 
         return input_ids
 
@@ -1437,7 +1461,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     num_decode_in_dp_rank += 1
             _request_distribution.append(
                 [num_decode_in_dp_rank, num_decode_in_dp_rank, _num_reqs])
-        request_distribution = np.array(_request_distribution).ravel()
+        request_distribution = np.array(_request_distribution,
+                                        dtype=np.int32).ravel()
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -1575,6 +1600,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
+        data_parallel_attn_sharding = NamedSharding(
+            self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
+
         # Get the number of scheduled tokens for each request.
         num_scheduled_tokens_per_req = []
         max_num_scheduled_tokens_all_reqs = 0
@@ -1692,16 +1720,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Put to device
         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
-            self.mesh, self.input_batch, padded_num_reqs)
+            self.mesh,
+            self.input_batch,
+            padded_num_reqs,
+            sharding=data_parallel_attn_sharding,
+        )
         if self.uses_mrope:
             positions = mrope_positions
         query_start_loc_cpu = query_start_loc
         seq_lens_cpu = seq_lens
 
-        (input_ids, positions, query_start_loc, seq_lens,
-         logits_indices, request_distribution) = device_array(
-             self.mesh, (input_ids, positions, query_start_loc, seq_lens,
-                         logits_indices, request_distribution))
+        (input_ids, positions, query_start_loc, seq_lens, logits_indices,
+         request_distribution) = device_array(
+             self.mesh,
+             (input_ids, positions, query_start_loc, seq_lens, logits_indices,
+              request_distribution),
+             sharding=data_parallel_attn_sharding,
+         )
 
         def build_block_table(kv_cache_gid: int) -> jax.Array:
             block_tables = self.block_tables_cpu[kv_cache_gid][:self.
@@ -1711,7 +1746,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 [:num_reqs])
             # Convert block_tables to 1D on cpu.
             block_tables = block_tables.reshape(-1)
-            block_tables = device_array(self.mesh, (block_tables))
+            block_tables = device_array(
+                self.mesh,
+                (block_tables),
+                sharding=data_parallel_attn_sharding,
+            )
             return block_tables
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
@@ -1760,7 +1799,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _get_input_ids_embeds(self, input_ids: jax.Array,
                               mm_embeds: jax.Array | None,
                               is_mm_embed: jax.Array | None):
-        if self.is_multimodal_model:
+        # Prevent the cost of calling additional function.
+        if self.is_multimodal_model and mm_embeds is not None:
             assert self.embed_input_ids_fn is not None
             inputs_embeds = self.embed_input_ids_fn(
                 self.state,

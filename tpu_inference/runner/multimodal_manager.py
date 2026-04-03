@@ -17,9 +17,10 @@ from typing import TYPE_CHECKING
 import jax
 import jax.numpy as jnp
 import numpy as np
+import torch
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
-from vllm.multimodal.utils import group_mm_kwargs_by_modality
+from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
 from tpu_inference.models.jax.utils.multi_modal_utils import (
@@ -86,7 +87,6 @@ class MultiModalManager:
                 mrope_pos_ptr += completion_part_len
 
     def execute_mm_encoder(self, scheduler_output: "VllmSchedulerOutput"):
-        import torch
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
             return
@@ -112,7 +112,7 @@ class MultiModalManager:
         # encoder outputs.
         encoder_outputs = []
         deepstack_outputs = None
-        for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
+        for _, num_items, mm_kwargs_group in group_and_batch_mm_kwargs(
                 mm_kwargs):
             batched_mm_inputs = mm_kwargs_group
             # Convert torch tensors to numpy arrays that JAX can handle.
@@ -136,7 +136,6 @@ class MultiModalManager:
                             torch.float32).numpy().astype(jnp.bfloat16)
                     else:
                         batched_mm_inputs[key] = value.numpy()
-
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
             # 1. A tensor of shape (num_items, feature_size, hidden_size)
@@ -145,7 +144,9 @@ class MultiModalManager:
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
             curr_group_outputs = self.runner.embed_multimodal_fn(
-                self.runner.state, image_grid_thw, **batched_mm_inputs)
+                self.runner.state,
+                image_grid_thw=image_grid_thw,
+                **batched_mm_inputs)
             deepstack_group_outputs = None
             if isinstance(curr_group_outputs, dict):
                 deepstack_group_outputs = curr_group_outputs.get("deepstack")

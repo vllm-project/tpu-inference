@@ -452,13 +452,17 @@ def _ragged_paged_attention_kernel_loop(
                 q = jnp.clip(q, min=minval, max=maxval)
             q = q.astype(k.dtype)
 
-        s = jnp.matmul(q, k.T,
-                       preferred_element_type=jnp.float32).astype(out_dtype)
-        s *= sm_scale
+        s = jnp.matmul(q, k.T, preferred_element_type=jnp.float32)
+
+        s_scale = sm_scale
         if k_scale is not None:
-            s *= k_scale
+            s_scale *= k_scale
         if q_scale is not None:
-            s *= q_scale
+            s_scale *= q_scale
+
+        s *= s_scale
+        s = s.astype(out_dtype)
+
         if soft_cap is not None:
             s = soft_cap * jnp.tanh(s / soft_cap)
 
@@ -1520,7 +1524,7 @@ def get_default_block_sizes(
                 bkv_csz = min(min_bkv_sz_to_peak, max_kv)
             else:
                 bq_sz = min(2048 // num_q_heads_per_kv_head, max_q // 2)
-                bkv_sz = min(2048, max_kv)
+                bkv_sz = min(2048, max_kv // 2)
                 bq_csz = min(1024 // num_q_heads_per_kv_head, max_q // 2)
                 bkv_csz = min(512, align_to(max_kv // 2, page_size))
         case _:
@@ -1528,9 +1532,9 @@ def get_default_block_sizes(
 
     return {
         "bq_sz": max(1, bq_sz),
-        "bkv_sz": max(page_size, bkv_sz),
+        "bkv_sz": align_to(bkv_sz, page_size),
         "bq_csz": max(1, bq_csz),
-        "bkv_csz": max(page_size, bkv_csz),
+        "bkv_csz": align_to(bkv_csz, page_size),
     }
 
 

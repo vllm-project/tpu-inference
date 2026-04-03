@@ -185,7 +185,7 @@ def test_propose(method, num_speculative_tokens):
     base_token_ids = [42, 60]
 
     def mock_model_fn(state, kv_caches, input_ids, target_hidden_states,
-                      attn_metadata):
+                      attn_metadata, layer_name_to_kvcache_index):
         """
         Mock model_fn.
         Returns: (kv_caches, hidden_states_for_logits, residual_tuple)

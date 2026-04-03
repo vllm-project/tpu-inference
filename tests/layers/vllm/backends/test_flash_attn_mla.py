@@ -268,7 +268,7 @@ class TestPallasMLAttentionBackendImpl:
 
         layer = MagicMock()
         layer.kv_cache_quantized_dtype = jnp.float8_e4m3fn
-        layer._q_scale_float = None
+        layer._q_scale_float = 1.0
         layer._k_scale_float = 1.0
         layer._v_scale_float = 1.0
 

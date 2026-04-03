@@ -215,6 +215,12 @@ def test_model_impl_type_choices(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("MODEL_IMPL_TYPE", "vllm")
     assert envs.MODEL_IMPL_TYPE == "vllm"
 
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "flax_nnx")
+    assert envs.DRAFT_MODEL_IMPL_TYPE == "flax_nnx"
+
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "vllm")
+    assert envs.DRAFT_MODEL_IMPL_TYPE == "vllm"
+
 
 def test_string_env_vars_defaults(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("JAX_PLATFORMS", raising=False)

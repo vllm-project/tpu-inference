@@ -47,7 +47,9 @@ export TARGET_MODEL_PATH="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-Coder-480
 export TARGET_TOKENIZER="Qwen/Qwen3-Coder-480B-A35B-Instruct"
 export MODEL_NAME="Qwen3-Coder-480B-A35B-Instruct"
 export DEVICE="tpu7x-16"
-export CODE_HASH="a4047d4-cf732f1-"
+VLLM_COMMIT=$(cut -c 1-7 "${TOP_DIR}/.buildkite/vllm_lkg.version" 2>/dev/null || echo "unknown")
+TPU_INF_COMMIT=$(git -C "${TOP_DIR}" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+export CODE_HASH="${VLLM_COMMIT}-${TPU_INF_COMMIT}"
 export CREATED_BY="bm-scheduler"
 
 # New parameters for advanced/experimental models like DeepSeek
@@ -69,6 +71,7 @@ export RUN_ACCURACY=""
 export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=vllm"
 export USE_UNFUSED_MEGABLOCKS_ENV=""
 export HF_CONFIG=""
+export USE_VLLM_LKG="true"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -86,7 +89,6 @@ while [[ $# -gt 0 ]]; do
     --dataset-name) DATASET_NAME="$2"; shift 2 ;;
     --run-type) RUN_TYPE="$2"; shift 2 ;;
     --device) DEVICE="$2"; shift 2 ;;
-    --code-hash) CODE_HASH="$2"; shift 2 ;;
     --created-by) CREATED_BY="$2"; shift 2 ;;
     --new-model-design) NEW_MODEL_DESIGN="$2"; shift 2 ;;
     --gpu-memory-utilization) GPU_MEMORY_UTILIZATION="$2"; shift 2 ;;
@@ -145,6 +147,7 @@ vllm serve \
   ${EXTRA_SERVER_ARGS} \
   --served-model-name ${TARGET_TOKENIZER} \
   --max-model-len=${MAX_MODEL_LEN} \
+  --api-server-count=3 \
   --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \
   --max-num-seqs ${MAX_NUM_SEQS} \
   --no-enable-prefix-caching \
@@ -275,7 +278,8 @@ EOF
 fi
 
 # Upload vllm_serve.log to GCS
-LOG_GCS_URI="gs://tpu-commons-ci/logs/${MODEL_NAME}_${INPUT_LEN}_${OUTPUT_LEN}_${JOB_REFERENCE}_vllm_serve.log"
+IMPL_TYPE="${MODEL_IMPL_TYPE_ENV#*=}"
+LOG_GCS_URI="gs://tpu-commons-ci/logs/${MODEL_NAME}_${INPUT_LEN}_${OUTPUT_LEN}_${IMPL_TYPE}_${CODE_HASH}_${JOB_REFERENCE}_vllm_serve.log"
 if [ -f "/tmp/vllm_serve.log" ]; then
   echo "Uploading vllm_serve.log to $LOG_GCS_URI"
   gsutil cp /tmp/vllm_serve.log "$LOG_GCS_URI" || echo "Warning: Failed to upload vllm_serve.log"

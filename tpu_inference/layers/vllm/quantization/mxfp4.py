@@ -25,13 +25,13 @@ from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig, FusedMoEQuantConfig, mxfp4_w4a16_moe_quant_config)
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
-from vllm.model_executor.layers.quantization.mxfp4 import (Mxfp4Backend,
-                                                           Mxfp4Config,
+from vllm.model_executor.layers.quantization.mxfp4 import (Mxfp4Config,
                                                            Mxfp4MoEMethod)
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
@@ -44,7 +44,7 @@ from tpu_inference.layers.common.quant_methods import MXFP4
 from tpu_inference.layers.common.quantization import \
     dequantize_tensor_from_mxfp4_packed
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm.moe import (
+from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.layers.vllm.quantization.unquantized import \
@@ -102,7 +102,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
 
         # We piggyback on triton implementation as it applies minimal hardware
         # specific post processing to the weights.
-        self.mxfp4_backend = Mxfp4Backend.TRITON
+        self.mxfp4_backend = Mxfp4MoeBackend.TRITON
 
         self.mesh = mesh
         self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)

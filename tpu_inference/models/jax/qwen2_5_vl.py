@@ -20,11 +20,13 @@ from typing import (Callable, List, Literal, NamedTuple, Optional, TypedDict,
 import jax
 import jax.numpy as jnp
 import numpy as np
+import torch
 from flax import nnx
 from jax.sharding import Mesh
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
 from vllm.config import VllmConfig
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 
 from tpu_inference import utils as utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
@@ -42,6 +44,7 @@ from tpu_inference.models.jax.qwen2 import Qwen2Model
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     MultiModalEmbeddings,
     merge_multimodal_embeddings,
+    normalize_mm_grid_thw,
     reshape_mm_tensor,
     split_mm_embeddings_by_grid,
 )
@@ -803,16 +806,26 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
-        hf_config,
-        image_grid_thw,
-        video_grid_thw,
-        second_per_grid_ts: list[float],
-        context_len: int = 0,
-        seq_len: int | None = None,
-        audio_feature_lengths=None,
-        use_audio_in_video: bool = False,
+        mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[jax.Array, int]:
         """Get mrope input positions and delta value."""
+
+        image_grid_thw = []
+        video_grid_thw = []
+        second_per_grid_ts = []
+        for mm_feature in mm_features:
+            item = mm_feature.data
+            if item is None:
+                continue
+            mm_input = item.get_data()
+            if mm_input.get("image_grid_thw") is not None:
+                image_grid_thw.append(mm_input["image_grid_thw"].tolist())
+            if mm_input.get("video_grid_thw") is not None:
+                video_grid_thw.append(mm_input["video_grid_thw"].tolist())
+            if mm_input.get("second_per_grid_ts") is not None:
+                second_per_grid_ts.append(mm_input["second_per_grid_ts"])
+
+        hf_config = self.config
 
         image_token_id = hf_config.image_token_id
         video_token_id = hf_config.video_token_id
@@ -916,7 +929,6 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
                                         axis=1).reshape(3, -1)
         mrope_position_delta = (llm_positions.max() + 1 -
                                 len(input_tokens)).item()
-        llm_positions = llm_positions[:, context_len:seq_len]
 
         return llm_positions, mrope_position_delta
 
@@ -925,7 +937,6 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             **kwargs: object) -> Optional[Qwen2_5_VLImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
-        # image_grid_thw = kwargs.pop("image_grid_thw", None)
 
         if pixel_values is None and image_embeds is None:
             return None
@@ -933,8 +944,6 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         if pixel_values is not None:
             pixel_values = reshape_mm_tensor(pixel_values,
                                              "image pixel values")
-            # image_grid_thw = reshape_mm_tensor(
-            #     image_grid_thw, "image grid_thw")
 
             if not isinstance(pixel_values, jax.Array):
                 raise ValueError("Incorrect type of image pixel values. "
@@ -947,8 +956,6 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         # Note: comment them out for now and save for future support
         # if image_embeds is not None:
         #     image_embeds = reshape_mm_tensor(image_embeds, "image embeds")
-        #     image_grid_thw = reshape_mm_tensor(image_grid_thw,
-        #                                       "image grid_thw")
 
         #     if not isinstance(image_embeds, jax.Array):
         #         raise ValueError("Incorrect type of image embeddings. "
@@ -958,14 +965,10 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         #         image_embeds=image_embeds,
         #         image_grid_thw=image_grid_thw)
 
-    def _parse_and_validate_multimodal_inputs(self,
-                                              image_grid_thw: tuple[tuple[int,
-                                                                          int,
-                                                                          int],
-                                                                    ...],
-                                              **kwargs: object) -> dict:
+    def _parse_and_validate_multimodal_inputs(
+            self, image_grid_thw: tuple[tuple[int, int, int], ...],
+            **kwargs: object) -> dict:
         mm_input_by_modality = {}
-
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
         for input_key in kwargs:
@@ -1014,13 +1017,16 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         )
         return image_splits
 
-    def embed_multimodal(self, image_grid_thw: tuple[tuple[int, int, int],
-                                                     ...],
-                         **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(
+        self,
+        image_grid_thw: tuple[tuple[int, int, int], ...] = (),
+        **kwargs: object,
+    ) -> MultiModalEmbeddings:
 
         if not self.is_first_rank:
             return ()
 
+        image_grid_thw = normalize_mm_grid_thw(image_grid_thw)
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(
             image_grid_thw, **kwargs)
         if not mm_input_by_modality:

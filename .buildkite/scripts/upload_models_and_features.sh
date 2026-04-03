@@ -25,7 +25,7 @@ declare -a TARGET_FOLDERS=(
     "parallelism"
     "models"
     "features"
-    "RL"
+    "rl"
 )
 
 
@@ -78,7 +78,7 @@ for folder_path in "${TARGET_FOLDERS[@]}"; do
         "models")
           model_list+=("$subject_name")
           ;;
-        "features" | "parallelism" | "quantization" | "kernel_microbenchmarks"/* | "RL")
+        "features" | "parallelism" | "quantization" | "kernel_microbenchmarks"/* | "rl")
           # When MODEL_IMPL_TYPE is 'auto', do not add quantization tests to the list for reporting.
           if ! [[ "$folder_path" == "quantization" && "${MODEL_IMPL_TYPE:-auto}" == "auto" ]]; then
             feature_list+=("${subject_name}")

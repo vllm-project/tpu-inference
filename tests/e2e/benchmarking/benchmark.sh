@@ -115,8 +115,15 @@ if [ -n "${MINIMUM_THROUGHPUT_THRESHOLD:-}" ]; then
     minimum_throughput_threshold="$MINIMUM_THROUGHPUT_THRESHOLD"
 fi
 
-if [ -n "${TENSOR_PARALLEL_SIZE:-}" ]; then
-    tensor_parallel_size="$TENSOR_PARALLEL_SIZE"
+# if TENSOR_PARALLEL_SIZE is set respect it.
+# otherwise, if TPU is tpu7x, use tp=2.
+if [ -z "$TENSOR_PARALLEL_SIZE" ] && [ "$TPU_VERSION" = "tpu7x" ]; then
+  tensor_parallel_size=2
+elif [ -n "$TENSOR_PARALLEL_SIZE" ]; then
+  tensor_parallel_size="$TENSOR_PARALLEL_SIZE"
+else
+  # Default fallback if neither condition is met
+  tensor_parallel_size=1
 fi
 
 echo "Using the root directory at $root_dir"

@@ -1173,10 +1173,10 @@ class DeepSeekV3(JaxModule):
         def _create_deepseek_attention(
                 i: int) -> Union[DeepseekV3MLA, DeepseekV3Attention]:
             if self.use_mla_kernel:
-                query_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
-                keyvalue_skh_spec = P(ShardingAxisName.MLP_TENSOR, None)
-                attn_o_tnh_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
-                anh_sharding = (None, ShardingAxisName.MLP_TENSOR, None)
+                query_tnh_spec = P(ShardingAxisName.ATTN_DATA, None, None)
+                keyvalue_skh_spec = P(ShardingAxisName.ATTN_DATA, None)
+                attn_o_tnh_spec = P(ShardingAxisName.ATTN_DATA, None, None)
+                anh_sharding = (None, ShardingAxisName.ATTN_HEAD, None)
             else:
                 query_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR)
                 keyvalue_skh_spec = P(None, ShardingAxisName.MLP_TENSOR)
@@ -1185,15 +1185,6 @@ class DeepSeekV3(JaxModule):
             ap_sharding = P(None, ShardingAxisName.ATTN_HEAD)
             q_da_sharding = P(None, ShardingAxisName.ATTN_HEAD)
             kv_da_sharding = P(None, ShardingAxisName.ATTN_HEAD)
-
-            if self.vllm_config.additional_config.get("replicate_attn_weights",
-                                                      False):
-                rd_sharding = ()
-                ap_sharding = ()
-                q_da_sharding = ()
-                kv_da_sharding = ()
-                if self.use_mla_kernel:
-                    anh_sharding = ()
 
             attn_cls = None
             if self.use_mla_kernel:
@@ -1222,11 +1213,12 @@ class DeepSeekV3(JaxModule):
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 rngs=rng,
                 quant_config=quant_config,
-                activation_attention_td=P(None, None),
-                activation_q_td=P(None, None),
+                activation_attention_td=P(ShardingAxisName.ATTN_DATA, None),
+                activation_q_td=P(ShardingAxisName.ATTN_DATA, None),
                 query_tnh=query_tnh_spec,
                 keyvalue_skh=keyvalue_skh_spec,
-                activation_attention_out_td=P(None, None),
+                activation_attention_out_td=P(ShardingAxisName.ATTN_DATA,
+                                              None),
                 attn_o_tnh=attn_o_tnh_spec,
                 q_da_sharding=q_da_sharding,
                 ap_sharding=ap_sharding,

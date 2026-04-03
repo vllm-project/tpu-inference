@@ -229,9 +229,10 @@ class Llama4WeightLoader(BaseWeightLoader):
                     f"does not match model shape for {mapped_name}: {mapped_model_weight.value.shape}!"
                 )
 
-            mapped_model_weight.value = shard_put(loaded_weight,
-                                                  mapped_model_weight.sharding,
-                                                  mesh=model_for_loading.mesh)
+            mapped_model_weight.value = shard_put(
+                loaded_weight,
+                mapped_model_weight.out_sharding,
+                mesh=model_for_loading.mesh)
             logger.debug(
                 f"{split_loaded_name}: {loaded_weight.shape}  -->  {mapped_name}: {mapped_model_weight.value.shape}"
             )
@@ -350,7 +351,7 @@ class Llama4WeightLoader(BaseWeightLoader):
                     f"Transformed parameter {loaded_name} to {mapped_name}: {loaded_weight.shape} --> {model_weight.value.shape}"
                 )
                 model_weight.value = shard_put(loaded_weight,
-                                               model_weight.sharding,
+                                               model_weight.out_sharding,
                                                mesh=model_for_loading.mesh)
                 if self.is_verbose:
                     print_param_info(model_weight, loaded_name)
@@ -386,7 +387,7 @@ class Llama4WeightLoader(BaseWeightLoader):
 
                         model_weight.array.scale.value = shard_put(
                             aggregated_weight,
-                            model_weight.array.scale.sharding,
+                            model_weight.array.scale.out_sharding,
                             mesh=model_for_loading.mesh)
 
                     elif aggregated_weight.itemsize < 2:  # check model weight elem nbits < 16
@@ -399,7 +400,7 @@ class Llama4WeightLoader(BaseWeightLoader):
 
                         model_weight.array.qvalue.value = shard_put(
                             aggregated_weight,
-                            model_weight.array.qvalue.sharding,
+                            model_weight.array.qvalue.out_sharding,
                             mesh=model_for_loading.mesh)
 
                     logger.debug(

@@ -163,6 +163,7 @@ class InputBatch:
             prompt_lens=torch.from_numpy(
                 self.num_prompt_tokens[:self.num_reqs]),
             prompt_token_ids=None,
+            prompt_token_ids_cpu=None,
             pooling_params=pooling_params,
             pooling_states=pooling_states,
         )
