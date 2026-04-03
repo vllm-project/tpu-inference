@@ -475,7 +475,6 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
 
         refs = self.forward_dag.execute(
             (scheduler_output, grammar_output))  # type: ignore
-        assert not self.has_connector, "async scheduling with connector not yet supported"
         return AsyncResultFuture(refs, self.workers)
 
 
