@@ -10,9 +10,9 @@ Feature,CorrectnessTest,PerformanceTest
 "Single-Host-P-D-disaggregation",✅ Passing,❓ Untested
 "Speculative Decoding: Eagle3",✅ Passing,✅ Passing
 "Speculative Decoding: Ngram",✅ Passing,✅ Passing
-"async scheduler",❌ Failing,❓ Untested
-"hybrid kv cache",✅ Passing,❓ Untested
-"multi-host",❌ Failing,❓ Untested
+"async scheduler",✅ Passing,✅ Passing
+"hybrid kv cache",❌ Failing,❓ Untested
+"multi-host",✅ Passing,❓ Untested
 "runai_model_streamer_loader",✅ Passing,❓ Untested
-"sampling_params",✅ Passing,❓ Untested
+"sampling_params",❌ Failing,❓ Untested
 "structured_decoding",✅ Passing,❓ Untested
