@@ -452,13 +452,17 @@ def _ragged_paged_attention_kernel_loop(
                 q = jnp.clip(q, min=minval, max=maxval)
             q = q.astype(k.dtype)
 
-        s = jnp.matmul(q, k.T,
-                       preferred_element_type=jnp.float32).astype(out_dtype)
-        s *= sm_scale
+        s = jnp.matmul(q, k.T, preferred_element_type=jnp.float32)
+
+        s_scale = sm_scale
         if k_scale is not None:
-            s *= k_scale
+            s_scale *= k_scale
         if q_scale is not None:
-            s *= q_scale
+            s_scale *= q_scale
+
+        s *= s_scale
+        s = s.astype(out_dtype)
+
         if soft_cap is not None:
             s = soft_cap * jnp.tanh(s / soft_cap)
 
