@@ -241,9 +241,14 @@ def _jax_logprobs_materialize(
     )
 
 
-@jax.jit
-def _unstack_tokens_compiled(stacked):
-    return jnp.unstack(stacked)
+@functools.partial(jax.jit, static_argnums=(2, 3, 4, 5))
+def unpack_compiled(stacked, metadata_blob, S1, S2, S3, dp_size):
+    input_ids, positions = jnp.unstack(stacked)
+    query_start_loc = metadata_blob[0 : S1]
+    seq_lens = metadata_blob[S1 : S1 + S2]
+    logits_indices = metadata_blob[S1 + S2 : S1 + S2 + S3]
+    request_distribution = metadata_blob[S1 + S2 + S3 : S1 + S2 + S3 + dp_size * 3]
+    return input_ids, positions, query_start_loc, seq_lens, logits_indices, request_distribution
 
 
 class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
@@ -1590,21 +1595,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.uses_mrope:
             positions = mrope_positions
 
-        query_start_loc_cpu = query_start_loc
-        logits_indices_cpu = logits_indices
-        seq_lens_cpu = seq_lens
-
         # Stack input_ids and positions
         assert input_ids.shape == positions.shape, f"input_ids shape {input_ids.shape} != positions shape {positions.shape}"
         stacked_tokens = np.stack([input_ids, positions])
 
-        # Collect all isolated host-side numpy arrays presence zones legality alignment
+        # Monolithic stack packing for small 1D metadata buffers
+        metadata_blob = np.concatenate([
+            query_start_loc, # already static bound max_num_reqs + dp_size
+            seq_lens, # already static bound max_num_reqs
+            self.logits_indices_cpu[:self.max_num_reqs], # mounted static top bound
+            request_distribution # size dp_size * 3
+        ])
+
         host_arrays_payload = {
             "stacked_tokens": stacked_tokens,
-            "query_start_loc": query_start_loc,
-            "seq_lens": seq_lens,
-            "logits_indices": logits_indices,
-            "request_distribution": request_distribution,
+            "metadata_blob": metadata_blob,
         }
 
         # Collect block tables host arrays loops zone presence zones legality
@@ -1634,6 +1639,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         for k in host_arrays_payload.keys():
             if k == "stacked_tokens":
                 sharding_payload[k] = NamedSharding(self.mesh, PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+            elif k == "metadata_blob":
+                # TODO(wyzhang): Fix for ATTN_DATA handling
+                # Currently assuming replicated mirrors suite assumption safety blits
+                sharding_payload[k] = NamedSharding(self.mesh, PartitionSpec())
             else:
                 sharding_payload[k] = data_parallel_attn_sharding
 
@@ -1645,11 +1654,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Restructure restore isolation conformance presence zone legality conformity corridor presence alignments zone zone!
         stacked_tokens_dev = dev_arrays_payload["stacked_tokens"]
-        input_ids, positions = _unstack_tokens_compiled(stacked_tokens_dev)
-        query_start_loc = dev_arrays_payload["query_start_loc"]
-        seq_lens = dev_arrays_payload["seq_lens"]
-        logits_indices = dev_arrays_payload["logits_indices"]
-        request_distribution = dev_arrays_payload["request_distribution"]
+        metadata_blob_dev = dev_arrays_payload["metadata_blob"]
+        
+        S1 = self.max_num_reqs + dp_size
+        S2 = self.max_num_reqs
+        S3 = self.max_num_reqs
+
+        input_ids, positions, query_start_loc, seq_lens, logits_indices, request_distribution = unpack_compiled(
+            stacked_tokens_dev, metadata_blob_dev, S1, S2, S3, dp_size
+        )
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
