@@ -1,18 +1,25 @@
-# Copyright 2026 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""SparseCore gather-reduce kernel implementation.
+
+This module contains a kernel implementation for performing a gather-reduce
+operation on TPU SparseCore. It groups rows of an operand based on provided
+indices, sums them up, and scatters the results.
+"""
 
 import array
+import functools
 from typing import Any
 
 import jax
@@ -21,6 +28,7 @@ import jax.numpy as jnp
 from jax import core
 from jax.experimental import mosaic
 from jax.experimental.mosaic.dialects import tpu
+from jax.interpreters import mlir
 from jaxlib.mlir import ir
 from jaxlib.mlir.dialects import arith, func, memref, scf, vector
 
@@ -37,16 +45,9 @@ class VectorTypeHelper:
         return ir.VectorType.get(shape, self.element_type_fn())
 
 
-_I32 = VectorTypeHelper(lambda: ir.IntegerType.get_signless(32))
-_F32 = VectorTypeHelper(lambda: ir.F32Type.get())
-_BF16 = VectorTypeHelper(lambda: ir.BF16Type.get())
-
-
-def is_supported_by_sc_gather_reduce(x_shape: int,
-                                     sc_kernel_threshold: int) -> bool:
-    if x_shape > sc_kernel_threshold and pltpu.get_tpu_info().generation == 7:
-        return True
-    return False
+_I32 = VectorTypeHelper(functools.partial(ir.IntegerType.get_signless, 32))
+_F32 = VectorTypeHelper(ir.F32Type.get)
+_BF16 = VectorTypeHelper(ir.BF16Type.get)
 
 
 @jax.jit(static_argnames=[
@@ -59,6 +60,7 @@ def is_supported_by_sc_gather_reduce(x_shape: int,
     "loop_parallel_access_1",
     "loop_parallel_access_2",
     "loop_parallel_access_3",
+    "topk_wgt_zero_nan",
 ], )
 def sc_gather_reduce(
     op: jax.Array,
@@ -67,20 +69,31 @@ def sc_gather_reduce(
     *,
     reduce_group_size: int,
     single_sc: bool = False,
-    col_chunk_size: int = int(3.5 * 1024),  # half a row
+    col_chunk_size: int = int(3.5 * 1024),
     row_chunk_size: int = 16,  # writing back 2 rows given reduce size of 8
-    loop_unroll_factor_1: int = 8,
+    loop_unroll_factor_1: int = 2,
     loop_unroll_factor_2: int = 2,
     loop_unroll_factor_3: int = 8,
     loop_parallel_access_1: bool = True,
-    loop_parallel_access_2: bool = True,
+    loop_parallel_access_2: bool = False,
     loop_parallel_access_3: bool = False,
+    topk_wgt_zero_nan: bool = False,
 ) -> jax.Array:
     """Performs a gather-reduce operation on SparseCore.
 
   This kernel groups rows of the operand `op` based on `idx`, sums them up,
   and scatters the results. The gather and add operations are performed in fp32,
   and the results are written back in bf16.
+
+  Equivalent jax numpy code:
+  ```
+    gathered = op[idx, :]
+    if topk_wgt_local is not None:
+      flat_weights = topk_wgt_local.flatten()
+      gathered = gathered * flat_weights[:, None].astype(acc_dtype)
+    gathered = jnp.reshape(gathered, (-1, reduce_group_size, op.shape[1]))
+    output = jnp.sum(gathered.astype(acc_dtype), axis=1).astype(jnp.bfloat16)
+    ```
 
   Args:
     op: The operand matrix in fp32 [B, K] to reduce.
@@ -90,20 +103,34 @@ def sc_gather_reduce(
     single_sc: Whether to use a single SparseCore.
     col_chunk_size: The size of column chunks to process.
     row_chunk_size: The size of row chunks for internal processing.
+    loop_unroll_factor_1: Unroll factor for the main loop over column chunks.
+    loop_unroll_factor_2: Unroll factor for the loop over row chunks in offset
+      calculation.
+    loop_unroll_factor_3: Unroll factor for the inner loop within offset
+      calculation.
+    loop_parallel_access_1: Enables parallel access for the main column chunk
+      loop.
+    loop_parallel_access_2: Enables parallel access for the row chunk loop in
+      offset calculation.
+    loop_parallel_access_3: Enables parallel access for the inner loop within
+      offset calculation.
+    topk_wgt_zero_nan: If true, treat zero topk_weights as indicators of NaN
+      during multiplication, resulting in zero output.
 
   Returns:
-    The result of operation, bf16 matrix [M/reduce_group_size x K].
+    The result of operation, bf16 matrix [M/reduce_group_size, K].
   """
 
-    assert (op.dtype == jnp.float32 or op.dtype == jnp.bfloat16
-            ), f"op.dtype must be f32 or bf16, but got {op.dtype}"
+    assert op.dtype in (
+        jnp.float32,
+        jnp.bfloat16,
+    ), f"op.dtype must be f32 or bf16, but got {op.dtype}"
     is_bf16 = op.dtype == jnp.bfloat16
     assert op.shape[0] % reduce_group_size == 0, (
         "op.shape[0] must be divisible by reduce_group_size, but got"
         f" {op.shape[0]} and {reduce_group_size}")
-    assert (  # writing back in bf16 (2 rows at once)
-        row_chunk_size / reduce_group_size == 2
-    ), (f"row_chunk_size must be 2 * reduce_group_size, but got {row_chunk_size=}"
+    assert row_chunk_size / reduce_group_size == 2, (  # writing back in bf16 (2 rows at once)
+        f"row_chunk_size must be 2 * reduce_group_size, but got {row_chunk_size=}"
         f" and {reduce_group_size=}")
 
     if topk_weights is not None:
@@ -121,7 +148,6 @@ def sc_gather_reduce(
 
     vreg_size = tpu_info.sparse_core.num_lanes
 
-    from jax.interpreters import mlir
     with mlir.make_ir_context() as ctx, ir.Location.unknown():
         # The TPU dialect is required for its TPU_DimensionSemantics
         tpu.register_dialect(ctx)
@@ -177,8 +203,8 @@ def sc_gather_reduce(
         Args:
           offset_tile_local: The destination memref in TileSpMem to store
             calculated offsets.
-          idx_tile_local: A memref in TileSpMem containing a chunk of indices
-            of rows to gather from `op`.
+          idx_tile_local: A memref in TileSpMem containing a chunk of indices of
+            rows to gather from `op`.
           col_pos: The index of the current column chunk being processed.
 
         Returns:
@@ -192,7 +218,8 @@ def sc_gather_reduce(
                 )
                 parity = arith.remui(
                     idx_loaded,
-                    vector.broadcast(_I32[row_chunk_size], const_lut(2, i32)))
+                    vector.broadcast(_I32[row_chunk_size], const_lut(2, i32)),
+                )
                 if is_bf16:
                     mul_mem_layout = 4
                 else:
@@ -236,18 +263,18 @@ def sc_gather_reduce(
                     else:
                         base_idx_rem = arith.remui(base_idx, const_lut(8, i32))
                     base_idx = arith.addi(
-                        arith.muli(
+                        arith.muli(  # NOTYPO
                             base_idx_div,
                             const_lut(op.shape[1] // 128 * mul_mem_layout,
                                       i32),
-                        ),  # go/NOTYPO
+                        ),
                         base_idx_rem,
                     )
 
                     # consider col chunk
                     base_idx = arith.addi(
                         base_idx,
-                        arith.muli(  # go/NOTYPO
+                        arith.muli(  # NOTYPO
                             arith.index_cast(i32, col_pos),
                             const_lut(col_chunk_size // 128 * mul_mem_layout,
                                       i32),
@@ -273,10 +300,9 @@ def sc_gather_reduce(
 
                         idx_local = arith.addi(
                             arith.muli(i, const_lut(
-                                (col_chunk_size // 128))),  # go/NOTYPO
-                            arith.muli(  # go/NOTYPO
-                                loop_j.induction_variable,
-                                const_lut(vreg_size)),
+                                (col_chunk_size // 128))),  # NOTYPO
+                            arith.muli(loop_j.induction_variable,
+                                       const_lut(vreg_size)),  # NOTYPO
                         )
                         tpu.store(
                             vec,
@@ -301,7 +327,7 @@ def sc_gather_reduce(
                         [
                             arith.subi(
                                 arith.muli(const_lut(
-                                    (col_chunk_size // 128)), i),  # go/NOTYPO
+                                    (col_chunk_size // 128)), i),  # NOTYPO
                                 const_lut(int(vreg_size * (1 + rem_vreg))),
                             )
                         ],
@@ -320,7 +346,7 @@ def sc_gather_reduce(
                         [
                             arith.subi(
                                 arith.muli(const_lut(
-                                    (col_chunk_size // 128)), i),  # go/NOTYPO
+                                    (col_chunk_size // 128)), i),  # NOTYPO
                                 const_lut(int(vreg_size)),
                             )
                         ],
@@ -367,30 +393,24 @@ def sc_gather_reduce(
 
                 # lin_idx is index type, cast to i32
                 lin_idx_i32 = arith.index_cast(i32, lin_idx)
-                lin_idx_base = arith.muli(lin_idx_i32, const_lut(16, i32))
+                lin_idx_base = arith.muli(lin_idx_i32,
+                                          const_lut(16, i32))  # NOTYPO
                 lin_idx_base_vec = vector.broadcast(_I32[row_chunk_size],
                                                     lin_idx_base)
 
                 iota = arith.constant(
                     _I32[row_chunk_size],
                     ir.DenseIntElementsAttr.get(
-                        array.array("i", [i for i in range(16)]),
+                        array.array("i", list(range(16))),
                         type=_I32[row_chunk_size],
                     ),
                 )
                 offsets = arith.addi(lin_idx_base_vec, iota)
 
-                tpu.store(
-                    offsets,
-                    offset_tile_weights,
-                    [const_lut(0)],
-                    enable_all_sublanes_mask,
-                )
-
                 tpu.enqueue_indirect_dma(
                     source=weights_ref,
                     target=dst_tile,
-                    offsets=offset_tile_weights,
+                    offsets=offsets,
                     semaphore=sflag,
                 )
                 tpu.wait_indirect_dma(semaphore=sflag,
@@ -418,8 +438,9 @@ def sc_gather_reduce(
 
         Args:
           scratch_local: Memref in TileSpMem containing rows gathered from `op`.
-          scratch_out_local: Memref in TileSpMem to store the 2 reduced rows
-            in bf16 format.
+          scratch_out_local: Memref in TileSpMem to store the 2 reduced rows in
+            bf16 format.
+          idx_parity: Parity information for each index in the gathered rows.
           weights_local: Optional memref in TileSpMem containing weights to
             apply before reduction.
           parity: Optional parity bit indicating which weights to use from
@@ -439,7 +460,8 @@ def sc_gather_reduce(
                         ir.MemRefType.get(
                             (2, row_chunk_size),
                             bf16,
-                            ir.StridedLayoutAttr.get(0, [row_chunk_size, 1]),
+                            ir.Attribute.parse("#tpu.tiled<,[" +
+                                               str(row_chunk_size) + ",1]>"),
                             memory_space=memoryspace_tilespmem,
                         ),
                         weights_local,
@@ -457,22 +479,20 @@ def sc_gather_reduce(
                         enable_all_sublanes_mask,
                     )
 
-                    # Reminder Mosaic SC compiler: 'compressed' flips [d0, d1] to [d1, d0]
-                    raw_weights_16x2 = vector.shape_cast(
-                        _BF16[16, 2], raw_weights)
+                    # Reminder Mosaic SC compiler: flips [d0, d1] to [d1, d0]
                     # part=1 corresponds to sc_tpu.unpackf result 1 (Even indices)
                     weights_evens = tpu.unpack_subelements(
                         _F32[16],
-                        raw_weights_16x2,
+                        raw_weights,
                         0,
-                        ir.Attribute.parse("#tpu.pack_format<compressed>"),
+                        ir.Attribute.parse("#tpu.pack_format<interleaved>"),
                     )
                     # part=0 corresponds to sc_tpu.unpackf result 0 (Odd indices)
                     weights_odds = tpu.unpack_subelements(
                         _F32[16],
-                        raw_weights_16x2,
+                        raw_weights,
                         1,
-                        ir.Attribute.parse("#tpu.pack_format<compressed>"),
+                        ir.Attribute.parse("#tpu.pack_format<interleaved>"),
                     )
 
                     is_odd = arith.cmpi(
@@ -497,8 +517,8 @@ def sc_gather_reduce(
                 # reinterpret cast to correct shape to read from it
                 if not is_bf16:
                     new_scratch_shape = (row_chunk_size, col_chunk_size)
-                    new_scratch_layout = ir.StridedLayoutAttr.get(
-                        0, [col_chunk_size, 1])
+                    new_scratch_layout = ir.Attribute.parse(
+                        "#tpu.tiled<,[" + str(col_chunk_size) + ",1]>")
                     new_scratch_ref_ty = ir.MemRefType.get(
                         new_scratch_shape,
                         f32,
@@ -544,25 +564,24 @@ def sc_gather_reduce(
                                 scratch_local,
                                 [
                                     arith.addi(const_lut(row_idx_l), row_add),
-                                    arith.muli(col_pos, const_lut(2)),
+                                    arith.muli(col_pos,
+                                               const_lut(2)),  # NOTYPO
                                 ],
                                 enable_all_sublanes_mask,
                             )
-                            vec_bf16_16x2 = vector.shape_cast(
-                                _BF16[16, 2], vec_bf16_2x16)
                             vec_f32_evens = tpu.unpack_subelements(
                                 _F32[16],
-                                vec_bf16_16x2,
+                                vec_bf16_2x16,
                                 0,
                                 ir.Attribute.parse(
-                                    "#tpu.pack_format<compressed>"),
+                                    "#tpu.pack_format<interleaved>"),
                             )
                             vec_f32_odds = tpu.unpack_subelements(
                                 _F32[16],
-                                vec_bf16_16x2,
+                                vec_bf16_2x16,
                                 1,
                                 ir.Attribute.parse(
-                                    "#tpu.pack_format<compressed>"),
+                                    "#tpu.pack_format<interleaved>"),
                             )
                             parity_of_row = vector.extract(
                                 idx_parity,
@@ -586,29 +605,40 @@ def sc_gather_reduce(
                     row0 = get_row_val(0)
                     if weights_local is not None:
                         row0 = arith.mulf(row0, weights_vecs[0])
-                        row0 = arith.select(
-                            arith.cmpf(arith.CmpFPredicate.OEQ,
-                                       weights_vecs[0], zero_vec_f32),
-                            zero_vec_f32, row0)
+                        if topk_wgt_zero_nan:
+                            row0 = arith.select(
+                                arith.cmpf(arith.CmpFPredicate.OEQ,
+                                           weights_vecs[0], zero_vec_f32),
+                                zero_vec_f32,
+                                row0,
+                            )
 
                     row8 = get_row_val(8)
                     if weights_local is not None:
                         row8 = arith.mulf(row8, weights_vecs[8])
-                        row8 = arith.select(
-                            arith.cmpf(arith.CmpFPredicate.OEQ,
-                                       weights_vecs[8], zero_vec_f32),
-                            zero_vec_f32, row8)
+                        if topk_wgt_zero_nan:
+                            row8 = arith.select(
+                                arith.cmpf(arith.CmpFPredicate.OEQ,
+                                           weights_vecs[8], zero_vec_f32),
+                                zero_vec_f32,
+                                row8,
+                            )
 
                     for sum_idx in range(7):
                         tmp_row0 = get_row_val(sum_idx + 1)
                         if weights_local is not None:
                             tmp_row0 = arith.mulf(tmp_row0,
                                                   weights_vecs[sum_idx + 1])
-                            tmp_row0 = arith.select(
-                                arith.cmpf(arith.CmpFPredicate.OEQ,
-                                           weights_vecs[sum_idx + 1],
-                                           zero_vec_f32), zero_vec_f32,
-                                tmp_row0)
+                            if topk_wgt_zero_nan:
+                                tmp_row0 = arith.select(
+                                    arith.cmpf(
+                                        arith.CmpFPredicate.OEQ,
+                                        weights_vecs[sum_idx + 1],
+                                        zero_vec_f32,
+                                    ),
+                                    zero_vec_f32,
+                                    tmp_row0,
+                                )
 
                         row0 = arith.addf(row0, tmp_row0)
 
@@ -616,28 +646,31 @@ def sc_gather_reduce(
                         if weights_local is not None:
                             tmp_row8 = arith.mulf(
                                 tmp_row8, weights_vecs[8 + sum_idx + 1])
-                            tmp_row8 = arith.select(
-                                arith.cmpf(arith.CmpFPredicate.OEQ,
-                                           weights_vecs[8 + sum_idx + 1],
-                                           zero_vec_f32), zero_vec_f32,
-                                tmp_row8)
+                            if topk_wgt_zero_nan:
+                                tmp_row8 = arith.select(
+                                    arith.cmpf(
+                                        arith.CmpFPredicate.OEQ,
+                                        weights_vecs[8 + sum_idx + 1],
+                                        zero_vec_f32,
+                                    ),
+                                    zero_vec_f32,
+                                    tmp_row8,
+                                )
 
                         row8 = arith.addf(row8, tmp_row8)
 
-                    packed_16x2 = tpu.pack_subelements(
-                        _BF16[vreg_size, 2],
+                    packed = tpu.pack_subelements(
+                        _BF16[2, vreg_size],
                         [row8, row0],
                         [0, 1],
-                        ir.Attribute.parse("#tpu.pack_format<compressed>"),
+                        ir.Attribute.parse("#tpu.pack_format<interleaved>"),
                     )
-                    packed = vector.shape_cast(_BF16[2, vreg_size],
-                                               packed_16x2)
 
                     tpu.store(
                         packed,
                         scratch_out_local,
                         [const_lut(0),
-                         arith.muli(col_offset, const_lut(2))],  # go/NOTYPO
+                         arith.muli(col_offset, const_lut(2))],  # NOTYPO
                         enable_all_sublanes_mask,
                     )
                     scf.YieldOp([])
@@ -649,11 +682,12 @@ def sc_gather_reduce(
                         row_chunk_size * col_chunk_size // mem_num,
                         mem_num,
                     )
-                    new_scratch_layout = ir.StridedLayoutAttr.get(
-                        0, [mem_num, 1])
+                    new_scratch_layout = ir.Attribute.parse("#tpu.tiled<,[" +
+                                                            str(mem_num) +
+                                                            ",1]>")
                     new_scratch_ref_ty = ir.MemRefType.get(
                         new_scratch_shape,
-                        f32,  # bf16,
+                        f32,
                         new_scratch_layout,
                         memory_space=memoryspace_tilespmem,
                     )
@@ -687,18 +721,18 @@ def sc_gather_reduce(
           offset_tile_out_local: The destination memref in TileSpMem to store
             calculated offsets.
           col_pos: The index of the current column chunk being processed.
-          row_pos: The starting row index for the reduction group in the
-            output tensor. If None, computes offsets for prologue.
+          row_pos: The starting row index for the reduction group in the output
+            tensor. If None, computes offsets for prologue.
 
         Returns:
           The offset_tile_out_local memref filled with offsets for DMA scatter.
         """
                 if row_pos is not None:
-
                     rest_row_pos = arith.remui(row_pos, const_lut(8))
                     rest_row_pos = arith.divui(rest_row_pos, const_lut(2))
                     tmp = arith.divui(row_pos, const_lut(8))
-                    tmp = arith.muli(tmp, const_lut(4 * op.shape[1] // 128))
+                    tmp = arith.muli(tmp, const_lut(4 * op.shape[1] //
+                                                    128))  # NOTYPO
                     row_vec_offset = arith.addi(tmp, rest_row_pos)
 
                     row_vec_offset = arith.index_cast(i32, row_vec_offset)
@@ -720,7 +754,7 @@ def sc_gather_reduce(
                     iota,
                     vector.broadcast(
                         _I32[row_chunk_size],
-                        arith.muli(  # go/NOTYPO
+                        arith.muli(  # NOTYPO
                             arith.index_cast(i32, col_pos),
                             const_lut(col_chunk_size // 128 * 4, i32),
                         ),
@@ -762,10 +796,9 @@ def sc_gather_reduce(
 
                         idx_local = arith.addi(
                             arith.muli(loop_i, const_lut(
-                                (op.shape[1] // 128))),  # go/NOTYPO
-                            arith.muli(  # go/NOTYPO
-                                loop_j.induction_variable,
-                                const_lut(vreg_size)),
+                                (op.shape[1] // 128))),  # NOTYPO
+                            arith.muli(loop_j.induction_variable,
+                                       const_lut(vreg_size)),  # NOTYPO
                         )
 
                         if row_pos is not None:
@@ -837,7 +870,7 @@ def sc_gather_reduce(
                 scratch_0 = memref.alloca(
                     ir.MemRefType.get(
                         shape=(row_chunk_size * 2, col_chunk_size),
-                        element_type=bf16,  # f32,
+                        element_type=bf16,
                         memory_space=memoryspace_tilespmem,
                     ),
                     [],
@@ -846,7 +879,7 @@ def sc_gather_reduce(
                 scratch_1 = memref.alloca(
                     ir.MemRefType.get(
                         shape=(row_chunk_size * 2, col_chunk_size),
-                        element_type=bf16,  # f32,
+                        element_type=bf16,
                         memory_space=memoryspace_tilespmem,
                     ),
                     [],
@@ -857,10 +890,11 @@ def sc_gather_reduce(
                     row_chunk_size * col_chunk_size * 2 // mem_num,
                     mem_num,
                 )
-                new_scratch_layout = ir.StridedLayoutAttr.get(0, [mem_num, 1])
+                new_scratch_layout = ir.Attribute.parse("#tpu.tiled<,[" +
+                                                        str(mem_num) + ",1]>")
                 new_scratch_ref_ty = ir.MemRefType.get(
                     new_scratch_shape,
-                    bf16,  # f32,
+                    bf16,
                     new_scratch_layout,
                     memory_space=memoryspace_tilespmem,
                 )
@@ -888,7 +922,8 @@ def sc_gather_reduce(
                     row_chunk_size * col_chunk_size // mem_num,
                     mem_num,
                 )
-                new_scratch_layout = ir.StridedLayoutAttr.get(0, [mem_num, 1])
+                new_scratch_layout = ir.Attribute.parse("#tpu.tiled<,[" +
+                                                        str(mem_num) + ",1]>")
                 new_scratch_ref_ty = ir.MemRefType.get(
                     new_scratch_shape,
                     f32,
@@ -896,17 +931,27 @@ def sc_gather_reduce(
                     memory_space=memoryspace_tilespmem,
                 )
 
-            scratch_0 = memref.reinterpret_cast(new_scratch_ref_ty,
-                                                scratch_0, [], [], [],
-                                                static_offsets=[0],
-                                                static_sizes=new_scratch_shape,
-                                                static_strides=[mem_num, 1])
+            scratch_0 = memref.reinterpret_cast(
+                new_scratch_ref_ty,
+                scratch_0,
+                [],
+                [],
+                [],
+                static_offsets=[0],
+                static_sizes=new_scratch_shape,
+                static_strides=[mem_num, 1],
+            )
 
-            scratch_1 = memref.reinterpret_cast(new_scratch_ref_ty,
-                                                scratch_1, [], [], [],
-                                                static_offsets=[0],
-                                                static_sizes=new_scratch_shape,
-                                                static_strides=[mem_num, 1])
+            scratch_1 = memref.reinterpret_cast(
+                new_scratch_ref_ty,
+                scratch_1,
+                [],
+                [],
+                [],
+                static_offsets=[0],
+                static_sizes=new_scratch_shape,
+                static_strides=[mem_num, 1],
+            )
 
             scratch_out_0 = memref.alloca(
                 ir.MemRefType.get(
@@ -930,7 +975,8 @@ def sc_gather_reduce(
 
             mem_num = 128 * 2
             new_scratch_shape = (2 * col_chunk_size // mem_num, mem_num)
-            new_scratch_layout = ir.StridedLayoutAttr.get(0, [mem_num, 1])
+            new_scratch_layout = ir.Attribute.parse("#tpu.tiled<,[" +
+                                                    str(mem_num) + ",1]>")
             new_scratch_ref_ty = ir.MemRefType.get(
                 new_scratch_shape,
                 bf16,
@@ -940,25 +986,36 @@ def sc_gather_reduce(
 
             scratch_out_0 = memref.reinterpret_cast(
                 new_scratch_ref_ty,
-                scratch_out_0, [], [], [],
+                scratch_out_0,
+                [],
+                [],
+                [],
                 static_offsets=[0],
                 static_sizes=new_scratch_shape,
-                static_strides=[mem_num, 1])
+                static_strides=[mem_num, 1],
+            )
 
             scratch_out_1 = memref.reinterpret_cast(
                 new_scratch_ref_ty,
-                scratch_out_1, [], [], [],
+                scratch_out_1,
+                [],
+                [],
+                [],
                 static_offsets=[0],
                 static_sizes=new_scratch_shape,
-                static_strides=[mem_num, 1])
+                static_strides=[mem_num, 1],
+            )
 
             new_input_shape = (
                 idx.shape[0] // reduce_group_size * op.shape[1] // mem_num,
                 mem_num,
             )
-            new_input_ref_ty = ir.MemRefType.get(new_input_shape,
-                                                 bf16,
-                                                 memory_space=memoryspace_hbm)
+            new_input_ref_ty = ir.MemRefType.get(
+                new_input_shape,
+                bf16,
+                layout=ir.Attribute.parse(f"#tpu.tiled<,[{mem_num}, 1]>"),
+                memory_space=memoryspace_hbm,
+            )
             out_ref = tpu.reinterpret_cast(
                 new_input_ref_ty,
                 out_ref,
@@ -967,7 +1024,10 @@ def sc_gather_reduce(
             if topk_weights is not None:
                 new_weights_shape = (topk_weights.size // 2, 2)
                 new_weights_ref_ty = ir.MemRefType.get(
-                    new_weights_shape, bf16, memory_space=memoryspace_hbm)
+                    new_weights_shape,
+                    bf16,
+                    layout=ir.Attribute.parse("#tpu.tiled<,[2, 1]>"),
+                    memory_space=memoryspace_hbm)
                 weights_ref = tpu.reinterpret_cast(new_weights_ref_ty,
                                                    weights_ref)
 
@@ -1012,7 +1072,6 @@ def sc_gather_reduce(
             weights_tile_1 = None
             sflag_weights_0 = None
             sflag_weights_1 = None
-            offset_tile_weights = None
             if topk_weights is not None:
                 weights_tile_0 = memref.alloca(
                     ir.MemRefType.get(
@@ -1034,6 +1093,32 @@ def sc_gather_reduce(
                     [],
                     [],
                 )
+                tiled_weights_ref_ty = ir.MemRefType.get(
+                    (row_chunk_size, 2),
+                    bf16,
+                    layout=ir.Attribute.parse("#tpu.tiled<,[2, 1]>"),
+                    memory_space=memoryspace_tilespmem,
+                )
+                weights_tile_0 = memref.reinterpret_cast(
+                    tiled_weights_ref_ty,
+                    weights_tile_0,
+                    [],
+                    [],
+                    [],
+                    static_offsets=[0],
+                    static_sizes=[row_chunk_size, 2],
+                    static_strides=[2, 1],
+                )
+                weights_tile_1 = memref.reinterpret_cast(
+                    tiled_weights_ref_ty,
+                    weights_tile_1,
+                    [],
+                    [],
+                    [],
+                    static_offsets=[0],
+                    static_sizes=[row_chunk_size, 2],
+                    static_strides=[2, 1],
+                )
 
                 sflag_weights_0 = tpu.sem_alloc(
                     ir.MemRefType.get((),
@@ -1043,16 +1128,6 @@ def sc_gather_reduce(
                     ir.MemRefType.get((),
                                       dma_semaphore_type,
                                       memory_space=memory_space_semaphore))
-
-                offset_tile_weights = memref.alloca(
-                    ir.MemRefType.get(
-                        shape=(vreg_size, ),
-                        element_type=i32,
-                        memory_space=memoryspace_tilespmem,
-                    ),
-                    [],
-                    [],
-                )
 
             offset_sizes = row_chunk_size * (col_chunk_size // 128)
             offset_tile_0 = memref.alloca(
@@ -1077,12 +1152,12 @@ def sc_gather_reduce(
 
             global_chunk_to_process = arith.addi(
                 arith.muli(current_sc_core, const_lut(num_sc_per_core,
-                                                      i32)),  # go/NOTYPO
+                                                      i32)),  # NOTYPO
                 current_local_core,
             )
             global_row_idx_start = arith.index_cast(
                 index,
-                arith.muli(  # go/NOTYPO
+                arith.muli(  # NOTYPO
                     global_chunk_to_process,
                     const_lut(idx.shape[0] // num_sc, i32),
                 ),
@@ -1140,11 +1215,12 @@ def sc_gather_reduce(
                     mem_num = 128 * 2
                     new_input_shape = (op.shape[0] * op.shape[1] // mem_num,
                                        mem_num)
-                    new_input_layout = ir.StridedLayoutAttr.get(
-                        0, [mem_num, 1])
+                    new_input_layout = ir.Attribute.parse("#tpu.tiled<,[" +
+                                                          str(mem_num) +
+                                                          ",1]>")
                     new_input_ref_ty = ir.MemRefType.get(
                         new_input_shape,
-                        bf16,  # f32
+                        bf16,
                         new_input_layout,
                         memory_space=memoryspace_hbm,
                     )
@@ -1152,19 +1228,25 @@ def sc_gather_reduce(
                     mem_num = 128
                     new_input_shape = (op.shape[0] * op.shape[1] // mem_num,
                                        mem_num)
-                    new_input_layout = ir.StridedLayoutAttr.get(
-                        0, [mem_num, 1])
+                    new_input_layout = ir.Attribute.parse("#tpu.tiled<,[" +
+                                                          str(mem_num) +
+                                                          ",1]>")
                     new_input_ref_ty = ir.MemRefType.get(
                         new_input_shape,
                         f32,
                         new_input_layout,
                         memory_space=memoryspace_hbm,
                     )
-                op_ref = memref.reinterpret_cast(new_input_ref_ty,
-                                                 op_ref, [], [], [],
-                                                 static_offsets=[0],
-                                                 static_sizes=new_input_shape,
-                                                 static_strides=[mem_num, 1])
+                op_ref = memref.reinterpret_cast(
+                    new_input_ref_ty,
+                    op_ref,
+                    [],
+                    [],
+                    [],
+                    static_offsets=[0],
+                    static_sizes=new_input_shape,
+                    static_strides=[mem_num, 1],
+                )
 
                 tpu.enqueue_indirect_dma(
                     source=op_ref,
@@ -1666,7 +1748,7 @@ def sc_gather_reduce(
         ]
 
         if topk_weights is not None:
-            # Insert weights before output - we append here because its the same
+            # Insert weights before output - we append here because it's the same
             # attribute as output.
             args_attributes.append(
                 ir.DictAttr.get({"sc.persistent": ir.UnitAttr.get()}))
