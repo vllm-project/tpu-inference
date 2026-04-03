@@ -145,6 +145,7 @@ def get_w13_padding_config(intermediate_size: int,
                            align: int = 128) -> W13PaddingConfig:
     """Calculates padded dimensions and pad amounts for w13 tensors."""
     local_intermediate_size = intermediate_size // reorder_size
+
     padded_local_intermediate_size = align_to(local_intermediate_size, align)
     padded_intermediate_size = padded_local_intermediate_size * reorder_size
     pad_amount = padded_local_intermediate_size - local_intermediate_size
