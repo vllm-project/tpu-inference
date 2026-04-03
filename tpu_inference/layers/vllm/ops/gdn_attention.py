@@ -29,8 +29,10 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     reorder_concatenated_tensor_for_sharding
 from tpu_inference.layers.vllm.ops.ragged_conv1d_jax import ragged_conv1d
-from tpu_inference.layers.vllm.ops.ragged_gated_delta_rule_jax import \
+
+from tpu_inference.layers.vllm.ops.ragged_gated_delta_rule_chunked_jax import \
     ragged_gated_delta_rule
+
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
 
@@ -110,6 +112,7 @@ def run_jax_gdn_attention_local(
         n_v,
         d_k,
         d_v,
+        max_seqlen=16384,
     )
 
     return (new_conv_state, new_recurrent_state), output
