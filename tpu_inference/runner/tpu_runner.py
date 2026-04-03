@@ -241,6 +241,11 @@ def _jax_logprobs_materialize(
     )
 
 
+@jax.jit
+def _unstack_tokens_compiled(stacked):
+    return jnp.unstack(stacked)
+
+
 class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def __init__(
@@ -1589,10 +1594,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logits_indices_cpu = logits_indices
         seq_lens_cpu = seq_lens
 
+        # Stack input_ids and positions
+        assert input_ids.shape == positions.shape, f"input_ids shape {input_ids.shape} != positions shape {positions.shape}"
+        stacked_tokens = np.stack([input_ids, positions])
+
         # Collect all isolated host-side numpy arrays presence zones legality alignment
         host_arrays_payload = {
-            "input_ids": input_ids,
-            "positions": positions,
+            "stacked_tokens": stacked_tokens,
             "query_start_loc": query_start_loc,
             "seq_lens": seq_lens,
             "logits_indices": logits_indices,
@@ -1621,15 +1629,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         for gid, host_arr in block_tables_host_dict.items():
             host_arrays_payload[f"block_tables_gid_{gid}"] = host_arr
 
+        # Build sharding pytree payload
+        sharding_payload = {}
+        for k in host_arrays_payload.keys():
+            if k == "stacked_tokens":
+                sharding_payload[k] = NamedSharding(self.mesh, PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+            else:
+                sharding_payload[k] = data_parallel_attn_sharding
+
         # Fire a SINGLE structural Compounded Monolithic transport flushes silencer silence voids!
         dev_arrays_payload = jax.device_put(
             host_arrays_payload,
-            data_parallel_attn_sharding,
+            sharding_payload,
         )
 
         # Restructure restore isolation conformance presence zone legality conformity corridor presence alignments zone zone!
-        input_ids = dev_arrays_payload["input_ids"]
-        positions = dev_arrays_payload["positions"]
+        stacked_tokens_dev = dev_arrays_payload["stacked_tokens"]
+        input_ids, positions = _unstack_tokens_compiled(stacked_tokens_dev)
         query_start_loc = dev_arrays_payload["query_start_loc"]
         seq_lens = dev_arrays_payload["seq_lens"]
         logits_indices = dev_arrays_payload["logits_indices"]
