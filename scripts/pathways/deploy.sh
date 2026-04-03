@@ -76,4 +76,19 @@ echo "=== Unsuspending jobs ==="
 kubectl patch job "${WORKER_JOB}" --type=merge -p '{"spec":{"suspend":false}}'
 kubectl patch job "${HEAD_JOB}" --type=merge -p '{"spec":{"suspend":false}}'
 
-echo "=== Done! Job '${JOBSET_NAME}' deployed with latest local changes. ==="
+echo "=== Waiting for head pod to be created ==="
+while true; do
+  POD_NAME=$(kubectl get pods -l "jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME},jobset.sigs.k8s.io/replicatedjob-name=pathways-head" -o name | head -n 1)
+  if [[ -n "${POD_NAME}" ]]; then
+    break
+  fi
+  echo "  Waiting for head pod to appear..."
+  sleep 2
+done
+
+echo "=== Waiting for container 'jax-tpu' to start in ${POD_NAME} ==="
+kubectl wait --for=condition=Ready "${POD_NAME}" --timeout=600s 2>/dev/null || true
+sleep 3
+
+echo "=== Following logs of ${POD_NAME} -c jax-tpu ==="
+kubectl logs -f "${POD_NAME}" -c jax-tpu
