@@ -17,7 +17,7 @@ _Latest News_ 🔥
 
 <details>
 <summary><i>Previous News</i> 🔥</summary>
-   
+
 - [Pytorch Conference](https://pytorchconference.sched.com/event/27QCh/sponsored-session-everything-everywhere-all-at-once-vllm-hardware-optionality-with-spotify-and-google-brittany-rockwell-google-shireen-kheradpey-spotify) Learn how Spotify uses vLLM with both GPUs and TPUs to drive down costs and improve user experience.
 - [Ray Summit, November 3-5](https://www.anyscale.com/ray-summit/2025) in San Francisco!
 - [JAX DevLab on November 18th](https://rsvp.withgoogle.com/events/devlab-fall-2025) in Sunnyvale!
