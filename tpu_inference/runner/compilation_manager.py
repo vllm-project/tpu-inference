@@ -272,6 +272,7 @@ class CompilationManager:
         that the scheduler is expected to handle, ensuring a compiled version
         is ready for each combination.
         """
+        dp_size = self.runner.vllm_config.sharding_config.total_dp_size
 
         for num_tokens in self.runner.num_tokens_paddings:
             dp_sharding = NamedSharding(
@@ -296,7 +297,10 @@ class CompilationManager:
                 next_tokens = self._create_dummy_tensor(
                     (num_reqs, ),
                     jnp.int32,
-                    sharding=NamedSharding(self.runner.mesh, PartitionSpec()))
+                    sharding=NamedSharding(
+                        self.runner.mesh,
+                        PartitionSpec(ShardingAxisName.ATTN_DATA)) if dp_size
+                    > 1 else NamedSharding(self.runner.mesh, PartitionSpec()))
 
                 placeholder_num = jnp.asarray(1, dtype=jnp.int32)
                 self._run_compilation(
