@@ -18,6 +18,7 @@ from typing import Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import torch
 from jax.sharding import Mesh
 
@@ -63,7 +64,7 @@ class TPUSupportedSamplingMetadata:
         # Use a dummy tensor with a unique shape for each logprobs config.
         # This avoids persistent cache collisions.
         dummy_shape = (1 if needs_logprobs else 2, )
-        cache_collision_dummy = jnp.zeros(dummy_shape, dtype=jnp.int32)
+        cache_collision_dummy = np.zeros(dummy_shape, dtype=np.int32)
         # Use replicated sharding for dummy tensor.
         cache_collision_dummy = device_array(mesh,
                                              cache_collision_dummy,
