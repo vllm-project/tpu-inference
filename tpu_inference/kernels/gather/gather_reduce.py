@@ -50,6 +50,13 @@ _F32 = VectorTypeHelper(ir.F32Type.get)
 _BF16 = VectorTypeHelper(ir.BF16Type.get)
 
 
+def is_supported_by_sc_gather_reduce(x_shape: int,
+                                     sc_kernel_threshold: int) -> bool:
+    if x_shape > sc_kernel_threshold and pltpu.get_tpu_info().generation == 7:
+        return True
+    return False
+
+
 @jax.jit(static_argnames=[
     "reduce_group_size",
     "single_sc",
