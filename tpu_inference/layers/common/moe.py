@@ -137,6 +137,7 @@ def moe_apply(
                     use_ep=layer.use_ep,
                     activation=activation,
                     scoring_fn=layer.scoring_func,
+                    fuse_act=envs.FUSE_MOE_ACT,
                     sc_kernel_threshold=envs.SC_KERNEL_THRESHOLD,
                     sc_kernel_col_chunk_size=envs.SC_KERNEL_COL_CHUNK_SIZE,
                 )

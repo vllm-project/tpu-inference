@@ -38,6 +38,18 @@ def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
                 f"FusedMoE does not support {scoring_fn} scoring function")
 
 
+def apply_act_fn(activation: str, gate: jax.Array,
+                 up: jax.Array) -> jax.Array:
+    match activation:
+        case "silu":
+            return jax.nn.silu(gate) * up
+        case "gelu":
+            return jax.nn.gelu(gate) * up
+        case _:
+            raise NotImplementedError(
+                f"Unsupported activation function: {activation}")
+
+
 def gmm_wrapper(lhs,
                 rhs,
                 rhs_scale,
@@ -90,6 +102,7 @@ def moe_gmm_local(
     activation: str,
     topk: int,
     parallelism: Literal["tp", "ep"],
+    fuse_act: bool,
     sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
 ) -> jax.Array:
@@ -100,17 +113,32 @@ def moe_gmm_local(
 
     assert parallelism in ["tp", "ep"]
 
-    # GMM1 computes x @ (W_up | W_gate) together and activation, output is [tokens,padded_intermediate_size]
-    gmm1_res = gmm_wrapper(
-        x,
-        w1,
-        w1_scale,
-        w1_bias,
-        group_sizes,
-        group_offset,
-        fuse_act=activation,
-        preferred_element_type=x.dtype,
-    )
+    if fuse_act:
+        # GMM1 computes x @ (W_up | W_gate) with fused activation inside the kernel
+        gmm1_res = gmm_wrapper(
+            x,
+            w1,
+            w1_scale,
+            w1_bias,
+            group_sizes,
+            group_offset,
+            fuse_act=activation,
+            preferred_element_type=x.dtype,
+        )
+    else:
+        # GMM1 computes x @ (W_up | W_gate) together and then split out to apply
+        # activation to the gate result
+        gmm1_res_gate_up = gmm_wrapper(
+            x,
+            w1,
+            w1_scale,
+            w1_bias,
+            group_sizes,
+            group_offset,
+            preferred_element_type=x.dtype,
+        )
+        gmm1_res_gate, gmm1_res_up = jnp.split(gmm1_res_gate_up, 2, -1)
+        gmm1_res = apply_act_fn(activation, gmm1_res_gate, gmm1_res_up)
 
     # When the parallelism is TP since w2_bias is not sharded, we should only apply bias
     # once, not applying to every shard. So we set w2_bias to 0 to all shards other than
@@ -118,7 +146,6 @@ def moe_gmm_local(
     if parallelism == "tp" and w2_bias is not None:
         shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR).sum()
         w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
-    gmm1_res = gmm1_res[:, :w2.shape[1]]  # trim to hidden size if padded
 
     local_group_size = w1.shape[0]
     if local_group_size < group_sizes.size:
@@ -195,6 +222,7 @@ def tensor_parallel_gmm(
     activation: str,
     topk: int,
     mesh: Mesh,
+    fuse_act: bool,
     sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
 ) -> jax.Array:
@@ -220,6 +248,7 @@ def tensor_parallel_gmm(
             activation=activation,
             topk=topk,
             parallelism="tp",
+            fuse_act=fuse_act,
             sc_kernel_threshold=sc_kernel_threshold,
             sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
         ),
@@ -269,6 +298,7 @@ def expert_parallel_gmm(
     activation: str,
     topk: int,
     mesh: Mesh,
+    fuse_act: bool,
     sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
 ) -> jax.Array:
@@ -290,6 +320,7 @@ def expert_parallel_gmm(
             activation=activation,
             topk=topk,
             parallelism="ep",
+            fuse_act=fuse_act,
             sc_kernel_threshold=sc_kernel_threshold,
             sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
         ),
@@ -331,6 +362,7 @@ def expert_parallel_gmm(
     "use_ep",
     "activation",
     "scoring_fn",
+    "fuse_act",
     "sc_kernel_threshold",
     "sc_kernel_col_chunk_size",
 ))
@@ -349,6 +381,7 @@ def fused_moe_func(
     use_ep: bool,
     activation: str,
     scoring_fn: str,
+    fuse_act: bool,
     sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
 ) -> jax.Array:
@@ -369,6 +402,7 @@ def fused_moe_func(
         use_ep: use expert parallelism.
         activation: activation function to perform on the output of w1.
         scoring_fn: scoring function to apply on gating_output.
+        fuse_act: whether to fuse activation into the GMM kernel.
 
     Returns:
         Output of moe operation [num_tokens, hidden_size]
@@ -455,6 +489,7 @@ def fused_moe_func(
             activation=activation,
             topk=topk,
             mesh=mesh,
+            fuse_act=fuse_act,
             sc_kernel_threshold=sc_kernel_threshold,
             sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
         )
@@ -473,6 +508,7 @@ def fused_moe_func(
             activation=activation,
             topk=topk,
             mesh=mesh,
+            fuse_act=fuse_act,
             sc_kernel_threshold=sc_kernel_threshold,
             sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
         )
