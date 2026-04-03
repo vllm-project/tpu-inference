@@ -69,22 +69,39 @@ def main(args: argparse.Namespace):
     print(f"Average warmup latency: {np.mean(warmup_latencies):.4f}s")
 
     # Enable tracing on server
-    llm.start_profile()
-    if DELAY_MS == 0:
-        time.sleep(1.0)
+    if args.xprof:
+        llm.start_profile()
+        if DELAY_MS == 0:
+            time.sleep(1.0)
+
     profile_latencies = []
     for _ in tqdm(range(args.num_iters), desc="Profile iterations"):
         profile_latencies.append(run_to_completion())
-    llm.stop_profile()
+
+    if args.xprof:
+        llm.stop_profile()
+
     print(f"Average profile latency: {np.mean(profile_latencies):.4f}s")
 
     return
 
 
+def str2bool(v):
+    if isinstance(v, bool):
+       return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
+
 def parse_args():
     parser = FlexibleArgumentParser(
         description="Benchmark the latency of processing a single batch of "
-        "requests till completion.")
+        "requests till completion.",
+        conflict_handler='resolve')
     parser.add_argument("--input-len", type=int, default=32)
     parser.add_argument("--output-len", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -108,7 +125,22 @@ def parse_args():
               "with ui.perfetto.dev, Tensorboard, or XProf"),
     )
 
+    parser.add_argument(
+        "--xprof",
+        type=str2bool,
+        default=False,
+        help="Enable XProf profiling (JAX trace collection).",
+    )
+
     parser = EngineArgs.add_cli_args(parser)
+
+    parser.add_argument(
+        "--enable-prefix-caching",
+        type=str2bool,
+        default=None,
+        help="Enable prefix caching for vLLM.",
+    )
+
     return parser.parse_args()
 
 
