@@ -148,8 +148,9 @@ class TestProcessedLogprobs:
     @staticmethod
     def _get_fake_mesh():
         """Create a fake mesh for testing purposes."""
-        devices = jax.devices("cpu")
-        mesh_shape = (1, )
+        devices = jax.devices()
+        num_devices = len(devices)
+        mesh_shape = (num_devices, )
         axis_names = (ShardingAxisName.ATTN_DATA, )
         device_mesh = mesh_utils.create_device_mesh(mesh_shape, devices)
         return Mesh(device_mesh, axis_names)
