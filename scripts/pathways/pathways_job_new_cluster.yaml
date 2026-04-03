@@ -11,7 +11,7 @@ spec:
   coordinator:
     replicatedJob: pathways-head
   failurePolicy:
-    maxRestarts: 100
+    maxRestarts: 0
     restartStrategy: Recreate
   network:
     enableDNSHostnames: true
@@ -22,6 +22,8 @@ spec:
     replicas: 1
     template:
       metadata:
+        labels:
+          kueue.x-k8s.io/queue-name: lq
         annotations:
           alpha.jobset.sigs.k8s.io/exclusive-topology: kubernetes.io/hostname
       spec:
@@ -31,6 +33,8 @@ spec:
         parallelism: 1
         template:
           metadata:
+            labels:
+              kueue.x-k8s.io/queue-name: lq
             annotations:
               alpha.jobset.sigs.k8s.io/exclusive-topology: kubernetes.io/hostname
           spec:
@@ -64,10 +68,12 @@ spec:
                     pip install --no-deps /tmp/tpu-inference
                     echo "tpu-inference patch installed."
 
+                    pip install jax==0.9.1 jaxlib==0.9.1
+
                     # Environment variables
                     export VLLM_ENABLE_V1_MULTIPROCESSING=0
                     export HF_TOKEN=${HF_TOKEN}
-                    export PHASED_PROFILING_DIR=gs://wenxindong-multipod-dev/profiling/vllm_qwen3_235b_a22b_instruct_2507/dp32/mar20
+                    export PHASED_PROFILING_DIR=gs://wenxindong-multipod-dev/profiling/vllm_qwen3_235b_a22b_instruct_2507/dp16/apr2
                     export VLLM_ENGINE_READY_TIMEOUT_S=7200
                     export MODEL_IMPL_TYPE=vllm
                     export NEW_MODEL_DESIGN=1
@@ -80,17 +86,16 @@ spec:
                     JAX_PLATFORMS=proxy,cpu \
                     JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 \
                     vllm serve Qwen/Qwen3-235B-A22B \
-                      --tensor-parallel-size 8 \
-                      --data-parallel-size 16 \
-                      --api-server-count 1 \
-                      --max-model-len 5120 \
-                      --gpu-memory-utilization 0.95 \
-                      --no-enable-prefix-caching \
-                      --max-num-seqs 256 \
-                      --max-num-batched-tokens 4096 \
-                      --enable-expert-parallel \
-                      --additional_config='{"sharding":{"sharding_strategy": {"enable_dp_attention":1}}}' \
-                      --load-format dummy
+                    --tensor-parallel-size 8 \
+                    --data-parallel-size 16 \
+                    --max-model-len 5120 \
+                    --api-server-count 1 \
+                    --gpu-memory-utilization 0.95 \
+                    --no-enable-prefix-caching \
+                    --max-num-seqs 128 \
+                    --max-num-batched-tokens 4096 \
+                    --enable-expert-parallel \
+                    --load-format dummy
                   ) & PID=$!
 
                   while kill -0 $PID 2>/dev/null; do
@@ -125,7 +130,7 @@ spec:
             # ── Pathways Resource Manager (sidecar initContainer) ──
             initContainers:
             - name: pathways-rm
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server:latest
               imagePullPolicy: Always
               args:
               - --server_port=29001
@@ -160,7 +165,7 @@ spec:
               restartPolicy: Always
             # ── Pathways Proxy Server (sidecar initContainer, port 29000) ──
             - name: pathways-proxy
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_proxy_server:latest
               imagePullPolicy: Always
               args:
               - --server_port=29000
@@ -194,6 +199,8 @@ spec:
     replicas: 1
     template:
       metadata:
+        labels:
+          kueue.x-k8s.io/queue-name: lq
         annotations:
           cloud.google.com/gke-tpu-slice-topology: 4x4x4 # Use your favorite 4m x 4n x 4k topology
       spec:
@@ -203,6 +210,8 @@ spec:
         parallelism: 16 # same as above
         template:
           metadata:
+            labels:
+              kueue.x-k8s.io/queue-name: lq
             annotations:
               cloud.google.com/gke-tpu-slice-topology: 4x4x4 # same as above
               kueue.k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
@@ -228,11 +237,12 @@ spec:
               effect: "NoSchedule"
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: tpu7x
+              # cloud.google.com/gke-tpu-topology: 4x4x4
             hostNetwork: true
             dnsPolicy: ClusterFirstWithHostNet
             containers:
             - name: pathways-worker
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server:latest
               imagePullPolicy: Always
               args:
               - --server_port=29005
