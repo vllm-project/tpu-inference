@@ -1,5 +1,2 @@
 buildkite-test-collector
 hf_transfer
-# TODO(https://github.com/vllm-project/vllm/issues/38379): Remove the following once vLLM supports transformers 5.5.0.
-# Gemma4 is added in transformers 5.5.0, we explicitly install it here for Gemma4 tests.
-transformers>=5.5.0

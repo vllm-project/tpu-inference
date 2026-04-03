@@ -20,6 +20,11 @@ from jax import numpy as jnp
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.model_loader import get_model_loader
 
+try:
+    from transformers import Gemma4TextConfig
+except ImportError:
+    Gemma4TextConfig = None
+
 from tpu_inference.distributed.jax_parallel_state import \
     init_pp_distributed_environment
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
@@ -32,6 +37,12 @@ from tpu_inference.models.jax.gemma4 import (Gemma4DecoderLayer,
 
 class TestGemma4ForCausalLM:
 
+    # TODO(https://github.com/vllm-project/vllm/issues/38379): Re-enable the test after addressing the issue.
+    @pytest.mark.skipif(
+        condition=Gemma4TextConfig is None,
+        reason=
+        "Gemma4 requires transformers v5.5.0, which will break other models. This test cannot be enabled until vLLM upgrades to transformers v5.5.0 or later."
+    )
     @pytest.mark.parametrize("model_name", [
         "google/gemma-4-31B-it",
         "google/gemma-4-26B-A4B-it",
