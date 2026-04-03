@@ -47,6 +47,10 @@ from tpu_inference.utils import time_function
 
 logger = init_logger(__name__)
 
+# Timeout (in seconds) for blocking recv_bytes() calls in the parent process.
+# If a worker doesn't respond within this time, we log a warning and raise.
+_IPC_RECV_TIMEOUT_SECONDS = 120.0
+
 
 class SchedulerCommand(Enum):
     """Enum for scheduler worker process commands."""
@@ -147,16 +151,33 @@ def _scheduler_worker_process(
         log_stats=log_stats,
     )
 
-    logger.debug(f"Scheduler worker process {rank} started")
+    logger.info(f"Scheduler worker process {rank} started (PID={os.getpid()})")
 
     def _send_result(result):
         """Send result back using cloudpickle serialization."""
         output_conn.send_bytes(cloudpickle.dumps(result))
 
+    # Worker-side debugging counters
+    _worker_cmd_count = 0
+
     # Process commands from the input connection
     while True:
         try:
-            command, data = cloudpickle.loads(input_conn.recv_bytes())
+            recv_start = time()
+            raw_msg = input_conn.recv_bytes()
+            recv_elapsed = time() - recv_start
+            command, data = cloudpickle.loads(raw_msg)
+
+            _worker_cmd_count += 1
+
+            if recv_elapsed > 5.0:
+                logger.warning(
+                    f"Worker {rank}: Waited {recv_elapsed:.2f}s to receive "
+                    f"command #{_worker_cmd_count} ({command.value}). "
+                    "Parent may be slow sending commands."
+                )
+
+            cmd_start = time()
 
             match command:
                 case SchedulerCommand.ADD_REQUEST:
@@ -260,6 +281,14 @@ def _scheduler_worker_process(
                         rank, f"Unknown command: {command}")
                     _send_result(error)
                     raise error
+
+            # Log slow commands
+            cmd_elapsed = time() - cmd_start
+            if cmd_elapsed > 1.0:
+                logger.warning(
+                    f"Worker {rank}: Command '{command.value}' "
+                    f"(#{_worker_cmd_count}) took {cmd_elapsed:.2f}s to execute"
+                )
 
         except (SystemExit, KeyboardInterrupt):
             logger.info(f"Scheduler worker {rank} received shutdown signal, "
@@ -398,11 +427,18 @@ class DPScheduler(SchedulerInterface):
             output_child_conn.close()
             self.processes.append(process)
 
+        # Debugging counters for tracking scheduling steps and IPC health
+        self._schedule_step_count = 0
+        self._update_from_output_count = 0
+        self._total_ipc_send_count = 0
+        self._total_ipc_recv_count = 0
+
         logger.info(
             f"DPScheduler (Async = {self.vllm_config.scheduler_config.async_scheduling}) "
             f"started {self.dp_size} worker processes with cloudpickle. "
             f"Per-rank limits: max_seqs={self.vllm_config.scheduler_config.max_num_seqs}, "
-            f"max_tokens={self.vllm_config.scheduler_config.max_num_batched_tokens}"
+            f"max_tokens={self.vllm_config.scheduler_config.max_num_batched_tokens}. "
+            f"Worker PIDs: {[p.pid for p in self.processes]}"
         )
 
         # Register an atexit handler that runs *before* multiprocessing's
@@ -434,14 +470,30 @@ class DPScheduler(SchedulerInterface):
                       command: SchedulerCommand,
                       data: Any = None) -> None:
         """Send a command to a worker process via its input pipe."""
+        self._total_ipc_send_count += 1
+
+        # Check worker health before sending
+        proc = self.processes[rank]
+        if not proc.is_alive():
+            raise RuntimeError(
+                f"Cannot send '{command.value}' to rank {rank}: "
+                f"worker process (PID={proc.pid}) is dead "
+                f"(exit code {proc.exitcode}). "
+                f"Step={self._schedule_step_count}, "
+                f"total_sends={self._total_ipc_send_count}"
+            )
+
         start_time = time()
         payload = cloudpickle.dumps((command, data))
         serialize_time = time() - start_time
         self.input_conns[rank].send_bytes(payload)
-        if serialize_time > 1.0:
-            logger.warning(f"Slow serialization ({serialize_time:.2f}s, "
-                           f"{len(payload)} bytes) for '{command.value}' "
-                           f"command to rank {rank}/{self.dp_size}.")
+        send_time = time() - start_time
+        if serialize_time > 1.0 or send_time > 1.0:
+            logger.warning(
+                f"Slow IPC send ({send_time:.2f}s, serialize={serialize_time:.2f}s, "
+                f"{len(payload)} bytes) for '{command.value}' "
+                f"to rank {rank}/{self.dp_size} at step {self._schedule_step_count}."
+            )
 
     def _get_result(self,
                     rank: int,
@@ -452,24 +504,63 @@ class DPScheduler(SchedulerInterface):
         multiprocessing.Queue.get(). This eliminates the background feeder
         threads that Queue uses, avoiding GIL contention and thread convoy
         effects at high DP sizes.
+
+        Includes a poll-based timeout to detect hangs early instead of
+        blocking forever.
         """
+        self._total_ipc_recv_count += 1
+        cmd_name = command.value if command else "unknown"
+
         try:
             start_time = time()
+
+            # Use poll() with a timeout to avoid blocking forever
+            if not self.output_conns[rank].poll(
+                    timeout=_IPC_RECV_TIMEOUT_SECONDS):
+                # Timed out waiting for the worker — gather diagnostics
+                proc = self.processes[rank]
+                alive = proc.is_alive()
+                exit_code = proc.exitcode
+                elapsed = time() - start_time
+
+                # Check health of ALL workers for a complete picture
+                worker_status = []
+                for r in range(self.dp_size):
+                    p = self.processes[r]
+                    worker_status.append(
+                        f"rank {r}: alive={p.is_alive()}, "
+                        f"exit_code={p.exitcode}, pid={p.pid}"
+                    )
+
+                raise RuntimeError(
+                    f"HANG DETECTED: Timed out after {elapsed:.1f}s waiting "
+                    f"for rank {rank} response to '{cmd_name}' command. "
+                    f"Schedule step={self._schedule_step_count}, "
+                    f"update_step={self._update_from_output_count}, "
+                    f"total_sends={self._total_ipc_send_count}, "
+                    f"total_recvs={self._total_ipc_recv_count}, "
+                    f"cached_outputs_depth={len(self.cached_schedulers_output)}, "
+                    f"assigned_requests={len(self.assigned_dp_rank)}. "
+                    f"Worker status: {'; '.join(worker_status)}"
+                )
+
             raw_bytes = self.output_conns[rank].recv_bytes()
             recv_time = time()
             result = cloudpickle.loads(raw_bytes)
             end_time = time()
             total_time = end_time - start_time
             if total_time > 1.0:
-                cmd_name = command.value if command else "unknown"
                 pipe_wait = recv_time - start_time
                 deserialize = end_time - recv_time
-                logger.warning(f"Long wait time ({total_time:.2f}s) for "
-                               f"rank {rank}/{self.dp_size} response to "
-                               f"'{cmd_name}' command "
-                               f"(pipe_wait={pipe_wait:.2f}s, "
-                               f"deserialize={deserialize:.2f}s, "
-                               f"{len(raw_bytes)} bytes).")
+                logger.warning(
+                    f"Long wait time ({total_time:.2f}s) for "
+                    f"rank {rank}/{self.dp_size} response to "
+                    f"'{cmd_name}' command at step {self._schedule_step_count} "
+                    f"(pipe_wait={pipe_wait:.2f}s, "
+                    f"deserialize={deserialize:.2f}s, "
+                    f"{len(raw_bytes)} bytes).")
+        except RuntimeError:
+            raise  # Re-raise our own timeout RuntimeError
         except Exception as e:
             # Check if the worker process is still alive for a better message
             proc = self.processes[rank]
@@ -477,12 +568,17 @@ class DPScheduler(SchedulerInterface):
                 exit_code = proc.exitcode
                 raise RuntimeError(
                     f"Pipe error for rank {rank}: "
-                    f"Worker process terminated with exit code {exit_code}. "
+                    f"Worker process (PID={proc.pid}) terminated with "
+                    f"exit code {exit_code}. "
+                    f"Step={self._schedule_step_count}, "
+                    f"cmd='{cmd_name}'. "
                     "This may indicate a crash or signal in the scheduler "
                     "worker process.") from e
             raise RuntimeError(
                 f"Pipe error for rank {rank}: "
-                "Worker process terminated unexpectedly. "
+                f"Worker process (PID={proc.pid}) terminated unexpectedly. "
+                f"Step={self._schedule_step_count}, "
+                f"cmd='{cmd_name}'. "
                 "This may indicate a crash in the scheduler worker process."
             ) from e
         if isinstance(result, SchedulerWorkerError):
@@ -537,6 +633,7 @@ class DPScheduler(SchedulerInterface):
         assert request.request_id not in self.assigned_dp_rank, (
             f"Request {request.request_id} already "
             f"assigned to rank {self.assigned_dp_rank[request.request_id]})")
+
         rank = self._find_best_rank_for_request(request)
         self.assigned_dp_rank[request.request_id] = rank
 
@@ -554,6 +651,10 @@ class DPScheduler(SchedulerInterface):
         3. Combine outputs from all schedulers
         4. Return unified scheduling result
         """
+        self._schedule_step_count += 1
+        step = self._schedule_step_count
+        schedule_start = time()
+
         # Run each scheduler independently
         for rank in range(self.dp_size):
             self._send_command(rank, SchedulerCommand.SCHEDULE)
@@ -561,7 +662,14 @@ class DPScheduler(SchedulerInterface):
         # Collect outputs from all workers (blocking)
         rank_outputs = []
         for rank in range(self.dp_size):
+            rank_recv_start = time()
             output = self._get_result(rank, SchedulerCommand.SCHEDULE)
+            rank_recv_elapsed = time() - rank_recv_start
+            if rank_recv_elapsed > 1.0:
+                logger.warning(
+                    f"Step {step}: Rank {rank} SCHEDULE response took "
+                    f"{rank_recv_elapsed:.2f}s"
+                )
             rank_outputs.append(output)
 
         # Cache scheduler outputs to use in `update_from_output`
@@ -570,12 +678,17 @@ class DPScheduler(SchedulerInterface):
         # Return combined scheduler outputs
         combined_output = self._combine_scheduler_outputs(rank_outputs)
 
-        logger.debug(
-            f"DPScheduler scheduled: "
-            f"{combined_output.total_num_scheduled_tokens} total tokens, "
-            f"{len(combined_output.scheduled_new_reqs)} new requests, "
-            f"{len(combined_output.scheduled_cached_reqs.req_ids)} cached requests"
-        )
+        total_elapsed = time() - schedule_start
+
+        # Per-rank token breakdown for load balance debugging
+        if step % 10 == 0 or total_elapsed > 2.0:
+            per_rank_tokens = [
+                output.total_num_scheduled_tokens for output in rank_outputs
+            ]
+            logger.info(
+                f"Step {step} per-rank scheduled tokens: {per_rank_tokens}, "
+                f"schedule_time={total_elapsed:.3f}s"
+            )
 
         return combined_output
 
@@ -792,6 +905,32 @@ class DPScheduler(SchedulerInterface):
         We need to route the model runner output to the appropriate scheduler
         based on which rank each request belongs to.
         """
+        self._update_from_output_count += 1
+        update_step = self._update_from_output_count
+
+        # Validate cached output queue depth
+        if len(self.cached_schedulers_output) == 0:
+            raise RuntimeError(
+                f"update_from_output step {update_step}: "
+                f"cached_schedulers_output is EMPTY! "
+                f"schedule_step={self._schedule_step_count}. "
+                "This indicates schedule() and update_from_output() are "
+                "out of sync."
+            )
+
+        # Check for req_ids in model output that aren't in our assignment map
+        untracked_reqs = [
+            req_id for req_id in model_runner_output.req_ids
+            if req_id not in self.assigned_dp_rank
+        ]
+        if untracked_reqs:
+            logger.error(
+                f"update_from_output step {update_step}: "
+                f"{len(untracked_reqs)} request(s) in model output are NOT "
+                f"in assigned_dp_rank: {untracked_reqs[:5]}... "
+                f"(total assigned={len(self.assigned_dp_rank)})"
+            )
+
         # Split model output by DP rank (each rank gets only its req_ids).
         rank_model_outputs = self._split_model_output_by_rank(
             model_runner_output)
@@ -806,8 +945,16 @@ class DPScheduler(SchedulerInterface):
         combined_engine_outputs = defaultdict(list)
         rank_scheduler_stats: List[Optional[SchedulerStats]] = []
         for rank in range(self.dp_size):
+            rank_recv_start = time()
             rank_engine_outputs = self._get_result(
                 rank, SchedulerCommand.UPDATE_FROM_OUTPUT)
+            rank_recv_elapsed = time() - rank_recv_start
+            if rank_recv_elapsed > 1.0:
+                logger.warning(
+                    f"update_from_output step {update_step}: "
+                    f"Rank {rank} UPDATE_FROM_OUTPUT response took "
+                    f"{rank_recv_elapsed:.2f}s"
+                )
             rank_stats = None
             for client_idx, engine_output in rank_engine_outputs.items():
                 combined_engine_outputs[client_idx].append(engine_output)
@@ -882,17 +1029,37 @@ class DPScheduler(SchedulerInterface):
 
         # Route finish signals to appropriate schedulers
         rank_request_ids = defaultdict(list)
+        untracked_ids = []
         for req_id in request_ids:
             if req_id not in self.assigned_dp_rank:
+                untracked_ids.append(req_id)
                 continue
             rank = self.assigned_dp_rank[req_id]
             rank_request_ids[rank].append(req_id)
 
+        if untracked_ids:
+            logger.warning(
+                f"finish_requests: {len(untracked_ids)} request(s) not found "
+                f"in assigned_dp_rank: {untracked_ids[:5]}..."
+            )
+
         # Forward to each scheduler
+        # NOTE: This is sequential (send+recv per rank), unlike schedule()
+        # and update_from_output() which send-all-then-recv-all. This could
+        # cause ordering issues if a worker is slow.
+        finish_start = time()
         for rank, req_ids in rank_request_ids.items():
             self._send_command(rank, SchedulerCommand.FINISH_REQUESTS,
                                (req_ids, finished_status))
             self._get_result(rank, SchedulerCommand.FINISH_REQUESTS)
+
+        finish_elapsed = time() - finish_start
+        if finish_elapsed > 1.0:
+            logger.warning(
+                f"finish_requests took {finish_elapsed:.2f}s for "
+                f"{len(request_ids)} requests across "
+                f"{len(rank_request_ids)} ranks"
+            )
 
     def get_num_unfinished_requests(self) -> int:
         """Get total number of unfinished requests across all DP ranks."""
@@ -1068,6 +1235,15 @@ class DPScheduler(SchedulerInterface):
 
     def shutdown(self) -> None:
         """Shutdown all DP rank scheduler worker processes."""
+        logger.info(
+            f"DPScheduler shutting down after {self._schedule_step_count} "
+            f"schedule steps and {self._update_from_output_count} "
+            f"update_from_output calls. "
+            f"Total IPC: sends={self._total_ipc_send_count}, "
+            f"recvs={self._total_ipc_recv_count}, "
+            f"remaining_assigned={len(self.assigned_dp_rank)}, "
+            f"cached_outputs_depth={len(self.cached_schedulers_output)}"
+        )
         atexit.unregister(self._atexit_cleanup)
 
         # Send shutdown command to all workers, skipping dead ones
