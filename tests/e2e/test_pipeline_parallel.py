@@ -116,16 +116,15 @@ def _run_inference_with_config(model_name: str,
             "ep": False,
             "impl": "jax"
         },
-        # EP is failing on v6
-        # {
-        #     "id": "ep_tp",
-        #     "model": "Qwen/Qwen1.5-MoE-A2.7B",
-        #     "tp": 2,
-        #     "pp": 2,
-        #     "dp": 1,
-        #     "ep": True,
-        #     "impl": "vllm"
-        # },
+        {
+            "id": "ep",
+            "model": "Qwen/Qwen1.5-MoE-A2.7B",
+            "tp": 1,
+            "pp": 2,
+            "dp": 1,
+            "ep": True,
+            "impl": "jax"
+        },
     ],
     ids=lambda x: x["id"],
 )
