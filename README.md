@@ -9,6 +9,11 @@
 | <a href="https://docs.vllm.ai/projects/tpu/en/latest/"><b>Documentation</b></a> | <a href="https://blog.vllm.ai/"><b>Blog</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/google-tpu-support/27"><b>User Forum</b></a> | <a href="https://slack.vllm.ai"><b>Developer Slack</b></a>  (#sig-tpu) |
 </p>
 
+<p align="center">
+<a href="https://github.com/vllm-project/tpu-inference/actions/workflows/pre-commit.yml"><img src="https://github.com/vllm-project/tpu-inference/actions/workflows/pre-commit.yml/badge.svg" alt="pre-commit"></a>
+<a href="docs/cicd-monitoring.md"><img src="https://img.shields.io/badge/CI%2FCD-Monitoring%20Guide-blue" alt="CI/CD Monitoring"></a>
+</p>
+
 ---
 
 _Latest News_ 🔥
