@@ -40,4 +40,40 @@ kubectl delete jobset "${JOBSET_NAME}" --ignore-not-found
 echo "=== Applying ${YAML_FILE} ==="
 kubectl apply -f "${YAML_FILE}"
 
+WORKER_JOB="${JOBSET_NAME}-worker-0"
+HEAD_JOB="${JOBSET_NAME}-pathways-head-0"
+
+echo "=== Waiting for jobs to be created ==="
+until kubectl get job "${WORKER_JOB}" &>/dev/null && kubectl get job "${HEAD_JOB}" &>/dev/null; do
+  echo "  Waiting for jobs to appear..."
+  sleep 2
+done
+
+echo "=== Adding Kueue management labels ==="
+kubectl label job "${WORKER_JOB}" kueue.x-k8s.io/managed=true --overwrite
+kubectl label job "${HEAD_JOB}" kueue.x-k8s.io/managed=true --overwrite
+
+echo "=== Waiting for workload to be admitted ==="
+WORKLOAD_NAME=""
+# Discover the workload name (jobset-<JOBSET_NAME>-<hash>)
+until [[ -n "${WORKLOAD_NAME}" ]]; do
+  WORKLOAD_NAME=$(kubectl get workloads -o custom-columns=NAME:.metadata.name --no-headers | grep "^jobset-${JOBSET_NAME}-" | head -1)
+  if [[ -z "${WORKLOAD_NAME}" ]]; then
+    echo "  Waiting for workload to appear..."
+    sleep 2
+  fi
+done
+echo "  Found workload: ${WORKLOAD_NAME}"
+
+# Wait for the workload to be admitted
+until [[ "$(kubectl get workload "${WORKLOAD_NAME}" -o jsonpath='{.status.conditions[?(@.type=="Admitted")].status}' 2>/dev/null)" == "True" ]]; do
+  echo "  Waiting for workload '${WORKLOAD_NAME}' to be admitted..."
+  sleep 5
+done
+echo "  Workload admitted!"
+
+echo "=== Unsuspending jobs ==="
+kubectl patch job "${WORKER_JOB}" --type=merge -p '{"spec":{"suspend":false}}'
+kubectl patch job "${HEAD_JOB}" --type=merge -p '{"spec":{"suspend":false}}'
+
 echo "=== Done! Job '${JOBSET_NAME}' deployed with latest local changes. ==="
