@@ -44,10 +44,14 @@ logger = init_logger(__name__)
 
 _MODEL_REGISTRY = {}
 
-# List of architectures that are preferred to use  "vllm" implementation over
+# List of architectures that are preferred to use "vllm" implementation over
 # "flax_nnx" implementation due to various factors such as performance.
-_VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset(
-    {"GptOssForCausalLM", "Qwen3MoeForCausalLM"})
+_VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset({
+    "GptOssForCausalLM",
+    "Qwen3MoeForCausalLM",
+    # Gemma4 model is lacking vision support in "flax_nnx" implementation.
+    "Gemma4ForConditionalGeneration",
+})
 
 # List of architectures that don't have pipeline parallelism support in jax yet.
 _PP_DISABLED_MODELS: frozenset[str] = frozenset(

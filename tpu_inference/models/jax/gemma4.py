@@ -20,7 +20,18 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
-from transformers import Gemma4TextConfig
+
+try:
+    from transformers import Gemma4TextConfig
+except ImportError:
+    print(
+        "Gemma4 is not available until transformers v5.5.0. Please upgrade transformers to use Gemma4 model."
+    )
+
+    class Gemma4TextConfig:
+        pass
+
+
 from vllm.config import VllmConfig
 
 from tpu_inference import utils
