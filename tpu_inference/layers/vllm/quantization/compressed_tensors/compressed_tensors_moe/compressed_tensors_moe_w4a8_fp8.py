@@ -291,7 +291,7 @@ class VllmCompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod,
         # The VLLM equivalent scheme quantizes the weights scales to fp8 and stores quantization scales; both per-group and per-channel
         # Here the weight_scales are kept in higher precision.
         return FusedMoEQuantConfig.make(
-            self.moe.in_dtype,  # quant dtype for activations
+            torch.float8_e4m3fn,  # quant dtype for activations
             w1_scale=layer.w13_weight_scale,  # group scale
             w2_scale=layer.w2_weight_scale,  # group scale
             per_act_token_quant=True,  # always use dynamic per-token

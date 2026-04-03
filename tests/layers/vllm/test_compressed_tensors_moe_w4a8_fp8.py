@@ -33,8 +33,8 @@ from vllm.scalar_type import scalar_types
 # yapf: disable
 from tests.layers.common import utils as test_utils
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
-from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a8_fp8 import \
-    VllmCompressedTensorsW4A8Fp8MoEMethod
+from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a8_fp8 import (
+    VllmCompressedTensorsW4A8Fp8MoEMethod, VllmCompressedTensorsW4A16MoEMethod)
 
 # yapf: enable
 
@@ -151,10 +151,13 @@ def initialize_int4_layer_weights(layer: torch.nn.Module,
 @pytest.mark.parametrize("intermediate_size", [1024])
 @pytest.mark.parametrize("hidden_size", [128])
 @pytest.mark.parametrize("num_experts", [8])
+@pytest.mark.parametrize("method", [
+    VllmCompressedTensorsW4A8Fp8MoEMethod, VllmCompressedTensorsW4A16MoEMethod
+])
 @pytest.mark.parametrize("topk", [2])
 @pytest.mark.parametrize("use_ep", [True, False])
-def test_fused_moe_method(mesh, num_tokens, intermediate_size, hidden_size,
-                          num_experts, topk, use_ep):
+def test_fused_moe_method_w4(mesh, num_tokens, intermediate_size, hidden_size,
+                             num_experts, method, topk, use_ep):
     engine_args = EngineArgs(
         model=MODEL,
         max_model_len=64,
@@ -176,8 +179,7 @@ def test_fused_moe_method(mesh, num_tokens, intermediate_size, hidden_size,
                          hidden_size=hidden_size,
                          intermediate_size=intermediate_size)
         moe = quant_config.get_moe_config(layer)
-        method = VllmCompressedTensorsW4A8Fp8MoEMethod(weight_quant,
-                                                       input_quant, moe, mesh)
+        method = method(weight_quant, input_quant, moe, mesh)
     method.create_weights(layer,
                           num_experts,
                           hidden_size,
