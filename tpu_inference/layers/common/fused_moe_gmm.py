@@ -433,7 +433,12 @@ def fused_moe_func(
         ),
     )(hidden_states, topk_indices)
 
-    x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
+    try:
+        x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
+    except Exception as e:
+        raise ValueError(
+            f"Error when padding input hidden states from {hidden_size} to {padded_hidden_size}."
+        ) from e
 
     if use_ep:
         x = expert_parallel_gmm(

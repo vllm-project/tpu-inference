@@ -44,10 +44,14 @@ logger = init_logger(__name__)
 
 _MODEL_REGISTRY = {}
 
-# List of architectures that are preferred to use  "vllm" implementation over
+# List of architectures that are preferred to use "vllm" implementation over
 # "flax_nnx" implementation due to various factors such as performance.
-_VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset(
-    {"GptOssForCausalLM", "Qwen3MoeForCausalLM"})
+_VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset({
+    "GptOssForCausalLM",
+    "Qwen3MoeForCausalLM",
+    # Gemma4 model is lacking vision support in "flax_nnx" implementation.
+    "Gemma4ForConditionalGeneration",
+})
 
 # List of architectures that don't have pipeline parallelism support in jax yet.
 _PP_DISABLED_MODELS: frozenset[str] = frozenset(
@@ -64,6 +68,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # would cause JAX init failure when using multi hosts with Ray.
 
     from tpu_inference.models.jax.deepseek_v3 import DeepseekV3ForCausalLM
+    from tpu_inference.models.jax.gemma4 import Gemma4ForCausalLM
     from tpu_inference.models.jax.gpt_oss import GptOss
     from tpu_inference.models.jax.llama3 import LlamaForCausalLM
     from tpu_inference.models.jax.llama4 import Llama4ForCausalLM
@@ -85,6 +90,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["Eagle3LlamaForCausalLM"] = EagleLlama3ForCausalLM
     _MODEL_REGISTRY["GptOssForCausalLM"] = GptOss
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
+    _MODEL_REGISTRY["Gemma4ForConditionalGeneration"] = Gemma4ForCausalLM
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -278,7 +284,8 @@ def get_flax_model(
     mesh: Mesh,
     is_draft_model: bool = False,
 ) -> nnx.Module:
-    model_dtype = to_jax_dtype(vllm_config.model_config.dtype)
+    original_dtype = vllm_config.model_config.dtype
+    model_dtype = to_jax_dtype(original_dtype)
     vllm_config.model_config.dtype = model_dtype
     vllm_config.quant_config = get_tpu_quantization_config(vllm_config)
 
@@ -293,6 +300,7 @@ def get_flax_model(
         model_class = _get_model_architecture(
             vllm_config.model_config.hf_config)
     jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
+    vllm_config.model_config.dtype = original_dtype
     kv_cache_sharding = NamedSharding(
         mesh,
         PartitionSpec(ShardingAxisName.ATTN_DATA, None,
