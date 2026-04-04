@@ -510,12 +510,14 @@ class TestQwen3VLMoeForConditionalGeneration:
 
     @patch('tpu_inference.models.jax.qwen3_vl_moe.get_default_maps')
     @patch('tpu_inference.models.jax.qwen3_vl_moe.check_all_loaded')
+    @patch('tpu_inference.models.jax.qwen3_vl_moe.load_nnx_param_from_reshaped_torch')
     @patch('tpu_inference.models.jax.qwen3_vl_moe._load_and_shard_weight')
     @patch('tpu_inference.models.jax.qwen3_vl_moe.model_weights_generator')
     def test_load_weights_routes_mlp_keys_by_layer_type(
         self,
         mock_weights_generator: MagicMock,
         mock_load_and_shard_weight: MagicMock,
+        mock_load_router_weight: MagicMock,
         mock_check_all_loaded: MagicMock,
         mock_get_default_maps: MagicMock,
         mock_vllm_config: MockMoeVllmConfig,
@@ -562,14 +564,68 @@ class TestQwen3VLMoeForConditionalGeneration:
         ]
         assert loaded_non_expert_keys == [
             "model.language_model.layers.0.mlp.gate_proj.weight",
-            "model.language_model.layers.1.mlp.gate.weight",
         ]
+        mock_load_router_weight.assert_called_once_with(
+            model.language_model.layers[1].mlp.gate.weight,
+            ANY,
+            permute_dims=(1, 0),
+            param_name="language_model.layers.1.mlp.gate.weight",
+        )
         mock_load_moe_weight.assert_called_once_with(
             "model.language_model.layers.1.mlp.experts.gate_up_proj",
             ANY,
             ANY,
         )
         mock_finalize.assert_called_once()
+        mock_check_all_loaded.assert_called_once()
+
+    @patch('tpu_inference.models.jax.qwen3_vl_moe.check_all_loaded')
+    @patch('tpu_inference.models.jax.qwen3_vl_moe.load_nnx_param_from_reshaped_torch')
+    @patch('tpu_inference.models.jax.qwen3_vl_moe._load_and_shard_weight')
+    @patch('tpu_inference.models.jax.qwen3_vl_moe.model_weights_generator')
+    def test_load_weights_routes_moe_gate_via_direct_router_param(
+        self,
+        mock_weights_generator: MagicMock,
+        mock_load_and_shard_weight: MagicMock,
+        mock_load_router_weight: MagicMock,
+        mock_check_all_loaded: MagicMock,
+        mock_vllm_config: MockMoeVllmConfig,
+        rng: PRNGKey,
+        mesh: Mesh,
+    ):
+        gate_weight = torch.zeros((4, 64), dtype=torch.float32)
+        q_proj_weight = torch.zeros((64, 64), dtype=torch.float32)
+        mock_weights_generator.return_value = iter([
+            ("model.language_model.layers.0.mlp.gate.weight", gate_weight),
+            ("model.language_model.layers.0.self_attn.q_proj.weight",
+             q_proj_weight),
+        ])
+
+        with patch(
+                'tpu_inference.models.jax.qwen3_vl_moe.Qwen3VLVisionTransformer',
+                autospec=True) as MockVision:
+            mock_visual = MockVision.return_value
+            mock_visual.dtype = mock_vllm_config.model_config.dtype
+            mock_visual.config = mock_vllm_config.model_config.hf_config.vision_config
+            mock_visual.spatial_merge_size = mock_vllm_config.model_config.hf_config.vision_config.spatial_merge_size
+            model = Qwen3VLMoeForConditionalGeneration(mock_vllm_config, rng,
+                                                       mesh)
+
+        model.load_weights(rng)
+
+        layer = model.language_model.layers[0]
+        mock_load_router_weight.assert_called_once_with(
+            layer.mlp.gate.weight,
+            gate_weight,
+            permute_dims=(1, 0),
+            param_name="language_model.layers.0.mlp.gate.weight",
+        )
+        loaded_non_expert_keys = [
+            call.args[5] for call in mock_load_and_shard_weight.call_args_list
+        ]
+        assert loaded_non_expert_keys == [
+            "model.language_model.layers.0.self_attn.q_proj.weight",
+        ]
         mock_check_all_loaded.assert_called_once()
 
     @patch('tpu_inference.models.jax.qwen3_vl_moe.model_weights_generator')

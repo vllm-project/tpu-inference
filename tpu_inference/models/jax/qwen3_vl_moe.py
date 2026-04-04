@@ -40,6 +40,7 @@ from tpu_inference.models.jax.utils.weight_utils import (
     assign_and_shard_param,
     check_all_loaded,
     get_default_maps,
+    load_nnx_param_from_reshaped_torch,
     model_weights_generator,
 )
 
@@ -536,6 +537,41 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                                          loaded_expert_modules)
         self._finalize_loaded_expert_modules(loaded_expert_modules)
 
+    def _load_moe_router_weight(self, hf_key, hf_weight) -> bool:
+        """Load MoE router gate weights without relying on state-tree aliases.
+
+        The sparse MoE block stores the router module both as ``mlp.gate`` and as
+        ``mlp.experts.router``. Directly assigning the concrete param avoids
+        failures when the generic state traversal resolves only one alias.
+        """
+        gate_match = re.match(r".*layers\.(\d+)\.mlp\.gate\.weight$", hf_key)
+        if gate_match is None:
+            return False
+
+        layer_idx = int(gate_match.group(1))
+        layer = self.language_model.layers[layer_idx]
+        if isinstance(layer, PPMissingLayer) or not hasattr(layer.mlp,
+                                                            "experts"):
+            return False
+
+        gate_module = getattr(layer.mlp, "gate", None)
+        gate_param = getattr(gate_module, "weight", None)
+        if gate_param is None:
+            gate_param = getattr(getattr(layer.mlp.experts, "router", None),
+                                 "weight", None)
+        if gate_param is None:
+            raise ValueError(
+                "Could not resolve MoE router param for "
+                f"language_model.layers.{layer_idx}.mlp.gate.weight")
+
+        load_nnx_param_from_reshaped_torch(
+            gate_param,
+            hf_weight,
+            permute_dims=(1, 0),
+            param_name=f"language_model.layers.{layer_idx}.mlp.gate.weight",
+        )
+        return True
+
     def load_weights(self, rng_key: jax.Array) -> None:
         self.rng = nnx.Rngs(rng_key)
         pp_missing_layers = []
@@ -624,6 +660,8 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
 
         for hf_key, hf_weight in weights_iterator:
             if self._skip_non_expert_weight(hf_key):
+                continue
+            if self._load_moe_router_weight(hf_key, hf_weight):
                 continue
             if re.match(r".*\.mlp\.experts(?:\.\d+\.)?.*", hf_key):
                 self._load_moe_expert_weight(hf_key, hf_weight,
