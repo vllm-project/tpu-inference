@@ -203,6 +203,10 @@ def _make_kv_caches(model: Qwen3VLMoeForConditionalGeneration,
     )
 
 
+def _cast_expected(values, dtype):
+    return np.array(jnp.asarray(values, dtype=dtype), dtype=np.float32)
+
+
 # --- Fixtures ---
 @pytest.fixture(scope="module")
 def mesh() -> Mesh:
@@ -353,6 +357,152 @@ class TestQwen3VLMoeForConditionalGeneration:
             model.visual = mock_visual
             model.language_model = MockLM.return_value
             yield model
+
+    def test_text_model_moe_param_contract_matches_hf_patterns(
+        self,
+        mock_vllm_config: MockMoeVllmConfig,
+        rng: PRNGKey,
+        mesh: Mesh,
+    ):
+        with patch(
+                'tpu_inference.models.jax.qwen3_vl_moe.Qwen3VLVisionTransformer',
+                autospec=True) as MockVision:
+            mock_visual = MockVision.return_value
+            mock_visual.dtype = mock_vllm_config.model_config.dtype
+            mock_visual.config = mock_vllm_config.model_config.hf_config.vision_config
+            mock_visual.spatial_merge_size = mock_vllm_config.model_config.hf_config.vision_config.spatial_merge_size
+            model = Qwen3VLMoeForConditionalGeneration(mock_vllm_config, rng,
+                                                       mesh)
+
+        dtype = mock_vllm_config.model_config.dtype
+        hf_config = mock_vllm_config.model_config.hf_config
+        layer = model.language_model.layers[0]
+        attn = layer.self_attn
+        experts = layer.mlp.experts
+
+        expected = {
+            "model.language_model.embed_tokens.weight":
+            model.language_model.embed_tokens.weight,
+            "model.language_model.layers.0.input_layernorm.weight":
+            layer.input_layernorm.weight,
+            "model.language_model.layers.0.post_attention_layernorm.weight":
+            layer.post_attention_layernorm.weight,
+            "model.language_model.layers.0.self_attn.q_proj.weight":
+            attn.q_proj.weight,
+            "model.language_model.layers.0.self_attn.k_proj.weight":
+            attn.k_proj.weight,
+            "model.language_model.layers.0.self_attn.v_proj.weight":
+            attn.v_proj.weight,
+            "model.language_model.layers.0.self_attn.o_proj.weight":
+            attn.o_proj.weight,
+            "model.language_model.layers.0.self_attn.q_norm.weight":
+            attn.q_norm.weight,
+            "model.language_model.layers.0.self_attn.k_norm.weight":
+            attn.k_norm.weight,
+            "model.language_model.layers.0.mlp.gate.weight":
+            layer.mlp.gate.weight,
+            "model.language_model.layers.0.mlp.experts.gate_up_proj":
+            experts.kernel_gating_EDF,
+            "model.language_model.layers.0.mlp.experts.down_proj":
+            experts.kernel_down_proj_EFD,
+            "model.language_model.norm.weight":
+            model.language_model.norm.weight,
+        }
+
+        for hf_key, param in expected.items():
+            assert param.value.dtype == dtype, hf_key
+            assert param.get_metadata().get("sharding") is not None, hf_key
+
+        assert model.language_model.embed_tokens.weight.shape == (
+            hf_config.vocab_size, hf_config.hidden_size)
+        assert layer.input_layernorm.weight.shape == (hf_config.hidden_size, )
+        assert layer.post_attention_layernorm.weight.shape == (
+            hf_config.hidden_size, )
+        assert attn.q_proj.weight.shape == (
+            hf_config.hidden_size,
+            hf_config.num_attention_heads,
+            hf_config.head_dim,
+        )
+        assert attn.k_proj.weight.shape == (
+            hf_config.hidden_size,
+            hf_config.num_key_value_heads,
+            hf_config.head_dim,
+        )
+        assert attn.v_proj.weight.shape == (
+            hf_config.hidden_size,
+            hf_config.num_key_value_heads,
+            hf_config.head_dim,
+        )
+        assert attn.o_proj.weight.shape == (
+            hf_config.num_attention_heads,
+            hf_config.head_dim,
+            hf_config.hidden_size,
+        )
+        assert attn.q_norm.weight.shape == (hf_config.head_dim, )
+        assert attn.k_norm.weight.shape == (hf_config.head_dim, )
+        assert layer.mlp.gate.weight.shape == (
+            hf_config.hidden_size,
+            hf_config.num_experts,
+        )
+        assert experts.kernel_gating_EDF.value.shape == (
+            hf_config.num_experts,
+            hf_config.hidden_size,
+            hf_config.moe_intermediate_size,
+        )
+        assert experts.kernel_up_proj_EDF.value.shape == (
+            hf_config.num_experts,
+            hf_config.hidden_size,
+            hf_config.moe_intermediate_size,
+        )
+        assert experts.kernel_down_proj_EFD.value.shape == (
+            hf_config.num_experts,
+            hf_config.moe_intermediate_size,
+            hf_config.hidden_size,
+        )
+        assert model.language_model.norm.weight.shape == (
+            hf_config.hidden_size, )
+
+    def test_text_model_dense_param_contract_matches_hf_patterns(
+        self,
+        rng: PRNGKey,
+        mesh: Mesh,
+    ):
+        config = MockMoeVllmConfig(num_experts=0)
+        with patch(
+                'tpu_inference.models.jax.qwen3_vl_moe.Qwen3VLVisionTransformer',
+                autospec=True) as MockVision:
+            mock_visual = MockVision.return_value
+            mock_visual.dtype = config.model_config.dtype
+            mock_visual.config = config.model_config.hf_config.vision_config
+            mock_visual.spatial_merge_size = config.model_config.hf_config.vision_config.spatial_merge_size
+            model = Qwen3VLMoeForConditionalGeneration(config, rng, mesh)
+
+        dtype = config.model_config.dtype
+        hf_config = config.model_config.hf_config
+        mlp = model.language_model.layers[0].mlp
+
+        expected = {
+            "model.language_model.layers.0.mlp.gate_proj.weight": mlp.gate_proj.weight,
+            "model.language_model.layers.0.mlp.up_proj.weight": mlp.up_proj.weight,
+            "model.language_model.layers.0.mlp.down_proj.weight": mlp.down_proj.weight,
+        }
+
+        for hf_key, param in expected.items():
+            assert param.value.dtype == dtype, hf_key
+            assert param.get_metadata().get("sharding") is not None, hf_key
+
+        assert mlp.gate_proj.weight.shape == (
+            hf_config.hidden_size,
+            hf_config.intermediate_size,
+        )
+        assert mlp.up_proj.weight.shape == (
+            hf_config.hidden_size,
+            hf_config.intermediate_size,
+        )
+        assert mlp.down_proj.weight.shape == (
+            hf_config.intermediate_size,
+            hf_config.hidden_size,
+        )
 
     def test_embed_multimodal_none_pixel_values_returns_empty(
         self, model: Qwen3VLMoeForConditionalGeneration
@@ -510,14 +660,12 @@ class TestQwen3VLMoeForConditionalGeneration:
 
     @patch('tpu_inference.models.jax.qwen3_vl_moe.get_default_maps')
     @patch('tpu_inference.models.jax.qwen3_vl_moe.check_all_loaded')
-    @patch('tpu_inference.models.jax.qwen3_vl_moe.load_nnx_param_from_reshaped_torch')
     @patch('tpu_inference.models.jax.qwen3_vl_moe._load_and_shard_weight')
     @patch('tpu_inference.models.jax.qwen3_vl_moe.model_weights_generator')
     def test_load_weights_routes_mlp_keys_by_layer_type(
         self,
         mock_weights_generator: MagicMock,
         mock_load_and_shard_weight: MagicMock,
-        mock_load_router_weight: MagicMock,
         mock_check_all_loaded: MagicMock,
         mock_get_default_maps: MagicMock,
         mock_vllm_config: MockMoeVllmConfig,
@@ -556,6 +704,10 @@ class TestQwen3VLMoeForConditionalGeneration:
         with patch.object(model,
                           '_load_moe_expert_weight') as mock_load_moe_weight, \
              patch.object(model,
+                          '_load_moe_router_weight',
+                          side_effect=lambda hf_key, _: hf_key.endswith(
+                              "mlp.gate.weight")) as mock_load_router_weight, \
+             patch.object(model,
                           '_finalize_loaded_expert_modules') as mock_finalize:
             model.load_weights(rng)
 
@@ -565,13 +717,10 @@ class TestQwen3VLMoeForConditionalGeneration:
         assert loaded_non_expert_keys == [
             "model.language_model.layers.0.mlp.gate_proj.weight",
         ]
-        mock_load_router_weight.assert_called_once_with(
-            model.language_model.layers[1].mlp.gate.weight,
-            ANY,
-            permute_dims=(1, 0),
-            param_name="language_model.layers.1.mlp.gate.weight",
-            mesh=mesh,
-        )
+        assert mock_load_router_weight.call_args_list[0].args[0] == (
+            "model.language_model.layers.0.mlp.gate.weight")
+        assert mock_load_router_weight.call_args_list[1].args[0] == (
+            "model.language_model.layers.1.mlp.gate.weight")
         mock_load_moe_weight.assert_called_once_with(
             "model.language_model.layers.1.mlp.experts.gate_up_proj",
             ANY,
@@ -581,14 +730,16 @@ class TestQwen3VLMoeForConditionalGeneration:
         mock_check_all_loaded.assert_called_once()
 
     @patch('tpu_inference.models.jax.qwen3_vl_moe.check_all_loaded')
-    @patch('tpu_inference.models.jax.qwen3_vl_moe.load_nnx_param_from_reshaped_torch')
+    @patch('tpu_inference.models.jax.qwen3_vl_moe.assign_and_shard_param')
+    @patch('tpu_inference.models.jax.qwen3_vl_moe.torchax.default_env')
     @patch('tpu_inference.models.jax.qwen3_vl_moe._load_and_shard_weight')
     @patch('tpu_inference.models.jax.qwen3_vl_moe.model_weights_generator')
     def test_load_weights_routes_moe_gate_via_direct_router_param(
         self,
         mock_weights_generator: MagicMock,
         mock_load_and_shard_weight: MagicMock,
-        mock_load_router_weight: MagicMock,
+        mock_default_env: MagicMock,
+        mock_assign_and_shard_param: MagicMock,
         mock_check_all_loaded: MagicMock,
         mock_vllm_config: MockMoeVllmConfig,
         rng: PRNGKey,
@@ -612,16 +763,29 @@ class TestQwen3VLMoeForConditionalGeneration:
             model = Qwen3VLMoeForConditionalGeneration(mock_vllm_config, rng,
                                                        mesh)
 
+        env = MagicMock()
+        env.t2j_copy.side_effect = lambda tensor: jnp.asarray(
+            tensor.detach().cpu().numpy())
+        mock_default_env.return_value = env
+
         model.load_weights(rng)
 
         layer = model.language_model.layers[0]
-        mock_load_router_weight.assert_called_once_with(
-            layer.mlp.gate.weight,
-            gate_weight,
-            permute_dims=(1, 0),
-            param_name="language_model.layers.0.mlp.gate.weight",
-            mesh=mesh,
+        mock_assign_and_shard_param.assert_called_once()
+        assert mock_assign_and_shard_param.call_args.args[0] is layer.mlp.gate.weight
+        np.testing.assert_array_equal(
+            np.array(mock_assign_and_shard_param.call_args.args[1],
+                     dtype=np.float32),
+            _cast_expected(gate_weight.T.numpy(),
+                           mock_vllm_config.model_config.dtype),
         )
+        assert mock_assign_and_shard_param.call_args.args[1].dtype == (
+            mock_vllm_config.model_config.dtype)
+        assert mock_assign_and_shard_param.call_args.kwargs == {
+            "param_name": "language_model.layers.0.mlp.gate.weight",
+            "mesh": mesh,
+        }
+        mock_default_env.assert_called_once()
         loaded_non_expert_keys = [
             call.args[5] for call in mock_load_and_shard_weight.call_args_list
         ]
@@ -675,14 +839,16 @@ class TestQwen3VLMoeForConditionalGeneration:
         ])
 
         model._load_moe_expert_weights()
+        model_dtype = mock_vllm_config.model_config.dtype
 
-        expected_gate = np.array(
-            gate_up[:, :moe_intermediate_size, :].permute(0, 2, 1),
-            dtype=np.float32)
-        expected_up = np.array(
-            gate_up[:, moe_intermediate_size:, :].permute(0, 2, 1),
-            dtype=np.float32)
-        expected_down = np.array(down.permute(0, 2, 1), dtype=np.float32)
+        expected_gate = _cast_expected(
+            gate_up[:, :moe_intermediate_size, :].permute(0, 2, 1).numpy(),
+            model_dtype)
+        expected_up = _cast_expected(
+            gate_up[:, moe_intermediate_size:, :].permute(0, 2, 1).numpy(),
+            model_dtype)
+        expected_down = _cast_expected(down.permute(0, 2, 1).numpy(),
+                                       model_dtype)
 
         np.testing.assert_array_equal(
             np.array(experts.kernel_gating_EDF.value, dtype=np.float32),
@@ -742,14 +908,15 @@ class TestQwen3VLMoeForConditionalGeneration:
         ])
 
         model._load_moe_expert_weights()
+        model_dtype = mock_vllm_config.model_config.dtype
 
-        expected_gate = np.array(
-            gate_up[:, :moe_intermediate_size, :].permute(0, 2, 1),
-            dtype=np.float32)
-        expected_up = np.array(
-            gate_up[:, moe_intermediate_size:, :].permute(0, 2, 1),
-            dtype=np.float32)
-        expected_down = np.array(down, dtype=np.float32)
+        expected_gate = _cast_expected(
+            gate_up[:, :moe_intermediate_size, :].permute(0, 2, 1).numpy(),
+            model_dtype)
+        expected_up = _cast_expected(
+            gate_up[:, moe_intermediate_size:, :].permute(0, 2, 1).numpy(),
+            model_dtype)
+        expected_down = _cast_expected(down.numpy(), model_dtype)
 
         np.testing.assert_array_equal(
             np.array(experts.kernel_gating_EDF.value, dtype=np.float32),
@@ -812,16 +979,24 @@ class TestQwen3VLMoeForConditionalGeneration:
         assert env.t2j_copy.call_count == 2
         np.testing.assert_array_equal(
             np.array(mock_assign.call_args_list[0].args[1], dtype=np.float32),
-            np.array(gate_up[:, :moe_intermediate_size, :].permute(0, 2, 1),
-                     dtype=np.float32),
+            _cast_expected(
+                gate_up[:, :moe_intermediate_size, :].permute(0, 2, 1).numpy(),
+                mock_vllm_config.model_config.dtype),
         )
         np.testing.assert_array_equal(
             np.array(mock_assign.call_args_list[1].args[1], dtype=np.float32),
-            np.array(gate_up[:, moe_intermediate_size:, :].permute(0, 2, 1),
-                     dtype=np.float32),
+            _cast_expected(
+                gate_up[:, moe_intermediate_size:, :].permute(0, 2, 1).numpy(),
+                mock_vllm_config.model_config.dtype),
         )
         assert mock_assign.call_args_list[0].args[0] is experts.kernel_gating_EDF
         assert mock_assign.call_args_list[1].args[0] is experts.kernel_up_proj_EDF
+        assert mock_assign.call_args_list[0].args[1].dtype == (
+            mock_vllm_config.model_config.dtype)
+        assert mock_assign.call_args_list[1].args[1].dtype == (
+            mock_vllm_config.model_config.dtype)
+        assert mock_assign.call_args_list[0].kwargs["mesh"] is mesh
+        assert mock_assign.call_args_list[1].kwargs["mesh"] is mesh
 
     @patch('tpu_inference.models.jax.qwen3_vl_moe.model_weights_generator')
     def test_load_moe_expert_weights_releases_indexed_buffers_after_sharding(
@@ -850,6 +1025,9 @@ class TestQwen3VLMoeForConditionalGeneration:
         gate_shape = tuple(experts.kernel_gating_EDF.value.shape[1:])
         up_shape = tuple(experts.kernel_up_proj_EDF.value.shape[1:])
         down_shape = tuple(experts.kernel_down_proj_EFD.value.shape[1:])
+        hf_gate_shape = tuple(reversed(gate_shape))
+        hf_up_shape = tuple(reversed(up_shape))
+        hf_down_shape = tuple(reversed(down_shape))
 
         def make_weight(shape: tuple[int, ...], offset: int) -> torch.Tensor:
             size = int(np.prod(shape))
@@ -857,11 +1035,11 @@ class TestQwen3VLMoeForConditionalGeneration:
                                 offset + size,
                                 dtype=torch.float32).reshape(shape)
 
-        gate_weights = [make_weight(gate_shape, expert_id * 1000)
+        gate_weights = [make_weight(hf_gate_shape, expert_id * 1000)
                         for expert_id in range(num_experts)]
-        up_weights = [make_weight(up_shape, expert_id * 2000)
+        up_weights = [make_weight(hf_up_shape, expert_id * 2000)
                       for expert_id in range(num_experts)]
-        down_weights = [make_weight(down_shape, expert_id * 3000)
+        down_weights = [make_weight(hf_down_shape, expert_id * 3000)
                         for expert_id in range(num_experts)]
 
         file_1_entries = []
@@ -886,19 +1064,29 @@ class TestQwen3VLMoeForConditionalGeneration:
 
         np.testing.assert_array_equal(
             np.array(experts.kernel_gating_EDF.value, dtype=np.float32),
-            np.stack([np.array(weight, dtype=np.float32)
-                      for weight in gate_weights],
+            np.stack([
+                _cast_expected(weight.T.numpy(),
+                               mock_vllm_config.model_config.dtype)
+                for weight in gate_weights
+            ],
                      axis=0),
         )
         np.testing.assert_array_equal(
             np.array(experts.kernel_up_proj_EDF.value, dtype=np.float32),
-            np.stack([np.array(weight, dtype=np.float32) for weight in up_weights],
+            np.stack([
+                _cast_expected(weight.T.numpy(),
+                               mock_vllm_config.model_config.dtype)
+                for weight in up_weights
+            ],
                      axis=0),
         )
         np.testing.assert_array_equal(
             np.array(experts.kernel_down_proj_EFD.value, dtype=np.float32),
-            np.stack([np.array(weight, dtype=np.float32)
-                      for weight in down_weights],
+            np.stack([
+                _cast_expected(weight.T.numpy(),
+                               mock_vllm_config.model_config.dtype)
+                for weight in down_weights
+            ],
                      axis=0),
         )
         assert all(weight is None

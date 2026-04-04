@@ -31,7 +31,7 @@ from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
-    jax_array_from_reshaped_torch, shard_put)
+    shard_put)
 
 modeling_flax_utils = FlaxUtils()
 logger = init_logger(__name__)
@@ -263,6 +263,9 @@ class JaxMoE(JaxModule):
 
         self.quant_method might reuse this method if the quantization method has specific logic for loading weights.
         """
+        import torchax
+
+        env = torchax.default_env()
 
         cnt = 0
         for param_name, torch_weight in weights:
@@ -289,9 +292,23 @@ class JaxMoE(JaxModule):
 
             assert isinstance(jax_param, nnx.Param)
 
-            jax_weight = jax_array_from_reshaped_torch(
-                torch_weight, reshape_dims=(1, ) +
-                torch_weight.shape)  # add expert dim for concatenation later
+            target_shape = tuple(jax_param.value.shape[1:])
+            source_shape = tuple(torch_weight.shape)
+            if source_shape == target_shape:
+                permute_dims = None
+            elif tuple(reversed(source_shape)) == target_shape:
+                permute_dims = (1, 0)
+            else:
+                raise ValueError(
+                    f"Unexpected {param_type} weight layout for {param_name}: "
+                    f"source {source_shape} vs target {target_shape}")
+
+            jax_weight = env.t2j_copy(torch_weight)
+            if permute_dims is not None:
+                jax_weight = jnp.transpose(jax_weight, permute_dims)
+            if jax_weight.dtype != jax_param.value.dtype:
+                jax_weight = jax_weight.astype(jax_param.value.dtype)
+            jax_weight = jnp.expand_dims(jax_weight, axis=0)
             jax_param._weights_to_load[expert_id] = jax_weight
 
         logger.debug(f"Loaded {cnt} weights for {self.prefix} MoE layer.")
@@ -309,7 +326,9 @@ class JaxMoE(JaxModule):
                 with cpu_mesh_context():
                     weights = jnp.concatenate(param._weights_to_load, axis=0)
                 try:
-                    param.value = shard_put(weights, param.sharding)
+                    param.value = shard_put(weights,
+                                            param.sharding,
+                                            mesh=self.mesh)
                     loaded_names.add(param_name)
                 except Exception as e:
                     raise RuntimeError(

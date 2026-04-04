@@ -40,7 +40,6 @@ from tpu_inference.models.jax.utils.weight_utils import (
     assign_and_shard_param,
     check_all_loaded,
     get_default_maps,
-    load_nnx_param_from_reshaped_torch,
     model_weights_generator,
 )
 
@@ -394,6 +393,19 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 continue
             param._weights_to_load = [None] * len(weights_to_load)
 
+    def _to_model_dtype(self,
+                        torch_weight,
+                        *,
+                        permute_dims: Optional[tuple[int, ...]] = None):
+        env = torchax.default_env()
+        jax_weight = env.t2j_copy(torch_weight)
+        if permute_dims is not None:
+            jax_weight = jnp.transpose(jax_weight, permute_dims)
+        model_dtype = self.vllm_config.model_config.dtype
+        if jax_weight.dtype != model_dtype:
+            jax_weight = jax_weight.astype(model_dtype)
+        return jax_weight
+
     def _skip_non_expert_weight(self, hf_key: str) -> bool:
         layer_match = re.match(r".*layers\.(\d+)\.(.*)", hf_key)
         if layer_match is None:
@@ -446,7 +458,6 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
 
         experts = layer.mlp.experts
         loaded_expert_modules[layer_idx] = experts
-        env = torchax.default_env()
 
         if indexed_match:
             expert_suffix = indexed_match.group(2)
@@ -474,10 +485,10 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                         f"source {source_shape} vs target {target_shape}")
             assign_and_shard_param(
                 experts.kernel_down_proj_EFD,
-                jnp.transpose(env.t2j_copy(hf_weight), permute_dims)
-                if permute_dims is not None else env.t2j_copy(hf_weight),
+                self._to_model_dtype(hf_weight, permute_dims=permute_dims),
                 param_name=(
                     f"language_model.layers.{layer_idx}.mlp.experts.down_proj"),
+                mesh=self.mesh,
             )
             return
 
@@ -497,17 +508,17 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         gate_proj, up_proj = hf_weight.chunk(2, dim=chunk_dim)
         assign_and_shard_param(
             experts.kernel_gating_EDF,
-            jnp.transpose(env.t2j_copy(gate_proj), permute_dims)
-            if permute_dims is not None else env.t2j_copy(gate_proj),
+            self._to_model_dtype(gate_proj, permute_dims=permute_dims),
             param_name=(
                 f"language_model.layers.{layer_idx}.mlp.experts.gate_proj"),
+            mesh=self.mesh,
         )
         assign_and_shard_param(
             experts.kernel_up_proj_EDF,
-            jnp.transpose(env.t2j_copy(up_proj), permute_dims)
-            if permute_dims is not None else env.t2j_copy(up_proj),
+            self._to_model_dtype(up_proj, permute_dims=permute_dims),
             param_name=(
                 f"language_model.layers.{layer_idx}.mlp.experts.up_proj"),
+            mesh=self.mesh,
         )
 
     def _finalize_loaded_expert_modules(self, loaded_expert_modules) -> None:
@@ -538,11 +549,13 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         self._finalize_loaded_expert_modules(loaded_expert_modules)
 
     def _load_moe_router_weight(self, hf_key, hf_weight) -> bool:
-        """Load MoE router gate weights without relying on state-tree aliases.
+        """Load MoE router gate weights via the standard torchax conversion path.
 
         The sparse MoE block stores the router module both as ``mlp.gate`` and as
         ``mlp.experts.router``. Directly assigning the concrete param avoids
-        failures when the generic state traversal resolves only one alias.
+        failures when the generic state traversal resolves only one alias, while
+        using ``torchax.default_env().t2j_copy`` keeps the tensor conversion
+        consistent with the rest of the working text-model loader.
         """
         gate_match = re.match(r".*layers\.(\d+)\.mlp\.gate\.weight$", hf_key)
         if gate_match is None:
@@ -564,10 +577,9 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 "Could not resolve MoE router param for "
                 f"language_model.layers.{layer_idx}.mlp.gate.weight")
 
-        load_nnx_param_from_reshaped_torch(
+        assign_and_shard_param(
             gate_param,
-            hf_weight,
-            permute_dims=(1, 0),
+            self._to_model_dtype(hf_weight, permute_dims=(1, 0)),
             param_name=f"language_model.layers.{layer_idx}.mlp.gate.weight",
             mesh=self.mesh,
         )
