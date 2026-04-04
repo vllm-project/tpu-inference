@@ -646,7 +646,7 @@ class TestQwen3VLMoeForConditionalGeneration:
             mock_weights_generator.assert_called_once_with(
                 model_name_or_path=mock_vllm_config.model_config.model,
                 download_dir=mock_vllm_config.load_config.download_dir,
-                framework="pt",
+                framework="flax",
             )
             mock_load_moe_weight.assert_called_once()
             mock_load_and_shard_weight.assert_called_once()

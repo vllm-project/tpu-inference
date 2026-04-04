@@ -397,15 +397,24 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                         torch_weight,
                         *,
                         permute_dims: Optional[tuple[int, ...]] = None):
-        env = torchax.default_env()
         with jax.default_device(jax.devices("cpu")[0]):
-            jax_weight = env.t2j_copy(torch_weight)
+            if hasattr(torch_weight, "detach") and hasattr(torch_weight, "cpu"):
+                env = torchax.default_env()
+                jax_weight = env.t2j_copy(torch_weight)
+            else:
+                jax_weight = jnp.asarray(torch_weight)
             if permute_dims is not None:
                 jax_weight = jnp.transpose(jax_weight, permute_dims)
             model_dtype = self.vllm_config.model_config.dtype
             if jax_weight.dtype != model_dtype:
                 jax_weight = jax_weight.astype(model_dtype)
         return jax_weight
+
+    @staticmethod
+    def _split_moe_fused_weight(hf_weight, *, split_count: int, axis: int):
+        if hasattr(hf_weight, "chunk"):
+            return hf_weight.chunk(split_count, dim=axis)
+        return jnp.split(jnp.asarray(hf_weight), split_count, axis=axis)
 
     def _skip_non_expert_weight(self, hf_key: str) -> bool:
         layer_match = re.match(r".*layers\.(\d+)\.(.*)", hf_key)
@@ -506,7 +515,8 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 "Unsupported fused gate_up_proj layout for "
                 f"language_model.layers.{layer_idx}.mlp.experts: "
                 f"source {fused_shape} vs expected EDF=({E}, {D}, {F})")
-        gate_proj, up_proj = hf_weight.chunk(2, dim=chunk_dim)
+        gate_proj, up_proj = self._split_moe_fused_weight(
+            hf_weight, split_count=2, axis=chunk_dim)
         assign_and_shard_param(
             experts.kernel_gating_EDF,
             self._to_model_dtype(gate_proj, permute_dims=permute_dims),
@@ -540,7 +550,7 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         weights_iterator = model_weights_generator(
             model_name_or_path=self.vllm_config.model_config.model,
             download_dir=self.vllm_config.load_config.download_dir,
-            framework="pt",
+            framework="flax",
             filter_regex=r".*\.mlp\.experts(?:\.\d+\.)?.*",
         )
         loaded_expert_modules = {}
@@ -669,7 +679,7 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             weights_iterator = model_weights_generator(
                 model_name_or_path=self.vllm_config.model_config.model,
                 download_dir=self.vllm_config.load_config.download_dir,
-                framework="pt",
+                framework="flax",
             )
 
         for hf_key, hf_weight in weights_iterator:

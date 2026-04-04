@@ -265,8 +265,6 @@ class JaxMoE(JaxModule):
         """
         import torchax
 
-        env = torchax.default_env()
-
         cnt = 0
         for param_name, torch_weight in weights:
             cnt += 1
@@ -304,7 +302,12 @@ class JaxMoE(JaxModule):
                     f"source {source_shape} vs target {target_shape}")
 
             with jax.default_device(jax.devices("cpu")[0]):
-                jax_weight = env.t2j_copy(torch_weight)
+                if hasattr(torch_weight, "detach") and hasattr(torch_weight,
+                                                                "cpu"):
+                    env = torchax.default_env()
+                    jax_weight = env.t2j_copy(torch_weight)
+                else:
+                    jax_weight = jnp.asarray(torch_weight)
                 if permute_dims is not None:
                     jax_weight = jnp.transpose(jax_weight, permute_dims)
                 if jax_weight.dtype != jax_param.value.dtype:
