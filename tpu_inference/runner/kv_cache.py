@@ -155,4 +155,4 @@ def get_attention_page_size_bytes(mesh, block_size, num_kv_heads, head_size,
         kv_dtype=jax_dtype,
         use_mla=use_mla,
     )
-    return (bits * np.prod(kv_cache_shape)) // 8
+    return int(bits * np.prod(kv_cache_shape)) // 8

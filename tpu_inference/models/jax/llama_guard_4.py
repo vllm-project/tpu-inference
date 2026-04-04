@@ -652,7 +652,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
 
         return inputs_embeds
 
-    def embed_multimodal(self, image_grid_thw, **kwargs) -> List[jax.Array]:
+    def embed_multimodal(self, **kwargs) -> List[jax.Array]:
         pixel_values = kwargs.pop("pixel_values")
         patches_per_image = kwargs.pop("patches_per_image", None)
 

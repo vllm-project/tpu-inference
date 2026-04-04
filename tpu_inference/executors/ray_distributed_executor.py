@@ -32,6 +32,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.ray_distributed_executor import \
     RayDistributedExecutor as RayDistributedExecutorV1
 from vllm.v1.executor.ray_executor import RayWorkerMetaData
+from vllm.v1.executor.ray_utils import WORKER_SPECIFIC_ENV_VARS
 from vllm.v1.executor.ray_utils import RayWorkerWrapper as RayWorkerWrapperV1
 from vllm.v1.executor.ray_utils import _wait_until_pg_ready
 from vllm.v1.outputs import ModelRunnerOutput
@@ -363,7 +364,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
 
         # Environment variables to copy from driver to workers
         env_vars_to_copy = get_env_vars_to_copy(
-            exclude_vars=self.WORKER_SPECIFIC_ENV_VARS,
+            exclude_vars=WORKER_SPECIFIC_ENV_VARS,
             additional_vars=set(current_platform.additional_env_vars),
             destination="workers")
 
@@ -483,7 +484,7 @@ class RayWorkerWrapper(RayWorkerWrapperV1):
     Ray worker wrapper for TPU.
 
     The implementation is similar to vllm/v1/executor/ray_utils.py
-    
+
     _is_intermediate_tensors: check whether the output is JaxIntermediateTensors.
     _is_last_rank: check whether this Ray worker is the last PP stage.
     """

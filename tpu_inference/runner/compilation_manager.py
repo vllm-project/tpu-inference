@@ -676,13 +676,16 @@ class CompilationManager:
         logger.info("Compiling gather_logprobs with different input shapes.")
         hsize = self.runner.model_config.get_vocab_size()
         for num_reqs in self.runner.num_reqs_paddings:
+            dp_size = self.runner.vllm_config.sharding_config.total_dp_size
             logits_sharding = NamedSharding(
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.MLP_DATA,
                               ShardingAxisName.MLP_TENSOR))
             token_ids_sharding = NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA, ))
-            logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
+                self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA, )
+            ) if dp_size > 1 else NamedSharding(self.runner.mesh,
+                                                PartitionSpec())
+            logits = self._create_dummy_tensor((num_reqs, hsize), jnp.float32,
                                                logits_sharding)
             token_ids = self._create_dummy_tensor((num_reqs, ), jnp.int32,
                                                   token_ids_sharding)
@@ -920,10 +923,11 @@ class CompilationManager:
                 input_ids,
                 draft_hidden_states,
                 attention_metadata,
+                layer_name_to_kvcache_index,
             ):
                 kv_caches, hidden_states, _ = self.runner.drafter.model_fn(
                     state, kv_caches, input_ids, draft_hidden_states,
-                    attention_metadata)
+                    attention_metadata, layer_name_to_kvcache_index)
                 self.runner.kv_caches = kv_caches
                 return hidden_states
 
@@ -944,6 +948,7 @@ class CompilationManager:
                 input_ids,
                 draft_hidden_states,
                 attention_metadata,
+                tuple(self.runner.layer_name_to_kvcache_index.items()),
                 num_tokens=num_tokens,
             )
             target_token_ids = self._create_dummy_tensor((num_tokens, ),
@@ -977,6 +982,7 @@ class CompilationManager:
                 input_ids_loop,
                 draft_hidden_state_loop,
                 attention_metadata,
+                tuple(self.runner.layer_name_to_kvcache_index.items()),
                 num_tokens=num_tokens,
             )
 

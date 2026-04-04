@@ -166,6 +166,27 @@ def _get_nnx_model(
                                              use_qwix_on_abstract_model=True)
             return jit_model
 
+        if getattr(model_class, '_self_manages_sharding', False):
+            # `_self_manages_sharding` is a class-level boolean flag set to True
+            # by model classes (e.g. MaxText-backed models) that handle their own
+            # JIT-compiled, sharded weight initialization internally — typically by
+            # wrapping construction in jax.jit with explicit out_shardings. For
+            # these models, the standard path below (which wraps create_abstract_model
+            # + with_sharding_constraint in an outer @jax.jit) must be skipped:
+            # adding a second outer jit causes nested JIT inlining that re-traces
+            # and multiplies compilation time without benefit.
+            with mesh:
+                jit_model = model_class(vllm_config, rng, mesh)
+                jit_model = apply_qwix_quantization(
+                    vllm_config,
+                    jit_model,
+                    rng,
+                    mesh,
+                    apply_to_abstract_model=False)
+                if hasattr(jit_model, 'initialize_cache'):
+                    jit_model.initialize_cache()
+            return jit_model
+
         @jax.jit
         def create_sharded_model():
             model = create_abstract_model()
@@ -300,6 +321,19 @@ def get_flax_model(
         model = nnx.merge(graphdef, state)
         return model(*args)
 
+    @jax.jit(
+        out_shardings=(
+            kv_cache_sharding,
+            hidden_states_sharding,
+            hidden_states_sharding,  # residual
+        ),
+        donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
+        static_argnums=(6, ),  # 6 is layer_name_to_kvcache_index
+    )
+    def run_draft_model(graphdef, state, *args):
+        model = nnx.merge(graphdef, state)
+        return model(*args)
+
     logits_sharding = NamedSharding(
         mesh,
         PartitionSpec(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR))
@@ -312,9 +346,9 @@ def get_flax_model(
 
     # Multi-modal support only
     # This function calculates the image token's embeddings by VIT
-    def run_embed_multimodal(graphdef, state, image_grid_thw, **kwargs):
+    def run_embed_multimodal(graphdef, state, **kwargs):
         model = nnx.merge(graphdef, state)
-        return model.embed_multimodal(image_grid_thw, **kwargs)
+        return model.embed_multimodal(**kwargs)
 
     embed_sharding = NamedSharding(mesh, PartitionSpec(None))
     # This function will calculates the embeddings of input texts and then merge with the image embeddings
@@ -332,7 +366,9 @@ def get_flax_model(
     model = nnx.merge(graphdef, state)
     precompile_vision_encoder_fn = getattr(model, "precompile_vision_encoder",
                                            None)
-    model_fn = functools.partial(run_model, graphdef)
+    model_fn = functools.partial(
+        run_draft_model, graphdef) if is_draft_model else functools.partial(
+            run_model, graphdef)
     compute_logits_fn = functools.partial(run_compute_logits, graphdef)
     embed_multimodal_fn = functools.partial(run_embed_multimodal, graphdef)
     embed_input_ids_fn = functools.partial(run_embed_input_ids, graphdef)
@@ -358,6 +394,7 @@ def get_vllm_model(
     vllm_config: VllmConfig,
     rng: jax.Array,
     mesh: Mesh,
+    is_draft_model: bool = False,
 ):
     model_dtype = to_torch_dtype(vllm_config.model_config.dtype)
     vllm_config.model_config.dtype = model_dtype
@@ -367,12 +404,14 @@ def get_vllm_model(
         vllm_config=vllm_config,
         rng=rng,
         mesh=mesh,
+        is_draft_model=is_draft_model,
     )
     params, lora_manager = model.load_weights()
 
     jit_model = model.jit_step_func()
     compute_logits_fn = model.jit_compute_logits_func()
     pooler_fn = model.build_pooler_func()
+    combine_hidden_states_fn = model.jit_combine_hidden_states_func()
 
     multimodal_fns = {
         "precompile_vision_encoder_fn":
@@ -386,7 +425,6 @@ def get_vllm_model(
     }
 
     # the model needs to be returned because lora weights are neither torch.nn.parameter nor torch.nn.buffer. After we load the lora weights and set it to the torch.nn.Module, we can shard it and move it to TPU.
-    combine_hidden_states_fn = None
     return jit_model, compute_logits_fn, pooler_fn, combine_hidden_states_fn, multimodal_fns, params, lora_manager, model
 
 
@@ -396,10 +434,13 @@ def get_model(
     mesh: Mesh,
     is_draft_model: bool = False,
 ) -> Any:
-    impl = envs.MODEL_IMPL_TYPE
+    if is_draft_model:
+        impl = envs.DRAFT_MODEL_IMPL_TYPE
+    else:
+        impl = envs.MODEL_IMPL_TYPE
     logger.info(f"Loading model with MODEL_IMPL_TYPE={impl}")
     if impl == "auto":
-        impl = resolve_model_architecture(vllm_config)
+        impl = resolve_model_architecture(vllm_config, is_draft_model)
         logger.info(f"Resolved MODEL_IMPL_TYPE 'auto' to '{impl}'")
 
     match impl:
@@ -411,7 +452,8 @@ def get_model(
                     logger.warning(
                         "PP is not fully supported on Jax flax_nnx %s models yet, fallback to vllm models.",
                         arch)
-                    return get_vllm_model(vllm_config, rng, mesh)
+                    return get_vllm_model(vllm_config, rng, mesh,
+                                          is_draft_model)
                 try:
                     # Try to load the flax model first
                     return get_flax_model(vllm_config, rng, mesh,
@@ -423,14 +465,16 @@ def get_model(
                     logger.warning(error_msg)
 
                     # Fall back to the vLLM model and updating the dtype accordingly
-                    return get_vllm_model(vllm_config, rng, mesh)
+                    return get_vllm_model(vllm_config, rng, mesh,
+                                          is_draft_model)
         case "vllm":
-            return get_vllm_model(vllm_config, rng, mesh)
+            return get_vllm_model(vllm_config, rng, mesh, is_draft_model)
         case _:
             raise NotImplementedError(f"Unsupported MODEL_IMPL_TYPE: {impl}")
 
 
-def resolve_model_architecture(vllm_config: VllmConfig) -> str:
+def resolve_model_architecture(vllm_config: VllmConfig,
+                               is_draft_model: bool) -> str:
     """Resolves the model implementation type.
 
     This function determines which model implementation to use based on the model
@@ -459,11 +503,11 @@ def resolve_model_architecture(vllm_config: VllmConfig) -> str:
 
     is_runai_streamer = getattr(getattr(vllm_config, 'load_config', None),
                                 'load_format', None) == 'runai_streamer'
+    hf_config = vllm_config.speculative_config.draft_model_config.hf_config if is_draft_model else vllm_config.model_config.hf_config
     if is_runai_streamer:
         try:
             # Try to get the JAX model class
-            model_class = _get_model_architecture(
-                vllm_config.model_config.hf_config)
+            model_class = _get_model_architecture(hf_config)
 
             # If found, check for WeightLoader capability
             if not hasattr(model_class, "WeightLoader") or not issubclass(
@@ -479,8 +523,7 @@ def resolve_model_architecture(vllm_config: VllmConfig) -> str:
             pass
 
     # Resolve "auto" based on architecture
-    architectures = getattr(vllm_config.model_config.hf_config,
-                            "architectures", [])
+    architectures = getattr(hf_config, "architectures", [])
     assert len(architectures) == 1, (
         f"Expected exactly one architecture, got {len(architectures)}: "
         f"{architectures}")
