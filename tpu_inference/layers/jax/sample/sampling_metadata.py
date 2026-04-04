@@ -16,7 +16,9 @@ import functools
 from dataclasses import dataclass
 from typing import Optional
 
+import json
 import jax
+from jax import export as jax_export
 import jax.numpy as jnp
 import torch
 from jax.sharding import Mesh
@@ -103,3 +105,17 @@ class TPUSupportedSamplingMetadata:
             do_sampling=not input_batch.all_greedy,
             logprobs=needs_logprobs,
         )
+
+
+def _serialize_sampling_metadata(aux_data):
+    return json.dumps(list(aux_data)).encode("utf-8")
+
+def _deserialize_sampling_metadata(b):
+    return tuple(json.loads(b.decode("utf-8")))
+
+jax_export.register_pytree_node_serialization(
+    TPUSupportedSamplingMetadata,
+    serialized_name="tpu_inference.layers.jax.sample.sampling_metadata.TPUSupportedSamplingMetadata",
+    serialize_auxdata=_serialize_sampling_metadata,
+    deserialize_auxdata=_deserialize_sampling_metadata,
+)
