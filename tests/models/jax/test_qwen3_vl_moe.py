@@ -570,6 +570,7 @@ class TestQwen3VLMoeForConditionalGeneration:
             ANY,
             permute_dims=(1, 0),
             param_name="language_model.layers.1.mlp.gate.weight",
+            mesh=mesh,
         )
         mock_load_moe_weight.assert_called_once_with(
             "model.language_model.layers.1.mlp.experts.gate_up_proj",
@@ -619,6 +620,7 @@ class TestQwen3VLMoeForConditionalGeneration:
             gate_weight,
             permute_dims=(1, 0),
             param_name="language_model.layers.0.mlp.gate.weight",
+            mesh=mesh,
         )
         loaded_non_expert_keys = [
             call.args[5] for call in mock_load_and_shard_weight.call_args_list

@@ -787,7 +787,8 @@ def assign_and_shard_param(jax_param: nnx.Param,
         jax.clear_caches()
     except Exception as e:
         raise RuntimeError(
-            f"Failed to load weight '{param_name}' with shape {shape} into param with shape {jax_param.value.shape}"
+            f"Failed to load weight '{param_name}' with shape {shape} into param "
+            f"with shape {jax_param.value.shape}: {type(e).__name__}: {e}"
         ) from e
 
 
@@ -797,7 +798,8 @@ def load_nnx_param_from_reshaped_torch(
         *,
         reshape_dims: Optional[tuple[int, ...]] = None,
         permute_dims: Optional[tuple[int, ...]] = None,
-        param_name: str = "Unknown"):
+        param_name: str = "Unknown",
+        mesh: Optional[Mesh] = None):
     """Load a nnx.Param from a torch.Tensor with reshaping and transposing.
 
     HuggingFace model almost always store linear layer weights with contracting dimension
@@ -809,6 +811,8 @@ def load_nnx_param_from_reshaped_torch(
         torch_weight: The source torch.Tensor weight.
         reshape_dims: Optional tuple specifying the shape to reshape the torch weight to before permutation. If None, no reshaping is applied.
         permute_dims: Optional tuple specifying the permutation of dimensions. If None, no-op for 1D tensors and transpose for 2D tensors is applied.
+        mesh: Optional device mesh override used when sharding metadata does not
+            already carry the target mesh.
     """
     jax_weight = jax_array_from_reshaped_torch(torch_weight,
                                                reshape_dims=reshape_dims,
@@ -817,7 +821,7 @@ def load_nnx_param_from_reshaped_torch(
     assert tuple(jax_weight.shape) == jax_param.value.shape, \
         f"Shape mismatch when loading weight '{param_name}': torch {jax_weight.shape} vs jax {jax_param.value.shape}"
 
-    assign_and_shard_param(jax_param, jax_weight, param_name)
+    assign_and_shard_param(jax_param, jax_weight, param_name, mesh=mesh)
 
 
 class JaxAutoWeightsLoader(AutoWeightsLoader):

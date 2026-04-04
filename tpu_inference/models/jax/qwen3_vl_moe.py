@@ -569,6 +569,7 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             hf_weight,
             permute_dims=(1, 0),
             param_name=f"language_model.layers.{layer_idx}.mlp.gate.weight",
+            mesh=self.mesh,
         )
         return True
 
