@@ -398,12 +398,13 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                         *,
                         permute_dims: Optional[tuple[int, ...]] = None):
         env = torchax.default_env()
-        jax_weight = env.t2j_copy(torch_weight)
-        if permute_dims is not None:
-            jax_weight = jnp.transpose(jax_weight, permute_dims)
-        model_dtype = self.vllm_config.model_config.dtype
-        if jax_weight.dtype != model_dtype:
-            jax_weight = jax_weight.astype(model_dtype)
+        with jax.default_device(jax.devices("cpu")[0]):
+            jax_weight = env.t2j_copy(torch_weight)
+            if permute_dims is not None:
+                jax_weight = jnp.transpose(jax_weight, permute_dims)
+            model_dtype = self.vllm_config.model_config.dtype
+            if jax_weight.dtype != model_dtype:
+                jax_weight = jax_weight.astype(model_dtype)
         return jax_weight
 
     def _skip_non_expert_weight(self, hf_key: str) -> bool:

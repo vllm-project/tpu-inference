@@ -303,12 +303,13 @@ class JaxMoE(JaxModule):
                     f"Unexpected {param_type} weight layout for {param_name}: "
                     f"source {source_shape} vs target {target_shape}")
 
-            jax_weight = env.t2j_copy(torch_weight)
-            if permute_dims is not None:
-                jax_weight = jnp.transpose(jax_weight, permute_dims)
-            if jax_weight.dtype != jax_param.value.dtype:
-                jax_weight = jax_weight.astype(jax_param.value.dtype)
-            jax_weight = jnp.expand_dims(jax_weight, axis=0)
+            with jax.default_device(jax.devices("cpu")[0]):
+                jax_weight = env.t2j_copy(torch_weight)
+                if permute_dims is not None:
+                    jax_weight = jnp.transpose(jax_weight, permute_dims)
+                if jax_weight.dtype != jax_param.value.dtype:
+                    jax_weight = jax_weight.astype(jax_param.value.dtype)
+                jax_weight = jnp.expand_dims(jax_weight, axis=0)
             jax_param._weights_to_load[expert_id] = jax_weight
 
         logger.debug(f"Loaded {cnt} weights for {self.prefix} MoE layer.")
