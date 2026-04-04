@@ -411,7 +411,8 @@ class TestQwen3VLMoeForConditionalGeneration:
 
         for hf_key, param in expected.items():
             assert param.value.dtype == dtype, hf_key
-            assert param.get_metadata().get("sharding") is not None, hf_key
+            assert getattr(param, "sharding", None) is not None or \
+                param.get_metadata().get("sharding") is not None, hf_key
 
         assert model.language_model.embed_tokens.weight.shape == (
             hf_config.vocab_size, hf_config.hidden_size)
@@ -489,7 +490,8 @@ class TestQwen3VLMoeForConditionalGeneration:
 
         for hf_key, param in expected.items():
             assert param.value.dtype == dtype, hf_key
-            assert param.get_metadata().get("sharding") is not None, hf_key
+            assert getattr(param, "sharding", None) is not None or \
+                param.get_metadata().get("sharding") is not None, hf_key
 
         assert mlp.gate_proj.weight.shape == (
             hf_config.hidden_size,

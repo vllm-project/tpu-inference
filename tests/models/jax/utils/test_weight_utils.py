@@ -14,7 +14,7 @@
 
 import os
 import tempfile
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import jax
 import numpy as np
@@ -28,7 +28,10 @@ from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxLinear
-from tpu_inference.models.jax.utils.weight_utils import LoadableWithIterator
+from tpu_inference.models.jax.utils.weight_utils import (
+    LoadableWithIterator,
+    assign_and_shard_param,
+)
 
 
 class TorchMLP(nn.Module):
@@ -113,3 +116,27 @@ class TestJaxAutoWeightsLoader:
                                    jax_output,
                                    rtol=1e-3,
                                    atol=1e-2)
+
+    @patch('tpu_inference.models.jax.utils.weight_utils.shard_put')
+    def test_assign_and_shard_param_prefers_param_sharding_metadata(
+        self,
+        mock_shard_put,
+    ):
+        param = MagicMock()
+        param.sharding = ('model', )
+        param.mesh = 'param-mesh'
+        param.value = MagicMock(shape=(2, 2))
+        param.get_metadata.return_value = {}
+
+        weight = jnp.ones((2, 2), dtype=jnp.bfloat16)
+        mock_shard_put.return_value = weight
+
+        assign_and_shard_param(param,
+                               weight,
+                               param_name='test.param',
+                               mesh='fallback-mesh')
+
+        mock_shard_put.assert_called_once_with(weight,
+                                               ('model', ),
+                                               mesh='param-mesh')
+        param.set_metadata.assert_called_once_with("_is_loaded", True)

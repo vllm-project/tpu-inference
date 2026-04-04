@@ -773,12 +773,15 @@ def assign_and_shard_param(jax_param: nnx.Param,
         param_name: The name of the parameter, used for error logging.
         mesh: The device mesh to shard the parameter on.
     """
-    spec = jax_param.get_metadata().get("sharding", ())
+    spec = getattr(jax_param, "sharding", None)
+    if spec is None:
+        spec = jax_param.get_metadata().get("sharding", ())
     if isinstance(spec, NamedSharding):
         spec = spec.spec
     elif isinstance(spec, SingleDeviceSharding):
         spec = ()
-    param_mesh = jax_param.get_metadata().get("mesh") or mesh
+    param_mesh = getattr(jax_param, "mesh",
+                         None) or jax_param.get_metadata().get("mesh") or mesh
     shape = jax_weight.shape
     try:
         jax_param.value = shard_put(jax_weight, spec, mesh=param_mesh)
