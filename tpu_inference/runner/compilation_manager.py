@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import os
-import shutil
 import time
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 
@@ -25,10 +24,11 @@ from jax.sharding import NamedSharding, PartitionSpec
 
 import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
+from tpu_inference.export import serving_model
+from tpu_inference.export.serialization_compat import \
+    register_external_serialization_compat
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.export import serving_model
-from tpu_inference.export.serialization_compat import register_external_serialization_compat
 from tpu_inference.layers.jax.sample.sampling import sample
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
@@ -82,11 +82,11 @@ class CompilationManager:
         if only_equal:
             return inner_val != outer_val
         return inner_val > outer_val
-    
+
     def export_wrapper(self, fn: Callable) -> Callable:
         if os.environ.get("TPU_INFERENCE_EXPORT_PATH") is None:
             return fn
-            
+
         def wrapper(*args, **kwargs):
             if hasattr(fn, '__name__'):
                 func_name = fn.__name__
@@ -94,29 +94,34 @@ class CompilationManager:
                 func_name = fn.func.__name__
             else:
                 func_name = "partial"
-            
+
             if func_name not in export_func_counter:
                 export_func_counter[func_name] = 0
-            
+
             try:
                 with jax.set_mesh(self.runner.mesh):
-                    full_func_name = func_name + "_" + str(export_func_counter[func_name])
+                    full_func_name = func_name + "_" + str(
+                        export_func_counter[func_name])
                     logger.info(f"Exporting function {full_func_name}")
                     try:
                         exported = jax.export.export(fn)(*args, **kwargs)
                     except ValueError as ve:
                         if "must be the result of `jit`" in str(ve):
-                            logger.info(f"Function not JITted, JITting it for export.")
-                            exported = jax.export.export(jax.jit(fn))(*args, **kwargs)
+                            logger.info(
+                                "Function not JITted, JITting it for export.")
+                            exported = jax.export.export(jax.jit(fn))(*args,
+                                                                      **kwargs)
                         else:
                             raise ve
                     export_func_map[full_func_name] = exported
                     export_func_counter[func_name] += 1
                     return exported.call(*args, **kwargs)
             except Exception as e:
-                logger.warning(f"Export failed for {func_name}: {e}. Falling back to direct call.")
+                logger.warning(
+                    f"Export failed for {func_name}: {e}. Falling back to direct call."
+                )
                 return fn(*args, **kwargs)
-                
+
         return wrapper
 
     def _run_compilation(self, name: str, fn: Callable, *args,
@@ -131,10 +136,10 @@ class CompilationManager:
     def capture_model(self) -> None:
         if envs.SKIP_JAX_PRECOMPILE or self.runner.model_config.enforce_eager:
             return
-            
+
         # Register external types for serialization compatibility
         register_external_serialization_compat()
-        
+
         logger.info("Precompile all the subgraphs with possible input shapes.")
         compilation_start_time = time.perf_counter()
 
@@ -166,15 +171,16 @@ class CompilationManager:
             self._precompile_structured_decoding()
             if self.runner.speculative_config:
                 self._precompile_speculative_decoding()
-        
+
         # Save model if export path is specified
         export_path = os.environ.get("TPU_INFERENCE_EXPORT_PATH")
         if export_path:
-            serving_model.save_deduplicated_functions(export_path, export_func_map)
+            serving_model.save_deduplicated_functions(export_path,
+                                                      export_func_map)
 
         elapsed = time.perf_counter() - compilation_start_time
         self.runner.vllm_config.compilation_config.compilation_time += elapsed
-        
+
     def _precompile_input_embeddings_merger(self) -> None:
         for num_tokens in self.runner.num_tokens_paddings:
             hidden_size = self.runner.vllm_config.model_config.get_hidden_size(

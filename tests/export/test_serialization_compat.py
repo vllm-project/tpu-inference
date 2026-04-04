@@ -13,24 +13,29 @@
 # limitations under the License.
 
 import unittest
+
 import jax
 import jax.numpy as jnp
 from vllm.v1.outputs import LogprobsTensors
-from tpu_inference.export.serialization_compat import register_external_serialization_compat
+
+from tpu_inference.export.serialization_compat import \
+    register_external_serialization_compat
+
 
 class TestSerializationCompat(unittest.TestCase):
+
     def test_logprobs_tensors_serialization(self):
         # 1. Create dummy object with JAX arrays to verify type serialization
-        x = LogprobsTensors(
-            logprob_token_ids=jnp.zeros((2, 2), dtype=jnp.int32),
-            logprobs=jnp.zeros((2, 2), dtype=jnp.float32),
-            selected_token_ranks=jnp.zeros((2,), dtype=jnp.int32),
-            cu_num_generated_tokens=None
-        )
-        
+        x = LogprobsTensors(logprob_token_ids=jnp.zeros((2, 2),
+                                                        dtype=jnp.int32),
+                            logprobs=jnp.zeros((2, 2), dtype=jnp.float32),
+                            selected_token_ranks=jnp.zeros((2, ),
+                                                           dtype=jnp.int32),
+                            cu_num_generated_tokens=None)
+
         def f(dummy):
             return x
-            
+
         # 2. Try to export WITHOUT registration
         # This assumes the test runs in a clean environment where registration hasn't happened yet.
         try:
@@ -40,10 +45,10 @@ class TestSerializationCompat(unittest.TestCase):
         except Exception as e:
             self.assertIn("unregistered type", str(e))
             print(f"Verified expected failure without registration: {e}")
-            
+
         # 3. Now register
         register_external_serialization_compat()
-        
+
         # 4. Try to export WITH registration
         try:
             exported = jax.export.export(jax.jit(f))(jnp.zeros(1))
@@ -58,19 +63,22 @@ class TestSerializationCompat(unittest.TestCase):
             from flax.nnx import Param
         except ImportError:
             self.skipTest("Flax NNX not available")
-            
+
         x = Param(jnp.zeros((2, 2), dtype=jnp.float32))
-        
+
         def f(dummy):
             return x
-            
+
         try:
             exported = jax.export.export(jax.jit(f))(jnp.zeros(1))
             serialized = exported.serialize()
             self.assertIsNotNone(serialized)
-            print("Successfully exported and serialized Param after registration.")
+            print(
+                "Successfully exported and serialized Param after registration."
+            )
         except Exception as e:
             self.fail(f"Failed to export Param after registration: {e}")
+
 
 if __name__ == '__main__':
     unittest.main()

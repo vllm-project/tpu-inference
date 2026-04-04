@@ -1,11 +1,24 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Simplified serving model format utilities for export."""
 
 import json
-import os
 import logging
+import os
 
-import jax
 from jax import export as jax_export
+
 
 def save_jax_exported(
     exp: jax_export.Exported,
@@ -16,11 +29,11 @@ def save_jax_exported(
     """Serializes a `jax.export.Exported` object and saves it to disk."""
     if os.path.exists(bin_file_path):
         logging.warning(f"File {bin_file_path} already exists.")
-    
+
     dirname = os.path.dirname(bin_file_path)
     if dirname:
         os.makedirs(dirname, exist_ok=True)
-    
+
     with open(bin_file_path, "wb") as f:
         f.write(exp.serialize(vjp_order=vjp_order))
 
@@ -50,16 +63,17 @@ def load(nativemodel_path: str) -> dict[str, jax_export.Exported]:
     model_fn_dir = os.path.join(nativemodel_path, "model_fn")
     model_fn_metadata_file = os.path.join(model_fn_dir, "metadata.json")
     if not os.path.exists(model_fn_metadata_file):
-        raise ValueError(f"Model path {model_fn_metadata_file} does not exist.")
+        raise ValueError(
+            f"Model path {model_fn_metadata_file} does not exist.")
     with open(model_fn_metadata_file, "r") as f:
         model_fn_metadata = json.load(f)
     model_fn_map: dict[str, jax_export.Exported] = {}
     for method_key, method_metadata in model_fn_metadata.items():
-        calling_convention_version = method_metadata["calling_convention_version"]
+        calling_convention_version = method_metadata[
+            "calling_convention_version"]
         check_calling_convention_version_supported(calling_convention_version)
         model_fn_map[method_key] = load_jax_exported(
-            os.path.join(model_fn_dir, method_metadata["file_path"])
-        )
+            os.path.join(model_fn_dir, method_metadata["file_path"]))
     return model_fn_map
 
 
@@ -84,42 +98,48 @@ def save(nativemodel_path: str,
         json.dump(metadata, f, indent=4)
 
 
-def save_deduplicated_functions(export_path: str, model_fn_map: dict[str, jax_export.Exported]) -> None:
+def save_deduplicated_functions(
+        export_path: str, model_fn_map: dict[str,
+                                             jax_export.Exported]) -> None:
     """Saves exported functions to subfolders, deduplicating them by hash."""
     import hashlib
     import shutil
-    
-    logging.info("Saving unique exported model functions to subfolders in %s", export_path)
+
+    logging.info("Saving unique exported model functions to subfolders in %s",
+                 export_path)
     os.makedirs(export_path, exist_ok=True)
     seen_hashes = {}
-    
+
     for name, exp in model_fn_map.items():
         try:
             # Attempt serialization to compute hash for deduplication
             serialized_bytes = exp.serialize()
             h = hashlib.md5(serialized_bytes).hexdigest()
-            
+
             if h in seen_hashes:
-                logging.info(f"Function {name} is a duplicate of {seen_hashes[h]}, skipping.")
+                logging.info(
+                    f"Function {name} is a duplicate of {seen_hashes[h]}, skipping."
+                )
                 continue
-                
+
             seen_hashes[h] = name
-            
+
             sub_path = os.path.join(export_path, name)
             if os.path.exists(sub_path):
                 shutil.rmtree(sub_path)
             os.makedirs(sub_path, exist_ok=True)
-            
+
             save(sub_path, {name: exp})
             logging.info(f"Successfully saved function {name}")
         except Exception as e:
             logging.error(f"Failed to process/save function {name}: {e}")
-            if isinstance(e, TypeError) and "Serialization is supported only for dictionaries with string keys" in str(e):
+            if isinstance(
+                    e, TypeError
+            ) and "Serialization is supported only for dictionaries with string keys" in str(
+                    e):
                 logging.error(
                     "To fix this properly, please identify the data structure containing the integer keys "
                     "and register it using `jax.export.register_pytree_node_serialization`. "
                     "This error usually happens when a standard Python dict with integer keys is part of the PyTree. "
                     "Consider wrapping it in a custom class and registering that class for serialization."
                 )
-
-

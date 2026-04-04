@@ -12,25 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from vllm.v1.outputs import LogprobsTensors
 from jax import export as jax_export
+from vllm.v1.outputs import LogprobsTensors
+
 
 def register_external_serialization_compat():
     """Register serialization compatibility for external types (e.g., vLLM)."""
     jax_export.register_namedtuple_serialization(
-        LogprobsTensors,
-        serialized_name="vllm.v1.outputs.LogprobsTensors"
-    )
-    
+        LogprobsTensors, serialized_name="vllm.v1.outputs.LogprobsTensors")
+
     try:
         from flax.nnx import Param
-        
+
         def _serialize_param(aux_data):
             return b""
-            
+
         def _deserialize_param(b):
             return ()
-            
+
         jax_export.register_pytree_node_serialization(
             Param,
             serialized_name="flax.nnx.variablelib.Param",
