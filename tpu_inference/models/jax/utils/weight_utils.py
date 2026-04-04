@@ -27,6 +27,7 @@ from typing import Any, Iterable, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import torch
 import torchax
 from flax import nnx
@@ -315,6 +316,20 @@ def get_default_maps(model_config, mesh: Mesh,
                        bias_pad_map=bias_pad_keys)
 
 
+def ensure_cpu_jax_array(weight: Any) -> jax.Array:
+    """Materialize any incoming weight as a CPU-backed JAX array.
+
+    This avoids accidental TPU/HBM allocations during reshape/transpose/cast
+    before the final sharded device_put step.
+    """
+    with jax.default_device(jax.devices("cpu")[0]):
+        if isinstance(weight, torch.Tensor):
+            return t2j(weight, use_dlpack=False)
+        if isinstance(weight, jax.Array):
+            return jnp.asarray(jax.device_get(weight))
+        return jnp.asarray(np.asarray(weight))
+
+
 def _load_and_shard_weight(vllm_config,
                            params: nnx.State,
                            shardings: Any,
@@ -341,6 +356,8 @@ def _load_and_shard_weight(vllm_config,
     head_dim_original = model_config.get_head_size()
     head_dim = utils.get_padded_head_dim(head_dim_original)
     head_dim_pad = head_dim - head_dim_original
+
+    hf_weight = ensure_cpu_jax_array(hf_weight)
 
     # Check if the key should retain its original dtype
     keep_original_dtype = False
@@ -525,16 +542,13 @@ def load_hf_weights(
     weights_iterator = None
     if hasattr(vllm_config.model_config, "runai_model_weights_iterator"):
         weights_iterator = vllm_config.model_config.runai_model_weights_iterator
-    env = torchax.default_env()
     # The weights_iterator is used in RunAI model streamer integration.
     if weights_iterator is not None:
         for hf_key, hf_weight in weights_iterator:
             if filter_regex and not re.match(filter_regex, hf_key):
                 continue
 
-            # Since the weights_iterator yields Pytorch tensors (torch.Tensor),
-            # we need to convert them to JAX arrays (jax.Array).
-            hf_weight_jax = env.t2j_copy(hf_weight)
+            hf_weight_jax = ensure_cpu_jax_array(hf_weight)
 
             _load_and_shard_weight(
                 vllm_config,
@@ -757,8 +771,7 @@ def jax_array_from_reshaped_torch(
     if permute_dims is not None:
         torch_weight = torch_weight.permute(*permute_dims)
 
-    with cpu_mesh_context():
-        return t2j(torch_weight, use_dlpack=False)
+    return ensure_cpu_jax_array(torch_weight)
 
 
 def assign_and_shard_param(jax_param: nnx.Param,

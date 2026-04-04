@@ -31,6 +31,7 @@ from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
+    ensure_cpu_jax_array,
     shard_put)
 
 modeling_flax_utils = FlaxUtils()
@@ -263,8 +264,6 @@ class JaxMoE(JaxModule):
 
         self.quant_method might reuse this method if the quantization method has specific logic for loading weights.
         """
-        import torchax
-
         cnt = 0
         for param_name, torch_weight in weights:
             cnt += 1
@@ -302,12 +301,7 @@ class JaxMoE(JaxModule):
                     f"source {source_shape} vs target {target_shape}")
 
             with jax.default_device(jax.devices("cpu")[0]):
-                if hasattr(torch_weight, "detach") and hasattr(torch_weight,
-                                                                "cpu"):
-                    env = torchax.default_env()
-                    jax_weight = env.t2j_copy(torch_weight)
-                else:
-                    jax_weight = jnp.asarray(torch_weight)
+                jax_weight = ensure_cpu_jax_array(torch_weight)
                 if permute_dims is not None:
                     jax_weight = jnp.transpose(jax_weight, permute_dims)
                 if jax_weight.dtype != jax_param.value.dtype:

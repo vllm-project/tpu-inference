@@ -7,7 +7,6 @@ from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-import torchax
 from flax import nnx
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
@@ -39,6 +38,7 @@ from tpu_inference.models.jax.utils.weight_utils import (
     _load_and_shard_weight,
     assign_and_shard_param,
     check_all_loaded,
+    ensure_cpu_jax_array,
     get_default_maps,
     model_weights_generator,
 )
@@ -397,24 +397,19 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                         torch_weight,
                         *,
                         permute_dims: Optional[tuple[int, ...]] = None):
-        with jax.default_device(jax.devices("cpu")[0]):
-            if hasattr(torch_weight, "detach") and hasattr(torch_weight, "cpu"):
-                env = torchax.default_env()
-                jax_weight = env.t2j_copy(torch_weight)
-            else:
-                jax_weight = jnp.asarray(torch_weight)
-            if permute_dims is not None:
-                jax_weight = jnp.transpose(jax_weight, permute_dims)
-            model_dtype = self.vllm_config.model_config.dtype
-            if jax_weight.dtype != model_dtype:
-                jax_weight = jax_weight.astype(model_dtype)
+        jax_weight = ensure_cpu_jax_array(torch_weight)
+        if permute_dims is not None:
+            jax_weight = jnp.transpose(jax_weight, permute_dims)
+        model_dtype = self.vllm_config.model_config.dtype
+        if jax_weight.dtype != model_dtype:
+            jax_weight = jax_weight.astype(model_dtype)
         return jax_weight
 
     @staticmethod
     def _split_moe_fused_weight(hf_weight, *, split_count: int, axis: int):
         if hasattr(hf_weight, "chunk"):
             return hf_weight.chunk(split_count, dim=axis)
-        return jnp.split(jnp.asarray(hf_weight), split_count, axis=axis)
+        return jnp.split(ensure_cpu_jax_array(hf_weight), split_count, axis=axis)
 
     def _skip_non_expert_weight(self, hf_key: str) -> bool:
         layer_match = re.match(r".*layers\.(\d+)\.(.*)", hf_key)
@@ -560,13 +555,13 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         self._finalize_loaded_expert_modules(loaded_expert_modules)
 
     def _load_moe_router_weight(self, hf_key, hf_weight) -> bool:
-        """Load MoE router gate weights via the standard torchax conversion path.
+        """Load MoE router gate weights via the standard CPU-safe conversion path.
 
         The sparse MoE block stores the router module both as ``mlp.gate`` and as
         ``mlp.experts.router``. Directly assigning the concrete param avoids
         failures when the generic state traversal resolves only one alias, while
-        using ``torchax.default_env().t2j_copy`` keeps the tensor conversion
-        consistent with the rest of the working text-model loader.
+        forcing the temporary tensor onto CPU avoids accidental TPU/HBM spikes
+        before final sharding.
         """
         gate_match = re.match(r".*layers\.(\d+)\.mlp\.gate\.weight$", hf_key)
         if gate_match is None:
@@ -672,7 +667,6 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             shardings = nnx.get_named_sharding(params, self.mesh)
         except TypeError:
             shardings = params
-        env = torchax.default_env()
         weights_iterator = getattr(self.vllm_config.model_config,
                                    "runai_model_weights_iterator", None)
         if weights_iterator is None:
@@ -699,7 +693,7 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 metadata_map,
                 self.mesh,
                 hf_key,
-                env.t2j_copy(hf_weight),
+                ensure_cpu_jax_array(hf_weight),
                 keep_hf_weight_suffix_when_match=[],
                 pp_missing_layers=pp_missing_layers,
             )
