@@ -86,7 +86,8 @@ if TYPE_CHECKING:
 
 import tpu_inference.distributed.utils as dist_utils
 from tpu_inference import envs
-from tpu_inference.distributed.kv_transfer import multi_layer_copy
+from tpu_inference.distributed.kv_transfer import copy_to_host, multi_layer_copy
+from tpu_inference.distributed.host_kv_pool import HostKVPool
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 from tpu_inference.utils import device_array
@@ -443,7 +444,7 @@ class TPUConnectorWorker:
         self.node_id = 0
 
         # req_id: (kv, expiration_time)
-        self.reqs_wait_pull: dict[ReqId, list[list[jax.Array], float]] = {}
+        self.reqs_wait_pull: dict[ReqId, list[list[jax.Array], float, int]] = {}
         # req_id: thread_future
         self.reqs_pulling: dict[ReqId, Future] = {}
         # req_id: (kv, indices)
@@ -463,6 +464,7 @@ class TPUConnectorWorker:
         self.kv_transfer_server = None
         self.zmq_cxt = zmq.Context()
         if self.is_producer:
+            self.kv_d2h_executor = ThreadPoolExecutor(max_workers=128)
             ready_event = threading.Event()
             self.pull_notify_listener_t = threading.Thread(
                 target=self._pull_notify_listener,
@@ -513,6 +515,17 @@ class TPUConnectorWorker:
                     f"ip={self.host_ip} | "
                     f"kv_transfer_port={self.kv_transfer_port}")
         self._maybe_start_p2p_server()
+
+        if self.is_producer and dist_utils.get_enable_d2h_transfer() and not self.multi_host:
+            block_size = self.vllm_config.cache_config.block_size
+            max_blocks = self.vllm_config.model_config.max_model_len // block_size
+            self.host_kv_pool = HostKVPool(
+                pool_size=dist_utils.get_max_host_kv_buffer_size(), 
+                num_layers=self.num_layers, 
+                max_blocks_per_req=max_blocks, 
+                cache_inner_shape=kv_layer.shape[1:], 
+                dtype=self.dtype, 
+                host_sharding=self.host_sharding)
 
     def _maybe_start_p2p_server(self):
         if self.kv_transfer_server is not None:
@@ -617,22 +630,52 @@ class TPUConnectorWorker:
         # TODO(xiang): pad block_ids to avoid recompilation
         indices = device_array(self.mesh, np.array(local_block_ids))
         kv = select_from_kv_caches(self.runner.kv_caches, indices)
-        if dist_utils.get_enable_d2h_transfer():
-            # (mrjunwan): we directly put the kv to host memory to reduce the memory pressure on device
-            # add time log here to monitor the transfer speed.
-            logger.info(
-                f"Worker {self.node_id} --> Doing D2H kv transfer for req_id={req_id}"
-            )
-            kv = jax.device_put(kv, self.host_sharding)
+        if dist_utils.get_enable_d2h_transfer() and not self.multi_host:
+            self.kv_d2h_executor.submit(self._async_d2h_and_transfer, req_id, req_meta, kv, len(local_block_ids))
+        else:
+            buffer_idx = -1
+            # NOTE(xiang): We need to manually store the kv because:
+            # Although we can set use_raw_buffers=True to let kv be safely destroyed after
+            # calling await_pull, it could be a stranding buffer if D never pulls it.
+            # So we have to set use_raw_buffers=False and stores the kv, then the kv buffer
+            # will be safely destroyed by either D notifying or expiration.
+            self.reqs_wait_pull[req_id] = [kv, req_meta.expiration_time, buffer_idx]
+            self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
+            self.kv_transfer_server.await_pull(req_meta.uuid, kv)
 
-        # NOTE(xiang): We need to manually store the kv because:
-        # Although we can set use_raw_buffers=True to let kv be safely destroyed after
-        # calling await_pull, it could be a stranding buffer if D never pulls it.
-        # So we have to set use_raw_buffers=False and stores the kv, then the kv buffer
-        # will be safely destroyed by either D notifying or expiration.
-        self.reqs_wait_pull[req_id] = [kv, req_meta.expiration_time]
+    def _async_d2h_and_transfer(self, req_id: str, req_meta: SendMeta, kv_src: list[jax.Array], num_valid_blocks: int):
+        # (mrjunwan): we directly put the kv to host memory to reduce the memory pressure on device
+        # add time log here to monitor the transfer speed.
+        logger.info(
+            f"Worker {self.node_id} --> Doing D2H kv transfer for req_id={req_id}"
+        )
+        buffer_idx, dest_buffer = self.host_kv_pool.get_buffer()
+        updated_dest_buffer = []
+
+        start_time = time.perf_counter()
+        sliced_dest_buffer = [dest[:num_valid_blocks,:,:,:,:] for dest in dest_buffer]
+        time_1 = time.perf_counter()
+        for src_layer, dest_layer in zip(kv_src, sliced_dest_buffer):
+            updated_dest = copy_to_host(
+                src=src_layer,
+                dest=dest_layer,
+                mesh=self.mesh,
+                sharding_spec=self.sharding.spec
+            )
+            updated_dest_buffer.append(updated_dest)
+        
+        # Wait for physical hardware transfer
+        jax.tree_util.tree_map(lambda x: x.block_until_ready(), updated_dest_buffer)
+        
+        end_time = time.perf_counter()
+        logger.info(
+            f"Worker {self.node_id} --> Done D2H kv transfer for req_id={req_id} | slice time={(time_1 - start_time)*1000:.2f}ms | copy time={(end_time - time_1)*1000:.2f}ms"
+        )
+        
+        # 4. Network transfer
+        self.reqs_wait_pull[req_id] = [dest_buffer, req_meta.expiration_time, buffer_idx]
         self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
-        self.kv_transfer_server.await_pull(req_meta.uuid, kv)
+        self.kv_transfer_server.await_pull(req_meta.uuid, updated_dest_buffer)
 
     def _maybe_build_kv_connection(self, req_meta: LoadMeta) -> Any:
         if isinstance(req_meta.remote_host, list):
@@ -743,10 +786,14 @@ class TPUConnectorWorker:
         # This req can then be released blocks in the current scheduler step.
         now = time.perf_counter()
         for req_id in list(self.reqs_wait_pull):
-            _, expires = self.reqs_wait_pull[req_id]
+            buffer, expires, buffer_index = self.reqs_wait_pull[req_id]
             if now > expires:
+                if buffer_index != -1 and self.host_kv_pool is not None:
+                    self.host_kv_pool.return_buffer(buffer_index, buffer)
                 del self.reqs_wait_pull[req_id]
                 done_sending.add(req_id)
+                # Return the buffer to the pool
+                
         if done_sending:
             logger.info(
                 f"Worker {self.node_id} -->  done_sending={done_sending}")

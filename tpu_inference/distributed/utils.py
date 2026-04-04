@@ -90,6 +90,10 @@ def get_p2p_wait_pull_timeout() -> int:
     timeout_str = os.getenv("TPU_P2P_WAIT_PULL_TIMEOUT", "30")
     return int(timeout_str)
 
+def get_max_host_kv_buffer_size() -> int:
+    """Maximum size of KV requests that can be handled by the host KV pool."""
+    size_str = os.getenv("TPU_MAX_HOST_KV_BUFFER_SIZE", "64")
+    return int(size_str)
 
 def get_device_topology_order_id(local_devices, global_devices) -> int:
     """
