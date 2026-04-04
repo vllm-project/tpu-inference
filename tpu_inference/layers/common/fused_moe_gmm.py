@@ -139,7 +139,7 @@ def moe_gmm_local(
         )
         gmm1_res_gate, gmm1_res_up = jnp.split(gmm1_res_gate_up, 2, -1)
         gmm1_res = apply_act_fn(activation, gmm1_res_gate, gmm1_res_up)
-
+    gmm1_res = gmm1_res[:, :w2.shape[1]]  # trim to intermediate size if padded
     # When the parallelism is TP since w2_bias is not sharded, we should only apply bias
     # once, not applying to every shard. So we set w2_bias to 0 to all shards other than
     # shard 0. For EP, it is not needed since bias is sharded on leading expert axis.
