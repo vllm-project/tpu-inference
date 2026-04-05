@@ -1,5 +1,16 @@
 # Copyright 2025 Google LLC
-# (License header omitted for brevity)
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import tempfile
 from unittest.mock import MagicMock, patch
@@ -27,9 +38,6 @@ from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compresse
 P = PartitionSpec
 MODELS = ["openai/gpt-oss-20b"]
 
-# ==============================================================================
-# 1. THE INT4 ORACLE (Reference Implementation)
-# ==============================================================================
 def pack_int4_to_int32(tensor_u8: torch.Tensor) -> torch.Tensor:
     shape = list(tensor_u8.shape)
     shape[-1] = shape[-1] // 8
@@ -75,9 +83,6 @@ def quantize_to_int4(weight: torch.Tensor, group_size: int = -1, symmetric: bool
         
     return weight_packed, scale, zp_packed
 
-# ==============================================================================
-# 2. ENVIRONMENT FIXTURES (The Fake Network)
-# ==============================================================================
 @pytest.fixture(autouse=True)
 def mock_get_pp_group():
     with patch("tpu_inference.distributed.jax_parallel_state.get_pp_group",
@@ -101,9 +106,6 @@ def setup_environment():
                                      backend="gloo")
         ensure_model_parallel_initialized(1, 1)
 
-# ==============================================================================
-# 3. CORE INTEGRATION TESTS
-# ==============================================================================
 class MockLinearLayer(torch.nn.Module):
     """Dummy module to mimic a vLLM layer for testing."""
     def __init__(self):
@@ -133,16 +135,12 @@ def test_wna16_linear(num_devices, batch_size, in_features, out_features,
 
     # 2. Get Oracle Quantized Weights
     weight_packed, weight_scale, zp_packed = quantize_to_int4(w, group_size, symmetric)
-    # Match vLLM buffers: scales are (out_features, num_groups). A 1-D (out_features,)
-    # scale is ambiguous and can become (1, out_features) after conversion, which then
-    # broadcasts against (out, 1, group_elems) into (out, out, in) in _dequantize_to_bf16.
+
     g_size = in_features if group_size == -1 else group_size
     num_groups = in_features // g_size
     weight_scale = weight_scale.reshape(out_features, num_groups).contiguous()
 
     # 3. Calculate Expected Output using unquantized math
-    # Note: For strict testing, you might want to dequantize `weight_packed` here to get 
-    # the exact expected math with quantization noise, but this raw math works for higher tolerances.
     expected = torch.nn.functional.linear(x, w, bias)
 
     # 4. Setup vLLM & Layer Configs
@@ -194,13 +192,10 @@ def test_wna16_linear(num_devices, batch_size, in_features, out_features,
         actual_torch,
         expected,
         check_device=False,
-        atol=2e-1,  # Generous tolerance due to INT4 precision loss
+        atol=2e-1,
         rtol=2e-1,
     )
 
-# ==============================================================================
-# 4. ACTORDER ORACLE & TESTS
-# ==============================================================================
 def quantize_to_int4_actorder(weight: torch.Tensor, group_size: int, symmetric: bool = True):
     """Oracle for Actorder: Weights are grouped by a random g_idx permutation."""
     out_features, in_features = weight.shape
@@ -255,7 +250,6 @@ def test_wna16_actorder(symmetric):
     w_packed, w_scale, zp_packed, g_idx = quantize_to_int4_actorder(w, group_size, symmetric)
 
     # 2. Reconstruct expected weights (The "Strict" Math Check)
-    # This exactly mimics your _dequantize_to_bf16 actorder logic in pure PyTorch
     scale_expanded = w_scale[:, g_idx].to(torch.float32)
 
     # Unpack weights safely for the expected math
@@ -266,7 +260,6 @@ def test_wna16_actorder(symmetric):
     if symmetric:
         w_approx = (w_int - 8).to(torch.float32) * scale_expanded
     else:
-        # Unpack zero points. They were packed transposed, so we unpack transposed.
         num_groups = in_features // group_size
         zp_packed_t = zp_packed.T
         zps_unpacked_t = torch.zeros((num_groups, out_features), dtype=torch.int32)
@@ -298,7 +291,7 @@ def test_wna16_actorder(symmetric):
     layer.weight_scale.data.copy_(w_scale)
     if not symmetric:
         layer.weight_zero_point.data = zp_packed
-    layer.weight_g_idx.data = g_idx  # <-- INJECT G_IDX HERE
+    layer.weight_g_idx.data = g_idx
     layer.bias = torch.nn.Parameter(bias)
 
     # Apply
@@ -311,9 +304,6 @@ def test_wna16_actorder(symmetric):
     torch.testing.assert_close(actual_torch, expected, check_device=False, atol=2e-1, rtol=2e-1)
 
 
-# ==============================================================================
-# 5. OUTLIER / RECONSTRUCTION TEST
-# ==============================================================================
 def test_wna16_outliers():
     """Tests that implementation matches strict math even when outliers degrade INT4 accuracy."""
     batch_size, in_features, out_features, group_size = 4, 256, 128, 64
@@ -334,7 +324,6 @@ def test_wna16_outliers():
     w_scale = w_scale.reshape(out_features, in_features // group_size).contiguous()
 
     # 2. Strict Reconstructed Math
-    # We unpack the integer weights manually in PyTorch to see exactly what the hardware *should* do
     w_int = torch.zeros_like(w, dtype=torch.int32)
     for i in range(8):
         w_int[:, i::8] = (w_packed >> (i * 4)) & 0xF
@@ -371,6 +360,4 @@ def test_wna16_outliers():
         x_in, bias_in = env.to_xla((x, layer.bias))
         actual_torch = quant_method.apply_weights(layer, x_in, bias_in).torch()
 
-    # We can use a MUCH tighter tolerance here because we are comparing
-    # the JAX hardware math directly against the PyTorch reconstruction math!
     torch.testing.assert_close(actual_torch, expected, check_device=False, atol=1e-3, rtol=1e-3)

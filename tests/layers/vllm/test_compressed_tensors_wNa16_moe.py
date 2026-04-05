@@ -1,5 +1,16 @@
 # Copyright 2025 Google LLC
-# (License header omitted for brevity)
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import tempfile
 from unittest.mock import MagicMock, patch
@@ -33,11 +44,8 @@ from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensor
 # yapf: enable
 
 P = PartitionSpec
-MODEL = 'BCCard/Qwen3-30B-A3B-FP8-Dynamic'  # Using same dummy model string
+MODEL = 'BCCard/Qwen3-30B-A3B-FP8-Dynamic'
 
-# ==============================================================================
-# INT4 ORACLE HELPERS (Needed to pack the dummy weights for the test)
-# ==============================================================================
 def pack_int4_to_int32(tensor_u8: torch.Tensor) -> torch.Tensor:
     shape = list(tensor_u8.shape)
     shape[-1] = shape[-1] // 8
@@ -70,9 +78,6 @@ def quantize_to_int4_moe(weight_3d: torch.Tensor, group_size: int = -1, symmetri
     
     return w_packed_3d, scale_3d
 
-# ==============================================================================
-# FIXTURES & REF MATH
-# ==============================================================================
 @pytest.fixture(autouse=True)
 def mock_get_pp_group():
     with patch("tpu_inference.distributed.jax_parallel_state.get_pp_group",
@@ -104,9 +109,6 @@ def _ref_math_in_bf16(w1, w2, w3, x, router_logits, top_k):
     out = torch.einsum("tai,ta -> ti", expert_outs, expert_weights)
     return out
 
-# ==============================================================================
-# MAIN TEST
-# ==============================================================================
 @pytest.mark.parametrize("mesh", [test_utils.get_spmd_mesh(1), test_utils.get_spmd_mesh(2)])
 @pytest.mark.parametrize("num_tokens", [8])
 @pytest.mark.parametrize("intermediate_size", [1024])
@@ -127,22 +129,21 @@ def test_fused_moe_method_int4(mesh, num_tokens, intermediate_size, hidden_size,
                          hidden_size=hidden_size,
                          intermediate_size=intermediate_size)
 
-    # ---> CHANGE 2: Update config to target INT4
     quant_config = VllmCompressedTensorsConfig(
         target_scheme_map={
             'Linear': {
                 'weights': QuantizationArgs(
-                    num_bits=4,              # Changed from 8 to 4
-                    type='int',              # Changed from 'float' to 'int'
+                    num_bits=4,
+                    type='int',
                     symmetric=True,
-                    group_size=128,          # Added standard group size
-                    strategy='group',        # Changed from channel to group
+                    group_size=128,
+                    strategy='group',
                     block_structure=None,
                     dynamic=False,
                     actorder=None,
                     observer='minmax',
                     observer_kwargs={}),
-                'input_activations': None,   # W4A16 means activations are NOT quantized
+                'input_activations': None,
                 'format': None
             }
         },
@@ -170,27 +171,24 @@ def test_fused_moe_method_int4(mesh, num_tokens, intermediate_size, hidden_size,
                 enable_eplb=False  
             ),
             in_dtype=torch.bfloat16,
-            intermediate_size_per_partition=intermediate_size,  # <--- ADDED
-            num_logical_experts=num_experts,                    # <--- ADDED
-            activation="silu",                                  # <--- ADDED
-            device="cpu",                                       # <--- ADDED
-            routing_method="topk"                               # <--- ADDED
+            intermediate_size_per_partition=intermediate_size,
+            num_logical_experts=num_experts,
+            activation="silu",
+            device="cpu",
+            routing_method="topk"
         )
     
     method = VllmCompressedTensorsWNA16MoEMethod(quant_config, moe, mesh)
     method.create_weights(layer, num_experts, hidden_size, intermediate_size, params_dtype=torch.bfloat16)
 
-    # ---> CHANGE 3: INJECT THE INT4 PACKED WEIGHTS
     torch.manual_seed(42)
     
-    # vLLM usually packs w1 and w3 together along the output dim
     w13_raw = torch.randn((num_experts, 2 * intermediate_size, hidden_size), dtype=torch.bfloat16)
     w2_raw = torch.randn((num_experts, hidden_size, intermediate_size), dtype=torch.bfloat16)
 
     w13_packed, w13_scale = quantize_to_int4_moe(w13_raw, group_size=128, symmetric=True)
     w2_packed, w2_scale = quantize_to_int4_moe(w2_raw, group_size=128, symmetric=True)
 
-    # FIXED: Use the correct `_packed` parameter names!
     layer.w13_weight_packed.data = w13_packed
     layer.w13_weight_scale.data = w13_scale
     layer.w2_weight_packed.data = w2_packed
@@ -205,12 +203,8 @@ def test_fused_moe_method_int4(mesh, num_tokens, intermediate_size, hidden_size,
         router_logits = torch.randn((seqlen, num_experts), dtype=torch.bfloat16).to('jax')
         topk_ids = torch.zeros((seqlen, topk), dtype=torch.int32).to('jax')
         
-        # Pass them positionally without names
         result = method.apply(layer, x, router_logits, topk_ids, None)
 
-        # ==========================================
-        # MISSING ASSERTION BLOCK ADDED BACK IN:
-        # ==========================================
         def unpack_and_scale(packed, scale, O, I):
             w_int = torch.zeros((num_experts, O, I), dtype=torch.int32)
             for i in range(8):
@@ -228,5 +222,4 @@ def test_fused_moe_method_int4(mesh, num_tokens, intermediate_size, hidden_size,
 
         result_reference = _ref_math_in_bf16(w1_approx, w2_approx, w3_approx, x, router_logits, topk)
 
-        # Generous tolerance because INT4 math has differences
         assert result.shape == result_reference.shape
