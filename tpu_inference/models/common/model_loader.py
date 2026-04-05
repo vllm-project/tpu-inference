@@ -301,10 +301,18 @@ def get_flax_model(
             vllm_config.model_config.hf_config)
     jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
     vllm_config.model_config.dtype = original_dtype
-    kv_cache_sharding = NamedSharding(
-        mesh,
-        PartitionSpec(ShardingAxisName.ATTN_DATA, None,
-                      ShardingAxisName.ATTN_HEAD))
+
+    use_mla = getattr(vllm_config.model_config, "use_mla", False)
+    if use_mla:
+        kv_cache_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(ShardingAxisName.MLP_TENSOR)
+        )
+    else:
+        kv_cache_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(ShardingAxisName.ATTN_DATA, None,
+                        ShardingAxisName.ATTN_HEAD))
     hidden_states_sharding = NamedSharding(mesh,
                                            PartitionSpec(
                                                ShardingAxisName.ATTN_DATA,

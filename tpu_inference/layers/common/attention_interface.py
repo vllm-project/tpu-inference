@@ -537,9 +537,9 @@ def mla_attention(
             k_scale=k_scale,
             v_scale=v_scale)
 
-        return new_cache, out
+        return out, new_cache
 
-    kv_cache, output_TNA = jax.jit(
+    output_TNA, kv_cache = jax.jit(
         jax.shard_map(_mla_ragged_paged_attention,
                       mesh=mesh,
                       in_specs=in_specs,

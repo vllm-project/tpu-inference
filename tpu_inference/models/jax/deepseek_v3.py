@@ -953,7 +953,8 @@ class DeepseekV3DecoderLayer(JaxModule):
         hidden_states = self.input_layernorm(x_TD)
         new_cache, attn_output = self.self_attn(hidden_states, kv_cache,
                                                 attention_metadata)
-        hidden_states = residual + attn_output
+        seq_len = residual.shape[0]
+        hidden_states = residual + attn_output[:seq_len, :]
 
         # Run MLP/MoE
         residual = hidden_states
@@ -961,7 +962,7 @@ class DeepseekV3DecoderLayer(JaxModule):
         mlp_output = self.mlp(hidden_states)
 
         # Residual
-        hidden_states = residual + mlp_output
+        hidden_states = residual + mlp_output[:seq_len, :]
 
         return new_cache, hidden_states
 
