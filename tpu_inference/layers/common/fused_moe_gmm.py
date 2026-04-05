@@ -353,6 +353,35 @@ def expert_parallel_gmm(
     )
 
 
+def _apply_scatter_gather_fp8(
+    hidden_states: jax.Array, mesh: Mesh, dtype: jnp.dtype
+) -> jax.Array:
+    fp8_max = jnp.finfo(jnp.float8_e4m3fn).max.astype(jnp.float32)
+    # Calculate scale per token
+    local_amax = jnp.max(jnp.abs(hidden_states), axis=-1, keepdims=True)
+    scale = jnp.where(local_amax == 0.0, 1.0, local_amax / fp8_max)
+    scale = jnp.maximum(scale, 1e-30)
+
+    # Quantize
+    hidden_states = jnp.clip(
+        hidden_states / scale, -fp8_max, fp8_max
+    ).astype(jnp.float8_e4m3fn)
+
+    # BARRIER: Prevent XLA from fusing the dequantize and pulling the All-Gather ABOVE the quantization
+    hidden_states, scale = jax.lax.optimization_barrier((hidden_states, scale))
+
+    # Dequantize if needed
+    return jax.shard_map(
+        lambda x, s: (x.astype(jnp.float32) * s).astype(dtype),
+        mesh=mesh,
+        in_specs=(
+            P(ShardingAxisName.MLP_DATA, None),
+            P(ShardingAxisName.MLP_DATA, None),
+        ),
+        out_specs=P(ShardingAxisName.MLP_DATA, None),
+    )(hidden_states, scale)
+
+
 @jax.jit(static_argnames=(
     "topk",
     "renormalize",
@@ -362,6 +391,7 @@ def expert_parallel_gmm(
     "scoring_fn",
     "sc_kernel_threshold",
     "sc_kernel_col_chunk_size",
+    "scatter_gather_fp8",
 ))
 def fused_moe_func(
     hidden_states: jax.Array,
@@ -380,6 +410,7 @@ def fused_moe_func(
     scoring_fn: str,
     sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
+    scatter_gather_fp8: bool = False,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -473,6 +504,11 @@ def fused_moe_func(
 
     x_out_spec = (P(ShardingAxisName.EXPERT_DATA)
                   if use_ep else P(ShardingAxisName.MLP_DATA))
+    if scatter_gather_fp8:
+        hidden_states = _apply_scatter_gather_fp8(
+            hidden_states, mesh, dtype
+        )
+
     x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
         _process_tokens_locally,
         mesh=mesh,
