@@ -100,8 +100,6 @@ class VllmCompressedTensorsWNA16(CompressedTensorsScheme):
             assert input_size_per_partition % group_size == 0
             scales_and_zp_size = input_size_per_partition // group_size
 
-        # Note: We still allocate initial tensors in 'packed' form so vLLM 
-        # can load the safetensors correctly from disk.
         weight = PackedvLLMParameter(
             input_dim=1,
             output_dim=0,
@@ -211,17 +209,13 @@ class VllmCompressedTensorsWNA16(CompressedTensorsScheme):
 
         @jax.jit
         def process_wna16_weights(weight, weight_scale, zero_point, bias, sort_indices):
-            # 1. Unconditionally unpack to int8 to avoid runtime compute costs
             unpacked_weight = self._unpack_packed_tensor(weight).astype(jnp.int8)
 
-            # 2. Permute columns to make groups contiguous (actorder case)
             if sort_indices is not None:
                 unpacked_weight = unpacked_weight[:, sort_indices]
                 
-            # 3. Unpack zero points to int8 if asymmetric
             unpacked_zp = None
             if zero_point is not None:
-                # ZP is stored transposed, so unpack .T then reverse the transpose
                 unpacked_zp = self._unpack_packed_tensor(zero_point.T).T.astype(jnp.int8)
 
             return process_linear_weights(

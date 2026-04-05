@@ -222,13 +222,8 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
                               router_logits=router_logits)
 
 
-class VllmCompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod,
-                                          VllmQuantConfig):
-    """Compressed-tensors WNA16 (weight-only int4/int8) MoE for TPU.
-
-    Eagerly dequantizes packed int4 weights to bfloat16 during loading,
-    handling g_idx activation reordering for grouped quantization.
-    """
+class VllmCompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod, VllmQuantConfig):
+    """Compressed-tensors WNA16 (weight-only int4/int8) MoE for TPU."""
 
     def __init__(
         self,
@@ -244,8 +239,7 @@ class VllmCompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod,
         self.strategy = weight_quant.strategy
         self.group_size = weight_quant.group_size if weight_quant.group_size else -1
         self.symmetric = weight_quant.symmetric
-        self.has_g_idx = (
-            weight_quant.actorder == ActivationOrdering.GROUP)
+        self.has_g_idx = (weight_quant.actorder == ActivationOrdering.GROUP)
 
         self.mesh = mesh
         self.moe_backend = select_moe_backend_from_fused_moe_config(moe)
@@ -257,10 +251,16 @@ class VllmCompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod,
     def is_monolithic(self) -> bool:
         return True
 
-    def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
-    ) -> None:
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> None:
         return None
+
+    def _unpack_packed_tensor(self, packed: jax.Array) -> jax.Array:
+        """Unpack int32-packed weights to individual values."""
+        if self.num_bits == 4:
+            return ct_u32_unpack_u4(packed)
+        # For INT8
+        u8 = jax.lax.bitcast_convert_type(packed, jnp.uint8)
+        return jnp.reshape(u8, u8.shape[:-2] + (-1,))
 
     def create_weights(
         self,
@@ -273,7 +273,7 @@ class VllmCompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod,
     ):
         extra_weight_attrs.pop("intermediate_size_full", None)
         extra_weight_attrs.update({
-            "is_transposed": True,
+            "is_transposed": False,  
             "quant_method": self.strategy,
         })
         w13_num_shards = 2 if self.moe.is_act_and_mul else 1
@@ -281,8 +281,8 @@ class VllmCompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod,
         w13_weight_packed = Parameter(
             torch.empty(
                 num_experts,
-                hidden_size // self.pack_factor,
-                w13_num_shards * intermediate_size_per_partition,
+                w13_num_shards * intermediate_size_per_partition, # Out
+                hidden_size // self.pack_factor,                  # In (Packed)
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -293,8 +293,8 @@ class VllmCompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod,
         w2_weight_packed = Parameter(
             torch.empty(
                 num_experts,
-                intermediate_size_per_partition // self.pack_factor,
-                hidden_size,
+                hidden_size,                                         # Out
+                intermediate_size_per_partition // self.pack_factor, # In (Packed)
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -310,10 +310,10 @@ class VllmCompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod,
             num_groups_w2 = intermediate_size_per_partition // self.group_size
 
         w13_weight_scale = Parameter(
-            torch.ones(
+            torch.empty(
                 num_experts,
+                w13_num_shards * intermediate_size_per_partition, # Out
                 num_groups_w13,
-                w13_num_shards * intermediate_size_per_partition,
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -322,10 +322,10 @@ class VllmCompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod,
         set_weight_attrs(w13_weight_scale, extra_weight_attrs)
 
         w2_weight_scale = Parameter(
-            torch.ones(
+            torch.empty(
                 num_experts,
+                hidden_size, # Out
                 num_groups_w2,
-                hidden_size,
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -334,70 +334,36 @@ class VllmCompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod,
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
         set_weight_attrs(w2_weight_scale, {"load_full_w2": False})
 
-        w13_weight_shape = Parameter(
-            torch.empty(num_experts, 2), requires_grad=False)
+        w13_weight_shape = Parameter(torch.empty(num_experts, 2), requires_grad=False)
         layer.register_parameter("w13_weight_shape", w13_weight_shape)
         set_weight_attrs(w13_weight_shape, extra_weight_attrs)
 
-        w2_weight_shape = Parameter(
-            torch.empty(num_experts, 2), requires_grad=False)
+        w2_weight_shape = Parameter(torch.empty(num_experts, 2), requires_grad=False)
         layer.register_parameter("w2_weight_shape", w2_weight_shape)
         set_weight_attrs(w2_weight_shape, extra_weight_attrs)
 
-        w13_g_idx = Parameter(
-            torch.empty(num_experts, hidden_size, dtype=torch.int32),
-            requires_grad=False,
-        )
+        w13_g_idx = Parameter(torch.empty(num_experts, hidden_size, dtype=torch.int32), requires_grad=False)
         layer.register_parameter("w13_weight_g_idx", w13_g_idx)
         set_weight_attrs(w13_g_idx, extra_weight_attrs)
 
-        w2_g_idx = Parameter(
-            torch.empty(
-                num_experts,
-                intermediate_size_per_partition,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
+        w2_g_idx = Parameter(torch.empty(num_experts, intermediate_size_per_partition, dtype=torch.int32), requires_grad=False)
         layer.register_parameter("w2_weight_g_idx", w2_g_idx)
         set_weight_attrs(w2_g_idx, extra_weight_attrs)
 
-        w13_g_idx_sort_indices = Parameter(
-            torch.empty(num_experts, hidden_size, dtype=torch.int32),
-            requires_grad=False,
-        )
-        layer.register_parameter("w13_g_idx_sort_indices",
-                                 w13_g_idx_sort_indices)
+        w13_g_idx_sort_indices = Parameter(torch.empty(num_experts, hidden_size, dtype=torch.int32), requires_grad=False)
+        layer.register_parameter("w13_g_idx_sort_indices", w13_g_idx_sort_indices)
         set_weight_attrs(w13_g_idx_sort_indices, extra_weight_attrs)
 
-        w2_g_idx_sort_indices = Parameter(
-            torch.empty(
-                num_experts,
-                intermediate_size_per_partition,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w2_g_idx_sort_indices",
-                                 w2_g_idx_sort_indices)
+        w2_g_idx_sort_indices = Parameter(torch.empty(num_experts, intermediate_size_per_partition, dtype=torch.int32), requires_grad=False)
+        layer.register_parameter("w2_g_idx_sort_indices", w2_g_idx_sort_indices)
         set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
 
         if self.moe.has_bias:
-            w13_bias = Parameter(
-                torch.empty(
-                    num_experts,
-                    w13_num_shards * intermediate_size_per_partition,
-                    dtype=params_dtype,
-                ),
-                requires_grad=False,
-            )
+            w13_bias = Parameter(torch.empty(num_experts, w13_num_shards * intermediate_size_per_partition, dtype=params_dtype), requires_grad=False)
             layer.register_parameter("w13_bias", w13_bias)
             set_weight_attrs(w13_bias, extra_weight_attrs)
 
-            w2_bias = Parameter(
-                torch.empty(num_experts, hidden_size, dtype=params_dtype),
-                requires_grad=False,
-            )
+            w2_bias = Parameter(torch.empty(num_experts, hidden_size, dtype=params_dtype), requires_grad=False)
             layer.register_parameter("w2_bias", w2_bias)
             set_weight_attrs(w2_bias, extra_weight_attrs)
 
@@ -409,180 +375,131 @@ class VllmCompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod,
         w13_scale = t2j(layer.w13_weight_scale, use_dlpack=False)
         w2_scale = t2j(layer.w2_weight_scale, use_dlpack=False)
 
-        if self.has_g_idx:
-            w13_g_idx_raw = t2j(layer.w13_weight_g_idx, use_dlpack=False)
-            w2_g_idx_raw = t2j(layer.w2_weight_g_idx, use_dlpack=False)
-        else:
-            w13_g_idx_raw = w2_g_idx_raw = None
-
-        if self.moe.has_bias:
-            w13_bias = t2j(layer.w13_bias, use_dlpack=False)
-            w2_bias = t2j(layer.w2_bias, use_dlpack=False)
-        else:
-            w13_bias = w2_bias = None
+        w13_g_idx = t2j(layer.w13_weight_g_idx, use_dlpack=False) if self.has_g_idx else None
+        w2_g_idx = t2j(layer.w2_weight_g_idx, use_dlpack=False) if self.has_g_idx else None
+        w13_bias = t2j(layer.w13_bias, use_dlpack=False) if self.moe.has_bias else None
+        w2_bias = t2j(layer.w2_bias, use_dlpack=False) if self.moe.has_bias else None
 
         for attr in [
-            "w13_weight_packed", "w2_weight_packed",
-            "w13_weight_scale", "w2_weight_scale",
-            "w13_weight_g_idx", "w2_weight_g_idx",
-            "w13_g_idx_sort_indices", "w2_g_idx_sort_indices",
-            "w13_weight_shape", "w2_weight_shape",
+            "w13_weight_packed", "w2_weight_packed", "w13_weight_scale", "w2_weight_scale",
+            "w13_weight_g_idx", "w2_weight_g_idx", "w13_g_idx_sort_indices", "w2_g_idx_sort_indices",
+            "w13_weight_shape", "w2_weight_shape", "w13_bias", "w2_bias"
         ]:
             if hasattr(layer, attr):
                 delattr(layer, attr)
 
-        if self.has_g_idx and w13_g_idx_raw is not None:
-            w13_perm = jnp.argsort(w13_g_idx_raw, axis=-1)
-            w13_inv_perm = jnp.argsort(w13_perm, axis=-1)
-            w2_perm = jnp.argsort(w2_g_idx_raw, axis=-1)
-            w2_inv_perm = jnp.argsort(w2_perm, axis=-1)
-        else:
-            num_w13_cols = w13_packed.shape[1]
-            num_w2_cols = w2_packed.shape[1]
-            w13_perm = jnp.broadcast_to(
-                jnp.arange(num_w13_cols, dtype=jnp.int32)[jnp.newaxis, :],
-                (w13_packed.shape[0], num_w13_cols))
-            w13_inv_perm = w13_perm
-            w2_perm = jnp.broadcast_to(
-                jnp.arange(num_w2_cols, dtype=jnp.int32)[jnp.newaxis, :],
-                (w2_packed.shape[0], num_w2_cols))
-            w2_inv_perm = w2_perm
-
-        group_size = self.group_size
-        num_bits = self.num_bits
-        symmetric = self.symmetric
-        do_w13_perm = self.has_g_idx
-        do_w2_perm = self.has_g_idx
-
         @jax.jit
-        def process_wna16_moe_weights(
-            w13_packed: jax.Array,
-            w13_scale: jax.Array,
-            w2_packed: jax.Array,
-            w2_scale: jax.Array,
-            w13_perm: jax.Array,
-            w13_inv_perm: jax.Array,
-            w2_perm: jax.Array,
-            w2_inv_perm: jax.Array,
-            w13_bias: jax.Array | None,
-            w2_bias: jax.Array | None,
+        def format_and_unpack_weights(
+            w13_p: jax.Array, w13_s: jax.Array,
+            w2_p: jax.Array, w2_s: jax.Array,
+            b13: jax.Array | None, b2: jax.Array | None,
         ) -> FusedMoEWeights:
-            # Swap axes so packed dim is last, then unpack
-            # w13_packed: (E, H//pack, 2*I) -> (E, 2*I, H//pack)
-            w13 = jnp.swapaxes(w13_packed, 1, 2)
-            w13 = ct_u32_unpack_u4(w13)  # (E, 2*I, H)
-
-            w2 = jnp.swapaxes(w2_packed, 1, 2)
-            w2 = ct_u32_unpack_u4(w2)  # (E, H, I)
-
-            # Scales: (E, num_groups, out_size) -> (E, out_size, num_groups)
-            w13_s = jnp.swapaxes(w13_scale, 1, 2)
-            w2_s = jnp.swapaxes(w2_scale, 1, 2)
-
-            # Apply g_idx column permutation on input dim (last dim)
-            if do_w13_perm:
-                w13 = jax.vmap(lambda w, p: w[:, p])(w13, w13_perm)
-            if do_w2_perm:
-                w2 = jax.vmap(lambda w, p: w[:, p])(w2, w2_perm)
-
-            # Dequantize: unpack groups, apply offset+scale
-            def _dequant(weight, scales, input_size):
-                E, O, I = weight.shape
-                eff_gs = I if group_size == -1 else group_size
-                n_groups = I // eff_gs
-                w = weight.reshape(E, O, n_groups, eff_gs)
-                w_f = w.astype(jnp.bfloat16)
-                if symmetric:
-                    off = jnp.array(
-                        1 << (num_bits - 1), dtype=jnp.bfloat16)
-                    w_deq = (w_f - off) * scales[:, :, :, jnp.newaxis]
-                else:
-                    w_deq = w_f * scales[:, :, :, jnp.newaxis]
-                return w_deq.reshape(E, O, I)
-
-            w13_deq = _dequant(w13, w13_s, w13.shape[-1])
-            w2_deq = _dequant(w2, w2_s, w2.shape[-1])
-
-            # Apply inverse permutation to restore original column order
-            if do_w13_perm:
-                w13_deq = jax.vmap(
-                    lambda w, p: w[:, p])(w13_deq, w13_inv_perm)
-            if do_w2_perm:
-                w2_deq = jax.vmap(
-                    lambda w, p: w[:, p])(w2_deq, w2_inv_perm)
+            
+            # Unpacking makes them natively (E, Out, In)
+            w13_unpacked = self._unpack_packed_tensor(w13_p).astype(jnp.int8)
+            w2_unpacked = self._unpack_packed_tensor(w2_p).astype(jnp.int8)
 
             w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
-            w13_reorder_size = get_mesh_shape_product(
-                self.mesh, ShardingAxisName.MLP_TENSOR)
+            w13_reorder_size = get_mesh_shape_product(self.mesh, ShardingAxisName.MLP_TENSOR)
 
             return process_moe_weights(
                 weights=FusedMoEWeights(
-                    w13_weight=w13_deq,
-                    w13_weight_scale=None,
-                    w13_bias=w13_bias,
-                    w2_weight=w2_deq,
-                    w2_weight_scale=None,
-                    w2_bias=w2_bias,
+                    w13_weight=w13_unpacked,     # ALREADY (E, Out, In)
+                    w13_weight_scale=w13_s,      # ALREADY (E, Out, num_groups)
+                    w13_bias=b13,
+                    w2_weight=w2_unpacked,       # ALREADY (E, Out, In)
+                    w2_weight_scale=w2_s,        # ALREADY (E, Out, num_groups)
+                    w2_bias=b2,
                 ),
                 moe_backend=self.moe_backend,
                 w13_reorder_size=w13_reorder_size,
                 w13_interleave=w13_interleave,
             )
 
-        weights = process_wna16_moe_weights(
-            w13_packed, w13_scale, w2_packed, w2_scale,
-            w13_perm, w13_inv_perm, w2_perm, w2_inv_perm,
-            w13_bias, w2_bias,
-        )
-        weights = torch_view(
-            shard_moe_weights(weights, self.moe_backend, self.mesh))
+        weights = format_and_unpack_weights(w13_packed, w13_scale, w2_packed, w2_scale, w13_bias, w2_bias)
+        weights = torch_view(shard_moe_weights(weights, self.moe_backend, self.mesh))
 
-        layer.w13_weight = Parameter(
-            weights.w13_weight, requires_grad=False)
-        layer.w2_weight = Parameter(
-            weights.w2_weight, requires_grad=False)
-
-        if weights.w13_weight_scale is not None:
-            layer.w13_weight_scale = Parameter(
-                weights.w13_weight_scale, requires_grad=False)
-        else:
-            layer.w13_weight_scale = None
-        if weights.w2_weight_scale is not None:
-            layer.w2_weight_scale = Parameter(
-                weights.w2_weight_scale, requires_grad=False)
-        else:
-            layer.w2_weight_scale = None
+        layer.w13_weight_unpacked = Parameter(weights.w13_weight, requires_grad=False)
+        layer.w13_weight_scale = Parameter(weights.w13_weight_scale, requires_grad=False)
+        layer.w2_weight_unpacked = Parameter(weights.w2_weight, requires_grad=False)
+        layer.w2_weight_scale = Parameter(weights.w2_weight_scale, requires_grad=False)
+        
+        if self.has_g_idx:
+            layer.w13_weight_g_idx = Parameter(torch_view(w13_g_idx), requires_grad=False)
+            layer.w2_weight_g_idx = Parameter(torch_view(w2_g_idx), requires_grad=False)
 
         if self.moe.has_bias:
-            layer.w13_bias = Parameter(
-                weights.w13_bias, requires_grad=False)
-            layer.w2_bias = Parameter(
-                weights.w2_bias, requires_grad=False)
+            layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
+            layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
 
-    def apply_monolithic(
+    def apply(
         self,
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
+        
+        num_bits = self.num_bits
+        symmetric = self.symmetric
+        group_size = self.group_size
+        has_g_idx = self.has_g_idx
+
+        def dequantize_to_bf16(unpacked_w_int8, scale, g_idx):
+            w_f = unpacked_w_int8.astype(jnp.bfloat16)
+            
+            if symmetric:
+                off = jnp.array(1 << (num_bits - 1), dtype=jnp.bfloat16)
+                w_f = w_f - off
+
+            # vLLM process_moe_weights transforms weights to (E, In_dim, Out_dim)
+            E, In_dim, Out_dim = w_f.shape
+
+            eff_gs = In_dim if group_size == -1 else group_size
+            n_groups = In_dim // eff_gs
+
+            # Clean the scale of any weird dummy dimensions added by vLLM
+            scale_clean = scale.reshape(E, n_groups, 1, Out_dim)
+
+            if has_g_idx and g_idx is not None:
+                scale_sq = scale_clean.squeeze(2)
+                scales_gathered = jax.vmap(lambda _s, _g: _s[_g, :])(scale_sq, g_idx)
+                w_deq = w_f * scales_gathered
+            else:
+                w_reshaped = w_f.reshape(E, n_groups, eff_gs, Out_dim)
+                w_deq = w_reshaped * scale_clean
+                w_deq = w_deq.reshape(E, In_dim, Out_dim)
+
+            return w_deq
+
+        w13_unpacked = jax_view(layer.w13_weight_unpacked)
+        w13_scale = jax_view(layer.w13_weight_scale)
+        w2_unpacked = jax_view(layer.w2_weight_unpacked)
+        w2_scale = jax_view(layer.w2_weight_scale)
+
+        w13_g = jax_view(layer.w13_weight_g_idx) if has_g_idx else None
+        w2_g = jax_view(layer.w2_weight_g_idx) if has_g_idx else None
+
+        w13_deq = dequantize_to_bf16(w13_unpacked, w13_scale, w13_g)
+        w2_deq = dequantize_to_bf16(w2_unpacked, w2_scale, w2_g)
+
+        # Pass everything as pure JAX arrays! 
+        # Convert the PyTorch biases to JAX arrays using jax_view()
         weights = FusedMoEWeights(
-            w13_weight=jax_view(layer.w13_weight),
-            w13_weight_scale=(
-                jax_view(layer.w13_weight_scale)
-                if layer.w13_weight_scale is not None else None),
-            w13_bias=(
-                jax_view(layer.w13_bias)
-                if self.moe.has_bias else None),
-            w2_weight=jax_view(layer.w2_weight),
-            w2_weight_scale=(
-                jax_view(layer.w2_weight_scale)
-                if layer.w2_weight_scale is not None else None),
-            w2_bias=(
-                jax_view(layer.w2_bias)
-                if self.moe.has_bias else None),
+            w13_weight=w13_deq,
+            w13_weight_scale=None,
+            w13_bias=jax_view(layer.w13_bias) if self.moe.has_bias else None,
+            w2_weight=w2_deq,
+            w2_weight_scale=None,
+            w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
         )
-        return vllm_moe_apply(layer=layer,
-                              weights=weights,
-                              quant_method_instance=self,
-                              x=x,
-                              router_logits=router_logits)
+
+        return vllm_moe_apply(
+            layer=layer,
+            weights=weights,
+            quant_method_instance=self,
+            x=x,
+            router_logits=router_logits
+        )
