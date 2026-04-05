@@ -24,6 +24,7 @@ import tpu_inference.envs as envs
 from tpu_inference.kernels.gather import gather_reduce as gather_reduce_sc
 from tpu_inference.kernels.gather.ragged_gather import ragged_gather
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
+from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
 
@@ -353,6 +354,28 @@ def expert_parallel_gmm(
     )
 
 
+def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
+                          dtype: jnp.dtype) -> jax.Array:
+    hidden_states_q, scale = quantize_tensor(
+        jnp.float8_e4m3fn,
+        hidden_states,
+        axis=-1,
+    )
+    # quantize_tensor squeezes the scale if axis is int. We need to expand it back.
+    scale = jnp.expand_dims(scale, -1)
+
+    # Dequantize if needed
+    return jax.shard_map(
+        lambda x, s: (x.astype(jnp.float32) * s).astype(dtype),
+        mesh=mesh,
+        in_specs=(
+            P(ShardingAxisName.MLP_DATA, None),
+            P(ShardingAxisName.MLP_DATA, None),
+        ),
+        out_specs=P(ShardingAxisName.MLP_DATA, None),
+    )(hidden_states_q, scale)
+
+
 @jax.jit(static_argnames=(
     "topk",
     "renormalize",
@@ -362,6 +385,7 @@ def expert_parallel_gmm(
     "scoring_fn",
     "sc_kernel_threshold",
     "sc_kernel_col_chunk_size",
+    "all_gather_fp8",
 ))
 def fused_moe_func(
     hidden_states: jax.Array,
@@ -380,6 +404,7 @@ def fused_moe_func(
     scoring_fn: str,
     sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
+    all_gather_fp8: bool = False,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -475,6 +500,9 @@ def fused_moe_func(
 
     x_out_spec = (P(ShardingAxisName.EXPERT_DATA)
                   if use_ep else P(ShardingAxisName.MLP_DATA))
+    if all_gather_fp8:
+        hidden_states = _apply_all_gather_fp8(hidden_states, mesh, dtype)
+
     x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
         _process_tokens_locally,
         mesh=mesh,
