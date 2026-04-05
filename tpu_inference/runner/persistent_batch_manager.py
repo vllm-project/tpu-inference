@@ -28,10 +28,12 @@ class PersistentBatchManager:
     def __init__(self, requests: Dict[str, CachedRequestState],
                  input_batch: InputBatch, encoder_cache: Dict[str,
                                                               'jax.Array'],
+                 deepstack_cache: Dict[str, list['jax.Array']] | None,
                  uses_mrope: bool, model_config, is_last_rank: bool):
         self.requests = requests
         self.input_batch = input_batch
         self.encoder_cache = encoder_cache
+        self.deepstack_cache = deepstack_cache
         self.uses_mrope = uses_mrope
         self.model_config = model_config
         self.is_last_rank = is_last_rank
@@ -108,6 +110,8 @@ class PersistentBatchManager:
         # Free the cached encoder outputs.
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
             self.encoder_cache.pop(mm_hash, None)
+            if self.deepstack_cache is not None:
+                self.deepstack_cache.pop(mm_hash, None)
 
         # Remove the unscheduled requests from the persistent batch.
         # NOTE(woosuk): The unscheduled requests are either preempted requests
