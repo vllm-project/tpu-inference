@@ -21,6 +21,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.envs as envs
+from tpu_inference.kernels.gather import gather_reduce as gather_reduce_sc
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.kernels.sparse_core import gather_reduce as gather_reduce_sc
 from tpu_inference.kernels.sparse_core.ragged_gather import ragged_gather
@@ -391,7 +392,6 @@ def expert_parallel_gmm(
     num_experts_per_shard = num_experts // ep_size
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
 
-    x_p_spec = P(ShardingAxisName.EXPERT_DATA)
     w1_scale_spec = None if w1_scale is None else ep_p_spec
     w1_bias_spec = None if w1_bias is None else ep_p_spec
     w2_scale_spec = None if w2_scale is None else ep_p_spec
@@ -409,7 +409,7 @@ def expert_parallel_gmm(
         ),
         mesh=mesh,
         in_specs=(
-            x_p_spec,
+            data_p_spec,
             ep_p_spec,
             w1_scale_spec,
             w1_bias_spec,
@@ -555,33 +555,13 @@ def fused_moe_func(
         token_indices = jnp.arange(num_tokens_local,
                                    dtype=jnp.int32).repeat(topk)
         token_indices_sorted = token_indices[topk_argsort_indices]
+        x = hidden_states_local[token_indices_sorted]
         # Below one_hot is equivalent to jnp.bincount(topk_indices_flat,
         # length=global_num_experts) but is more performant.
         group_sizes_local = jax.nn.one_hot(topk_indices_flat,
                                            global_num_experts,
                                            dtype=jnp.int32).sum(axis=0)
         topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
-
-        if use_ep:
-            num_ep_shard = get_mesh_shape_product(mesh,
-                                                  ShardingAxisName.EXPERT)
-            local_num_experts = global_num_experts // num_ep_shard
-            shard_idx = jax.lax.axis_index(ShardingAxisName.EXPERT)
-
-            experts_start = shard_idx * local_num_experts
-            experts_end = experts_start + local_num_experts
-            group_offsets = jnp.cumulative_sum(group_sizes_local,
-                                               include_initial=True)
-            shard_output_start = group_offsets[experts_start]
-            shard_output_end = group_offsets[experts_end]
-            x = ragged_gather(
-                hidden_states_local,
-                token_indices_sorted,
-                shard_output_start,
-                shard_output_end,
-            )
-        else:
-            x = hidden_states_local[token_indices_sorted]
 
         return x, group_sizes_local, topk_argsort_revert_indices
 
@@ -598,11 +578,10 @@ def fused_moe_func(
             P(ShardingAxisName.MLP_DATA, None),
         ),
         out_specs=(
-            x_out_spec,
+            P(ShardingAxisName.MLP_DATA, None),
             P(ShardingAxisName.MLP_DATA),
             P(ShardingAxisName.MLP_DATA),
         ),
-        check_vma=False,
     )(hidden_states, topk_indices)
 
     try:
