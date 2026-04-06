@@ -14,7 +14,9 @@
 
 import functools
 import logging
+import os
 import random
+import threading
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
@@ -28,8 +30,7 @@ import vllm.envs as vllm_envs
 from flax import nnx
 from jax._src import mesh as mesh_lib
 from jax._src.pallas.utils import next_power_of_2
-from jax.experimental import colocated_python
-from jax.experimental import mesh_utils
+from jax.experimental import colocated_python, mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
@@ -67,7 +68,7 @@ from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.checkpoint_utils import (load_checkpoint,
-                                                         save_checkpoint)
+                                                             save_checkpoint)
 from tpu_inference.models.jax.utils.weight_utils import (
     shard_put, transfer_state_with_mappings)
 from tpu_inference.runner import utils as runner_utils
@@ -241,14 +242,13 @@ def _jax_logprobs_materialize(
     )
 
 
-@functools.partial(jax.jit, static_argnums=(2, 3, 4, 5))
-def unpack_compiled(stacked, metadata_blob, S1, S2, S3, dp_size):
+@functools.partial(jax.jit, static_argnums=(2, 3, 4))
+def unpack_compiled(stacked, metadata_blob, S1, S2, dp_size):
     input_ids, positions = jnp.unstack(stacked)
-    query_start_loc = metadata_blob[0 : S1]
-    seq_lens = metadata_blob[S1 : S1 + S2]
-    logits_indices = metadata_blob[S1 + S2 : S1 + S2 + S3]
-    request_distribution = metadata_blob[S1 + S2 + S3 : S1 + S2 + S3 + dp_size * 3]
-    return input_ids, positions, query_start_loc, seq_lens, logits_indices, request_distribution
+    query_start_loc = metadata_blob[0:S1]
+    seq_lens = metadata_blob[S1:S1 + S2]
+    request_distribution = metadata_blob[S1 + S2:S1 + S2 + dp_size * 3]
+    return input_ids, positions, query_start_loc, seq_lens, request_distribution
 
 
 class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
@@ -262,7 +262,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         is_last_rank: bool = True,
     ):
         self.vllm_config = vllm_config
-        
+
         # Diagnostic: Unconditionally dump populated production config state
         # try:
         #     import pickle
@@ -369,6 +369,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     "Failed to initialize colocated CPU mesh, "
                     "falling back to standard device_put: %s", e)
                 self._colocated_cpu_mesh = None
+
     def _create_new_model_mesh(self) -> jax.sharding.Mesh:
         num_slices = envs.NUM_SLICES
 
@@ -634,8 +635,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Use transfer guards to ensure the transfer goes through the direct
         # colocated CPU ↔ TPU interconnect, not through the Pathways head.
         with (
-            jax.transfer_guard_device_to_host("disallow_explicit"),
-            jax.transfer_guard_host_to_device("disallow_explicit"),
+                jax.transfer_guard_device_to_host("disallow_explicit"),
+                jax.transfer_guard_host_to_device("disallow_explicit"),
         ):
             tpu_arrays = jax.device_put(cpu_arrays, tpu_sharding)
 
@@ -693,9 +694,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # weight loading have finished before we report HBM usage or
         # start compilation, giving an accurate picture of weight memory.
         logger.info("Waiting for all model weights to be ready on device...")
-        jax.tree.map(lambda x: x.block_until_ready()
-                      if hasattr(x, 'block_until_ready') else x, self.state)
 
+        def _block_until_weights_ready():
+            jax.tree.map(
+                lambda x: x.block_until_ready()
+                if hasattr(x, 'block_until_ready') else x, self.state)
+
+        weight_ready_thread = threading.Thread(
+            target=_block_until_weights_ready, daemon=True)
+        weight_ready_thread.start()
+        weight_ready_thread.join(timeout=15)
+        if weight_ready_thread.is_alive():
+            logger.error("Model weights were not ready within 15 seconds. "
+                         "Killing the process.")
+            os._exit(1)
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
@@ -873,7 +885,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[JaxIntermediateTensors] = None,
     ) -> JaxIntermediateTensors | ModelRunnerOutput | None:
-        
+
         # Diagnostic: Unconditionally dump production scheduler traces with timestamp suffixes
         # try:
         #     import pickle
@@ -1600,25 +1612,29 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Monolithic stack packing for small 1D metadata buffers
         metadata_blob = np.concatenate([
-            query_start_loc, # already static bound max_num_reqs + dp_size
-            seq_lens, # already static bound max_num_reqs
-            self.logits_indices_cpu[:self.max_num_reqs], # mounted static top bound
-            request_distribution # size dp_size * 3
+            query_start_loc,  # already static bound max_num_reqs + dp_size
+            seq_lens,  # already static bound max_num_reqs
+            request_distribution  # size dp_size * 3
         ])
 
         host_arrays_payload = {
             "stacked_tokens": stacked_tokens,
             "metadata_blob": metadata_blob,
+            "logits_indices": logits_indices,
         }
 
         # Collect block tables host arrays loops zone presence zones legality
         def build_block_table_host(kv_cache_gid: int) -> np.ndarray:
-             block_tables = self.block_tables_cpu[kv_cache_gid][:self.max_num_reqs]
-             for dp_rank in range(dp_size):
-                 req_offset = dp_rank * max_num_reqs_per_dp_rank
-                 _num_reqs = num_req_per_dp_rank[dp_rank]
-                 block_tables[req_offset:req_offset + _num_reqs, :self.max_num_blocks_per_req] = self.input_batch.block_table[kv_cache_gid].get_cpu_tensor()[req_indices_dp[dp_rank]]
-             return block_tables.reshape(-1)
+            block_tables = self.block_tables_cpu[kv_cache_gid][:self.
+                                                               max_num_reqs]
+            for dp_rank in range(dp_size):
+                req_offset = dp_rank * max_num_reqs_per_dp_rank
+                _num_reqs = num_req_per_dp_rank[dp_rank]
+                block_tables[
+                    req_offset:req_offset + _num_reqs, :self.
+                    max_num_blocks_per_req] = self.input_batch.block_table[
+                        kv_cache_gid].get_cpu_tensor()[req_indices_dp[dp_rank]]
+            return block_tables.reshape(-1)
 
         block_tables_host_dict = {}
         if len(self.kv_cache_config.kv_cache_groups) <= 1:
@@ -1626,24 +1642,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             if not no_kv_cache:
                 block_tables_host_dict[0] = build_block_table_host(0)
         else:
-            for gid, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
+            for gid, kv_cache_group in enumerate(
+                    self.kv_cache_config.kv_cache_groups):
                 block_tables_host_dict[gid] = build_block_table_host(gid)
 
         # Merge block tables into payload accumulation silencer
         for gid, host_arr in block_tables_host_dict.items():
             host_arrays_payload[f"block_tables_gid_{gid}"] = host_arr
 
-        # Build sharding pytree payload
-        sharding_payload = {}
-        for k in host_arrays_payload.keys():
-            if k == "stacked_tokens":
-                sharding_payload[k] = NamedSharding(self.mesh, PartitionSpec(None, ShardingAxisName.ATTN_DATA))
-            elif k == "metadata_blob":
-                # TODO(wyzhang): Fix for ATTN_DATA handling
-                # Currently assuming replicated mirrors suite assumption safety blits
-                sharding_payload[k] = NamedSharding(self.mesh, PartitionSpec())
-            else:
-                sharding_payload[k] = data_parallel_attn_sharding
+        # Build sharding pytree payload.
+        # All arrays are sharded on ATTN_DATA (the DP axis), since all
+        # metadata and block tables are laid out in contiguous per-DP-rank
+        # chunks. stacked_tokens has an extra leading dim (input_ids, positions).
+        sharding_payload = {
+            k: data_parallel_attn_sharding for k in host_arrays_payload
+        }
+        sharding_payload["stacked_tokens"] = NamedSharding(
+            self.mesh, PartitionSpec(None, ShardingAxisName.ATTN_DATA))
 
         # Fire a SINGLE structural Compounded Monolithic transport flushes silencer silence voids!
         dev_arrays_payload = jax.device_put(
@@ -1654,14 +1669,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Restructure restore isolation conformance presence zone legality conformity corridor presence alignments zone zone!
         stacked_tokens_dev = dev_arrays_payload["stacked_tokens"]
         metadata_blob_dev = dev_arrays_payload["metadata_blob"]
-        
+        logits_indices = dev_arrays_payload["logits_indices"]
+
         S1 = self.max_num_reqs + dp_size
         S2 = self.max_num_reqs
-        S3 = self.max_num_reqs
 
-        input_ids, positions, query_start_loc, seq_lens, logits_indices, request_distribution = unpack_compiled(
-            stacked_tokens_dev, metadata_blob_dev, S1, S2, S3, dp_size
-        )
+        input_ids, positions, query_start_loc, seq_lens, request_distribution = unpack_compiled(
+            stacked_tokens_dev, metadata_blob_dev, S1, S2, dp_size)
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
@@ -1679,7 +1693,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if len(self.kv_cache_config.kv_cache_groups) <= 1:
             # Pooling model will not using kv cache
             no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0
-            block_tables = dev_arrays_payload.get("block_tables_gid_0") if not no_kv_cache else None
+            block_tables = dev_arrays_payload.get(
+                "block_tables_gid_0") if not no_kv_cache else None
             attention_metadata = build_attn(block_tables)
         else:
             attention_metadata = {
@@ -2055,14 +2070,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         """
         Saves the current model state to an Orbax checkpoint.
         """
-        save_checkpoint(
-            state=self.state,
-            path=path,
-            step=step,
-            use_checkpoint_manager=use_checkpoint_manager,
-            enable_colocated_python=enable_colocated_python,
-            enable_single_replica=enable_single_replica
-        )
+        save_checkpoint(state=self.state,
+                        path=path,
+                        step=step,
+                        use_checkpoint_manager=use_checkpoint_manager,
+                        enable_colocated_python=enable_colocated_python,
+                        enable_single_replica=enable_single_replica)
 
     def load_checkpoint(
         self,
@@ -2088,5 +2101,4 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             step=step,
             use_checkpoint_manager=use_checkpoint_manager,
             enable_colocated_python=enable_colocated_python,
-            enable_single_replica=enable_single_replica
-        )
+            enable_single_replica=enable_single_replica)
