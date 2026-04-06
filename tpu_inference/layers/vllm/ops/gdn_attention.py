@@ -29,7 +29,7 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     reorder_concatenated_tensor_for_sharding
 from tpu_inference.layers.vllm.ops.ragged_conv1d_jax import ragged_conv1d
-from tpu_inference.layers.vllm.ops.ragged_gated_delta_rule_jax import \
+from tpu_inference.layers.vllm.ops.ragged_gated_delta_rule_chunked import \
     ragged_gated_delta_rule
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
@@ -205,6 +205,7 @@ def run_jax_gdn_attention(
     mapped_fn = jax.shard_map(
         p_run_jax_gdn_attention_local,
         mesh=mesh,
+        check_vma=False,
         in_specs=in_specs,
         out_specs=out_specs,
     )
