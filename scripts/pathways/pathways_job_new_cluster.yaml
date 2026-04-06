@@ -3,15 +3,14 @@ kind: JobSet
 metadata:
   annotations:
     jobset.sigs.k8s.io/hack: "true"
-  labels:
-    kueue.x-k8s.io/queue-name: lq
+  labels: {}
   name: wenxindong-test # Change to your favorite run name (please use your ldap)
   namespace: default
 spec:
   coordinator:
     replicatedJob: pathways-head
   failurePolicy:
-    maxRestarts: 0
+    maxRestarts: 100
     restartStrategy: Recreate
   network:
     enableDNSHostnames: true
@@ -22,10 +21,7 @@ spec:
     replicas: 1
     template:
       metadata:
-        labels:
-          kueue.x-k8s.io/queue-name: lq
-        annotations:
-          alpha.jobset.sigs.k8s.io/exclusive-topology: kubernetes.io/hostname
+        annotations: {}
       spec:
         backoffLimit: 0
         completionMode: Indexed
@@ -33,10 +29,9 @@ spec:
         parallelism: 1
         template:
           metadata:
-            labels:
-              kueue.x-k8s.io/queue-name: lq
             annotations:
-              alpha.jobset.sigs.k8s.io/exclusive-topology: kubernetes.io/hostname
+              kueue.x-k8s.io/safe-to-forcefully-delete: "true"
+            labels: {}
           spec:
             containers:
             - name: jax-tpu
@@ -73,11 +68,12 @@ spec:
                     # Environment variables
                     export VLLM_ENABLE_V1_MULTIPROCESSING=0
                     export HF_TOKEN=${HF_TOKEN}
-                    export PHASED_PROFILING_DIR=gs://wenxindong-multipod-dev/profiling/vllm_qwen3_235b_a22b_instruct_2507/dp16/apr2
+                    export PHASED_PROFILING_DIR=gs://wenxindong-multipod-dev/profiling/vllm_qwen3_235b_a22b_instruct_2507/apr6
                     export VLLM_ENGINE_READY_TIMEOUT_S=7200
                     export MODEL_IMPL_TYPE=vllm
                     export NEW_MODEL_DESIGN=1
                     # export SKIP_JAX_PRECOMPILE=1
+                    export RPA_D_BLOCK_SIZES="1,4096,1,256"
 
                     # Clear potentially corrupted model streamer cache
                     # rm -rf /root/.cache/vllm/assets/model_streamer
@@ -204,21 +200,20 @@ spec:
         annotations:
           cloud.google.com/gke-tpu-slice-topology: 4x4x4 # Use your favorite 4m x 4n x 4k topology
       spec:
-        backoffLimit: 0
+        backoffLimit: 2048000
         completionMode: Indexed
         completions: 16 # use num_chips / 4 (see your topology setting above)
         parallelism: 16 # same as above
         template:
           metadata:
-            labels:
-              kueue.x-k8s.io/queue-name: lq
             annotations:
               cloud.google.com/gke-tpu-slice-topology: 4x4x4 # same as above
               kueue.k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
-              kueue.x-k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
               kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-partition-4x4x4-id
               kueue.x-k8s.io/podset-slice-size: "16"
               cloud.google.com/skip-tpu-webhook-check: "true"
+              kueue.x-k8s.io/safe-to-forcefully-delete: "true"
+            labels: {}
           spec:
             affinity:
               nodeAffinity:
@@ -237,13 +232,19 @@ spec:
               effect: "NoSchedule"
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: tpu7x
-              # cloud.google.com/gke-tpu-topology: 4x4x4
+              cloud.google.com/reservation-name: ghostfish-l0727cey97uen
             hostNetwork: true
             dnsPolicy: ClusterFirstWithHostNet
             containers:
             - name: pathways-worker
               image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server:latest
               imagePullPolicy: Always
+              restartPolicy: OnFailure
+              restartPolicyRules:
+              - action: RestartAllContainers
+                exitCodes:
+                  operator: NotIn
+                  values: [0]
               args:
               - --server_port=29005
               - --resource_manager_address=$(PATHWAYS_HEAD):29001
@@ -294,6 +295,8 @@ spec:
                 protocol: TCP
               resources:
                 limits:
+                  google.com/tpu: "4"
+                requests:
                   google.com/tpu: "4"
               volumeMounts:
               - mountPath: /tmp

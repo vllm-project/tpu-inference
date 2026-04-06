@@ -18,6 +18,7 @@ GCS_BUCKET="gs://wenxindong-multipod-dev"
 GCS_PATCH_PATH="${GCS_BUCKET}/patches/tpu-inference.tar.gz"
 
 JOBSET_NAME="wenxindong-test"
+KUBE_CONTEXT="gke_cloud-tpu-multipod-dev_us-central1_bodaborg-super-alpha-cluster"
 
 echo "=== Packaging tpu-inference ==="
 cd "${REPO_DIR}"
@@ -35,29 +36,19 @@ echo "=== Uploading to ${GCS_PATCH_PATH} ==="
 gcloud storage cp /tmp/tpu-inference.tar.gz "${GCS_PATCH_PATH}"
 
 echo "=== Deleting existing JobSet '${JOBSET_NAME}' (if any) ==="
-kubectl delete jobset "${JOBSET_NAME}" --ignore-not-found
+kubectl --context="${KUBE_CONTEXT}" delete jobset "${JOBSET_NAME}" --ignore-not-found
 
 echo "=== Applying ${YAML_FILE} ==="
-kubectl apply -f "${YAML_FILE}"
+kubectl --context="${KUBE_CONTEXT}" apply -f "${YAML_FILE}"
 
-WORKER_JOB="${JOBSET_NAME}-worker-0"
-HEAD_JOB="${JOBSET_NAME}-pathways-head-0"
+# Kueue manages the lifecycle via the queue-name label on the worker Job.
+# It handles admission, topology assignment, and unsuspension.
+# The head job (CPU-only) has no Kueue label and is managed by the JobSet directly.
 
-echo "=== Waiting for jobs to be created ==="
-until kubectl get job "${WORKER_JOB}" &>/dev/null && kubectl get job "${HEAD_JOB}" &>/dev/null; do
-  echo "  Waiting for jobs to appear..."
-  sleep 2
-done
-
-echo "=== Adding Kueue management labels ==="
-kubectl label job "${WORKER_JOB}" kueue.x-k8s.io/managed=true --overwrite
-kubectl label job "${HEAD_JOB}" kueue.x-k8s.io/managed=true --overwrite
-
-echo "=== Waiting for workload to be admitted ==="
+echo "=== Waiting for workload to be admitted by Kueue ==="
 WORKLOAD_NAME=""
-# Discover the workload name (jobset-<JOBSET_NAME>-<hash>)
 until [[ -n "${WORKLOAD_NAME}" ]]; do
-  WORKLOAD_NAME=$(kubectl get workloads -o custom-columns=NAME:.metadata.name --no-headers | grep "^jobset-${JOBSET_NAME}-" | head -1)
+  WORKLOAD_NAME=$(kubectl --context="${KUBE_CONTEXT}" get workloads -o custom-columns=NAME:.metadata.name --no-headers | grep "^jobset-${JOBSET_NAME}-" | head -1)
   if [[ -z "${WORKLOAD_NAME}" ]]; then
     echo "  Waiting for workload to appear..."
     sleep 2
@@ -65,20 +56,25 @@ until [[ -n "${WORKLOAD_NAME}" ]]; do
 done
 echo "  Found workload: ${WORKLOAD_NAME}"
 
-# Wait for the workload to be admitted
-until [[ "$(kubectl get workload "${WORKLOAD_NAME}" -o jsonpath='{.status.conditions[?(@.type=="Admitted")].status}' 2>/dev/null)" == "True" ]]; do
+until [[ "$(kubectl --context="${KUBE_CONTEXT}" get workload "${WORKLOAD_NAME}" -o jsonpath='{.status.conditions[?(@.type=="Admitted")].status}' 2>/dev/null)" == "True" ]]; do
   echo "  Waiting for workload '${WORKLOAD_NAME}' to be admitted..."
   sleep 5
 done
 echo "  Workload admitted!"
 
-echo "=== Unsuspending jobs ==="
-kubectl patch job "${WORKER_JOB}" --type=merge -p '{"spec":{"suspend":false}}'
-kubectl patch job "${HEAD_JOB}" --type=merge -p '{"spec":{"suspend":false}}'
+echo "=== Waiting for jobs to be unsuspended by Kueue ==="
+WORKER_JOB="${JOBSET_NAME}-worker-0"
+HEAD_JOB="${JOBSET_NAME}-pathways-head-0"
+until [[ "$(kubectl --context="${KUBE_CONTEXT}" get job "${WORKER_JOB}" -o jsonpath='{.spec.suspend}' 2>/dev/null)" == "false" ]] && \
+      [[ "$(kubectl --context="${KUBE_CONTEXT}" get job "${HEAD_JOB}" -o jsonpath='{.spec.suspend}' 2>/dev/null)" == "false" ]]; do
+  echo "  Waiting for Kueue to unsuspend jobs..."
+  sleep 5
+done
+echo "  Jobs unsuspended!"
 
 echo "=== Waiting for head pod to be created ==="
 while true; do
-  POD_NAME=$(kubectl get pods -l "jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME},jobset.sigs.k8s.io/replicatedjob-name=pathways-head" -o name | head -n 1)
+  POD_NAME=$(kubectl --context="${KUBE_CONTEXT}" get pods -l "jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME},jobset.sigs.k8s.io/replicatedjob-name=pathways-head" -o name | head -n 1)
   if [[ -n "${POD_NAME}" ]]; then
     break
   fi
@@ -87,8 +83,8 @@ while true; do
 done
 
 echo "=== Waiting for container 'jax-tpu' to start in ${POD_NAME} ==="
-kubectl wait --for=condition=Ready "${POD_NAME}" --timeout=600s 2>/dev/null || true
+kubectl --context="${KUBE_CONTEXT}" wait --for=condition=Ready "${POD_NAME}" --timeout=600s 2>/dev/null || true
 sleep 3
 
 echo "=== Following logs of ${POD_NAME} -c jax-tpu ==="
-kubectl logs -f "${POD_NAME}" -c jax-tpu
+kubectl --context="${KUBE_CONTEXT}" logs -f "${POD_NAME}" -c jax-tpu

@@ -47,10 +47,6 @@ from tpu_inference.utils import time_function
 
 logger = init_logger(__name__)
 
-# Timeout (in seconds) for blocking recv_bytes() calls in the parent process.
-# If a worker doesn't respond within this time, we log a warning and raise.
-_IPC_RECV_TIMEOUT_SECONDS = 120.0
-
 
 class SchedulerCommand(Enum):
     """Enum for scheduler worker process commands."""
@@ -513,43 +509,12 @@ class DPScheduler(SchedulerInterface):
 
         try:
             start_time = time()
-
-            # Use poll() with a timeout to avoid blocking forever
-            if not self.output_conns[rank].poll(
-                    timeout=_IPC_RECV_TIMEOUT_SECONDS):
-                # Timed out waiting for the worker — gather diagnostics
-                proc = self.processes[rank]
-                alive = proc.is_alive()
-                exit_code = proc.exitcode
-                elapsed = time() - start_time
-
-                # Check health of ALL workers for a complete picture
-                worker_status = []
-                for r in range(self.dp_size):
-                    p = self.processes[r]
-                    worker_status.append(
-                        f"rank {r}: alive={p.is_alive()}, "
-                        f"exit_code={p.exitcode}, pid={p.pid}"
-                    )
-
-                raise RuntimeError(
-                    f"HANG DETECTED: Timed out after {elapsed:.1f}s waiting "
-                    f"for rank {rank} response to '{cmd_name}' command. "
-                    f"Schedule step={self._schedule_step_count}, "
-                    f"update_step={self._update_from_output_count}, "
-                    f"total_sends={self._total_ipc_send_count}, "
-                    f"total_recvs={self._total_ipc_recv_count}, "
-                    f"cached_outputs_depth={len(self.cached_schedulers_output)}, "
-                    f"assigned_requests={len(self.assigned_dp_rank)}. "
-                    f"Worker status: {'; '.join(worker_status)}"
-                )
-
             raw_bytes = self.output_conns[rank].recv_bytes()
             recv_time = time()
             result = cloudpickle.loads(raw_bytes)
             end_time = time()
             total_time = end_time - start_time
-            if total_time > 1.0:
+            if total_time > 0.2:
                 pipe_wait = recv_time - start_time
                 deserialize = end_time - recv_time
                 logger.warning(
@@ -665,7 +630,7 @@ class DPScheduler(SchedulerInterface):
             rank_recv_start = time()
             output = self._get_result(rank, SchedulerCommand.SCHEDULE)
             rank_recv_elapsed = time() - rank_recv_start
-            if rank_recv_elapsed > 1.0:
+            if rank_recv_elapsed > 0.2:
                 logger.warning(
                     f"Step {step}: Rank {rank} SCHEDULE response took "
                     f"{rank_recv_elapsed:.2f}s"
@@ -681,7 +646,7 @@ class DPScheduler(SchedulerInterface):
         total_elapsed = time() - schedule_start
 
         # Per-rank token breakdown for load balance debugging
-        if step % 10 == 0 or total_elapsed > 2.0:
+        if total_elapsed > 0.2:
             per_rank_tokens = [
                 output.total_num_scheduled_tokens for output in rank_outputs
             ]
@@ -908,29 +873,6 @@ class DPScheduler(SchedulerInterface):
         self._update_from_output_count += 1
         update_step = self._update_from_output_count
 
-        # Validate cached output queue depth
-        if len(self.cached_schedulers_output) == 0:
-            raise RuntimeError(
-                f"update_from_output step {update_step}: "
-                f"cached_schedulers_output is EMPTY! "
-                f"schedule_step={self._schedule_step_count}. "
-                "This indicates schedule() and update_from_output() are "
-                "out of sync."
-            )
-
-        # Check for req_ids in model output that aren't in our assignment map
-        untracked_reqs = [
-            req_id for req_id in model_runner_output.req_ids
-            if req_id not in self.assigned_dp_rank
-        ]
-        if untracked_reqs:
-            logger.error(
-                f"update_from_output step {update_step}: "
-                f"{len(untracked_reqs)} request(s) in model output are NOT "
-                f"in assigned_dp_rank: {untracked_reqs[:5]}... "
-                f"(total assigned={len(self.assigned_dp_rank)})"
-            )
-
         # Split model output by DP rank (each rank gets only its req_ids).
         rank_model_outputs = self._split_model_output_by_rank(
             model_runner_output)
@@ -1029,19 +971,11 @@ class DPScheduler(SchedulerInterface):
 
         # Route finish signals to appropriate schedulers
         rank_request_ids = defaultdict(list)
-        untracked_ids = []
         for req_id in request_ids:
             if req_id not in self.assigned_dp_rank:
-                untracked_ids.append(req_id)
                 continue
             rank = self.assigned_dp_rank[req_id]
             rank_request_ids[rank].append(req_id)
-
-        if untracked_ids:
-            logger.warning(
-                f"finish_requests: {len(untracked_ids)} request(s) not found "
-                f"in assigned_dp_rank: {untracked_ids[:5]}..."
-            )
 
         # Forward to each scheduler
         # NOTE: This is sequential (send+recv per rank), unlike schedule()
