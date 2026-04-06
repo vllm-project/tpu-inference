@@ -1,0 +1,9 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: balanced-storage
+provisioner: pd.csi.storage.gke.io # The name of the provisioner (CSI driver)
+parameters:
+  type: pd-balanced # Specifies a balanced disk type on GCP
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer 

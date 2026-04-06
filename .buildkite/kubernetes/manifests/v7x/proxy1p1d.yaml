@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-disagg-proxy
+  labels:
+    app: vllm-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-proxy
+  template:
+    metadata:
+      labels:
+        app: vllm-proxy
+    spec:
+      containers:
+      - name: proxy-container
+        image: vllm/vllm-tpu:nightly
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            # Start the proxy server in the background
+            python3 examples/disagg/toy_proxy_server.py \
+              --host 0.0.0.0 \
+              --port 10000 \
+              --prefiller-host vllm-service-prefill \
+              --prefiller-port 8000 \
+              --decoder-host vllm-service-decode \
+              --decoder-port 8000 &
+            # Keep the container alive for benchmarking
+            echo "Proxy started. Ready for benchmark."
+            tail -f /dev/null
+        ports:
+        - containerPort: 10000
+        resources:
+          requests:
+            cpu: "8"
+            memory: "16Gi"
+            ephemeral-storage: "20Gi"
+          limits:
+            cpu: "16"
+            memory: "32Gi"
