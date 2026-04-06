@@ -968,8 +968,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             if tpu_sampling_metadata.logprobs:
                 if self.model_config.logprobs_mode == "processed_logprobs":
                     logits = processed_logits
-                else:
-                    logits = logits.astype(jnp.float32)
                 logprobs = self._compute_and_gather_logprobs(
                     logits, next_tokens, self.model_config.max_logprobs)
                 logprobs = _jax_logprobs_copy_to_host_async(logprobs)
@@ -1137,6 +1135,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     @staticmethod
     @jax.jit(static_argnames=("max_logprobs", ))
     def _compute_and_gather_logprobs(logits, next_tokens, max_logprobs):
+        logits = logits.astype(jnp.float32)
         logprobs = compute_logprobs(logits)
         return gather_logprobs(logprobs, next_tokens, max_logprobs)
 

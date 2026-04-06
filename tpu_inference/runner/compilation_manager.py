@@ -627,7 +627,7 @@ class CompilationManager:
                 self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA, )
             ) if dp_size > 1 else NamedSharding(self.runner.mesh,
                                                 PartitionSpec())
-            logits = self._create_dummy_tensor((num_reqs, hsize), jnp.float32,
+            logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
                                                logits_sharding)
             token_ids = self._create_dummy_tensor((num_reqs, ), jnp.int32,
                                                   token_ids_sharding)
