@@ -523,7 +523,7 @@ class TestRayDistributedExecutorExecuteDag(unittest.TestCase):
         self.executor.scheduler_config.async_scheduling = False
 
         with patch(
-                "vllm.v1.executor.ray_distributed_executor"
+                "vllm.v1.executor.ray_executor"
                 ".RayDistributedExecutor._execute_dag",
                 return_value="super_result") as mock_super:
             result = self.executor._execute_dag(MagicMock(),
