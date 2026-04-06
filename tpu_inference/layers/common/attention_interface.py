@@ -522,6 +522,7 @@ def mla_attention(
         # TODO: use auto tuner to find the best block sizes.
         num_kv_pages_per_block = (3, 1, 1)
         num_queries_per_block = (1, 16, 16)
+        decode_batch_size = 4
 
         out, new_cache = mla_ragged_paged_attention(
             q,
@@ -533,6 +534,7 @@ def mla_attention(
             sm_scale=sm_scale,
             num_kv_pages_per_block=num_kv_pages_per_block,
             num_queries_per_block=num_queries_per_block,
+            decode_batch_size=decode_batch_size,
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale)
