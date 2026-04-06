@@ -44,9 +44,8 @@ class MockVllmConfig:
         self.ec_transfer_config = MagicMock()
 
 
-@patch(
-    "vllm.v1.executor.ray_distributed_executor.RayDistributedExecutor.__init__",
-    lambda x, y: None)
+@patch("vllm.v1.executor.ray_executor.RayDistributedExecutor.__init__",
+       lambda x, y: None)
 @patch("tpu_inference.executors.ray_distributed_executor.envs")
 @patch("tpu_inference.executors.ray_distributed_executor.ray")
 @patch("tpu_inference.executors.ray_distributed_executor.current_platform")
