@@ -662,7 +662,7 @@ class TPUConnectorWorker:
 
         start_time = time.perf_counter()
         sliced_dest_buffer = [
-            dest[:num_valid_blocks, :, :, :, :] for dest in dest_buffer
+            jax.lax.slice_in_dim(dest, 0, num_valid_blocks) for dest in dest_buffer
         ]
         time_1 = time.perf_counter()
         for src_layer, dest_layer in zip(kv_src, sliced_dest_buffer):
@@ -673,10 +673,15 @@ class TPUConnectorWorker:
             updated_dest_buffer.append(updated_dest)
 
         # Wait for physical hardware transfer
-        jax.tree_util.tree_map(lambda x: x.block_until_ready(),
-                               updated_dest_buffer)
+        while True:
+                end_time = time.perf_counter()
+                if all(
+                        chunk.is_ready() for chunk in updated_dest_buffer
+                ) or end_time - time_1 > dist_utils.get_p2p_wait_pull_timeout(
+                ):
+                    break
+                time.sleep(0.001)
 
-        end_time = time.perf_counter()
         logger.info(
             f"Worker {self.node_id} --> Done D2H kv transfer for req_id={req_id} | slice time={(time_1 - start_time)*1000:.2f}ms | copy time={(end_time - time_1)*1000:.2f}ms"
         )
