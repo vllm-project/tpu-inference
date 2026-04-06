@@ -29,7 +29,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.network_utils import (get_distributed_init_method, get_ip,
                                       get_open_port)
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.executor.ray_distributed_executor import \
+from vllm.v1.executor.ray_executor import \
     RayDistributedExecutor as RayDistributedExecutorV1
 from vllm.v1.executor.ray_executor import RayWorkerMetaData
 from vllm.v1.executor.ray_utils import WORKER_SPECIFIC_ENV_VARS
