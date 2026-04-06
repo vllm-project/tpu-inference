@@ -13,19 +13,25 @@
 # limitations under the License.
 
 import jax
+import jax.numpy as jnp
 import torch
-from compressed_tensors.quantization import QuantizationArgs
+from compressed_tensors.quantization import (ActivationOrdering,
+                                             QuantizationArgs)
 from jax.sharding import Mesh
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.layer import \
+    FusedMoeWeightScaleSupported
+from vllm.model_executor.layers.linear import set_weight_attrs
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
     CompressedTensorsMoEMethod, CompressedTensorsW8A8Fp8MoEMethod)
 
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_moe_weights, shard_moe_weights)
+from tpu_inference.layers.common.quantization import ct_u32_unpack_u4
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
@@ -76,9 +82,14 @@ class VllmCompressedTensorsMoEMethod(CompressedTensorsMoEMethod):
         if quant_config._is_fp8_w8a8(weight_quant, input_quant):
             return VllmCompressedTensorsW8A8Fp8MoEMethod(
                 weight_quant, input_quant, layer.moe_config, quant_config.mesh)
-        else:
-            raise RuntimeError(
-                f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}")
+        if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
+            return VllmCompressedTensorsWNA16MoEMethod(
+                weight_quant=weight_quant,
+                moe=layer.moe_config,
+                mesh=quant_config.mesh,
+            )
+        raise RuntimeError(
+            f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}")
 
 
 class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,

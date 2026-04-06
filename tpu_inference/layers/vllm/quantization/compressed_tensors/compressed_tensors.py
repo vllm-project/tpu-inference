@@ -36,6 +36,8 @@ from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compresse
     VllmCompressedTensorsW8A8Fp8
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_int8 import \
     VllmCompressedTensorsW8A8Int8
+from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import \
+    VllmCompressedTensorsWNA16
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedConfig
@@ -92,8 +94,23 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, VllmQuantConfig):
         # TODO(kyuyeunk): Add support for different act_quant_format
 
         linear_config = self.get_linear_config(layer)
+
+        if input_quant is None:
+            if self._is_wNa16_group_channel(weight_quant, input_quant):
+                return VllmCompressedTensorsWNA16(
+                    num_bits=weight_quant.num_bits,
+                    strategy=weight_quant.strategy,
+                    group_size=weight_quant.group_size,
+                    symmetric=weight_quant.symmetric,
+                    actorder=weight_quant.actorder,
+                    linear_config=linear_config,
+                )
+            raise NotImplementedError(
+                "Weight-only compressed-tensors quantization is not "
+                "supported for this configuration on TPU.")
+
         if self._is_fp8_w8a8(weight_quant, input_quant):
-            is_static_input_scheme = input_quant and not input_quant.dynamic
+            is_static_input_scheme = not input_quant.dynamic
             return VllmCompressedTensorsW8A8Fp8(
                 weight_quant=weight_quant,
                 is_static_input_scheme=is_static_input_scheme,
