@@ -7,7 +7,8 @@ import os
 # This prevents errors when trying to create CUDA streams on TPU hardware
 # The issue was introduced by vllm-project/vllm#26440
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
-os.environ["LIBTPU_INIT_ARGS"] = "--xla_tpu_use_tc_device_shape_on_sc=true"
+os.environ["LIBTPU_INIT_ARGS"] = os.environ.get(
+    "LIBTPU_INIT_ARGS", "") + " --xla_tpu_use_tc_device_shape_on_sc=true"
 # AOT compile is currently a Torch-only feature and thus we should not enable it
 # for TPU
 os.environ["VLLM_USE_AOT_COMPILE"] = "0"

@@ -429,7 +429,7 @@ class VllmCompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod,
                                                               packed_dim=2)
 
             # compressed-tensors uint4 is offset by 8 (0-15 -> -8 to 7)
-            return (unpacked - 8).astype(jnp.float8_e4m3fn)
+            return (unpacked - 8).astype(jnp.int4)
 
         # N.B
         # layer.w13_weight: [num_experts, 2*moe_intermediate_size, hidden_size]
@@ -449,7 +449,7 @@ class VllmCompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod,
             w13_bias = w2_bias = None
 
         @jax.jit
-        def process_fp8_moe_weights(
+        def process_fp4_moe_weights(
             w13_weight: jax.Array,
             w13_weight_scale: jax.Array,
             w13_bias: jax.Array | None,
@@ -475,7 +475,7 @@ class VllmCompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod,
                 w13_interleave=w13_interleave,
             )
 
-        weights = process_fp8_moe_weights(
+        weights = process_fp4_moe_weights(
             w13_weight,
             w13_weight_scale,
             w13_bias,

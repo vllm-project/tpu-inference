@@ -539,6 +539,52 @@ def mla_attention(
 
         return new_cache, out
 
+    q = q_TNA
+    q_rope = q_rope_TNH
+    k = k_SA
+    k_rope = k_rope_SH
+    cache = kv_cache
+    seq_lens = md.seq_lens
+    block_tables = md.block_tables
+    query_start_loc = md.query_start_loc
+    distribution = md.request_distribution
+    import numpy as np
+    jnp.set_printoptions(threshold=np.inf)
+    jax.debug.print("[MLA kernel debug] q shape {x}", x=q.shape)
+    jax.debug.print("[MLA kernel debug] q dtype {x}", x=q.dtype)
+    jax.debug.print("[MLA kernel debug] q sharding {x}",
+                    x=jax.typeof(q).sharding)
+    jax.debug.print("[MLA kernel debug] q_rope shape {x}", x=q_rope.shape)
+    jax.debug.print("[MLA kernel debug] q_rope dtype {x}", x=q_rope.dtype)
+    jax.debug.print("[MLA kernel debug] q_rope sharding {x}",
+                    x=jax.typeof(q_rope).sharding)
+    jax.debug.print("[MLA kernel debug] k shape {x}", x=k.shape)
+    jax.debug.print("[MLA kernel debug] k dtype {x}", x=k.dtype)
+    jax.debug.print("[MLA kernel debug] k sharding {x}",
+                    x=jax.typeof(k).sharding)
+    jax.debug.print("[MLA kernel debug] k_rope shape {x}", x=k_rope.shape)
+    jax.debug.print("[MLA kernel debug] k_rope dtype {x}", x=k_rope.dtype)
+    jax.debug.print("[MLA kernel debug] k_rope sharding {x}",
+                    x=jax.typeof(k_rope).sharding)
+    jax.debug.print("[MLA kernel debug] cache shape {x}", x=cache.shape)
+    jax.debug.print("[MLA kernel debug] cache dtype {x}", x=cache.dtype)
+    jax.debug.print("[MLA kernel debug] cache sharding {x}",
+                    x=jax.typeof(cache).sharding)
+    jax.debug.print("[MLA kernel debug] sm scale {x}", x=sm_scale)
+    jax.debug.print("[MLA kernel debug] seq lens  {x}", x=seq_lens)
+    jax.debug.print("[MLA kernel debug] block tables  {x}", x=block_tables)
+    jax.debug.print("[MLA kernel debug] query start loc  {x}",
+                    x=query_start_loc)
+    jax.debug.print("[MLA kernel debug] distribution  {x}", x=distribution)
+
+    jax.debug.print("q_TNA NaN: {x}", x=jnp.isnan(q_TNA).any())
+    jax.debug.print("q_rope_TNH NaN: {x}", x=jnp.isnan(q_rope_TNH).any())
+    jax.debug.print("k_SA NaN: {x}", x=jnp.isnan(k_SA).any())
+    jax.debug.print("k_rope_SH NaN: {x}", x=jnp.isnan(k_rope_SH).any())
+
+    # Check if the cache contains NaNs
+    jax.debug.print("kv_cache NaN: {x}", x=jnp.isnan(kv_cache).any())
+
     kv_cache, output_TNA = jax.jit(
         jax.shard_map(_mla_ragged_paged_attention,
                       mesh=mesh,
@@ -548,4 +594,52 @@ def mla_attention(
                                         kv_cache, md.seq_lens, md.block_tables,
                                         md.query_start_loc,
                                         md.request_distribution)
+
+    # Check if kv_cache or output_TNA contains NaNs
+    jax.debug.print("kv_cache NaN2: {x}", x=jnp.isnan(kv_cache).any())
+    jax.debug.print("output_TNA NaN2: {x}", x=jnp.isnan(output_TNA).any())
+
+    # if nan then save all inputs and outputs to file
+    def save_tensors_on_nan(q, q_rope, k, k_rope, kv, seq_lens, block_tables,
+                            query_start, req_dist, sm, k_sc):
+        print("WARNING: NaNs detected! Saving inputs and outputs to file...")
+        # Use standard numpy.save (np.save), because jnp.save doesn't work well in callbacks
+        jnp.save("q_TNA.npy", q)
+        jnp.save("q_rope_TNH.npy", q_rope)
+        jnp.save("k_SA.npy", k)
+        jnp.save("k_rope_SH.npy", k_rope)
+        jnp.save("kv_cache.npy", kv)
+        jnp.save("md_seq_lens.npy", seq_lens)
+        jnp.save("md_block_tables.npy", block_tables)
+        jnp.save("md_query_start_loc.npy", query_start)
+        jnp.save("md_request_distribution.npy", req_dist)
+        print(f"SM Scale: {sm}")
+        print(f"k-scale: {k_sc}")
+        raise ValueError("NaNs detected in kv_cache or output_TNA!")
+
+    has_nans = jnp.logical_or(
+        jnp.isnan(kv_cache).any(),
+        jnp.isnan(output_TNA).any())
+
+    # --- 3. Use JAX control flow to conditionally trigger the save ---
+    def handle_nans(operands):
+        # This branch runs if has_nans == True
+        # Pass all variables to the host python function
+        jax.debug.callback(save_tensors_on_nan, *operands)
+        return ()
+
+    def do_nothing(operands):
+        # This branch runs if has_nans == False
+        return ()
+
+    # Execute the conditional on the hardware (TPU/GPU)
+    jax.lax.cond(
+        has_nans,
+        handle_nans,
+        do_nothing,
+        # Bundle all variables needed for saving into a single tuple operand
+        (q_TNA, q_rope_TNH, k_SA, k_rope_SH, kv_cache, md.seq_lens,
+         md.block_tables, md.query_start_loc, md.request_distribution,
+         sm_scale, k_scale))
+
     return kv_cache, output_TNA

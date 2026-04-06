@@ -1,0 +1,1300 @@
+{
+  "results": {
+    "mmlu_pro": {
+      "exact_match,custom-extract": 0.55,
+      "exact_match_stderr,custom-extract": 0.018247610675957288,
+      "alias": "mmlu_pro"
+    },
+    "mmlu_pro_biology": {
+      "alias": " - biology",
+      "exact_match,custom-extract": 0.9,
+      "exact_match_stderr,custom-extract": 0.06882472016116853
+    },
+    "mmlu_pro_business": {
+      "alias": " - business",
+      "exact_match,custom-extract": 0.05,
+      "exact_match_stderr,custom-extract": 0.049999999999999996
+    },
+    "mmlu_pro_chemistry": {
+      "alias": " - chemistry",
+      "exact_match,custom-extract": 0.85,
+      "exact_match_stderr,custom-extract": 0.08191780219091252
+    },
+    "mmlu_pro_computer_science": {
+      "alias": " - computer_science",
+      "exact_match,custom-extract": 0.85,
+      "exact_match_stderr,custom-extract": 0.08191780219091253
+    },
+    "mmlu_pro_economics": {
+      "alias": " - economics",
+      "exact_match,custom-extract": 0.9,
+      "exact_match_stderr,custom-extract": 0.06882472016116853
+    },
+    "mmlu_pro_engineering": {
+      "alias": " - engineering",
+      "exact_match,custom-extract": 0.6,
+      "exact_match_stderr,custom-extract": 0.11239029738980327
+    },
+    "mmlu_pro_health": {
+      "alias": " - health",
+      "exact_match,custom-extract": 0.0,
+      "exact_match_stderr,custom-extract": 0.0
+    },
+    "mmlu_pro_history": {
+      "alias": " - history",
+      "exact_match,custom-extract": 0.75,
+      "exact_match_stderr,custom-extract": 0.09933992677987828
+    },
+    "mmlu_pro_law": {
+      "alias": " - law",
+      "exact_match,custom-extract": 0.75,
+      "exact_match_stderr,custom-extract": 0.09933992677987828
+    },
+    "mmlu_pro_math": {
+      "alias": " - math",
+      "exact_match,custom-extract": 0.95,
+      "exact_match_stderr,custom-extract": 0.05000000000000003
+    },
+    "mmlu_pro_other": {
+      "alias": " - other",
+      "exact_match,custom-extract": 0.05,
+      "exact_match_stderr,custom-extract": 0.04999999999999999
+    },
+    "mmlu_pro_philosophy": {
+      "alias": " - philosophy",
+      "exact_match,custom-extract": 0.0,
+      "exact_match_stderr,custom-extract": 0.0
+    },
+    "mmlu_pro_physics": {
+      "alias": " - physics",
+      "exact_match,custom-extract": 1.0,
+      "exact_match_stderr,custom-extract": 0.0
+    },
+    "mmlu_pro_psychology": {
+      "alias": " - psychology",
+      "exact_match,custom-extract": 0.05,
+      "exact_match_stderr,custom-extract": 0.04999999999999999
+    }
+  },
+  "groups": {
+    "mmlu_pro": {
+      "exact_match,custom-extract": 0.55,
+      "exact_match_stderr,custom-extract": 0.018247610675957288,
+      "alias": "mmlu_pro"
+    }
+  },
+  "group_subtasks": {
+    "mmlu_pro": [
+      "mmlu_pro_biology",
+      "mmlu_pro_business",
+      "mmlu_pro_chemistry",
+      "mmlu_pro_computer_science",
+      "mmlu_pro_economics",
+      "mmlu_pro_engineering",
+      "mmlu_pro_health",
+      "mmlu_pro_history",
+      "mmlu_pro_law",
+      "mmlu_pro_math",
+      "mmlu_pro_other",
+      "mmlu_pro_philosophy",
+      "mmlu_pro_physics",
+      "mmlu_pro_psychology"
+    ]
+  },
+  "configs": {
+    "mmlu_pro_biology": {
+      "task": "mmlu_pro_biology",
+      "task_alias": "biology",
+      "dataset_path": "TIGER-Lab/MMLU-Pro",
+      "test_split": "test",
+      "fewshot_split": "validation",
+      "process_docs": "functools.partial(<function process_docs at 0x7b988e540180>, subject='biology')",
+      "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988e540540>, including_answer=False)",
+      "doc_to_target": "answer",
+      "unsafe_code": false,
+      "description": "The following are multiple choice questions (with answers) about biology. Think step by step and then finish your answer with \"the answer is (X)\" where X is the correct letter choice.\n",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "first_n",
+        "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988e541080>, including_answer=True)",
+        "doc_to_target": ""
+      },
+      "num_fewshot": 5,
+      "metric_list": [
+        {
+          "metric": "exact_match",
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "ignore_case": true,
+          "ignore_punctuation": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "until": [
+          "Question:"
+        ],
+        "max_gen_toks": 2048,
+        "do_sample": false,
+        "temperature": 0.0
+      },
+      "repeats": 1,
+      "filter_list": [
+        {
+          "name": "custom-extract",
+          "filter": [
+            {
+              "function": "regex",
+              "regex_pattern": "answer is \\(?([ABCDEFGHIJ])\\)?"
+            },
+            {
+              "function": "take_first"
+            }
+          ]
+        }
+      ],
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 2.1,
+        "pretrained": "Qwen/Qwen3.5-397B-A17B-FP8",
+        "attention_backend": "FLASH_ATTN",
+        "gdn_prefill_backend": "triton",
+        "kv_cache_dtype": "fp8",
+        "tensor_parallel_size": 8,
+        "max_model_len": 5120,
+        "max_num_batched_tokens": 4096,
+        "block_size": 256,
+        "limit_mm_per_prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "enable_thinking": false
+      }
+    },
+    "mmlu_pro_business": {
+      "task": "mmlu_pro_business",
+      "task_alias": "business",
+      "dataset_path": "TIGER-Lab/MMLU-Pro",
+      "test_split": "test",
+      "fewshot_split": "validation",
+      "process_docs": "functools.partial(<function process_docs at 0x7b988e5bc900>, subject='business')",
+      "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f6dc2c0>, including_answer=False)",
+      "doc_to_target": "answer",
+      "unsafe_code": false,
+      "description": "The following are multiple choice questions (with answers) about business. Think step by step and then finish your answer with \"the answer is (X)\" where X is the correct letter choice.\n",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "first_n",
+        "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988e543420>, including_answer=True)",
+        "doc_to_target": ""
+      },
+      "num_fewshot": 5,
+      "metric_list": [
+        {
+          "metric": "exact_match",
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "ignore_case": true,
+          "ignore_punctuation": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "until": [
+          "Question:"
+        ],
+        "max_gen_toks": 2048,
+        "do_sample": false,
+        "temperature": 0.0
+      },
+      "repeats": 1,
+      "filter_list": [
+        {
+          "name": "custom-extract",
+          "filter": [
+            {
+              "function": "regex",
+              "regex_pattern": "answer is \\(?([ABCDEFGHIJ])\\)?"
+            },
+            {
+              "function": "take_first"
+            }
+          ]
+        }
+      ],
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 2.1,
+        "pretrained": "Qwen/Qwen3.5-397B-A17B-FP8",
+        "attention_backend": "FLASH_ATTN",
+        "gdn_prefill_backend": "triton",
+        "kv_cache_dtype": "fp8",
+        "tensor_parallel_size": 8,
+        "max_model_len": 5120,
+        "max_num_batched_tokens": 4096,
+        "block_size": 256,
+        "limit_mm_per_prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "enable_thinking": false
+      }
+    },
+    "mmlu_pro_chemistry": {
+      "task": "mmlu_pro_chemistry",
+      "task_alias": "chemistry",
+      "dataset_path": "TIGER-Lab/MMLU-Pro",
+      "test_split": "test",
+      "fewshot_split": "validation",
+      "process_docs": "functools.partial(<function process_docs at 0x7b988e542340>, subject='chemistry')",
+      "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988e542b60>, including_answer=False)",
+      "doc_to_target": "answer",
+      "unsafe_code": false,
+      "description": "The following are multiple choice questions (with answers) about chemistry. Think step by step and then finish your answer with \"the answer is (X)\" where X is the correct letter choice.\n",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "first_n",
+        "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988e542ca0>, including_answer=True)",
+        "doc_to_target": ""
+      },
+      "num_fewshot": 5,
+      "metric_list": [
+        {
+          "metric": "exact_match",
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "ignore_case": true,
+          "ignore_punctuation": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "until": [
+          "Question:"
+        ],
+        "max_gen_toks": 2048,
+        "do_sample": false,
+        "temperature": 0.0
+      },
+      "repeats": 1,
+      "filter_list": [
+        {
+          "name": "custom-extract",
+          "filter": [
+            {
+              "function": "regex",
+              "regex_pattern": "answer is \\(?([ABCDEFGHIJ])\\)?"
+            },
+            {
+              "function": "take_first"
+            }
+          ]
+        }
+      ],
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 2.1,
+        "pretrained": "Qwen/Qwen3.5-397B-A17B-FP8",
+        "attention_backend": "FLASH_ATTN",
+        "gdn_prefill_backend": "triton",
+        "kv_cache_dtype": "fp8",
+        "tensor_parallel_size": 8,
+        "max_model_len": 5120,
+        "max_num_batched_tokens": 4096,
+        "block_size": 256,
+        "limit_mm_per_prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "enable_thinking": false
+      }
+    },
+    "mmlu_pro_computer_science": {
+      "task": "mmlu_pro_computer_science",
+      "task_alias": "computer_science",
+      "dataset_path": "TIGER-Lab/MMLU-Pro",
+      "test_split": "test",
+      "fewshot_split": "validation",
+      "process_docs": "functools.partial(<function process_docs at 0x7b988f6dd300>, subject='computer science')",
+      "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f6dc5e0>, including_answer=False)",
+      "doc_to_target": "answer",
+      "unsafe_code": false,
+      "description": "The following are multiple choice questions (with answers) about computer science. Think step by step and then finish your answer with \"the answer is (X)\" where X is the correct letter choice.\n",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "first_n",
+        "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f6dc900>, including_answer=True)",
+        "doc_to_target": ""
+      },
+      "num_fewshot": 5,
+      "metric_list": [
+        {
+          "metric": "exact_match",
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "ignore_case": true,
+          "ignore_punctuation": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "until": [
+          "Question:"
+        ],
+        "max_gen_toks": 2048,
+        "do_sample": false,
+        "temperature": 0.0
+      },
+      "repeats": 1,
+      "filter_list": [
+        {
+          "name": "custom-extract",
+          "filter": [
+            {
+              "function": "regex",
+              "regex_pattern": "answer is \\(?([ABCDEFGHIJ])\\)?"
+            },
+            {
+              "function": "take_first"
+            }
+          ]
+        }
+      ],
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 2.1,
+        "pretrained": "Qwen/Qwen3.5-397B-A17B-FP8",
+        "attention_backend": "FLASH_ATTN",
+        "gdn_prefill_backend": "triton",
+        "kv_cache_dtype": "fp8",
+        "tensor_parallel_size": 8,
+        "max_model_len": 5120,
+        "max_num_batched_tokens": 4096,
+        "block_size": 256,
+        "limit_mm_per_prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "enable_thinking": false
+      }
+    },
+    "mmlu_pro_economics": {
+      "task": "mmlu_pro_economics",
+      "task_alias": "economics",
+      "dataset_path": "TIGER-Lab/MMLU-Pro",
+      "test_split": "test",
+      "fewshot_split": "validation",
+      "process_docs": "functools.partial(<function process_docs at 0x7b988e540b80>, subject='economics')",
+      "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988e540ea0>, including_answer=False)",
+      "doc_to_target": "answer",
+      "unsafe_code": false,
+      "description": "The following are multiple choice questions (with answers) about economics. Think step by step and then finish your answer with \"the answer is (X)\" where X is the correct letter choice.\n",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "first_n",
+        "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988e540fe0>, including_answer=True)",
+        "doc_to_target": ""
+      },
+      "num_fewshot": 5,
+      "metric_list": [
+        {
+          "metric": "exact_match",
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "ignore_case": true,
+          "ignore_punctuation": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "until": [
+          "Question:"
+        ],
+        "max_gen_toks": 2048,
+        "do_sample": false,
+        "temperature": 0.0
+      },
+      "repeats": 1,
+      "filter_list": [
+        {
+          "name": "custom-extract",
+          "filter": [
+            {
+              "function": "regex",
+              "regex_pattern": "answer is \\(?([ABCDEFGHIJ])\\)?"
+            },
+            {
+              "function": "take_first"
+            }
+          ]
+        }
+      ],
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 2.1,
+        "pretrained": "Qwen/Qwen3.5-397B-A17B-FP8",
+        "attention_backend": "FLASH_ATTN",
+        "gdn_prefill_backend": "triton",
+        "kv_cache_dtype": "fp8",
+        "tensor_parallel_size": 8,
+        "max_model_len": 5120,
+        "max_num_batched_tokens": 4096,
+        "block_size": 256,
+        "limit_mm_per_prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "enable_thinking": false
+      }
+    },
+    "mmlu_pro_engineering": {
+      "task": "mmlu_pro_engineering",
+      "task_alias": "engineering",
+      "dataset_path": "TIGER-Lab/MMLU-Pro",
+      "test_split": "test",
+      "fewshot_split": "validation",
+      "process_docs": "functools.partial(<function process_docs at 0x7b988f6dee80>, subject='engineering')",
+      "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f6de340>, including_answer=False)",
+      "doc_to_target": "answer",
+      "unsafe_code": false,
+      "description": "The following are multiple choice questions (with answers) about engineering. Think step by step and then finish your answer with \"the answer is (X)\" where X is the correct letter choice.\n",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "first_n",
+        "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f6dfc40>, including_answer=True)",
+        "doc_to_target": ""
+      },
+      "num_fewshot": 5,
+      "metric_list": [
+        {
+          "metric": "exact_match",
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "ignore_case": true,
+          "ignore_punctuation": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "until": [
+          "Question:"
+        ],
+        "max_gen_toks": 2048,
+        "do_sample": false,
+        "temperature": 0.0
+      },
+      "repeats": 1,
+      "filter_list": [
+        {
+          "name": "custom-extract",
+          "filter": [
+            {
+              "function": "regex",
+              "regex_pattern": "answer is \\(?([ABCDEFGHIJ])\\)?"
+            },
+            {
+              "function": "take_first"
+            }
+          ]
+        }
+      ],
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 2.1,
+        "pretrained": "Qwen/Qwen3.5-397B-A17B-FP8",
+        "attention_backend": "FLASH_ATTN",
+        "gdn_prefill_backend": "triton",
+        "kv_cache_dtype": "fp8",
+        "tensor_parallel_size": 8,
+        "max_model_len": 5120,
+        "max_num_batched_tokens": 4096,
+        "block_size": 256,
+        "limit_mm_per_prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "enable_thinking": false
+      }
+    },
+    "mmlu_pro_health": {
+      "task": "mmlu_pro_health",
+      "task_alias": "health",
+      "dataset_path": "TIGER-Lab/MMLU-Pro",
+      "test_split": "test",
+      "fewshot_split": "validation",
+      "process_docs": "functools.partial(<function process_docs at 0x7b988f6df420>, subject='health')",
+      "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f6dd4e0>, including_answer=False)",
+      "doc_to_target": "answer",
+      "unsafe_code": false,
+      "description": "The following are multiple choice questions (with answers) about health. Think step by step and then finish your answer with \"the answer is (X)\" where X is the correct letter choice.\n",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "first_n",
+        "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f6df560>, including_answer=True)",
+        "doc_to_target": ""
+      },
+      "num_fewshot": 5,
+      "metric_list": [
+        {
+          "metric": "exact_match",
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "ignore_case": true,
+          "ignore_punctuation": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "until": [
+          "Question:"
+        ],
+        "max_gen_toks": 2048,
+        "do_sample": false,
+        "temperature": 0.0
+      },
+      "repeats": 1,
+      "filter_list": [
+        {
+          "name": "custom-extract",
+          "filter": [
+            {
+              "function": "regex",
+              "regex_pattern": "answer is \\(?([ABCDEFGHIJ])\\)?"
+            },
+            {
+              "function": "take_first"
+            }
+          ]
+        }
+      ],
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 2.1,
+        "pretrained": "Qwen/Qwen3.5-397B-A17B-FP8",
+        "attention_backend": "FLASH_ATTN",
+        "gdn_prefill_backend": "triton",
+        "kv_cache_dtype": "fp8",
+        "tensor_parallel_size": 8,
+        "max_model_len": 5120,
+        "max_num_batched_tokens": 4096,
+        "block_size": 256,
+        "limit_mm_per_prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "enable_thinking": false
+      }
+    },
+    "mmlu_pro_history": {
+      "task": "mmlu_pro_history",
+      "task_alias": "history",
+      "dataset_path": "TIGER-Lab/MMLU-Pro",
+      "test_split": "test",
+      "fewshot_split": "validation",
+      "process_docs": "functools.partial(<function process_docs at 0x7b988f7e7c40>, subject='history')",
+      "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f7e4c20>, including_answer=False)",
+      "doc_to_target": "answer",
+      "unsafe_code": false,
+      "description": "The following are multiple choice questions (with answers) about history. Think step by step and then finish your answer with \"the answer is (X)\" where X is the correct letter choice.\n",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "first_n",
+        "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f6dfe20>, including_answer=True)",
+        "doc_to_target": ""
+      },
+      "num_fewshot": 5,
+      "metric_list": [
+        {
+          "metric": "exact_match",
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "ignore_case": true,
+          "ignore_punctuation": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "until": [
+          "Question:"
+        ],
+        "max_gen_toks": 2048,
+        "do_sample": false,
+        "temperature": 0.0
+      },
+      "repeats": 1,
+      "filter_list": [
+        {
+          "name": "custom-extract",
+          "filter": [
+            {
+              "function": "regex",
+              "regex_pattern": "answer is \\(?([ABCDEFGHIJ])\\)?"
+            },
+            {
+              "function": "take_first"
+            }
+          ]
+        }
+      ],
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 2.1,
+        "pretrained": "Qwen/Qwen3.5-397B-A17B-FP8",
+        "attention_backend": "FLASH_ATTN",
+        "gdn_prefill_backend": "triton",
+        "kv_cache_dtype": "fp8",
+        "tensor_parallel_size": 8,
+        "max_model_len": 5120,
+        "max_num_batched_tokens": 4096,
+        "block_size": 256,
+        "limit_mm_per_prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "enable_thinking": false
+      }
+    },
+    "mmlu_pro_law": {
+      "task": "mmlu_pro_law",
+      "task_alias": "law",
+      "dataset_path": "TIGER-Lab/MMLU-Pro",
+      "test_split": "test",
+      "fewshot_split": "validation",
+      "process_docs": "functools.partial(<function process_docs at 0x7b988f6de2a0>, subject='law')",
+      "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f6de520>, including_answer=False)",
+      "doc_to_target": "answer",
+      "unsafe_code": false,
+      "description": "The following are multiple choice questions (with answers) about law. Think step by step and then finish your answer with \"the answer is (X)\" where X is the correct letter choice.\n",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "first_n",
+        "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f6de8e0>, including_answer=True)",
+        "doc_to_target": ""
+      },
+      "num_fewshot": 5,
+      "metric_list": [
+        {
+          "metric": "exact_match",
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "ignore_case": true,
+          "ignore_punctuation": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "until": [
+          "Question:"
+        ],
+        "max_gen_toks": 2048,
+        "do_sample": false,
+        "temperature": 0.0
+      },
+      "repeats": 1,
+      "filter_list": [
+        {
+          "name": "custom-extract",
+          "filter": [
+            {
+              "function": "regex",
+              "regex_pattern": "answer is \\(?([ABCDEFGHIJ])\\)?"
+            },
+            {
+              "function": "take_first"
+            }
+          ]
+        }
+      ],
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 2.1,
+        "pretrained": "Qwen/Qwen3.5-397B-A17B-FP8",
+        "attention_backend": "FLASH_ATTN",
+        "gdn_prefill_backend": "triton",
+        "kv_cache_dtype": "fp8",
+        "tensor_parallel_size": 8,
+        "max_model_len": 5120,
+        "max_num_batched_tokens": 4096,
+        "block_size": 256,
+        "limit_mm_per_prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "enable_thinking": false
+      }
+    },
+    "mmlu_pro_math": {
+      "task": "mmlu_pro_math",
+      "task_alias": "math",
+      "dataset_path": "TIGER-Lab/MMLU-Pro",
+      "test_split": "test",
+      "fewshot_split": "validation",
+      "process_docs": "functools.partial(<function process_docs at 0x7b988f68f420>, subject='math')",
+      "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f68e020>, including_answer=False)",
+      "doc_to_target": "answer",
+      "unsafe_code": false,
+      "description": "The following are multiple choice questions (with answers) about math. Think step by step and then finish your answer with \"the answer is (X)\" where X is the correct letter choice.\n",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "first_n",
+        "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f68d300>, including_answer=True)",
+        "doc_to_target": ""
+      },
+      "num_fewshot": 5,
+      "metric_list": [
+        {
+          "metric": "exact_match",
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "ignore_case": true,
+          "ignore_punctuation": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "until": [
+          "Question:"
+        ],
+        "max_gen_toks": 2048,
+        "do_sample": false,
+        "temperature": 0.0
+      },
+      "repeats": 1,
+      "filter_list": [
+        {
+          "name": "custom-extract",
+          "filter": [
+            {
+              "function": "regex",
+              "regex_pattern": "answer is \\(?([ABCDEFGHIJ])\\)?"
+            },
+            {
+              "function": "take_first"
+            }
+          ]
+        }
+      ],
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 2.1,
+        "pretrained": "Qwen/Qwen3.5-397B-A17B-FP8",
+        "attention_backend": "FLASH_ATTN",
+        "gdn_prefill_backend": "triton",
+        "kv_cache_dtype": "fp8",
+        "tensor_parallel_size": 8,
+        "max_model_len": 5120,
+        "max_num_batched_tokens": 4096,
+        "block_size": 256,
+        "limit_mm_per_prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "enable_thinking": false
+      }
+    },
+    "mmlu_pro_other": {
+      "task": "mmlu_pro_other",
+      "task_alias": "other",
+      "dataset_path": "TIGER-Lab/MMLU-Pro",
+      "test_split": "test",
+      "fewshot_split": "validation",
+      "process_docs": "functools.partial(<function process_docs at 0x7b988f6dd580>, subject='other')",
+      "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f6dcc20>, including_answer=False)",
+      "doc_to_target": "answer",
+      "unsafe_code": false,
+      "description": "The following are multiple choice questions (with answers) about other. Think step by step and then finish your answer with \"the answer is (X)\" where X is the correct letter choice.\n",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "first_n",
+        "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f6dd1c0>, including_answer=True)",
+        "doc_to_target": ""
+      },
+      "num_fewshot": 5,
+      "metric_list": [
+        {
+          "metric": "exact_match",
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "ignore_case": true,
+          "ignore_punctuation": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "until": [
+          "Question:"
+        ],
+        "max_gen_toks": 2048,
+        "do_sample": false,
+        "temperature": 0.0
+      },
+      "repeats": 1,
+      "filter_list": [
+        {
+          "name": "custom-extract",
+          "filter": [
+            {
+              "function": "regex",
+              "regex_pattern": "answer is \\(?([ABCDEFGHIJ])\\)?"
+            },
+            {
+              "function": "take_first"
+            }
+          ]
+        }
+      ],
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 2.1,
+        "pretrained": "Qwen/Qwen3.5-397B-A17B-FP8",
+        "attention_backend": "FLASH_ATTN",
+        "gdn_prefill_backend": "triton",
+        "kv_cache_dtype": "fp8",
+        "tensor_parallel_size": 8,
+        "max_model_len": 5120,
+        "max_num_batched_tokens": 4096,
+        "block_size": 256,
+        "limit_mm_per_prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "enable_thinking": false
+      }
+    },
+    "mmlu_pro_philosophy": {
+      "task": "mmlu_pro_philosophy",
+      "task_alias": "philosophy",
+      "dataset_path": "TIGER-Lab/MMLU-Pro",
+      "test_split": "test",
+      "fewshot_split": "validation",
+      "process_docs": "functools.partial(<function process_docs at 0x7b988f68fd80>, subject='philosophy')",
+      "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f68fb00>, including_answer=False)",
+      "doc_to_target": "answer",
+      "unsafe_code": false,
+      "description": "The following are multiple choice questions (with answers) about philosophy. Think step by step and then finish your answer with \"the answer is (X)\" where X is the correct letter choice.\n",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "first_n",
+        "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f68f880>, including_answer=True)",
+        "doc_to_target": ""
+      },
+      "num_fewshot": 5,
+      "metric_list": [
+        {
+          "metric": "exact_match",
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "ignore_case": true,
+          "ignore_punctuation": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "until": [
+          "Question:"
+        ],
+        "max_gen_toks": 2048,
+        "do_sample": false,
+        "temperature": 0.0
+      },
+      "repeats": 1,
+      "filter_list": [
+        {
+          "name": "custom-extract",
+          "filter": [
+            {
+              "function": "regex",
+              "regex_pattern": "answer is \\(?([ABCDEFGHIJ])\\)?"
+            },
+            {
+              "function": "take_first"
+            }
+          ]
+        }
+      ],
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 2.1,
+        "pretrained": "Qwen/Qwen3.5-397B-A17B-FP8",
+        "attention_backend": "FLASH_ATTN",
+        "gdn_prefill_backend": "triton",
+        "kv_cache_dtype": "fp8",
+        "tensor_parallel_size": 8,
+        "max_model_len": 5120,
+        "max_num_batched_tokens": 4096,
+        "block_size": 256,
+        "limit_mm_per_prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "enable_thinking": false
+      }
+    },
+    "mmlu_pro_physics": {
+      "task": "mmlu_pro_physics",
+      "task_alias": "physics",
+      "dataset_path": "TIGER-Lab/MMLU-Pro",
+      "test_split": "test",
+      "fewshot_split": "validation",
+      "process_docs": "functools.partial(<function process_docs at 0x7b988f68e200>, subject='physics')",
+      "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f68d8a0>, including_answer=False)",
+      "doc_to_target": "answer",
+      "unsafe_code": false,
+      "description": "The following are multiple choice questions (with answers) about physics. Think step by step and then finish your answer with \"the answer is (X)\" where X is the correct letter choice.\n",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "first_n",
+        "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f68d6c0>, including_answer=True)",
+        "doc_to_target": ""
+      },
+      "num_fewshot": 5,
+      "metric_list": [
+        {
+          "metric": "exact_match",
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "ignore_case": true,
+          "ignore_punctuation": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "until": [
+          "Question:"
+        ],
+        "max_gen_toks": 2048,
+        "do_sample": false,
+        "temperature": 0.0
+      },
+      "repeats": 1,
+      "filter_list": [
+        {
+          "name": "custom-extract",
+          "filter": [
+            {
+              "function": "regex",
+              "regex_pattern": "answer is \\(?([ABCDEFGHIJ])\\)?"
+            },
+            {
+              "function": "take_first"
+            }
+          ]
+        }
+      ],
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 2.1,
+        "pretrained": "Qwen/Qwen3.5-397B-A17B-FP8",
+        "attention_backend": "FLASH_ATTN",
+        "gdn_prefill_backend": "triton",
+        "kv_cache_dtype": "fp8",
+        "tensor_parallel_size": 8,
+        "max_model_len": 5120,
+        "max_num_batched_tokens": 4096,
+        "block_size": 256,
+        "limit_mm_per_prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "enable_thinking": false
+      }
+    },
+    "mmlu_pro_psychology": {
+      "task": "mmlu_pro_psychology",
+      "task_alias": "psychology",
+      "dataset_path": "TIGER-Lab/MMLU-Pro",
+      "test_split": "test",
+      "fewshot_split": "validation",
+      "process_docs": "functools.partial(<function process_docs at 0x7b988f7e5120>, subject='psychology')",
+      "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f7e5300>, including_answer=False)",
+      "doc_to_target": "answer",
+      "unsafe_code": false,
+      "description": "The following are multiple choice questions (with answers) about psychology. Think step by step and then finish your answer with \"the answer is (X)\" where X is the correct letter choice.\n",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "first_n",
+        "doc_to_text": "functools.partial(<function format_cot_example at 0x7b988f7e54e0>, including_answer=True)",
+        "doc_to_target": ""
+      },
+      "num_fewshot": 5,
+      "metric_list": [
+        {
+          "metric": "exact_match",
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "ignore_case": true,
+          "ignore_punctuation": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "until": [
+          "Question:"
+        ],
+        "max_gen_toks": 2048,
+        "do_sample": false,
+        "temperature": 0.0
+      },
+      "repeats": 1,
+      "filter_list": [
+        {
+          "name": "custom-extract",
+          "filter": [
+            {
+              "function": "regex",
+              "regex_pattern": "answer is \\(?([ABCDEFGHIJ])\\)?"
+            },
+            {
+              "function": "take_first"
+            }
+          ]
+        }
+      ],
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 2.1,
+        "pretrained": "Qwen/Qwen3.5-397B-A17B-FP8",
+        "attention_backend": "FLASH_ATTN",
+        "gdn_prefill_backend": "triton",
+        "kv_cache_dtype": "fp8",
+        "tensor_parallel_size": 8,
+        "max_model_len": 5120,
+        "max_num_batched_tokens": 4096,
+        "block_size": 256,
+        "limit_mm_per_prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "enable_thinking": false
+      }
+    }
+  },
+  "versions": {
+    "mmlu_pro": 2.0,
+    "mmlu_pro_biology": 2.1,
+    "mmlu_pro_business": 2.1,
+    "mmlu_pro_chemistry": 2.1,
+    "mmlu_pro_computer_science": 2.1,
+    "mmlu_pro_economics": 2.1,
+    "mmlu_pro_engineering": 2.1,
+    "mmlu_pro_health": 2.1,
+    "mmlu_pro_history": 2.1,
+    "mmlu_pro_law": 2.1,
+    "mmlu_pro_math": 2.1,
+    "mmlu_pro_other": 2.1,
+    "mmlu_pro_philosophy": 2.1,
+    "mmlu_pro_physics": 2.1,
+    "mmlu_pro_psychology": 2.1
+  },
+  "n-shot": {
+    "mmlu_pro_biology": 5,
+    "mmlu_pro_business": 5,
+    "mmlu_pro_chemistry": 5,
+    "mmlu_pro_computer_science": 5,
+    "mmlu_pro_economics": 5,
+    "mmlu_pro_engineering": 5,
+    "mmlu_pro_health": 5,
+    "mmlu_pro_history": 5,
+    "mmlu_pro_law": 5,
+    "mmlu_pro_math": 5,
+    "mmlu_pro_other": 5,
+    "mmlu_pro_philosophy": 5,
+    "mmlu_pro_physics": 5,
+    "mmlu_pro_psychology": 5
+  },
+  "higher_is_better": {
+    "mmlu_pro": {
+      "exact_match": true
+    },
+    "mmlu_pro_biology": {
+      "exact_match": true
+    },
+    "mmlu_pro_business": {
+      "exact_match": true
+    },
+    "mmlu_pro_chemistry": {
+      "exact_match": true
+    },
+    "mmlu_pro_computer_science": {
+      "exact_match": true
+    },
+    "mmlu_pro_economics": {
+      "exact_match": true
+    },
+    "mmlu_pro_engineering": {
+      "exact_match": true
+    },
+    "mmlu_pro_health": {
+      "exact_match": true
+    },
+    "mmlu_pro_history": {
+      "exact_match": true
+    },
+    "mmlu_pro_law": {
+      "exact_match": true
+    },
+    "mmlu_pro_math": {
+      "exact_match": true
+    },
+    "mmlu_pro_other": {
+      "exact_match": true
+    },
+    "mmlu_pro_philosophy": {
+      "exact_match": true
+    },
+    "mmlu_pro_physics": {
+      "exact_match": true
+    },
+    "mmlu_pro_psychology": {
+      "exact_match": true
+    }
+  },
+  "n-samples": {
+    "mmlu_pro_biology": {
+      "original": 717,
+      "effective": 20
+    },
+    "mmlu_pro_business": {
+      "original": 789,
+      "effective": 20
+    },
+    "mmlu_pro_chemistry": {
+      "original": 1132,
+      "effective": 20
+    },
+    "mmlu_pro_computer_science": {
+      "original": 410,
+      "effective": 20
+    },
+    "mmlu_pro_economics": {
+      "original": 844,
+      "effective": 20
+    },
+    "mmlu_pro_engineering": {
+      "original": 969,
+      "effective": 20
+    },
+    "mmlu_pro_health": {
+      "original": 818,
+      "effective": 20
+    },
+    "mmlu_pro_history": {
+      "original": 381,
+      "effective": 20
+    },
+    "mmlu_pro_law": {
+      "original": 1101,
+      "effective": 20
+    },
+    "mmlu_pro_math": {
+      "original": 1351,
+      "effective": 20
+    },
+    "mmlu_pro_other": {
+      "original": 924,
+      "effective": 20
+    },
+    "mmlu_pro_philosophy": {
+      "original": 499,
+      "effective": 20
+    },
+    "mmlu_pro_physics": {
+      "original": 1299,
+      "effective": 20
+    },
+    "mmlu_pro_psychology": {
+      "original": 798,
+      "effective": 20
+    }
+  },
+  "config": {
+    "model": "vllm",
+    "model_args": {
+      "pretrained": "Qwen/Qwen3.5-397B-A17B-FP8",
+      "attention_backend": "FLASH_ATTN",
+      "gdn_prefill_backend": "triton",
+      "kv_cache_dtype": "fp8",
+      "tensor_parallel_size": 8,
+      "max_model_len": 5120,
+      "max_num_batched_tokens": 4096,
+      "block_size": 256,
+      "limit_mm_per_prompt": {
+        "image": 0,
+        "video": 0
+      },
+      "enable_thinking": false
+    },
+    "batch_size": 1,
+    "batch_sizes": [],
+    "device": null,
+    "use_cache": null,
+    "limit": 20.0,
+    "bootstrap_iters": 100000,
+    "gen_kwargs": null,
+    "random_seed": 42,
+    "numpy_seed": 42,
+    "torch_seed": 42,
+    "fewshot_seed": 42
+  },
+  "git_hash": "d384718b1",
+  "date": 1775711713.6397157,
+  "pretty_env_info": "PyTorch version: 2.10.0+cu128\nIs debug build: False\nCUDA used to build PyTorch: 12.8\nROCM used to build PyTorch: N/A\n\nOS: Ubuntu 24.04.3 LTS (x86_64)\nGCC version: (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0\nClang version: Could not collect\nCMake version: version 4.2.1\nLibc version: glibc-2.39\n\nPython version: 3.12.12 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 20:16:04) [GCC 11.2.0] (64-bit runtime)\nPython platform: Linux-6.14.0-1014-gcp-x86_64-with-glibc2.39\nIs CUDA available: False\nCUDA runtime version: No CUDA\nCUDA_MODULE_LOADING set to: N/A\nGPU models and configuration: No CUDA\nNvidia driver version: No CUDA\ncuDNN version: No CUDA\nIs XPU available: False\nHIP runtime version: N/A\nMIOpen runtime version: N/A\nIs XNNPACK available: True\nCaching allocator config: N/A\n\nCPU:\nArchitecture:                            x86_64\nCPU op-mode(s):                          32-bit, 64-bit\nAddress sizes:                           52 bits physical, 57 bits virtual\nByte Order:                              Little Endian\nCPU(s):                                  224\nOn-line CPU(s) list:                     0-223\nVendor ID:                               GenuineIntel\nModel name:                              INTEL(R) XEON(R) PLATINUM 8581C\nCPU family:                              6\nModel:                                   207\nThread(s) per core:                      2\nCore(s) per socket:                      56\nSocket(s):                               2\nStepping:                                2\nBogoMIPS:                                1999.99\nFlags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced fsgsbase tsc_adjust bmi1 hle avx2 smep bmi2 erms invpcid rtm avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves avx_vnni avx512_bf16 wbnoinvd arat avx512vbmi umip avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq la57 rdpid cldemote movdiri movdir64b fsrm md_clear serialize tsxldtrk amx_bf16 avx512_fp16 amx_tile amx_int8 arch_capabilities\nHypervisor vendor:                       KVM\nVirtualization type:                     full\nL1d cache:                               5.3 MiB (112 instances)\nL1i cache:                               3.5 MiB (112 instances)\nL2 cache:                                224 MiB (112 instances)\nL3 cache:                                520 MiB (2 instances)\nNUMA node(s):                            2\nNUMA node0 CPU(s):                       0-55,112-167\nNUMA node1 CPU(s):                       56-111,168-223\nVulnerability Gather data sampling:      Not affected\nVulnerability Ghostwrite:                Not affected\nVulnerability Indirect target selection: Not affected\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Not affected\nVulnerability Spec rstack overflow:      Not affected\nVulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl\nVulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; Enhanced / Automatic IBRS; IBPB conditional; PBRSB-eIBRS SW sequence; BHI BHI_DIS_S\nVulnerability Srbds:                     Not affected\nVulnerability Tsx async abort:           Not affected\n\nVersions of relevant libraries:\n[pip3] mypy_extensions==1.1.0\n[pip3] numpy==2.3.5\n[pip3] nvidia-cublas-cu12==12.8.4.1\n[pip3] nvidia-cuda-cupti-cu12==12.8.90\n[pip3] nvidia-cuda-nvrtc-cu12==12.8.93\n[pip3] nvidia-cuda-runtime-cu12==12.8.90\n[pip3] nvidia-cudnn-cu12==9.10.2.21\n[pip3] nvidia-cufft-cu12==11.3.3.83\n[pip3] nvidia-curand-cu12==10.3.9.90\n[pip3] nvidia-cusolver-cu12==11.7.3.90\n[pip3] nvidia-cusparse-cu12==12.5.8.93\n[pip3] nvidia-cusparselt-cu12==0.7.1\n[pip3] nvidia-nccl-cu12==2.27.5\n[pip3] nvidia-nvjitlink-cu12==12.8.93\n[pip3] nvidia-nvtx-cu12==12.8.90\n[pip3] torch==2.10.0\n[pip3] torchaudio==2.10.0\n[pip3] torchax==0.0.11\n[pip3] torchvision==0.25.0\n[pip3] triton==3.6.0\n[conda] numpy                                       2.3.5                                      pypi_0           pypi\n[conda] nvidia-cublas-cu12                          12.8.4.1                                   pypi_0           pypi\n[conda] nvidia-cuda-cupti-cu12                      12.8.90                                    pypi_0           pypi\n[conda] nvidia-cuda-nvrtc-cu12                      12.8.93                                    pypi_0           pypi\n[conda] nvidia-cuda-runtime-cu12                    12.8.90                                    pypi_0           pypi\n[conda] nvidia-cudnn-cu12                           9.10.2.21                                  pypi_0           pypi\n[conda] nvidia-cufft-cu12                           11.3.3.83                                  pypi_0           pypi\n[conda] nvidia-curand-cu12                          10.3.9.90                                  pypi_0           pypi\n[conda] nvidia-cusolver-cu12                        11.7.3.90                                  pypi_0           pypi\n[conda] nvidia-cusparse-cu12                        12.5.8.93                                  pypi_0           pypi\n[conda] nvidia-cusparselt-cu12                      0.7.1                                      pypi_0           pypi\n[conda] nvidia-nccl-cu12                            2.27.5                                     pypi_0           pypi\n[conda] nvidia-nvjitlink-cu12                       12.8.93                                    pypi_0           pypi\n[conda] nvidia-nvtx-cu12                            12.8.90                                    pypi_0           pypi\n[conda] torch                                       2.10.0                                     pypi_0           pypi\n[conda] torchaudio                                  2.10.0                                     pypi_0           pypi\n[conda] torchax                                     0.0.11                                     pypi_0           pypi\n[conda] torchvision                                 0.25.0                                     pypi_0           pypi\n[conda] triton                                      3.6.0                                      pypi_0           pypi",
+  "transformers_version": "4.57.6",
+  "lm_eval_version": "0.4.9.2",
+  "upper_git_hash": null,
+  "tokenizer_pad_token": [
+    "<|endoftext|>",
+    "248044"
+  ],
+  "tokenizer_eos_token": [
+    "<|im_end|>",
+    "248046"
+  ],
+  "tokenizer_bos_token": [
+    null,
+    "None"
+  ],
+  "eot_token_id": 248046,
+  "max_length": 5120,
+  "task_hashes": {
+    "mmlu_pro_biology": "2d2988b7bee9845fdf6ab2794dd8b7c2602434f3148b8d399dd231909b48ad8a",
+    "mmlu_pro_business": "418dda2727ebab59837cf8807e3f577ce177998d6e22a5a2615b4c07b2db0404",
+    "mmlu_pro_chemistry": "abde8f0feefbc580ec8ebedb9f5077510f243b8459f77fc45d4010f5616733a2",
+    "mmlu_pro_computer_science": "ecac2b1cd710ea9d3d9e6d66287e7825ee36f2813beb3270413a6cea081d6fe3",
+    "mmlu_pro_economics": "b9939372a547e9e4c7aeb5f8d0b9e91ff19ef8d0f5f93d96b360411ade8c0863",
+    "mmlu_pro_engineering": "3a20e17f4a9437621464ce00ad7541a5b4e14b04d9d5d105c096fad5af03a38f",
+    "mmlu_pro_health": "141231f429d6caf34dbfc05fd09e232a526338afbb13a8bfe8a3211b9cce2d45",
+    "mmlu_pro_history": "3248d49417c902ea927b172c45518fbe31e5e76e471bfb570407355ec54bed6e",
+    "mmlu_pro_law": "07d5ce82b0f33bf0dec5391de41f0cf936d87e1662346a98b7336e908d821508",
+    "mmlu_pro_math": "e8aa5c6957381478bb0fe8243b6b4a5fcf4e38b26a62d5a0a16c97d4fed829db",
+    "mmlu_pro_other": "97bf5e9805168aa452a2ebbf1045be51d9bf9424c4f7a2516e91c6a2ff90f83f",
+    "mmlu_pro_philosophy": "18adebddebde8a4f0a0357d5ffeece52e4ce30c66eba6a6440121663859301d9",
+    "mmlu_pro_physics": "52f78b163af9f900e194f89ed36768bf0a71c7a2ac5f9f5bcb0e7b4dd3657c40",
+    "mmlu_pro_psychology": "212e54b1f9fd9db00964b47d4d6c09e19fefb8069e9d4c6fb199510c72c830b7"
+  },
+  "model_source": "vllm",
+  "model_name": "",
+  "model_name_sanitized": "",
+  "system_instruction": null,
+  "system_instruction_sha": null,
+  "fewshot_as_multiturn": false,
+  "chat_template": "{%- set image_count = namespace(value=0) %}\n{%- set video_count = namespace(value=0) %}\n{%- macro render_content(content, do_vision_count, is_system_content=false) %}\n    {%- if content is string %}\n        {{- content }}\n    {%- elif content is iterable and content is not mapping %}\n        {%- for item in content %}\n            {%- if 'image' in item or 'image_url' in item or item.type == 'image' %}\n                {%- if is_system_content %}\n                    {{- raise_exception('System message cannot contain images.') }}\n                {%- endif %}\n                {%- if do_vision_count %}\n                    {%- set image_count.value = image_count.value + 1 %}\n                {%- endif %}\n                {%- if add_vision_id %}\n                    {{- 'Picture ' ~ image_count.value ~ ': ' }}\n                {%- endif %}\n                {{- '<|vision_start|><|image_pad|><|vision_end|>' }}\n            {%- elif 'video' in item or item.type == 'video' %}\n                {%- if is_system_content %}\n                    {{- raise_exception('System message cannot contain videos.') }}\n                {%- endif %}\n                {%- if do_vision_count %}\n                    {%- set video_count.value = video_count.value + 1 %}\n                {%- endif %}\n                {%- if add_vision_id %}\n                    {{- 'Video ' ~ video_count.value ~ ': ' }}\n                {%- endif %}\n                {{- '<|vision_start|><|video_pad|><|vision_end|>' }}\n            {%- elif 'text' in item %}\n                {{- item.text }}\n            {%- else %}\n                {{- raise_exception('Unexpected item type in content.') }}\n            {%- endif %}\n        {%- endfor %}\n    {%- elif content is none or content is undefined %}\n        {{- '' }}\n    {%- else %}\n        {{- raise_exception('Unexpected content type.') }}\n    {%- endif %}\n{%- endmacro %}\n{%- if not messages %}\n    {{- raise_exception('No messages provided.') }}\n{%- endif %}\n{%- if tools and tools is iterable and tools is not mapping %}\n    {{- '<|im_start|>system\\n' }}\n    {{- \"# Tools\\n\\nYou have access to the following functions:\\n\\n<tools>\" }}\n    {%- for tool in tools %}\n        {{- \"\\n\" }}\n        {{- tool | tojson }}\n    {%- endfor %}\n    {{- \"\\n</tools>\" }}\n    {{- '\\n\\nIf you choose to call a function ONLY reply in the following format with NO suffix:\\n\\n<tool_call>\\n<function=example_function_name>\\n<parameter=example_parameter_1>\\nvalue_1\\n</parameter>\\n<parameter=example_parameter_2>\\nThis is the value for the second parameter\\nthat can span\\nmultiple lines\\n</parameter>\\n</function>\\n</tool_call>\\n\\n<IMPORTANT>\\nReminder:\\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\\n- Required parameters MUST be specified\\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\\n</IMPORTANT>' }}\n    {%- if messages[0].role == 'system' %}\n        {%- set content = render_content(messages[0].content, false, true)|trim %}\n        {%- if content %}\n            {{- '\\n\\n' + content }}\n        {%- endif %}\n    {%- endif %}\n    {{- '<|im_end|>\\n' }}\n{%- else %}\n    {%- if messages[0].role == 'system' %}\n        {%- set content = render_content(messages[0].content, false, true)|trim %}\n        {{- '<|im_start|>system\\n' + content + '<|im_end|>\\n' }}\n    {%- endif %}\n{%- endif %}\n{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1) %}\n{%- for message in messages[::-1] %}\n    {%- set index = (messages|length - 1) - loop.index0 %}\n    {%- if ns.multi_step_tool and message.role == \"user\" %}\n        {%- set content = render_content(message.content, false)|trim %}\n        {%- if not(content.startswith('<tool_response>') and content.endswith('</tool_response>')) %}\n            {%- set ns.multi_step_tool = false %}\n            {%- set ns.last_query_index = index %}\n        {%- endif %}\n    {%- endif %}\n{%- endfor %}\n{%- if ns.multi_step_tool %}\n    {{- raise_exception('No user query found in messages.') }}\n{%- endif %}\n{%- for message in messages %}\n    {%- set content = render_content(message.content, true)|trim %}\n    {%- if message.role == \"system\" %}\n        {%- if not loop.first %}\n            {{- raise_exception('System message must be at the beginning.') }}\n        {%- endif %}\n    {%- elif message.role == \"user\" %}\n        {{- '<|im_start|>' + message.role + '\\n' + content + '<|im_end|>' + '\\n' }}\n    {%- elif message.role == \"assistant\" %}\n        {%- set reasoning_content = '' %}\n        {%- if message.reasoning_content is string %}\n            {%- set reasoning_content = message.reasoning_content %}\n        {%- else %}\n            {%- if '</think>' in content %}\n                {%- set reasoning_content = content.split('</think>')[0].rstrip('\\n').split('<think>')[-1].lstrip('\\n') %}\n                {%- set content = content.split('</think>')[-1].lstrip('\\n') %}\n            {%- endif %}\n        {%- endif %}\n        {%- set reasoning_content = reasoning_content|trim %}\n        {%- if loop.index0 > ns.last_query_index %}\n            {{- '<|im_start|>' + message.role + '\\n<think>\\n' + reasoning_content + '\\n</think>\\n\\n' + content }}\n        {%- else %}\n            {{- '<|im_start|>' + message.role + '\\n' + content }}\n        {%- endif %}\n        {%- if message.tool_calls and message.tool_calls is iterable and message.tool_calls is not mapping %}\n            {%- for tool_call in message.tool_calls %}\n                {%- if tool_call.function is defined %}\n                    {%- set tool_call = tool_call.function %}\n                {%- endif %}\n                {%- if loop.first %}\n                    {%- if content|trim %}\n                        {{- '\\n\\n<tool_call>\\n<function=' + tool_call.name + '>\\n' }}\n                    {%- else %}\n                        {{- '<tool_call>\\n<function=' + tool_call.name + '>\\n' }}\n                    {%- endif %}\n                {%- else %}\n                    {{- '\\n<tool_call>\\n<function=' + tool_call.name + '>\\n' }}\n                {%- endif %}\n                {%- if tool_call.arguments is defined %}\n                    {%- for args_name, args_value in tool_call.arguments|items %}\n                        {{- '<parameter=' + args_name + '>\\n' }}\n                        {%- set args_value = args_value | tojson | safe if args_value is mapping or (args_value is sequence and args_value is not string) else args_value | string %}\n                        {{- args_value }}\n                        {{- '\\n</parameter>\\n' }}\n                    {%- endfor %}\n                {%- endif %}\n                {{- '</function>\\n</tool_call>' }}\n            {%- endfor %}\n        {%- endif %}\n        {{- '<|im_end|>\\n' }}\n    {%- elif message.role == \"tool\" %}\n        {%- if loop.previtem and loop.previtem.role != \"tool\" %}\n            {{- '<|im_start|>user' }}\n        {%- endif %}\n        {{- '\\n<tool_response>\\n' }}\n        {{- content }}\n        {{- '\\n</tool_response>' }}\n        {%- if not loop.last and loop.nextitem.role != \"tool\" %}\n            {{- '<|im_end|>\\n' }}\n        {%- elif loop.last %}\n            {{- '<|im_end|>\\n' }}\n        {%- endif %}\n    {%- else %}\n        {{- raise_exception('Unexpected message role.') }}\n    {%- endif %}\n{%- endfor %}\n{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant\\n' }}\n    {%- if enable_thinking is defined and enable_thinking is false %}\n        {{- '<think>\\n\\n</think>\\n\\n' }}\n    {%- else %}\n        {{- '<think>\\n' }}\n    {%- endif %}\n{%- endif %}",
+  "chat_template_sha": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+  "start_time": 4426307.615697583,
+  "end_time": 4463077.439479502,
+  "total_evaluation_time_seconds": "36769.823781918734"
+}
