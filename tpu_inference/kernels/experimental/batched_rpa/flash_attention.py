@@ -32,6 +32,7 @@ def flash_attention(
     processed_kv_len,  # [B]
     effective_kv_len,  # [B]
     config: rpa_schedule.RPAConfig,
+    bq_start: int,
 ):
     """Flash attention kernel."""
     b, k_heads, tq, h = q.shape
@@ -64,16 +65,13 @@ def flash_attention(
         qk = config.soft_cap * jnp.tanh(qk / config.soft_cap)
 
     qk_masked = []
-    v_masked = []
-
     int_ty = config.int_ty
-
     for b_idx in range(config.batch_size):
         kv_idx_b = (lax.broadcasted_iota(int_ty, (k_heads, tq, s), 2) +
                     processed_kv_len[b_idx])
         q_idx_b = (lax.broadcasted_iota(jnp.int32, (k_heads, tq, s), 1) //
-                   config.num_q_heads_per_kv_head
-                   ).astype(int_ty) + processed_q_len[b_idx]
+                   config.num_q_heads_per_kv_head +
+                   bq_start).astype(int_ty) + processed_q_len[b_idx]
 
         eff_kv_len_b = effective_kv_len[b_idx]
         mask_b = q_idx_b < eff_kv_len_b
@@ -83,21 +81,8 @@ def flash_attention(
             mask_b = jnp.logical_and(
                 mask_b, q_idx_b < kv_idx_b + config.sliding_window)
 
-        if not config.mask_v:
-            mask_b = jnp.logical_and(mask_b, kv_idx_b < eff_kv_len_b)
-
         qk_masked.append(jnp.where(mask_b, qk[b_idx], config.mask_value))
-
-        if config.mask_v:
-            kv_idx_v = (lax.broadcasted_iota(int_ty, (k_heads, s, h), 1) +
-                        processed_kv_len[b_idx])
-            v_mask_b = kv_idx_v < eff_kv_len_b
-            v_masked.append(jnp.where(v_mask_b, v[b_idx], 0))
-        else:
-            v_masked.append(v[b_idx])
-
     qk = jnp.stack(qk_masked, axis=0)
-    v = jnp.stack(v_masked, axis=0)
 
     m_curr = jnp.max(qk, axis=-1, keepdims=True)
     m_next = jnp.maximum(m_prev, m_curr)

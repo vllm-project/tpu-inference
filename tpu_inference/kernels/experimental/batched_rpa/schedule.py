@@ -86,7 +86,6 @@ class RPAConfig:
     n_buffer: int = 2
     out_dtype: Any = jnp.bfloat16
     fuse_accum: bool = False
-    mask_v: bool = True
 
     @property
     def bkv_p_cache(self) -> int:

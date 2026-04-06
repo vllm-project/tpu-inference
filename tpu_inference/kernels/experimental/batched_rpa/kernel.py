@@ -204,21 +204,28 @@ def make_rpa_kernel(config: schedule_lib.RPAConfig):
             l_val = l_scratch[...]
             acc_val = acc_scratch[...]
 
-            m_next, l_next, o_next = flash_attention.flash_attention(
-                q,
-                k,
-                v,
-                acc_val,
-                m_val,
-                l_val,
-                processed_q_len=processed_q_len,
-                processed_kv_len=processed_kv_len,
-                effective_kv_len=effective_kv_len,
-                config=config,
-            )
-            m_scratch[...] = m_next
-            l_scratch[...] = l_next
-            acc_scratch[...] = o_next
+            compute_size = pl.cdiv(config.bq_sz, 16)
+            for bq_start in range(0, config.bq_sz, compute_size):
+                q_start = bq_start * config.num_q_heads_per_kv_head
+                q_end = q_start + compute_size * config.num_q_heads_per_kv_head
+                q_slice = slice(q_start, q_end)
+
+                m_next, l_next, o_next = flash_attention.flash_attention(
+                    q[:, :, q_slice],
+                    k,
+                    v,
+                    acc_val[:, :, q_slice],
+                    m_val[:, :, q_slice],
+                    l_val[:, :, q_slice],
+                    processed_q_len=processed_q_len,
+                    processed_kv_len=processed_kv_len,
+                    effective_kv_len=effective_kv_len,
+                    config=config,
+                    bq_start=bq_start,
+                )
+                m_scratch[:, :, q_slice] = m_next
+                l_scratch[:, :, q_slice] = l_next
+                acc_scratch[:, :, q_slice] = o_next
 
             @pl.loop(0, config.batch_size, unroll=True)
             def _for_each_row(b):

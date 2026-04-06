@@ -623,7 +623,6 @@ def ragged_paged_attention(
             n_buffer=effective_blocks.n_buffer,
             out_dtype=out_dtype,
             fuse_accum=True if case == schedule.RpaCase.DECODE else False,
-            mask_v=False if case == schedule.RpaCase.DECODE else True,
         )
         rpa_schedule = schedule.generate_rpa_metadata(cu_q_lens,
                                                       kv_lens,
