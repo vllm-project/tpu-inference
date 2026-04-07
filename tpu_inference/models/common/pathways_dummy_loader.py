@@ -27,7 +27,8 @@ import torch.nn
 from jax.sharding import (Mesh, NamedSharding, PartitionSpec,
                           SingleDeviceSharding)
 from vllm import envs as vllm_envs
-from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import (ModelConfig, VllmConfig, get_current_vllm_config,
+                         set_current_vllm_config)
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
@@ -48,7 +49,13 @@ _SEED = 1234
 def is_pathways_dummy_load() -> bool:
     if not vllm_envs.VLLM_TPU_USING_PATHWAYS:
         return False
-    load_format = get_current_vllm_config().load_config.load_format
+    try:
+        load_format = get_current_vllm_config().load_config.load_format
+    except AssertionError:
+        # get_current_vllm_config() raises when called outside of a
+        # set_current_vllm_config() context.  Fall back to False so callers
+        # that don't yet have the config active don't crash.
+        return False
     return load_format in ("dummy", "pathways_dummy")
 
 
@@ -211,14 +218,16 @@ class PathwaysDummyModelLoader(BaseModelLoader):
                        if load_config.device is None else load_config.device)
         target_device = torch.device(load_device)
 
-        with set_default_torch_dtype(model_config.dtype):
-            with target_device:
-                model = initialize_model(vllm_config=vllm_config,
-                                         model_config=model_config,
-                                         prefix=prefix)
-            # process_weights_after_loading triggers the quant methods'
-            # process_weights_after_loading which, under Pathways + dummy,
-            # creates random weights directly on TPU.
-            process_weights_after_loading(model, model_config, target_device)
+        with set_current_vllm_config(vllm_config):
+            with set_default_torch_dtype(model_config.dtype):
+                with target_device:
+                    model = initialize_model(vllm_config=vllm_config,
+                                             model_config=model_config,
+                                             prefix=prefix)
+                # process_weights_after_loading triggers the quant methods'
+                # process_weights_after_loading which, under Pathways + dummy,
+                # creates random weights directly on TPU.
+                process_weights_after_loading(model, model_config,
+                                              target_device)
 
         return model.eval()
