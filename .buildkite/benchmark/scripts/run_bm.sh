@@ -121,9 +121,6 @@ if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
   gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/* "$GENERATION_CONFIG_FOLDER" || echo "Warning: failed to sync generation configs ${DATASET}"
 fi
 
-# Ensure we can delete the files outside the container
-cleanup_permissions
-
 if [ "$RUN_TYPE" = "lm_eval" ]; then
   {
     ".buildkite/benchmark/lm_eval/$DATASET/run.sh"
