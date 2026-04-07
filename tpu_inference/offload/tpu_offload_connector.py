@@ -1331,6 +1331,10 @@ class TPUOffloadConnectorScheduler():
             # Determine the total length of tokens the tracker should hold.
             # This is vLLM's already computed tokens + newly scheduled tokens.
             num_total_tokens_for_tracker = request.num_computed_tokens + num_new_scheduled_tokens
+            # for async-scheduling (decode phase) / spec. decoding, some
+            # tokens' kv may not be generated in the current step
+            num_total_tokens_for_tracker = min(num_total_tokens_for_tracker,
+                                               _request.num_tokens)
             tokens_for_tracker = request.prompt_token_ids[:
                                                           num_total_tokens_for_tracker]
             logger.debug(
@@ -1397,6 +1401,9 @@ class TPUOffloadConnectorScheduler():
             num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
             # (local_computed_tokens + cpu_cache_hit_tokens) + new_tokens
             cur_total_tokens = _request.num_computed_tokens + num_new_tokens
+            # for async-scheduling (decode phase) / spec. decoding, some
+            # tokens' kv may not be generated in the current step
+            cur_total_tokens = min(cur_total_tokens, _request.num_tokens)
             num_tracked_tokens = len(tracker.token_ids)
             # the slice of new tokens should be tracked
             new_token_ids = _request.all_token_ids[
