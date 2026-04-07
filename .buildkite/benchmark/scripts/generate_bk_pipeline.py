@@ -20,16 +20,17 @@ import sys
 import yaml
 
 
-def create_step_with_matrix(case_data, global_env, file_path):
+def create_benchmark_group(case_data, global_env, file_path):
     """
-    Creates a Buildkite Step containing a Matrix for parallel TPU execution.
+    Creates a Buildkite Group step by manually expanding TPU types into 
+    individual parallel child steps.
     """
     # Identify Case Name (fallback to model name)
     model_name = case_data.get("server_command_options",
                                {}).get("args", {}).get("model", "unknown")
     case_name = case_data.get("case_name", model_name)
 
-    # Extract TPU types for the Matrix
+    # Extract TPU types from the case data
     tpu_types = case_data.get("tpu_type")
 
     # Merge Environment Variables (Global + Case Specific)
@@ -76,10 +77,10 @@ def main():
     # Handle multiple benchmark cases
     if "benchmark_cases" in data:
         for case in data["benchmark_cases"]:
-            steps.append(create_step_with_matrix(case, global_env, args.input))
+            steps.append(create_benchmark_group(case, global_env, args.input))
     else:
         # Handle single case file
-        steps.append(create_step_with_matrix(data, global_env, args.input))
+        steps.append(create_benchmark_group(data, global_env, args.input))
 
     # Output the final Buildkite YAML structure
     print(
