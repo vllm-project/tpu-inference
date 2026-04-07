@@ -461,7 +461,6 @@ def _ragged_paged_attention_kernel_loop(
             s_scale *= q_scale
 
         s *= s_scale
-        s = s.astype(out_dtype)
 
         if soft_cap is not None:
             s = soft_cap * jnp.tanh(s / soft_cap)
@@ -495,6 +494,7 @@ def _ragged_paged_attention_kernel_loop(
             s = jnp.where(mask, s, mask_value)
 
         s_rowmax = jnp.max(s, axis=1, keepdims=True)
+        s_rowmax = s_rowmax.astype(out_dtype)
         m_prev = m_ref[...]
         m_curr = jnp.maximum(m_prev, s_rowmax)
         m_ref[...] = m_curr
