@@ -108,7 +108,12 @@ def patch_mm_model(
 
         # Start from 1 because 'model' is our root
         for name in module_names[1:-1]:
-            cur_module = getattr(cur_module, name)
+            try:
+                cur_module = getattr(cur_module, name)
+            except AttributeError as e:
+                raise ValueError(
+                    f"{type(cur_module)} has attributes {dir(cur_module)}"
+                ) from e
 
         target_module_name = module_names[-1]
         jitted_module = JittableModule(getattr(cur_module, target_module_name))
