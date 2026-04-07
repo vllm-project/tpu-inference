@@ -63,9 +63,9 @@ CSV_MAP = {
     "kernel_support": "support_matrices/v6e/vllm/kernel_support_matrix.csv",
     "microbenchmarks": {
         "v6":
-        "support_matrices/v6e/vllm/kernel_support_matrix-microbenchmarks.csv",
+        "support_matrices/v6e/default/kernel_support_matrix-microbenchmarks.csv",
         "v7":
-        "support_matrices/v7x/vllm/kernel_support_matrix-microbenchmarks.csv"
+        "support_matrices/v7x/default/kernel_support_matrix-microbenchmarks.csv"
     }
 }
 
