@@ -31,7 +31,7 @@ def create_benchmark_group(case_data, global_env, file_path):
     case_name = case_data.get("case_name", model_name)
 
     # Extract TPU types from the case data
-    tpu_types = case_data.get("tpu_type")
+    ci_queues = case_data.get("ci_queue")
 
     # Merge Environment Variables (Global + Case Specific)
     combined_env = {**global_env, **case_data.get("env", {})}
@@ -39,17 +39,17 @@ def create_benchmark_group(case_data, global_env, file_path):
 
     # Construct the Step dictionary
     child_steps = []
-    for tpu in tpu_types:
+    for agent in ci_queues:
         child_steps.append({
-            "label": f"{tpu} {case_name}",
+            "label": f"{agent} {case_name}",
             "command":
             f"bash .buildkite/benchmark/scripts/test_run.sh {file_path}",
             "env": {
                 **combined_env, "TARGET_CASE_NAME": case_name,
-                "TPU_TYPE": tpu
+                "ci_queue": agent
             },
             "agents": {
-                "queue": tpu
+                "queue": agent
             }
         })
 
