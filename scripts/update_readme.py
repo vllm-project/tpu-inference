@@ -198,7 +198,7 @@ def _merge_model_status_text(status_v6, status_v7):
 
 
 def generate_html_feature_table(headers, data):
-    """Generates an HTML table specifically for the core feature matrix, merging v6e and v7x."""
+    """Generates an HTML table specifically for the core feature matrix."""
     if not headers:
         return ""
 
@@ -216,16 +216,10 @@ def generate_html_feature_table(headers, data):
 
     for row in data:
         html.append("    <tr>")
-        html.append(
-            f"      <td>{row[0]}</td>")  # Feature name, bolded for style
-
-        merged_flax = _merge_hw_status(row[1], row[4])
-        merged_pytorch = _merge_hw_status(row[2], row[5])
-        merged_default = _merge_hw_status(row[3], row[6])
-
-        html.append(f"      <td>{merged_flax}</td>")
-        html.append(f"      <td>{merged_pytorch}</td>")
-        html.append(f"      <td>{merged_default}</td>")
+        html.append(f"      <td>{row[0]}</td>")
+        html.append(f"      <td>{row[1]}</td>")
+        html.append(f"      <td>{row[2]}</td>")
+        html.append(f"      <td>{row[3]}</td>")
         html.append("    </tr>")
 
     html.append("  </tbody>")
@@ -253,17 +247,11 @@ def generate_html_quantization_table(headers, data):
 
     for row in data:
         html.append("    <tr>")
-        # Ensure we have 9 columns worth of data, then drop default columns (indices 5 and 8)
-        padded_row = row + [""] * (9 - len(row))
-        html.append(f"      <td>{padded_row[0]}</td>")
-        html.append(f"      <td>{padded_row[1]}</td>")
-        html.append(f"      <td>{padded_row[2]}</td>")
-
-        merged_flax = _merge_hw_status(padded_row[3], padded_row[6])
-        merged_pytorch = _merge_hw_status(padded_row[4], padded_row[7])
-
-        html.append(f"      <td>{merged_flax}</td>")
-        html.append(f"      <td>{merged_pytorch}</td>")
+        html.append(f"      <td>{row[0]}</td>")
+        html.append(f"      <td>{row[1]}</td>")
+        html.append(f"      <td>{row[2]}</td>")
+        html.append(f"      <td>{row[3]}</td>")
+        html.append(f"      <td>{row[4]}</td>")
         html.append("    </tr>")
 
     html.append("  </tbody>")
@@ -465,30 +453,246 @@ def generate_html_parallelism_table(headers, data):
             feature_html = f"{feature_name}"
 
         html.append(f"      <td>{feature_html}</td>")
-
-        v6_flax = row[1]
-        v6_torch = row[2]
-        v7_flax = row[3]
-        v7_torch = row[4]
-
-        flax_single = _merge_hw_status(v6_flax.get("single", "❓ Untested"),
-                                       v7_flax.get("single", "❓ Untested"))
-        flax_multi = _merge_hw_status(v6_flax.get("multi", "❓ Untested"),
-                                      v7_flax.get("multi", "❓ Untested"))
-        torch_single = _merge_hw_status(v6_torch.get("single", "❓ Untested"),
-                                        v7_torch.get("single", "❓ Untested"))
-        torch_multi = _merge_hw_status(v6_torch.get("multi", "❓ Untested"),
-                                       v7_torch.get("multi", "❓ Untested"))
-
-        html.append(f"      <td>{flax_single}</td>")
-        html.append(f"      <td>{flax_multi}</td>")
-        html.append(f"      <td>{torch_single}</td>")
-        html.append(f"      <td>{torch_multi}</td>")
+        html.append(f"      <td>{row[1]}</td>")
+        html.append(f"      <td>{row[2]}</td>")
+        html.append(f"      <td>{row[3]}</td>")
+        html.append(f"      <td>{row[4]}</td>")
         html.append("    </tr>")
 
     html.append("  </tbody>")
     html.append("</table>")
     return "\n".join(html)
+
+
+def _process_model_support(file_sources):
+    """Processes model support matrix data."""
+    merged_models = {}
+    for col_key, fpath in file_sources.items():
+        _, data_rows = read_csv_data(fpath)
+        if not data_rows:
+            continue
+        for row in data_rows:
+            if not row:
+                continue
+            model_name = row[0].strip()
+            m_type = row[1] if len(row) > 1 else ""
+            unit = row[2] if len(row) > 2 else "❓ Untested"
+            corr = row[3] if len(row) > 3 else "❓ Untested"
+            bench = row[4] if len(row) > 4 else "❓ Untested"
+
+            if model_name not in merged_models:
+                merged_models[model_name] = {
+                    "Type": m_type,
+                    "v6": {
+                        "u": "❓ Untested",
+                        "c": "❓ Untested",
+                        "b": "❓ Untested"
+                    },
+                    "v7": {
+                        "u": "❓ Untested",
+                        "c": "❓ Untested",
+                        "b": "❓ Untested"
+                    }
+                }
+
+            hw_key = "v6" if "v6" in col_key else "v7"
+            merged_models[model_name][hw_key] = {
+                "u": unit,
+                "c": corr,
+                "b": bench
+            }
+
+    headers = [
+        "Model", "Type", "Unit Test", "Correctness Test", "Performance Test"
+    ]
+    all_data = []
+    for model_name, metrics in sorted(merged_models.items(),
+                                      key=lambda x:
+                                      (x[1]["Type"].lower(), x[0].lower())):
+        u_combined = _merge_model_status_text(metrics["v6"]["u"],
+                                              metrics["v7"]["u"])
+        c_combined = _merge_model_status_text(metrics["v6"]["c"],
+                                              metrics["v7"]["c"])
+        b_combined = _merge_model_status_text(metrics["v6"]["b"],
+                                              metrics["v7"]["b"])
+
+        all_data.append(
+            [model_name, metrics["Type"], u_combined, c_combined, b_combined])
+
+    for row in all_data:
+        if row and row[0]:
+            raw_model_name = row[0].strip("'` ")
+            if raw_model_name and not row[0].startswith("["):
+                row[0] = f"[{row[0]}](https://huggingface.co/{raw_model_name})"
+    return generate_markdown_table(headers, all_data)
+
+
+def _process_core_features(file_sources):
+    """Processes core features matrix data."""
+    merged_features = {}
+    for col_key, fpath in file_sources.items():
+        _, data_rows = read_csv_data(fpath)
+        if data_rows:
+            for row in data_rows:
+                if not row:
+                    continue
+                feature = row[0].strip()
+                if feature not in merged_features:
+                    merged_features[feature] = {
+                        "v6_flax": "",
+                        "v6_pytorch": "",
+                        "v6_default": "",
+                        "v7_flax": "",
+                        "v7_pytorch": "",
+                        "v7_default": ""
+                    }
+                c = row[1] if len(row) > 1 else ""
+                p = row[2] if len(row) > 2 else ""
+                merged_features[feature][col_key] = merge_metrics(c, p)
+
+    all_data = []
+    for feature in sorted(merged_features.keys(), key=lambda x: x.lower()):
+        metrics = merged_features[feature]
+        merged_flax = _merge_hw_status(metrics["v6_flax"], metrics["v7_flax"])
+        merged_pytorch = _merge_hw_status(metrics["v6_pytorch"],
+                                          metrics["v7_pytorch"])
+        merged_default = _merge_hw_status(metrics["v6_default"],
+                                          metrics["v7_default"])
+        all_data.append([feature, merged_flax, merged_pytorch, merged_default])
+
+    return generate_html_feature_table(["Feature"], all_data)
+
+
+def _process_parallelism(file_sources):
+    """Processes parallelism matrix data."""
+    merged_features = {}
+    for col_key, fpath in file_sources.items():
+        _, data_rows = read_csv_data(fpath)
+        if data_rows:
+            for row in data_rows:
+                if not row:
+                    continue
+                feature = row[0].strip()
+                if feature not in merged_features:
+                    merged_features[feature] = {
+                        "v6_flax": {
+                            "c": "❓",
+                            "p": "❓"
+                        },
+                        "v6_pytorch": {
+                            "c": "❓",
+                            "p": "❓"
+                        },
+                        "v7_flax": {
+                            "c": "❓",
+                            "p": "❓"
+                        },
+                        "v7_pytorch": {
+                            "c": "❓",
+                            "p": "❓"
+                        }
+                    }
+                single_merged = merge_metrics(row[1] if len(row) > 1 else "",
+                                              row[2] if len(row) > 2 else "")
+                multi_merged = merge_metrics(row[3] if len(row) > 3 else "",
+                                             row[4] if len(row) > 4 else "")
+                merged_features[feature][col_key] = {
+                    "single": single_merged,
+                    "multi": multi_merged
+                }
+
+    all_data = []
+    for feature in sorted(merged_features.keys(), key=lambda x: x.lower()):
+        metrics = merged_features[feature]
+
+        def _get_status(hw_key, type_key):
+            return metrics.get(hw_key, {}).get(type_key, "❓ Untested")
+
+        flax_single = _merge_hw_status(_get_status("v6_flax", "single"),
+                                       _get_status("v7_flax", "single"))
+        flax_multi = _merge_hw_status(_get_status("v6_flax", "multi"),
+                                      _get_status("v7_flax", "multi"))
+        torch_single = _merge_hw_status(_get_status("v6_pytorch", "single"),
+                                        _get_status("v7_pytorch", "single"))
+        torch_multi = _merge_hw_status(_get_status("v6_pytorch", "multi"),
+                                       _get_status("v7_pytorch", "multi"))
+
+        all_data.append(
+            [feature, flax_single, flax_multi, torch_single, torch_multi])
+
+    return generate_html_parallelism_table(["Feature"], all_data)
+
+
+def _process_microbenchmarks(file_sources):
+    """Processes microbenchmarks matrix data."""
+    _, v6_d = read_csv_data(file_sources["v6"])
+    _, v7_d = read_csv_data(file_sources["v7"])
+
+    merged_data = {}
+    if v6_d:
+        for row in v6_d:
+            if not row or row[0].lower() == "kernels":
+                continue
+            merged_data[row[0]] = {"v6": row[1:]}
+
+    if v7_d:
+        for row in v7_d:
+            if not row or row[0].lower() == "kernels":
+                continue
+            if row[0] not in merged_data:
+                merged_data[row[0]] = {}
+            merged_data[row[0]]["v7"] = row[1:]
+
+    all_data = []
+    for kernel in sorted(merged_data.keys()):
+        v6_metrics = merged_data[kernel].get("v6", [""] * 18)
+        v7_metrics = merged_data[kernel].get("v7", [""] * 18)
+        v6_metrics = v6_metrics + [""] * (18 - len(v6_metrics))
+        v7_metrics = v7_metrics + [""] * (18 - len(v7_metrics))
+
+        merged_row = [kernel]
+        for i in [0, 3, 6, 9, 12, 15]:
+            stat_v6 = merge_metrics(v6_metrics[i], v6_metrics[i + 1])
+            stat_v7 = merge_metrics(v7_metrics[i], v7_metrics[i + 1])
+            merged_row.append(_merge_hw_status(stat_v6, stat_v7))
+
+        all_data.append(merged_row)
+
+    return generate_html_microbenchmark_table(["test"], all_data)
+
+
+def _process_quantization(file_sources):
+    """Processes quantization matrix data."""
+    static_file = file_sources["static"]
+    headers, static_d = read_csv_data(static_file)
+    if not headers:
+        return ""
+
+    nightly_data = {}
+    for k in ["v6_flax", "v6_pytorch", "v7_flax", "v7_pytorch"]:
+        _, d = read_csv_data(file_sources[k])
+        nightly_data[k] = d
+
+    all_data = []
+    for row in static_d:
+        if not row or len(row) < 3:
+            continue
+        if row[0] == "AWQ INT4" and not row[1]:
+            continue
+        w = row[0]
+        m = row[1]
+        v6_f = _find_quantization_status(w, m, nightly_data["v6_flax"])
+        v6_p = _find_quantization_status(w, m, nightly_data["v6_pytorch"])
+        v7_f = _find_quantization_status(w, m, nightly_data["v7_flax"])
+        v7_p = _find_quantization_status(w, m, nightly_data["v7_pytorch"])
+
+        merged_flax = _merge_hw_status(v6_f, v7_f)
+        merged_pytorch = _merge_hw_status(v6_p, v7_p)
+
+        new_row = row[:3] + [merged_flax, merged_pytorch]
+        all_data.append(new_row)
+
+    return generate_html_quantization_table(headers, all_data)
 
 
 def update_readme():
@@ -497,276 +701,33 @@ def update_readme():
         content = f.read()
 
     for section_key, file_sources in CSV_MAP.items():
-        headers, all_data = [], []
-
-        if section_key in ("core_features", "parallelism"):
-            merged_features = {}
-            for col_key, fpath in file_sources.items():
-                h, d = read_csv_data(fpath)
-                if d:
-                    for r in d:
-                        if not r:
-                            continue
-                        feature = r[0].strip()
-
-                        if feature not in merged_features:
-                            if section_key == "parallelism":
-                                merged_features[feature] = {
-                                    "v6_flax": {
-                                        "c": "❓",
-                                        "p": "❓"
-                                    },
-                                    "v6_pytorch": {
-                                        "c": "❓",
-                                        "p": "❓"
-                                    },
-                                    "v7_flax": {
-                                        "c": "❓",
-                                        "p": "❓"
-                                    },
-                                    "v7_pytorch": {
-                                        "c": "❓",
-                                        "p": "❓"
-                                    }
-                                }
-                            else:
-                                merged_features[feature] = {
-                                    "v6_flax": "",
-                                    "v6_pytorch": "",
-                                    "v6_default": "",
-                                    "v7_flax": "",
-                                    "v7_pytorch": "",
-                                    "v7_default": ""
-                                }
-
-                        c = r[1] if len(r) > 1 else ""
-                        p = r[2] if len(r) > 2 else ""
-
-                        # [REMOVED SKIP FILTER]
-
-                        if section_key == "parallelism":
-                            # Correctly parse Single-Host Correctness/Performance (r1,r2) and Multi-Host (r3,r4)
-                            single_merged = merge_metrics(
-                                r[1] if len(r) > 1 else "",
-                                r[2] if len(r) > 2 else "")
-                            multi_merged = merge_metrics(
-                                r[3] if len(r) > 3 else "",
-                                r[4] if len(r) > 4 else "")
-                            merged_features[feature][col_key] = {
-                                "single": single_merged,
-                                "multi": multi_merged
-                            }
-                        else:
-                            merged_features[feature][col_key] = merge_metrics(
-                                c, p)
-
-            for feature in sorted(merged_features.keys(),
-                                  key=lambda x: x.lower()):
-                metrics = merged_features[feature]
-                if section_key == "core_features":
-                    row = [
-                        feature, metrics["v6_flax"], metrics["v6_pytorch"],
-                        metrics["v6_default"], metrics["v7_flax"],
-                        metrics["v7_pytorch"], metrics["v7_default"]
-                    ]
-                else:
-                    row = [
-                        feature,
-                        metrics.get("v6_flax", {
-                            "c": "❓",
-                            "p": "❓"
-                        }),
-                        metrics.get("v6_pytorch", {
-                            "c": "❓",
-                            "p": "❓"
-                        }),
-                        metrics.get("v7_flax", {
-                            "c": "❓",
-                            "p": "❓"
-                        }),
-                        metrics.get("v7_pytorch", {
-                            "c": "❓",
-                            "p": "❓"
-                        })
-                    ]
-                all_data.append(row)
-
-            headers = ["Feature"]
-            if section_key == "core_features":
-                new_table = generate_html_feature_table(headers, all_data)
-            else:
-                new_table = generate_html_parallelism_table(headers, all_data)
-
-        elif section_key == "microbenchmarks":
-            # Custom merge logic for microbenchmarks (Horizontal Join of v6 and v7)
-            v6_h, v6_d = read_csv_data(file_sources["v6"])
-            v7_h, v7_d = read_csv_data(file_sources["v7"])
-
-            merged_data = {}
-            if v6_d:
-                for row in v6_d:
-                    if not row or row[0].lower() == "kernels":
-                        continue
-                    merged_data[row[0]] = {"v6": row[1:]}
-
-            if v7_d:
-                for row in v7_d:
-                    if not row or row[0].lower() == "kernels":
-                        continue
-                    if row[0] not in merged_data:
-                        merged_data[row[0]] = {}
-                    merged_data[row[0]]["v7"] = row[1:]
-
-            for kernel in sorted(merged_data.keys()):
-                v6_metrics = merged_data[kernel].get("v6", [""] * 18)
-                v7_metrics = merged_data[kernel].get("v7", [""] * 18)
-                # Ensure they have exactly 18 columns to cover 6 quantizations (3 columns each)
-                v6_metrics = v6_metrics + [""] * (18 - len(v6_metrics))
-                v7_metrics = v7_metrics + [""] * (18 - len(v7_metrics))
-
-                merged_row = [kernel]
-                for i in [0, 3, 6, 9, 12, 15]:
-                    stat_v6 = merge_metrics(v6_metrics[i], v6_metrics[i + 1])
-                    stat_v7 = merge_metrics(v7_metrics[i], v7_metrics[i + 1])
-                    merged_row.append(_merge_hw_status(stat_v6, stat_v7))
-
-                all_data.append(merged_row)
-
-            headers = ["test"
-                       ]  # Dummy header, script handles rendering manually
-            new_table = generate_html_microbenchmark_table(headers, all_data)
-
+        if section_key == "model_support":
+            new_table = _process_model_support(file_sources)
+        elif section_key == "core_features":
+            new_table = _process_core_features(file_sources)
+        elif section_key == "parallelism":
+            new_table = _process_parallelism(file_sources)
         elif section_key == "quantization":
-            static_file = file_sources["static"]
-            headers, static_d = read_csv_data(static_file)
-            if not headers:
-                continue
-
-            nightly_data = {}
-            for k in [
-                    "v6_flax", "v6_pytorch", "v6_default", "v7_flax",
-                    "v7_pytorch", "v7_default"
-            ]:
-                _, d = read_csv_data(file_sources[k])
-                nightly_data[k] = d
-
-            for row in static_d:
-                if not row or len(row) < 3:
-                    continue
-                # Explicitly drop the duplicate bugged AWQ INT4 row per Brittany's feedback
-                if row[0] == "AWQ INT4" and not row[1]:
-                    continue
-                w = row[0]
-                m = row[1]
-                v6_f = _find_quantization_status(w, m, nightly_data["v6_flax"])
-                v6_p = _find_quantization_status(w, m,
-                                                 nightly_data["v6_pytorch"])
-                v6_d = _find_quantization_status(w, m,
-                                                 nightly_data["v6_default"])
-                v7_f = _find_quantization_status(w, m, nightly_data["v7_flax"])
-                v7_p = _find_quantization_status(w, m,
-                                                 nightly_data["v7_pytorch"])
-                v7_d = _find_quantization_status(w, m,
-                                                 nightly_data["v7_default"])
-
-                new_row = row[:3] + [v6_f, v6_p, v6_d, v7_f, v7_p, v7_d]
-                all_data.append(new_row)
-
-            new_table = generate_html_quantization_table(headers, all_data)
-
-        elif section_key == "model_support":
-            merged_models = {}
-            for col_key, fpath in file_sources.items():
-                h, d = read_csv_data(fpath)
-                if not d:
-                    continue
-                for r in d:
-                    if not r:
-                        continue
-                    model_name = r[0].strip()
-                    m_type = r[1] if len(r) > 1 else ""
-                    unit = r[2] if len(r) > 2 else "❓ Untested"
-                    corr = r[3] if len(r) > 3 else "❓ Untested"
-                    bench = r[4] if len(r) > 4 else "❓ Untested"
-
-                    if model_name not in merged_models:
-                        merged_models[model_name] = {
-                            "Type": m_type,
-                            "v6": {
-                                "u": "❓ Untested",
-                                "c": "❓ Untested",
-                                "b": "❓ Untested"
-                            },
-                            "v7": {
-                                "u": "❓ Untested",
-                                "c": "❓ Untested",
-                                "b": "❓ Untested"
-                            }
-                        }
-
-                    hw_key = "v6" if "v6" in col_key else "v7"
-                    merged_models[model_name][hw_key] = {
-                        "u": unit,
-                        "c": corr,
-                        "b": bench
-                    }
-
-            headers = [
-                "Model", "Type", "Unit Test", "Correctness Test",
-                "Performance Test"
-            ]
-
-            for model_name, metrics in sorted(
-                    merged_models.items(),
-                    key=lambda x: (x[1]["Type"].lower(), x[0].lower())):
-                u_combined = _merge_model_status_text(metrics["v6"]["u"],
-                                                      metrics["v7"]["u"])
-                c_combined = _merge_model_status_text(metrics["v6"]["c"],
-                                                      metrics["v7"]["c"])
-                b_combined = _merge_model_status_text(metrics["v6"]["b"],
-                                                      metrics["v7"]["b"])
-
-                all_data.append([
-                    model_name, metrics["Type"], u_combined, c_combined,
-                    b_combined
-                ])
-
-            for row in all_data:
-                if row and row[0]:
-                    raw_model_name = row[0].strip("'` ")
-                    if raw_model_name and not row[0].startswith("["):
-                        row[0] = f"[{row[0]}](https://huggingface.co/{raw_model_name})"
-            new_table = generate_markdown_table(headers, all_data)
-
+            new_table = _process_quantization(file_sources)
+        elif section_key == "microbenchmarks":
+            new_table = _process_microbenchmarks(file_sources)
         else:
             sources = file_sources if isinstance(file_sources,
                                                  list) else [file_sources]
-            for i, file_path in enumerate(sources):
+            headers, all_data = [], []
+            for file_path in sources:
                 h, d = read_csv_data(file_path)
                 if h:
                     if not headers:
                         headers = h
                     all_data.extend(d)
-
-            if section_key == "core_features":
-                new_table = generate_html_feature_table(headers, all_data)
-            else:
-                new_table = generate_markdown_table(headers, all_data)
+            new_table = generate_markdown_table(headers, all_data)
 
         if section_key == "microbenchmarks":
-            footer = (
-                "\n\n> **Note:**\n"
-                "> - *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*"
-            )
-            new_table += footer
+            new_table += "\n\n> **Note:**\n> - *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*"
         elif section_key == "quantization":
-            footer = (
-                "\n\n> **Note:**\n"
-                "> - *This table only tests checkpoint loading compatibility.*"
-            )
-            new_table += footer
+            new_table += "\n\n> **Note:**\n> - *This table only tests checkpoint loading compatibility.*"
 
-        # Write out decoupled MkDocs snippet regardless of README presence
         os.makedirs("docs/includes", exist_ok=True)
         snippet_path = os.path.join("docs", "includes", f"{section_key}.md")
         with open(snippet_path, "w", encoding="utf-8") as f:
@@ -778,7 +739,6 @@ def update_readme():
             replacement = f"\\1\n{new_table}\n\\3"
             content = re.sub(pattern, replacement, content, flags=re.DOTALL)
 
-    # Automatically update the Last Updated timestamp
     current_time = datetime.datetime.now(
         datetime.timezone.utc).strftime("%Y-%m-%d %I:%M %p UTC")
     content = re.sub(r"\*Last Updated: .*\*?",
