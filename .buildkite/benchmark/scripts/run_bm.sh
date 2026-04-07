@@ -100,19 +100,19 @@ if contains_element "$DATASET" "${DATASETS[@]}"; then
   echo "Syncing dataset for $DATASET"
   case "$DATASET" in
     "custom-token")
-      gsutil -m cp gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/*.* "$DATASET_DIR/" || echo "Warning: failed to sync dataset"
+      gsutil -m cp gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/*.* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
       ;;
     "mmlu")
-      gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/mmlu/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset"
+      gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/mmlu/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
       ;;
     "mlperf")
-      gsutil -m cp gs://vllm-cb-storage2/dataset/mlperf/mlperf_shuffled.jsonl "$DATASET_DIR/mlperf.jsonl" || echo "Warning: failed to sync dataset"
+      gsutil -m cp gs://vllm-cb-storage2/dataset/mlperf/mlperf_shuffled.jsonl "$DATASET_DIR/mlperf.jsonl" || echo "Warning: failed to sync dataset ${DATASET}"
       ;;
     "math500")
-      gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/math500/math500.jsonl "$DATASET_DIR/" || echo "Warning: failed to sync dataset"
+      gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/math500/math500.jsonl "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
       ;;
     "bench-custom-token"|"bench-custom-mm")
-      gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/bench-dataset/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset"
+      gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/bench-dataset/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
       ;;
   esac
 fi
@@ -122,7 +122,7 @@ if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
   echo "Syncing generation configs for DeepSeek-R1"
   GENERATION_CONFIG_FOLDER="$DOCKER_ARTIFACT_FOLDER/generation_configs"
   mkdir -p "$GENERATION_CONFIG_FOLDER"
-  gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/* "$GENERATION_CONFIG_FOLDER" || echo "Warning: failed to sync generation configs"
+  gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/* "$GENERATION_CONFIG_FOLDER" || echo "Warning: failed to sync generation configs ${DATASET}"
 fi
 
 # Ensure we can delete the files outside the container
