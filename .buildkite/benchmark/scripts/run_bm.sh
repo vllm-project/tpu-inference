@@ -48,7 +48,7 @@ mkdir -p "$PROFILE_FOLDER"
 
 
 CASE_FILE="$1"
-TARGET_CASE_NAME="$2"
+TARGET_CASE_NAME=${2:-""}
 
 if [ -z "$CASE_FILE" ]; then
     echo "Usage: $0 <case.json> [TARGET_CASE_NAME]"
