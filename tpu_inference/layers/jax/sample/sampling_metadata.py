@@ -90,16 +90,23 @@ class TPUSupportedSamplingMetadata:
                                   DEFAULT_SAMPLING_PARAMS["top_p"])
 
         # Slice persistent device tensors to a fixed pre-compiled padded shape.
+        # Concatenate all sampling params into a single blob, transfer once,
+        # then split on device to avoid multiple device_put calls.
+        # top_k is int32 so we cast to float32 for the concat and back after.
+        n = padded_num_reqs
+        sampling_blob = np.concatenate([
+            temp_tensor[:n],
+            top_p_tensor[:n],
+            top_k_tensor[:n].astype(np.float32),
+        ])
+        sampling_blob_dev = jax.device_put(sampling_blob, sharding)
+        temp_dev, top_p_dev, top_k_f32 = jnp.split(sampling_blob_dev, 3)
+        top_k_dev = top_k_f32.astype(jnp.int32)
+
         return cls(
-            temperature=device_array(mesh,
-                                     temp_tensor[:padded_num_reqs],
-                                     sharding=sharding),
-            top_p=device_array(mesh,
-                               top_p_tensor[:padded_num_reqs],
-                               sharding=sharding),
-            top_k=device_array(mesh,
-                               top_k_tensor[:padded_num_reqs],
-                               sharding=sharding),
+            temperature=temp_dev,
+            top_p=top_p_dev,
+            top_k=top_k_dev,
             _cache_collision_dummy=cache_collision_dummy,
             do_sampling=not input_batch.all_greedy,
             logprobs=needs_logprobs,
