@@ -196,8 +196,10 @@ echo "Logging output to: $BENCHMARK_LOG"
 if ! bash "$RUN_MULTIHOST_SCRIPT" "$SERVER_CMD" "$BENCHMARK_CMD" > "$BENCHMARK_LOG" 2>&1; then
   echo "Benchmarking failed. See log: $BENCHMARK_LOG"
   echo "Status=FAILED" > "$RESULT_FILE"
+  BENCHMARK_STATUS="FAILED"
 else
   echo "Benchmarking completed. Parsing results..."
+  BENCHMARK_STATUS="SUCCESS"
   
   # 2. Parse benchmark log and generate key-value .result file
   python3 -c '
@@ -281,7 +283,11 @@ fi
 
 # Upload vllm_serve.log to GCS
 IMPL_TYPE="${MODEL_IMPL_TYPE_ENV#*=}"
-LOG_GCS_URI="gs://tpu-commons-ci/logs/${MODEL_NAME}_${INPUT_LEN}_${OUTPUT_LEN}_${IMPL_TYPE}_${CODE_HASH}_${JOB_REFERENCE}_vllm_serve.log"
+RUN_MODE="benchmark"
+if [ -n "$PHASED_PROFILING_DIR" ]; then
+  RUN_MODE="xprof"
+fi
+LOG_GCS_URI="gs://tpu-commons-ci/logs/${MODEL_NAME}_${INPUT_LEN}_${OUTPUT_LEN}_${IMPL_TYPE}_${CODE_HASH}_${BENCHMARK_STATUS}_${RUN_MODE}_${JOB_REFERENCE}_vllm_serve.log"
 if [ -f "/tmp/vllm_serve.log" ]; then
   echo "Uploading vllm_serve.log to $LOG_GCS_URI"
   gsutil cp /tmp/vllm_serve.log "$LOG_GCS_URI" || echo "Warning: Failed to upload vllm_serve.log"
