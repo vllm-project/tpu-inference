@@ -458,9 +458,16 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                                     jnp.float8_e4m3fn)
                     param.set_raw_value(value)
 
+                    # Under Pathways the only available backend is 'proxy',
+                    # so jax.devices('cpu') raises RuntimeError. Fall back to
+                    # the default device (None) in that case.
+                    try:
+                        cpu_device = jax.devices('cpu')[0]
+                    except RuntimeError:
+                        cpu_device = None
                     scale_value = jnp.zeros((E, (K + block_k - 1) // block_k,
                                              (N + block_n - 1) // block_n),
-                                            device=jax.devices('cpu')[0])
+                                            device=cpu_device)
                     setattr(
                         layer, f"{param_name}_{self.weight_scale_name}",
                         nnx.Param(scale_value,

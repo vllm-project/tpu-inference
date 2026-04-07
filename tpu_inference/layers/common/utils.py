@@ -149,7 +149,10 @@ def general_device_put(tensor: jax.Array,
 def cpu_mesh() -> Mesh:
     global _cpu_mesh
     if _cpu_mesh is None:
-        _cpu_mesh = Mesh(jax.devices("cpu")[:1], ("cpu", ))
+        try:
+            _cpu_mesh = Mesh(jax.devices("cpu")[:1], ("cpu", ))
+        except RuntimeError:
+            _cpu_mesh = Mesh(jax.devices()[:1], ("cpu", ))
     return _cpu_mesh
 
 
