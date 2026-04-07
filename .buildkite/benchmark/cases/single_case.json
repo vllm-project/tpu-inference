@@ -3,7 +3,7 @@
     "VLLM_USE_V1": "1",
     "MODEL_IMPL_TYPE": "vllm"
   },
-  "ci_queue": ["tpu_v6e_queue", "tpu_v7x_2_queue"],
+  "ci_queue": ["tpu_v6e_queue", "cpu"],
   "server_command_options": {
     "command_type": "vllm_serve",
     "args": {
