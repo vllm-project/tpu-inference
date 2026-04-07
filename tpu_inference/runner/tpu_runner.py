@@ -604,12 +604,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                     and not disable_mm_from_limits)
 
         # Clear JIT compilation caches from weight loading to free XLA
-        # program reservations (bytes_reserved) on TPU HBM. This is
-        # especially important when MOE_REQUANTIZE_ON_TPU is enabled,
-        # as the requantization JIT programs reserve significant HBM.
-        if envs.MOE_REQUANTIZE_ON_TPU:
-            jax.clear_caches()
-            logger.info("Cleared JIT caches after weight loading")
+        # program reservations (bytes_reserved) on TPU HBM.
+        jax.clear_caches()
+        logger.info("Cleared JIT caches after weight loading")
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")

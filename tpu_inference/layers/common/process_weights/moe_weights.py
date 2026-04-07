@@ -600,36 +600,6 @@ def process_fp8_moe_weights(
     w13_reorder_size = get_mesh_shape_product(mesh,
                                               ShardingAxisName.MLP_TENSOR)
 
-    if not envs.MOE_REQUANTIZE_ON_TPU:
-        # Default path: direct dequant → quantize → process (matches main branch).
-        w13_weight = dequantize_tensor(w13_weight,
-                                       w13_weight_scale, (1, 2),
-                                       jnp.float32,
-                                       block_size=weight_block_size)
-        w2_weight = dequantize_tensor(w2_weight,
-                                      w2_weight_scale, (1, 2),
-                                      jnp.float32,
-                                      block_size=weight_block_size)
-
-        weights = quantize_moe_weights(
-            FusedMoEWeights(
-                w13_weight=w13_weight,
-                w13_weight_scale=None,
-                w13_bias=None,
-                w2_weight=w2_weight,
-                w2_weight_scale=None,
-                w2_bias=None,
-            ),
-            desired_quant_dtype,
-            requant_block_size,
-        )
-        return process_moe_weights(
-            weights,
-            moe_backend=moe_backend,
-            w13_reorder_size=w13_reorder_size,
-            w13_interleave=w13_interleave,
-        )
-
     # TPU path: shard_map + lax.scan for lower XLA reservation.
 
     # Pre-compute pad widths and block sizes for requantization.

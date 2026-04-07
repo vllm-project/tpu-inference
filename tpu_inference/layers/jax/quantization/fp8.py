@@ -23,7 +23,6 @@ import torch
 from flax import nnx
 from jax.sharding import PartitionSpec as P
 
-import tpu_inference.envs as envs
 from tpu_inference.layers.common.linear import sharded_quantized_batched_matmul
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.linear_weights import \
@@ -536,30 +535,18 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                                             w2_weight_scale=w2_weight_scale,
                                             w2_bias=None)
 
-            if envs.MOE_REQUANTIZE_ON_TPU:
-                # Shard FP8 weights to TPU before requantization so that
-                # process_fp8_moe_weights runs on TPU instead of CPU.
-                input_weights = shard_fp8_moe_weights_to_tpu(
-                    input_weights, layer.mesh, source_mesh=cpu_mesh())
+            # Shard FP8 weights to TPU before requantization so that
+            # process_fp8_moe_weights runs on TPU instead of CPU.
+            input_weights = shard_fp8_moe_weights_to_tpu(
+                input_weights, layer.mesh, source_mesh=cpu_mesh())
 
-                weights = process_fp8_moe_weights(
-                    input_weights,
-                    moe_backend=layer.moe_backend,
-                    mesh=layer.mesh,
-                    activation=layer.activation,
-                    weight_block_size=weight_block_size,
-                )
-            else:
-                # Weights are on CPU; run under cpu_mesh_context
-                # so JIT targets CPU devices.
-                with cpu_mesh_context():
-                    weights = process_fp8_moe_weights(
-                        input_weights,
-                        moe_backend=layer.moe_backend,
-                        mesh=layer.mesh,
-                        activation=layer.activation,
-                        weight_block_size=weight_block_size,
-                    )
+            weights = process_fp8_moe_weights(
+                input_weights,
+                moe_backend=layer.moe_backend,
+                mesh=layer.mesh,
+                activation=layer.activation,
+                weight_block_size=weight_block_size,
+            )
 
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
