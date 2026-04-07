@@ -391,10 +391,10 @@ class KVCacheManager:
                 total_group_page_size = 0
                 for name in kv_cache_tensor.shared_by:
                     spec = layer_name_to_spec[name]
-                    # MambaSpec has a padded page size to unify the cache size
-                    # with full attention layers. But when duplicating the KV
-                    # cache for each layer, use the unpadded page size for
-                    # calculating the number of blocks, else HBM is underutilized.
+                    # MambaSpec has a padded page size to unify it with full
+                    # attention layers. If duplicating, use unpadded size for
+                    # num_blocks calculation to make it consistent with actual
+                    # allocation and avoid underutilization of HBM.
                     if isinstance(spec, MambaSpec):
                         total_group_page_size += dataclasses.replace(
                             spec, page_size_padded=None).page_size_bytes
