@@ -25,10 +25,12 @@ from jax import lax
 from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig
 
+from tpu_inference import utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
-from tpu_inference.utils import device_array
+from tpu_inference.utils import device_array, get_mesh_shape_product
 
 logger = init_logger(__name__)
 
@@ -64,8 +66,7 @@ class DFlashProposer:
         self.max_num_tokens = runner.max_num_tokens
         self.max_model_len = runner.max_model_len
 
-        # Host-side context projection buffer
-        self._ctx_buf: Optional[np.ndarray] = None
+        # Context length tracking (host-side counter)
         self._ctx_len: int = 0
 
         # On-device KV caches (allocated in load_model)
@@ -112,9 +113,6 @@ class DFlashProposer:
 
         # Allocate on-device KV caches
         hf_config = self.draft_model_config.hf_config
-        from tpu_inference import utils
-        from tpu_inference.layers.common.sharding import ShardingAxisName
-        from tpu_inference.utils import get_mesh_shape_product
 
         sharding_size = get_mesh_shape_product(self.mesh,
                                                ShardingAxisName.MLP_TENSOR)
@@ -141,41 +139,13 @@ class DFlashProposer:
             cache_shape,
         )
 
+    @functools.partial(jax.jit, static_argnums=(0,))
     def _project_aux_hidden(
-            self, aux_hidden_states: tuple[jax.Array, ...]) -> jax.Array:
+            self, state: nnx.State,
+            aux_hidden_states: tuple[jax.Array, ...]) -> jax.Array:
         """Project and normalise auxiliary hidden states."""
         raw = jnp.concatenate(aux_hidden_states, axis=-1)
-        return self.combine_hidden_states_fn(self.state, raw)
-
-    def _update_context_buffer(
-        self,
-        projected: jax.Array,
-        seq_len: int,
-    ) -> Optional[np.ndarray]:
-        """Append newly-accepted projected hidden states to the buffer.
-
-        Returns the NEW context tokens as a numpy array, or None on rejection.
-        """
-        proj_np = np.asarray(projected)
-
-        if self._ctx_buf is None:
-            self._ctx_buf = np.zeros(
-                (self.max_model_len, proj_np.shape[-1]),
-                dtype=proj_np.dtype,
-            )
-
-        num_new = seq_len - self._ctx_len
-        if num_new <= 0:
-            self._ctx_len = seq_len
-            self._cache_len = min(self._cache_len, seq_len)
-            return None
-
-        end = min(self._ctx_len + num_new, self.max_model_len)
-        n_copy = end - self._ctx_len
-        self._ctx_buf[self._ctx_len:end] = proj_np[:n_copy]
-        new_ctx = proj_np[:n_copy].copy()
-        self._ctx_len = end
-        return new_ctx
+        return self.combine_hidden_states_fn(state, raw)
 
     @staticmethod
     def _next_padded_size(n: int) -> int:
@@ -186,23 +156,6 @@ class DFlashProposer:
         while p < n:
             p *= 2
         return p
-
-    @staticmethod
-    def _pad_context(ctx: np.ndarray) -> np.ndarray:
-        """Pad context array to the next power-of-2 size (min 16).
-
-        Args:
-            ctx: (T, D) numpy array of context features.
-
-        Returns:
-            (T_padded, D) numpy array with zero-padding appended.
-        """
-        T = ctx.shape[0]
-        T_padded = DFlashProposer._next_padded_size(T)
-        if T_padded == T:
-            return ctx
-        pad = np.zeros((T_padded - T, ctx.shape[1]), dtype=ctx.dtype)
-        return np.concatenate([ctx, pad], axis=0)
 
     @functools.partial(jax.jit, static_argnums=(0, 3, 4))
     def _build_noise_block(
@@ -259,28 +212,40 @@ class DFlashProposer:
             self._ctx_len = seq_len
         self._prev_seq_len = seq_len
 
-        # 3. Project new auxiliary hidden states
-        projected = self._project_aux_hidden(aux_hidden_states)
+        # 3. Project new auxiliary hidden states (on-device, JIT'd)
+        projected = self._project_aux_hidden(self.state, aux_hidden_states)
 
-        # 4. Update context buffer and get NEW tokens
-        new_ctx_np = self._update_context_buffer(projected, seq_len)
-
-        if new_ctx_np is None or len(new_ctx_np) == 0:
-            # Full rejection — all padded entries are zeros, and noise
-            # writes at cache_len + 0, completely overwriting them.
+        # 4. Compute context update — slicing and padding stay on device
+        #    to avoid host<->TPU transfer overhead.
+        num_new = seq_len - self._ctx_len
+        if num_new <= 0:
+            # Full rejection — trim context tracking, use zero placeholder.
+            # Noise writes at cache_len + 0, completely overwriting padding.
+            self._ctx_len = seq_len
+            self._cache_len = min(self._cache_len, seq_len)
             actual_new_ctx_count = 0
-            new_ctx_np = np.zeros((16, self.hidden_size), dtype=np.float32)
+            new_ctx_jax = device_array(
+                self.mesh,
+                jnp.zeros((16, self.hidden_size), dtype=jnp.bfloat16),
+            )
         else:
-            actual_new_ctx_count = len(new_ctx_np)
-            new_ctx_np = self._pad_context(new_ctx_np)
+            end = min(self._ctx_len + num_new, self.max_model_len)
+            n_copy = end - self._ctx_len
+            actual_new_ctx_count = n_copy
+            self._ctx_len = end
 
-        # 5. Upload padded context to device.
-        # Padding to power-of-2 sizes (16/32/64/128) means JIT only
-        # traces ~4 unique shapes, eliminating per-token retracing.
-        new_ctx_jax = device_array(
-            self.mesh,
-            jnp.array(new_ctx_np, dtype=jnp.bfloat16),
-        )
+            # 5. Slice and pad on device — no host<->TPU transfer.
+            # Padding to power-of-2 sizes (16/32/64/128) means JIT only
+            # traces ~4 unique shapes, eliminating per-token retracing.
+            ctx = projected[:n_copy].astype(jnp.bfloat16)
+            padded_size = self._next_padded_size(n_copy)
+            if padded_size > n_copy:
+                pad = jnp.zeros(
+                    (padded_size - n_copy, self.hidden_size),
+                    dtype=jnp.bfloat16,
+                )
+                ctx = jnp.concatenate([ctx, pad], axis=0)
+            new_ctx_jax = device_array(self.mesh, ctx)
 
         # 6. Build noise block
         seq_len_arr = device_array(self.mesh,
