@@ -36,7 +36,7 @@ from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.pathways_dummy_loader import (
     create_dummy_weights_on_tpu, is_pathways_dummy_load)
-from tpu_inference.utils import t2j, to_jax_dtype
+from tpu_inference.utils import to_jax_dtype
 
 P = PartitionSpec
 

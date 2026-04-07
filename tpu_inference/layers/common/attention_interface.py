@@ -35,7 +35,7 @@ from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes import \
     get_tuned_block_sizes
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.utils import get_megacore
+from tpu_inference.utils import get_megacore, get_mesh_shape_product
 
 MAX_ALLOWED_PAGE_INDICES_N = (
     128 * 1024

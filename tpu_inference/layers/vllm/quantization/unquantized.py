@@ -124,25 +124,6 @@ class VllmUnquantizedConfig(QuantizationConfig, VllmQuantConfig):
         return None
 
 
-class VllmUnquantizedEmbeddingMethod(UnquantizedEmbeddingMethod):
-
-    def __init__(self, mesh):
-        self.mesh = mesh
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        weight = t2j(layer.weight, use_dlpack=False)
-        weight = general_device_put(
-            weight,
-            NamedSharding(self.mesh, P(ShardingAxisName.MLP_TENSOR, None)))
-        layer.weight = Parameter(torch_view(weight), requires_grad=False)
-
-        if isinstance(layer, ParallelLMHead) and layer.bias is not None:
-            bias = t2j(layer.bias, use_dlpack=False)
-            bias = general_device_put(
-                bias, NamedSharding(self.mesh, P(ShardingAxisName.MLP_TENSOR)))
-            layer.bias = Parameter(torch_view(bias), requires_grad=False)
-
-
 class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
                                   common_unquantized.UnquantizedLinearMethod,
                                   VllmQuantizationMethod):
