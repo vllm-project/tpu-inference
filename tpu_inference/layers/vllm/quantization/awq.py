@@ -36,7 +36,7 @@ from vllm.model_executor.layers.quantization.base_config import \
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
-from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
+from tpu_inference.layers.common.linear import dense_gmm_matmul
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, to_parameter_list)
 from tpu_inference.layers.common.process_weights.moe_weights import (
@@ -58,33 +58,6 @@ P = PartitionSpec
 
 logger = init_logger(__name__)
 
-
-def _dense_gmm_local(x, weight, scale, *, group_size):
-    """Run GMM kernel on a local shard for dense matmul.
-
-    Treats the dense linear as a single-group GMM, allowing the kernel
-    to handle int8 weights with subchannel scale application.
-
-    Args:
-        x: Input activations, shape (batch, K_local).
-        weight: Int8 weight (zero-point subtracted), shape (K_local, N_local).
-        scale: Per-group scales, shape (num_groups_local, N_local).
-        group_size: Number of input channels per quantization group.
-    """
-    batch = x.shape[0]
-    rhs = weight[jnp.newaxis, :, :]  # (1, K_local, N_local)
-    rhs_scale = scale[jnp.newaxis, :,
-                      jnp.newaxis, :]  # (1, G_local, 1, N_local)
-    group_sizes = jnp.array([batch], dtype=jnp.int32)
-
-    return gmm_v2(
-        lhs=x,
-        rhs=rhs,
-        rhs_scale=rhs_scale,
-        group_sizes=group_sizes,
-        zero_initialize=False,
-        maybe_quantize_lhs=False,
-    )
 
 
 @register_quantization_config(AWQ)
@@ -174,7 +147,7 @@ class VllmAWQLinearMethod(AWQLinearMethod):
                     zero_point=None,
                     bias=bias,
                 ),
-                fused=False,  # Always split to avoid VMEM OOM on large N
+                fused=False,
                 output_sizes=self.linear_config.output_sizes,
                 reorder_size=self.linear_config.n_shards,
                 transposed=False,
@@ -205,7 +178,6 @@ class VllmAWQLinearMethod(AWQLinearMethod):
         sharded_scale = shard(weights.weight_scale, scale_sharding)
         sharded_bias = shard(weights.bias, bias_sharding)
 
-        # Always use split path
         layer.weight = to_parameter_list(
             [torch_view(w) for w in sharded_weight])
         layer.weight_scale = to_parameter_list(
@@ -242,7 +214,7 @@ class VllmAWQLinearMethod(AWQLinearMethod):
             out_p_spec = P()
 
             def _local_fn(x, w, s):
-                out = _dense_gmm_local(x,
+                out = dense_gmm_matmul(x,
                                        w,
                                        s,
                                        group_size=self.quant_config.group_size)
@@ -253,7 +225,7 @@ class VllmAWQLinearMethod(AWQLinearMethod):
             out_p_spec = P(None, tp_axis)
 
             _local_fn = functools.partial(
-                _dense_gmm_local, group_size=self.quant_config.group_size)
+                dense_gmm_matmul, group_size=self.quant_config.group_size)
 
         return jax.shard_map(
             _local_fn,
