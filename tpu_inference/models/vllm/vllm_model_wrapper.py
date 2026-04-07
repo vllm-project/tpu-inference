@@ -533,7 +533,6 @@ class VllmModelWrapper:
         # The function cannot be JITted directly due to its dynamic implementation
         def embed_multimodal_func(
             params_and_buffers: Any,
-            image_grid_thw: Any,
             **kwargs,
         ) -> Any:
             inner_model = getattr(self.model, "vllm_model", self.model)

@@ -195,6 +195,7 @@ class ScatterReduceScTest(parameterized.TestCase):
             loop_parallel_access_1=True,
             loop_parallel_access_2=False,
             loop_parallel_access_3=False,
+            topk_wgt_zero_nan=True,
         )
 
         @jax.jit

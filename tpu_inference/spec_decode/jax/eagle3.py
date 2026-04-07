@@ -69,7 +69,7 @@ class Eagle3Proposer:
 
     def load_model(self, target_model: Any) -> None:
         """Loads the draft model."""
-        self.model_fn, self.compute_logits_fn, self.pooler_fn, self.combine_hidden_states_fn, _, self.state, _, _ = get_model(
+        self.model_fn, self.compute_logits_fn, self.pooler_fn, self.combine_hidden_states_fn, _, self.state, _, self.model = get_model(
             self.vllm_config, self.rng_key, self.mesh, is_draft_model=True)
         draft_model_impl = envs.DRAFT_MODEL_IMPL_TYPE
         target_model_impl = envs.MODEL_IMPL_TYPE
@@ -104,15 +104,19 @@ class Eagle3Proposer:
                 logger.info("Draft model has its own embed_tokens.")
         else:
             EMBED_TOKENS_KEY = 'vllm_model.model.embed_tokens.weight'
-            draft_embed_tokens = self.state.get(EMBED_TOKENS_KEY, None)
+            if hasattr(self.model.model.vllm_model, 'has_own_embed_tokens'
+                       ) and self.model.model.vllm_model.has_own_embed_tokens:
+                draft_embed_tokens = self.state.get(EMBED_TOKENS_KEY, None)
+            else:
+                draft_embed_tokens = None
             target_embed_tokens = target_model.get(EMBED_TOKENS_KEY, None)
+            assert target_embed_tokens is not None
             if draft_embed_tokens is None or ~jnp.any(draft_embed_tokens):
                 logger.info(
                     "Draft model does not have embedding. Setting draft model's embed_tokens to target model's embed"
                 )
                 self.state[EMBED_TOKENS_KEY] = target_embed_tokens
-            elif target_embed_tokens is not None and jnp.array_equal(
-                    draft_embed_tokens, target_embed_tokens):
+            elif jnp.array_equal(draft_embed_tokens, target_embed_tokens):
                 logger.info(
                     "Draft model's embed_tokens is identical to target model's embed. Sharing the embedding."
                 )
