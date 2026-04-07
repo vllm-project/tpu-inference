@@ -76,7 +76,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-04-07 08:00 PM UTC*
+*Last Updated: 2026-04-07 08:03 PM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -421,19 +421,19 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td rowspan="2"><b>Moe</b></td>
       <td>Fused&nbsp;MoE</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>gmm</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
@@ -442,10 +442,10 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td rowspan="1"><b>Dense</b></td>
       <td>All&#8209;gather&nbsp;matmul</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
@@ -454,28 +454,28 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td rowspan="3"><b>Attention</b></td>
       <td>Generic&nbsp;Ragged&nbsp;Paged<br>Attention&nbsp;V3*</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>MLA</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>Ragged&nbsp;Paged<br>Attention&nbsp;V3&nbsp;Head_Dim<br>64*</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
