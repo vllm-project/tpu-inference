@@ -48,7 +48,7 @@ class KVCacheMetadata:
 
 def get_kv_cache_shape_with_mesh(mesh: Mesh,
                                  total_num_pages: int,
-                                 page_size: int,
+                                 block_size: int,
                                  actual_num_kv_heads: int,
                                  actual_head_dim: int,
                                  kv_dtype: any,
@@ -67,7 +67,7 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
         # so actual_num_kv_heads is never used in mla.get_kv_cache_shape().
         get_kv_cache_shape_fn = mla.get_kv_cache_shape
         shape = list(
-            get_kv_cache_shape_fn(total_num_pages, page_size, actual_head_dim,
+            get_kv_cache_shape_fn(total_num_pages, block_size, actual_head_dim,
                                   kv_dtype))
     else:
         assert actual_num_kv_heads % model_cnt == 0
@@ -76,7 +76,7 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
                 else rpa.get_kv_cache_shape
         )
         shape = list(
-            get_kv_cache_shape_fn(total_num_pages, page_size,
+            get_kv_cache_shape_fn(total_num_pages, block_size,
                                   actual_num_kv_heads // model_cnt,
                                   actual_head_dim, kv_dtype))
         shape[2] *= model_cnt
@@ -149,7 +149,7 @@ def get_attention_page_size_bytes(mesh, block_size, num_kv_heads, head_size,
     kv_cache_shape = get_kv_cache_shape_with_mesh(
         mesh=mesh,
         total_num_pages=1,
-        page_size=block_size,
+        block_size=block_size,
         actual_num_kv_heads=num_kv_heads,
         actual_head_dim=head_size,
         kv_dtype=jax_dtype,
