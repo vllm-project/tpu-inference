@@ -180,7 +180,7 @@ def _merge_model_status_text(status_v6, status_v7):
 
     if "❌" in s6 or "fail" in s6 or "❌" in s7 or "fail" in s7:
         return "❌ Failing"
-    if "✅" in s6 or "pass" in s6 or "✅" in s7 or "pass" in s7:
+    if ("✅" in s6 or "pass" in s6) and ("✅" in s7 or "pass" in s7):
         return "✅ Passing"
     if "⚠️" in s6 or "beta" in s6 or "⚠️" in s7 or "beta" in s7:
         return "⚠️ Beta"
@@ -308,15 +308,17 @@ def _find_quantization_status(weight, method, nightly_rows):
     for nr in matched:
         c = nr[3] if len(nr) > 3 else ""
         p = nr[4] if len(nr) > 4 else ""
-        if "unverified" in c.lower() or "untested" in c.lower() or "❓" in c:
-            overall_corr = "❓"
-        elif "fail" in c.lower() or "❌" in c:
+        if "fail" in c.lower() or "❌" in c:
             overall_corr = "❌"
+        elif ("unverified" in c.lower() or "untested" in c.lower()
+              or "❓" in c) and overall_corr != "❌":
+            overall_corr = "❓"
 
-        if "unverified" in p.lower() or "untested" in p.lower() or "❓" in p:
-            overall_perf = "❓"
-        elif "fail" in p.lower() or "❌" in p:
+        if "fail" in p.lower() or "❌" in p:
             overall_perf = "❌"
+        elif ("unverified" in p.lower() or "untested" in p.lower()
+              or "❓" in p) and overall_perf != "❌":
+            overall_perf = "❓"
 
     return merge_metrics(overall_corr, overall_perf)
 
