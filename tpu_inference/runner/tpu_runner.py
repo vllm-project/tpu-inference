@@ -123,7 +123,8 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._discard_sampled_tokens_req_indices = discard_sampled_tokens_req_indices
         self.logits_indices_selector: list[int] = logits_indices_selector
         self._logprobs_tensors = logprobs_tensors
-
+    
+    @time_function
     def get_output(self) -> ModelRunnerOutput:
         next_tokens_cpu = np.asarray(jax.device_get(self._next_tokens))
         if self.logits_indices_selector is not None:
@@ -703,7 +704,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         weight_ready_thread = threading.Thread(
             target=_block_until_weights_ready, daemon=True)
         weight_ready_thread.start()
-        weight_ready_thread.join(timeout=15)
+        weight_ready_thread.join(timeout=30)
         if weight_ready_thread.is_alive():
             logger.error("Model weights were not ready within 15 seconds. "
                          "Killing the process.")
@@ -759,6 +760,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                          intermediate_tensors)
         return output
 
+    @time_function
     def sample_tokens(
         self,
         grammar_output: "GrammarOutput | None",
@@ -799,6 +801,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             hidden_states, logits, aux_hidden_states, spec_decode_metadata,
             kv_connector_output, logits_indices_selector, padded_num_reqs)
 
+    @time_function
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
         # device_get should return immediately as we have scheduled it in previous function call.

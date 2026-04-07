@@ -514,7 +514,7 @@ class DPScheduler(SchedulerInterface):
             result = cloudpickle.loads(raw_bytes)
             end_time = time()
             total_time = end_time - start_time
-            if total_time > 0.2:
+            if total_time > 0.02:
                 pipe_wait = recv_time - start_time
                 deserialize = end_time - recv_time
                 logger.warning(

@@ -403,9 +403,10 @@ def time_function(func):
         result = func(*args, **kwargs)
         end_time = time.perf_counter()
         execution_time = end_time - start_time
-        logger.debug(
-            f"Function '{func.__name__}' executed in {execution_time:.4f} seconds."
-        )
+        if execution_time > 0.2:  # Log only if execution time is greater than 100ms
+            logger.info(
+                f"Function '{func.__name__}' executed in {execution_time:.4f} seconds."
+            )
         return result
 
     return wrapper
