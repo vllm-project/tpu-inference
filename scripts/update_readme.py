@@ -22,50 +22,58 @@ import re
 # This MUST match your file structure exactly.
 CSV_MAP = {
     "model_support": {
-        "v6_pytorch": "support_matrices/v6e/vllm/model_support_matrix.csv",
-        "v7_pytorch": "support_matrices/v7x/vllm/model_support_matrix.csv"
+        "v6_pytorch":
+        "support_matrices/release/v6e/vllm/model_support_matrix.csv",
+        "v7_pytorch":
+        "support_matrices/release/v7x/vllm/model_support_matrix.csv"
     },
     "core_features": {
-        "v6_flax": "support_matrices/v6e/flax_nnx/feature_support_matrix.csv",
-        "v6_pytorch": "support_matrices/v6e/vllm/feature_support_matrix.csv",
+        "v6_flax":
+        "support_matrices/release/v6e/flax_nnx/feature_support_matrix.csv",
+        "v6_pytorch":
+        "support_matrices/release/v6e/vllm/feature_support_matrix.csv",
         "v6_default":
-        "support_matrices/v6e/default/feature_support_matrix.csv",
-        "v7_flax": "support_matrices/v7x/flax_nnx/feature_support_matrix.csv",
-        "v7_pytorch": "support_matrices/v7x/vllm/feature_support_matrix.csv",
-        "v7_default": "support_matrices/v7x/default/feature_support_matrix.csv"
+        "support_matrices/release/v6e/default/feature_support_matrix.csv",
+        "v7_flax":
+        "support_matrices/release/v7x/flax_nnx/feature_support_matrix.csv",
+        "v7_pytorch":
+        "support_matrices/release/v7x/vllm/feature_support_matrix.csv",
+        "v7_default":
+        "support_matrices/release/v7x/default/feature_support_matrix.csv"
     },
     "parallelism": {
         "v6_flax":
-        "support_matrices/v6e/flax_nnx/parallelism_support_matrix.csv",
+        "support_matrices/release/v6e/flax_nnx/parallelism_support_matrix.csv",
         "v6_pytorch":
-        "support_matrices/v6e/vllm/parallelism_support_matrix.csv",
+        "support_matrices/release/v6e/vllm/parallelism_support_matrix.csv",
         "v7_flax":
-        "support_matrices/v7x/flax_nnx/parallelism_support_matrix.csv",
+        "support_matrices/release/v7x/flax_nnx/parallelism_support_matrix.csv",
         "v7_pytorch":
-        "support_matrices/v7x/vllm/parallelism_support_matrix.csv"
+        "support_matrices/release/v7x/vllm/parallelism_support_matrix.csv"
     },
     "quantization": {
         "static":
-        "support_matrices/v6e/vllm/quantization_support_matrix.csv",
+        "support_matrices/release/v6e/vllm/quantization_support_matrix.csv",
         "v6_flax":
-        "support_matrices/v6e/flax_nnx/quantization_support_matrix.csv",
+        "support_matrices/release/v6e/flax_nnx/quantization_support_matrix.csv",
         "v6_pytorch":
-        "support_matrices/v6e/vllm/quantization_support_matrix.csv",
+        "support_matrices/release/v6e/vllm/quantization_support_matrix.csv",
         "v6_default":
-        "support_matrices/v6e/default/quantization_support_matrix.csv",
+        "support_matrices/release/v6e/default/quantization_support_matrix.csv",
         "v7_flax":
-        "support_matrices/v7x/flax_nnx/quantization_support_matrix.csv",
+        "support_matrices/release/v7x/flax_nnx/quantization_support_matrix.csv",
         "v7_pytorch":
-        "support_matrices/v7x/vllm/quantization_support_matrix.csv",
+        "support_matrices/release/v7x/vllm/quantization_support_matrix.csv",
         "v7_default":
-        "support_matrices/v7x/default/quantization_support_matrix.csv"
+        "support_matrices/release/v7x/default/quantization_support_matrix.csv"
     },
-    "kernel_support": "support_matrices/v6e/vllm/kernel_support_matrix.csv",
+    "kernel_support":
+    "support_matrices/release/v6e/vllm/kernel_support_matrix.csv",
     "microbenchmarks": {
         "v6":
-        "support_matrices/v6e/default/kernel_support_matrix-microbenchmarks.csv",
+        "support_matrices/release/v6e/default/kernel_support_matrix-microbenchmarks.csv",
         "v7":
-        "support_matrices/v7x/default/kernel_support_matrix-microbenchmarks.csv"
+        "support_matrices/release/v7x/default/kernel_support_matrix-microbenchmarks.csv"
     }
 }
 
