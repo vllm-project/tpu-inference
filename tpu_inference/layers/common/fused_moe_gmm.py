@@ -21,7 +21,6 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.envs as envs
-from tpu_inference.kernels.gather import gather_reduce as gather_reduce_sc
 from tpu_inference.kernels.gather.ragged_gather import ragged_gather
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -120,65 +119,45 @@ def moe_gmm_local(
         shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR).sum()
         w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
     gmm1_res = gmm1_res[:, :w2.shape[1]]  # trim to hidden size if padded
+    gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
+                           group_offset)
 
+    batch_size = gmm2_res.shape[0]
     local_group_size = w1.shape[0]
     if local_group_size < group_sizes.size:
         mask = valid_rows_mask(
-            gmm1_res.shape[0],
+            gmm2_res.shape[0],
             group_sizes,
             group_offset,
             group_offset + local_group_size,
-        )[topk_argsort_revert_indices]
-
-    if gather_reduce_sc.is_supported_by_sc_gather_reduce(
-            gmm1_res.shape[0], sc_kernel_threshold):
-        gmm2_res = gmm_wrapper(gmm1_res,
-                               w2,
-                               w2_scale,
-                               w2_bias,
-                               group_sizes,
-                               group_offset,
-                               preferred_element_type=jnp.float32.dtype)
-
-        if local_group_size < group_sizes.size:
-            mask = mask.reshape(-1, topk)
-            topk_weights = jnp.where(mask, topk_weights, 0)
-
-        inds = topk_argsort_revert_indices
-        topk_weights = topk_weights.flatten().reshape(-1, 128)
-
-        token_hidden = gather_reduce_sc.sc_gather_reduce(
-            op=gmm2_res,
-            idx=inds,
-            reduce_group_size=topk,
-            topk_weights=topk_weights,
-            col_chunk_size=sc_kernel_col_chunk_size,
-        )
+        )[topk_argsort_revert_indices].reshape(-1, topk, 1)
     else:
-        gmm2_res = gmm_wrapper(gmm1_res,
-                               w2,
-                               w2_scale,
-                               w2_bias,
-                               group_sizes,
-                               group_offset,
-                               preferred_element_type=x.dtype)
+        mask = jnp.full((batch_size, ), True).reshape(-1, topk, 1)
 
-        # First run local reduction on topk experts owned by the rank for all tokens
-        token_topk_hidden = gmm2_res[topk_argsort_revert_indices].reshape(
+    chunk_size = 16384
+    out_list = []
+    for start in range(0, batch_size, chunk_size):
+        end = min(batch_size, start + chunk_size)
+        start_tok = start // topk
+        end_tok = end // topk
+
+        cur_indices = topk_argsort_revert_indices[start:end]
+        cur_topk_weights = topk_weights[start_tok:end_tok]
+        cur_mask = mask[start_tok:end_tok]
+
+        cur_sorted = gmm2_res[cur_indices].reshape(
             (-1, topk, gmm2_res.shape[-1]))
-        token_topk_hidden = token_topk_hidden * jnp.expand_dims(topk_weights,
-                                                                axis=-1)
 
-        if local_group_size < group_sizes.size:
-            mask = mask.reshape(-1, topk, 1)
-            token_topk_hidden = jnp.where(mask, token_topk_hidden, 0.0)
+        cur_topk_weights = jnp.expand_dims(cur_topk_weights, axis=-1)
+        cur_weighted = cur_sorted * cur_topk_weights
+        cur_masked = jnp.where(cur_mask, cur_weighted, 0.0)
+        cur_reduced = cur_masked.sum(axis=-2)
 
-        token_hidden = token_topk_hidden.sum(axis=-2)
-
-    reduction_axis = (ShardingAxisName.MLP_TENSOR
-                      if parallelism == "tp" else ShardingAxisName.EXPERT)
-    # Then global reduction on all ranks for all tokens and all experts
-    return jax.lax.psum(token_hidden, axis_name=reduction_axis).astype(x.dtype)
+        reduction_axis = (ShardingAxisName.MLP_TENSOR
+                          if parallelism == "tp" else ShardingAxisName.EXPERT)
+        out = jax.lax.psum(cur_reduced, axis_name=reduction_axis)
+        out_list.append(out)
+    return jnp.concat(out_list, axis=0)
 
 
 def tensor_parallel_gmm(
