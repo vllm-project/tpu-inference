@@ -62,7 +62,7 @@ def main(args: argparse.Namespace):
         return latency
 
     # Warmup
-    print("Warming up...")
+    print("Warming up up up...")
     warmup_latencies = []
     for _ in tqdm(range(args.num_iters_warmup), desc="Warmup iterations"):
         warmup_latencies.append(run_to_completion())
