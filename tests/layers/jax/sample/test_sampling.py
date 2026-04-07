@@ -33,6 +33,7 @@ class TestSampling:
         logits = jnp.array([[1.0, 2.0, 3.0], [3.0, 2.0, 1.0]],
                            dtype=jnp.float32)
         logprobs = compute_logprobs(logits)
+        
 
         # Expected values computed with scipy.special.log_softmax
         expected_logprobs = np.array(
@@ -139,7 +140,7 @@ class TestProcessedLogprobs:
                                  temperature,
                                  dtype=jnp.float32),
             top_k=jnp.full((batch_size, ), top_k, dtype=jnp.int32),
-            top_p=jnp.full((batch_size, ), top_p, dtype=jnp.float32),
+            top_p=jnp.full((batch_size, ), top_p, dtype=jnp.bfloat),
             _cache_collision_dummy=None,
             do_sampling=do_sampling,
             logprobs=True,
@@ -157,7 +158,7 @@ class TestProcessedLogprobs:
 
     def test_processed_logprobs_with_temperature(self):
         """Temperature scaling should change the logprobs distribution."""
-        logits = jnp.array([[1.0, 2.0, 3.0]], dtype=jnp.float32)
+        logits = jnp.array([[1.0, 2.0, 3.0]], dtype=jnp.bfloat16)
 
         raw_logprobs = compute_logprobs(logits)
 
@@ -177,7 +178,7 @@ class TestProcessedLogprobs:
     def test_processed_logprobs_matches_manual_temperature(self):
         """Verify processed_logprobs produces the same result as manually
         dividing by temperature then computing log_softmax."""
-        logits = jnp.array([[1.0, 2.0, 3.0, 0.5]], dtype=jnp.float32)
+        logits = jnp.array([[1.0, 2.0, 3.0, 0.5]], dtype=jnp.bfloat16)
         temperature = 0.8
 
         metadata = self._make_sampling_metadata(1, temperature=temperature)
@@ -193,7 +194,7 @@ class TestProcessedLogprobs:
 
     def test_processed_logprobs_with_topk(self):
         """After top-k masking, tokens outside top-k should get -inf logprobs."""
-        logits = jnp.array([[1.0, 5.0, 3.0, 2.0, 4.0]], dtype=jnp.float32)
+        logits = jnp.array([[1.0, 5.0, 3.0, 2.0, 4.0]], dtype=jnp.bfloat16)
 
         metadata = self._make_sampling_metadata(1, temperature=1.0, top_k=2)
         _, processed_logits = sample(jax.random.PRNGKey(0),
@@ -213,7 +214,7 @@ class TestProcessedLogprobs:
     def test_processed_logprobs_with_topp(self):
         """After top-p filtering, low-probability tokens should be masked."""
         # Make logits where one token dominates.
-        logits = jnp.array([[10.0, 1.0, 0.0, -1.0]], dtype=jnp.float32)
+        logits = jnp.array([[10.0, 1.0, 0.0, -1.0]], dtype=jnp.bfloat16)
 
         metadata = self._make_sampling_metadata(1, temperature=1.0, top_p=0.5)
         _, processed_logits = sample(jax.random.PRNGKey(0),
@@ -227,7 +228,7 @@ class TestProcessedLogprobs:
     def test_processed_logprobs_greedy_fallback(self):
         """For greedy requests (temperature < eps), processed logprobs should
         match raw logprobs."""
-        logits = jnp.array([[1.0, 2.0, 3.0]], dtype=jnp.float32)
+        logits = jnp.array([[1.0, 2.0, 3.0]], dtype=jnp.bfloat16)
 
         raw_logprobs = compute_logprobs(logits)
 
