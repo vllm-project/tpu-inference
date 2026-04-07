@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import dataclasses
 from typing import TYPE_CHECKING, List
 
 import jax
@@ -386,14 +387,31 @@ class KVCacheManager:
                     break
 
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
+            if duplicate_shared_layers:
+                total_group_page_size = 0
+                for name in kv_cache_tensor.shared_by:
+                    spec = layer_name_to_spec[name]
+                    # MambaSpec has a padded page size to unify the cache size
+                    # with full attention layers. But when duplicating the KV
+                    # cache for each layer, use the unpadded page size for
+                    # calculating the number of blocks, else HBM is underutilized.
+                    if isinstance(spec, MambaSpec):
+                        total_group_page_size += dataclasses.replace(
+                            spec, page_size_padded=None).page_size_bytes
+                    else:
+                        total_group_page_size += spec.page_size_bytes
+                num_blocks = kv_cache_tensor.size // total_group_page_size
+            else:
+                # If sharing KV cache, compute `num_blocks` using the page size
+                # of the first layer.
+                page_size_bytes = layer_name_to_spec[
+                    kv_cache_tensor.shared_by[0]].page_size_bytes
+                assert kv_cache_tensor.size % page_size_bytes == 0
+                num_blocks = kv_cache_tensor.size // page_size_bytes
+
             for j, layer_name in enumerate(kv_cache_tensor.shared_by):
                 layer_spec = layer_name_to_spec[layer_name]
 
-                page_size_bytes = layer_spec.page_size_bytes
-                assert kv_cache_tensor.size % page_size_bytes == 0
-                num_blocks = kv_cache_tensor.size // page_size_bytes
-                if duplicate_shared_layers:
-                    num_blocks //= num_shared_layers
                 sharding_config = self.runner.vllm_config.sharding_config
                 if self.use_mla and not self.runner.vllm_config.additional_config.get(
                         "sharding", {}).get("sharding_strategy", {}).get(
