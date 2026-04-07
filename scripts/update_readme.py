@@ -58,14 +58,10 @@ CSV_MAP = {
         "support_matrices/release/v6e/flax_nnx/quantization_support_matrix.csv",
         "v6_pytorch":
         "support_matrices/release/v6e/vllm/quantization_support_matrix.csv",
-        "v6_default":
-        "support_matrices/release/v6e/default/quantization_support_matrix.csv",
         "v7_flax":
         "support_matrices/release/v7x/flax_nnx/quantization_support_matrix.csv",
         "v7_pytorch":
-        "support_matrices/release/v7x/vllm/quantization_support_matrix.csv",
-        "v7_default":
-        "support_matrices/release/v7x/default/quantization_support_matrix.csv"
+        "support_matrices/release/v7x/vllm/quantization_support_matrix.csv"
     },
     "kernel_support":
     "support_matrices/release/v6e/vllm/kernel_support_matrix.csv",
