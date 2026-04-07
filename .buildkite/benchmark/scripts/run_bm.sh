@@ -41,11 +41,28 @@ if [[ "${BUILDKITE:-false}" == "true" ]]; then
   cleanup_artifact_log
 fi
 
+report_and_exit() {
+  local exit_code=${1:-0}
+  local record_id="${RECORD_ID:-local}"
+  local report_exit_code
+
+  echo "--- Calling report_result.sh for RECORD_ID=${record_id}"
+  bash .buildkite/benchmark/scripts/report_result.sh "$record_id"
+  report_exit_code=$?
+
+  # Exit with the reporting script's failure code if it did not succeed.
+  if [ "$report_exit_code" -ne 0 ]; then
+    exit "$report_exit_code"
+  fi
+
+  # Exit with the originally provided exit code.
+  exit "$exit_code"
+}
+
 echo "--- Preparing Local Artifacts Folder"
 mkdir -p "$ARTIFACT_FOLDER"
 mkdir -p "$LOG_FOLDER"
 mkdir -p "$PROFILE_FOLDER"
-
 
 CASE_FILE="$1"
 TARGET_CASE_NAME=${2:-""}
@@ -292,5 +309,4 @@ echo "✓ Throughput: $best_throughput"
 echo "✓ P99 E2EL: $best_e2el"
 echo "======================================"
 
-echo "--- Calling report_result.sh for RECORD_ID=${RECORD_ID}"
-bash .buildkite/benchmark/scripts/report_result.sh "$RECORD_ID"
+report_and_exit 0
