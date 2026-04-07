@@ -43,7 +43,7 @@ def create_benchmark_group(case_data, global_env, file_path):
         child_steps.append({
             "label": f"{agent} {case_name}",
             "command":
-            f"bash .buildkite/benchmark/scripts/test_run.sh {file_path}",
+            f"bash .buildkite/benchmark/scripts/run_job.sh {file_path}",
             "env": {
                 **combined_env, "TARGET_CASE_NAME": case_name,
                 "ci_queue": agent

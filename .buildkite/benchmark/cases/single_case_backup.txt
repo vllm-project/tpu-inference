@@ -6,6 +6,7 @@
     "ARTIFACT_REPO": "vllm-tpu-bm-bk",
     "GCP_INSTANCE_ID": "vllm-bm-inst",
     "GCP_DATABASE_ID": "vllm-bm-bk-runs",
+
     "VLLM_USE_V1": "1",
     "MODELTAG": "NEW",
     "EXPECTED_ETEL": 3600000,
@@ -13,6 +14,9 @@
     "INPUT_LEN": 4096,
     "OUTPUT_LEN": 1024,
     "PREFIX_LEN": 3600
+  },
+  "extra_env": {
+    "VLLM_USE_V1": "1"
   },
   "ci_queue": ["tpu_v6e_queue", "tpu_v7x_2_queue"],
   "server_command_options": {
@@ -29,19 +33,24 @@
       "gpu-memory-utilization": 0.98,
       "async-scheduling": true,
       "additional-config": "{\"quantization\": { \"qwix\": { \"rules\": [{ \"module_path\": \".*\", \"weight_qtype\": \"float8_e4m3fn\", \"act_qtype\": \"float8_e4m3fn\"}]}}}"
+    },
+    "extra_args": {
+      "kv-cache-dtype": "fp8",
+      "gpu-memory-utilization": 0.98
     }
   },
   "client_command_options": {
     "command_type": "vllm_bench_serve",
     "args": {
       "model": "Qwen/Qwen3-4B",
-      "backend": "vllm",
+      "backend":"vllm",
       "request-rate": "inf",
       "dataset-name": "custom",
-      "dataset-path": "/workspace/artifacts/dataset/Qwen3-4B/inlen4096_outlen1024_prefixlen3600.jsonl",
+      "dataset-path":"/workspace/artifacts/dataset/Qwen3-4B/inlen4096_outlen1024_prefixlen3600.jsonl",
       "num-prompts": 1000,
       "percentile-metrics": "ttft,tpot,itl,e2el",
       "ignore-eos": true,
+      "input": "",
       "custom-output-len": 1024,
       "skip-chat-template": true
     }

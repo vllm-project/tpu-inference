@@ -34,11 +34,8 @@ if [ $# -ne 1 ]; then
   exit 1
 fi
 
-# Inside Docker: Use DOCKER_ARTIFACT_FOLDER and DOCKER_LOG_FOLDER
-# Outside Docker (Local): Default to 'artifacts' and 'artifacts/temp_logs'
-ARTIFACT_ROOT="${DOCKER_ARTIFACT_FOLDER:-artifacts}"
-RESULT_FILE="${ARTIFACT_ROOT}/${RECORD_ID}.result"
-LOG_FOLDER="${DOCKER_LOG_FOLDER:-artifacts/temp_logs}"
+# Define Result_file name
+RESULT_FILE="${ARTIFACT_FOLDER}/${RECORD_ID}.result"
 
 # Temp write to another bucket
 # REMOTE_LOG_ROOT="gs://$GCS_BUCKET/job_logs/$RECORD_ID/"
@@ -46,9 +43,9 @@ REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
 
 (
   printf "[DEBUG] Start scan artifacts folder...\n"
-  printf "[INFO] ARTIFACT_ROOT=\n%s\n" "$ARTIFACT_ROOT"
-  if [ -d "$ARTIFACT_ROOT" ]; then
-    printf "[DEBUG] ls $ARTIFACT_ROOT=\n%s\n" "$(ls "$ARTIFACT_ROOT")"
+  printf "[INFO] ARTIFACT_FOLDER=\n%s\n" "$ARTIFACT_FOLDER"
+  if [ -d "$ARTIFACT_FOLDER" ]; then
+    printf "[DEBUG] ls $ARTIFACT_FOLDER=\n%s\n" "$(ls "$ARTIFACT_FOLDER")"
   fi
   printf "[INFO] LOG_FOLDER=\n%s\n" "$LOG_FOLDER"
 
