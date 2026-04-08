@@ -38,7 +38,7 @@
       "backend": "vllm",
       "request-rate": "inf",
       "dataset-name": "custom",
-      "dataset-path": "/workspace/artifacts/dataset/Qwen3-4B/inlen4096_outlen1024_prefixlen3600.jsonl",
+      "dataset-path": "/workspace/tpu_inference/artifacts/dataset/Qwen3-4B/inlen4096_outlen1024_prefixlen3600.jsonl",
       "num-prompts": 1000,
       "percentile-metrics": "ttft,tpot,itl,e2el",
       "ignore-eos": true,

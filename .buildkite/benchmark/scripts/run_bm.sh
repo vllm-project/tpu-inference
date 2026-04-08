@@ -226,7 +226,7 @@ run_benchmark(){
     fi
   fi
 
-  echo "[DEBUG] Executing client_cmd: ${CLIENT_CMD[*]} > $BM_LOG" 2>&1
+  echo "[DEBUG] Executing client_cmd: ${CLIENT_CMD[*]} > $BM_LOG" >&2
   # Execute the array directly, preserving strict argument boundaries
   "${CLIENT_CMD[@]}" > "$BM_LOG" 2>&1
 
