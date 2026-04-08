@@ -200,7 +200,7 @@ run_benchmark(){
   echo "logging to $BM_LOG"
   echo
 
-  local request_rate=$1
+  local request_rate=${1:-""}
 
   if [[ -n "$request_rate" ]]; then
     local found=false
