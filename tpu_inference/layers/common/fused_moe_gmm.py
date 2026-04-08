@@ -426,10 +426,10 @@ def fused_moe_func(
         topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
-    if use_ep:
-        # All-gather topk weights for attention dp
-        topk_indices, topk_weights = all_gather_topk_indices_and_weights(
-            topk_indices, topk_weights, dtype, mesh)
+    # TODO(gxd3): we should call all_gather_topk_indices_and_weights only if
+    # attention dp is used.
+    topk_indices, topk_weights = all_gather_topk_indices_and_weights(
+        topk_indices, topk_weights, dtype, mesh)
     topk_weights = topk_weights.astype(dtype)
     topk_weights = jax.lax.with_sharding_constraint(
         topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
