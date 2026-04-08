@@ -107,7 +107,7 @@ contains_element () {
 DATASET_DIR="$ARTIFACT_FOLDER/dataset"
 mkdir -p "$DATASET_DIR"
 
-DATASETS=("custom-token" "mmlu" "mlperf" "bench-custom-token" "math500" "bench-custom-mm")
+DATASETS=("custom" "custom-token" "mmlu" "mlperf" "bench-custom-token" "math500" "bench-custom-mm")
 # shellcheck disable=SC2153
 if contains_element "$DATASET" "${DATASETS[@]}"; then
   echo "Syncing dataset for $DATASET"
@@ -124,7 +124,7 @@ if contains_element "$DATASET" "${DATASETS[@]}"; then
     "math500")
       gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/math500/math500.jsonl "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
       ;;
-    "bench-custom-token"|"bench-custom-mm")
+    "custom"|"bench-custom-token"|"bench-custom-mm")
       gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/bench-dataset/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
       ;;
   esac
