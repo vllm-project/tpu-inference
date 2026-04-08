@@ -76,7 +76,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-04-08 03:19 PM UTC*
+*Last Updated: 2026-04-08 03:30 PM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -151,7 +151,7 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td>async scheduler</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
     </tr>
     <tr>
@@ -168,9 +168,9 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>hybrid kv cache</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>KV cache host offloading</td>
@@ -192,9 +192,9 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>Multimodal Inputs</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>Out-of-tree model support</td>
@@ -216,9 +216,9 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>sampling_params</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>Single Program Multi Data</td>
@@ -235,7 +235,7 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td>Speculative Decoding: Eagle3</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
@@ -299,16 +299,16 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>PP</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>SP&nbsp;(<a href="https://github.com/vllm-project/tpu-inference/issues/1749">vote&nbsp;to&nbsp;prioritize</a>)</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
@@ -344,35 +344,35 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>FP4 W4A16</td>
       <td>mxfp4</td>
       <td>v7</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>FP8 W8A8</td>
       <td>compressed-tensor</td>
       <td>v7</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>FP8 W8A16</td>
       <td>compressed-tensor</td>
       <td>v7</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>INT4 W4A16</td>
       <td>awq</td>
       <td>v5, v6</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>INT8 W8A8</td>
       <td>compressed-tensor</td>
       <td>v5, v6</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
   </tbody>
