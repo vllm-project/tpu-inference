@@ -27,13 +27,16 @@ def create_benchmark_group(case_data,
     """
     Creates a Buildkite Group step.
     """
+    # Extract filename without extension to be used as the step label
+    file_basename = os.path.splitext(os.path.basename(file_path))[0]
+
     # Identify Case Name
     model_name = case_data.get("server_command_options",
                                {}).get("args", {}).get("model", "unknown")
     case_name = case_data.get("case_name", model_name)
 
     # Extract TPU types from the case data
-    ci_queues = case_data.get("ci_queue")
+    ci_queues = case_data.get("ci_queue", [])
 
     # Merge Environment Variables (Global + Case Specific)
     combined_env = {**global_env, **case_data.get("env", {})}
@@ -45,12 +48,16 @@ def create_benchmark_group(case_data,
         # Build the environment for this specific step
         step_env = {**combined_env, "ci_queue": agent}
 
-        if not is_single_case:
+        if is_single_case:
+            # Use the filename without extension as the step label
+            step_label = f"{agent} {file_basename}"
+        else:
             step_env["TARGET_CASE_NAME"] = case_name
+            step_label = f"{agent} {case_name}"
 
         child_steps.append({
             "label":
-            f"{agent} {case_name}",
+            step_label,
             "env":
             step_env,
             "agents": {
