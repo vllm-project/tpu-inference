@@ -131,8 +131,6 @@ def main():
     print(f"export MAX_NUM_SEQS=\"{max_num_seqs}\"")
     max_num_batched_tokens = srv_opts.get("args", {}).get("max-num-batched-tokens", {})
     print(f"export MAX_NUM_BATCHED_TOKENS=\"{max_num_batched_tokens}\"")
-    tensor_parallel_size = srv_opts.get("args", {}).get("tensor-parallel-size", {})
-    print(f"export TENSOR_PARALLEL_SIZE=\"{tensor_parallel_size}\"")
     max_model_len = srv_opts.get("args", {}).get("max-model-len", {})
     print(f"export MAX_MODEL_LEN=\"{max_model_len}\"")
 
@@ -145,18 +143,24 @@ def main():
     # Output execution strategy based on command_type
     if cli_cmd_type == "lm_eval":
         # Resolve queue-specific args before building command
-        srv_raw_args = srv_opts.get("args", {})
-        srv_resolved_args = resolve_queue_args(srv_raw_args, current_queue)
+        cli_raw_args = cli_opts.get("args", {})
+        cli_resolved_args = resolve_queue_args(cli_raw_args, current_queue)
 
         print("export COMMAND_TYPE=\"lm_eval\"")
-        lm_cmd = build_command(cli_cmd_type, srv_resolved_args)
+        lm_cmd = build_command(cli_cmd_type, cli_resolved_args)
         quoted_lm_cmd = ' '.join(
             shlex.quote(arg) for arg in shlex.split(lm_cmd))
         print(f"LM_EVAL_CMD=({quoted_lm_cmd})")
+
+        tensor_parallel_size = cli_resolved_args.get("tensor-parallel-size", {})
+        print(f"export TENSOR_PARALLEL_SIZE=\"{tensor_parallel_size}\"")
     else:
         srv_cmd_type = srv_opts.get("command_type", "")
-        srv_cmd = build_command(srv_cmd_type, resolve_queue_args(srv_opts.get("args", {}), current_queue))
-        cli_cmd = build_command(cli_cmd_type, resolve_queue_args(cli_opts.get("args", {}), current_queue))
+        srv_resolved_args = resolve_queue_args(srv_opts.get("args", {}), current_queue)
+        cli_resolved_args = resolve_queue_args(cli_opts.get("args", {}), current_queue)
+
+        srv_cmd = build_command(srv_cmd_type, srv_resolved_args)
+        cli_cmd = build_command(cli_cmd_type, cli_resolved_args)
 
         print("export COMMAND_TYPE=\"server_client\"")
         quoted_srv_cmd = ' '.join(
@@ -165,6 +169,9 @@ def main():
         quoted_cli_cmd = ' '.join(
             shlex.quote(arg) for arg in shlex.split(cli_cmd))
         print(f"CLIENT_CMD=({quoted_cli_cmd})")
+
+        tensor_parallel_size = srv_resolved_args.get("tensor-parallel-size", {})
+        print(f"export TENSOR_PARALLEL_SIZE=\"{tensor_parallel_size}\"")
 
 
 if __name__ == '__main__':

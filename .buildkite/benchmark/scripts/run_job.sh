@@ -19,9 +19,10 @@ readonly EXIT_SUCCESS=0
 readonly EXIT_FAILURE=1
 
 CASE_FILE="$1"
+TARGET_CASE_NAME=${2:-""}
 
 if [ -z "$CASE_FILE" ]; then
-    echo "Usage: $0 <case.json>"
+    echo "Usage: $0 <case.json> [TARGET_CASE_NAME]"
     exit 1
 fi
 
@@ -129,7 +130,7 @@ BM_JOB_STATUS=$EXIT_SUCCESS
 .buildkite/scripts/run_in_docker.sh bash -c "
   echo always > /sys/kernel/mm/transparent_hugepage/enabled && \
   chmod +x .buildkite/benchmark/scripts/run_bm.sh && \
-  .buildkite/benchmark/scripts/run_bm.sh $CASE_FILE" || {
+  .buildkite/benchmark/scripts/run_bm.sh $CASE_FILE $TARGET_CASE_NAME" || {
     echo "Error running benchmark job in docker."
     BM_JOB_STATUS=$EXIT_FAILURE
 }

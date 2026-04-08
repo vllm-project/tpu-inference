@@ -51,9 +51,11 @@ def create_benchmark_group(case_data,
         if is_single_case:
             # Use the filename without extension as the step label
             step_label = f"{agent} {file_basename}"
+            case_parameter = f"{file_path}"
         else:
             step_env["TARGET_CASE_NAME"] = case_name
             step_label = f"{agent} {case_name}"
+            case_parameter = f"{file_path} {case_name}"
 
         child_steps.append({
             "label":
@@ -64,7 +66,7 @@ def create_benchmark_group(case_data,
                 "queue": agent
             },
             "command":
-            f"bash .buildkite/benchmark/scripts/run_job.sh {file_path}",
+            f"bash .buildkite/benchmark/scripts/run_job.sh {case_parameter}",
         })
 
     return {"group": case_name, "key": safe_key, "steps": child_steps}

@@ -15,6 +15,14 @@
 
 set -euo pipefail
 
+CASE_FILE="$1"
+TARGET_CASE_NAME=${2:-""}
+
+if [ -z "$CASE_FILE" ]; then
+    echo "Usage: $0 <case.json> [TARGET_CASE_NAME]"
+    exit 1
+fi
+
 if ! command -v gcloud &> /dev/null; then
   echo "gcloud not found. Installing Google Cloud SDK..."
   apt-get update && apt-get install -y gnupg curl
@@ -63,14 +71,6 @@ echo "--- Preparing Local Artifacts Folder"
 mkdir -p "$ARTIFACT_FOLDER"
 mkdir -p "$LOG_FOLDER"
 mkdir -p "$PROFILE_FOLDER"
-
-CASE_FILE="$1"
-TARGET_CASE_NAME=${2:-""}
-
-if [ -z "$CASE_FILE" ]; then
-    echo "Usage: $0 <case.json> [TARGET_CASE_NAME]"
-    exit 1
-fi
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_PARSER="$DIR/parser_case.py"
