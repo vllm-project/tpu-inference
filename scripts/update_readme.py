@@ -19,57 +19,106 @@ import re
 
 # --- CONFIGURATION ---
 # This dictionary maps the "markers" in your README to your CSV files.
-# This MUST match your file structure exactly.
 CSV_MAP = {
-    "model_support": {
-        "v6_pytorch":
-        "support_matrices/release/v6e/vllm/model_support_matrix.csv",
-        "v7_pytorch":
-        "support_matrices/release/v7x/vllm/model_support_matrix.csv"
+    "release": {
+        "model_support": {
+            "v6_pytorch":
+            "support_matrices/release/v6e/vllm/model_support_matrix.csv",
+            "v7_pytorch":
+            "support_matrices/release/v7x/vllm/model_support_matrix.csv"
+        },
+        "core_features": {
+            "v6_flax":
+            "support_matrices/release/v6e/flax_nnx/feature_support_matrix.csv",
+            "v6_pytorch":
+            "support_matrices/release/v6e/vllm/feature_support_matrix.csv",
+            "v6_default":
+            "support_matrices/release/v6e/default/feature_support_matrix.csv",
+            "v7_flax":
+            "support_matrices/release/v7x/flax_nnx/feature_support_matrix.csv",
+            "v7_pytorch":
+            "support_matrices/release/v7x/vllm/feature_support_matrix.csv",
+            "v7_default":
+            "support_matrices/release/v7x/default/feature_support_matrix.csv"
+        },
+        "parallelism": {
+            "v6_flax":
+            "support_matrices/release/v6e/flax_nnx/parallelism_support_matrix.csv",
+            "v6_pytorch":
+            "support_matrices/release/v6e/vllm/parallelism_support_matrix.csv",
+            "v7_flax":
+            "support_matrices/release/v7x/flax_nnx/parallelism_support_matrix.csv",
+            "v7_pytorch":
+            "support_matrices/release/v7x/vllm/parallelism_support_matrix.csv"
+        },
+        "quantization": {
+            "static":
+            "support_matrices/release/v6e/vllm/quantization_support_matrix.csv",
+            "v6_flax":
+            "support_matrices/release/v6e/flax_nnx/quantization_support_matrix.csv",
+            "v6_pytorch":
+            "support_matrices/release/v6e/vllm/quantization_support_matrix.csv",
+            "v7_flax":
+            "support_matrices/release/v7x/flax_nnx/quantization_support_matrix.csv",
+            "v7_pytorch":
+            "support_matrices/release/v7x/vllm/quantization_support_matrix.csv"
+        },
+        "microbenchmarks": {
+            "v6":
+            "support_matrices/release/v6e/default/kernel_support_matrix-microbenchmarks.csv",
+            "v7":
+            "support_matrices/release/v7x/default/kernel_support_matrix-microbenchmarks.csv"
+        }
     },
-    "core_features": {
-        "v6_flax":
-        "support_matrices/release/v6e/flax_nnx/feature_support_matrix.csv",
-        "v6_pytorch":
-        "support_matrices/release/v6e/vllm/feature_support_matrix.csv",
-        "v6_default":
-        "support_matrices/release/v6e/default/feature_support_matrix.csv",
-        "v7_flax":
-        "support_matrices/release/v7x/flax_nnx/feature_support_matrix.csv",
-        "v7_pytorch":
-        "support_matrices/release/v7x/vllm/feature_support_matrix.csv",
-        "v7_default":
-        "support_matrices/release/v7x/default/feature_support_matrix.csv"
-    },
-    "parallelism": {
-        "v6_flax":
-        "support_matrices/release/v6e/flax_nnx/parallelism_support_matrix.csv",
-        "v6_pytorch":
-        "support_matrices/release/v6e/vllm/parallelism_support_matrix.csv",
-        "v7_flax":
-        "support_matrices/release/v7x/flax_nnx/parallelism_support_matrix.csv",
-        "v7_pytorch":
-        "support_matrices/release/v7x/vllm/parallelism_support_matrix.csv"
-    },
-    "quantization": {
-        "static":
-        "support_matrices/release/v6e/vllm/quantization_support_matrix.csv",
-        "v6_flax":
-        "support_matrices/release/v6e/flax_nnx/quantization_support_matrix.csv",
-        "v6_pytorch":
-        "support_matrices/release/v6e/vllm/quantization_support_matrix.csv",
-        "v7_flax":
-        "support_matrices/release/v7x/flax_nnx/quantization_support_matrix.csv",
-        "v7_pytorch":
-        "support_matrices/release/v7x/vllm/quantization_support_matrix.csv"
-    },
-    "kernel_support":
-    "support_matrices/release/v6e/vllm/kernel_support_matrix.csv",
-    "microbenchmarks": {
-        "v6":
-        "support_matrices/release/v6e/default/kernel_support_matrix-microbenchmarks.csv",
-        "v7":
-        "support_matrices/release/v7x/default/kernel_support_matrix-microbenchmarks.csv"
+    "nightly": {
+        "model_support": {
+            "v6_pytorch":
+            "support_matrices/nightly/v6e/vllm/model_support_matrix.csv",
+            "v7_pytorch":
+            "support_matrices/nightly/v7x/vllm/model_support_matrix.csv"
+        },
+        "core_features": {
+            "v6_flax":
+            "support_matrices/nightly/v6e/flax_nnx/feature_support_matrix.csv",
+            "v6_pytorch":
+            "support_matrices/nightly/v6e/vllm/feature_support_matrix.csv",
+            "v6_default":
+            "support_matrices/nightly/v6e/default/feature_support_matrix.csv",
+            "v7_flax":
+            "support_matrices/nightly/v7x/flax_nnx/feature_support_matrix.csv",
+            "v7_pytorch":
+            "support_matrices/nightly/v7x/vllm/feature_support_matrix.csv",
+            "v7_default":
+            "support_matrices/nightly/v7x/default/feature_support_matrix.csv"
+        },
+        "parallelism": {
+            "v6_flax":
+            "support_matrices/nightly/v6e/flax_nnx/parallelism_support_matrix.csv",
+            "v6_pytorch":
+            "support_matrices/nightly/v6e/vllm/parallelism_support_matrix.csv",
+            "v7_flax":
+            "support_matrices/nightly/v7x/flax_nnx/parallelism_support_matrix.csv",
+            "v7_pytorch":
+            "support_matrices/nightly/v7x/vllm/parallelism_support_matrix.csv"
+        },
+        "quantization": {
+            "static":
+            "support_matrices/nightly/v6e/vllm/quantization_support_matrix.csv",
+            "v6_flax":
+            "support_matrices/nightly/v6e/flax_nnx/quantization_support_matrix.csv",
+            "v6_pytorch":
+            "support_matrices/nightly/v6e/vllm/quantization_support_matrix.csv",
+            "v7_flax":
+            "support_matrices/nightly/v7x/flax_nnx/quantization_support_matrix.csv",
+            "v7_pytorch":
+            "support_matrices/nightly/v7x/vllm/quantization_support_matrix.csv"
+        },
+        "microbenchmarks": {
+            "v6":
+            "support_matrices/nightly/v6e/default/kernel_support_matrix-microbenchmarks.csv",
+            "v7":
+            "support_matrices/nightly/v7x/default/kernel_support_matrix-microbenchmarks.csv"
+        }
     }
 }
 
@@ -710,48 +759,46 @@ def _process_quantization(file_sources):
 
 
 def update_readme():
-    """Finds markers in README.md and replaces content with fresh tables."""
+    """Finds markers in README_dual.md and replaces content with fresh tables."""
     with open(README_PATH, "r", encoding="utf-8") as f:
         content = f.read()
 
-    for section_key, file_sources in CSV_MAP.items():
-        if section_key == "model_support":
-            new_table = _process_model_support(file_sources)
-        elif section_key == "core_features":
-            new_table = _process_core_features(file_sources)
-        elif section_key == "parallelism":
-            new_table = _process_parallelism(file_sources)
-        elif section_key == "quantization":
-            new_table = _process_quantization(file_sources)
-        elif section_key == "microbenchmarks":
-            new_table = _process_microbenchmarks(file_sources)
-        else:
-            sources = file_sources if isinstance(file_sources,
-                                                 list) else [file_sources]
-            headers, all_data = [], []
-            for file_path in sources:
-                h, d = read_csv_data(file_path)
-                if h:
-                    if not headers:
-                        headers = h
-                    all_data.extend(d)
-            new_table = generate_markdown_table(headers, all_data)
+    for type_key in ["release", "nightly"]:
+        type_map = CSV_MAP[type_key]
+        for section_key, file_sources in type_map.items():
+            if section_key == "model_support":
+                new_table = _process_model_support(file_sources)
+            elif section_key == "core_features":
+                new_table = _process_core_features(file_sources)
+            elif section_key == "parallelism":
+                new_table = _process_parallelism(file_sources)
+            elif section_key == "quantization":
+                new_table = _process_quantization(file_sources)
+            elif section_key == "microbenchmarks":
+                new_table = _process_microbenchmarks(file_sources)
+            else:
+                continue
 
-        if section_key == "microbenchmarks":
-            new_table += "\n\n> **Note:**\n> - *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*"
-        elif section_key == "quantization":
-            new_table += "\n\n> **Note:**\n> - *This table only tests checkpoint loading compatibility.*"
+            if section_key == "microbenchmarks":
+                new_table += "\n\n> **Note:**\n> - *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*"
+            elif section_key == "quantization":
+                new_table += "\n\n> **Note:**\n> - *This table only tests checkpoint loading compatibility.*"
 
-        os.makedirs("docs/includes", exist_ok=True)
-        snippet_path = os.path.join("docs", "includes", f"{section_key}.md")
-        with open(snippet_path, "w", encoding="utf-8") as f:
-            f.write(new_table.strip() + "\n")
+            os.makedirs("docs/includes", exist_ok=True)
+            snippet_path = os.path.join("docs", "includes",
+                                        f"{type_key}_{section_key}.md")
+            with open(snippet_path, "w", encoding="utf-8") as f:
+                f.write(new_table.strip() + "\n")
 
-        start_marker, end_marker = f"<!-- START: {section_key} -->", f"<!-- END: {section_key} -->"
-        pattern = f"({re.escape(start_marker)})(.*?)({re.escape(end_marker)})"
-        if start_marker in content:
-            replacement = f"\\1\n{new_table}\n\\3"
-            content = re.sub(pattern, replacement, content, flags=re.DOTALL)
+            start_marker = f"<!-- START: {type_key}_{section_key} -->"
+            end_marker = f"<!-- END: {type_key}_{section_key} -->"
+            pattern = f"({re.escape(start_marker)})(.*?)({re.escape(end_marker)})"
+            if start_marker in content:
+                replacement = f"\\1\n{new_table}\n\\3"
+                content = re.sub(pattern,
+                                 replacement,
+                                 content,
+                                 flags=re.DOTALL)
 
     current_time = datetime.datetime.now(
         datetime.timezone.utc).strftime("%Y-%m-%d %I:%M %p UTC")
@@ -760,7 +807,9 @@ def update_readme():
 
     with open(README_PATH, "w", encoding="utf-8") as f:
         f.write(content)
-    print("✅ README.md and MkDocs snippets have been automatically updated.")
+    print(
+        f"✅ {README_PATH} and MkDocs snippets have been automatically updated."
+    )
 
 
 if __name__ == "__main__":

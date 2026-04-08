@@ -76,7 +76,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-04-08 03:19 PM UTC*
+*Last Updated: 2026-04-08 07:43 PM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -93,9 +93,13 @@ Below is the live status of our supported models, features, and kernels. Click o
 <br>
 
 <details open markdown="1">
+<summary><b> 🚀&nbsp; Release Support Matrix </b></summary>
+<ul>
+  <li>
+<details open markdown="1">
 <summary><b> ✅ Tested Models </b></summary>
 
-<!-- START: model_support -->
+<!-- START: release_model_support -->
 | Model | Type | Unit&nbsp;Test | Correctness&nbsp;Test | Performance&nbsp;Test |
 | --- | --- | --- | --- | --- |
 | [deepseek-ai/DeepSeek-OCR](https://huggingface.co/deepseek-ai/DeepSeek-OCR) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
@@ -126,10 +130,11 @@ Below is the live status of our supported models, features, and kernels. Click o
 | [Qwen/Qwen3_5-397B-A17B](https://huggingface.co/Qwen/Qwen3_5-397B-A17B) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
 | [zai-org/GLM-5](https://huggingface.co/zai-org/GLM-5) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
 
-<!-- END: model_support -->
+<!-- END: release_model_support -->
 
 </details>
-
+  </li>
+  <li>
 <details open markdown="1">
 <summary><b> 🚀&nbsp; Advanced Capabilities </b></summary>
 <ul>
@@ -137,7 +142,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <details open markdown="1">
 <summary>Core Features</summary>
 
-<!-- START: core_features -->
+<!-- START: release_core_features -->
 <table>
   <thead>
     <tr>
@@ -252,7 +257,7 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
   </tbody>
 </table>
-<!-- END: core_features -->
+<!-- END: release_core_features -->
 
 </details>
   </li>
@@ -260,7 +265,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <details open markdown="1">
 <summary>Parallelism Techniques</summary>
 
-<!-- START: parallelism -->
+<!-- START: release_parallelism -->
 <table>
   <thead>
     <tr>
@@ -320,7 +325,7 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
   </tbody>
 </table>
-<!-- END: parallelism -->
+<!-- END: release_parallelism -->
 
 </details>
   </li>
@@ -328,7 +333,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <details open markdown="1">
 <summary>Quantization Methods</summary>
 
-<!-- START: quantization -->
+<!-- START: release_quantization -->
 <table>
   <thead>
     <tr>
@@ -380,30 +385,18 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 > **Note:**
 > - *This table only tests checkpoint loading compatibility.*
-<!-- END: quantization -->
+<!-- END: release_quantization -->
 
+</details>
+  </li>
+</ul>
 </details>
   </li>
   <li>
 <details open markdown="1">
-<summary>Hardware Acceleration & Dtype Support</summary>
-
-| TPU Generations | Natively Supported Hardware Acceleration |
-| :--- | :--- |
-| v5 | int8, int4, bf16 |
-| v6 | int8, int4, bf16 |
-| v7 | fp8_e4m3fn, fp8_e5m2, bf16 |
-
-</details>
-  </li>
-
-</ul>
-</details>
-
-<details open markdown="1">
 <summary><b> 🔬 Microbenchmark Kernel Support </b></summary>
 
-<!-- START: microbenchmarks -->
+<!-- START: release_microbenchmarks -->
 <table>
   <thead>
     <tr>
@@ -484,8 +477,405 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 > **Note:**
 > - *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*
-<!-- END: microbenchmarks -->
+<!-- END: release_microbenchmarks -->
 
+</details>
+  </li>
+</ul>
+</details>
+
+<br>
+
+<details markdown="1">
+<summary><b> 🧪&nbsp; Nightly Support Matrix </b></summary>
+<ul>
+  <li>
+<details open markdown="1">
+<summary><b> ✅ Tested Models </b></summary>
+
+<!-- START: nightly_model_support -->
+| Model | Type | Unit&nbsp;Test | Correctness&nbsp;Test | Performance&nbsp;Test |
+| --- | --- | --- | --- | --- |
+| [deepseek-ai/DeepSeek-OCR](https://huggingface.co/deepseek-ai/DeepSeek-OCR) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [meta-llama/Llama-4-Maverick-17B-128E-Instruct](https://huggingface.co/meta-llama/Llama-4-Maverick-17B-128E-Instruct) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [meta-llama/Llama-Guard-4-12B/Multimodal](https://huggingface.co/meta-llama/Llama-Guard-4-12B/Multimodal) | Multimodal | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="❌ Failing">❌</span> |
+| [moonshotai/Kimi-K2.5](https://huggingface.co/moonshotai/Kimi-K2.5) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [Qwen/Qwen2.5-VL-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) | Multimodal | <span title="✅ Passing">✅</span> | <span title="❌ Failing">❌</span> | <span title="❓ Untested">❓</span> |
+| [Qwen/Qwen3-Omni-30B-A3B-Instruct](https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [Qwen/Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [Qwen/Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [deepseek-ai/DeepSeek-Math-V2](https://huggingface.co/deepseek-ai/DeepSeek-Math-V2) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [deepseek-ai/DeepSeek-R1](https://huggingface.co/deepseek-ai/DeepSeek-R1) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [deepseek-ai/DeepSeek-V3.1](https://huggingface.co/deepseek-ai/DeepSeek-V3.1) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [deepseek-ai/DeepSeek-V3.2](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [deepseek-ai/DeepSeek-V3.2-Speciale](https://huggingface.co/deepseek-ai/DeepSeek-V3.2-Speciale) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [google/gemma-3-27b-it](https://huggingface.co/google/gemma-3-27b-it) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
+| [meta-llama/Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
+| [meta-llama/Llama-3.3-70B-Instruct](https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
+| [meta-llama/Llama-Guard-4-12B/Text-Only](https://huggingface.co/meta-llama/Llama-Guard-4-12B/Text-Only) | Text | <span title="✅ Passing">✅</span> | <span title="❌ Failing">❌</span> | <span title="❓ Untested">❓</span> |
+| [MiniMaxAI/MiniMax-M2.5](https://huggingface.co/MiniMaxAI/MiniMax-M2.5) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [moonshotai/Kimi-K2-Thinking](https://huggingface.co/moonshotai/Kimi-K2-Thinking) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [openai/gpt-oss-120b](https://huggingface.co/openai/gpt-oss-120b) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [openai/gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [Qwen/Qwen3-30B-A3B](https://huggingface.co/Qwen/Qwen3-30B-A3B) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
+| [Qwen/Qwen3-32B](https://huggingface.co/Qwen/Qwen3-32B) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
+| [Qwen/Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
+| [Qwen/Qwen3-Coder-480B-A35B-Instruct](https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
+| [Qwen/Qwen3_5-397B-A17B](https://huggingface.co/Qwen/Qwen3_5-397B-A17B) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [zai-org/GLM-5](https://huggingface.co/zai-org/GLM-5) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+
+<!-- END: nightly_model_support -->
+
+</details>
+  </li>
+  <li>
+<details open markdown="1">
+<summary><b> 🚀&nbsp; Advanced Capabilities </b></summary>
+<ul>
+  <li>
+<details open markdown="1">
+<summary>Core Features</summary>
+
+<!-- START: nightly_core_features -->
+<table>
+  <thead>
+    <tr>
+      <th>Feature</th>
+      <th>Flax</th>
+      <th>Torchax</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>async scheduler</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+    </tr>
+    <tr>
+      <td>Chunked Prefill</td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+    </tr>
+    <tr>
+      <td>DCN-based P/D disaggregation</td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+    </tr>
+    <tr>
+      <td>hybrid kv cache</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+    </tr>
+    <tr>
+      <td>KV cache host offloading</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>LoRA_Torch</td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+    </tr>
+    <tr>
+      <td>multi-host</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>Multimodal Inputs</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+    </tr>
+    <tr>
+      <td>Out-of-tree model support</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+    </tr>
+    <tr>
+      <td>Prefix Caching</td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+    </tr>
+    <tr>
+      <td>runai_model_streamer_loader</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>sampling_params</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+    </tr>
+    <tr>
+      <td>Single Program Multi Data</td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+    </tr>
+    <tr>
+      <td>Single-Host-P-D-disaggregation</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>Speculative Decoding: Eagle3</td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+    </tr>
+    <tr>
+      <td>Speculative Decoding: Ngram</td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+    </tr>
+    <tr>
+      <td>structured_decoding</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+  </tbody>
+</table>
+<!-- END: nightly_core_features -->
+
+</details>
+  </li>
+  <li>
+<details open markdown="1">
+<summary>Parallelism Techniques</summary>
+
+<!-- START: nightly_parallelism -->
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2" width="150" style="text-align:left">Feature</th>
+      <th colspan="2">Flax</th>
+      <th colspan="2">Torchax</th>
+    </tr>
+    <tr>
+      <th>Single-host</th>
+      <th>Multi-host</th>
+      <th>Single-host</th>
+      <th>Multi-host</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>CP</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>DP</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>EP</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>PP</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+    </tr>
+    <tr>
+      <td>SP&nbsp;(<a href="https://github.com/vllm-project/tpu-inference/issues/1749">vote&nbsp;to&nbsp;prioritize</a>)</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>TP</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+  </tbody>
+</table>
+<!-- END: nightly_parallelism -->
+
+</details>
+  </li>
+  <li>
+<details open markdown="1">
+<summary>Quantization Methods</summary>
+
+<!-- START: nightly_quantization -->
+<table>
+  <thead>
+    <tr>
+      <th>Checkpoint dtype</th>
+      <th>Method</th>
+      <th>Supported<br>Hardware Acceleration</th>
+      <th>Flax</th>
+      <th>Torchax</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>FP4 W4A16</td>
+      <td>mxfp4</td>
+      <td>v7</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>FP8 W8A8</td>
+      <td>compressed-tensor</td>
+      <td>v7</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>FP8 W8A16</td>
+      <td>compressed-tensor</td>
+      <td>v7</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>INT4 W4A16</td>
+      <td>awq</td>
+      <td>v5, v6</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>INT8 W8A8</td>
+      <td>compressed-tensor</td>
+      <td>v5, v6</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+  </tbody>
+</table>
+
+> **Note:**
+> - *This table only tests checkpoint loading compatibility.*
+<!-- END: nightly_quantization -->
+
+</details>
+  </li>
+</ul>
+</details>
+  </li>
+  <li>
+<details open markdown="1">
+<summary><b> 🔬 Microbenchmark Kernel Support </b></summary>
+
+<!-- START: nightly_microbenchmarks -->
+<table>
+  <thead>
+    <tr>
+      <th width="150" style="text-align:left">Category</th>
+      <th width="300" style="text-align:left">Test</th>
+      <th>W16A16</th>
+      <th>W8A8</th>
+      <th>W8A16</th>
+      <th>W4A4</th>
+      <th>W4A8</th>
+      <th>W4A16</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td rowspan="2"><b>Moe</b></td>
+      <td>Fused&nbsp;MoE</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>gmm</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+  </tbody>
+  <tbody>
+    <tr>
+      <td rowspan="1"><b>Dense</b></td>
+      <td>All&#8209;gather&nbsp;matmul</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+  </tbody>
+  <tbody>
+    <tr>
+      <td rowspan="3"><b>Attention</b></td>
+      <td>Generic&nbsp;Ragged&nbsp;Paged<br>Attention&nbsp;V3*</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>MLA</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>Ragged&nbsp;Paged<br>Attention&nbsp;V3&nbsp;Head_Dim<br>64*</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+  </tbody>
+</table>
+
+> **Note:**
+> - *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*
+<!-- END: nightly_microbenchmarks -->
+
+</details>
+  </li>
+</ul>
 </details>
 
 <br>
