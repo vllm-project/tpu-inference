@@ -84,6 +84,7 @@ def sample(
             logits, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
 
     greedy_tokens = jnp.argmax(logits, axis=-1)
+    logits = logits.astype(jnp.float32)
     if not tpu_sampling_metadata.do_sampling:
         ret_tokens = greedy_tokens
         ret_logits = logits
