@@ -27,7 +27,7 @@ def create_benchmark_group(case_data,
     """
     Creates a Buildkite Group step.
     """
-    # Identify Case Name (fallback to model name)
+    # Identify Case Name
     model_name = case_data.get("server_command_options",
                                {}).get("args", {}).get("model", "unknown")
     case_name = case_data.get("case_name", model_name)
@@ -67,7 +67,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input",
                         required=True,
-                        help="Path to the multi_case JSON file")
+                        help="Path to the benchmark JSON configuration file")
     args = parser.parse_args()
 
     # Verify input file existence
@@ -83,14 +83,14 @@ def main():
 
     if "benchmark_cases" in data:
         for case in data["benchmark_cases"]:
-            # Multi-case
+            # Multi-case: Requires TARGET_CASE_NAME to distinguish between tests
             steps.append(
                 create_benchmark_group(case,
                                        global_env,
                                        args.input,
                                        is_single_case=False))
     else:
-        # Single case file
+        # Single-case
         steps.append(
             create_benchmark_group(data,
                                    global_env,
