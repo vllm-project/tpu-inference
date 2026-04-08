@@ -161,19 +161,21 @@ def _merge_hw_status(status_v6, status_v7):
     s6 = str(status_v6).lower()
     s7 = str(status_v7).lower()
 
-    # Failing takes ultimate priority: if any fails, the whole box fails.
-    if "❌" in s6 or "fail" in s6 or "❌" in s7 or "fail" in s7:
+    v6_fail = "❌" in s6 or "fail" in s6
+    v7_fail = "❌" in s7 or "fail" in s7
+    v6_pass = "✅" in s6 or "pass" in s6
+    v7_pass = "✅" in s7 or "pass" in s7
+
+    if v6_fail or v7_fail:
         return _format_cell("❌&nbsp;Failing")
 
-    # Both must pass natively without failing
-    if ("✅" in s6 or "pass" in s6) and ("✅" in s7 or "pass" in s7):
+    if v6_pass and v7_pass:
         return _format_cell("✅&nbsp;Passing")
 
     # Handling N/A edge cases
     if "n/a" in s6 and "n/a" in s7:
         return _format_cell("N/A")
 
-    # Any residual state (unverified, untested, missing) goes to untested.
     return _format_cell("❓&nbsp;Untested")
 
 
@@ -182,14 +184,30 @@ def _merge_model_status_text(status_v6, status_v7):
     s6 = str(status_v6).lower()
     s7 = str(status_v7).lower()
 
-    if "❌" in s6 or "fail" in s6 or "❌" in s7 or "fail" in s7:
+    v6_fail = "❌" in s6 or "fail" in s6
+    v7_fail = "❌" in s7 or "fail" in s7
+    v6_pass = "✅" in s6 or "pass" in s6
+    v7_pass = "✅" in s7 or "pass" in s7
+    v6_oom = "not enough hbm" in s6 or "oom" in s6
+    v7_oom = "not enough hbm" in s7 or "oom" in s7
+
+    if v6_fail or v7_fail:
         return "❌ Failing"
-    if ("✅" in s6 or "pass" in s6) and ("✅" in s7 or "pass" in s7):
+
+    if v6_pass and v7_pass:
         return "✅ Passing"
+
+    # Treat OOM as a Pass if the other version passes
+    if v7_pass and v6_oom:
+        return "✅ Passing"
+    if v6_pass and v7_oom:
+        return "✅ Passing"
+
     if "⚠️" in s6 or "beta" in s6 or "⚠️" in s7 or "beta" in s7:
         return "⚠️ Beta"
     if "📝" in s6 or "plan" in s6 or "📝" in s7 or "plan" in s7:
         return "📝 Planned"
+
     return "❓ Untested"
 
 
