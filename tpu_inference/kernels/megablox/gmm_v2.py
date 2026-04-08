@@ -203,8 +203,7 @@ class GmmConfigs:
             return self.dims.size_n // 2
 
 
-TileFn = Callable[[Dimensions, InputConfigs, InputConfigs, int, str | None],
-                  TileSizes]
+TileFn = Callable[..., TileSizes]
 
 
 class IndexMaps:
@@ -835,6 +834,9 @@ def calculate_tiling(
     rhs_cfgs: InputConfigs,
     vmem_limit_bytes: int,
     fuse_act: str | None = None,
+    zero_init: bool = False,
+    out_dtype: jnp.dtype = jnp.bfloat16,
+    acc_dtype: jnp.dtype = jnp.bfloat16,
 ) -> TileSizes:
     """Calculate optimal tile sizes for GMM kernel."""
 
@@ -856,7 +858,6 @@ def calculate_tiling(
 
     # Calculate vmem limit for a single rhs buffer when using triple buffers.
     num_rhs_buffers = 3
-    rhs_vmem_target = vmem_limit_bytes // num_rhs_buffers
     base_rhs_size_bytes = dims.size_k * dims.size_n * rhs_bits // 8
 
     # To avoid stalling MXU, we add some buffer room where tile_n cannot go
@@ -884,10 +885,34 @@ def calculate_tiling(
 
     # Multiple k tiles will introduce accumulation overhead. Thus, we first try
     # to fit rhs into vmem by only adjusting tile_n.
+    def get_total_memory(tk, tn):
+        lhs_bits = jax.dtypes.itemsize_bits(lhs_cfgs.quant_dtype
+                                            or lhs_cfgs.dtype)
+        rhs_bits = jax.dtypes.itemsize_bits(rhs_cfgs.dtype)
+        out_bytes = jnp.dtype(out_dtype).itemsize
+        acc_bytes = jnp.dtype(acc_dtype).itemsize
+
+        # When fuse_act is enabled, we need to double rhs_scale_factor since we
+        # need to store both gate and up weights in rhs.
+        rhs_scale_factor = 2 if fuse_act is not None else 1
+        rhs_mem = num_rhs_buffers * rhs_scale_factor * tk * tn * rhs_bits // 8
+        lhs_mem = 2 * tile_m * tk * lhs_bits // 8
+        out_mem = tile_m * tn * out_bytes
+        acc_cols = 2 * tn if fuse_act is not None else tn
+        scratch_mem = (16 * tn * out_bytes) + (tile_m * acc_cols * acc_bytes)
+        if zero_init:
+            # We zero out the outputs for non active experts using zero_ref sized DMA.
+            target_zero_ref_bytes = 2 * 1024 * 1024
+            tile_zero_m = target_zero_ref_bytes // num_lanes // out_bytes
+            tile_zero_m = min(tile_zero_m, dims.size_m)
+            scratch_mem += tile_zero_m * num_lanes * out_bytes
+
+        # Add some buffer room for spill slots.
+        spill_slots = int(2.1 * 1024 * 1024)
+        return rhs_mem + lhs_mem + out_mem + scratch_mem + spill_slots
 
     # Decrease tile_n until rhs fits in vmem target.
-    while (pl.cdiv(base_rhs_size_bytes, num_n_tiles) > rhs_vmem_target
-           and tile_n > tile_n_limit):
+    while get_total_memory(tile_k, tile_n) > vmem_limit_bytes:
         num_n_tiles += 1
         tile_n = align_to(size_n_per_rhs,
                           num_n_tiles * num_lanes) // num_n_tiles
@@ -900,16 +925,18 @@ def calculate_tiling(
 
         # Decrease tile_k until rhs fits in vmem target and tile_k is valid.
         base_rhs_size_bytes = pl.cdiv(base_rhs_size_bytes, num_n_tiles)
-        while pl.cdiv(
-                base_rhs_size_bytes, num_k_tiles
-        ) > rhs_vmem_target or not _is_tile_k_quant_block_compatible(tile_k):
+        while get_total_memory(
+                tile_k, tile_n
+        ) > vmem_limit_bytes or not _is_tile_k_quant_block_compatible(tile_k):
             num_k_tiles += 1
             tile_k = align_to(dims.size_k,
                               num_k_tiles * num_lanes) // num_k_tiles
+            if tile_k == 0:
+                break
 
     if tile_n == 0 or tile_k == 0:
         raise ValueError(
-            f"Could not find valid tile sizes for {dims=} and {rhs_vmem_target=}."
+            f"Could not find valid tile sizes for {dims=} and {vmem_limit_bytes=}."
         )
 
     return TileSizes(tile_m=tile_m, tile_k=tile_k, tile_n=tile_n)
@@ -1082,7 +1109,8 @@ def make_gmm_configs(
     if isinstance(tile_info, TileSizes):
         tiles = tile_info
     else:
-        tiles = tile_info(dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes, fuse_act)
+        tiles = tile_info(dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes, fuse_act,
+                          zero_initialize, out_dtype, acc_dtype)
 
     return GmmConfigs(
         dims=dims,
