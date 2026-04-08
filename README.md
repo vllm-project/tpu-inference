@@ -260,8 +260,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- END: release_core_features -->
 
 </details>
-  </li>
-  <li>
+
 <details open markdown="1">
 <summary>Parallelism Techniques</summary>
 
@@ -652,8 +651,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- END: nightly_core_features -->
 
 </details>
-  </li>
-  <li>
+
 <details open markdown="1">
 <summary>Parallelism Techniques</summary>
 
