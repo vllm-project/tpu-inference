@@ -58,10 +58,30 @@ git submodule status
 DEVICE=$BUILDKITE_AGENT_META_DATA_QUEUE
 
 echo "--- Configuring Docker Arguments for benchmark"
+
+ARTIFACT_FOLDER="$(pwd)/artifacts"
+LOG_FOLDER="${ARTIFACT_FOLDER}/temp_logs"
+PROFILE_FOLDER="${LOG_FOLDER}/profile"
+
+# Do cleanup before create config
+cleanup_artifact_log() {
+  echo "deleting artifacts: $ARTIFACT_FOLDER"
+  rm -rf "$ARTIFACT_FOLDER"
+}
+cleanup_artifact_log
+
+echo "--- Preparing Local Artifacts Folder"
+mkdir -p "$ARTIFACT_FOLDER"
+mkdir -p "$LOG_FOLDER"
+mkdir -p "$PROFILE_FOLDER"
+trap cleanup_artifact_log EXIT
+
 # Prepare environment variables for the Docker container.
 declare -a BENCHMARK_DOCKER_ARGS=(
   "-v" "/dev/shm:/dev/shm"
   "-v" "/etc/boto.cfg:/etc/boto.cfg"
+  "-v" "$ARTIFACT_FOLDER:/workspace/tpu_inference/artifacts"
+  "-e" "ARTIFACT_FOLDER=/workspace/tpu_inference/artifacts"
   "-e" "DEVICE=$DEVICE"
   "-e" "RECORD_ID=$RECORD_ID"
   "-e" "RUN_TYPE=$RUN_TYPE"
@@ -71,55 +91,6 @@ declare -a BENCHMARK_DOCKER_ARGS=(
   "-e" "BUILDKITE_AGENT_NAME=${BUILDKITE_AGENT_NAME}"
   "-e" "BUILDKITE_AGENT_META_DATA_QUEUE=${BUILDKITE_AGENT_META_DATA_QUEUE}"
 )
-# declare -a BENCHMARK_DOCKER_ARGS=(
-#   "-v" "$ARTIFACT_FOLDER:/workspace/artifacts"
-#   "-v" "/dev/shm:/dev/shm"
-#   "-e" "DOCKER_ARTIFACT_FOLDER=/workspace/artifacts"
-#   "-e" "DOCKER_LOG_FOLDER=/workspace/artifacts/temp_logs"
-#   "-e" "RECORD_ID=$RECORD_ID"
-#   "-e" "DEVICE=$DEVICE"
-#   "-e" "MODEL=$MODEL"
-#   "-e" "MAX_NUM_SEQS=$MAX_NUM_SEQS"
-#   "-e" "MAX_NUM_BATCHED_TOKENS=$MAX_NUM_BATCHED_TOKENS"
-#   "-e" "TENSOR_PARALLEL_SIZE=$TENSOR_PARALLEL_SIZE"
-#   "-e" "MAX_MODEL_LEN=$MAX_MODEL_LEN"
-#   "-e" "DATASET=$DATASET"
-#   "-e" "INPUT_LEN=$INPUT_LEN"
-#   "-e" "OUTPUT_LEN=$OUTPUT_LEN"
-#   "-e" "EXPECTED_ETEL=$EXPECTED_ETEL"
-#   "-e" "NUM_PROMPTS=$NUM_PROMPTS"
-#   "-e" "MODELTAG=$MODELTAG"
-#   "-e" "PREFIX_LEN=$PREFIX_LEN"
-#   "-e" "ADDITIONAL_CONFIG=$ADDITIONAL_CONFIG"
-#   "-e" "EXTRA_ARGS=$EXTRA_ARGS"
-#   "-e" "GCP_PROJECT_ID=${GCP_PROJECT_ID}"
-#   "-e" "GCP_REGION=${GCP_REGION}"
-#   "-e" "GCS_BUCKET=${GCS_BUCKET}"
-#   "-e" "ARTIFACT_REPO=${ARTIFACT_REPO}"
-#   "-e" "GCP_INSTANCE_ID=${GCP_INSTANCE_ID}"
-#   "-e" "GCP_DATABASE_ID=${GCP_DATABASE_ID}"
-#   "-e" "BUILDKITE_AGENT_NAME=${BUILDKITE_AGENT_NAME}"
-#   "-e" "RUN_TYPE=$RUN_TYPE"
-#   "-e" "CODE_HASH=${CODE_HASH}"
-#   "-e" "JOB_REFERENCE=${JOB_REFERENCE}"
-#   "-e" "BUILDKITE=${BUILDKITE}"
-#   "-v" "/etc/boto.cfg:/etc/boto.cfg"
-# )
-
-# if [ -n "${EXTRA_ENVS:-}" ]; then
-#   echo "--- Parsing EXTRA_ENVS into Docker arguments"
-
-#   # Strip leading and trailing single or double quotes
-#   CLEANED_EXTRA_ENVS=$(printf "%s\n" "$EXTRA_ENVS" | sed -e "s/^'//" -e "s/'$//" -e 's/^"//' -e 's/"$//')
-  
-#   IFS=';' read -ra ENV_PAIRS <<< "$CLEANED_EXTRA_ENVS"
-  
-#   for pair in "${ENV_PAIRS[@]}"; do
-#     if [ -n "$pair" ]; then
-#       BENCHMARK_DOCKER_ARGS+=("-e" "$pair")
-#     fi
-#   done
-# fi
 
 BENCHMARK_DOCKER_ARGS_STR="$(printf '%s\n' "${BENCHMARK_DOCKER_ARGS[@]}")"
 export BENCHMARK_DOCKER_ARGS_STR
@@ -133,6 +104,40 @@ BM_JOB_STATUS=$EXIT_SUCCESS
   .buildkite/benchmark/scripts/run_bm.sh $CASE_FILE $TARGET_CASE_NAME" || {
     echo "Error running benchmark job in docker."
     BM_JOB_STATUS=$EXIT_FAILURE
+}
+
+
+(
+  # Handle log file
+  VLLM_LOG="$LOG_FOLDER/vllm_log.txt"
+  BM_LOG="$LOG_FOLDER/bm_log.txt"
+
+  # Upload vllm and bm log to Buildkite aritfact
+  ARTIFACT_VLLM="${RECORD_ID}_vllm_log.txt"
+  ARTIFACT_BM="${RECORD_ID}_bm_log.txt"
+
+  # Re-enable set -e inside the subshell because it is disabled by the || operator
+  set -e
+
+  echo "Preparing Buildkite artifacts..."
+  if [ -f "$VLLM_LOG" ]; then
+    cp "$VLLM_LOG" "$ARTIFACT_VLLM"
+    buildkite-agent artifact upload "$ARTIFACT_VLLM"
+    rm -f "$ARTIFACT_VLLM"
+  else
+    echo "Warning: $VLLM_LOG not found, skipping upload."
+  fi
+
+  if [ -f "$BM_LOG" ]; then
+    cp "$BM_LOG" "$ARTIFACT_BM"
+    buildkite-agent artifact upload "$ARTIFACT_BM"
+    rm -f "$ARTIFACT_BM"
+  else
+    echo "Warning: $BM_LOG not found, skipping upload."
+  fi
+) || {
+  echo "Error uploading artifacts to Buildkite."
+  BM_JOB_STATUS=$EXIT_FAILURE
 }
 
 exit $BM_JOB_STATUS

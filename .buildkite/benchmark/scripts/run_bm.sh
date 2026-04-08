@@ -31,23 +31,19 @@ if ! command -v gcloud &> /dev/null; then
   apt-get update && apt-get install -y google-cloud-cli
 fi
 
-ARTIFACT_FOLDER="$(pwd)/artifacts"
+# Set umask so that any newly created files/directories have 777/666 permissions by default.
+# This ensures that the host user can delete artifacts created by the docker root user.
+umask 000
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ARTIFACT_FOLDER is provided by Buildkite via environment variable. 
+# Default to a local path relative to the script for local runs.
+ARTIFACT_FOLDER="${ARTIFACT_FOLDER:-$SCRIPT_DIR/artifacts}"
 LOG_FOLDER="$ARTIFACT_FOLDER/temp_logs"
 PROFILE_FOLDER="$LOG_FOLDER/profile"
 export ARTIFACT_FOLDER
 export LOG_FOLDER
 export PROFILE_FOLDER
-
-cleanup_artifact_log() {
-  echo "deleting artifacts: ${ARTIFACT_FOLDER}"
-  rm -rf "${ARTIFACT_FOLDER}"
-}
-
-# If Running on Buildkite, do cleanup artifact
-if [[ "${BUILDKITE:-false}" == "true" ]]; then
-  trap cleanup_artifact_log EXIT
-  cleanup_artifact_log
-fi
 
 report_and_exit() {
   local exit_code=${1:-0}
@@ -72,8 +68,7 @@ mkdir -p "$ARTIFACT_FOLDER"
 mkdir -p "$LOG_FOLDER"
 mkdir -p "$PROFILE_FOLDER"
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON_PARSER="$DIR/parser_case.py"
+PYTHON_PARSER="$SCRIPT_DIR/parser_case.py"
 # Evaluate the Python output to set variables in the current shell context
 eval "$(python3 "$PYTHON_PARSER" "$CASE_FILE" "$TARGET_CASE_NAME")"
 
