@@ -13,6 +13,7 @@
 # limitations under the License.
 # yapf: disable
 import json
+import os
 import shlex
 import sys
 
@@ -24,6 +25,30 @@ CMD_MAP = {
     "benchmark_serving": "python3 scripts/bench_serving/benchmark_serving.py"
 }
 
+def resolve_queue_args(args_dict, current_queue):
+    """
+    Resolves dictionary-based arguments based on the current CI queue.
+    """
+    resolved_args = {}
+    if not args_dict:
+        return resolved_args
+
+    for key, value in args_dict.items():
+        # If the argument value is a dictionary, treat it as a queue-mapping configuration
+        if isinstance(value, dict):
+            if current_queue and current_queue in value:
+                resolved_args[key] = value[current_queue]
+            elif "default" in value:
+                resolved_args[key] = value["default"]
+            else:
+                # Fatal error if resolution fails and no default is provided
+                print(f"echo '[ERROR] Failed to resolve arg \"--{key}\" for queue \"{current_queue}\". No default found.' >&2")
+                print("exit 1")
+                sys.exit(1)
+        else:
+            resolved_args[key] = value
+
+    return resolved_args
 
 def build_command(cmd_type, args_dict):
     """Builds a safe shell command string from a dictionary of arguments."""
@@ -51,6 +76,9 @@ def main():
 
     config_file = sys.argv[1]
     target_case = sys.argv[2] if len(sys.argv) > 2 else None
+
+    # Fetch queue name from environment, default to empty string
+    current_queue = os.environ.get("BUILDKITE_AGENT_META_DATA_QUEUE", "").strip()
 
     try:
         with open(config_file, 'r') as f:
@@ -93,6 +121,8 @@ def main():
     # Export specific environment for insert to db
     dataset = cli_opts.get("args", {}).get("dataset-name", {})
     print(f"export DATASET=\"{dataset}\"")
+    num_prompts = cli_opts.get("args", {}).get("num-prompts", {})
+    print(f"export NUM_PROMPTS=\"{num_prompts}\"")
     additional_config = srv_opts.get("args", {}).get("additional-config", {})
     print(f"export ADDITIONAL_CONFIG=\"{additional_config}\"")
     model = srv_opts.get("args", {}).get("model", {})
@@ -114,17 +144,21 @@ def main():
 
     # Output execution strategy based on command_type
     if cli_cmd_type == "lm_eval":
-        print("export RUN_TYPE=\"lm_eval\"")
-        lm_cmd = build_command(cli_cmd_type, srv_opts.get("args", {}))
+        # Resolve queue-specific args before building command
+        srv_raw_args = srv_opts.get("args", {})
+        srv_resolved_args = resolve_queue_args(srv_raw_args, current_queue)
+
+        print("export COMMAND_TYPE=\"lm_eval\"")
+        lm_cmd = build_command(cli_cmd_type, srv_resolved_args)
         quoted_lm_cmd = ' '.join(
             shlex.quote(arg) for arg in shlex.split(lm_cmd))
         print(f"LM_EVAL_CMD=({quoted_lm_cmd})")
     else:
         srv_cmd_type = srv_opts.get("command_type", "")
-        srv_cmd = build_command(srv_cmd_type, srv_opts.get("args", {}))
-        cli_cmd = build_command(cli_cmd_type, cli_opts.get("args", {}))
+        srv_cmd = build_command(srv_cmd_type, resolve_queue_args(srv_opts.get("args", {}), current_queue))
+        cli_cmd = build_command(cli_cmd_type, resolve_queue_args(cli_opts.get("args", {}), current_queue))
 
-        print("export RUN_TYPE=\"server_client\"")
+        print("export COMMAND_TYPE=\"server_client\"")
         quoted_srv_cmd = ' '.join(
             shlex.quote(arg) for arg in shlex.split(srv_cmd))
         print(f"SERVER_CMD=({quoted_srv_cmd})")

@@ -9,7 +9,6 @@
     "VLLM_USE_V1": "1",
     "MODELTAG": "NEW",
     "EXPECTED_ETEL": 3600000,
-    "NUM_PROMPTS": 1000,
     "INPUT_LEN": 4096,
     "OUTPUT_LEN": 1024,
     "PREFIX_LEN": 3600
@@ -22,7 +21,11 @@
       "seed": 42,
       "max-num-seqs": 512,
       "max-num-batched-tokens": 4096,
-      "tensor-parallel-size": 2,
+      "tensor-parallel-size": {
+        "tpu_v6e_queue": 1,
+        "tpu_v7x_2_queue": 2,
+        "default": 1
+      },
       "no-enable-prefix-caching": true,
       "max-model-len": 5120,
       "kv-cache-dtype": "fp8",
