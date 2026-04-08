@@ -154,6 +154,8 @@ def moe_gmm_local(
         shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR).sum()
         w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
     gmm1_res = gmm1_res[:, :w2.shape[1]]  # trim to hidden size if padded
+    gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
+                           group_offset)
 
     local_group_size = w1.shape[0]
     if local_group_size < group_sizes.size:
@@ -250,42 +252,46 @@ def moe_gmm_local(
             token_hidden, chunk_out_reduced_final,
             ((sc_psum_num_chunks - 1) * (chunk_size // 8), 0))
     else:
-        gmm2_res = gmm_wrapper(gmm1_res,
-                               w2,
-                               w2_scale,
-                               w2_bias,
-                               group_sizes,
-                               group_offset,
-                               preferred_element_type=x.dtype)
+        chunk_size = 16384
+        out_list = []
+        for start in range(0, batch_size, chunk_size):
+            end = min(batch_size, start + chunk_size)
+            start_tok = start // topk
+            end_tok = end // topk
 
-        if local_group_size < group_sizes.size:
-            group_offsets = jnp.cumulative_sum(group_sizes,
-                                               include_initial=True)
-            experts_start = group_offset[0]
-            experts_end = group_offset[0] + local_group_size
-            shard_output_start = group_offsets[experts_start]
-            shard_output_end = group_offsets[experts_end]
-            token_hidden = ragged_scatter(gmm2_res,
-                                          topk_argsort_revert_indices,
-                                          shard_output_start, shard_output_end)
-        else:
-            token_hidden = gmm2_res[topk_argsort_revert_indices]
 
-        # First run local reduction on topk experts owned by the rank for all tokens
-        token_topk_hidden = token_hidden.reshape(
-            (-1, topk, gmm2_res.shape[-1]))
-        token_topk_hidden = token_topk_hidden * jnp.expand_dims(topk_weights,
+            if local_group_size < group_sizes.size:
+                group_offsets = jnp.cumulative_sum(group_sizes,
+                                                   include_initial=True)
+                experts_start = group_offset[0]
+                experts_end = group_offset[0] + local_group_size
+                shard_output_start = group_offsets[experts_start]
+                shard_output_end = group_offsets[experts_end]
+                token_hidden = ragged_scatter(gmm2_res,
+                                              topk_argsort_revert_indices,
+                                              shard_output_start, shard_output_end)
+            else:
+                token_hidden = gmm2_res[topk_argsort_revert_indices]
+
+            # First run local reduction on topk experts owned by the rank for all tokens
+            token_topk_hidden = token_hidden.reshape(
+                (-1, topk, gmm2_res.shape[-1]))
+            token_topk_hidden = token_topk_hidden * jnp.expand_dims(topk_weights,
                                                                 axis=-1)
 
-        if local_group_size < group_sizes.size:
-            mask = mask.reshape(-1, topk, 1)
-            token_topk_hidden = jnp.where(mask, token_topk_hidden, 0.0)
+            cur_sorted = gmm2_res[cur_indices].reshape(
+                (-1, topk, gmm2_res.shape[-1]))
 
-        token_hidden = token_topk_hidden.sum(axis=-2)
+            cur_topk_weights = jnp.expand_dims(cur_topk_weights, axis=-1)
+            cur_weighted = cur_sorted * cur_topk_weights
+            cur_masked = jnp.where(cur_mask, cur_weighted, 0.0)
+            cur_reduced = cur_masked.sum(axis=-2)
 
-        # Then global reduction on all ranks for all tokens and all experts
-        token_hidden = jax.lax.psum(token_hidden,
-                                    axis_name=reduction_axis).astype(x.dtype)
+            reduction_axis = (ShardingAxisName.MLP_TENSOR
+                              if parallelism == "tp" else ShardingAxisName.EXPERT)
+            out = jax.lax.psum(cur_reduced, axis_name=reduction_axis)
+            out_list.append(out)
+        token_hidden = jnp.concat(out_list, axis=0)
 
     return token_hidden
 
