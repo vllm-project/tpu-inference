@@ -226,7 +226,7 @@ run_benchmark(){
     fi
   fi
 
-  printf "[DEBUG] Executing client_cmd: %s\n" "${CLIENT_CMD[*]} > \"$BM_LOG\" 2>&1"
+  printf "[DEBUG] Executing client_cmd: %s\n" "${CLIENT_CMD[*]} > \"$BM_LOG\"" 2>&1
   # Execute the array directly, preserving strict argument boundaries
   "${CLIENT_CMD[@]}" > "$BM_LOG" 2>&1
 
