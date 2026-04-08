@@ -261,6 +261,7 @@ with open(sys.argv[2], "w") as out:
   ' "$BENCHMARK_LOG" "$RESULT_FILE"
 
   # Append static Spanner schema parameters using the bash environment variables
+  FORCE_RANDOM_ROUTING_BOOL=$([ "${FORCE_MOE_RANDOM_ROUTING_ENV#*=}" = "1" ] && echo "true" || echo "false")
   cat <<EOF >> "$RESULT_FILE"
 RunType=${RUN_TYPE}
 MaxNumSeqs=${MAX_NUM_SEQS}
@@ -276,7 +277,8 @@ NumPrompts=${NUM_PROMPTS}
 CodeHash=${CODE_HASH}
 Model=${MODEL_NAME}
 JobReference=${JOB_REFERENCE}
-ExtraArgs=${MODEL_IMPL_TYPE_ENV#*=}
+ExtraArgs=${MODEL_IMPL_TYPE_ENV#*=}${FORCE_MOE_RANDOM_ROUTING_ENV:+ ${FORCE_MOE_RANDOM_ROUTING_ENV}}
+ForceRandomRouting=${FORCE_RANDOM_ROUTING_BOOL}
 EOF
 
 fi
@@ -286,6 +288,8 @@ IMPL_TYPE="${MODEL_IMPL_TYPE_ENV#*=}"
 RUN_MODE="benchmark"
 if [ -n "$PHASED_PROFILING_DIR" ]; then
   RUN_MODE="xprof"
+elif [ "${FORCE_MOE_RANDOM_ROUTING_ENV#*=}" = "1" ]; then
+  RUN_MODE="force-moe-random-routing"
 fi
 LOG_GCS_URI="gs://tpu-commons-ci/logs/${MODEL_NAME}_${INPUT_LEN}_${OUTPUT_LEN}_${IMPL_TYPE}_${CODE_HASH}_${BENCHMARK_STATUS}_${RUN_MODE}_${JOB_REFERENCE}_vllm_serve.log"
 if [ -f "/tmp/vllm_serve.log" ]; then
@@ -309,6 +313,8 @@ while IFS='=' read -r key value; do
     keys+="${key}, "
     if [[ "$key" == "AccuracyMetrics" ]]; then
       vals+="JSON '${value}', "
+    elif [[ "$value" == "true" || "$value" == "false" ]]; then
+      vals+="${value}, "
     elif [[ "$value" =~ ^[0-9.]+$ ]]; then
       vals+="${value}, "
     else
