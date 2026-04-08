@@ -72,6 +72,7 @@ export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=vllm"
 export USE_UNFUSED_MEGABLOCKS_ENV=""
 export HF_CONFIG=""
 export USE_VLLM_LKG="true"
+export FORCE_MOE_RANDOM_ROUTING_ENV=""
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -105,6 +106,7 @@ while [[ $# -gt 0 ]]; do
     --model-impl-type) export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=$2"; shift 2 ;;
     --use-unfused-megablocks) export USE_UNFUSED_MEGABLOCKS_ENV="USE_UNFUSED_MEGABLOCKS=$2"; shift 2 ;;
     --hf-config) export HF_CONFIG="$2"; shift 2 ;;
+    --force-moe-random-routing) export FORCE_MOE_RANDOM_ROUTING_ENV="FORCE_MOE_RANDOM_ROUTING=$2"; shift 2 ;;
     *) echo "Unknown parameter passed: $1"; exit 1 ;;
   esac
 done
@@ -139,6 +141,7 @@ ${MOE_REQUANTIZE_BLOCK_SIZE_ENV} \
 ${MOE_REQUANTIZE_WEIGHT_DTYPE_ENV} \
 ${PHASED_PROFILING_DIR_ENV} \
 ${USE_UNFUSED_MEGABLOCKS_ENV} \
+${FORCE_MOE_RANDOM_ROUTING_ENV} \
 TPU_BACKEND_TYPE=jax \
 ${MODEL_IMPL_TYPE_ENV} \
 vllm serve \

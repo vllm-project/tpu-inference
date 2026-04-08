@@ -387,6 +387,9 @@ def fused_moe_func(
 
     topk_weights = apply_scoring_fn(scoring_fn, gating_output)
     if envs.FORCE_MOE_RANDOM_ROUTING:
+        print(
+            "[Warning] Forcing random routing for MoE, for performance testing only."
+        )
         # Forcing random routing is useful to get rid of the effect
         # of routing imbalance during performance debugging.
         rng_key = jax.random.PRNGKey(0)
