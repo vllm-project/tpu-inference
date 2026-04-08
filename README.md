@@ -93,12 +93,12 @@ Below is the live status of our supported models, features, and kernels. Click o
 <br>
 
 <details open markdown="1">
-<summary><b> 🚀&nbsp; Release Support Matrix </b></summary>
+<summary><b> 🚀&nbsp; Release Support Matrices </b></summary>
 
 <blockquote>
 
 <details open markdown="1">
-<summary><b> ✅ Tested Models (Release) </b></summary>
+<summary><b> ✅ Tested Models </b></summary>
 
 <!-- START: release_model_support -->
 | Model | Type | Unit&nbsp;Test | Correctness&nbsp;Test | Performance&nbsp;Test |
@@ -136,7 +136,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 </details>
 
 <details open markdown="1">
-<summary><b> 🚀&nbsp; Advanced Capabilities (Release) </b></summary>
+<summary><b> 🚀&nbsp; Advanced Capabilities </b></summary>
 <blockquote>
 
 <details open markdown="1">
@@ -390,7 +390,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 </details>
 
 <details open markdown="1">
-<summary><b> 🔬 Microbenchmark Kernel Support (Release) </b></summary>
+<summary><b> 🔬 Microbenchmark Kernel Support </b></summary>
 <blockquote>
 
 <!-- START: release_microbenchmarks -->
@@ -484,12 +484,12 @@ Below is the live status of our supported models, features, and kernels. Click o
 <br>
 
 <details markdown="1">
-<summary><b> 🧪&nbsp; Nightly Support Matrix </b></summary>
+<summary><b> 🧪&nbsp; Nightly Support Matrices </b></summary>
 
 <blockquote>
 
 <details open markdown="1">
-<summary><b> ✅ Tested Models (Nightly) </b></summary>
+<summary><b> ✅ Tested Models </b></summary>
 
 <!-- START: nightly_model_support -->
 | Model | Type | Unit&nbsp;Test | Correctness&nbsp;Test | Performance&nbsp;Test |
@@ -527,7 +527,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 </details>
 
 <details open markdown="1">
-<summary><b> 🚀&nbsp; Advanced Capabilities (Nightly) </b></summary>
+<summary><b> 🚀&nbsp; Advanced Capabilities </b></summary>
 <blockquote>
 
 <details open markdown="1">
@@ -781,7 +781,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 </details>
 
 <details open markdown="1">
-<summary><b> 🔬 Microbenchmark Kernel Support (Nightly) </b></summary>
+<summary><b> 🔬 Microbenchmark Kernel Support </b></summary>
 <blockquote>
 
 <!-- START: nightly_microbenchmarks -->
