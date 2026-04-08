@@ -169,6 +169,7 @@ def moe_gmm_local(
     reduction_axis = (ShardingAxisName.MLP_TENSOR
                       if parallelism == "tp" else ShardingAxisName.EXPERT)
 
+    chunk_size = gmm2_res.shape[0] // sc_psum_num_chunks
     if gather_reduce_sc.is_supported_by_sc_gather_reduce(
             gmm1_res.shape[0], sc_kernel_threshold):
         gmm2_res = gmm_wrapper(gmm1_res,
@@ -186,7 +187,6 @@ def moe_gmm_local(
         inds = topk_argsort_revert_indices
         topk_weights = topk_weights.flatten().reshape(-1, 128)
 
-        chunk_size = gmm2_res.shape[0] // sc_psum_num_chunks
         inds_reshaped = inds.reshape(sc_psum_num_chunks, chunk_size)
         topk_weights_reshaped = topk_weights.reshape(sc_psum_num_chunks,
                                                      chunk_size // 128, 128)
@@ -252,7 +252,6 @@ def moe_gmm_local(
             token_hidden, chunk_out_reduced_final,
             ((sc_psum_num_chunks - 1) * (chunk_size // 8), 0))
     else:
-        chunk_size = 16384
         out_list = []
         for start in range(0, batch_size, chunk_size):
             end = min(batch_size, start + chunk_size)
