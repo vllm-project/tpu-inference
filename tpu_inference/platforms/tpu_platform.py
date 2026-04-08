@@ -283,14 +283,21 @@ class TpuPlatform(Platform):
         # TODO: TPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
 
-        # Align block/mamba sizes for hybrid model (may override user settings).
-        if vllm_config.model_config.is_hybrid:
-            backend_cls = cls._find_non_ssm_backend(vllm_config)
-            if backend_cls is None:
-                return
-            cls._align_hybrid_block_size(vllm_config, backend_cls)
-
-        return
+        # Since TPU uses an SPMD representation for layers and KV caches, we
+        # temporarily set the tensor parallel size to 1. This prevents vLLM from
+        # incorrectly partitioning the number of KV heads during hybrid block
+        # size alignment.
+        orig_tp_size = vllm_config.parallel_config.tensor_parallel_size
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        try:
+            if vllm_config.model_config.is_hybrid:
+                backend_cls = cls._find_non_ssm_backend(vllm_config)
+                if backend_cls is not None:
+                    # Align block/mamba sizes for hybrid model (may override
+                    # user settings).
+                    cls._align_hybrid_block_size(vllm_config, backend_cls)
+        finally:
+            vllm_config.parallel_config.tensor_parallel_size = orig_tp_size
 
     @classmethod
     def is_pin_memory_available(cls):

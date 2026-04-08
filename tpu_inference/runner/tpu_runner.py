@@ -1487,20 +1487,32 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padded_num_reqs,
             sharding=data_parallel_attn_sharding,
         )
-        if self.uses_mrope:
-            positions = mrope_positions
 
         query_start_loc_cpu = query_start_loc
         logits_indices_cpu = logits_indices
         seq_lens_cpu = seq_lens
 
-        (input_ids, positions, query_start_loc, seq_lens, logits_indices,
+        (input_ids, query_start_loc, seq_lens, logits_indices,
          request_distribution) = device_array(
              self.mesh,
-             (input_ids, positions, query_start_loc, seq_lens, logits_indices,
+             (input_ids, query_start_loc, seq_lens, logits_indices,
               request_distribution),
              sharding=data_parallel_attn_sharding,
          )
+
+        if self.uses_mrope:
+            # M-RoPE positions are of the shape (3, max_num_tokens).
+            # https://github.com/vllm-project/tpu-inference/blob/efc9608acd925bb3b64db6fda509514f799ab7be/tpu_inference/runner/tpu_runner.py#L555
+            # Shard the positions accordingly.
+            mrope_sharding = NamedSharding(
+                self.mesh, PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+            positions = device_array(self.mesh,
+                                     mrope_positions,
+                                     sharding=mrope_sharding)
+        else:
+            positions = device_array(self.mesh,
+                                     positions,
+                                     sharding=data_parallel_attn_sharding)
 
         def build_block_table(kv_cache_gid: int) -> jax.Array:
             block_tables = self.block_tables_cpu[kv_cache_gid][:self.
