@@ -95,7 +95,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <details open markdown="1">
 <summary><b> 🚀&nbsp; Release Support Matrix </b></summary>
 
-<details open markdown="1">
+<details open markdown="1" style="margin-left: 2em;">
 <summary><b> ✅ Tested Models </b></summary>
 
 <!-- START: release_model_support -->
@@ -133,10 +133,10 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 </details>
 
-<details open markdown="1">
+<details open markdown="1" style="margin-left: 2em;">
 <summary><b> 🚀&nbsp; Advanced Capabilities </b></summary>
 
-<details open markdown="1">
+<details open markdown="1" style="margin-left: 2em;">
 <summary>Core Features</summary>
 
 <!-- START: release_core_features -->
@@ -259,7 +259,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 </details>
   </li>
   <li>
-<details open markdown="1">
+<details open markdown="1" style="margin-left: 2em;">
 <summary>Parallelism Techniques</summary>
 
 <!-- START: release_parallelism -->
@@ -326,7 +326,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 </details>
 
-<details open markdown="1">
+<details open markdown="1" style="margin-left: 2em;">
 <summary>Quantization Methods</summary>
 
 <!-- START: release_quantization -->
@@ -387,7 +387,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 </details>
 
-<details open markdown="1">
+<details open markdown="1" style="margin-left: 2em;">
 <summary><b> 🔬 Microbenchmark Kernel Support </b></summary>
 
 <!-- START: release_microbenchmarks -->
@@ -482,7 +482,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <details markdown="1">
 <summary><b> 🧪&nbsp; Nightly Support Matrix </b></summary>
 
-<details open markdown="1">
+<details open markdown="1" style="margin-left: 2em;">
 <summary><b> ✅ Tested Models </b></summary>
 
 <!-- START: nightly_model_support -->
@@ -520,10 +520,10 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 </details>
 
-<details open markdown="1">
+<details open markdown="1" style="margin-left: 2em;">
 <summary><b> 🚀&nbsp; Advanced Capabilities </b></summary>
 
-<details open markdown="1">
+<details open markdown="1" style="margin-left: 2em;">
 <summary>Core Features</summary>
 
 <!-- START: nightly_core_features -->
@@ -646,7 +646,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 </details>
   </li>
   <li>
-<details open markdown="1">
+<details open markdown="1" style="margin-left: 2em;">
 <summary>Parallelism Techniques</summary>
 
 <!-- START: nightly_parallelism -->
@@ -713,7 +713,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 </details>
 
-<details open markdown="1">
+<details open markdown="1" style="margin-left: 2em;">
 <summary>Quantization Methods</summary>
 
 <!-- START: nightly_quantization -->
@@ -774,7 +774,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 </details>
 
-<details open markdown="1">
+<details open markdown="1" style="margin-left: 2em;">
 <summary><b> 🔬 Microbenchmark Kernel Support </b></summary>
 
 <!-- START: nightly_microbenchmarks -->
