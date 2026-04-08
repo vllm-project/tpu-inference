@@ -45,18 +45,19 @@ def create_benchmark_group(case_data,
         # Build the environment for this specific step
         step_env = {**combined_env, "ci_queue": agent}
 
-        # Only add TARGET_CASE_NAME if it is part of a multi-case file
         if not is_single_case:
             step_env["TARGET_CASE_NAME"] = case_name
 
         child_steps.append({
-            "label": f"{agent} {case_name}",
-            "command":
-            f"bash .buildkite/benchmark/scripts/run_job.sh {file_path}",
-            "env": step_env,
+            "label":
+            f"{agent} {case_name}",
+            "env":
+            step_env,
             "agents": {
                 "queue": agent
-            }
+            },
+            "command":
+            f"bash .buildkite/benchmark/scripts/run_job.sh {file_path}",
         })
 
     return {"group": case_name, "key": safe_key, "steps": child_steps}
