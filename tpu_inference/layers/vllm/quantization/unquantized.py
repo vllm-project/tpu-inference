@@ -136,16 +136,22 @@ class VllmUnquantizedEmbeddingMethod(UnquantizedEmbeddingMethod):
         self.mesh = mesh
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        weight = t2j(layer.weight, use_dlpack=False)
-        weight = general_device_put(
-            weight,
-            NamedSharding(self.mesh, P(ShardingAxisName.MLP_TENSOR, None)))
+        weight_sharding = NamedSharding(
+            self.mesh, P(ShardingAxisName.MLP_TENSOR, None))
+        weight = _load_weight_for_layer(layer, "weight", weight_sharding)
+        # Free CPU memory immediately
+        layer.weight.untyped_storage().resize_(0)
+        delattr(layer, 'weight')
+        weight = general_device_put(weight, weight_sharding)
         layer.weight = Parameter(torch_view(weight), requires_grad=False)
 
         if isinstance(layer, ParallelLMHead) and layer.bias is not None:
-            bias = t2j(layer.bias, use_dlpack=False)
-            bias = general_device_put(
-                bias, NamedSharding(self.mesh, P(ShardingAxisName.MLP_TENSOR)))
+            bias_sharding = NamedSharding(
+                self.mesh, P(ShardingAxisName.MLP_TENSOR))
+            bias = _load_weight_for_layer(layer, "bias", bias_sharding)
+            layer.bias.untyped_storage().resize_(0)
+            delattr(layer, 'bias')
+            bias = general_device_put(bias, bias_sharding)
             layer.bias = Parameter(torch_view(bias), requires_grad=False)
 
 
