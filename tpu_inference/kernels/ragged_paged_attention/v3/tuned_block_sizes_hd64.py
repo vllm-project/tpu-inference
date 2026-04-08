@@ -158,6 +158,14 @@ TUNED_BLOCK_SIZES = {
                     'max_model_len-8192-sw-None': (32, 32),
                     'max_model_len-8192-sw-128': (2, 32),
                 },
+            },
+            'q_bfloat16_kv_float8_e4m3fn': {
+                'q_head-32_kv_head-4_head-64': {
+                    'max_model_len-8192-sw-None': (16, 8),
+                    'max_model_len-8192-sw-128': (4, 8),
+                    'max_model_len-16384-sw-None': (24, 16),
+                    'max_model_len-16384-sw-128': (4, 16),
+                }
             }
         },
     },
