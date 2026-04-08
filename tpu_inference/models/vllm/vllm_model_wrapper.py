@@ -193,6 +193,18 @@ class VllmModelWrapper:
                 # used in punica wrapper.
                 lora_manager, vllm_model = load_lora_model(
                     vllm_model, vllm_config_for_load, device="jax")
+            from vllm.lora.layers import BaseLayerWithLoRA
+            
+            unsupported_keys = ["embed_tokens", "lm_head", "logits_processor"]
+            
+            for name, module in vllm_model.named_modules():
+                if any(k in name for k in unsupported_keys) and isinstance(module, BaseLayerWithLoRA):
+                    parent_name = ".".join(name.split(".")[:-1])
+                    child_name = name.split(".")[-1]
+                    parent = vllm_model.get_submodule(parent_name) if parent_name else vllm_model
+                    setattr(parent, child_name, module.base_layer)
+                    logger.info(f"TPU-Inference Patch: Force reverted {name} to original base layer.")
+            
             replace_set_lora(vllm_model)
 
         static_forward_context = vllm_config_for_load.compilation_config.static_forward_context
