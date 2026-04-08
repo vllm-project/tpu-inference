@@ -69,15 +69,32 @@ class ShardingAxisName2D:
     VOCAB = ('data', 'model')
 
 
-try:
-    _use_2d_tp_sharding = envs.USE_2D_TP
-    _use_base_sharding = envs.NEW_MODEL_DESIGN
-    if _use_2d_tp_sharding or _use_base_sharding:
-        ShardingAxisName = ShardingAxisNameBase
-    else:
-        ShardingAxisName = ShardingAxisName2D
-except Exception:
-    ShardingAxisName = ShardingAxisName2D
+# Lazily initialize the ShardingAxisName so that we can decide which one to use based on the
+# propagated / updated environment variables in the multi-host setup.
+class LazyShardingAxisName:
+    """Lazy loading for ShardingAxisName."""
+
+    def __init__(self):
+        self._cls = None
+
+    def _initialize(self):
+        if self._cls is None:
+            try:
+                _use_2d_tp_sharding = envs.USE_2D_TP
+                _use_base_sharding = envs.NEW_MODEL_DESIGN
+                if _use_2d_tp_sharding or _use_base_sharding:
+                    self._cls = ShardingAxisNameBase
+                else:
+                    self._cls = ShardingAxisName2D
+            except Exception:
+                self._cls = ShardingAxisName2D
+
+    def __getattr__(self, name):
+        self._initialize()
+        return getattr(self._cls, name)
+
+
+ShardingAxisName = LazyShardingAxisName()
 
 
 @dataclass
@@ -136,7 +153,8 @@ class ShardingConfigManager:
         parallel_config = vllm_config.parallel_config
         # Currently tensor_parallelism is also used for other things like determining number of Ray workers.
         pc_tensor_parallelism = parallel_config.tensor_parallel_size
-        ss_tensor_parallelsim = sharding_strategy.get("tensor_parallelism", 1)
+        ss_tensor_parallelsim = sharding_strategy.get("tensor_parallelism",
+                                                      None)
         data_parallelism = parallel_config.data_parallel_size
         expert_parallelism = sharding_strategy.get("expert_parallelism", 1)
         sequence_parallelism = sharding_strategy.get("sequence_parallelism", 1)
@@ -144,7 +162,7 @@ class ShardingConfigManager:
 
         enable_dp_attention = sharding_strategy.get("enable_dp_attention",
                                                     False)
-        if pc_tensor_parallelism != ss_tensor_parallelsim and ss_tensor_parallelsim > 1:
+        if pc_tensor_parallelism != ss_tensor_parallelsim and ss_tensor_parallelsim:
             # The user has explicitly set the tensor parallelism in the sharding config.
             tensor_parallelism = ss_tensor_parallelsim
         else:

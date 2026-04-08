@@ -65,7 +65,6 @@ After installing `vllm-tpu`, you can start the API server.
    ```shell
    vllm serve "meta-llama/Llama-3.1-8B" \
        --download_dir /tmp \
-       --disable-log-requests \
        --tensor_parallel_size=1 \
        --max-model-len=2048
    ```

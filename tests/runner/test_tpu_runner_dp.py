@@ -1095,5 +1095,223 @@ class TestTPUJaxRunnerDPInputsLightweight:
         assert len(token_in_tpu_pre_next_tokens_indices) == 2
 
 
+class TestTPUJaxRunnerPadding:
+
+    def setup_method(self):
+        self.runner = MagicMock()
+        self.runner.dp_size = 2
+        self.runner.num_tokens_paddings = [16, 32, 64]
+        self.runner.num_tokens_paddings_per_dp = [8, 16, 32]
+        self.runner.dtype = "bfloat16"
+        self.runner.mesh = MagicMock()
+        self.runner.model_config = MagicMock()
+        self.runner.model_config.get_hidden_size.return_value = 128
+
+        # Bind the actual methods to our mock
+        from tpu_inference.runner.tpu_runner import TPUModelRunner
+        self.runner._get_padded_total_tokens = TPUModelRunner._get_padded_total_tokens.__get__(
+            self.runner)
+        self.runner.get_intermediate_tensor_spec = TPUModelRunner.get_intermediate_tensor_spec.__get__(
+            self.runner)
+
+    def test_get_padded_total_tokens_even_dp(self):
+        """Test padding calculation with even distribution."""
+        mock_output = MagicMock()
+        mock_output.total_num_scheduled_tokens = 12  # 6 per rank
+        mock_output.max_num_scheduled_tokens_per_dp_rank = 6
+
+        # max 6 -> next bucket in [8, 16, 32] is 8.
+        # global = 8 * 2 = 16.
+        padded = self.runner._get_padded_total_tokens(mock_output)
+        assert padded == 16
+
+    def test_get_padded_total_tokens_skewed_dp(self):
+        """Test padding calculation with skewed distribution."""
+        mock_output = MagicMock()
+        mock_output.total_num_scheduled_tokens = 12  # e.g., 12 on rank 0, 0 on rank 1
+        mock_output.max_num_scheduled_tokens_per_dp_rank = 12
+
+        # max 12 -> next bucket in [8, 16, 32] is 16.
+        # global = 16 * 2 = 32.
+        padded = self.runner._get_padded_total_tokens(mock_output)
+        assert padded == 32
+
+    def test_get_padded_total_tokens_no_dp(self):
+        """Test padding calculation with dp_size=1."""
+        self.runner.dp_size = 1
+        self.runner.num_tokens_paddings_per_dp = [16, 32, 64]
+
+        # Use a spec to ensure getattr fallback works correctly
+        from vllm.v1.core.sched.output import SchedulerOutput
+        mock_output = MagicMock(spec=SchedulerOutput)
+        mock_output.total_num_scheduled_tokens = 20
+
+        # max 20 -> next bucket in [16, 32, 64] is 32.
+        # global = 32 * 1 = 32.
+        padded = self.runner._get_padded_total_tokens(mock_output)
+        assert padded == 32
+
+    def test_get_intermediate_tensor_spec(self):
+        """Test that get_intermediate_tensor_spec returns correct shape."""
+        mock_output = MagicMock()
+        mock_output.total_num_scheduled_tokens = 12
+        mock_output.max_num_scheduled_tokens_per_dp_rank = 6
+
+        # Create a mock for ShapeDtypeStruct to avoid JAX validation
+        mock_spec_instance = MagicMock()
+        mock_spec_instance.shape = (16, 128)
+        mock_spec_instance.dtype = 'float32'
+        mock_spec_instance.sharding = 'mock_sharding'
+
+        with patch('tpu_inference.runner.tpu_runner.to_jax_dtype',
+                   return_value='float32'), \
+             patch('tpu_inference.runner.tpu_runner.NamedSharding', return_value='mock_sharding'), \
+             patch('tpu_inference.runner.tpu_runner.PartitionSpec', return_value='mock_spec'), \
+             patch('jax.ShapeDtypeStruct', return_value=mock_spec_instance):
+
+            spec_dict = self.runner.get_intermediate_tensor_spec(mock_output)
+
+            assert "hidden_states" in spec_dict
+            spec = spec_dict["hidden_states"]
+            assert spec.shape == (16, 128)
+            assert spec.dtype == 'float32'
+            assert spec.sharding == 'mock_sharding'
+
+
+class TestSamplingMetadataPassthrough:
+
+    def test_sample_tokens_passes_sampling_metadata_from_state(self):
+        """sample_tokens() should pass execute_model_state.sampling_metadata to _sample_from_logits."""
+        runner = MagicMock()
+        mock_sampling_metadata = MagicMock()
+        # Set the specific field we want to trace; other fields are auto-mocked.
+        runner.execute_model_state.sampling_metadata = mock_sampling_metadata
+        runner._sample_from_logits = MagicMock(return_value=MagicMock())
+
+        TPUModelRunner.sample_tokens(runner, grammar_output=None)
+
+        runner._sample_from_logits.assert_called_once()
+        # Signature: _sample_from_logits(scheduler_output, attn_metadata,
+        #                                 sampling_metadata, input_ids, ...)
+        assert runner._sample_from_logits.call_args.args[
+            2] is mock_sampling_metadata
+
+    @patch('tpu_inference.runner.tpu_runner.NamedSharding')
+    @patch('tpu_inference.runner.tpu_runner.runner_utils')
+    @patch('tpu_inference.runner.tpu_runner.device_array',
+           side_effect=lambda mesh, tensors, **kwargs: tensors)
+    @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
+    def test_prepare_inputs_dp_uses_attn_data_sharding_for_sampling_metadata(
+            self, mock_sampling_metadata, mock_device_array, mock_runner_utils,
+            mock_named_sharding):
+        """_prepare_inputs_dp() should use ATTN_DATA sharding for TPUSupportedSamplingMetadata."""
+        from jax.sharding import PartitionSpec
+
+        from tpu_inference.layers.common.sharding import ShardingAxisName
+
+        runner = MagicMock()
+        runner.dp_size = 2
+        runner.max_num_reqs = 8
+        runner.max_num_blocks_per_req = 8
+        runner.input_batch.num_reqs = 2
+        runner.input_batch.req_ids = ["req1", "req2"]
+        runner.input_batch.req_id_to_index = {"req1": 0, "req2": 1}
+        runner.input_batch.num_computed_tokens_cpu = np.array([5, 6])
+        runner.input_batch.token_ids_cpu = np.zeros((8, 64), dtype=np.int32)
+        mock_block_table = MagicMock()
+        mock_block_table.get_cpu_tensor.return_value = np.arange(32).reshape(
+            4, 8)
+        runner.input_batch.block_table = [mock_block_table]
+        runner.input_ids_cpu = np.zeros(64, dtype=np.int32)
+        runner.positions_cpu = np.zeros(64, dtype=np.int32)
+        runner.query_start_loc_cpu = np.zeros(10, dtype=np.int32)
+        runner.seq_lens_cpu = np.zeros(8, dtype=np.int32)
+        runner.logits_indices_cpu = np.zeros(8, dtype=np.int32)
+        runner.block_tables_cpu = [np.zeros((8, 8), dtype=np.int32)]
+        runner.arange_cpu = np.arange(64, dtype=np.int64)
+        runner.num_tokens_paddings_per_dp = [8, 16, 32]
+        runner.num_reqs_paddings_per_dp = [4, 8]
+        runner.uses_mrope = False
+        runner.phase_based_profiler = None
+        runner.lora_config = None
+        runner.scheduler_config.async_scheduling = False
+        runner._pre_async_results = None
+        mock_kv_cache_config = MagicMock()
+        mock_kv_cache_config.kv_cache_groups = [MagicMock()]
+        runner.kv_cache_config = mock_kv_cache_config
+        runner._prepare_dp_input_metadata = TPUModelRunner._prepare_dp_input_metadata.__get__(
+            runner)
+        runner._prepare_async_token_substitution_indices_dp = TPUModelRunner._prepare_async_token_substitution_indices_dp.__get__(
+            runner)
+
+        mock_runner_utils.get_padded_token_len.side_effect = lambda paddings, val: 8
+        mock_sampling_metadata.from_input_batch.return_value = MagicMock()
+        mock_named_sharding.return_value = MagicMock()
+
+        scheduler_output = MagicMock()
+        scheduler_output.num_scheduled_tokens = {"req1": 3, "req2": 2}
+        scheduler_output.assigned_dp_rank = {"req1": 0, "req2": 1}
+        scheduler_output.total_num_scheduled_tokens = 5
+        scheduler_output.scheduled_spec_decode_tokens = {}
+
+        TPUModelRunner._prepare_inputs_dp(runner, scheduler_output)
+
+        # Verify from_input_batch was called exactly once with the ATTN_DATA sharding
+        mock_sampling_metadata.from_input_batch.assert_called_once()
+        sharding_arg = mock_sampling_metadata.from_input_batch.call_args.kwargs.get(
+            'sharding')
+        assert sharding_arg is mock_named_sharding.return_value, (
+            "from_input_batch should receive the data_parallel_attn_sharding instance"
+        )
+
+        # Verify NamedSharding was called with ATTN_DATA PartitionSpec.
+        call_partition_specs = [
+            call.args[1] for call in mock_named_sharding.call_args_list
+            if len(call.args) > 1
+        ]
+        assert PartitionSpec(
+            ShardingAxisName.ATTN_DATA) in call_partition_specs, (
+                "NamedSharding must be called with ATTN_DATA PartitionSpec")
+
+    @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
+    @patch('tpu_inference.runner.tpu_runner.sample')
+    @patch('tpu_inference.runner.tpu_runner.runner_utils')
+    @patch('jax.device_get', return_value=np.zeros(8, dtype=np.int32))
+    def test_sample_from_logits_does_not_call_from_input_batch(
+            self, mock_jax_device_get, mock_runner_utils, mock_sample,
+            mock_sampling_metadata):
+        """_sample_from_logits() should use its tpu_sampling_metadata argument, not create one internally."""
+        runner = MagicMock()
+        runner.input_batch.num_reqs = 0  # empty batch keeps the loop trivial
+        runner.speculative_config = None
+        runner.scheduler_config.async_scheduling = False
+
+        mock_tpu_sampling_metadata = MagicMock()
+        mock_tpu_sampling_metadata.do_sampling = False
+        mock_tpu_sampling_metadata.logprobs = False
+
+        mock_runner_utils.get_padded_num_reqs_with_upper_limit.return_value = 8
+        mock_sample.return_value = np.zeros(8, dtype=np.int32)
+
+        try:
+            TPUModelRunner._sample_from_logits(
+                runner,
+                MagicMock(),  # scheduler_output
+                MagicMock(),  # attn_metadata
+                mock_tpu_sampling_metadata,
+                None,  # input_ids
+                MagicMock(),  # hidden_states
+                MagicMock(),  # logits
+                None,  # aux_hidden_states
+                None,  # spec_decode_metadata
+                None,  # kv_connector_output
+                padded_num_reqs=8,
+            )
+        except Exception:
+            pass  # only care that from_input_batch was never called
+
+        mock_sampling_metadata.from_input_batch.assert_not_called()
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

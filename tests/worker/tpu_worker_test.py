@@ -126,6 +126,23 @@ class TestPPConfig:
         assert pp_config.default_tpu_chips_per_process_bounds == "1,1,1"
         assert pp_config.default_tpu_visible_chips == "2"
 
+    @patch('tpu_inference.tpu_info.get_num_cores_per_chip')
+    @patch.dict('os.environ', {"TPU_MULTIHOST_BACKEND": "ray"})
+    def test_pp_config_with_ray(self, mock_get_cores, mock_vllm_config):
+        """Tests PPConfig when using Ray multi-host backend."""
+        mock_get_cores.return_value = 2
+        mock_vllm_config.sharding_config.total_devices = 4
+
+        # Rank 1 in a PP=2 setup. Normally chips would be 2,3.
+        # With Ray, each host starts from 0.
+        pp_config = PPConfig(vllm_config=mock_vllm_config,
+                             rank=1,
+                             ip="127.0.0.1",
+                             prev_worker_ip="127.0.0.1",
+                             pp_world_size=2)
+
+        assert pp_config.default_tpu_visible_chips == "0,1"
+
 
 class TestTPUWorker:
     """Test suite for the TPUWorker class."""
@@ -453,3 +470,32 @@ class TestTPUWorker:
         _ = worker.get_supported_tasks()
 
         worker.model_runner.get_supported_tasks.assert_called_once()
+
+    @patch('tpu_inference.worker.tpu_worker.TPUModelRunner')
+    @patch('tpu_inference.worker.tpu_worker.utils')
+    @patch('tpu_inference.worker.tpu_worker.jax')
+    @patch('tpu_inference.worker.tpu_worker.ensure_kv_transfer_initialized')
+    @patch.dict('os.environ', {
+        "TPU_MULTIHOST_BACKEND": "ray",
+        "TPU_PROCESS_PORT": "9999"
+    })
+    @patch('tpu_inference.worker.tpu_worker.jax_parallel_state')
+    def test_init_device_with_ray(self, mock_ensure_kv_transfer_initialized,
+                                  mock_jax_parallel_state, mock_jax,
+                                  mock_utils, mock_runner_cls,
+                                  mock_vllm_config, mock_get_pp_group):
+        """Tests init_device behavior with Ray multi-host backend."""
+        mock_vllm_config.parallel_config.pipeline_parallel_size = 2
+        worker = TPUWorker(vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=1,
+                           distributed_init_method="test_method",
+                           devices=['tpu:0'])
+
+        with patch.dict('os.environ', {}, clear=False):
+            worker.init_device()
+
+            import os
+            assert os.environ["TPU_PROCESS_ADDRESSES"] == "localhost:9999"
+            assert os.environ["TPU_PROCESS_PORT"] == "9999"
+            assert os.environ["CLOUD_TPU_TASK_ID"] == "0"

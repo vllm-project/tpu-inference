@@ -17,6 +17,7 @@ import jax
 import jax.numpy as jnp
 import torch
 import torch.nn.functional as F
+from jax.sharding import AxisType
 
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   MESH_AXIS_NAMES_2D)
@@ -34,11 +35,11 @@ def get_spmd_mesh(num_devices: int = 1, enable_attn_dp: bool = False):
         attn_dp_size = 2
         model_size = num_devices // attn_dp_size
         mesh_shape = (1, attn_dp_size, 1, 1, model_size)
-        return jax.make_mesh(mesh_shape, axis_names, devices=devices)
     else:
         axis_names = MESH_AXIS_NAMES_2D
         mesh_shape = (1, len(devices))
-        return jax.make_mesh(mesh_shape, axis_names, devices=devices)
+    axis_types = (AxisType.Auto, ) * len(axis_names)
+    return jax.make_mesh(mesh_shape, axis_names, axis_types, devices=devices)
 
 
 def find_all_layer_type(module: torch.nn.Module, layer_type: torch.nn.Module):
@@ -121,6 +122,24 @@ def ref_moe(x: torch.Tensor,
     x = x[seq_indexes, expert_indices]
 
     return torch.einsum("tai,ta->ti", x, expert_weights)
+
+
+def ref_quantize_fp8(
+        x: torch.Tensor,
+        dtype: torch.dtype,
+        axis: Optional[int] = None) -> tuple[torch.Tensor, torch.Tensor]:
+    per_tensor = axis is None
+    dtype_info = torch.finfo(dtype)
+    dtype_max = float(dtype_info.max)
+    dtype_min = float(dtype_info.min)
+
+    dim = () if per_tensor else (axis, )
+    x_abs_max = torch.amax(torch.abs(x), dim=dim, keepdim=True)
+    if per_tensor:
+        x_abs_max = torch.squeeze(x_abs_max, dim=-1)
+    x_s = x_abs_max / dtype_max
+    x_q = torch.clip(x / x_s, dtype_min, dtype_max).to(dtype)
+    return x_q, x_s.to(torch.float32)
 
 
 def ref_moe_jax(x: jax.Array,

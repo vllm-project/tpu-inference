@@ -19,11 +19,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
+import torchax
 from jax.sharding import Mesh
 from vllm.v1.attention.backend import AttentionType
 
-from tpu_inference.layers.vllm.mla_attention import (
-    VllmTPUMLAAttention, VllmTPUMultiHeadLatentAttentionWrapper)
+from tpu_inference.layers.vllm.custom_ops.mla_attention import (
+    VllmMLAAttention, VllmMultiHeadLatentAttentionWrapper)
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 
@@ -50,7 +51,7 @@ class TestVllmTPUMLAAttention:
         mock_super_init.side_effect = side_effect
 
         kv_b_proj = MagicMock()
-        attn = VllmTPUMLAAttention(
+        attn = VllmMLAAttention(
             num_heads=8,
             scale=1.0,
             qk_nope_head_dim=64,
@@ -79,7 +80,7 @@ class TestVllmTPUMLAAttention:
         mock_super_init.side_effect = side_effect
 
         kv_b_proj = MagicMock()
-        attn = VllmTPUMLAAttention(
+        attn = VllmMLAAttention(
             num_heads=8,
             scale=1.0,
             qk_nope_head_dim=64,
@@ -96,7 +97,7 @@ class TestVllmTPUMLAAttention:
     @patch(
         "vllm.model_executor.layers.attention.mla_attention.MLAAttention.__init__",
         autospec=True)
-    def test_process_weights_after_loading(self, mock_super_init):
+    def test_process_weights_after_loading(self, mock_super_init, mesh):
 
         def side_effect(self, *args, **kwargs):
             self.kv_cache_dtype = "auto"
@@ -105,7 +106,7 @@ class TestVllmTPUMLAAttention:
 
         # Mock a linear layer (to simulate column parallel linear)
         kv_b_proj = torch.nn.Linear(10, 10)
-        attn = VllmTPUMLAAttention(
+        attn = VllmMLAAttention(
             num_heads=8,
             scale=1.0,
             qk_nope_head_dim=64,
@@ -117,14 +118,19 @@ class TestVllmTPUMLAAttention:
             prefix="test",
         )
 
-        attn.W_UK_T = torch.rand(10, 10)
-        attn.W_UV = torch.rand(10, 10)
+        attn.W_UK_T = torchax.tensor.Tensor(jnp.ones((10, 10)),
+                                            env=torchax.default_env())
+        attn.W_UV = torchax.tensor.Tensor(jnp.ones((10, 10)),
+                                          env=torchax.default_env())
         attn.kv_b_proj = MagicMock()
+        attn.kv_b_proj.quant_method.linear_config.mesh = mesh
+        attn.kv_b_proj.named_parameters.return_value = {}
 
         with patch(
                 "vllm.model_executor.layers.attention.mla_attention.MLAAttention.process_weights_after_loading"
         ) as mock_super_process:
-            attn.process_weights_after_loading(torch.float32)
+            with torchax.default_env():
+                attn.process_weights_after_loading(torch.float32)
 
             mock_super_process.assert_called_once_with(torch.float32)
 
@@ -134,7 +140,9 @@ class TestVllmTPUMLAAttention:
             assert isinstance(attn.W_UV, torch.nn.Parameter)
             assert not attn.W_UV.requires_grad
 
-    @patch("tpu_inference.layers.vllm.mla_attention.get_attention_context")
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.mla_attention.get_attention_context"
+    )
     @patch(
         "vllm.model_executor.layers.attention.mla_attention.MLAAttention.__init__",
         autospec=True)
@@ -145,7 +153,7 @@ class TestVllmTPUMLAAttention:
 
         mock_super_init.side_effect = side_effect
 
-        attn = VllmTPUMLAAttention(
+        attn = VllmMLAAttention(
             num_heads=8,
             scale=1.0,
             qk_nope_head_dim=64,
@@ -192,7 +200,9 @@ class TestVllmTPUMLAAttention:
             assert context.kv_caches[0] is mock_new_kv_cache
 
     @patch("torch.ops.vllm.maybe_calc_kv_scales", create=True)
-    @patch("tpu_inference.layers.vllm.mla_attention.get_attention_context")
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.mla_attention.get_attention_context"
+    )
     @patch(
         "vllm.model_executor.layers.attention.mla_attention.MLAAttention.__init__",
         autospec=True)
@@ -205,7 +215,7 @@ class TestVllmTPUMLAAttention:
 
         mock_super_init.side_effect = side_effect
 
-        attn = VllmTPUMLAAttention(
+        attn = VllmMLAAttention(
             num_heads=8,
             scale=1.0,
             qk_nope_head_dim=64,
@@ -240,8 +250,9 @@ class TestVllmTPUMLAAttention:
 
 class TestVllmTPUMultiHeadLatentAttentionWrapper:
 
-    @patch("tpu_inference.layers.vllm.mla_attention.VllmTPUMLAAttention",
-           autospec=True)
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.mla_attention.VllmMLAAttention",
+        autospec=True)
     def test_init(self, mock_tpu_mla_attn):
         mla_modules = MagicMock()
         mla_modules.fused_qkv_a_proj = "fused_qkv_a_proj"
@@ -257,7 +268,7 @@ class TestVllmTPUMultiHeadLatentAttentionWrapper:
         mla_modules.indexer_rotary_emb = "indexer_rotary_emb"
         mla_modules.is_sparse = False
 
-        wrapper = VllmTPUMultiHeadLatentAttentionWrapper(
+        wrapper = VllmMultiHeadLatentAttentionWrapper(
             hidden_size=128,
             num_heads=8,
             scale=1.0,

@@ -202,7 +202,11 @@ def sharded_quantized_batched_matmul(x: jax.Array,
     axis_shard = {c: w_spec_padded[i] for i, c in enumerate(w_axis)}
 
     # Input sharding: match weight sharding for shared axes, None for free.
-    x_spec = tuple(axis_shard.get(c, None) for c in x_axis)
+    # The first axis of x is ShardingAxisName.ATTN_DATA to handle
+    # DP attention case.
+    x_spec = tuple(
+        ShardingAxisName.ATTN_DATA if i == 0 else axis_shard.get(c, None)
+        for i, c in enumerate(x_axis))
     x_sharding = P(*x_spec)
 
     # Scale sharding: scale is 1D (out_features) for tensorwise.
@@ -221,7 +225,10 @@ def sharded_quantized_batched_matmul(x: jax.Array,
     dg_out_labels = batch_labels + lhs_free + rhs_free
     dg_out_spec = tuple(axis_shard.get(c, None) for c in dg_out_labels)
     # Apply the output permutation to match the einsum output.
-    out_spec = tuple(dg_out_spec[i] for i in output_perm)
+    # The first axis of output is ShardingAxisName.ATTN_DATA to handle
+    # DP attention case.
+    out_spec = tuple(ShardingAxisName.ATTN_DATA if idx == 0 else dg_out_spec[i]
+                     for idx, i in enumerate(output_perm))
     out_sharding = P(*out_spec)
 
     # Determine the contracting axis name for psum (if sharded).

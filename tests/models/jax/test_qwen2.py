@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, set_current_vllm_config
 from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
 from tpu_inference.distributed.jax_parallel_state import \
@@ -40,6 +40,7 @@ class MockVllmConfig:
         self.load_config.download_dir = None
         self.cache_config = MagicMock(cache_dtype=kv_cache_dtype)
         self.quant_config = None
+        self.parallel_config = None
 
 
 @pytest.fixture(scope="module")
@@ -164,7 +165,7 @@ class TestQwen2ForCausalLM:
         assert mlp.down_proj.weight.shape == (intermediate_size, hidden_size)
 
         # Test model load
-        with jax.set_mesh(mesh):
+        with jax.set_mesh(mesh), set_current_vllm_config(mock_vllm_config):
             loader = get_model_loader(LoadConfig(load_format="hf"))
             loader.load_weights(model, model_config)
 

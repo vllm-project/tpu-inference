@@ -22,7 +22,6 @@ from compressed_tensors.quantization import (QuantizationArgs,
 from jax.sharding import NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
-from torchax.ops.mappings import t2j
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
     CompressedTensorsW8A8Fp8
 from vllm.model_executor.layers.quantization.utils.fp8_utils import \
@@ -41,6 +40,7 @@ from tpu_inference.layers.common.utils import \
 from tpu_inference.layers.vllm.quantization.configs import \
     VllmQuantLinearConfig
 from tpu_inference.logger import init_logger
+from tpu_inference.utils import t2j
 
 P = PartitionSpec
 

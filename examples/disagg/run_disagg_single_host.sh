@@ -67,8 +67,8 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     \
     vllm serve $MODEL \
     --port $PORT \
-    --gpu-memory-utilization 0.2 \
-    --max-num-batched-tokens 8192 \
+    --gpu-memory-utilization 0.3 \
+    --max-num-batched-tokens 1024 \
     --block-size 128 \
     --no-enable-prefix-caching \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
@@ -101,9 +101,9 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     \
     vllm serve $MODEL \
     --port $PORT \
-    --gpu-memory-utilization 0.6 \
+    --gpu-memory-utilization 0.3 \
     --no-enable-prefix-caching \
-    --max-num-batched-tokens 8192 \
+    --max-num-batched-tokens 1024 \
     --block-size 128 \
     --tensor-parallel-size $DECODER_TP_SIZE \
     --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}" \
@@ -145,7 +145,7 @@ vllm bench serve \
 --model=$MODEL \
 --num-warmups=3 \
 --dataset-name=random \
---random-input-len=4096 \
+--random-input-len=1024 \
 --random-output-len=128 \
 --num-prompts=30 \
 --ignore-eos \

@@ -18,6 +18,7 @@ from typing import Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import torch
 from jax.sharding import Mesh
 
@@ -37,6 +38,7 @@ DEFAULT_SAMPLING_PARAMS = dict(
         "temperature",
         "top_k",
         "top_p",
+        "_cache_collision_dummy",
     ],
     meta_fields=["do_sampling", "logprobs"],
 )
@@ -45,6 +47,7 @@ class TPUSupportedSamplingMetadata:
     temperature: Optional[jnp.ndarray] = None
     top_k: Optional[jnp.ndarray] = None
     top_p: Optional[jnp.ndarray] = None
+    _cache_collision_dummy: Optional[jnp.ndarray] = None
     do_sampling: bool = False
     logprobs: bool = False
 
@@ -57,8 +60,20 @@ class TPUSupportedSamplingMetadata:
         sharding: Optional[jax.sharding.Sharding] = None,
     ) -> "TPUSupportedSamplingMetadata":
         needs_logprobs = input_batch.max_num_logprobs > 0 if input_batch.max_num_logprobs else False
+
+        # Use a dummy tensor with a unique shape for each logprobs config.
+        # This avoids persistent cache collisions.
+        dummy_shape = (1 if needs_logprobs else 2, )
+        cache_collision_dummy = np.zeros(dummy_shape, dtype=np.int32)
+        # Use replicated sharding for dummy tensor.
+        cache_collision_dummy = device_array(mesh,
+                                             cache_collision_dummy,
+                                             sharding=None)
+
         if input_batch.all_greedy:
-            return cls(do_sampling=False, logprobs=needs_logprobs)
+            return cls(do_sampling=False,
+                       logprobs=needs_logprobs,
+                       _cache_collision_dummy=cache_collision_dummy)
         num_reqs = input_batch.num_reqs
 
         def fill_slice(cpu_torch_tensor: torch.Tensor,
@@ -85,6 +100,7 @@ class TPUSupportedSamplingMetadata:
             top_k=device_array(mesh,
                                top_k_tensor[:padded_num_reqs],
                                sharding=sharding),
+            _cache_collision_dummy=cache_collision_dummy,
             do_sampling=not input_batch.all_greedy,
             logprobs=needs_logprobs,
         )

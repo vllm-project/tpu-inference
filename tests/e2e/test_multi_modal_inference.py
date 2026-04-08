@@ -13,11 +13,11 @@ from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.multimodal.image import convert_image_mode
 
-# Expected partial text output from the model. This is based on a previous
-# run and is used for verification. The test is considered passed if the
+# Expected partial text output from the model. This is based on a query to
+# vllm 0.17.0 on A100. The test is considered passed if the
 # generated output match with this text.
 EXPECTED_TEXT = (
-    "The image depicts a tall, cylindrical tower with a lattice-like structure, surrounded by cherry blossom trees in full bloom. The cherry blossoms are in various stages of opening, with pink petals covering the branches. The sky is clear and blue, providing a vibrant backdrop to the scene. The tower appears to be a significant landmark"
+    "The image depicts a stunning view of the Tokyo Skytree, a tall tower located in Tokyo, Japan. The sky is clear and blue, providing a beautiful backdrop for the tower. In the foreground, there are cherry blossom trees in full bloom, with pink flowers covering the branches. The cherry blossoms are in full bloom"
 )
 
 
@@ -77,6 +77,8 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes):
 
     engine_args["additional_config"][
         "enable_dynamic_image_sizes"] = enable_dynamic_image_sizes
+    engine_args["compilation_config"]["cudagraph_capture_sizes"] = []
+
     llm = LLM(**engine_args)
 
     sampling_params = SamplingParams(

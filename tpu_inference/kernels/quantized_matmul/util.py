@@ -258,20 +258,11 @@ def validate_inputs(
     w_q: jax.Array,
     w_scale: jax.Array,
     x_abs_max: jax.Array,
-    x_q_dtype: jnp.dtype,
     batch_block_size: int,
     out_block_size: int,
     in_block_size: int,
 ):
     """Verify inputs invoking the kernel."""
-
-    if x.dtype != x_q_dtype:
-        # If the input is quantized, then it should be the same subdtype as w_q
-        if jnp.issubdtype(x_q_dtype, jnp.integer) != jnp.issubdtype(
-                w_q.dtype, jnp.integer):
-            raise ValueError(
-                f"{x_q_dtype=} and {w_q.dtype=} must be the same int or float type."
-            )
 
     # Verify input shapes.
     if x.shape[1] != w_q.shape[1]:

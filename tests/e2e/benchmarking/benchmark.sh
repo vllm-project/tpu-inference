@@ -115,8 +115,15 @@ if [ -n "${MINIMUM_THROUGHPUT_THRESHOLD:-}" ]; then
     minimum_throughput_threshold="$MINIMUM_THROUGHPUT_THRESHOLD"
 fi
 
-if [ -n "${TENSOR_PARALLEL_SIZE:-}" ]; then
-    tensor_parallel_size="$TENSOR_PARALLEL_SIZE"
+# if TENSOR_PARALLEL_SIZE is set respect it.
+# otherwise, if TPU is tpu7x, use tp=2.
+if [ -z "$TENSOR_PARALLEL_SIZE" ] && [ "$TPU_VERSION" = "tpu7x" ]; then
+  tensor_parallel_size=2
+elif [ -n "$TENSOR_PARALLEL_SIZE" ]; then
+  tensor_parallel_size="$TENSOR_PARALLEL_SIZE"
+else
+  # Default fallback if neither condition is met
+  tensor_parallel_size=1
 fi
 
 echo "Using the root directory at $root_dir"
@@ -222,9 +229,9 @@ fi
 # Spin up the vLLM server
 echo "Spinning up the vLLM server..."
 if [[ "$test_model" == "RedHatAI/Meta-Llama-3.1-8B-Instruct-quantized.w8a8" ]]; then
-    (vllm serve "$test_model" --disable-log-requests --download_dir "$vllm_download_dir" --tensor-parallel-size "$tensor_parallel_size" "${extra_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
+    (vllm serve "$test_model" --download_dir "$vllm_download_dir" --tensor-parallel-size "$tensor_parallel_size" "${extra_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
 else
-    (vllm serve "$test_model" --disable-log-requests --download_dir "$vllm_download_dir" --tensor-parallel-size "$tensor_parallel_size" "${extra_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
+    (vllm serve "$test_model" --download_dir "$vllm_download_dir" --tensor-parallel-size "$tensor_parallel_size" "${extra_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
 fi
 
 # Set trap to ensure cleanup happens even on immediate or normal exit

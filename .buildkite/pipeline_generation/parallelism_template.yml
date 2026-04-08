@@ -1,0 +1,109 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# pipeline-name: {FEATURE_NAME}
+# pipeline-type: {CATEGORY}
+steps:
+  # --- Single-Host Tests ---
+  - label: "${{TPU_VERSION:-tpu6e}} Correctness tests for {FEATURE_NAME} (single-host)"
+    key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Single_Host"
+    soft_fail: true
+    agents:
+      queue: "${{TPU_QUEUE_SINGLE:-tpu_v6e_queue}}"
+    commands:
+      - echo "placeholder" # TODO : replace with your single-host correctness test command
+
+  - label: "${{TPU_VERSION:-tpu6e}} Record correctness test result for {FEATURE_NAME} (single-host)"
+    key: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Single_Host"
+    depends_on: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Single_Host"
+    env:
+      CI_TPU_VERSION: "${{TPU_VERSION:-tpu6e}}"
+      CI_TARGET: "{FEATURE_NAME}"
+      CI_STAGE: "Single-Host CorrectnessTest"
+      CI_CATEGORY: "{CATEGORY}"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Single_Host
+
+  - label: "${{TPU_VERSION:-tpu6e}} Performance tests for {FEATURE_NAME} (single-host)"
+    key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_PerformanceTest_Single_Host"
+    depends_on: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Single_Host"
+    soft_fail: true
+    agents:
+      queue: "${{TPU_QUEUE_SINGLE:-tpu_v6e_queue}}"
+    commands:
+      - echo "placeholder" # TODO : replace with your single-host performance test command
+
+  - label: "${{TPU_VERSION:-tpu6e}} Record performance test result for {FEATURE_NAME} (single-host)"
+    key: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_FEATURE_NAME}_PerformanceTest_Single_Host"
+    depends_on: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_PerformanceTest_Single_Host"
+    env:
+      CI_TPU_VERSION: "${{TPU_VERSION:-tpu6e}}"
+      CI_TARGET: "{FEATURE_NAME}"
+      CI_STAGE: "Single-Host PerformanceTest"
+      CI_CATEGORY: "{CATEGORY}"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_PerformanceTest_Single_Host
+
+  # --- Multi-Host Tests ---
+  - label: "${{TPU_VERSION:-tpu6e}} Correctness tests for {FEATURE_NAME} (multi-host)"
+    key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Multi_Host"
+    soft_fail: true
+    agents:
+      queue: "${{TPU_QUEUE_SINGLE:-tpu_v6e_queue}}"
+    commands:
+      - echo "placeholder" # TODO : replace with your multi-host correctness test command
+
+  - label: "${{TPU_VERSION:-tpu6e}} Record correctness test result for {FEATURE_NAME} (multi-host)"
+    key: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Multi_Host"
+    depends_on: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Multi_Host"
+    env:
+      CI_TPU_VERSION: "${{TPU_VERSION:-tpu6e}}"
+      CI_TARGET: "{FEATURE_NAME}"
+      CI_STAGE: "Multi-Host CorrectnessTest"
+      CI_CATEGORY: "{CATEGORY}"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Multi_Host
+
+  - label: "${{TPU_VERSION:-tpu6e}} Performance tests for {FEATURE_NAME} (multi-host)"
+    key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_PerformanceTest_Multi_Host"
+    depends_on: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Multi_Host"
+    soft_fail: true
+    agents:
+      queue: "${{TPU_QUEUE_SINGLE:-tpu_v6e_queue}}"
+    commands:
+      - echo "placeholder" # TODO : replace with your multi-host performance test command
+
+  - label: "${{TPU_VERSION:-tpu6e}} Record performance test result for {FEATURE_NAME} (multi-host)"
+    key: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_FEATURE_NAME}_PerformanceTest_Multi_Host"
+    depends_on: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_PerformanceTest_Multi_Host"
+    env:
+      CI_TPU_VERSION: "${{TPU_VERSION:-tpu6e}}"
+      CI_TARGET: "{FEATURE_NAME}"
+      CI_STAGE: "Multi-Host PerformanceTest"
+      CI_CATEGORY: "{CATEGORY}"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_PerformanceTest_Multi_Host
