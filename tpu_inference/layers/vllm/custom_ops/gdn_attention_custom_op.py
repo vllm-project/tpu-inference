@@ -19,11 +19,15 @@ from einops import rearrange
 from vllm.model_executor.layers.mamba.gdn_linear_attn import \
     GatedDeltaNetAttention
 
+from tpu_inference.layers.vllm.ops.gdn_attention import gdn_attention_core_tpu
+from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+    get_vllm_model_wrapper_context
+
 
 @GatedDeltaNetAttention.register_oot
 class VllmGatedDeltaNetAttention(GatedDeltaNetAttention):
 
-    def forward_cuda(
+    def forward(
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
@@ -37,6 +41,8 @@ class VllmGatedDeltaNetAttention(GatedDeltaNetAttention):
         2. Core attention (custom op)
         3. Output projection
         """
+        vllm_model_wrapper_context = get_vllm_model_wrapper_context()
+        mesh = vllm_model_wrapper_context.mesh
         num_tokens = hidden_states.size(0)
         # ============================================================
         # Part 1: Input Projection
@@ -83,13 +89,12 @@ class VllmGatedDeltaNetAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
-        torch.ops.vllm.gdn_attention_core(
-            mixed_qkv,
-            b,
-            a,
-            core_attn_out,
-            self.prefix,
-        )
+        gdn_attention_core_tpu(mixed_qkv,
+                               b,
+                               a,
+                               core_attn_out,
+                               self.prefix,
+                               mesh=mesh)
 
         # ============================================================
         # Part 3: Output Projection

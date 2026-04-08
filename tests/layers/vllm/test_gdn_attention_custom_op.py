@@ -14,16 +14,33 @@
 
 from unittest.mock import MagicMock, patch
 
+import jax
+import numpy as np
+import pytest
 import torch
+from jax.sharding import Mesh
 
-from tpu_inference.layers.vllm.custom_ops.gdn_attention import \
+from tpu_inference.layers.vllm.custom_ops.gdn_attention_custom_op import \
     VllmGatedDeltaNetAttention
+from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+    set_vllm_model_wrapper_context
+
+
+@pytest.fixture
+def mesh():
+    """Provides a mock 1D JAX mesh for testing."""
+    devices = np.array(jax.local_devices())[0:1]
+    if not devices.any():
+        devices = np.array([jax.devices("cpu")[0]])
+    return Mesh(devices.reshape((-1, 1, 1)), ("data", "attn_dp", "model"))
 
 
 class TestVllmGatedDeltaNetAttention:
 
-    @patch("torch.ops.vllm.gdn_attention_core", create=True)
-    def test_forward_cuda_lora(self, mock_gdn_attention_core):
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_custom_op.gdn_attention_core_tpu"
+    )
+    def test_forward_cuda_lora(self, mock_gdn_attention_core_tpu, mesh):
         attn = VllmGatedDeltaNetAttention.__new__(VllmGatedDeltaNetAttention)
         attn.head_v_dim = 16
         attn.num_v_heads = 4
@@ -49,14 +66,18 @@ class TestVllmGatedDeltaNetAttention:
         attn.norm.return_value = norm_out
         attn.out_proj.return_value = (torch.ones(num_tokens, 64) * 5, None)
 
-        attn.forward_cuda(hidden_states, output)
+        with set_vllm_model_wrapper_context(kv_caches=[],
+                                            mesh=mesh,
+                                            layer_name_to_kvcache_index={}):
+            attn.forward(hidden_states, output)
 
         attn.in_proj_qkv.assert_called_once_with(hidden_states)
         attn.in_proj_z.assert_called_once_with(hidden_states)
         attn.in_proj_ba.assert_called_once_with(hidden_states)
 
-        assert mock_gdn_attention_core.call_count == 1
-        core_args = mock_gdn_attention_core.call_args[0]
+        assert mock_gdn_attention_core_tpu.call_count == 1
+        core_args = mock_gdn_attention_core_tpu.call_args[0]
+        core_kwargs = mock_gdn_attention_core_tpu.call_args[1]
 
         assert core_args[0].shape == (num_tokens, 96)  # mixed_qkv
         assert core_args[1].shape == (num_tokens, 16)  # b
@@ -64,6 +85,7 @@ class TestVllmGatedDeltaNetAttention:
         assert core_args[3].shape == (num_tokens, 4, 16)  # core_attn_out
         assert core_args[3].dtype == hidden_states.dtype
         assert core_args[4] == "test_layer"
+        assert core_kwargs["mesh"] == mesh
 
         attn.norm.assert_called_once()
         # Verify z was correctly reshaped: [num_tokens, -1, head_v_dim]
@@ -77,8 +99,11 @@ class TestVllmGatedDeltaNetAttention:
         assert torch.all(output[:num_tokens] == 5)
         assert torch.all(output[num_tokens:] == 0)
 
-    @patch("torch.ops.vllm.gdn_attention_core", create=True)
-    def test_forward_cuda_non_lora_no_gqa(self, mock_gdn_attention_core):
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_custom_op.gdn_attention_core_tpu"
+    )
+    def test_forward_cuda_non_lora_no_gqa(self, mock_gdn_attention_core_tpu,
+                                          mesh):
         attn = VllmGatedDeltaNetAttention.__new__(VllmGatedDeltaNetAttention)
         attn.head_v_dim = 16
         attn.num_v_heads = 4
@@ -109,19 +134,25 @@ class TestVllmGatedDeltaNetAttention:
         attn.norm.return_value = norm_out
         attn.out_proj.return_value = (torch.ones(num_tokens, 64) * 5, None)
 
-        attn.forward_cuda(hidden_states, output)
+        with set_vllm_model_wrapper_context(kv_caches=[],
+                                            mesh=mesh,
+                                            layer_name_to_kvcache_index={}):
+            attn.forward(hidden_states, output)
 
         attn.in_proj_qkvz.assert_called_once_with(hidden_states)
         attn.in_proj_ba.assert_called_once_with(hidden_states)
 
-        assert mock_gdn_attention_core.call_count == 1
-        core_args = mock_gdn_attention_core.call_args[0]
+        assert mock_gdn_attention_core_tpu.call_count == 1
+        core_args = mock_gdn_attention_core_tpu.call_args[0]
+        core_kwargs = mock_gdn_attention_core_tpu.call_args[1]
+
         # mixed_qkv should be separated accurately
         assert core_args[0].shape == (num_tokens, 128)
         assert core_args[1].shape == (num_tokens, 16)
         assert core_args[2].shape == (num_tokens, 16)
         assert core_args[3].shape == (num_tokens, 4, 16)
         assert core_args[4] == "test_layer"
+        assert core_kwargs["mesh"] == mesh
 
         attn.norm.assert_called_once()
         # Verify z was split and reshaped correctly
@@ -133,8 +164,11 @@ class TestVllmGatedDeltaNetAttention:
         assert torch.all(output[:num_tokens] == 5)
         assert torch.all(output[num_tokens:] == 0)
 
-    @patch("torch.ops.vllm.gdn_attention_core", create=True)
-    def test_forward_cuda_non_lora_gqa(self, mock_gdn_attention_core):
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_custom_op.gdn_attention_core_tpu"
+    )
+    def test_forward_cuda_non_lora_gqa(self, mock_gdn_attention_core_tpu,
+                                       mesh):
         attn = VllmGatedDeltaNetAttention.__new__(VllmGatedDeltaNetAttention)
         attn.head_v_dim = 16
         attn.num_v_heads = 4
@@ -170,14 +204,19 @@ class TestVllmGatedDeltaNetAttention:
         attn.norm.return_value = norm_out
         attn.out_proj.return_value = (torch.ones(num_tokens, 64) * 5, None)
 
-        attn.forward_cuda(hidden_states, output)
+        with set_vllm_model_wrapper_context(kv_caches=[],
+                                            mesh=mesh,
+                                            layer_name_to_kvcache_index={}):
+            attn.forward(hidden_states, output)
 
         attn.in_proj_qkvz.assert_called_once_with(hidden_states)
         attn.in_proj_ba.assert_called_once_with(hidden_states)
         attn.fix_query_key_value_ordering.assert_called_once()
 
-        assert mock_gdn_attention_core.call_count == 1
-        core_args = mock_gdn_attention_core.call_args[0]
+        assert mock_gdn_attention_core_tpu.call_count == 1
+        core_args = mock_gdn_attention_core_tpu.call_args[0]
+        core_kwargs = mock_gdn_attention_core_tpu.call_args[1]
+
         # mixed_qkv should be cat of rearranged query, key, value
         # rearranged from "l p d -> l (p d)", e.g. 2x(4*8) = 2x32 -> cat into 2x96
         assert core_args[0].shape == (num_tokens, 96)
@@ -185,6 +224,7 @@ class TestVllmGatedDeltaNetAttention:
         assert core_args[2].shape == (num_tokens, 16)
         assert core_args[3].shape == (num_tokens, 4, 16)
         assert core_args[4] == "test_layer"
+        assert core_kwargs["mesh"] == mesh
 
         attn.norm.assert_called_once()
         # Verify unpacked z is natively used
