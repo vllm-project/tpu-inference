@@ -139,6 +139,9 @@ ${MOE_REQUANTIZE_BLOCK_SIZE_ENV} \
 ${MOE_REQUANTIZE_WEIGHT_DTYPE_ENV} \
 ${PHASED_PROFILING_DIR_ENV} \
 ${USE_UNFUSED_MEGABLOCKS_ENV} \
+VLLM_LOGGING_LEVEL=INFO \
+VLLM_CONFIGURE_LOGGING=1 \
+VLLM_ENGINE_READY_TIMEOUT_S=7200 \
 TPU_BACKEND_TYPE=jax \
 ${MODEL_IMPL_TYPE_ENV} \
 vllm serve \
@@ -147,6 +150,7 @@ vllm serve \
   ${EXTRA_SERVER_ARGS} \
   --served-model-name ${TARGET_TOKENIZER} \
   --max-model-len=${MAX_MODEL_LEN} \
+  --api-server-count=3 \
   --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \
   --max-num-seqs ${MAX_NUM_SEQS} \
   --no-enable-prefix-caching \
