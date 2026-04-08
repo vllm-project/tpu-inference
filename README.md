@@ -391,7 +391,6 @@ Below is the live status of our supported models, features, and kernels. Click o
 </details>
 
 </blockquote>
-</details>
 
 <details open markdown="1">
 <summary><b> 🔬 Microbenchmark Kernel Support (Release) </b></summary>
@@ -786,7 +785,6 @@ Below is the live status of our supported models, features, and kernels. Click o
 </details>
 
 </blockquote>
-</details>
 
 <details open markdown="1">
 <summary><b> 🔬 Microbenchmark Kernel Support (Nightly) </b></summary>
