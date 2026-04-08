@@ -20,10 +20,12 @@ import sys
 import yaml
 
 
-def create_benchmark_group(case_data, global_env, file_path):
+def create_benchmark_group(case_data,
+                           global_env,
+                           file_path,
+                           is_single_case=False):
     """
-    Creates a Buildkite Group step by manually expanding TPU types into 
-    individual parallel child steps.
+    Creates a Buildkite Group step.
     """
     # Identify Case Name (fallback to model name)
     model_name = case_data.get("server_command_options",
@@ -40,14 +42,18 @@ def create_benchmark_group(case_data, global_env, file_path):
     # Construct the Step dictionary
     child_steps = []
     for agent in ci_queues:
+        # Build the environment for this specific step
+        step_env = {**combined_env, "ci_queue": agent}
+
+        # Only add TARGET_CASE_NAME if it is part of a multi-case file
+        if not is_single_case:
+            step_env["TARGET_CASE_NAME"] = case_name
+
         child_steps.append({
             "label": f"{agent} {case_name}",
             "command":
             f"bash .buildkite/benchmark/scripts/run_job.sh {file_path}",
-            "env": {
-                **combined_env, "TARGET_CASE_NAME": case_name,
-                "ci_queue": agent
-            },
+            "env": step_env,
             "agents": {
                 "queue": agent
             }
@@ -74,15 +80,22 @@ def main():
     global_env = data.get("global_env", {})
     steps = []
 
-    # Handle multiple benchmark cases
     if "benchmark_cases" in data:
         for case in data["benchmark_cases"]:
-            steps.append(create_benchmark_group(case, global_env, args.input))
+            # Multi-case
+            steps.append(
+                create_benchmark_group(case,
+                                       global_env,
+                                       args.input,
+                                       is_single_case=False))
     else:
-        # Handle single case file
-        steps.append(create_benchmark_group(data, global_env, args.input))
+        # Single case file
+        steps.append(
+            create_benchmark_group(data,
+                                   global_env,
+                                   args.input,
+                                   is_single_case=True))
 
-    # Output the final Buildkite YAML structure
     print(
         yaml.dump({"steps": steps}, sort_keys=False, default_flow_style=False))
 
