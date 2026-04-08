@@ -665,8 +665,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logger.info("Loading drafter model...")
             self.drafter.load_model(self.state)
 
-        self.rng_params_for_sampling = nnx.Rngs(
+        # Replicate the RNG key across all devices in the mesh so that
+        # jax.random.split produces replicated keys and the jitted sample()
+        # function does not trigger a DevicePutWithSharding to broadcast
+        # from a single device at every step.
+        rng_key = nnx.Rngs(
             jax.random.key(self.model_config.seed)).params()
+        replicated_sharding = NamedSharding(self.mesh, PartitionSpec())
+        self.rng_params_for_sampling = jax.device_put(
+            rng_key, replicated_sharding)
 
         # This allows a multi-modal model to be used as text-only, assuming the user
         # passes the following to vLLM (on the CLI):
@@ -704,7 +711,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         weight_ready_thread = threading.Thread(
             target=_block_until_weights_ready, daemon=True)
         weight_ready_thread.start()
-        weight_ready_thread.join(timeout=30)
+        weight_ready_thread.join(timeout=1200)
         if weight_ready_thread.is_alive():
             logger.error("Model weights were not ready within 15 seconds. "
                          "Killing the process.")
@@ -830,7 +837,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             # If request not active in the *current* batch (e.g. finished or evicted), skip it.
             req_id = pre_req_ids[pre_req_idx]
-            if req_id not in self.input_batch.req_id_to_index:
+            if req_id not in req_id_to_index:
                 continue
 
             req_idx = self.input_batch.req_id_to_index[req_id]
@@ -1567,14 +1574,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         _request_distribution = []
         for dp_rank in range(dp_size):
             _num_reqs = num_req_per_dp_rank[dp_rank]
-            # The batch has been reordered by _reorder_batch so decode requests come first
-            # Count decode requests (those with num_scheduled_tokens == 1) in this DP rank
-            num_decode_in_dp_rank = 0
-            for req_id in req_ids_dp[dp_rank]:
-                if scheduler_output.num_scheduled_tokens[req_id] == 1:
-                    num_decode_in_dp_rank += 1
-            _request_distribution.append(
-                [num_decode_in_dp_rank, num_decode_in_dp_rank, _num_reqs])
+            # Treat all requests as mixed to avoid expensive batch reordering.
+            _request_distribution.append([0, 0, _num_reqs])
         request_distribution = np.array(_request_distribution,
                                         dtype=np.int32).ravel()
 

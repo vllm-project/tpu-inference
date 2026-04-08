@@ -44,38 +44,14 @@ class PersistentBatchManager:
         Returns:
             The number of swaps in requests.
         """
-        # Note(jevinjiang): currently we only consider decode_only.
         num_reqs = self.input_batch.num_reqs
-        swap_cnt = 0
-        if num_reqs <= 0:
-            return swap_cnt
-        # Use two-pointer approach to reorder the decode requests to front.
-        i, j = 0, num_reqs - 1
-        while i < j:
-            i_req_id = self.input_batch.req_ids[i]
-            j_req_id = self.input_batch.req_ids[j]
-
-            if scheduler_output.num_scheduled_tokens[i_req_id] == 1:
-                # i is a decode request, move to the next one.
-                i += 1
-            elif scheduler_output.num_scheduled_tokens[j_req_id] > 1:
-                # j is a prefill request, move to the previous one.
-                j -= 1
-            else:
-                # Swap i and j.
-                self.input_batch.swap_states(i, j)
-                i += 1
-                j -= 1
-                swap_cnt += 1
-
-        num_decode = i + int(scheduler_output.num_scheduled_tokens[
-            self.input_batch.req_ids[i]] == 1)
-
-        self.input_batch.request_distribution = [
-            num_decode, num_decode, num_reqs
-        ]
-
-        return swap_cnt
+        # Skip expensive physical reordering of batch data. Instead, treat all
+        # requests as mixed so the RPA kernel handles both decode and prefill
+        # without requiring decode requests to be contiguous at the front.
+        # This avoids the costly swap_states() calls (each swapping full
+        # token_ids_cpu rows, block tables, etc.).
+        self.input_batch.request_distribution = [0, 0, num_reqs]
+        return 0
 
     def update_states(self, scheduler_output: "VllmSchedulerOutput",
                       get_mrope_input_positions_fn) -> bool:
