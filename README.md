@@ -94,8 +94,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 <details open markdown="1">
 <summary><b> 🚀&nbsp; Release Support Matrix </b></summary>
-<ul>
-  <li>
+
 <details open markdown="1">
 <summary><b> ✅ Tested Models </b></summary>
 
@@ -133,12 +132,10 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- END: release_model_support -->
 
 </details>
-  </li>
-  <li>
+
 <details open markdown="1">
 <summary><b> 🚀&nbsp; Advanced Capabilities </b></summary>
-<ul>
-  <li>
+
 <details open markdown="1">
 <summary>Core Features</summary>
 
@@ -328,8 +325,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- END: release_parallelism -->
 
 </details>
-  </li>
-  <li>
+
 <details open markdown="1">
 <summary>Quantization Methods</summary>
 
@@ -388,11 +384,9 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- END: release_quantization -->
 
 </details>
-  </li>
-</ul>
+
 </details>
-  </li>
-  <li>
+
 <details open markdown="1">
 <summary><b> 🔬 Microbenchmark Kernel Support </b></summary>
 
@@ -480,16 +474,14 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- END: release_microbenchmarks -->
 
 </details>
-  </li>
-</ul>
+
 </details>
 
 <br>
 
 <details markdown="1">
 <summary><b> 🧪&nbsp; Nightly Support Matrix </b></summary>
-<ul>
-  <li>
+
 <details open markdown="1">
 <summary><b> ✅ Tested Models </b></summary>
 
@@ -527,12 +519,10 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- END: nightly_model_support -->
 
 </details>
-  </li>
-  <li>
+
 <details open markdown="1">
 <summary><b> 🚀&nbsp; Advanced Capabilities </b></summary>
-<ul>
-  <li>
+
 <details open markdown="1">
 <summary>Core Features</summary>
 
@@ -722,8 +712,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- END: nightly_parallelism -->
 
 </details>
-  </li>
-  <li>
+
 <details open markdown="1">
 <summary>Quantization Methods</summary>
 
@@ -782,11 +771,9 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- END: nightly_quantization -->
 
 </details>
-  </li>
-</ul>
+
 </details>
-  </li>
-  <li>
+
 <details open markdown="1">
 <summary><b> 🔬 Microbenchmark Kernel Support </b></summary>
 
@@ -874,8 +861,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- END: nightly_microbenchmarks -->
 
 </details>
-  </li>
-</ul>
+
 </details>
 
 <br>
