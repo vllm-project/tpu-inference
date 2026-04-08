@@ -14,6 +14,7 @@
 
 from tpu_inference.layers.vllm.custom_ops import embedding as embedding
 from tpu_inference.layers.vllm.custom_ops import fused_moe as fused_moe
+from tpu_inference.layers.vllm.custom_ops import gdn_attention as gdn_attention
 from tpu_inference.layers.vllm.custom_ops import linear as linear
 from tpu_inference.layers.vllm.custom_ops import mla_attention as mla_attention
 from tpu_inference.layers.vllm.custom_ops import rope as rope
