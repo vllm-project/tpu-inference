@@ -165,11 +165,6 @@ def _merge_hw_status(status_v6, status_v7):
     v7_fail = "❌" in s7 or "fail" in s7
     v6_pass = "✅" in s6 or "pass" in s6
     v7_pass = "✅" in s7 or "pass" in s7
-    v6_untested = "❓" in s6 or "untested" in s6
-    v7_untested = "❓" in s7 or "untested" in s7
-
-    if v6_untested or v7_untested:
-        return _format_cell("❓&nbsp;Untested")
 
     if v6_fail or v7_fail:
         return _format_cell("❌&nbsp;Failing")
@@ -283,10 +278,6 @@ def merge_metrics(c, p):
     c_clean = str(c).replace("&nbsp;", " ").strip()
     p_clean = str(p).replace("&nbsp;", " ").strip()
 
-    if "❓" in c_clean or "❓" in p_clean or "untested" in c_clean.lower(
-    ) or "untested" in p_clean.lower():
-        return "❓&nbsp;Untested"
-
     if "❌" in c_clean or "❌" in p_clean or "fail" in c_clean.lower(
     ) or "fail" in p_clean.lower():
         return "❌&nbsp;Failing"
@@ -295,6 +286,9 @@ def merge_metrics(c, p):
             or "pass" in c_clean.lower()) and ("✅" in p_clean
                                                or "pass" in p_clean.lower()):
         return "✅&nbsp;Passing"
+
+    if "❓" in c_clean or "❓" in p_clean:
+        return "❓&nbsp;Untested"
 
     return "❓&nbsp;Untested"
 
