@@ -523,6 +523,8 @@ def mla_attention(
         num_kv_pages_per_block = (3, 1, 1)
         num_queries_per_block = (1, 16, 16)
         decode_batch_size = 4
+        # TODO: adjust vmem_limit_bytes based on TPU version.
+        vmem_limit_bytes = 64 * 1024 * 1024  # 64MB.
 
         out, new_cache = mla_ragged_paged_attention(
             q,
@@ -537,7 +539,8 @@ def mla_attention(
             decode_batch_size=decode_batch_size,
             q_scale=q_scale,
             k_scale=k_scale,
-            v_scale=v_scale)
+            v_scale=v_scale,
+            vmem_limit_bytes=vmem_limit_bytes)
 
         return new_cache, out
 
