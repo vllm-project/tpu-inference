@@ -263,18 +263,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         is_last_rank: bool = True,
     ):
         self.vllm_config = vllm_config
-
-        # Diagnostic: Unconditionally dump populated production config state
-        # try:
-        #     import pickle
-        #     import time
-        #     ts = int(time.time())
-        #     with open(f"/tmp/vllm_config_{ts}.pkl", "wb") as f:
-        #         pickle.dump(vllm_config, f)
-        #     print(f"--- [DIAGNOSTIC] Forced-swizzle saved vllm_config to /tmp/vllm_config_{ts}.pkl ---", flush=True)
-        # except Exception as e:
-        #     print(f"--- [DIAGNOSTIC] Failed to dump vllm_config: {e} ---", flush=True)
-
         self.model_config = vllm_config.model_config
         # TODO(jevinjiang): override block size based on RPA v3.
         self.cache_config = vllm_config.cache_config
@@ -837,7 +825,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             # If request not active in the *current* batch (e.g. finished or evicted), skip it.
             req_id = pre_req_ids[pre_req_idx]
-            if req_id not in req_id_to_index:
+            if req_id not in self.input_batch.req_id_to_index:
                 continue
 
             req_idx = self.input_batch.req_id_to_index[req_id]
@@ -895,17 +883,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[JaxIntermediateTensors] = None,
     ) -> JaxIntermediateTensors | ModelRunnerOutput | None:
-
-        # Diagnostic: Unconditionally dump production scheduler traces with timestamp suffixes
-        # try:
-        #     import pickle
-        #     import time
-        #     ts = int(time.time())
-        #     with open(f"/tmp/scheduler_output_{ts}.pkl", "wb") as f:
-        #         pickle.dump(scheduler_output, f)
-        # except Exception:
-        #     pass
-
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
         if not scheduler_output.total_num_scheduled_tokens:
