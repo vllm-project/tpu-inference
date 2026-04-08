@@ -11,6 +11,7 @@ from tpu_inference.kernels.quantized_matmul import (blockwise_kernel, kernel,
 xla_quantized_matmul = util.xla_quantized_matmul
 per_channel_kernel = kernel.quantized_matmul_kernel
 blockwise_kernel = blockwise_kernel.quantized_matmul_kernel
+batched_quantized_matmul_kernel = kernel.batched_quantized_matmul_kernel
 quantize_tensor = util.quantize_tensor
 get_tuned_block_sizes = tuned_block_sizes.get_tuned_block_sizes
 TunedValue = tuned_block_sizes.TunedValue
@@ -299,6 +300,135 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
             tuned_value=TunedValue(512, 512, 512, 2),
             block_size=512,
             x_q_dtype=jnp.float8_e4m3fn,
+        )
+
+    def _test_batched_quantized_matmul(
+        self,
+        dtype: jnp.dtype,
+        q_dtype: jnp.dtype,
+        t: int,
+        n: int,
+        p: int,
+        l: int,
+        quantize_activation: bool,
+        atol=0.5,
+        rtol=0.5,
+        is_scalar_scale=False,
+    ):
+
+        prng_key = jax.random.key(1234)
+        k0, k1 = jax.random.split(prng_key, 2)
+        x = jax.random.uniform(k0, (t, n, p), dtype=dtype, minval=-1, maxval=1)
+        w = jax.random.uniform(k1, (n, l, p), dtype=dtype, minval=-1, maxval=1)
+
+        if is_scalar_scale:
+            w_q, _ = quantize_tensor(w, q_dtype, dim=-1)
+            w_scale = jnp.array(0.0039, dtype=jnp.float32)
+        else:
+            w_q, w_scale = quantize_tensor(w, q_dtype, dim=-1)
+            w_scale = jnp.squeeze(w_scale, axis=-1)
+
+        # Kernel expects w_q as [N, P, L]
+        w_q_kernel = w_q.transpose(0, 2, 1)
+        # w_q_kernel = w_q
+
+        x_q_dtype = q_dtype if quantize_activation else dtype
+
+        output = batched_quantized_matmul_kernel(
+            x,
+            w_q_kernel,
+            w_scale,
+            x_q_dtype=x_q_dtype,
+        )
+        # import functools
+        # f = functools.partial(kernel.quantized_matmul_kernel, x_q_dtype=x_q_dtype)
+        # output = jax.vmap(f, in_axes=(1, 0, 0), out_axes=1)(
+        #     x,
+        #     w_q_kernel,
+        #     w_scale,
+        # )
+
+        # Reference
+        if is_scalar_scale:
+            w_dequant = w_q.astype(jnp.float32) * w_scale
+        else:
+            w_dequant = w_q.astype(jnp.float32) * w_scale[:, :, jnp.newaxis]
+
+        if quantize_activation:
+            # Dynamic quantization
+            x_abs_max = jnp.max(jnp.abs(x), axis=-1, keepdims=True)
+            is_float = jnp.issubdtype(x_q_dtype, jnp.floating)
+            dtype_info = jnp.finfo(x_q_dtype) if is_float else jnp.iinfo(x_q_dtype)
+            dtype_max = float(dtype_info.max)
+            x_s = x_abs_max / dtype_max
+            x_q = (x / x_s).astype(x_q_dtype) if is_float else jnp.round(
+                x / x_s).astype(x_q_dtype)
+            x_ref = x_q.astype(jnp.float32) * x_s
+        else:
+            x_ref = x.astype(jnp.float32)
+
+        # out[t, n, l] = sum_p x[t, n, p] * w[n, l, p]
+        expected = jnp.einsum("tnp, nlp -> tnl", x_ref, w_dequant).astype(dtype)
+
+        if output.shape[1] > n:
+            output = output[:, :n, :]
+
+        self.assertAllClose(output,
+                            expected,
+                            rtol=rtol,
+                            atol=atol,
+                            check_dtypes=True)
+
+    @parameterized.product(
+        dtype=[jnp.bfloat16],
+        q_dtype=[jnp.float8_e4m3fn],
+        t=[128, 192],
+        n=[128],
+        p=[512],
+        l=[128, 512],
+        quantize_activation=[True],
+    )
+    def test_batched_quantized_matmul_various_shapes(
+        self,
+        dtype,
+        q_dtype,
+        t,
+        n,
+        p,
+        l,
+        quantize_activation,
+    ):
+        self._test_batched_quantized_matmul(
+            dtype,
+            q_dtype,
+            t,
+            n,
+            p,
+            l,
+            quantize_activation=quantize_activation,
+        )
+
+    def test_batched_quantized_matmul_scalar_scale(self):
+        self._test_batched_quantized_matmul(
+            jnp.bfloat16,
+            jnp.float8_e4m3fn,
+            128,
+            128,
+            512,
+            128,
+            quantize_activation=True,
+            is_scalar_scale=True,
+        )
+
+    def test_batched_quantized_matmul_unaligned_heads(self):
+        self._test_batched_quantized_matmul(
+            jnp.bfloat16,
+            jnp.float8_e4m3fn,
+            128,
+            64,
+            512,
+            128,
+            quantize_activation=True,
         )
 
 

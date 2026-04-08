@@ -13,17 +13,23 @@
 # limitations under the License.
 from typing import Tuple
 
+import functools
+import jax
+from jax.sharding import PartitionSpec as P
 import jax.numpy as jnp
 import torch
 from jax.sharding import Mesh
 from torchax.interop import jax_view
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+from tpu_inference.kernels.quantized_matmul.kernel import batched_quantized_matmul_kernel
 from vllm.v1.attention.backend import (AttentionBackend, AttentionLayer,
                                        MLAAttentionImpl)
 from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
                                                  register_backend)
 
+from tpu_inference.layers.common.sharding import \
+    ShardingAxisNameBase as ShardingAxisName
 from tpu_inference.layers.common.attention_interface import mla_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import (
@@ -144,14 +150,21 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
 
         # Prepare inputs
         q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=2)
+        in_specs = (P(ShardingAxisName.ATTN_DATA), None, None)
+        out_specs = (P(ShardingAxisName.ATTN_DATA))
+        sharded_kernel = jax.shard_map(functools.partial(batched_quantized_matmul_kernel,x_q_dtype=input_dtype),
+                                   mesh=mesh, 
+                                   in_specs=in_specs,
+                                   out_specs=out_specs,
+                                   check_vma=False,
+        )
+        q_nope = sharded_kernel(
+            q_nope,
+            jax_view(layer.W_UK_T),
+            jax_view(layer.W_UK_T_scale).squeeze(0),
+        ) * jax_view(layer.W_UK_T_scale).astype(input_dtype)
 
-        # (B, N, P) x (N, P, L) -> (B, N, L)
-        # torch nn param
-        q_nope = (jnp.einsum("bnp,npl->bnl",
-                             q_nope,
-                             jax_view(layer.W_UK_T),
-                             preferred_element_type=jnp.float32) *
-                  jax_view(layer.W_UK_T_scale)).astype(input_dtype)
+
 
         q_scale = k_scale = v_scale = None
         if layer.kv_cache_quantized_dtype:

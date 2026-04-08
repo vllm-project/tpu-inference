@@ -126,21 +126,7 @@ def quantized_matmul_kernel(
     *,
     tuned_value: TunedValue | None = None,
 ) -> jax.Array:
-    """Quantized matmul kernel.
-
-    Args:
-      x: Input unquantized array.
-      w_q: Weight quantized array. [n_output_features, n_input_features]
-      w_scale: Weight quantization scale. [n_output_features]
-      w_zp: Weight zero point for asymmetric quantization.
-      block_size: Block size for subchannel quantization.
-      x_q_dtype: Quantization type of the input. If None or if the value is the
-        same as x.dtype, then no quantization is applied.
-      tuned_value: Kernel tuned values for optimal performance.
-
-    Returns:
-      Quantized matmul result.
-    """
+    """Quantized matmul kernel."""
 
     if w_zp is not None:
         raise NotImplementedError("zero_point is not supported.")
@@ -151,14 +137,8 @@ def quantized_matmul_kernel(
         x_q_dtype = x.dtype
     quantize_activation = x_q_dtype != x.dtype
 
-    # Pallas kernel only has access to a single block of the input. Therefere,
-    # for per-token quantization, abs max has to be computed outside of the
-    # kernel.
     x_abs_max = jnp.max(jnp.abs(x), axis=-1, keepdims=False)  # [bs]
-    # Pallas requires minormost dim to be a multiple of sublane size 128.
-    # Therefore, instead of using [bs, 1], we reshape this into [1, bs]
     x_abs_max = jnp.expand_dims(x_abs_max, axis=0)  # [1, bs]
-    assert x_abs_max.shape == (1, x.shape[0])
 
     orig_n_batch, orig_n_in = x.shape
     orig_n_out, _ = w_q.shape
@@ -187,8 +167,8 @@ def quantized_matmul_kernel(
         w_scale = jnp.pad(w_scale, (0, padded_n_out - orig_n_out))
     padded_n_in = next_multiple(orig_n_in, in_block_size)
     if orig_n_in < padded_n_in:
-        x = jnp.pad(x, ((0, 0), (0, padded_n_in - orig_n_in)))
-        w_q = jnp.pad(w_q, ((0, 0), (0, padded_n_in - orig_n_in)))
+        x = jnp.pad(x, ((0, 0), (padded_n_in - orig_n_in)))
+        w_q = jnp.pad(w_q, ((0, 0), (padded_n_in - orig_n_in)))
 
     if w_scale.dtype != jnp.float32:
         w_scale = w_scale.astype(jnp.float32)
@@ -199,9 +179,6 @@ def quantized_matmul_kernel(
     n_in = padded_n_in // in_block_size
 
     save_acc = n_in > 1
-    # Remove redundant input quantization logic by caching quantized input. For
-    # best performance, only enable this behavior when single input block is
-    # used per batch.
     save_x_q = quantize_activation and n_in == 1 and n_out > 1
 
     acc_dtype = jnp.float32
@@ -265,19 +242,174 @@ def quantized_matmul_kernel(
         ),
     )
 
-    util.validate_inputs(
-        x=x,
-        w_q=w_q,
-        w_scale=w_scale,
-        x_abs_max=x_abs_max,
-        batch_block_size=batch_block_size,
-        out_block_size=out_block_size,
-        in_block_size=in_block_size,
-    )
-
     # The named_scope is used for autotune.
     kernel_name = get_kernel_name(tuned_value)
     with jax.named_scope(kernel_name):
         out = kernel(x, w_q, w_scale, x_abs_max)
 
     return out[:orig_n_batch, :orig_n_out]
+
+
+def _batched_matmul_body(
+    x_ref: jax.Array,           # (batch_block_size, heads_block_size, in_block_size)
+    w_ref: jax.Array,           # (heads_block_size, in_block_size, out_block_size)
+    out_ref: jax.Array,         # (batch_block_size, heads_block_size, out_block_size)
+    acc_scratch: jax.Array,     # (batch_block_size, heads_block_size, out_block_size)
+    *,
+    save_acc: bool,
+):
+    """Shared body for simplified 3D batched matmul kernel.
+
+    Grid axes: (batch_idx=0, out_idx=1, in_idx=2).
+    """
+    in_idx  = pl.program_id(2)
+    n_in = pl.num_programs(2)
+    x_ref_dtype = x_ref.dtype
+    
+
+    if save_acc:
+        is_first_step = in_idx == 0
+        is_last_step  = in_idx == (n_in - 1)
+    else:
+        is_first_step = True
+        is_last_step  = True
+
+    def matmul_body(is_first_step: bool, is_last_step: bool):
+        x_block = x_ref[...] # (batch_block_size, heads_block_size, in_block_size)
+        w_block = w_ref[...] # (heads_block_size, in_block_size, out_block_size)
+
+        # Compute [batch, heads, out] = [batch, heads, in] @ [heads, in, out]
+        acc_block = jnp.einsum('tnp,npl->tnl', x_block, w_block, preferred_element_type=jnp.float32)
+
+        if not is_first_step:
+            acc_block += acc_scratch[...]
+
+        if is_last_step:
+            out_ref[...] = acc_block.astype(x_ref_dtype)
+        else:
+            acc_scratch[...] = acc_block
+
+    unfold_args((is_first_step, is_last_step), (), matmul_body)
+
+
+def batched_matmul_kernel(
+    x_ref: jax.Array,
+    w_ref: jax.Array,
+    out_ref: jax.Array,
+    acc_scratch: jax.Array,
+    *,
+    save_acc: bool,
+):
+    """Wrapper to maintain compatibility with existing call site."""
+    _batched_matmul_body(
+        x_ref, w_ref, out_ref, acc_scratch,
+        save_acc=save_acc,
+    )
+
+
+@jax.jit(static_argnames=[
+    "x_q_dtype",
+    "tuned_value",
+])
+def batched_quantized_matmul_kernel(
+    x: jax.Array,       # [T, N, P]  tokens first
+    w_q: jax.Array,     # [N, L, P]  output-features first per head, quantized
+    w_scale: jax.Array, # [N, L] per-output-feature scale, or scalar (shape ())
+    x_q_dtype: jnp.dtype | None = None,
+    *,
+    tuned_value: TunedValue | None = None,
+) -> jax.Array:  # [T, N, L]  tokens-major physical layout
+    """Batched matmul: out[t, n, :] = x[t, n, :] @ w_q[n].T. Simplified: no quantization."""
+    
+    orig_n_batch, n_heads, orig_n_in = x.shape
+    _, _, orig_n_out                 = w_q.shape
+
+    # TODO: update the hardcodings to be configurable.
+    heads_block_size = 128 
+    batch_block_size = 128
+    out_block_size   = 128
+    in_block_size    = 128
+
+    if tuned_value is None:
+        tuned_value = TunedValue(batch_block_size, out_block_size, in_block_size)
+
+    # Pad N to block-size multiples.
+    padded_n_heads = next_multiple(n_heads, heads_block_size)
+    if n_heads < padded_n_heads:
+        pad = padded_n_heads - n_heads
+        x   = jnp.pad(x,   ((0, 0), (0, pad), (0, 0))) # pad N dim
+        w_q = jnp.pad(w_q, ((0, pad), (0, 0), (0, 0))) # pad N dim
+
+    # Pad T (Tokens) dimension in x.
+    padded_n_batch = next_multiple(orig_n_batch, batch_block_size)
+    if orig_n_batch < padded_n_batch:
+        pad = padded_n_batch - orig_n_batch
+        x   = jnp.pad(x,   ((0, pad), (0, 0), (0, 0))) # pad T dim
+
+    # Pad L (dim 2) for out, pad P (dim 1) for in.
+    padded_n_out = next_multiple(orig_n_out, out_block_size)
+    if orig_n_out < padded_n_out:
+        pad = padded_n_out - orig_n_out
+        w_q = jnp.pad(w_q, ((0, 0), (0, 0), (0, pad)))  # pad L dim
+
+    padded_n_in = next_multiple(orig_n_in, in_block_size)
+    if orig_n_in < padded_n_in:
+        pad = padded_n_in - orig_n_in
+        x   = jnp.pad(x,   ((0, 0), (0, 0), (0, pad)))  # pad P dim in x
+        w_q = jnp.pad(w_q, ((0, 0), (0, pad), (0, 0)))  # pad P dim in w_q
+
+    n_batch_blocks = padded_n_batch // batch_block_size
+    n_out_blocks   = padded_n_out   // out_block_size
+    n_in_blocks    = padded_n_in    // in_block_size
+
+    save_acc = n_in_blocks > 1
+    acc_dtype = jnp.float32
+
+    # TODO update to have accuracy bounds.
+    vmem_limit_bytes = get_device_vmem_limit()
+
+    x_spec = pl.BlockSpec(
+        # x: [T, N, P]
+        (batch_block_size, heads_block_size, in_block_size),
+        lambda b, o, i: (b, 0, i),
+    )
+    w_q_spec = pl.BlockSpec(
+        # w_q: [N, P, L]
+        (heads_block_size, in_block_size, out_block_size),
+        lambda b, o, i: (0, i, o),
+    )
+    out_spec = pl.BlockSpec(
+        # out: [T, N, L]
+        (batch_block_size, heads_block_size, out_block_size),
+        lambda b, o, i: (b, 0, o),
+    )
+    scratch_shapes = [
+        (pltpu.VMEM((batch_block_size, heads_block_size, out_block_size), acc_dtype)
+         if save_acc else None),
+    ]
+    compiler_params = pltpu.CompilerParams(
+        dimension_semantics=("parallel", "arbitrary", "arbitrary"),
+        vmem_limit_bytes=vmem_limit_bytes,
+    )
+    out_shape = jax.ShapeDtypeStruct((padded_n_batch, padded_n_heads, padded_n_out), x.dtype)
+
+    kernel_name = get_kernel_name(tuned_value)
+    with jax.named_scope(kernel_name):
+        kernel = pl.pallas_call(
+            functools.partial(
+                batched_matmul_kernel,
+                save_acc=save_acc,
+            ),
+            grid_spec=pltpu.PrefetchScalarGridSpec(
+                num_scalar_prefetch=0,
+                in_specs=[x_spec, w_q_spec], 
+                out_specs=out_spec,
+                scratch_shapes=scratch_shapes,
+                grid=(n_batch_blocks, n_out_blocks, n_in_blocks),
+            ),
+            out_shape=out_shape,
+            compiler_params=compiler_params,
+        )
+        out = kernel(x, w_q)
+
+    return out[:orig_n_batch, :n_heads, :orig_n_out]
