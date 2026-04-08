@@ -587,3 +587,132 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
             self.assertListEqual(
                 dst_chunks,
                 worker.offload_stats.data["finished_load_chunks"][req_id])
+
+    def test_tpu_connector_async_save_integrity(self):
+        """
+        Verify that the worker ensures data integrity using the dependency graph.
+        This test mimics the scenario of two adjacent model iterations where
+        a save in iteration N must complete its read before iteration N+1
+        modifies the same memory.
+        """
+        # 1. Setup
+        connector = self._create_connector(swap_op_type="jax")
+        worker = connector.connector_worker
+        block_to_save = 0
+        dst_chunk = 7
+
+        # 2. Define Kernel for modification (Mimics Step N+1 compute)
+        @jax.jit
+        def _modify_kernel(caches, block_id, val):
+            return jax.tree.map(lambda x: x.at[block_id].set(val), caches)
+
+        # stall kernel
+        @jax.jit
+        def _stall_kernel(a, b, num_loops=20):
+            # Heavy matmul loop to keep the TPU busy for a significant duration.
+            def body_fun(i, val):
+                return jnp.matmul(val, b)
+
+            return jax.lax.fori_loop(0, num_loops, body_fun, a)
+
+        # 3. Warmup to prevent JIT stalls during the timed race
+        logger.info("Warming up integrity test kernels...")
+        dummy_val = jnp.full(self.cache_shape[1:],
+                             1.23,
+                             dtype=self.cache_dtype)
+        worker.runner.kv_caches = _modify_kernel(worker.runner.kv_caches, 10,
+                                                 dummy_val)
+
+        # Warm up stall kernel
+        size = 4096  # Balanced size and loops for a solid stall
+        key = jax.random.key(42)
+        a = jax.random.normal(key, (size, size), dtype=jnp.float32)
+        b = jax.random.normal(key, (size, size), dtype=jnp.float32)
+        # Scale matrices to prevent overflow during repeated multiplication
+        a = a / jnp.sqrt(size)
+        b = b / jnp.sqrt(size)
+        _stall_kernel(a, b).block_until_ready()
+
+        worker._precompile_kv_swap_operations()
+        jax.block_until_ready(worker.runner.kv_caches)
+
+        # 4. Baseline Capture
+        # Capture the pre-corruption ground truth on the host for all layers.
+        src_kv_cache_baseline = [np.array(c) for c in worker.runner.kv_caches]
+
+        # 5. START THE RACE
+        # Stall the TPU with a heavy compute operation.
+        # This ensures the following save and corruption are queued together
+        # while the TPU is busy, creating a deep command queue.
+        logger.info("Dispatching stall compute...")
+        _stall_kernel(a, b)
+
+        # A. Step N Save: Dispatch Async Save for Block 0.
+        # Due to the removal of block_until_ready, Python moves to 'B' immediately.
+        save_spec = SaveSpec(
+            num_skip_leading_tokens=0,
+            num_total_tokens=self.block_size,
+            is_final_save=False,
+            skip_save=False,
+            src_blocks=[block_to_save],
+            dst_chunks=[dst_chunk],
+        )
+        req_meta = TPUReqMeta(
+            req_id="async_integrity_test",
+            token_ids=list(range(self.block_size)),
+            local_block_ids=[block_to_save],
+            save_spec=save_spec,
+        )
+        connector.bind_connector_metadata(
+            TPUOffloadConnectorMetadata(requests_meta=[req_meta]))
+
+        logger.info("Dispatching Async Save...")
+        save_start_time = time.time()
+        worker.start_save_kv()
+        logger.info(
+            f"Async Save dispatched in {time.time() - save_start_time:.6f}s")
+
+        # B. Step N+1 Compute: IMMEDIATELY CORRUPT Block 0
+        # If the dependency graph/barrier is broken, this might overwrite
+        # Block 0 before the DMA engine finished reading it for the save.
+        corruption_val = jnp.full(self.cache_shape[1:],
+                                  6.66,
+                                  dtype=self.cache_dtype)
+        logger.info(
+            f"RACE: Immediately dispatching corruption with value {6.66}...")
+        corruption_start_time = time.time()
+        worker.runner.kv_caches = _modify_kernel(worker.runner.kv_caches,
+                                                 block_to_save, corruption_val)
+        logger.info(
+            f"Corruption dispatched in {time.time() - corruption_start_time:.6f}s"
+        )
+
+        # 6. Wait for Hardware and Poll completion
+        logger.info(
+            "Waiting for hardware to finish queued operations and polling for completion..."
+        )
+        jax.block_until_ready(worker.runner.kv_caches)
+        poll_count = 0
+        while worker._pending_save_futures:
+            worker._process_completed_saves()
+            poll_count += 1
+            time.sleep(0.01)
+        logger.info(f"Completion detected after {poll_count} polls.")
+
+        # 7. Verification
+        logger.info(
+            f"Starting integrity verification for chunk {dst_chunk}...")
+        cpu_val = np.array(worker.cpu_backend.get(dst_chunk))
+        if len(cpu_val.shape) == 6:
+            cpu_val = np.squeeze(cpu_val, axis=0)
+
+        # Verify all layers for the saved block. Success proves that
+        # hardware-level sequencing is enforced across the entire KV stack.
+        for layer in range(self.num_layers):
+            self.assertArraysEqual(src_kv_cache_baseline[layer][block_to_save],
+                                   cpu_val[layer])
+
+        # Sanity check: verify corruption actually happened on device.
+        current_device_val = np.array(
+            worker.runner.kv_caches[0][block_to_save])
+        self.assertArraysEqual(current_device_val, np.array(corruption_val))
