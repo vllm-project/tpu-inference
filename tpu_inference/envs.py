@@ -268,6 +268,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # kv offload to dram: batch multiple requests' save operations into a single swap call
     "TPU_OFFLOAD_BATCHED_SAVE":
     lambda: bool(int(os.getenv("TPU_OFFLOAD_BATCHED_SAVE", "0"))),
+    # kv offload to dram: batch multiple requests' load operations into a single swap call
+    "TPU_OFFLOAD_BATCHED_LOAD":
+    lambda: bool(int(os.getenv("TPU_OFFLOAD_BATCHED_LOAD", "0"))),
 }
 
 

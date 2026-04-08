@@ -135,11 +135,13 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
 
     def _create_connector(self,
                           swap_op_type: str = "jax",
-                          use_precompiled_swap_ops: bool = False):
+                          use_precompiled_swap_ops: bool = False,
+                          batched_load: bool = False):
         os.environ["TPU_OFFLOAD_SWAP_OP_TYPE"] = swap_op_type
         os.environ[
             "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE"] = "0" if use_precompiled_swap_ops else "1"
         os.environ["TPU_OFFLOAD_NUM_CPU_CHUNKS"] = str(self.num_cpu_chunks)
+        os.environ["TPU_OFFLOAD_BATCHED_LOAD"] = "1" if batched_load else "0"
 
         connector = CPUOffloadingConnector(self.vllm_config,
                                            KVConnectorRole.WORKER)
@@ -442,6 +444,20 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
             use_precompiled_swap_ops=True,
             swap_op_type="jax",
         ),
+        dict(
+            testcase_name="_batched_load_multi_requests",
+            num_blocks_to_operate=4,
+            num_requests=4,
+            batched_load=True,
+            use_precompiled_swap_ops=True,
+        ),
+        dict(
+            testcase_name="_batched_load_multi_requests_large",
+            num_blocks_to_operate=16,
+            num_requests=6,
+            batched_load=True,
+            use_precompiled_swap_ops=True,
+        ),
     )
     def test_tpu_connector_load(
         self,
@@ -449,6 +465,7 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         num_requests: int = 1,
         use_precompiled_swap_ops: bool = False,
         swap_op_type: str = "jax",
+        batched_load: bool = False,
     ):
         """
         This test simulates a scenario where some amount of blocks get
@@ -468,7 +485,8 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
             )
         # 1. Setup
         connector = self._create_connector(swap_op_type,
-                                           use_precompiled_swap_ops)
+                                           use_precompiled_swap_ops,
+                                           batched_load)
         worker = connector.connector_worker
         # Ground truth cache. We copy it to host early because the save
         # operation will donate via stack_kv_cache_cross_layers.

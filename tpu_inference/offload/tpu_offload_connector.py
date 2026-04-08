@@ -323,7 +323,8 @@ UPDATE_KV_LATENCY_SECONDS = Histogram(
 
 LOAD_KV_LATENCY_SECONDS = Histogram(
     'vllm_kv_cache_load_data_latency_seconds',
-    'Latency of loading KV cache data from CPU to TPU per request',
+    'Latency of loading KV cache data from CPU to TPU',
+    labelnames=["num_blocks", "req_batch_size"],
     buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0])
 
 LOAD_KV_SIZE_BLOCKS = Counter(
@@ -1683,9 +1684,11 @@ class TPUOffloadConnectorWorker:
         # assert self.swap_op_type in get_args(CPU_OFFLOADING_SWAP_OP_TYPE)
         self.use_bucketed_swap_ops = not envs.TPU_OFFLOAD_SKIP_JAX_PRECOMPILE
         self.batched_save = envs.TPU_OFFLOAD_BATCHED_SAVE
+        self.batched_load = envs.TPU_OFFLOAD_BATCHED_LOAD
         logger.info(f" swap operation type is {self.swap_op_type}, "
                     f"use_bucketed_swap_ops={self.use_bucketed_swap_ops}, "
-                    f"batched_save={self.batched_save}.")
+                    f"batched_save={self.batched_save}, "
+                    f"batched_load={self.batched_load}.")
 
         # cpu cache
         self.num_cpu_chunks = envs.TPU_OFFLOAD_NUM_CPU_CHUNKS
@@ -2501,6 +2504,48 @@ class TPUOffloadConnectorWorker:
 
         self._pending_save_futures = remaining_futures
 
+    def _execute_load(self, all_dst_blocks: list[int],
+                      all_assembled_kv_on_cpu: list[jax.Array],
+                      load_requests_to_finish: list[tuple[str, list[int]]]):
+        if not all_dst_blocks:
+            return
+
+        LOAD_KV_REQUESTS.inc(len(load_requests_to_finish))
+        start_time = time.time()
+
+        if not self.no_op_load:
+            if self.use_bucketed_swap_ops:
+                self.runner.kv_caches = self._bucketed_update_kv_caches(
+                    self.runner.kv_caches,
+                    all_assembled_kv_on_cpu,
+                    all_dst_blocks,
+                )
+            else:
+                self.runner.kv_caches = update_kv_caches_one(
+                    self.runner.kv_caches,
+                    all_assembled_kv_on_cpu,
+                    all_dst_blocks,
+                    self.mesh,
+                    self.indices_sharding,
+                )
+            jax.block_until_ready(self.runner.kv_caches)
+
+        duration = time.time() - start_time
+        num_blocks = len(all_dst_blocks)
+        req_batch_size = len(load_requests_to_finish)
+        logger.info(
+            f"TPUOffloadConnectorWorker: Load time for {req_batch_size} requests, "
+            f"{num_blocks} blocks: {duration:.4f} seconds")
+        LOAD_KV_LATENCY_SECONDS.labels(
+            num_blocks=str(num_blocks),
+            req_batch_size=str(req_batch_size)).observe(duration)
+        LOAD_KV_SIZE_BLOCKS.inc(num_blocks)
+
+        for req_id, src_chunks in load_requests_to_finish:
+            if src_chunks:
+                self.offload_stats.record_load(req=req_id,
+                                               loaded_chunk_ids=src_chunks)
+
     def start_load_kv(self, fwd_ctx: "ForwardContext") -> None:
         """
         This function is the worker-side entry point for loading data from the
@@ -2536,16 +2581,16 @@ class TPUOffloadConnectorWorker:
 
         assert self.runner is not None and self.runner.kv_caches is not None
 
+        all_dst_blocks = []
+        all_assembled_kv_on_cpu = []
+        load_requests_to_finish = []
+        req_details = []
+
         # Process each request that needs its KV cache loaded
-        load_times = []
         for meta in metadata.requests_meta:
             if not (meta.load_spec and meta.load_spec.can_load):
                 continue
 
-            LOAD_KV_REQUESTS.inc()
-            request_load_start_time = time.time()
-            logger.info(
-                "TPUOffloadConnectorWorker: Starting KV cache load process.")
             dst_blocks = meta.load_spec.dst_blocks
             src_chunks = meta.load_spec.src_chunks
             num_blocks_to_load = len(dst_blocks)
@@ -2578,82 +2623,40 @@ class TPUOffloadConnectorWorker:
                     f"Request({meta.req_id}): dst_blocks {dst_blocks} contains blocks not present in local_block_ids {meta.local_block_ids}"
                 )
 
-            logger.info(
-                f"Processing KV load for request {meta.req_id}: "
-                f"Total matched: {num_matched_tokens}, "
-                f"Already computed: {num_skip_leading_tokens}. "
-                f"Fetching delta of {num_tokens_to_load_delta} tokens from cache for "
-                f"{num_blocks_to_load} blocks.")
-
-            if not self.no_op_load:
-                # Assemble the per-layer data for the delta tokens on the CPU.
-                # We create a list of lists, where the outer list represents layers
-                # and the inner lists will hold the data chunks for that layer.
-                # assembled_kv_on_cpu = [[] for _ in range(self.num_layers)]
-                assembled_kv_on_cpu = []
-
-                # Fetch and chunks from the backend.
-                for i in range(num_blocks_to_load):
-                    src_chunk_id = src_chunks[i]
-                    cached_value = self.cpu_backend.get(src_chunk_id)
-                    if cached_value is not None:
-                        # for j in range(self.num_layers):
-                        #     assembled_kv_on_cpu[j].append(cached_value[j])
-                        assembled_kv_on_cpu.append(cached_value)
-                    else:
-                        logger.error(
-                            f"Chunk[{src_chunk_id}] not found in CPU backend for request {meta.req_id}. Inconsistent state detected."
-                        )
-                        return
-
-                # swap-in
-                # [stacked_kv(1, num_layers, block_size, num_head, 2, head_dim)] * num_blocks_to_load
-                raw_chunked_kv_on_tpu = []
-                for i in range(num_blocks_to_load):
-                    raw_chunked_kv_on_tpu.append(
-                        jax.device_put(assembled_kv_on_cpu[i],
-                                       self.expanded_device_sharding))
-                jax.block_until_ready(raw_chunked_kv_on_tpu)
-
-                update_kv_start = time.time()
-                if self.use_bucketed_swap_ops:
-                    self.runner.kv_caches = self._bucketed_update_kv_caches(
-                        self.runner.kv_caches,
-                        raw_chunked_kv_on_tpu,
-                        dst_blocks,
-                    )
+            current_dst_blocks = list(dst_blocks)
+            assembled_kv_on_cpu = []
+            for i in range(num_blocks_to_load):
+                src_chunk_id = src_chunks[i]
+                cached_value = self.cpu_backend.get(src_chunk_id)
+                if cached_value is not None:
+                    tpu_chunk = jax.device_put(cached_value,
+                                               self.expanded_device_sharding)
+                    assembled_kv_on_cpu.append(tpu_chunk)
                 else:
-                    self.runner.kv_caches = update_kv_caches_one(
-                        self.runner.kv_caches,
-                        raw_chunked_kv_on_tpu,
-                        dst_blocks,
-                        self.mesh,
-                        self.indices_sharding,
+                    logger.error(
+                        f"Chunk[{src_chunk_id}] not found in CPU backend for request {meta.req_id}. Inconsistent state detected."
                     )
-                jax.block_until_ready(self.runner.kv_caches)
-                update_duration = time.time() - update_kv_start
-                UPDATE_KV_LATENCY_SECONDS.labels(num_blocks=str(
-                    num_blocks_to_load)).observe(update_duration)
-                logger.debug(
-                    f"Request {meta.req_id}: Loaded {num_tokens_to_load_delta} tokens into "
-                    f"{num_blocks_to_load} new blocks; "
-                    f" src_chunks: {src_chunks}, "
-                    f" dst blocks: {dst_blocks}, "
-                    f" insert duration {update_duration} s.")
+                    return
 
-            load_duration = time.time() - request_load_start_time
-            LOAD_KV_LATENCY_SECONDS.observe(load_duration)
-            load_times.append(load_duration)
-            LOAD_KV_SIZE_BLOCKS.inc(num_blocks_to_load)
-            if num_blocks_to_load > 0:
-                self.offload_stats.record_load(req=meta.req_id,
-                                               loaded_chunk_ids=src_chunks)
+            if self.batched_load:
+                all_dst_blocks.extend(current_dst_blocks)
+                all_assembled_kv_on_cpu.extend(assembled_kv_on_cpu)
+                load_requests_to_finish.append((meta.req_id, src_chunks))
+                req_details.append(
+                    f"{meta.req_id}: {num_blocks_to_load} blocks")
+            else:
+                logger.info(
+                    f"TPUOffloadConnectorWorker: Executing sequential KV cache load for request {meta.req_id}."
+                )
+                self._execute_load(current_dst_blocks, assembled_kv_on_cpu,
+                                   [(meta.req_id, src_chunks)])
 
-        if load_times:
-            aggregate_load_time = sum(load_times)
+        if self.batched_load and all_dst_blocks:
             logger.info(
-                f"TPUOffloadConnectorWorker: Aggregate KV cache load time for {len(load_times)} requests: {aggregate_load_time:.4f} seconds"
+                f"TPUOffloadConnectorWorker: Executing Batched KV cache load for {len(load_requests_to_finish)} requests. Details: {', '.join(req_details)}"
             )
+            self._execute_load(all_dst_blocks, all_assembled_kv_on_cpu,
+                               load_requests_to_finish)
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """
