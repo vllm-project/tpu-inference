@@ -286,10 +286,12 @@ IMPL_TYPE="${MODEL_IMPL_TYPE_ENV#*=}"
 RUN_MODE="benchmark"
 if [ -n "$PHASED_PROFILING_DIR" ]; then
   RUN_MODE="xprof"
-elif [ "${FORCE_MOE_RANDOM_ROUTING_ENV#*=}" = "1" ]; then
-  RUN_MODE="force-moe-random-routing"
 fi
-LOG_GCS_URI="gs://tpu-commons-ci/logs/${MODEL_NAME}_${INPUT_LEN}_${OUTPUT_LEN}_${IMPL_TYPE}_${CODE_HASH}_${BENCHMARK_STATUS}_${RUN_MODE}_${JOB_REFERENCE}_vllm_serve.log"
+MOE_ROUTING_TAG=""
+if [ "${FORCE_MOE_RANDOM_ROUTING_ENV#*=}" = "1" ]; then
+  MOE_ROUTING_TAG="_force-moe-random-routing"
+fi
+LOG_GCS_URI="gs://tpu-commons-ci/logs/${MODEL_NAME}_${INPUT_LEN}_${OUTPUT_LEN}_${IMPL_TYPE}_${CODE_HASH}_${BENCHMARK_STATUS}_${RUN_MODE}${MOE_ROUTING_TAG}_${JOB_REFERENCE}_vllm_serve.log"
 if [ -f "/tmp/vllm_serve.log" ]; then
   echo "Uploading vllm_serve.log to $LOG_GCS_URI"
   gsutil cp /tmp/vllm_serve.log "$LOG_GCS_URI" || echo "Warning: Failed to upload vllm_serve.log"
