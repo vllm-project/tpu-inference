@@ -36,6 +36,7 @@ from tpu_inference.layers.common.process_weights.linear_weights import (
     shard_linear_weights, to_parameter_list)
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_fp8_moe_weights, shard_moe_weights)
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.quant_methods import FP8
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
 from tpu_inference.layers.vllm.interface.moe import (
@@ -245,6 +246,22 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
 
         w2_weight = t2j(layer.w2_weight, use_dlpack=False)
         w2_weight_scale = t2j(layer.w2_weight_scale_inv, use_dlpack=False)
+
+        # In Pathways, jit-ted functions dispatch to a single device unless
+        # inputs are explicitly sharded. process_fp8_moe_weights dequantizes
+        # fp8 → float32 → requantizes to bfloat16, peaking at ~56 GB for 256
+        # experts — exceeding per-chip HBM. Pre-shard along the expert axis so
+        # each chip only processes its subset of experts (~0.44 GB per chip).
+        # All operations inside process_fp8_moe_weights are embarrassingly
+        # parallel over the expert dimension so this is safe.
+        if self.moe_backend == MoEBackend.GMM_EP:
+            from jax.sharding import NamedSharding
+            ep_sharding = NamedSharding(self.mesh,
+                                        PartitionSpec(ShardingAxisName.EXPERT))
+            w13_weight = jax.device_put(w13_weight, ep_sharding)
+            w13_weight_scale = jax.device_put(w13_weight_scale, ep_sharding)
+            w2_weight = jax.device_put(w2_weight, ep_sharding)
+            w2_weight_scale = jax.device_put(w2_weight_scale, ep_sharding)
 
         # TODO: do we need to support bias?
         input_weights = FusedMoEWeights(
