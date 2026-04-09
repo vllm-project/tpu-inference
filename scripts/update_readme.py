@@ -740,8 +740,6 @@ def _process_quantization(file_sources):
     for row in static_d:
         if not row or len(row) < 3:
             continue
-        if row[0] == "AWQ INT4" and not row[1]:
-            continue
         w = row[0]
         m = row[1]
         v6_f = _find_quantization_status(w, m, nightly_data["v6_flax"])
