@@ -24,11 +24,16 @@ if [ -z "$CASE_FILE" ]; then
 fi
 
 if ! command -v gcloud &> /dev/null; then
-  echo "gcloud not found. Installing Google Cloud SDK..."
-  apt-get update && apt-get install -y gnupg curl
-  echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
-  curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
-  apt-get update && apt-get install -y google-cloud-cli
+  if [[ "${BUILDKITE:-false}" == "true" ]]; then
+    echo "gcloud not found on Buildkite. Installing Google Cloud SDK..."
+    apt-get update && apt-get install -y gnupg curl
+    echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+    curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+    apt-get update && apt-get install -y google-cloud-cli
+  else
+    echo "Error: gcloud is not installed and not running on Buildkite. Please install gcloud SDK manually."
+    exit 1
+  fi
 fi
 
 # Set umask so that any newly created files/directories have 777/666 permissions by default.
