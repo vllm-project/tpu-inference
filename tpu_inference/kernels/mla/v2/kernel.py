@@ -25,8 +25,6 @@ from jax.experimental.pallas import tpu as pltpu
 
 DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 
-DEFAULT_VMEM_LIMIT_BYTES = 100 * 1024 * 1024
-
 
 def cdiv_on_kv_packing(a, kv_packing):
     assert kv_packing == 1 or kv_packing == 2 or kv_packing == 4
@@ -1456,6 +1454,9 @@ def mla_ragged_paged_attention(
         num_queries_per_blocks = [num_queries_per_block for _ in range(3)]
     else:
         num_queries_per_blocks = num_queries_per_block
+
+    if vmem_limit_bytes is None:
+        vmem_limit_bytes = pltpu.get_tpu_info().vmem_capacity_bytes
 
     static_validate_inputs(
         ql_nope,
