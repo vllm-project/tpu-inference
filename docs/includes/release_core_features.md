@@ -57,6 +57,18 @@
       <td><span title="❌&nbsp;Failing">❌</span></td>
     </tr>
     <tr>
+      <td>Multimodal Inputs</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+    </tr>
+    <tr>
+      <td>Out-of-tree model support</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+    </tr>
+    <tr>
       <td>hybrid kv cache</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -73,18 +85,6 @@
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
-    </tr>
-    <tr>
-      <td>Multimodal Inputs</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-    </tr>
-    <tr>
-      <td>Out-of-tree model support</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
     </tr>
     <tr>
       <td>runai_model_streamer_loader</td>
