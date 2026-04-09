@@ -21,17 +21,17 @@
     "args": {
       "model": "Qwen/Qwen3-4B",
       "seed": 42,
-      "max-num-seqs": 512,
-      "max-num-batched-tokens": 4096,
+      "max-num-seqs": 128,
+      "max-num-batched-tokens": 8192,
       "tensor-parallel-size": {
         "tpu_v6e_queue": 1,
         "tpu_v7x_2_queue": 2,
         "default": 1
       },
-      "no-enable-prefix-caching": true,
+      "no-enable-prefix-caching": false,
       "max-model-len": 5120,
       "kv-cache-dtype": "fp8",
-      "gpu-memory-utilization": 0.98,
+      "gpu-memory-utilization": 0.90,
       "async-scheduling": true,
       "additional-config": "{\"quantization\": { \"qwix\": { \"rules\": [{ \"module_path\": \".*\", \"weight_qtype\": \"float8_e4m3fn\", \"act_qtype\": \"float8_e4m3fn\"}]}}}"
     }
