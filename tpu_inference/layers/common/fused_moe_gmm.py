@@ -150,14 +150,18 @@ def moe_gmm_local(
     gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
                            group_offset)
 
+    batch_size = gmm2_res.shape[0]
     local_group_size = w1.shape[0]
+
     if local_group_size < group_sizes.size:
         mask = valid_rows_mask(
             gmm1_res.shape[0],
             group_sizes,
             group_offset,
             group_offset + local_group_size,
-        )[topk_argsort_revert_indices]
+        )[topk_argsort_revert_indices].reshape(-1, topk, 1)
+    else:
+        mask = jnp.full((batch_size, ), True).reshape(-1, topk, 1)
 
     reduction_axis = (ShardingAxisName.MLP_TENSOR
                       if parallelism == "tp" else ShardingAxisName.EXPERT)
