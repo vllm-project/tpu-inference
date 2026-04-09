@@ -54,8 +54,28 @@ buildkite-agent step update "label" "$BK_RECORD_ID_LABEL" --append
 echo "--- Verifying Submodule Commit"
 git submodule status
 
-# TODO: device value convert to db value ( -> v7x-2)
-DEVICE=$BUILDKITE_AGENT_META_DATA_QUEUE
+# Device value convert to db value
+# Dynamic mapping for TPU version and chip count
+# This regex matches patterns like 'tpu_v7x_8_queue' or 'tpu_v6e_16_queue'
+if [[ "$BUILDKITE_AGENT_META_DATA_QUEUE" =~ ^tpu_v(7x|6e)_([0-9]+)_queue$ ]]; then
+    # Extract hardware version (7x or 6e) and chip count from regex capture groups
+    VERSION="${BASH_REMATCH[1]}"
+    COUNT="${BASH_REMATCH[2]}"
+    
+    if [ "$VERSION" == "7x" ]; then
+        # Map v7x patterns to "tpu7x-N"
+        DEVICE="tpu7x-$COUNT"
+    else
+        # Map v6e patterns to "v6e-N"
+        DEVICE="v6e-$COUNT"
+    fi
+elif [ "$BUILDKITE_AGENT_META_DATA_QUEUE" == "tpu_v6e_queue" ]; then
+    DEVICE="v6e-1"
+else
+    DEVICE="$BUILDKITE_AGENT_META_DATA_QUEUE"
+fi
+
+echo "[INFO] Dynamic mapping complete: $BUILDKITE_AGENT_META_DATA_QUEUE -> $DEVICE"
 
 echo "--- Configuring Docker Arguments for benchmark"
 

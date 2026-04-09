@@ -124,7 +124,7 @@ def main():
     num_prompts = cli_opts.get("args", {}).get("num-prompts", {})
     print(f"export NUM_PROMPTS=\"{num_prompts}\"")
     additional_config = srv_opts.get("args", {}).get("additional-config", {})
-    print(f"export ADDITIONAL_CONFIG=\"{additional_config}\"")
+    print(f"export ADDITIONAL_CONFIG={shlex.quote(str(additional_config))}")
     model = srv_opts.get("args", {}).get("model", {})
     print(f"export MODEL=\"{model}\"")
     max_num_seqs = srv_opts.get("args", {}).get("max-num-seqs", {})
