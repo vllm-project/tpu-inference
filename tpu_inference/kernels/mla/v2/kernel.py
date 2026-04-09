@@ -25,8 +25,6 @@ from jax.experimental.pallas import tpu as pltpu
 
 DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 
-DEFAULT_VMEM_LIMIT_BYTES = 100 * 1024 * 1024
-
 
 def cdiv_on_kv_packing(a, kv_packing):
     assert kv_packing == 1 or kv_packing == 2 or kv_packing == 4
