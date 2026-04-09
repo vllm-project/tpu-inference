@@ -582,6 +582,9 @@ def _process_model_support(file_sources):
         all_data.append(
             [model_name, metrics["Type"], u_combined, c_combined, b_combined])
 
+    all_data.sort(key=lambda row:
+                  (-sum('✅' in str(cell) for cell in row[2:]), row[0].lower()))
+
     for row in all_data:
         if row and row[0]:
             raw_model_name = row[0].strip("'` ")
@@ -622,6 +625,9 @@ def _process_core_features(file_sources):
         merged_default = _merge_hw_status(metrics["v6_default"],
                                           metrics["v7_default"])
         all_data.append([feature, merged_flax, merged_pytorch, merged_default])
+
+    all_data.sort(key=lambda row:
+                  (-sum('✅' in str(cell) for cell in row[1:]), row[0].lower()))
 
     return generate_html_feature_table(["Feature"], all_data)
 
@@ -683,6 +689,9 @@ def _process_parallelism(file_sources):
         all_data.append(
             [feature, flax_single, flax_multi, torch_single, torch_multi])
 
+    all_data.sort(key=lambda row:
+                  (-sum('✅' in str(cell) for cell in row[1:]), row[0].lower()))
+
     return generate_html_parallelism_table(["Feature"], all_data)
 
 
@@ -721,6 +730,9 @@ def _process_microbenchmarks(file_sources):
 
         all_data.append(merged_row)
 
+    all_data.sort(key=lambda row:
+                  (-sum('✅' in str(cell) for cell in row[1:]), row[0].lower()))
+
     return generate_html_microbenchmark_table(["test"], all_data)
 
 
@@ -752,6 +764,9 @@ def _process_quantization(file_sources):
 
         new_row = row[:3] + [merged_flax, merged_pytorch]
         all_data.append(new_row)
+
+    all_data.sort(key=lambda row:
+                  (-sum('✅' in str(cell) for cell in row[3:]), row[0].lower()))
 
     return generate_html_quantization_table(headers, all_data)
 
