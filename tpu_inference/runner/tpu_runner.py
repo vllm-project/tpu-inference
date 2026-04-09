@@ -969,9 +969,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         with self.maybe_forbid_compile:
 
             if tpu_sampling_metadata.logprobs:
+                # --- [DEBUG START] ---
+                import os
+                if self.rank == 0:
+                    print(f"\n" + "!"*60)
+                    print(f"[DEBUG_RUN] PID: {os.getpid()} | Rank: {self.rank}")
+                    print(f"[DEBUG_RUN] DP Size: {self.dp_size}")
+                    print(f"[DEBUG_RUN] num_reqs (raw): {self.input_batch.num_reqs}")
+                    print(f"[DEBUG_RUN] padded_num_reqs: {padded_num_reqs}")
+                    print(f"[DEBUG_RUN] Logits Shape: {logits.shape}")
+                    print(f"[DEBUG_RUN] Logits Sharding: {logits.sharding}")
+                    print(f"[DEBUG_RUN] Max Logprobs: {self.model_config.max_logprobs}")
+                    print(f"!"*60 + "\n")
+                # --- [DEBUG END] ---
+                print(f"DEBUG RUNTIME: logits shape={logits.shape}, dtype={logits.dtype}, sharding={logits.sharding.spec}")
                 logits = processed_logits if self.model_config.logprobs_mode == "processed_logprobs" else logits
                 logprobs = self._compute_and_gather_logprobs(
-                    logits, next_tokens, self.model_config.max_logprobs)
+                    logits, next_tokens, num_reqs=padded_num_reqs, max_logprobs=self.model_config.max_logprobs)
                 logprobs = _jax_logprobs_copy_to_host_async(logprobs)
             else:
                 logprobs = None
@@ -1135,9 +1149,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         return ret
 
     @staticmethod
-    @jax.jit(static_argnames=("max_logprobs", ))
-    def _compute_and_gather_logprobs(logits, next_tokens, max_logprobs):
-        logprobs = compute_logprobs(logits)
+    @jax.jit(static_argnames=("num_reqs", "max_logprobs"))
+    def _compute_and_gather_logprobs(logits, next_tokens, num_reqs, max_logprobs):
+        logprobs = compute_logprobs(logits.astype(jnp.float32))
         return gather_logprobs(logprobs, next_tokens, max_logprobs)
 
     def _prepare_dp_input_metadata(self,

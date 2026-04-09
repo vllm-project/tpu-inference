@@ -619,29 +619,66 @@ class CompilationManager:
                 layer_cache.block_until_ready()
 
     def _precompile_gather_logprobs(self) -> None:
+        import tpu_inference.layers.common.sharding as sharding_mod
+        print("\n" + "*"*50)
+        print(f"[SHARDING_CHECK] Available attributes in ShardingAxisName:")
+        print(dir(sharding_mod.ShardingAxisName))
+        print("*"*50 + "\n")
         logger.info("Compiling gather_logprobs with different input shapes.")
         hsize = self.runner.model_config.get_vocab_size()
+        # --- DEBUG PRINT START ---
+        print(f"\n" + "="*60)
+        print(f"[DEBUG_COMPILE] Starting _precompile_gather_logprobs")
+        print(f"[DEBUG_COMPILE] num_reqs_paddings (Global): {self.runner.num_reqs_paddings}")
+        print(f"[DEBUG_COMPILE] num_reqs_paddings_per_dp (Per-Rank): {self.runner.num_reqs_paddings_per_dp}")
+        print(f"[DEBUG_COMPILE] Model Config Max Logprobs: {self.runner.model_config.max_logprobs}")
+        # --- DEBUG PRINT END ---
         for num_reqs in self.runner.num_reqs_paddings:
             dp_size = self.runner.vllm_config.sharding_config.total_dp_size
+            # if dp_size > 1:
+            #     # Matches the runtime spec: P('data', ('attn_dp', 'attn_dp_expert', 'model', 'expert'))
+            #     # Based on the Mesh definition, ShardingAxisName.DATA maps to the 'data' axis.
+            #     logits_sharding = NamedSharding(
+            #         self.runner.mesh,
+            #         PartitionSpec(
+            #             ('data',), 
+            #             ('attn_dp', 'attn_dp_expert', 'model', 'expert')
+            #         )
+            #     )
+            #     token_ids_sharding = NamedSharding(
+            #         self.runner.mesh, 
+            #         PartitionSpec(('data',))
+            #     )
+            # else:
+            #     logits_sharding = NamedSharding(self.runner.mesh, PartitionSpec())
+            #     token_ids_sharding = NamedSharding(self.runner.mesh, PartitionSpec())
             logits_sharding = NamedSharding(
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.MLP_DATA,
-                              ShardingAxisName.MLP_TENSOR))
+                              ShardingAxisName.MLP_TENSOR))  if dp_size > 1 else NamedSharding(self.runner.mesh,
+                                                PartitionSpec())
             token_ids_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA, )
             ) if dp_size > 1 else NamedSharding(self.runner.mesh,
                                                 PartitionSpec())
+            # --- DEBUG PRINT START ---
+            print(f"[DEBUG_COMPILE] Loop Iteration | num_reqs: {num_reqs}")
+            print(f"[DEBUG_COMPILE] Logits Sharding Spec: {logits_sharding.spec}")
+            print(f"[DEBUG_COMPILE] Token IDs Sharding Spec: {token_ids_sharding.spec}")
+            # --- DEBUG PRINT END ---
             logits = self._create_dummy_tensor((num_reqs, hsize), jnp.float32,
                                                logits_sharding)
             token_ids = self._create_dummy_tensor((num_reqs, ), jnp.int32,
                                                   token_ids_sharding)
             self._run_compilation(
                 f"worker{self.runner.rank} gather_logprobs",
-                self.runner._compute_and_gather_logprobs,
+                lambda lg, tid: self.runner._compute_and_gather_logprobs(
+                    lg, tid, num_reqs=num_reqs, max_logprobs=self.runner.model_config.max_logprobs
+                ),
                 logits,
                 token_ids,
-                self.runner.model_config.max_logprobs,
-                num_reqs=num_reqs,
+                num_reqs = num_reqs,
+                max_logprobs = self.runner.model_config.max_logprobs,
             )
 
         self._gather_logprobs_precompiled = True
