@@ -14,6 +14,7 @@
 
 import json
 import math
+import os
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, List, Optional
 
@@ -162,6 +163,13 @@ class ShardingConfigManager:
 
         enable_dp_attention = sharding_strategy.get("enable_dp_attention",
                                                     False)
+        # Allow explicit attention-only DP size via env var.
+        # Only takes effect when VLLM_ATTN_DP_SIZE > 1; otherwise
+        # the existing enable_dp_attention logic is unchanged.
+        _attn_dp_env = int(os.environ.get("VLLM_ATTN_DP_SIZE", "0"))
+        if _attn_dp_env > 1:
+            enable_dp_attention = True
+            envs.NEW_MODEL_DESIGN = True
         if pc_tensor_parallelism != ss_tensor_parallelsim and ss_tensor_parallelsim:
             # The user has explicitly set the tensor parallelism in the sharding config.
             tensor_parallelism = ss_tensor_parallelsim
@@ -193,6 +201,9 @@ class ShardingConfigManager:
             attn_dp = max(
                 int(tensor_parallelism // num_kv_heads_per_device_in_kv_cache),
                 1)
+            # Explicit env-var override takes precedence over auto-detect.
+            if _attn_dp_env > 1:
+                attn_dp = _attn_dp_env
             tensor_parallelism = tensor_parallelism // attn_dp
             attn_dp_expert = expert_parallelism
             expert_parallelism = 1
