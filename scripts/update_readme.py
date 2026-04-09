@@ -354,6 +354,16 @@ def _score_status(cell):
     return 3
 
 
+def _get_model_status_rank(row):
+    """Ranks model row status: Has ✅ -> 0, Has ❌ -> 1, Only ❓ -> 2."""
+    cells = [str(c) for c in row[2:]]
+    if any('✅' in c for c in cells):
+        return 0
+    if any('❌' in c for c in cells):
+        return 1
+    return 2
+
+
 def _find_quantization_status(weight, method, nightly_rows):
     """Finds quantization status recursively inside nightly CSV arrays."""
     if not nightly_rows:
@@ -594,8 +604,8 @@ def _process_model_support(file_sources):
         all_data.append(
             [model_name, metrics["Type"], u_combined, c_combined, b_combined])
 
-    all_data.sort(key=lambda row: (tuple(
-        sorted(_score_status(c) for c in row[2:])), row[0].lower()))
+    all_data.sort(key=lambda row: (_get_model_status_rank(row), row[1].lower(),
+                                   row[0].lower()))
 
     for row in all_data:
         if row and row[0]:
