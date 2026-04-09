@@ -111,7 +111,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 <blockquote>
 
-<sub><i>Stable support status for official releases and production deployments.</i></sub><br><br>
+<i>Stable support status for official releases and production deployments.</i><br><br>
 
 <details open markdown="1">
 <summary><b> ✅ Tested Models </b></summary>
@@ -504,7 +504,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 <blockquote>
 
-<sub><i>Bleeding-edge support status for the latest nightly/main branch developments.</i></sub><br><br>
+<i>Bleeding-edge support status for the latest nightly/main branch developments.</i><br><br>
 
 <details open markdown="1">
 <summary><b> ✅ Tested Models </b></summary>
