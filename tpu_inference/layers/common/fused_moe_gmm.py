@@ -19,6 +19,7 @@ import jax
 from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+
 import tpu_inference.envs as envs
 from tpu_inference.kernels.gather.ragged_gather import ragged_gather
 from tpu_inference.kernels.gather import gather_reduce as gather_reduce_sc
@@ -169,13 +170,6 @@ def moe_gmm_local(
     chunk_size = gmm2_res.shape[0] // sc_psum_num_chunks
     if False:  # gather_reduce_sc.is_supported_by_sc_gather_reduce(
         #     gmm1_res.shape[0], sc_kernel_threshold):
-        gmm2_res = gmm_wrapper(gmm1_res,
-                               w2,
-                               w2_scale,
-                               w2_bias,
-                               group_sizes,
-                               group_offset,
-                               preferred_element_type=jnp.float32.dtype)
 
         if local_group_size < group_sizes.size:
             mask = mask.reshape(-1, topk)
@@ -397,7 +391,6 @@ def expert_parallel_gmm(
         mesh=mesh,
         in_specs=(
             x_p_spec,
-            data_p_spec,
             ep_p_spec,
             w1_scale_spec,
             w1_bias_spec,
@@ -516,7 +509,6 @@ def fused_moe_func(
         token_indices = jnp.arange(num_tokens_local,
                                    dtype=jnp.int32).repeat(topk)
         token_indices_sorted = token_indices[topk_argsort_indices]
-        x = hidden_states_local[token_indices_sorted]
         # Below one_hot is equivalent to jnp.bincount(topk_indices_flat,
         # length=global_num_experts) but is more performant.
         group_sizes_local = jax.nn.one_hot(topk_indices_flat,
