@@ -96,7 +96,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <summary>
   <h3>
     🚀&nbsp; Release Support Matrices<br>
-    <sub><i>Stable support status for official releases and production deployments.</i></sub>
+    <sub><span style="font-weight: normal;"><i>Stable support status for official releases and production deployments.</i></span></sub>
   </h3>
 </summary>
 
@@ -493,7 +493,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <summary>
   <h3>
     🧪&nbsp; Nightly Support Matrices<br>
-    <sub><i>Bleeding-edge support status for the latest nightly/main branch developments.</i></sub>
+    <sub><span style="font-weight: normal;"><i>Bleeding-edge support status for the latest nightly/main branch developments.</i></span></sub>
   </h3>
 </summary>
 
