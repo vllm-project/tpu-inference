@@ -3,7 +3,6 @@
     "GCP_PROJECT_ID": "cloud-tpu-inference-test",
     "GCP_REGION": "southamerica-west1",
     "GCS_BUCKET": "vllm-cb-storage2",
-    "ARTIFACT_REPO": "vllm-tpu-bm-bk",
     "GCP_INSTANCE_ID": "vllm-bm-inst",
     "GCP_DATABASE_ID": "vllm-bm-bk-runs",
     "VLLM_USE_V1": "1",
@@ -13,7 +12,10 @@
     "OUTPUT_LEN": 1024,
     "PREFIX_LEN": 3600
   },
-  "ci_queue": ["tpu_v6e_queue", "tpu_v7x_2_queue"],
+  "ci_queue": [
+    "tpu_v6e_queue",
+    "tpu_v7x_2_queue"
+  ],
   "server_command_options": {
     "command_type": "vllm_serve",
     "args": {

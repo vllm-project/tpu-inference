@@ -3,14 +3,15 @@
     "GCP_PROJECT_ID": "cloud-tpu-inference-test",
     "GCP_REGION": "southamerica-west1",
     "GCS_BUCKET": "vllm-cb-storage2",
-    "ARTIFACT_REPO": "vllm-tpu-bm-bk",
     "GCP_INSTANCE_ID": "vllm-bm-inst",
     "GCP_DATABASE_ID": "vllm-bm-bk-runs"
   },
   "benchmark_cases": [
     {
       "case_name": "Qwen3-4B-dataset_custom-inlen_4096-outlen_1024-C1",
-      "ci_queue": ["tpu_v6e_queue"],
+      "ci_queue": [
+        "tpu_v6e_queue"
+      ],
       "env": {
         "VLLM_USE_V1": "1",
         "MODEL_IMPL_TYPE": "vllm",
@@ -58,7 +59,9 @@
     },
     {
       "case_name": "Qwen3-4B-dataset_custom-inlen_4096-outlen_1024-C2",
-      "ci_queue": ["tpu_v7x_2_queue"],
+      "ci_queue": [
+        "tpu_v7x_2_queue"
+      ],
       "env": {
         "VLLM_USE_V1": "1",
         "MODEL_IMPL_TYPE": "vllm",

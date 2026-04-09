@@ -23,17 +23,23 @@ if [ -z "$CASE_FILE" ]; then
     exit 1
 fi
 
+if [[ "${BUILDKITE:-false}" == "true" ]]; then
+  apt-get update && apt-get install -y gnupg curl
+  echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+  curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+  apt-get update && apt-get install -y google-cloud-cli
+
+  # TODO: Move to image building.
+  # Ingore the error because in case of using uv, the packages are installed outside this script.
+  pip install evaluate==0.4.5 || true
+  pip install rouge-score==0.1.2 || true
+  # Install lm_eval with dependencies, version is same as https://github.com/vllm-project/vllm/blob/main/.buildkite/scripts/hardware_ci/run-tpu-v1-test.sh#L64
+  pip install "lm-eval[api,math]>=0.4.9.2" || true
+fi
+
 if ! command -v gcloud &> /dev/null; then
-  if [[ "${BUILDKITE:-false}" == "true" ]]; then
-    echo "gcloud not found on Buildkite. Installing Google Cloud SDK..."
-    apt-get update && apt-get install -y gnupg curl
-    echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
-    curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
-    apt-get update && apt-get install -y google-cloud-cli
-  else
     echo "Error: gcloud is not installed and not running on Buildkite. Please install gcloud SDK manually."
     exit 1
-  fi
 fi
 
 # Set umask so that any newly created files/directories have 777/666 permissions by default.
@@ -76,13 +82,6 @@ mkdir -p "$PROFILE_FOLDER"
 PYTHON_PARSER="$SCRIPT_DIR/parser_case.py"
 # Evaluate the Python output to set variables in the current shell context
 eval "$(python3 "$PYTHON_PARSER" "$CASE_FILE" "$TARGET_CASE_NAME")"
-
-# TODO: Move to image building.
-# Ingore the error because in case of using uv, the packages are installed outside this script.
-pip install evaluate==0.4.5 || true
-pip install rouge-score==0.1.2 || true
-# Install lm_eval with dependencies, version is same as https://github.com/vllm-project/vllm/blob/main/.buildkite/scripts/hardware_ci/run-tpu-v1-test.sh#L64
-pip install "lm-eval[api,math]>=0.4.9.2" || true
 
 VLLM_LOG="$LOG_FOLDER/vllm_log.txt"
 BM_LOG="$LOG_FOLDER/bm_log.txt"

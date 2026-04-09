@@ -3,7 +3,6 @@
     "GCP_PROJECT_ID": "cloud-tpu-inference-test",
     "GCP_REGION": "southamerica-west1",
     "GCS_BUCKET": "vllm-cb-storage2",
-    "ARTIFACT_REPO": "vllm-tpu-bm-bk",
     "GCP_INSTANCE_ID": "vllm-bm-inst",
     "GCP_DATABASE_ID": "vllm-bm-bk-runs",
 
