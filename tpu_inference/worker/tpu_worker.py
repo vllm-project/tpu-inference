@@ -157,6 +157,9 @@ class TPUWorker(WorkerBase):
 
         # step_counter is used to calculate uuid to transfer intermediate tensors.
         self.step_counter = 0
+        self.num_received_requests = 0
+        self._has_started_profiling = False
+        self._has_stopped_profiling = False
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
@@ -379,13 +382,34 @@ class TPUWorker(WorkerBase):
         self,
         scheduler_output: SchedulerOutput,
     ) -> Optional[ModelRunnerOutput]:
+        is_prefill_worker = self.vllm_config.kv_transfer_config.is_kv_producer
+        is_decode_worker = self.vllm_config.kv_transfer_config.is_kv_consumer
+
+        for req in scheduler_output.scheduled_new_reqs:
+            self.num_received_requests += 1
+            if is_prefill_worker:
+                logger.info("Prefill worker start process request (%s): %s", self.num_received_requests, req.req_id)
+            if is_decode_worker:
+                logger.info("Decode worker start process request (%s): %s", self.num_received_requests, req.req_id)
+
+        # for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+        #     if is_prefill_worker:
+        #         logger.info("Prefill worker start process request (%s): %s", self.num_received_requests, req_id)
+        #     if is_decode_worker:
+        #         logger.info("Decode worker start process request (%s): %s", self.num_received_requests, req_id)
+
         # NOTE: This method intentionally returns a concrete vLLM type, which
         # violates the pure abstract contract of the base class. This is a
         # deliberate, temporary compromise for the same reasons outlined in
         # the `get_kv_cache_spec` method.
         # NOTE: delete profile code before merging the branch
-        # if self.step_counter == 1:
-        #     self.profile(is_start=True)
+        logger.info(f"Worker {self.rank} execute_model step {self.step_counter} | "
+                    f"scheduled_new_reqs={scheduler_output.scheduled_new_reqs} | "
+                    f"scheduled_cached_reqs={scheduler_output.scheduled_cached_reqs} | "
+                    f"hbm={utils.hbm_usage_gb(self.devices)}GiB")
+        if self.num_received_requests >= 10 and not self._has_started_profiling:
+            self.profile(is_start=True)
+            self._has_started_profiling = True
         if self.parallel_config.pipeline_parallel_size == 1 or self.rank == 0:
             intermediate_tensors = None
         else:
@@ -399,9 +423,18 @@ class TPUWorker(WorkerBase):
                 uuid, tensor_spec)
             intermediate_tensors = JaxIntermediateTensors(
                 intermediate_tensors_dict)
-
+        
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
+
+        if isinstance(output, ModelRunnerOutput):
+            if is_prefill_worker and output.kv_connector_output and output.kv_connector_output.finished_sending:
+                for req_id in output.kv_connector_output.finished_sending:
+                    logger.info("Prefill worker complete request: %s", req_id)
+
+        for req_id in scheduler_output.finished_req_ids:
+            if is_decode_worker:
+                logger.info("Decode worker complete request: %s", req_id)
 
         if isinstance(output, JaxIntermediateTensors):
             assert self.parallel_config.pipeline_parallel_size > 1
@@ -411,12 +444,15 @@ class TPUWorker(WorkerBase):
                 scheduler_output, self.rank, self.step_counter)
             get_pp_group().send_tensor_dict(uuid, output.tensors)
             self.step_counter += 1
+            if self.num_received_requests >= 15 and self._has_started_profiling and not self._has_stopped_profiling:
+                self.profile(is_start=False)
+                self._has_stopped_profiling = True
             return None
         else:
             self.step_counter += 1
-            # NOTE: delete profile code before merging the branch
-            # if self.step_counter == 10:
-            #     self.profile(is_start=False)
+            if self.num_received_requests >= 15 and self._has_started_profiling and not self._has_stopped_profiling:
+                self.profile(is_start=False)
+                self._has_stopped_profiling = True
             # With a connector, the scheduler expects output from all workers
             # TODO(mrjunwan): Figure out if this is ok after https://github.com/vllm-project/vllm/pull/26866
             if has_kv_transfer_group():
