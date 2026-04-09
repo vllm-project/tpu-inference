@@ -116,6 +116,9 @@ def main_kernel(
             col_hbm_start = col_tile_start + col_vmem_start
             for row_vmem in range(num_simd_lanes):
                 row_hbm = indices[row_vmem] // packing
+                # Since we have changed layout from (8, 128) to (1, 128), continuous
+                # memory addresss does not yield desired values anymore. Therefore,
+                # we break up a dmas into multiple num_lanes sized requests.
                 pltpu.make_async_copy(
                     in_32b_hbm_ref.at[row_hbm,
                                       pl.ds(col_hbm_start, num_lanes)],
@@ -176,7 +179,12 @@ def main_kernel(
                         if row_dst_pack == packing - 1:
                             # Store packed data into correct position.
                             row_dst = row_src // packing
+                            # Instead of creating a separate buffer for saving the result,
+                            # we reuse existing buffer to minimize vmem requirement.
+                            # We can safely overwrite the buffer because the new values are
+                            # the packed values of the existing values.
                             out_vmem_ref[row_dst, col_slice] = out
+                            out = None
 
             # Start dma write.
             for row_vmem in range(num_simd_lanes // packing):
