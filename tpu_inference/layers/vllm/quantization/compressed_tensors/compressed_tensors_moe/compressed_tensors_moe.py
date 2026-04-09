@@ -17,10 +17,10 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import \
     CompressedTensorsMoEMethod
 
-from tpu_inference.layers.vllm.quantization.unquantized import \
-    VllmUnquantizedFusedMoEMethod
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8 import \
     VllmCompressedTensorsW8A8Fp8MoEMethod
+from tpu_inference.layers.vllm.quantization.unquantized import \
+    VllmUnquantizedFusedMoEMethod
 
 
 class VllmCompressedTensorsMoEMethod(CompressedTensorsMoEMethod):
