@@ -87,6 +87,20 @@ Below is the live status of our supported models, features, and kernels. Click o
 > - 📝 **Planned:** Not yet implemented, but on the official roadmap.
 > - ⛔️ **Unplanned:** There is no benefit to adding this.
 > - ❓ **Untested:** The functionality exists but has not been recently or thoroughly verified.
+>
+> <details>
+> <summary> <b>📐 <i>View Matrix Aggregation Rules (v6/v7 & C+P)</i></b> </summary>
+> 
+> - **🛠️ Correctness + Performance (C + P)**
+>   - ❌ **Failing**: If either check fails.
+>   - ✅ **Passing**: If **BOTH** checks pass successfully.
+>   - ❓ **Untested**: If any check is untested (and neither fails).
+>
+> - **🌐 Hardware Rollups (v6 + v7)**
+>   - ❌ **Failing**: If the feature fails on **either** v6 or v7.
+>   - ✅ **Passing**: If the feature passes on **BOTH** v6 and v7.
+>   - ❓ **Untested**: If either generation is untested (and neither fails).
+> </details>
 
 </details>
 
