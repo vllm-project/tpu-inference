@@ -20,7 +20,7 @@
 [![bug](https://img.shields.io/badge/bug-12-d73a4a?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22bug%22) [![good first issue](https://img.shields.io/badge/good%20first%20issue-8-7057ff?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22good%20first%20issue%22) [![enhancement](https://img.shields.io/badge/enhancement-7-a2eeef?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22enhancement%22) [![contribution-welcome](https://img.shields.io/badge/contribution--welcome-5-ededed?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22contribution-welcome%22) [![auto-generated](https://img.shields.io/badge/auto--generated-5-ededed?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22auto-generated%22) [![View All Issues](https://img.shields.io/badge/View%20All%20Issues-184-238636?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues)
 <!-- END: issue_badges -->
 
-## 📰 Latest News
+## Latest News
 
 - [Announcing Gemma 4 on vLLM](https://vllm.ai/blog/gemma4) Byte for byte, the most capable open models - available on TPUs on Day 0!
 
@@ -36,7 +36,7 @@
 
 <br>
 
-## 👋&nbsp; About
+## About
 
 vLLM TPU is now powered by `tpu-inference`, an expressive and powerful new hardware plugin unifying JAX and PyTorch under a single lowering path within the vLLM project. The new backend now provides a framework for developers to:
 
@@ -45,7 +45,7 @@ vLLM TPU is now powered by `tpu-inference`, an expressive and powerful new hardw
 - Retain vLLM standardization: keep the same user experience, telemetry, and interface.
 <br>
 
-## ⭐&nbsp; Recommended models and features
+## Recommended models and features
 
 Although vLLM TPU’s new unified backend makes out-of-the-box high performance serving possible with any model supported in vLLM, the reality is that we're still in the process of implementing a few core components.
 
@@ -53,7 +53,7 @@ For this reason, we’ve provided a **[Recommended Models and Features](https://
 
 <br>
 
-## 🚀&nbsp; Get started
+## Get started
 
 Get started with vLLM on TPUs by following the [quickstart guide](https://docs.vllm.ai/projects/tpu/en/latest/getting_started/quickstart/).
 
@@ -65,14 +65,14 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 <br>
 
-## 🍳&nbsp; Recipes
+## Recipes
 
 - [v7x (Ironwood) Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM)
 - [v6e (Trillium) Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)
 
 <br>
 
-## 📊&nbsp; TPU Support Matrix Dashboard
+## TPU Support Matrix Dashboard
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
