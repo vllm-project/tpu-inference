@@ -1,6 +1,6 @@
 Feature,CorrectnessTest,PerformanceTest
 "Chunked Prefill",✅ Passing,✅ Passing
-"DCN-based P/D disaggregation",✅ Passing,✅ Passing
+"DCN-based P/D disaggregation",❌ Failing,❌ Failing
 "KV cache host offloading",❓ Untested,❓ Untested
 "LoRA_Torch",✅ Passing,✅ Passing
 "Multimodal Inputs",❌ Failing,❓ Untested
@@ -14,5 +14,5 @@ Feature,CorrectnessTest,PerformanceTest
 "hybrid kv cache",❌ Failing,❓ Untested
 "multi-host",❓ Untested,❓ Untested
 "runai_model_streamer_loader",✅ Passing,❓ Untested
-"sampling_params",❌ Failing,❓ Untested
+"sampling_params",✅ Passing,❓ Untested
 "structured_decoding",✅ Passing,❓ Untested

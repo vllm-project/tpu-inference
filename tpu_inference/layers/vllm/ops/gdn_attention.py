@@ -354,7 +354,7 @@ def gdn_in_proj_tpu(
     return mixed_qkvz, ba
 
 
-def apply_gated_delta_net_torch_ops_patch(mesh: jax.sharding.Mesh) -> None:
+def apply_gated_delta_net_torch_ops_patch() -> None:
     """
     This is a patch to inject the `gdn_attention_core` op so the
     Torch/GPU  kernel is bypassed in favor of the TPU kernel
@@ -366,13 +366,6 @@ def apply_gated_delta_net_torch_ops_patch(mesh: jax.sharding.Mesh) -> None:
         import vllm.model_executor.models.qwen3_next  # noqa: F401
     except ImportError:
         pass
-
-    # Ensure the op exists in the namespace, which initializes the OpOverloadPacket
-    if hasattr(torch.ops, "vllm") and hasattr(torch.ops.vllm,
-                                              "gdn_attention_core"):
-        # dummy call to ensure the op is registered
-        torch.ops.vllm.gdn_attention_core = functools.partial(
-            gdn_attention_core_tpu, mesh=mesh)
 
     if hasattr(torch.ops.vllm, "gdn_in_proj"):
         # dummy call to ensure the op is registered
