@@ -855,9 +855,12 @@ def calculate_tiling(
     tile_m = min(tile_m, dims.size_m)
 
     # Calculate vmem limit for a single rhs buffer when using triple buffers.
+    # Each buffer holds [size_group, tile_k, tile_n] since the group dimension
+    # is loaded entirely (BlockSpec uses None for that axis). Account for this
+    # by including dims.size_group in the base size estimate.
     num_rhs_buffers = 3
     rhs_vmem_target = vmem_limit_bytes // num_rhs_buffers
-    base_rhs_size_bytes = dims.size_k * dims.size_n * rhs_bits // 8
+    base_rhs_size_bytes = dims.size_k * dims.size_n * dims.size_group * rhs_bits // 8
 
     # To avoid stalling MXU, we add some buffer room where tile_n cannot go
     # smaller than 2x of mxu_column_size.
@@ -893,10 +896,17 @@ def calculate_tiling(
                           num_n_tiles * num_lanes) // num_n_tiles
 
     # If decreasing tile_n is no longer possible, we decrease tile_k instead.
-    if tile_n < tile_n_limit:
-        num_n_tiles -= 1
-        tile_n = align_to(size_n_per_rhs,
-                          num_n_tiles * num_lanes) // num_n_tiles
+    # This handles two cases:
+    # 1. tile_n overshot below tile_n_limit (undo last step, then reduce tile_k)
+    # 2. tile_n landed exactly on tile_n_limit but rhs still doesn't fit in
+    #    rhs_vmem_target (the original condition missed this case)
+    rhs_fits = pl.cdiv(base_rhs_size_bytes, num_n_tiles) <= rhs_vmem_target
+    if not rhs_fits:
+        if tile_n < tile_n_limit:
+            # Undo overshoot: revert to the last valid tile_n
+            num_n_tiles -= 1
+            tile_n = align_to(size_n_per_rhs,
+                              num_n_tiles * num_lanes) // num_n_tiles
 
         # Decrease tile_k until rhs fits in vmem target and tile_k is valid.
         base_rhs_size_bytes = pl.cdiv(base_rhs_size_bytes, num_n_tiles)
