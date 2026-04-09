@@ -148,10 +148,10 @@ echo "------------------------------------------------"
 PROXY_POD=$(kubectl get pods -l "$PROXY_LABEL" -o jsonpath="{.items[0].metadata.name}")
 
 # Run input=1024, output=8192
-run_disagg_benchmark $PROXY_POD $MODEL 1024 8192 256
+run_disagg_benchmark $PROXY_POD $MODEL 1024 8192 10
 
 # Run input=8192, output=1024
-run_disagg_benchmark $PROXY_POD $MODEL 8192 1024 256
+run_disagg_benchmark $PROXY_POD $MODEL 8192 1024 10
 
 # Benchmark results should be saved in local files 1024_8192.json and
 # 8192_1024.json.
@@ -159,6 +159,37 @@ run_disagg_benchmark $PROXY_POD $MODEL 8192 1024 256
 # - Throughput
 # - TTFT (mean, median, P90)
 # - TPOT (mean, median, P90)
+BASE_RECORD_ID="gke-run-$(date +%Y%m%d-%H%M%S)"
+
+for RESULT_FILE in "1024_8192.json" "8192_1024.json"; do
+    if [ ! -f "$RESULT_FILE" ]; then
+        echo "Warning: Result file $RESULT_FILE not found."
+        continue
+    fi
+    
+    RECORD_ID="${BASE_RECORD_ID}-${RESULT_FILE%.*}"
+    
+    # Upload to GCS
+    GCS_BUCKET="${GCS_BUCKET}"
+    GCS_PATH="gs://$GCS_BUCKET/$RECORD_ID/$RESULT_FILE"
+    echo "Uploading results to GCS: $GCS_PATH"
+    gsutil cp "$RESULT_FILE" "$GCS_PATH"
+
+    
+    # Dump results to database
+    echo "Parsing results and dumping to database..."
+    python3 parse_gke_results.py "$RESULT_FILE" "$RECORD_ID" | while read -r SQL; do
+        if [[ -n "$SQL" ]]; then
+            echo "Executing SQL statement..."
+            gcloud spanner databases execute-sql "${GCP_DATABASE_ID}" \
+                --project="${PROJECT_NAME}" \
+                --instance="${GCP_INSTANCE_ID}" \
+                --sql="$SQL"
+        fi
+    done
+done
+
+
 
 # Cleanup
 cleanup_1p1d
