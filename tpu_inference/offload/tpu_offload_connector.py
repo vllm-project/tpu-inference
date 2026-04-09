@@ -533,7 +533,7 @@ class RequestTracker:
         else:
             raise ValueError(
                 f"Unsupported new_block_ids type {type(new_block_ids)}")
-        logger.info(
+        logger.debug(
             f" update req({self.req_id}): new_blocks: {new_block_ids}, "
             f"num_new_tokens: {len(new_token_ids)}; "
             f"existing blocks:{self.block_ids}, "
@@ -863,7 +863,7 @@ class TPUOffloadConnectorScheduler():
         self.staging_buffer_manager = StagingBufferManager(
             num_blocks=self.num_staging_blocks)
 
-        logger.info(
+        logger.info_once(
             f"TPUOffloadConnectorScheduler initialized with: "
             f"block_size={self.block_size}, "
             f"cpu_chunk_size={self.cpu_chunk_size}, "
@@ -891,10 +891,10 @@ class TPUOffloadConnectorScheduler():
         # get block_hash
         block_hashes = self._get_request_block_hashes(request)
         num_total_blocks = len(block_hashes)
-        logger.info(f"Checking for cache hit: {request.request_id},"
-                    f"total_token_len: {request.num_tokens}, "
-                    f"block_hashes ({num_total_blocks}), "
-                    f"already computed tokens: {num_computed_tokens}. ")
+        logger.debug(f"Checking for cache hit: {request.request_id},"
+                     f"total_token_len: {request.num_tokens}, "
+                     f"block_hashes ({num_total_blocks}), "
+                     f"already computed tokens: {num_computed_tokens}. ")
 
         # look for blocks in the cache
         num_hits = self.offload_manager.lookup(block_hashes)
@@ -926,7 +926,7 @@ class TPUOffloadConnectorScheduler():
             # )
             if num_blocks_to_load > num_avail_staging_blocks:
                 # reduce blocks_to_load (and matched tokens) when there are insufficient staging blocks.
-                logger.info(
+                logger.debug(
                     f" Req({request.request_id}) found {num_matched_blocks} blocks ({num_matched_tokens} tokens), but only {num_avail_staging_blocks} staging blocks available."
                 )
                 num_blocks_to_load = num_avail_staging_blocks
@@ -981,7 +981,7 @@ class TPUOffloadConnectorScheduler():
             # the slot gets override.) And from there, the request can
             # seamlessly transition to the decoding phase.
             num_matched_for_scheduler = num_matched_tokens - 1
-            logger.info(
+            logger.debug(
                 f"Request {request.request_id}: Full prompt hit. Reporting {num_matched_for_scheduler} matched tokens. Actual hit from backend is {num_matched_tokens} tokens"
             )
         num_to_load = max(0, num_matched_for_scheduler - num_computed_tokens)
@@ -1000,7 +1000,7 @@ class TPUOffloadConnectorScheduler():
         Update the dst_blocks in the load_spec
         """
         UPDATE_STATE_AFTER_ALLOC_CALLS.inc()
-        logger.info(
+        logger.debug(
             f"TPUOffloadConnectorScheduler: Entering update_state_after_alloc Request {request.request_id}: Scheduler allocated "
             f"{num_external_tokens} external tokens.")
         self._unfinished_requests[request.request_id] = request
@@ -1019,7 +1019,7 @@ class TPUOffloadConnectorScheduler():
 
             block_hashes = self._get_request_block_hashes(request)
             all_blocks = blocks.get_block_ids()[0]
-            logger.info(
+            logger.debug(
                 f"  Request: {request.request_id} has {len(all_blocks)} blocks / {len(block_hashes)} block hashes."
             )
 
@@ -1040,7 +1040,7 @@ class TPUOffloadConnectorScheduler():
             self.load_specs[request.request_id] = load_spec
             self._reqs_being_loaded[request.request_id] |= set(
                 load_spec.src_chunks)
-            logger.info(
+            logger.debug(
                 f"Request {request.request_id} has {len(dst_blocks)} dst_blocks ({dst_blocks}) to load."
             )
 
@@ -1091,14 +1091,14 @@ class TPUOffloadConnectorScheduler():
                     next_block_boundary = (
                         tracker.save_watermark // self.block_size +
                         1) * self.block_size
-                    logger.info(
+                    logger.debug(
                         f"in decode phase, next_block_boundary: {next_block_boundary}, "
                     )
                     if adjusted_num_total_tokens == next_block_boundary:
                         should_save = True
 
             if should_save:
-                logger.info(
+                logger.debug(
                     f"    - Preparing meta for req (save): {tracker.req_id}, "
                     f"is_finished={is_finished}, "
                     f"total_tokens={num_tracked_tokens}, "
@@ -1203,7 +1203,7 @@ class TPUOffloadConnectorScheduler():
                             get_num_total_allocate_blocks_for_save())
 
                     if adjusted_num_total_tokens > tracker.save_watermark:
-                        logger.info(
+                        logger.debug(
                             f"      -> Old watermark {tracker.save_watermark}, new save_watermark count: {adjusted_num_total_tokens}"
                         )
                         tracker.save_watermark = adjusted_num_total_tokens
@@ -1243,7 +1243,7 @@ class TPUOffloadConnectorScheduler():
             save_spec=save_spec,
             load_spec=load_spec,
         )
-        logger.info(
+        logger.debug(
             f"    - creating metadata for cached req: {req_meta.req_id} "
             f"(has_save={req_meta.save_spec is not None}, "
             f"has_load={req_meta.load_spec is not None})")
@@ -1259,11 +1259,11 @@ class TPUOffloadConnectorScheduler():
 
         # TODO(jcgu): should we delete phase_1 for finished_requests
         # Phase 1: Handle and clean up finished requests
-        logger.info(
+        logger.debug(
             f"Phase 1: Processing {len(scheduler_output.finished_req_ids)} finished requests."
         )
         for finished_req_id in scheduler_output.finished_req_ids:
-            logger.info(f"  - Processing finished req: {finished_req_id}")
+            logger.debug(f"  - Processing finished req: {finished_req_id}")
             tracker = self._request_trackers[finished_req_id]
 
             # TODO: If tracker is none, will it ever process the other?
@@ -1302,7 +1302,7 @@ class TPUOffloadConnectorScheduler():
                                                  _save_spec,
                                                  load_spec=None)
             if req_meta:
-                logger.info(
+                logger.debug(
                     f"  - Creating final save metadata for req: {_finished_req_id}"
                 )
                 metadata.requests_meta.append(req_meta)
@@ -1311,14 +1311,14 @@ class TPUOffloadConnectorScheduler():
         # Phase 2: Process newly scheduled requests
         # This block handles requests being scheduled for the very first time.
         # It creates the initial RequestTracker and prepares the first work order.
-        logger.info(
+        logger.debug(
             f"Phase 2: Processing {len(scheduler_output.scheduled_new_reqs)} new requests."
         )
         for request in scheduler_output.scheduled_new_reqs:
             req_id = request.req_id
 
             _request = self._unfinished_requests[req_id]
-            logger.info(
+            logger.debug(
                 f"  - Processing new req: {req_id}, {len(_request.block_hashes)} block_hashes."
             )
             num_new_scheduled_tokens = scheduler_output.num_scheduled_tokens[
@@ -1357,7 +1357,7 @@ class TPUOffloadConnectorScheduler():
                 save_watermark=initial_save_watermark,
             )
             self._request_trackers[req_id] = tracker
-            logger.info(
+            logger.debug(
                 f"    - Created tracker for {req_id} with initial state: {tracker}"
             )
 
@@ -1375,7 +1375,7 @@ class TPUOffloadConnectorScheduler():
         # once and are now being processed again
         # (e.g., chunked prefill, resumed_requests).
         cached_reqs = scheduler_output.scheduled_cached_reqs
-        logger.info(
+        logger.debug(
             f"Phase 3: Processing {len(cached_reqs.req_ids)} cached requests.")
         for i, req_id in enumerate(cached_reqs.req_ids):
             _request = self._unfinished_requests.get(req_id)
@@ -1407,7 +1407,7 @@ class TPUOffloadConnectorScheduler():
 
             # debug
             if req_id in cached_reqs.resumed_req_ids:
-                logger.info(
+                logger.debug(
                     f"- cached requests({req_id}): cur_iter new_tokens: {num_new_tokens}, new_token_ids:{len(new_token_ids)}, new_blocks: {new_blocks}"
                 )
 
@@ -1423,7 +1423,7 @@ class TPUOffloadConnectorScheduler():
                 metadata.requests_meta.append(req_meta)
 
         if metadata.requests_meta:
-            logger.info(
+            logger.debug(
                 f"Prepared {len(metadata.requests_meta)} requests for worker.")
 
         # after building connector_metadata, all load_specs should be consumed
@@ -1433,7 +1433,7 @@ class TPUOffloadConnectorScheduler():
 
         # clean up the temporary states of requests that are not scheduled
         for req_id, _load_spec in self._pre_load_specs.items():
-            logger.info(f"non-scheduled-reuqest:{req_id}")
+            logger.debug(f"non-scheduled-reuqest:{req_id}")
             _freed_num_staging_blocks = self.staging_buffer_manager.free(
                 req_id, "load")
             assert _freed_num_staging_blocks == len(
@@ -1476,7 +1476,7 @@ class TPUOffloadConnectorScheduler():
             for req_id, gathered_block_ids in connector_output.kv_connector_stats.data[
                     "finished_gather_blocks"].items():
                 num_gathered_blocks = len(gathered_block_ids)
-                logger.info(
+                logger.debug(
                     f"  finished_gather_blocks for {req_id}: {num_gathered_blocks}"
                 )
                 # update pending gathers
@@ -1488,13 +1488,13 @@ class TPUOffloadConnectorScheduler():
                 if len(self._save_reqs_w_pending_gather[req_id]) == 0:
                     self._save_reqs_w_pending_gather.pop(req_id, None)
                 else:
-                    logger.info(
+                    logger.debug(
                         f"  remaining_gather_blocks:{req_id}, {self._save_reqs_w_pending_gather[req_id]}."
                     )
             for req_id, saved_chunk_ids in connector_output.kv_connector_stats.data[
                     "finished_save_chunks"].items():
                 num_saved_chunks = len(saved_chunk_ids)
-                logger.info(
+                logger.debug(
                     f"  finished_save_chunks for {req_id}: {saved_chunk_ids}")
                 # free staging blocks
                 # TODO: Add metrics
@@ -1523,7 +1523,7 @@ class TPUOffloadConnectorScheduler():
                         assert len(self._reqs_being_saved[req_id]) >= len(
                             self._save_reqs_w_pending_gather[req_id]
                         ), f"{req_id}, {self._reqs_being_saved[req_id]}, {self._save_reqs_w_pending_gather[req_id]}"
-                    logger.info(
+                    logger.debug(
                         f"  remaining_saving_blocks:{req_id}, {self._reqs_being_saved[req_id]}."
                     )
 
@@ -1533,7 +1533,7 @@ class TPUOffloadConnectorScheduler():
             for req_id, loaded_chunk_ids in connector_output.kv_connector_stats.data[
                     "finished_load_chunks"].items():
                 num_loaded_chunks = len(loaded_chunk_ids)
-                logger.info(
+                logger.debug(
                     f"  finished_load_chunks for {req_id}: {num_loaded_chunks}"
                 )
                 self.staging_buffer_manager.free(
@@ -1589,7 +1589,7 @@ class TPUOffloadConnectorScheduler():
                 self._fully_finished_reqs.add(req_id)
                 FULLY_FINISHED_REQS_SIZE.set(len(self._fully_finished_reqs))
                 self._finished_reqs_w_pending_ops.discard(req_id)
-                logger.info(f"Request {req_id} is now fully finished.")
+                logger.debug(f"Request {req_id} is now fully finished.")
 
     def request_finished(
         self,
@@ -1620,7 +1620,7 @@ class TPUOffloadConnectorScheduler():
             FINISHED_REQS_W_PENDING_OPS_SIZE.labels(
                 source="_save_reqs_w_pending_gather").set(
                     len(self._finished_reqs_w_pending_ops))
-            logger.info(
+            logger.debug(
                 f"not_free_with_gather:{req_id}, {self._save_reqs_w_pending_gather[req_id]}"
             )
             delay_free = True
@@ -1630,13 +1630,13 @@ class TPUOffloadConnectorScheduler():
             FINISHED_REQS_W_PENDING_OPS_SIZE.labels(
                 source="_reqs_being_loaded").set(
                     len(self._finished_reqs_w_pending_ops))
-            logger.info(
+            logger.debug(
                 f"not_free_with_load:{req_id}, {self._reqs_being_loaded[req_id]}"
             )
             delay_free = True
 
         if not delay_free:
-            logger.info(f" finished request: {req_id}")
+            logger.debug(f" finished request: {req_id}")
             self._save_reqs_w_pending_gather.pop(req_id, None)
             self._reqs_being_loaded.pop(req_id, None)
 
@@ -1690,7 +1690,7 @@ class TPUOffloadConnectorWorker:
         self.num_cpu_chunks = envs.TPU_OFFLOAD_NUM_CPU_CHUNKS
         self.cpu_backend = LocalCPUBackend(num_cpu_chunks=self.num_cpu_chunks)
         model_name = self.vllm_config.model_config.model
-        logger.info(
+        logger.debug(
             f"Model name is {model_name}, KV block_size={self.block_size}")
 
         self.cpu_chunk_size = self.block_size
@@ -1809,7 +1809,7 @@ class TPUOffloadConnectorWorker:
         Pre-compiles the functions used for KV cache swapping
         with a variety of common block sizes to avoid runtime recompilation.
         """
-        logger.info("Starting pre-compilation of KV cache swap operations")
+        logger.debug("Starting pre-compilation of KV cache swap operations")
         start_time = time.time()
         paged_kv_for_compilation = self.runner.kv_caches
         num_warmup = 2
@@ -1818,7 +1818,7 @@ class TPUOffloadConnectorWorker:
         with jax.set_mesh(self.mesh):
             for num_blocks in BLOCK_SIZE_BUCKETS:
                 try:
-                    logger.info(f"  - Compiling for {num_blocks} blocks...")
+                    logger.debug(f"  - Compiling for {num_blocks} blocks...")
 
                     # Warm up
                     for _ in range(num_warmup):
@@ -1853,8 +1853,8 @@ class TPUOffloadConnectorWorker:
 
         self.runner.kv_caches = paged_kv_for_compilation
         duration = time.time() - start_time
-        logger.info("KV cache swap pre-compilation finished in %.2f [secs].",
-                    duration)
+        logger.debug("KV cache swap pre-compilation finished in %.2f [secs].",
+                     duration)
 
     def _bucketed_stack_kv_caches(
         self,
@@ -1881,7 +1881,7 @@ class TPUOffloadConnectorWorker:
             decomposed_block_slice_arr = [
                 jnp.array(x) for x in decomposed_block_buckets
             ]
-        logger.info(
+        logger.debug(
             f"Decomposing gather for {num_blocks} blocks into buckets: {decomposed_block_buckets}"
         )
         # We thread current_kv_caches through the loop to handle buffer donation.
@@ -1921,7 +1921,7 @@ class TPUOffloadConnectorWorker:
                                         self.mesh, self.indices_sharding)
 
         decomposed_block_buckets = self._decompose_into_buckets(dst_blocks)
-        logger.info(
+        logger.debug(
             f"Decomposing insert for {num_blocks} blocks into bucket: {decomposed_block_buckets}"
         )
 
@@ -1965,13 +1965,13 @@ class TPUOffloadConnectorWorker:
 
         num_tokens_to_save = num_total_tokens - num_skip_leading_tokens
         if num_tokens_to_save <= 0 and not save_spec.is_final_save:
-            logger.info(f"Request {req_id}: No new tokens to save.")
+            logger.debug(f"Request {req_id}: No new tokens to save.")
             return None
 
         process_token_ids = full_token_ids[:num_total_tokens]
         tokens_to_save = process_token_ids[num_skip_leading_tokens:]
 
-        logger.info(
+        logger.debug(
             f"Request {req_id} save details: "
             f"full_block_ids len={len(full_block_ids)}, "
             f"num_skip_leading_tokens={num_skip_leading_tokens}, "
@@ -1987,7 +1987,7 @@ class TPUOffloadConnectorWorker:
             return None
 
         if not tokens_to_save:
-            logger.info(
+            logger.debug(
                 f"Request {req_id}: No new tokens to save, but processing as final save."
             )
             return None
@@ -2091,10 +2091,10 @@ class TPUOffloadConnectorWorker:
                 continue
 
             if meta.save_spec.skip_save:
-                logger.info(
+                logger.debug(
                     f"Request {meta.req_id}: Scheduler signaled to skip save.")
                 if meta.save_spec.is_final_save:
-                    logger.info(
+                    logger.debug(
                         f"Request {meta.req_id}: Final save is a no-op. Marking as finished."
                     )
                     self.finished_save_reqs.add(meta.req_id)
@@ -2114,7 +2114,7 @@ class TPUOffloadConnectorWorker:
                             dst_chunks=dst_chunks,
                             is_final_save=meta.save_spec.is_final_save))
 
-            logger.info(
+            logger.debug(
                 f"Request {meta.req_id} contributes {num_blocks_to_save} "
                 f"blocks to unified batch. Current total: {len(all_src_blocks)} "
                 f"blocks from {len(manifest)} requests.")
@@ -2276,7 +2276,7 @@ class TPUOffloadConnectorWorker:
         # 1. SYNC BLOCKING: Unified Gather and Validation
         gather_result = self._batched_gather_tpu_blocks(metadata)
         if gather_result is None:
-            logger.info("Batched gather returned None, no blocks to save.")
+            logger.debug("Batched gather returned None, no blocks to save.")
             return
 
         flat_kv_caches_tpu, manifest, total_num_blocks_to_save = gather_result
@@ -2288,7 +2288,7 @@ class TPUOffloadConnectorWorker:
             except Exception as e:
                 logger.error(f"Error in batched transfer: {e}", exc_info=True)
 
-        logger.info(
+        logger.debug(
             f"Submitting batched transfer task for {len(manifest)} requests, {total_num_blocks_to_save} blocks total."
         )
         # Note: We use manifest for the pending future tracking.
@@ -2340,10 +2340,9 @@ class TPUOffloadConnectorWorker:
         if self._processed_save_for_step:
             return
 
-        # logger.info("TPUOffloadConnectorWorker: Entering start_save_kv")
         metadata = self.connector._get_connector_metadata()
         if not isinstance(metadata, TPUOffloadConnectorMetadata):
-            logger.info(
+            logger.debug(
                 "wait_for_save:not an instances of TPUOffloadConnectorMetadata"
             )
             self._processed_save_for_step = True
@@ -2363,12 +2362,12 @@ class TPUOffloadConnectorWorker:
             if meta.save_spec:
                 if meta.save_spec.skip_save:
                     START_SAVE_KV_SKIP_SAVE_CALLS.inc()
-                    logger.info(
+                    logger.debug(
                         f"Request {meta.req_id}: Scheduler signaled to skip save."
                     )
                     if meta.save_spec.is_final_save:
                         START_SAVE_KV_IS_FINAL_SAVE_CALLS.inc()
-                        logger.info(
+                        logger.debug(
                             f"Request {meta.req_id}: Final save is a no-op. Marking as finished."
                         )
                         self.finished_save_reqs.add(meta.req_id)
@@ -2414,7 +2413,7 @@ class TPUOffloadConnectorWorker:
                     return req_id
 
                 # 2. ASYNC NON-BLOCKING: Transfer to CPU and Register
-                logger.info(
+                logger.debug(
                     f"Submitting transfer task for request {meta.req_id}")
                 future = self.save_executor.submit(_async_transfer_task,
                                                    meta.req_id,
@@ -2465,8 +2464,8 @@ class TPUOffloadConnectorWorker:
         if completed_count > 0:
             duration = time.time() - start_time
             PROCESS_COMPLETED_SAVE_LATENCY.observe(duration)
-            logger.info(f"collected {completed_count} save operation "
-                        f"completions in {duration:.4f} seconds.")
+            logger.debug(f"collected {completed_count} save operation "
+                         f"completions in {duration:.4f} seconds.")
 
         self._pending_save_futures = remaining_futures
 
@@ -2513,7 +2512,7 @@ class TPUOffloadConnectorWorker:
 
             LOAD_KV_REQUESTS.inc()
             request_load_start_time = time.time()
-            logger.info(
+            logger.debug(
                 "TPUOffloadConnectorWorker: Starting KV cache load process.")
             dst_blocks = meta.load_spec.dst_blocks
             src_chunks = meta.load_spec.src_chunks
@@ -2524,7 +2523,7 @@ class TPUOffloadConnectorWorker:
             assert num_skip_leading_tokens % self.block_size == 0, f"{num_skip_leading_tokens} % {self.block_size} != 0"
 
             if num_tokens_to_load_delta <= 0:
-                logger.info(
+                logger.debug(
                     f"Request {meta.req_id}: No new tokens to load. Skipping.")
                 continue
 
@@ -2547,7 +2546,7 @@ class TPUOffloadConnectorWorker:
                     f"Request({meta.req_id}): dst_blocks {dst_blocks} contains blocks not present in local_block_ids {meta.local_block_ids}"
                 )
 
-            logger.info(
+            logger.debug(
                 f"Processing KV load for request {meta.req_id}: "
                 f"Total matched: {num_matched_tokens}, "
                 f"Already computed: {num_skip_leading_tokens}. "
@@ -2619,7 +2618,7 @@ class TPUOffloadConnectorWorker:
 
         if load_times:
             aggregate_load_time = sum(load_times)
-            logger.info(
+            logger.debug(
                 f"TPUOffloadConnectorWorker: Aggregate KV cache load time for {len(load_times)} requests: {aggregate_load_time:.4f} seconds"
             )
 

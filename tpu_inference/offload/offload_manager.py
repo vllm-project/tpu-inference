@@ -172,7 +172,7 @@ class LRUCacheManager:
 
         num_new_chunks = len(new_chunk_idxs)
         if num_new_chunks == 0:
-            logger.info("No new chunks to allocate")
+            logger.debug("No new chunks to allocate")
             return None
         num_chunks_to_evict = max(
             0, num_new_chunks - self.chunk_pool.num_free_chunks)
@@ -367,7 +367,7 @@ class StagingBufferManager():
                 f" Staging buffer manager should not get usage: {usage}")
         self._num_free_blocks -= num_blocks
 
-        logger.info(
+        logger.debug(
             f"  allocate {num_blocks} staging blocks to Req:{req_id} for {usage}."
         )
         return num_blocks
@@ -427,7 +427,7 @@ class StagingBufferManager():
                 f" Staging buffer manager should not get usage: {usage}")
         self._num_free_blocks += num_freed_blocks
 
-        logger.info(
+        logger.debug(
             f"  free {num_freed_blocks} staging blocks (usage: {usage}) from Req:{req_id}"
         )
         return num_freed_blocks
