@@ -167,8 +167,8 @@ def moe_gmm_local(
                       if parallelism == "tp" else ShardingAxisName.EXPERT)
 
     chunk_size = gmm2_res.shape[0] // sc_psum_num_chunks
-    if gather_reduce_sc.is_supported_by_sc_gather_reduce(
-            gmm1_res.shape[0], sc_kernel_threshold):
+    if False:  # gather_reduce_sc.is_supported_by_sc_gather_reduce(
+        #     gmm1_res.shape[0], sc_kernel_threshold):
         gmm2_res = gmm_wrapper(gmm1_res,
                                w2,
                                w2_scale,
@@ -267,8 +267,8 @@ def moe_gmm_local(
             cur_masked = jnp.where(cur_mask, cur_weighted, 0.0)
             cur_reduced = cur_masked.sum(axis=-2)
 
-            reduction_axis = (ShardingAxisName.MLP_TENSOR
-                              if parallelism == "tp" else ShardingAxisName.EXPERT)
+            reduction_axis = (ShardingAxisName.MLP_TENSOR if parallelism
+                              == "tp" else ShardingAxisName.EXPERT)
             out = jax.lax.psum(cur_reduced, axis_name=reduction_axis)
             out_list.append(out)
         token_hidden = jnp.concat(out_list, axis=0)
