@@ -272,7 +272,7 @@ class CompilationManager:
         that the scheduler is expected to handle, ensuring a compiled version
         is ready for each combination.
         """
-        dp_size = self.runner.vllm_config.sharding_config.total_dp_size
+        dp_size = self.runner.vllm_config.sharding_config.model_dp_size * self.runner.vllm_config.sharding_config.attn_dp_size
 
         for num_tokens in self.runner.num_tokens_paddings:
             dp_sharding = NamedSharding(
