@@ -19,14 +19,14 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-R1_UnitTest"
     soft_fail: true
     agents:
-      queue: cpu  # TODO: replace with execution environment
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"  # TODO: replace with execution environment
     commands:
       - |
         if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
           buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-R1_UnitTest" "not enough HBM"
         else
           .buildkite/scripts/run_in_docker.sh \
-            .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh -m "gs://tpu-commons-ci/deepseek/r1"
+            bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh -m "gs://tpu-commons-ci/deepseek/r1"
         fi
     env:
       NEW_MODEL_DESIGN: "1"
