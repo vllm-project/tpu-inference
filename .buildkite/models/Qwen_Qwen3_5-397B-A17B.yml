@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: Qwen/Qwen3_5-397B-A17B
+# pipeline-name: Qwen/Qwen3.5-397B-A17B
 # pipeline-type: text-only
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen3.5-397B-A17B-FP8"
@@ -34,7 +34,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_UnitTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-      CI_TARGET: "Qwen/Qwen3.5-397B-A17B-FP8"
+      CI_TARGET: "Qwen/Qwen3.5-397B-A17B"
       CI_STAGE: "UnitTest"
       CI_CATEGORY: "text-only"
     agents:
@@ -62,7 +62,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_Accuracy"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-      CI_TARGET: "Qwen/Qwen3.5-397B-A17B-FP8"
+      CI_TARGET: "Qwen/Qwen3.5-397B-A17B"
       CI_STAGE: "Accuracy/Correctness"
       CI_CATEGORY: "text-only"
     agents:
@@ -90,7 +90,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_Benchmark"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-      CI_TARGET: "Qwen/Qwen3.5-397B-A17B-FP8"
+      CI_TARGET: "Qwen/Qwen3.5-397B-A17B"
       CI_STAGE: "Benchmark"
       CI_CATEGORY: "text-only"
     agents:
