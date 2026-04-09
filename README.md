@@ -101,7 +101,6 @@ Below is the live status of our supported models, features, and kernels. Click o
 </summary>
 
 <blockquote>
-<br>
 
 <details open markdown="1">
 <summary><b> ✅ Tested Models </b></summary>
@@ -498,7 +497,6 @@ Below is the live status of our supported models, features, and kernels. Click o
 </summary>
 
 <blockquote>
-<br>
 
 <details open markdown="1">
 <summary><b> ✅ Tested Models </b></summary>
