@@ -106,6 +106,8 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 <br>
 
+<div style="display: none;">
+
 <details open markdown="1">
 <summary><h3>Release Support Matrices</h3></summary>
 
@@ -493,6 +495,8 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 </blockquote>
 </details>
+
+</div>
 
 <br>
 
