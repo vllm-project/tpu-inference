@@ -30,15 +30,15 @@ If you are new to vLLM on TPU, we recommend starting with the **[Quickstart](get
 
 **Compatible TPU Generations**
 
-- Recommended: v7, v5e, v6
+- Recommended: v7x, v5e, v6e
 - Experimental: v3, v4, v5p
 
 **Recipes**
 
 Tested end-to-end guides for hosting specific models on specific TPU generations.
 
-- [v7 (Ironwood) Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM)
-- [v6 (Trillium) Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)
+- [v7x (Ironwood) Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM)
+- [v6e (Trillium) Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)
 
 ## Developer Guides
 

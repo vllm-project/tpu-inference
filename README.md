@@ -60,15 +60,15 @@ Get started with vLLM on TPUs by following the [quickstart guide](https://docs.v
 Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn more.
 
 **Compatible TPU Generations**
-- Recommended: v7, v5e, v6
+- Recommended: v7x, v5e, v6e
 - Experimental: v3, v4, v5p
 
 <br>
 
 ## 🍳&nbsp; Recipes
 
-- [v7 (Ironwood) Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM)
-- [v6 (Trillium) Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)
+- [v7x (Ironwood) Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM)
+- [v6e (Trillium) Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)
 
 <br>
 
@@ -89,16 +89,16 @@ Below is the live status of our supported models, features, and kernels. Click o
 > - ❓ **Untested:** The functionality exists but has not been recently or thoroughly verified.
 >
 > <details>
-> <summary> <b>📐 <i>View Matrix Aggregation Rules (v6/v7 & C+P)</i></b> </summary>
+> <summary> <b>📐 <i>View Matrix Aggregation Rules (v6e/v7x & C+P)</i></b> </summary>
 >
 > - **🛠️ Correctness + Performance (C + P)**
 >   - ❌ **Failing**: If either check fails.
 >   - ✅ **Passing**: If **BOTH** checks pass successfully.
 >   - ❓ **Untested**: If any check is untested (and neither fails).
 >
-> - **🌐 Hardware Rollups (v6 + v7)**
->   - ❌ **Failing**: If the feature fails on **either** v6 or v7.
->   - ✅ **Passing**: If the feature passes on **BOTH** v6 and v7.
+> - **🌐 Hardware Rollups (v6e + v7x)**
+>   - ❌ **Failing**: If the feature fails on **either** v6e or v7x.
+>   - ✅ **Passing**: If the feature passes on **BOTH** v6e and v7x.
 >   - ❓ **Untested**: If either generation is untested (and neither fails).
 > </details>
 
