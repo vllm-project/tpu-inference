@@ -87,15 +87,31 @@ Below is the live status of our supported models, features, and kernels. Click o
 > - 📝 **Planned:** Not yet implemented, but on the official roadmap.
 > - ⛔️ **Unplanned:** There is no benefit to adding this.
 > - ❓ **Untested:** The functionality exists but has not been recently or thoroughly verified.
+>
+> <details>
+> <summary> <b>📐 <i>View Matrix Aggregation Rules (v6/v7 & C+P)</i></b> </summary>
+>
+> - **🛠️ Correctness + Performance (C + P)**
+>   - ❌ **Failing**: If either check fails.
+>   - ✅ **Passing**: If **BOTH** checks pass successfully.
+>   - ❓ **Untested**: If any check is untested (and neither fails).
+>
+> - **🌐 Hardware Rollups (v6 + v7)**
+>   - ❌ **Failing**: If the feature fails on **either** v6 or v7.
+>   - ✅ **Passing**: If the feature passes on **BOTH** v6 and v7.
+>   - ❓ **Untested**: If either generation is untested (and neither fails).
+> </details>
 
 </details>
 
 <br>
 
 <details open markdown="1">
-<summary><b> 🚀&nbsp; Release Support Matrices </b></summary>
+<summary><h3>🚀 Release Support Matrices</h3></summary>
 
 <blockquote>
+
+<i>Stable support status for official releases and production deployments.</i><br><br>
 
 <details open markdown="1">
 <summary><b> ✅ Tested Models </b></summary>
@@ -484,9 +500,11 @@ Below is the live status of our supported models, features, and kernels. Click o
 <br>
 
 <details markdown="1">
-<summary><b> 🧪&nbsp; Nightly Support Matrices </b></summary>
+<summary><h3>🧪 Nightly Support Matrices</h3></summary>
 
 <blockquote>
+
+<i>Bleeding-edge support status for the latest nightly/main branch developments.</i><br><br>
 
 <details open markdown="1">
 <summary><b> ✅ Tested Models </b></summary>
