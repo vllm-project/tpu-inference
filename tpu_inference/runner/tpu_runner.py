@@ -597,11 +597,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     "Disabling multi-modality for model because limits are set to 0."
                 )
 
+        logger.info(
+            f"DEBUG is_multimodal_model check: "
+            f"is_multimodal_model={self.model_config.is_multimodal_model}, "
+            f"embed_multimodal_fn is not None={self.embed_multimodal_fn is not None}, "
+            f"has_architectures={hasattr(self.model_config.hf_config, 'architectures')}, "
+            f"disable_mm_from_limits={disable_mm_from_limits}"
+        )
+
         self.is_multimodal_model = (self.model_config.is_multimodal_model
                                     and self.embed_multimodal_fn is not None
                                     and hasattr(self.model_config.hf_config,
-                                                "architectures")
-                                    and not disable_mm_from_limits)
+                                                "architectures"))
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")

@@ -535,15 +535,8 @@ class VllmModelWrapper:
             params_and_buffers: Any,
             **kwargs,
         ) -> Any:
-            inner_model = getattr(self.model, "vllm_model", self.model)
-            method = getattr(inner_model, "embed_multimodal", None)
-            sig = inspect.signature(method) if method else None
-            has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()) if sig else False
-            supports_image_grid_thw = sig and ("image_grid_thw" in sig.parameters or has_var_keyword)
-
-            # Delete image_grid_thw if it's not supported to avoid passing it to models that don't want it.
-            if not supports_image_grid_thw:
-                del image_grid_thw
+            # Pop it so it doesn't go through the 'move' loop if we want to handle it specially
+            image_grid_thw = kwargs.pop("image_grid_thw", None)
 
             def move(v: Any) -> Any:
                 import numpy as np
@@ -569,9 +562,11 @@ class VllmModelWrapper:
                     k: jax.tree.map(move, v)
                     for k, v in kwargs.items()
                 }
-                if supports_image_grid_thw:
+                
+                # Always pass it if it was present, assuming the model supports it or ignores it via **kwargs
+                if image_grid_thw is not None:
                     call_kwargs["image_grid_thw"] = torch.tensor(
-                        image_grid_thw, dtype=torch.long)
+                        image_grid_thw, dtype=torch.long).to(device="jax")
 
                 output_from_torch = torch.func.functional_call(
                     self.model,
@@ -601,6 +596,12 @@ class VllmModelWrapper:
             is_multimodal: jax.Array | None = None,
         ) -> jax.Array:
             with torchax.default_env():
+                if mm_embeds is not None and is_multimodal is not None:
+                    if not isinstance(mm_embeds, list):
+                        num_expected = int(is_multimodal.sum())
+                        if mm_embeds.shape[0] > num_expected:
+                            mm_embeds = mm_embeds[:num_expected]
+
                 if mm_embeds is not None:
                     if isinstance(mm_embeds, list):
                         torch_mm_embeds = [torch_view(x) for x in mm_embeds]

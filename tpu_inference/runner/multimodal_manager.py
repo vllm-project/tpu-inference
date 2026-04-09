@@ -177,6 +177,18 @@ class MultiModalManager:
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length
 
+                print(f"DEBUG gather_mm_embeddings:")
+                print(f"  req_id: {req_id}")
+                print(f"  mm_feature.identifier: {mm_feature.identifier}")
+                print(f"  pos_info.offset: {pos_info.offset}")
+                print(f"  pos_info.length: {pos_info.length}")
+                if hasattr(pos_info, "is_embed") and pos_info.is_embed is not None:
+                    import torch
+                    if isinstance(pos_info.is_embed, torch.Tensor):
+                        print(f"  pos_info.is_embed.sum(): {pos_info.is_embed.sum().item()}")
+                    else:
+                        print(f"  pos_info.is_embed type: {type(pos_info.is_embed)}")
+
                 # The encoder output is needed if the two ranges overlap:
                 # [num_computed_tokens,
                 #  num_computed_tokens + num_scheduled_tokens) and
