@@ -1397,7 +1397,7 @@ def mla_ragged_paged_attention(
     # If passsed in as int, all cases are the same.
     num_kv_pages_per_block: tuple[int, int, int] | int | None = None,
     num_queries_per_block: tuple[int, int, int] | int | None = None,
-    vmem_limit_bytes: int = pltpu.get_tpu_info().vmem_capacity_bytes,
+    vmem_limit_bytes: int | None = None,
     decode_batch_size: int = 1,
     # Debug params.
     debug_mode: bool = False,
@@ -1454,6 +1454,9 @@ def mla_ragged_paged_attention(
         num_queries_per_blocks = [num_queries_per_block for _ in range(3)]
     else:
         num_queries_per_blocks = num_queries_per_block
+
+    if vmem_limit_bytes is None:
+        vmem_limit_bytes = pltpu.get_tpu_info().vmem_capacity_bytes
 
     static_validate_inputs(
         ql_nope,
