@@ -114,36 +114,41 @@ def general_device_put(tensor: jax.Array,
 
     `source_mesh` specifies the mesh on which the input tensor is currently located.
     """
+    target_sharding = sharding if layout is None else Format(layout, sharding)
 
     def _put(t):
-        multihost_backend = envs.TPU_MULTIHOST_BACKEND
+        # Fast path if the tensor is already correctly sharded.
+        if isinstance(t, jax.Array) and t.sharding == target_sharding:
+            return t
+
         # If we are not in multi-host setup, or the tensor is not fully addressable,
         # we can use jax.device_put directly.
-        if multihost_backend != "ray" or (isinstance(t, jax.Array)
-                                          and not t.is_fully_addressable):
-            if layout is not None:
-                return jax.device_put(t, Format(layout, sharding))
-            else:
-                return jax.device_put(t, sharding)
+        if isinstance(t, jax.Array) and not t.is_fully_addressable:
+            return jax.device_put(t, target_sharding)
 
         # NOTE: at here, num_global_devices != num_local_devices
         # meaning we are in multi-host setup. Each host will run the same process
         # and each process only need to handle the devices accessible to this host.
-        ctx = nullcontext() if source_mesh is None else jax.set_mesh(
-            source_mesh)
         # `t[i]` needs to be operated in the same mesh as `t`, which is provided as
         # `source_mesh`.
-        with ctx:
-            global_array = jax.make_array_from_callback(
-                t.shape, sharding, lambda index: t[index])
+        global_array = jax.make_array_from_callback(t.shape, sharding,
+                                                    lambda index: t[index])
         if layout is not None:
             dst_mesh = sharding.mesh
             with jax.set_mesh(dst_mesh):
-                global_array = jax.device_put(global_array,
-                                              Format(layout, sharding))
+                global_array = jax.device_put(global_array, target_sharding)
         return global_array
 
-    return jax.tree_util.tree_map(_put, tensor)
+    # Can always use jax.device_put directly in single-host setups.
+    multihost_backend = envs.TPU_MULTIHOST_BACKEND
+    if multihost_backend != "ray":
+        return jax.device_put(tensor, target_sharding)
+
+    ctx = nullcontext() if source_mesh is None else jax.set_mesh(source_mesh)
+    with ctx:
+        if isinstance(tensor, jax.Array):
+            return _put(tensor)
+        return jax.tree_util.tree_map(_put, tensor)
 
 
 def cpu_mesh() -> Mesh:
