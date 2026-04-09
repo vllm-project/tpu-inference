@@ -72,6 +72,7 @@ export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=vllm"
 export USE_UNFUSED_MEGABLOCKS_ENV=""
 export HF_CONFIG=""
 export USE_VLLM_LKG="true"
+export FORCE_MOE_RANDOM_ROUTING_ENV=""
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -105,6 +106,7 @@ while [[ $# -gt 0 ]]; do
     --model-impl-type) export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=$2"; shift 2 ;;
     --use-unfused-megablocks) export USE_UNFUSED_MEGABLOCKS_ENV="USE_UNFUSED_MEGABLOCKS=$2"; shift 2 ;;
     --hf-config) export HF_CONFIG="$2"; shift 2 ;;
+    --force-moe-random-routing) export FORCE_MOE_RANDOM_ROUTING_ENV="FORCE_MOE_RANDOM_ROUTING=$2"; shift 2 ;;
     *) echo "Unknown parameter passed: $1"; exit 1 ;;
   esac
 done
@@ -142,6 +144,7 @@ ${USE_UNFUSED_MEGABLOCKS_ENV} \
 VLLM_LOGGING_LEVEL=INFO \
 VLLM_CONFIGURE_LOGGING=1 \
 VLLM_ENGINE_READY_TIMEOUT_S=10800 \
+${FORCE_MOE_RANDOM_ROUTING_ENV} \
 TPU_BACKEND_TYPE=jax \
 ${MODEL_IMPL_TYPE_ENV} \
 vllm serve \
@@ -277,7 +280,7 @@ NumPrompts=${NUM_PROMPTS}
 CodeHash=${CODE_HASH}
 Model=${MODEL_NAME}
 JobReference=${JOB_REFERENCE}
-ExtraArgs=${MODEL_IMPL_TYPE_ENV#*=}
+ExtraArgs=${MODEL_IMPL_TYPE_ENV#*=}${FORCE_MOE_RANDOM_ROUTING_ENV:+ ${FORCE_MOE_RANDOM_ROUTING_ENV}}
 EOF
 
 fi
@@ -288,7 +291,11 @@ RUN_MODE="benchmark"
 if [ -n "$PHASED_PROFILING_DIR" ]; then
   RUN_MODE="xprof"
 fi
-LOG_GCS_URI="gs://tpu-commons-ci/logs/${MODEL_NAME}_${INPUT_LEN}_${OUTPUT_LEN}_${IMPL_TYPE}_${CODE_HASH}_${BENCHMARK_STATUS}_${RUN_MODE}_${JOB_REFERENCE}_vllm_serve.log"
+MOE_ROUTING_TAG=""
+if [ "${FORCE_MOE_RANDOM_ROUTING_ENV#*=}" = "1" ]; then
+  MOE_ROUTING_TAG="_force-moe-random-routing"
+fi
+LOG_GCS_URI="gs://tpu-commons-ci/logs/${MODEL_NAME}_${INPUT_LEN}_${OUTPUT_LEN}_${IMPL_TYPE}_${CODE_HASH}_${BENCHMARK_STATUS}_${RUN_MODE}${MOE_ROUTING_TAG}_${JOB_REFERENCE}_vllm_serve.log"
 if [ -f "/tmp/vllm_serve.log" ]; then
   echo "Uploading vllm_serve.log to $LOG_GCS_URI"
   gsutil cp /tmp/vllm_serve.log "$LOG_GCS_URI" || echo "Warning: Failed to upload vllm_serve.log"
