@@ -21,8 +21,8 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.envs as envs
-from tpu_inference.kernels.gather.ragged_gather import ragged_gather
 from tpu_inference.kernels.gather import gather_reduce as gather_reduce_sc
+from tpu_inference.kernels.gather.ragged_gather import ragged_gather
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
