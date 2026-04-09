@@ -247,22 +247,6 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         w2_weight = t2j(layer.w2_weight, use_dlpack=False)
         w2_weight_scale = t2j(layer.w2_weight_scale_inv, use_dlpack=False)
 
-        # In Pathways, jit-ted functions dispatch to a single device unless
-        # inputs are explicitly sharded. process_fp8_moe_weights dequantizes
-        # fp8 → float32 → requantizes to bfloat16, peaking at ~56 GB for 256
-        # experts — exceeding per-chip HBM. Pre-shard along the expert axis so
-        # each chip only processes its subset of experts (~0.44 GB per chip).
-        # All operations inside process_fp8_moe_weights are embarrassingly
-        # parallel over the expert dimension so this is safe.
-        if self.moe_backend == MoEBackend.GMM_EP:
-            from jax.sharding import NamedSharding
-            ep_sharding = NamedSharding(self.mesh,
-                                        PartitionSpec(ShardingAxisName.EXPERT))
-            w13_weight = jax.device_put(w13_weight, ep_sharding)
-            w13_weight_scale = jax.device_put(w13_weight_scale, ep_sharding)
-            w2_weight = jax.device_put(w2_weight, ep_sharding)
-            w2_weight_scale = jax.device_put(w2_weight_scale, ep_sharding)
-
         # TODO: do we need to support bias?
         input_weights = FusedMoEWeights(
             w13_weight=w13_weight,
@@ -277,14 +261,55 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         if self.weight_block_size is not None:
             weight_block_size = tuple(self.weight_block_size)
 
-        weights = process_fp8_moe_weights(
-            input_weights,
-            moe_backend=self.moe_backend,
-            mesh=self.mesh,
-            activation=layer.activation.value,
-            # Convert to tuple so jax jit can hash it
-            weight_block_size=weight_block_size,
-        )
+        if self.moe_backend == MoEBackend.GMM_EP:
+            from jax.sharding import NamedSharding
+            ep_sharding = NamedSharding(self.mesh,
+                                        PartitionSpec(ShardingAxisName.EXPERT))
+
+            # In Pathways, jit-ted functions dispatch to a single device unless
+            # inputs are sharded, causing OOM (~56 GB) when dequantizing 256 experts
+            # on 1 chip. Using jax.device_put to pre-shard triggers a host-initiated
+            # MakeShardedBufferFromLiveShardOp which hangs for cross-slice shardings
+            # in multi-slice Pathways (RecvManager deadlock on workers).
+            #
+            # Instead, use jax.lax.with_sharding_constraint INSIDE a JIT so XLA/GSPMD
+            # compiles the scatter as part of the executable (runs on-device), not as
+            # a host-to-device DMA. Each chip processes its 2/256 expert subset.
+            moe_backend = self.moe_backend
+            mesh = self.mesh
+            activation = layer.activation.value
+
+            def _process_with_expert_sharding(weights):
+                sharded = FusedMoEWeights(
+                    w13_weight=jax.lax.with_sharding_constraint(
+                        weights.w13_weight, ep_sharding),
+                    w13_weight_scale=jax.lax.with_sharding_constraint(
+                        weights.w13_weight_scale, ep_sharding),
+                    w13_bias=None,
+                    w2_weight=jax.lax.with_sharding_constraint(
+                        weights.w2_weight, ep_sharding),
+                    w2_weight_scale=jax.lax.with_sharding_constraint(
+                        weights.w2_weight_scale, ep_sharding),
+                    w2_bias=None,
+                )
+                return process_fp8_moe_weights(
+                    sharded,
+                    moe_backend=moe_backend,
+                    mesh=mesh,
+                    activation=activation,
+                    weight_block_size=weight_block_size,
+                )
+
+            weights = jax.jit(_process_with_expert_sharding)(input_weights)
+        else:
+            weights = process_fp8_moe_weights(
+                input_weights,
+                moe_backend=self.moe_backend,
+                mesh=self.mesh,
+                activation=layer.activation.value,
+                # Convert to tuple so jax jit can hash it
+                weight_block_size=weight_block_size,
+            )
         weights = torch_view(
             shard_moe_weights(weights, self.moe_backend, self.mesh))
 
