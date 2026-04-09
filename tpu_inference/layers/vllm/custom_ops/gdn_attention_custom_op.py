@@ -12,16 +12,126 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import jax
+import jax.numpy as jnp
 import torch
 # NOTE: we don't specify this in our requirements.txt but it should be coming
 # from upstream vLLM
 from einops import rearrange
+from torchax.interop import jax_view, torch_view
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn_linear_attn import \
     GatedDeltaNetAttention
 
-from tpu_inference.layers.vllm.ops.gdn_attention import gdn_attention_core_tpu
+from tpu_inference import envs
+from tpu_inference.layers.common.gdn_attention import (
+    GdnAttentionConfig, RaggedGatedDeltaRuleImpl, run_jax_gdn_attention)
+from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.utils import \
+    reorder_concatenated_tensor_for_sharding
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
+
+
+def gdn_attention_core_tpu(
+    mixed_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    mesh: jax.sharding.Mesh,
+) -> None:
+    """
+    This acts as main bridge between PyTorch and JAX for the GDN core attention.
+    Uses a robust, token-by-token scan to inherently handle any mix of
+    ragged prefill and decode sequences without dynamic shape compilation errors.
+
+    Some key details:
+    1. Cache Mapping: We'll read vLLM's  `block_tables` and `query_start_loc`
+       and translate them into static index arrays (`req_indices` and `state_indices`).
+    2. JAX Scan: We use `jax.lax.scan` to perform a robust, token-by-token loop over
+       the flat inputs. This allows us to handle ANY mix of prefill and decode tokens
+       in a single compiled XLA graph.
+    3. Conditional Updates: The `valid_mask` ensures that padded dummy tokens
+       (used to keep the tensor shape static) do not corrupt the recurrent state
+       in the cache.
+    """
+    fc = get_forward_context()
+    attn_metadata = fc.attn_metadata[layer_name]
+
+    layer_module = fc.no_compile_layers[layer_name]
+    vllm_context = get_vllm_model_wrapper_context()
+
+    n_kq = layer_module.num_k_heads
+    n_v = layer_module.num_v_heads
+    d_k = layer_module.head_k_dim
+    d_v = layer_module.head_v_dim
+    kernel_size = layer_module.conv_kernel_size
+
+    j_mixed_qkv = jax_view(mixed_qkv)  # [num_tokens, dim]
+    j_b = jax_view(b)
+    j_a = jax_view(a)
+
+    j_conv_weight = jax_view(layer_module.conv1d.weight)
+    j_conv_bias = jax_view(layer_module.conv1d.bias
+                           ) if layer_module.conv1d.bias is not None else None
+    j_A_log = jax_view(layer_module.A_log)
+    j_dt_bias = jax_view(layer_module.dt_bias)
+
+    # The j_mixed_qkv and j_conv_weight are not in an interleaved layout.
+    # E.g. they are in [Q Q | K K | V V] layout. We need [Q K | Q K | Q K] layout.
+    # Use reorder_concatenated_tensor_for_sharding to reorder into correct layout
+    key_dim = n_kq * d_k
+    value_dim = n_v * d_v
+    tp_size = mesh.shape[ShardingAxisName.ATTN_HEAD]
+    j_mixed_qkv = reorder_concatenated_tensor_for_sharding(
+        j_mixed_qkv, [key_dim, key_dim, value_dim], tp_size, -1)
+    j_conv_weight = reorder_concatenated_tensor_for_sharding(
+        j_conv_weight, [key_dim, key_dim, value_dim], tp_size, 0)
+
+    layer_idx = vllm_context.layer_name_to_kvcache_index[layer_name]
+    conv_state, recurrent_state = vllm_context.kv_caches[layer_idx]
+
+    # Map physical cache blocks
+    flat_block_tables = jax_view(attn_metadata.block_tables)
+    max_reqs = attn_metadata.seq_lens.shape[0]
+    max_blocks_per_req = flat_block_tables.shape[0] // max_reqs
+    block_tables_2d = jnp.reshape(flat_block_tables,
+                                  (max_reqs, max_blocks_per_req))
+    state_indices = block_tables_2d[:, 0].astype(jnp.int32)
+
+    # Map tokens to their respective requests
+    q_loc = jax_view(attn_metadata.query_start_loc)
+    distribution = jax_view(attn_metadata.request_distribution)
+    config = GdnAttentionConfig(
+        ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl(
+            envs.RAGGED_GATED_DELTA_RULE_IMPL))
+
+    (new_conv_state,
+     new_recurrent_state), j_output = run_jax_gdn_attention(j_mixed_qkv,
+                                                            j_b,
+                                                            j_a,
+                                                            conv_state,
+                                                            recurrent_state,
+                                                            j_conv_weight,
+                                                            j_conv_bias,
+                                                            j_A_log,
+                                                            j_dt_bias,
+                                                            state_indices,
+                                                            q_loc,
+                                                            distribution,
+                                                            n_kq,
+                                                            n_v,
+                                                            d_k,
+                                                            d_v,
+                                                            kernel_size,
+                                                            mesh=mesh,
+                                                            config=config)
+
+    vllm_context.kv_caches[layer_idx] = (new_conv_state, new_recurrent_state)
+
+    j_output_flat = j_output.reshape(core_attn_out.shape)
+    core_attn_out.copy_(torch_view(j_output_flat))
 
 
 @GatedDeltaNetAttention.register_oot
