@@ -39,7 +39,6 @@ process_json_test_cases() {
 
     echo "--- Generating dynamic pipelines from $folder"
 
-    # Use nullglob to handle empty directories gracefully
     shopt -s nullglob
     local files=("$folder"/*.json)
     
@@ -49,24 +48,13 @@ process_json_test_cases() {
     fi
 
     for case_file in "${files[@]}"; do
-        case_name=$(basename "$case_file" .json)
         echo "Processing case file: $case_file"
-
-        # Create a unique temporary YAML file for this case
-        local tmp_yml
-        tmp_yml="/tmp/${case_name}_$(date +%s).yml"
-        
-        # Execute the Python generator and upload the result
-        if python3 "$generator" --input "$case_file" > "$tmp_yml"; then
-            upload_with_priority "$tmp_yml" "$priority"
+        if upload_with_priority <(python3 "$generator" --input "$case_file") "$priority"; then
+            echo "Successfully uploaded pipeline for $case_file"
         else
-            echo "🚨 Error: Failed to generate pipeline for $case_file"
-            rm -f "$tmp_yml"
+            echo "🚨 Error: Failed to generate or upload pipeline for $case_file"
             exit 1
         fi
-        
-        # Cleanup
-        rm -f "$tmp_yml"
     done
 }
 
@@ -83,9 +71,6 @@ upload_benchmark_pipeline() {
     local case_folder=".buildkite/benchmark/cases"
     local generator_script="${SCRIPT_DIR}/generate_bk_pipeline.py"
     process_json_test_cases "$case_folder" "$generator_script" "$JOB_PRIORITY"
-
-    # Upload benchmark pipelines
-    # upload_with_priority .buildkite/benchmark/cases/benchmark_dev_test_v7x.yml "$JOB_PRIORITY"
 }
 
 upload_benchmark_pipeline

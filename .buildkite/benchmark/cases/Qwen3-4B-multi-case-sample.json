@@ -13,8 +13,6 @@
         "tpu_v6e_queue"
       ],
       "env": {
-        "VLLM_USE_V1": "1",
-        "MODEL_IMPL_TYPE": "vllm",
         "MODELTAG": "NEW",
         "EXPECTED_ETEL": 3600000,
         "INPUT_LEN": 4096,
@@ -23,14 +21,21 @@
       },
       "server_command_options": {
         "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "MODEL_IMPL_TYPE": "vllm",
+          "NEW_MODEL_DESIGN": "1"
+        },
         "args": {
           "model": "Qwen/Qwen3-4B",
           "seed": 42,
           "max-num-seqs": 512,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "tpu_v6e_queue": 1,
-            "tpu_v7x_2_queue": 2,
+            "v6e-1": 1,
+            "v6e-8": 8,
+            "v7x-2": 2,
+            "v7x-8": 8,
             "default": 1
           },
           "no-enable-prefix-caching": true,
@@ -63,8 +68,6 @@
         "tpu_v7x_2_queue"
       ],
       "env": {
-        "VLLM_USE_V1": "1",
-        "MODEL_IMPL_TYPE": "vllm",
         "MODELTAG": "NEW",
         "EXPECTED_ETEL": 3600000,
         "INPUT_LEN": 4096,
@@ -73,14 +76,21 @@
       },
       "server_command_options": {
         "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "MODEL_IMPL_TYPE": "vllm",
+          "NEW_MODEL_DESIGN": "1"
+        },
         "args": {
           "model": "Qwen/Qwen3-4B",
           "seed": 42,
           "max-num-seqs": 512,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "tpu_v6e_queue": 1,
-            "tpu_v7x_2_queue": 2,
+            "v6e-1": 1,
+            "v6e-8": 8,
+            "v7x-2": 2,
+            "v7x-8": 8,
             "default": 1
           },
           "no-enable-prefix-caching": true,
