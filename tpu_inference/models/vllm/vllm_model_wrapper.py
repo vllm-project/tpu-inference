@@ -193,21 +193,29 @@ class VllmModelWrapper:
             get_pp_group as jax_get_pp_group
 
         logger.info("Applying Qwen3-VL stateless Deepstack patches")
+        logger.info(f"DEBUG: vllm_model type={type(vllm_model).__name__}")
+        logger.info(f"DEBUG: vision_config={vllm_model.config.vision_config}")
 
         # 1. Override setter to avoid in-place mutation error
         orig_set_deepstack = getattr(vllm_model, "_set_deepstack_input_embeds", None)
         if orig_set_deepstack is not None:
             def patched_set_deepstack(deepstack_input_embeds):
                 indexes = getattr(vllm_model.config.vision_config, "deepstack_visual_indexes", [])
+                logger.info(f"DEBUG: patched_set_deepstack called with type={type(deepstack_input_embeds)}")
                 
                 if not hasattr(vllm_model, "_deepstack_tensors"):
                     vllm_model._deepstack_tensors = {}
 
                 if isinstance(deepstack_input_embeds, dict):
+                    logger.info(f"DEBUG: deepstack_input_embeds keys={list(deepstack_input_embeds.keys())}")
+                    for k, v in deepstack_input_embeds.items():
+                        logger.info(f"DEBUG: key={k}, shape={v.shape if hasattr(v, 'shape') else 'N/A'}")
                     vllm_model._deepstack_tensors.update(deepstack_input_embeds)
                 elif isinstance(deepstack_input_embeds, (list, tuple)):
+                    logger.info(f"DEBUG: deepstack_input_embeds len={len(deepstack_input_embeds)}")
                     for idx, v in enumerate(deepstack_input_embeds):
-                        key = f"deepstack_input_embeds_{indexes[idx]}" if idx < len(indexes) else f"deepstack_input_embeds_{idx}"
+                        key = f"deepstack_input_embeds_{idx}"
+                        logger.info(f"DEBUG: idx={idx}, key={key}, shape={v.shape if hasattr(v, 'shape') else 'N/A'}")
                         vllm_model._deepstack_tensors[key] = v
             vllm_model._set_deepstack_input_embeds = patched_set_deepstack
 
@@ -216,21 +224,27 @@ class VllmModelWrapper:
             from vllm.sequence import IntermediateTensors
             
             def patched_get_deepstack(num_tokens: int):
+                logger.info(f"DEBUG: patched_get_deepstack called, num_tokens={num_tokens}")
                 # 1. Try to use cached JAX tensors if available
                 if getattr(vllm_model, "_deepstack_tensors", None):
+                    logger.info(f"DEBUG: returning cached deepstack tensors, keys={list(vllm_model._deepstack_tensors.keys())}")
                     return IntermediateTensors(vllm_model._deepstack_tensors)
                 
                 # 2. Fallback to native retrieval and conversion
+                logger.info("DEBUG: fallback to native retrieval in get_deepstack")
                 orig_output = orig_get_deepstack(num_tokens)
                 converted = {}
                 for k, v in orig_output.items():
+                    logger.info(f"DEBUG: fallback key={k}, orig type={type(v)}")
                     if not v.__class__.__module__.startswith("torchax"):
                         try:
                             import jax
                             val_f32 = v.detach().cpu().float().numpy()
                             jax_arr = jax.device_put(val_f32).astype(jax.numpy.bfloat16)
                             v = torch_view(jax_arr)
-                        except Exception:
+                            logger.info(f"DEBUG: converted to torchax via CPU fallback, shape={v.shape}")
+                        except Exception as e:
+                            logger.info(f"DEBUG: conversion failed for {k}, error={e}")
                             v = torch_view(jax_view(v))
                     converted[k] = v
                 return IntermediateTensors(converted)
@@ -240,37 +254,72 @@ class VllmModelWrapper:
         orig_embed_input_ids = getattr(vllm_model, "embed_input_ids", None)
         if orig_embed_input_ids is not None:
             def patched_embed_input_ids(*args, **kwargs):
+                logger.info(f"DEBUG: patched_embed_input_ids called, args={len(args)}, kwargs={list(kwargs.keys())}")
                 inputs_embeds = orig_embed_input_ids(*args, **kwargs)
+                logger.info(f"DEBUG: orig inputs_embeds shape={inputs_embeds.shape}")
                 deepstack_input_embeds = getattr(vllm_model, "deepstack_input_embeds", None)
                 if deepstack_input_embeds is not None:
+                    logger.info(f"DEBUG: deepstack_input_embeds found in model, type={type(deepstack_input_embeds)}")
+                    packed = None
                     if torch.is_tensor(deepstack_input_embeds):
-                        packed = deepstack_input_embeds.transpose(0, 1).reshape(inputs_embeds.size(0), -1)
+                        logger.info(f"DEBUG: deepstack_input_embeds is tensor, shape={deepstack_input_embeds.shape}")
+                        cur_tokens = inputs_embeds.size(0)
+                        packed = deepstack_input_embeds[:, :cur_tokens, :].transpose(0, 1).reshape(cur_tokens, -1)
+                    elif isinstance(deepstack_input_embeds, list):
+                        logger.info(f"DEBUG: deepstack_input_embeds is list, len={len(deepstack_input_embeds)}")
+                        if len(deepstack_input_embeds) > 0:
+                            logger.info(f"DEBUG: first element shape={deepstack_input_embeds[0].shape}")
+                            # Stack lists of tensors to a single tensor
+                            stacked = torch.stack(deepstack_input_embeds, dim=0)
+                            logger.info(f"DEBUG: stacked shape={stacked.shape}")
+                            cur_tokens = inputs_embeds.size(0)
+                            packed = stacked[:, :cur_tokens, :].transpose(0, 1).reshape(cur_tokens, -1)
+                        else:
+                            logger.info(f"DEBUG: deepstack_input_embeds list is empty")
+                    else:
+                         logger.info(f"DEBUG: deepstack_input_embeds type {type(deepstack_input_embeds)} not supported for packing")
+
+                    if packed is not None:
+                        logger.info(f"DEBUG: packed shape={packed.shape}")
+                        packed = packed.to(inputs_embeds.device)
+                        logger.info(f"DEBUG: packed moved to device={packed.device}")
                         inputs_embeds = torch.cat([inputs_embeds, packed], dim=-1)
+                        logger.info(f"DEBUG: concatenated inputs_embeds shape={inputs_embeds.shape}")
+                    else:
+                        logger.info(f"DEBUG: skipping deepstack packing because packed is None")
                 return inputs_embeds
             vllm_model.embed_input_ids = patched_embed_input_ids
 
         # 3. Patch forward to unpack state
         orig_forward = vllm_model.forward
         def patched_forward(input_ids, positions, intermediate_tensors, inputs_embeds=None, **kwargs):
+            logger.info(f"DEBUG: patched_forward called, inputs_embeds is None={inputs_embeds is None}")
+            if inputs_embeds is not None:
+                 logger.info(f"DEBUG: inputs_embeds shape={inputs_embeds.shape}")
             if inputs_embeds is not None and jax_get_pp_group().is_first_rank:
                 if getattr(vllm_model, "use_deepstack", False) and inputs_embeds.shape[-1] > vllm_model.visual_dim:
+                    logger.info(f"DEBUG: deepstack unpacking triggered. inputs_embeds shape={inputs_embeds.shape}, visual_dim={vllm_model.visual_dim}")
                     packed_dim = inputs_embeds.shape[-1] - vllm_model.visual_dim
                     deepstack_packed = inputs_embeds[..., vllm_model.visual_dim:]
                     inputs_embeds = inputs_embeds[..., :vllm_model.visual_dim]
+                    logger.info(f"DEBUG: sliced inputs_embeds shape={inputs_embeds.shape}")
+                    logger.info(f"DEBUG: deepstack_packed shape={deepstack_packed.shape}")
                     
                     deepstack_input_embeds = {}
                     num_levels = getattr(vllm_model, "deepstack_num_level", 1)
                     per_level_dim = packed_dim // num_levels
                     indexes = getattr(vllm_model.config.vision_config, "deepstack_visual_indexes", [])
+                    logger.info(f"DEBUG: num_levels={num_levels}, per_level_dim={per_level_dim}, indexes={indexes}")
                     
                     for idx, layer_idx in enumerate(indexes):
                         start = idx * per_level_dim
                         end = (idx + 1) * per_level_dim
                         sliced = deepstack_packed[..., start:end]
-                        if not isinstance(sliced, torch.Tensor) and "torchax.tensor" not in str(type(sliced)):
-                            sliced = torch_view(jax_view(sliced))
-                        deepstack_input_embeds[f"deepstack_input_embeds_{layer_idx}"] = sliced
+                        logger.info(f"DEBUG: level {idx}, layer {layer_idx}, sliced shape={sliced.shape}, type={type(sliced)}")
+                        sliced = torch_view(jax_view(sliced))
+                        deepstack_input_embeds[f"deepstack_input_embeds_{idx}"] = sliced
 
+                    logger.info(f"DEBUG: setting deepstack tensors, keys={list(deepstack_input_embeds.keys())}")
                     vllm_model._set_deepstack_input_embeds(deepstack_input_embeds)
 
             return orig_forward(input_ids=input_ids, positions=positions, 
