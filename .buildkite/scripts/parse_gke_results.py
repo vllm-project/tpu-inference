@@ -1,6 +1,15 @@
 import json
 import sys
 import os
+from datetime import datetime
+
+def fmt(val, is_str=False):
+    """Helper to safely format python values to SQL values"""
+    if val is None or val == 'NULL': 
+        return 'NULL'
+    if is_str: 
+        return f"'{val}'"
+    return str(val)
 
 def parse_and_dump(file_path, record_id):
     if not os.path.exists(file_path):
@@ -31,19 +40,17 @@ def parse_and_dump(file_path, record_id):
                 continue
 
             rate = data.get('request_rate')
-            throughput = data.get('request_throughput')
             
-            # Latency metrics
-            median_ttft = data.get('median_ttft_ms')
-            p90_ttft = data.get('p90_ttft_ms')
-            p99_ttft = data.get('p99_ttft_ms')
-            
-            median_tpot = data.get('median_tpot_ms')
-            p90_tpot = data.get('p90_tpot_ms')
-            p99_tpot = data.get('p99_tpot_ms')
-            
-            median_itl = data.get('median_itl_ms')
-            p99_itl = data.get('p99_itl_ms')
+            # Parse date from JSON
+            # Example: "20260402-195133" -> "2026-04-02T19:51:33Z"
+            date_str = data.get('date')
+            spanner_timestamp = 'CURRENT_TIMESTAMP()'
+            if date_str:
+                try:
+                    dt = datetime.strptime(date_str, '%Y%m%d-%H%M%S')
+                    spanner_timestamp = f"TIMESTAMP '{dt.strftime('%Y-%m-%dT%H:%M:%SZ')}'"
+                except ValueError:
+                    print(f"Warning: Could not parse date string: {date_str}. Using CURRENT_TIMESTAMP()", file=sys.stderr)
 
             # Generate a unique RecordId for this rate
             unique_record_id = f"{record_id}_{rate}"
@@ -51,20 +58,27 @@ def parse_and_dump(file_path, record_id):
             sql = f"""
             INSERT INTO RunRecord (
                 RecordId, Status, CreatedTime, LastUpdate,
-                Throughput, MedianTTFT, P90TTFT, P99TTFT,
-                MedianTPOT, P90TPOT, P99TPOT,
-                MedianITL, P99ITL,
-                Device, Model, RunType, CodeHash, Dataset, CreatedBy,
-                InputLen, OutputLen
+                Device, Model, RunType, CodeHash, Dataset, CreatedBy, InputLen, OutputLen,
+                EndpointType, Backend, Label, TokenizerId, NumPrompts, RequestRate, Burstiness, MaxConcurrency,
+                Duration, Completed, Failed, TotalInputTokens, TotalOutputTokens, MaxConcurrentRequests,
+                RequestThroughput, RequestGoodput, OutputThroughput, TotalTokenThroughput, MaxOutputTokensPerS, Rtfx,
+                MeanTTFT, MedianTTFT, StdTTFT, P90TTFT, P99TTFT,
+                MeanTPOT, MedianTPOT, StdTPOT, P90TPOT, P99TPOT,
+                MeanITL, MedianITL, StdITL, P90ITL, P99ITL
             ) VALUES (
-                '{unique_record_id}', 'COMPLETED', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(),
-                {throughput or 'NULL'}, {median_ttft or 'NULL'}, {p90_ttft or 'NULL'}, {p99_ttft or 'NULL'},
-                {median_tpot or 'NULL'}, {p90_tpot or 'NULL'}, {p99_tpot or 'NULL'},
-                {median_itl or 'NULL'}, {p99_itl or 'NULL'},
-                'GKE', '{data.get('model_id', 'N/A')}', 'GKE_DISAGG', 'N/A', 'random', 'scheduler',
-                {input_len}, {output_len}
+                '{unique_record_id}', 'COMPLETED', {spanner_timestamp}, CURRENT_TIMESTAMP(),
+                'GKE', {fmt(data.get('model_id', 'N/A'), True)}, 'GKE_DISAGG', 'N/A', 'random', 'scheduler', {input_len}, {output_len},
+                {fmt(data.get('endpoint_type'), True)}, {fmt(data.get('backend'), True)}, {fmt(data.get('label'), True)}, {fmt(data.get('tokenizer_id'), True)}, 
+                {fmt(data.get('num_prompts'))}, {fmt(data.get('request_rate'))}, {fmt(data.get('burstiness'))}, {fmt(data.get('max_concurrency'))},
+                {fmt(data.get('duration'))}, {fmt(data.get('completed'))}, {fmt(data.get('failed'))}, {fmt(data.get('total_input_tokens'))}, {fmt(data.get('total_output_tokens'))}, {fmt(data.get('max_concurrent_requests'))},
+                {fmt(data.get('request_throughput'))}, {fmt(data.get('request_goodput'))}, {fmt(data.get('output_throughput'))}, {fmt(data.get('total_token_throughput'))}, {fmt(data.get('max_output_tokens_per_s'))}, {fmt(data.get('rtfx'))},
+                {fmt(data.get('mean_ttft_ms'))}, {fmt(data.get('median_ttft_ms'))}, {fmt(data.get('std_ttft_ms'))}, {fmt(data.get('p90_ttft_ms'))}, {fmt(data.get('p99_ttft_ms'))},
+                {fmt(data.get('mean_tpot_ms'))}, {fmt(data.get('median_tpot_ms'))}, {fmt(data.get('std_tpot_ms'))}, {fmt(data.get('p90_tpot_ms'))}, {fmt(data.get('p99_tpot_ms'))},
+                {fmt(data.get('mean_itl_ms'))}, {fmt(data.get('median_itl_ms'))}, {fmt(data.get('std_itl_ms'))}, {fmt(data.get('p90_itl_ms'))}, {fmt(data.get('p99_itl_ms'))}
             );
             """
+            
+            # Print as a single line for bash processing
             print(" ".join(sql.split()))
 
 if __name__ == "__main__":
@@ -72,4 +86,3 @@ if __name__ == "__main__":
         print("Usage: python parse_gke_results.py <file_path> <record_id>", file=sys.stderr)
         sys.exit(1)
     parse_and_dump(sys.argv[1], sys.argv[2])
-
