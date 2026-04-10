@@ -1146,12 +1146,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         dp_size = self.dp_size
         max_num_reqs_per_dp_rank = self.max_num_reqs // dp_size
 
-        # Use pre-computed per-rank metadata from DPSchedulerOutput when
-        # available, avoiding an O(num_reqs) re-split by assigned_dp_rank.
-        req_ids_dp = req_ids_per_rank.req_ids_per_rank
+        req_ids_dp = scheduler_output.req_ids_per_rank
         scheduled_tokens_per_dp_rank = scheduler_output.scheduled_tokens_per_rank
 
-        # Build the remaining derived structures from pre-computed data.
         req_indices_dp = {
             dp_rank: [
                 self.input_batch.req_id_to_index[req_id]
