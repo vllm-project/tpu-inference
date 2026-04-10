@@ -112,6 +112,6 @@ class LocalCPUBackend:
             del dummy_value
         self.current_size_bytes -= reclaimed_size_bytes
 
-        logger.info(
+        logger.debug(
             f" Reclaimed {len(unoccupied_chunk_ids)} unoccupied chunks, "
             f"with {reclaimed_size_bytes} bytes.")
