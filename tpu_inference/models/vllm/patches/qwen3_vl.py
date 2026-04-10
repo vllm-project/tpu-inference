@@ -9,6 +9,10 @@ def _patched_set_deepstack(vllm_model, deepstack_input_embeds):
     
     This avoids stateful updates of native vLLM variables that would break JAX JIT tracing.
     """
+    if deepstack_input_embeds is None:
+        vllm_model._deepstack_tensors = {}
+        return
+
     if not hasattr(vllm_model, "_deepstack_tensors"):
         vllm_model._deepstack_tensors = {}
 
@@ -126,8 +130,17 @@ def _patched_forward(vllm_model, orig_forward, input_ids, positions, intermediat
                         inputs_embeds=inputs_embeds, **kwargs)
 
 def apply_qwen3_vl_patches(vllm_model):
-    """
-    Apply Qwen3-VL specific monkey-patches for stateless Deepstack support.
+    """Apply Qwen3-VL specific monkey-patches for stateless Deepstack support.
+
+    These patches are required for TPU execution because JAX JIT requires functions
+    to be pure and stateless. Native vLLM stores Deepstack vision embeddings
+    statefully in model instance variables and retrieves them during the language
+    model pass. This side-channel state access breaks JAX tracing.
+
+    To resolve this, these patches intercept the embeddings, pack them into the
+    hidden dimension of the text embeddings (`inputs_embeds`) so they can cross
+    the JIT compilation boundary as standard input arguments, and then unpack
+    them back into a JAX-friendly cache inside the execution step.
     """
     if not getattr(vllm_model, "use_deepstack", False):
         return
