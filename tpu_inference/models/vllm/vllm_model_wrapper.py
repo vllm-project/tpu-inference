@@ -175,108 +175,6 @@ class VllmModelWrapper:
                 if hasattr(module, "get_pp_group"):
                     setattr(module, "get_pp_group", jax_get_pp_group)
 
-    def _apply_qwen3_vl_patches(self, vllm_model):
-        """
-        Apply Qwen3-VL specific monkey-patches for stateless Deepstack support.
-        This allows passing intermediate vision embeddings through JIT boundaries
-        by packing them into inputs_embeds.
-        """
-        if not hasattr(vllm_model, "config") or "qwen" not in getattr(vllm_model.config, "model_type", "").lower():
-            return
-
-        if not getattr(vllm_model, "use_deepstack", False):
-            return
-
-        from torchax.interop import jax_view, torch_view
-
-        from tpu_inference.distributed.jax_parallel_state import \
-            get_pp_group as jax_get_pp_group
-
-        logger.info("Applying Qwen3-VL stateless Deepstack patches")
-
-        # 1. Override setter to avoid in-place mutation error
-        orig_set_deepstack = getattr(vllm_model, "_set_deepstack_input_embeds", None)
-        if orig_set_deepstack is not None:
-            def patched_set_deepstack(deepstack_input_embeds):
-                indexes = getattr(vllm_model.config.vision_config, "deepstack_visual_indexes", [])
-                
-                if not hasattr(vllm_model, "_deepstack_tensors"):
-                    vllm_model._deepstack_tensors = {}
-
-                if isinstance(deepstack_input_embeds, dict):
-                    vllm_model._deepstack_tensors.update(deepstack_input_embeds)
-                elif isinstance(deepstack_input_embeds, (list, tuple)):
-                    for idx, v in enumerate(deepstack_input_embeds):
-                        key = f"deepstack_input_embeds_{indexes[idx]}" if idx < len(indexes) else f"deepstack_input_embeds_{idx}"
-                        vllm_model._deepstack_tensors[key] = v
-            vllm_model._set_deepstack_input_embeds = patched_set_deepstack
-
-        orig_get_deepstack = getattr(vllm_model, "_get_deepstack_input_embeds", None)
-        if orig_get_deepstack is not None:
-            from vllm.sequence import IntermediateTensors
-            
-            def patched_get_deepstack(num_tokens: int):
-                # 1. Try to use cached JAX tensors if available
-                if getattr(vllm_model, "_deepstack_tensors", None):
-                    return IntermediateTensors(vllm_model._deepstack_tensors)
-                
-                # 2. Fallback to native retrieval and conversion
-                orig_output = orig_get_deepstack(num_tokens)
-                converted = {}
-                for k, v in orig_output.items():
-                    if not v.__class__.__module__.startswith("torchax"):
-                        try:
-                            import jax
-                            val_f32 = v.detach().cpu().float().numpy()
-                            jax_arr = jax.device_put(val_f32).astype(jax.numpy.bfloat16)
-                            v = torch_view(jax_arr)
-                        except Exception:
-                            v = torch_view(jax_view(v))
-                    converted[k] = v
-                return IntermediateTensors(converted)
-            vllm_model._get_deepstack_input_embeds = patched_get_deepstack
-
-        # 2. Patch embed_input_ids to pack state
-        orig_embed_input_ids = getattr(vllm_model, "embed_input_ids", None)
-        if orig_embed_input_ids is not None:
-            def patched_embed_input_ids(*args, **kwargs):
-                inputs_embeds = orig_embed_input_ids(*args, **kwargs)
-                deepstack_input_embeds = getattr(vllm_model, "deepstack_input_embeds", None)
-                if deepstack_input_embeds is not None:
-                    if torch.is_tensor(deepstack_input_embeds):
-                        packed = deepstack_input_embeds.transpose(0, 1).reshape(inputs_embeds.size(0), -1)
-                        inputs_embeds = torch.cat([inputs_embeds, packed], dim=-1)
-                return inputs_embeds
-            vllm_model.embed_input_ids = patched_embed_input_ids
-
-        # 3. Patch forward to unpack state
-        orig_forward = vllm_model.forward
-        def patched_forward(input_ids, positions, intermediate_tensors, inputs_embeds=None, **kwargs):
-            if inputs_embeds is not None and jax_get_pp_group().is_first_rank:
-                if getattr(vllm_model, "use_deepstack", False) and inputs_embeds.shape[-1] > vllm_model.visual_dim:
-                    packed_dim = inputs_embeds.shape[-1] - vllm_model.visual_dim
-                    deepstack_packed = inputs_embeds[..., vllm_model.visual_dim:]
-                    inputs_embeds = inputs_embeds[..., :vllm_model.visual_dim]
-                    
-                    deepstack_input_embeds = {}
-                    num_levels = getattr(vllm_model, "deepstack_num_level", 1)
-                    per_level_dim = packed_dim // num_levels
-                    indexes = getattr(vllm_model.config.vision_config, "deepstack_visual_indexes", [])
-                    
-                    for idx, layer_idx in enumerate(indexes):
-                        start = idx * per_level_dim
-                        end = (idx + 1) * per_level_dim
-                        sliced = deepstack_packed[..., start:end]
-                        if not isinstance(sliced, torch.Tensor) and "torchax.tensor" not in str(type(sliced)):
-                            sliced = torch_view(jax_view(sliced))
-                        deepstack_input_embeds[f"deepstack_input_embeds_{layer_idx}"] = sliced
-
-                    vllm_model._set_deepstack_input_embeds(deepstack_input_embeds)
-
-            return orig_forward(input_ids=input_ids, positions=positions, 
-                                intermediate_tensors=intermediate_tensors, 
-                                inputs_embeds=inputs_embeds, **kwargs)
-        vllm_model.forward = patched_forward
 
     def load_weights(self):
         loading_start = time.time()
@@ -349,7 +247,10 @@ class VllmModelWrapper:
         with load_context, jax_context:
             with set_current_vllm_config(vllm_config_for_load):
                 vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
-                self._apply_qwen3_vl_patches(vllm_model)
+                if hasattr(vllm_model, "config") and hasattr(vllm_model.config, "architectures"):
+                    if "Qwen3VLForConditionalGeneration" in vllm_model.config.architectures:
+                        from tpu_inference.models.vllm.patches.qwen3_vl import apply_qwen3_vl_patches
+                        apply_qwen3_vl_patches(vllm_model)
 
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:
