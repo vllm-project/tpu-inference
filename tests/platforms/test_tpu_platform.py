@@ -290,3 +290,23 @@ class TestTpuPlatform:
             TpuPlatform.update_block_size_for_backend(vllm_config)
 
         assert vllm_config.cache_config.block_size == 1280
+
+    def test_update_block_size_for_backend_tp_override(self, vllm_config):
+        vllm_config.model_config.is_hybrid = True
+        vllm_config.parallel_config.tensor_parallel_size = 8
+
+        mock_backend = MagicMock()
+
+        # We temporarily override the tensor parallel size to 1 when aligning
+        # hybrid block size.
+        def assert_tp_is_one(*args, **kwargs):
+            assert vllm_config.parallel_config.tensor_parallel_size == 1
+
+        with patch.object(TpuPlatform, '_find_non_ssm_backend', return_value=mock_backend), \
+             patch.object(TpuPlatform, '_align_hybrid_block_size', side_effect=assert_tp_is_one) as mock_align:
+            TpuPlatform.update_block_size_for_backend(vllm_config)
+
+            mock_align.assert_called_once_with(vllm_config, mock_backend)
+
+        # Ensure the tensor parallel size is restored in the `finally` block
+        assert vllm_config.parallel_config.tensor_parallel_size == 8

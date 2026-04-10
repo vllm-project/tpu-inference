@@ -39,6 +39,7 @@ from tpu_inference.layers.vllm.ops.ragged_gated_delta_rule_ref import \
     ragged_gated_delta_rule as ragged_gated_delta_rule_ref
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
+from tpu_inference.utils import get_mesh_shape_product
 
 
 class RaggedConv1dImpl(enum.Enum):
@@ -219,31 +220,35 @@ def run_jax_gdn_attention(
         - The output tensor of shape `(num_tokens, n_v * d_v)`.
     """
     in_specs = (
-        P(None, ShardingAxisName.ATTN_HEAD),  # j_mixed_qkv
-        P(None, ShardingAxisName.ATTN_HEAD),  # j_b
-        P(None, ShardingAxisName.ATTN_HEAD),  # j_a
-        P(None, None, ShardingAxisName.ATTN_HEAD),  # conv_state
-        P(None, ShardingAxisName.ATTN_HEAD, None, None),  # recurrent_state
+        P(ShardingAxisName.ATTN_DATA,
+          ShardingAxisName.ATTN_HEAD),  # j_mixed_qkv
+        P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # j_b
+        P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # j_a
+        P(ShardingAxisName.ATTN_DATA, None,
+          ShardingAxisName.ATTN_HEAD),  # conv_state
+        P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None,
+          None),  # recurrent_state
         P(ShardingAxisName.ATTN_HEAD, None, None),  # j_conv_weight
         P(ShardingAxisName.ATTN_HEAD)
         if j_conv_bias is not None else None,  # j_conv_bias
         P(ShardingAxisName.ATTN_HEAD),  # j_A_log
         P(ShardingAxisName.ATTN_HEAD),  # j_dt_bias
-        P(),  # query_start_loc
-        P(),  # state_indices
-        P(),  # distribution
+        P(ShardingAxisName.ATTN_DATA),  # query_start_loc
+        P(ShardingAxisName.ATTN_DATA),  # state_indices
+        P(ShardingAxisName.ATTN_DATA),  # distribution
     )
 
     out_specs = (
         (
-            P(None, None, ShardingAxisName.ATTN_HEAD),  # new_conv_state
-            P(None, ShardingAxisName.ATTN_HEAD, None,
+            P(ShardingAxisName.ATTN_DATA, None,
+              ShardingAxisName.ATTN_HEAD),  # new_conv_state
+            P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None,
               None),  # new_recurrent_state
         ),
-        P(None, ShardingAxisName.ATTN_HEAD),  # output
+        P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # output
     )
 
-    tp_size = mesh.shape[ShardingAxisName.ATTN_HEAD]
+    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
 
     p_run_jax_gdn_attention_local = functools.partial(
         run_jax_gdn_attention_local,
@@ -331,7 +336,7 @@ def gdn_attention_core_tpu(
     # Use reorder_concatenated_tensor_for_sharding to reorder into correct layout
     key_dim = n_kq * d_k
     value_dim = n_v * d_v
-    tp_size = mesh.shape[ShardingAxisName.ATTN_HEAD]
+    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
     j_mixed_qkv = reorder_concatenated_tensor_for_sharding(
         j_mixed_qkv, [key_dim, key_dim, value_dim], tp_size, -1)
     j_conv_weight = reorder_concatenated_tensor_for_sharding(
