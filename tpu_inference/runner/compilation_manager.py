@@ -586,10 +586,6 @@ class CompilationManager:
                         _cache_collision_dummy=_cache_collision_dummy,
                         do_sampling=do_sampling,
                         logprobs=logprobs)
-                    print(f"\n[DEBUG-WARMUP] PRECOMPILING SAMPLE:")
-                    print(f"  - num_reqs: {num_reqs}")
-                    print(f"  - logits dtype: {logits.dtype}")
-                    print(f"  - logits sharding: {getattr(logits.sharding, 'spec', logits.sharding)}")
                     self._run_compilation(
                         f"worker{self.runner.rank} sample",
                         sample,
