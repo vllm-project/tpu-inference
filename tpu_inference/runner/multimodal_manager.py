@@ -177,11 +177,6 @@ class MultiModalManager:
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length
 
-                print(f"DEBUG gather_mm_embeddings:")
-                print(f"  req_id: {req_id}")
-                print(f"  mm_feature.identifier: {mm_feature.identifier}")
-                print(f"  pos_info.offset: {pos_info.offset}")
-                print(f"  pos_info.length: {pos_info.length}")
                 if hasattr(pos_info, "is_embed") and pos_info.is_embed is not None:
                     import torch
                     if isinstance(pos_info.is_embed, torch.Tensor):
