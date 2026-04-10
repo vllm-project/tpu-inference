@@ -275,11 +275,14 @@ def _batched_matmul_body(
         is_last_step  = True
 
     def matmul_body(is_first_step: bool, is_last_step: bool):
-        x_block = x_ref[...] # (batch_block_size, heads_block_size, in_block_size)
-        w_block = w_ref[...] # (heads_block_size, in_block_size, out_block_size)
-
-        # Compute [batch, heads, out] = [batch, heads, in] @ [heads, in, out]
-        acc_block = jnp.einsum('tnp,npl->tnl', x_block, w_block, preferred_element_type=jnp.float32)
+        batch_block_size, heads_block_size, in_block_size = x_ref.shape
+        L_block = out_ref.shape[3]
+        
+        acc_block_3d = jnp.einsum('tnp,npl->tnl', x_ref[...], w_ref[...], 
+                                  preferred_element_type=jnp.float32)
+        
+        # Reshape back to 4D [T, N/4, 4, L]
+        acc_block_4d = acc_block_3d.reshape(batch_block_size, out_ref.shape[1], 4, L_block)
 
         if not is_first_step:
             acc_block += acc_scratch[...]
@@ -310,6 +313,10 @@ def batched_matmul_kernel(
 @jax.jit(static_argnames=[
     "x_q_dtype",
     "tuned_value",
+    "heads_block_size",
+    "batch_block_size",
+    "out_block_size",
+    "in_block_size",
 ])
 def batched_quantized_matmul_kernel(
     x: jax.Array,       # [T, N, P]  tokens first
@@ -318,19 +325,21 @@ def batched_quantized_matmul_kernel(
     x_q_dtype: jnp.dtype | None = None,
     *,
     tuned_value: TunedValue | None = None,
+    heads_block_size: int = 128,
+    batch_block_size: int = 64,
+    out_block_size: int = 128,
+    in_block_size: int = 256,
 ) -> jax.Array:  # [T, N, L]  tokens-major physical layout
     """Batched matmul: out[t, n, :] = x[t, n, :] @ w_q[n].T. Simplified: no quantization."""
     
     orig_n_batch, n_heads, orig_n_in = x.shape
     _, _, orig_n_out                 = w_q.shape
 
-    # TODO: update the hardcodings to be configurable.
-    heads_block_size = 128 
-    batch_block_size = 128
-    out_block_size   = 128
-    in_block_size    = 128
-
-    if tuned_value is None:
+    if tuned_value is not None:
+        batch_block_size = tuned_value.batch_block_size
+        out_block_size = tuned_value.out_block_size
+        in_block_size = tuned_value.in_block_size
+    else:
         tuned_value = TunedValue(batch_block_size, out_block_size, in_block_size)
 
     # Pad N to block-size multiples.
@@ -359,11 +368,19 @@ def batched_quantized_matmul_kernel(
         w_q = jnp.pad(w_q, ((0, 0), (0, pad), (0, 0)))  # pad P dim in w_q
 
     n_batch_blocks = padded_n_batch // batch_block_size
+    n_heads_blocks = padded_n_heads // heads_block_size
     n_out_blocks   = padded_n_out   // out_block_size
     n_in_blocks    = padded_n_in    // in_block_size
 
     save_acc = n_in_blocks > 1
     acc_dtype = jnp.float32
+
+    # TODO: Update for any bitwidth
+    if heads_block_size % 4 != 0:
+        raise ValueError(f"heads_block_size must be a multiple of 4, got {heads_block_size}")
+    
+    heads_outer = padded_n_heads // 4
+    heads_block_outer = heads_block_size // 4
 
     # TODO update to have accuracy bounds.
     vmem_limit_bytes = get_device_vmem_limit()
@@ -371,24 +388,24 @@ def batched_quantized_matmul_kernel(
     x_spec = pl.BlockSpec(
         # x: [T, N, P]
         (batch_block_size, heads_block_size, in_block_size),
-        lambda b, o, i: (b, 0, i),
+        lambda b, h, o, i: (b, h, i),
     )
     w_q_spec = pl.BlockSpec(
         # w_q: [N, P, L]
         (heads_block_size, in_block_size, out_block_size),
-        lambda b, o, i: (0, i, o),
+        lambda b, h, o, i: (h, i, o),
     )
     out_spec = pl.BlockSpec(
-        # out: [T, N, L]
-        (batch_block_size, heads_block_size, out_block_size),
-        lambda b, o, i: (b, 0, o),
+        # out: [T, N/4, 4, L]
+        (batch_block_size, heads_block_outer, 4, out_block_size),
+        lambda b, h, o, i: (b, h, 0, o),
     )
     scratch_shapes = [
-        (pltpu.VMEM((batch_block_size, heads_block_size, out_block_size), acc_dtype)
+        (pltpu.VMEM((batch_block_size, heads_block_outer, 4, out_block_size), acc_dtype)
          if save_acc else None),
     ]
     compiler_params = pltpu.CompilerParams(
-        dimension_semantics=("parallel", "arbitrary", "arbitrary"),
+        dimension_semantics=("parallel", "parallel", "arbitrary", "arbitrary"),
         vmem_limit_bytes=vmem_limit_bytes,
     )
     out_shape = jax.ShapeDtypeStruct((padded_n_batch, padded_n_heads, padded_n_out), x.dtype)
@@ -405,11 +422,11 @@ def batched_quantized_matmul_kernel(
                 in_specs=[x_spec, w_q_spec], 
                 out_specs=out_spec,
                 scratch_shapes=scratch_shapes,
-                grid=(n_batch_blocks, n_out_blocks, n_in_blocks),
+                grid=(n_batch_blocks, n_heads_blocks, n_out_blocks, n_in_blocks),
             ),
             out_shape=out_shape,
             compiler_params=compiler_params,
         )
         out = kernel(x, w_q)
 
-    return out[:orig_n_batch, :n_heads, :orig_n_out]
+    return out[:orig_n_batch, :n_heads // 4, :, :orig_n_out]

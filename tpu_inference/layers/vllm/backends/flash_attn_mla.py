@@ -152,11 +152,26 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
         q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=2)
         in_specs = (P(ShardingAxisName.ATTN_DATA), None, None)
         out_specs = (P(ShardingAxisName.ATTN_DATA))
-        sharded_kernel = jax.shard_map(functools.partial(batched_quantized_matmul_kernel,x_q_dtype=input_dtype),
-                                   mesh=mesh, 
-                                   in_specs=in_specs,
-                                   out_specs=out_specs,
-                                   check_vma=False,
+
+        # Extract block sizes from kwargs if available
+        heads_block_size = kwargs.get("heads_block_size", 128)
+        batch_block_size = kwargs.get("batch_block_size", 128)
+        out_block_size = kwargs.get("out_block_size", 128)
+        in_block_size = kwargs.get("in_block_size", 128)
+
+        sharded_kernel = jax.shard_map(
+            functools.partial(
+                batched_quantized_matmul_kernel,
+                x_q_dtype=input_dtype,
+                heads_block_size=heads_block_size,
+                batch_block_size=batch_block_size,
+                out_block_size=out_block_size,
+                in_block_size=in_block_size,
+            ),
+            mesh=mesh, 
+            in_specs=in_specs,
+            out_specs=out_specs,
+            check_vma=False,
         )
         q_nope = sharded_kernel(
             q_nope,
