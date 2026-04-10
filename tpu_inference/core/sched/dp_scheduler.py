@@ -155,7 +155,7 @@ def _scheduler_worker_process(
     )
 
     # Worker caches its own SchedulerOutput so the parent never has to
-    # send it back. 
+    # send it back.
     _cached_scheduler_outputs: deque[SchedulerOutput] = deque()
     _worker_step_id = 0  # monotonic, matches parent's step counter
 
@@ -612,8 +612,8 @@ class DPScheduler(SchedulerInterface):
         now = time()
         if self._prev_schedule_start > 0:
             e2e_step_time = now - self._prev_schedule_start
-            logger.info(
-                "Step %d e2e time: %.4f seconds", step - 1, e2e_step_time)
+            logger.info("Step %d e2e time: %.4f seconds", step - 1,
+                        e2e_step_time)
         self._prev_schedule_start = now
         schedule_start = time()
 
@@ -630,8 +630,7 @@ class DPScheduler(SchedulerInterface):
             if rank_recv_elapsed > 0.2:
                 logger.warning(
                     f"Step {step}: Rank {rank} SCHEDULE response took "
-                    f"{rank_recv_elapsed:.2f}s"
-                )
+                    f"{rank_recv_elapsed:.2f}s")
             rank_outputs.append(output)
 
         # Cache scheduler outputs to use in `update_from_output`
@@ -649,8 +648,7 @@ class DPScheduler(SchedulerInterface):
             ]
             logger.info(
                 f"Step {step} per-rank scheduled tokens: {per_rank_tokens}, "
-                f"schedule_time={total_elapsed:.3f}s"
-            )
+                f"schedule_time={total_elapsed:.3f}s")
 
         return combined_output
 
@@ -885,9 +883,8 @@ class DPScheduler(SchedulerInterface):
 
         for rank in range(self.dp_size):
             rank_output = rank_model_outputs[rank]
-            self._send_command(
-                rank, SchedulerCommand.UPDATE_FROM_OUTPUT,
-                (update_step, rank_output))
+            self._send_command(rank, SchedulerCommand.UPDATE_FROM_OUTPUT,
+                               (update_step, rank_output))
 
         combined_engine_outputs = defaultdict(list)
         rank_scheduler_stats: List[Optional[SchedulerStats]] = []
@@ -930,8 +927,7 @@ class DPScheduler(SchedulerInterface):
         return combined_engine_outputs
 
     def _split_model_output_by_rank(
-            self,
-            scheduler_output: DPSchedulerOutput,
+            self, scheduler_output: DPSchedulerOutput,
             global_model_output: ModelRunnerOutput) -> List[ModelRunnerOutput]:
         """Split the model runner output by DP rank for individual scheduler updates.
 
@@ -966,8 +962,8 @@ class DPScheduler(SchedulerInterface):
 
             # Slice sampled_token_ids: only this rank's entries.
             rank_sampled_token_ids = (
-                [global_sampled_token_ids[i] for i in global_indices]
-                if global_sampled_token_ids else [])
+                [global_sampled_token_ids[i]
+                 for i in global_indices] if global_sampled_token_ids else [])
 
             # Slice logprobs: only this rank's entries.
             rank_logprobs = None
@@ -983,22 +979,27 @@ class DPScheduler(SchedulerInterface):
                     new_cu = [0]
                     for gi in global_indices:
                         start = cu[gi]
-                        end = (cu[gi + 1] if gi + 1 < len(cu)
-                               else global_logprobs.logprob_token_ids.shape[0])
+                        end = (cu[gi + 1] if gi + 1 < len(cu) else
+                               global_logprobs.logprob_token_ids.shape[0])
                         length = end - start
                         slices.append((start, end))
                         new_cu.append(new_cu[-1] + length)
                     rank_logprob_token_ids = np.concatenate(
-                        [global_logprobs.logprob_token_ids[s:e]
-                         for s, e in slices], axis=0
+                        [
+                            global_logprobs.logprob_token_ids[s:e]
+                            for s, e in slices
+                        ],
+                        axis=0
                     ) if slices else global_logprobs.logprob_token_ids[:0]
                     rank_logprobs_vals = np.concatenate(
-                        [global_logprobs.logprobs[s:e]
-                         for s, e in slices], axis=0
-                    ) if slices else global_logprobs.logprobs[:0]
+                        [global_logprobs.logprobs[s:e] for s, e in slices],
+                        axis=0) if slices else global_logprobs.logprobs[:0]
                     rank_sampled_token_ranks = np.concatenate(
-                        [global_logprobs.sampled_token_ranks[s:e]
-                         for s, e in slices], axis=0
+                        [
+                            global_logprobs.sampled_token_ranks[s:e]
+                            for s, e in slices
+                        ],
+                        axis=0
                     ) if slices else global_logprobs.sampled_token_ranks[:0]
                     rank_logprobs = LogprobsLists(
                         logprob_token_ids=rank_logprob_token_ids,
@@ -1022,34 +1023,34 @@ class DPScheduler(SchedulerInterface):
             # Slice prompt_logprobs_dict: only this rank's entries.
             rank_prompt_logprobs_dict = {
                 req_id: global_prompt_logprobs_dict[req_id]
-                for req_id in req_ids
-                if req_id in global_prompt_logprobs_dict
+                for req_id in req_ids if req_id in global_prompt_logprobs_dict
             }
 
             # Slice pooler_output: only this rank's entries.
             rank_pooler_output = (
-                [global_pooler_output[i] for i in global_indices]
-                if global_pooler_output else None)
+                [global_pooler_output[i]
+                 for i in global_indices] if global_pooler_output else None)
 
             # Slice num_nans_in_logits: only this rank's entries.
-            rank_num_nans_in_logits = (
-                {req_id: global_num_nans_in_logits[req_id]
-                 for req_id in req_ids
-                 if req_id in global_num_nans_in_logits}
-                if global_num_nans_in_logits else None)
+            rank_num_nans_in_logits = ({
+                req_id:
+                global_num_nans_in_logits[req_id]
+                for req_id in req_ids if req_id in global_num_nans_in_logits
+            } if global_num_nans_in_logits else None)
 
-            outputs.append(ModelRunnerOutput(
-                req_ids=req_ids,
-                req_id_to_index=rank_req_id_to_index,
-                sampled_token_ids=rank_sampled_token_ids,
-                logprobs=rank_logprobs,
-                prompt_logprobs_dict=rank_prompt_logprobs_dict,
-                pooler_output=rank_pooler_output,
-                num_nans_in_logits=rank_num_nans_in_logits,
-                # kv_connector_output is shared (small metadata); only send
-                # if non-None to avoid serializing None per rank.
-                kv_connector_output=global_kv_connector_output,
-            ))
+            outputs.append(
+                ModelRunnerOutput(
+                    req_ids=req_ids,
+                    req_id_to_index=rank_req_id_to_index,
+                    sampled_token_ids=rank_sampled_token_ids,
+                    logprobs=rank_logprobs,
+                    prompt_logprobs_dict=rank_prompt_logprobs_dict,
+                    pooler_output=rank_pooler_output,
+                    num_nans_in_logits=rank_num_nans_in_logits,
+                    # kv_connector_output is shared (small metadata); only send
+                    # if non-None to avoid serializing None per rank.
+                    kv_connector_output=global_kv_connector_output,
+                ))
 
         return outputs
 
