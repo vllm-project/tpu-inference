@@ -228,9 +228,9 @@ run_benchmark(){
     fi
   fi
 
-  echo "[DEBUG] Executing client_cmd: ${CLIENT_CMD[*]} > $BM_LOG" >&2
+  echo "[DEBUG] Executing client_cmd: ${CLIENT_CMD_ENVS[*]} ${CLIENT_CMD[*]} > $BM_LOG" >&2
   # Execute the array directly, preserving strict argument boundaries
-  "${CLIENT_CMD[@]}" > "$BM_LOG" 2>&1
+  env "${CLIENT_CMD_ENVS[@]}" "${CLIENT_CMD[@]}" > "$BM_LOG" 2>&1
 
   throughput=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
   p99_e2el=$(grep "P99 E2EL (ms):" "$BM_LOG" | awk '{print $NF}')

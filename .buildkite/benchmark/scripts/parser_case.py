@@ -169,6 +169,10 @@ def main():
     print(f"export MAX_NUM_BATCHED_TOKENS=\"{max_num_batched_tokens}\"")
     max_model_len = srv_opts.get("args", {}).get("max-model-len", {})
     print(f"export MAX_MODEL_LEN=\"{max_model_len}\"")
+    cli_env = cli_opts.get("env", {})
+    cli_env_parts = [f"{k}={v}" for k, v in cli_env.items()]
+    quoted_cli_env = ' '.join(shlex.quote(p) for p in cli_env_parts)
+    print(f"CLIENT_CMD_ENVS=({quoted_cli_env})")
 
     # TODO:
     # EXTRA_ENVS
