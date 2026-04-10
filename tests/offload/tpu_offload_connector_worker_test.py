@@ -133,10 +133,7 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         except RuntimeError:
             return None
 
-    def _create_connector(self,
-                          swap_op_type: str = "jax",
-                          use_precompiled_swap_ops: bool = False):
-        os.environ["TPU_OFFLOAD_SWAP_OP_TYPE"] = swap_op_type
+    def _create_connector(self, use_precompiled_swap_ops: bool = False):
         os.environ[
             "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE"] = "0" if use_precompiled_swap_ops else "1"
         os.environ["TPU_OFFLOAD_NUM_CPU_CHUNKS"] = str(self.num_cpu_chunks)
@@ -203,15 +200,12 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         logger.info(
             f"Decomposition for {num_blocks} blocks into {expected_buckets}.")
 
-    @parameterized.named_parameters(
-        dict(testcase_name="_jax", swap_op_type="jax"), )
-    def test_precompile_run_success(self, swap_op_type: str):
+    def test_precompile_run_success(self):
         """
         Tests that _precompile_kv_swap_operations runs without errors and
         modifies the cache content.
         """
-        connector = self._create_connector(swap_op_type,
-                                           use_precompiled_swap_ops=True)
+        connector = self._create_connector(use_precompiled_swap_ops=True)
 
         worker = connector.connector_worker
 
@@ -292,7 +286,6 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         is_final_save: bool = False,
         skip_save: bool = False,
         use_precompiled_swap_ops: bool = False,
-        swap_op_type: str = "jax",
     ):
         total_num_blocks_to_save = num_blocks_to_save * num_requests
         if total_num_blocks_to_save > self.num_blocks or total_num_blocks_to_save > self.num_cpu_chunks:
@@ -341,14 +334,12 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
                     f"num_requests={num_requests}, "
                     f"is_final_save={is_final_save}, "
                     f"skip_save={skip_save}, "
-                    f"use_precompiled_swap_ops={use_precompiled_swap_ops}, "
-                    f"swap_op_type={swap_op_type};")
+                    f"use_precompiled_swap_ops={use_precompiled_swap_ops};")
 
         connector_metadata = TPUOffloadConnectorMetadata(
             requests_meta=requests_meta)
 
-        connector = self._create_connector(swap_op_type,
-                                           use_precompiled_swap_ops)
+        connector = self._create_connector(use_precompiled_swap_ops)
         worker = connector.connector_worker
         connector.bind_connector_metadata(connector_metadata)
         logger.info(
@@ -393,21 +384,8 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
                     np_cpu_kv_chunk = np.squeeze(np_cpu_kv_chunk, axis=0)
                 for layer_idx in range(self.num_layers):
                     tpu_kv_block = kv_caches[layer_idx][tpu_block_id]
-                    if swap_op_type != "jax_copy":
-                        self.assertArraysEqual(np.array(tpu_kv_block),
-                                               np_cpu_kv_chunk[layer_idx])
-                    else:
-                        cpu_shards_for_layer = cpu_kv_chunk[layer_idx]
-                        tpu_shards_for_layer = tpu_kv_block.addressable_shards
-                        self.assertEqual(
-                            len(cpu_shards_for_layer),
-                            len(tpu_shards_for_layer),
-                        )
-                        for cpu_shard, tpu_shard in zip(
-                                cpu_shards_for_layer, tpu_shards_for_layer):
-                            # cpu_shard is using SingleDeviceSharding
-                            self.assertArraysEqual(np.array(cpu_shard),
-                                                   np.array(tpu_shard.data))
+                    self.assertArraysEqual(np.array(tpu_kv_block),
+                                           np_cpu_kv_chunk[layer_idx])
         logger.info("Saved data verification completed.")
 
     @parameterized.named_parameters(
@@ -426,21 +404,18 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
             num_blocks_to_operate=5,
             num_requests=1,
             use_precompiled_swap_ops=True,
-            swap_op_type="jax",
         ),
         dict(
             testcase_name="_multi_requests_single_block_compile_jax",
             num_blocks_to_operate=1,
             num_requests=6,
             use_precompiled_swap_ops=True,
-            swap_op_type="jax",
         ),
         dict(
             testcase_name="_multi_requests_multi_blocks_compile_jax",
             num_blocks_to_operate=16,
             num_requests=6,
             use_precompiled_swap_ops=True,
-            swap_op_type="jax",
         ),
     )
     def test_tpu_connector_load(
@@ -448,7 +423,6 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         num_blocks_to_operate: int,
         num_requests: int = 1,
         use_precompiled_swap_ops: bool = False,
-        swap_op_type: str = "jax",
     ):
         """
         This test simulates a scenario where some amount of blocks get
@@ -467,8 +441,7 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
                 f"num_blocks_to_save {total_num_blocks_to_operate} exceeds ModelRunner / OffloadConnectorWorker's capacity"
             )
         # 1. Setup
-        connector = self._create_connector(swap_op_type,
-                                           use_precompiled_swap_ops)
+        connector = self._create_connector(use_precompiled_swap_ops)
         worker = connector.connector_worker
         # Ground truth cache. We copy it to host early because the save
         # operation will donate via stack_kv_cache_cross_layers.
@@ -596,7 +569,7 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         modifies the same memory.
         """
         # 1. Setup
-        connector = self._create_connector(swap_op_type="jax")
+        connector = self._create_connector()
         worker = connector.connector_worker
         block_to_save = 0
         dst_chunk = 7

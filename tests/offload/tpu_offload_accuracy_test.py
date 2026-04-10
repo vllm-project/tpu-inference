@@ -56,7 +56,6 @@ def _test_kv_cache_cpu_offloading_accuracy(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     kv_transfer_config: KVTransferConfig,
-    swap_op_type: str,
     skip_precompile: str,
     decode_save: str,
     batched_save: str,
@@ -66,7 +65,6 @@ def _test_kv_cache_cpu_offloading_accuracy(
     num_requests = len(prompts)
     with monkeypatch.context():
         os.environ['SKIP_JAX_PRECOMPILE'] = '0'
-        os.environ['TPU_OFFLOAD_SWAP_OP_TYPE'] = swap_op_type
         os.environ['TPU_OFFLOAD_SKIP_JAX_PRECOMPILE'] = skip_precompile
         os.environ['TPU_OFFLOAD_DECODE_SAVE'] = decode_save
         os.environ['TPU_OFFLOAD_BATCHED_SAVE'] = batched_save
@@ -132,18 +130,16 @@ def test_kv_cache_cpu_offloading_accuracy_smaller_then_cpu_ram(
     sampling_config: SamplingParams,
     kv_transfer_config: KVTransferConfig,
 ):
-    swap_op_types = ["jax"]
     decode_saves = ["0"]
     skip_precompile = ["0", "1"]
     batched_saves = ["0"]
     prompts = [read_prompt_from_file("small_prompt.txt")]
-    for swap_op_type, decode_save, _skip_precompile, batched_save in itertools.product(
-            swap_op_types, decode_saves, skip_precompile, batched_saves):
+    for decode_save, _skip_precompile, batched_save in itertools.product(
+            decode_saves, skip_precompile, batched_saves):
         _test_kv_cache_cpu_offloading_accuracy(
             monkeypatch,
             sampling_config,
             kv_transfer_config,
-            swap_op_type,
             _skip_precompile,
             decode_save,
             batched_save,
@@ -167,18 +163,16 @@ def test_kv_cache_cpu_offloading_accuracy_larger_than_cpu_ram(
     sampling_config: SamplingParams,
     kv_transfer_config: KVTransferConfig,
 ):
-    swap_op_types = ["jax"]
     decode_saves = ["0"]
     skip_precompile = ["0", "1"]
     batched_saves = ["0"]
     prompts = [read_prompt_from_file("large_prompt.txt")]
-    for swap_op_type, decode_save, _skip_precompile, batched_save in itertools.product(
-            swap_op_types, decode_saves, skip_precompile, batched_saves):
+    for decode_save, _skip_precompile, batched_save in itertools.product(
+            decode_saves, skip_precompile, batched_saves):
         _test_kv_cache_cpu_offloading_accuracy(
             monkeypatch,
             sampling_config,
             kv_transfer_config,
-            swap_op_type,
             _skip_precompile,
             decode_save,
             batched_save,
