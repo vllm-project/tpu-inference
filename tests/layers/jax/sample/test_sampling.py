@@ -33,6 +33,7 @@ class TestSampling:
         logits = jnp.array([[1.0, 2.0, 3.0], [3.0, 2.0, 1.0]],
                            dtype=jnp.float32)
         logprobs = compute_logprobs(logits)
+        
 
         # Expected values computed with scipy.special.log_softmax
         expected_logprobs = np.array(

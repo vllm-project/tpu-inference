@@ -963,7 +963,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 sampling_metadata=tpu_sampling_metadata,
                 key=rejection_rng,
             )
-
         with self.maybe_forbid_compile:
             if tpu_sampling_metadata.logprobs:
                 logits = processed_logits if self.model_config.logprobs_mode == "processed_logprobs" else logits
