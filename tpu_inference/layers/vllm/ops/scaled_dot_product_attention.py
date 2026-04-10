@@ -141,8 +141,6 @@ def vllm_vit_sdpa(
     else:
         seg_ids = None
 
-    from tpu_inference.layers.common.attention_interface import \
-        sharded_flash_attention
     attn_fn = sharded_flash_attention(
         mesh,
         causal=False,
