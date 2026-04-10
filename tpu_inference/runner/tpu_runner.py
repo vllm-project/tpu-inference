@@ -586,29 +586,29 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         disable_mm_from_limits = False
         if self.model_config.is_multimodal_model:
             mm_limits = self.model_config.multimodal_config.limit_per_prompt
+            
             image_limit = mm_limits.get("image")
             video_limit = mm_limits.get("video")
-            image_count = image_limit.count if image_limit else 0
-            video_count = video_limit.count if video_limit else 0
-            disable_mm_from_limits = image_count == 0 and video_count == 0
+            
+            # We only disable multi-modality if the user EXPLICITLY provided limits
+            # AND both of those limits are set to 0.
+            # If a limit is not specified (None), we assume it is not limiting to 0.
+            if image_limit is not None or video_limit is not None:
+                image_count = image_limit.count if image_limit is not None else 1
+                video_count = video_limit.count if video_limit is not None else 1
+                
+                disable_mm_from_limits = image_count == 0 and video_count == 0
 
             if disable_mm_from_limits:
                 logger.info(
                     "Disabling multi-modality for model because limits are set to 0."
                 )
 
-        logger.info(
-            f"DEBUG is_multimodal_model check: "
-            f"is_multimodal_model={self.model_config.is_multimodal_model}, "
-            f"embed_multimodal_fn is not None={self.embed_multimodal_fn is not None}, "
-            f"has_architectures={hasattr(self.model_config.hf_config, 'architectures')}, "
-            f"disable_mm_from_limits={disable_mm_from_limits}"
-        )
-
         self.is_multimodal_model = (self.model_config.is_multimodal_model
                                     and self.embed_multimodal_fn is not None
                                     and hasattr(self.model_config.hf_config,
-                                                "architectures"))
+                                                "architectures")
+                                    and not disable_mm_from_limits)
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
