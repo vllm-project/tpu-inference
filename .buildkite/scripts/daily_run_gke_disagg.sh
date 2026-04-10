@@ -148,10 +148,10 @@ echo "------------------------------------------------"
 PROXY_POD=$(kubectl get pods -l "$PROXY_LABEL" -o jsonpath="{.items[0].metadata.name}")
 
 # Run input=1024, output=8192
-run_disagg_benchmark $PROXY_POD $MODEL 1024 8192 10
+run_disagg_benchmark $PROXY_POD $MODEL 1024 8192 256
 
 # Run input=8192, output=1024
-run_disagg_benchmark $PROXY_POD $MODEL 8192 1024 10
+run_disagg_benchmark $PROXY_POD $MODEL 8192 1024 256
 
 # Benchmark results should be saved in local files 1024_8192.json and
 # 8192_1024.json.
