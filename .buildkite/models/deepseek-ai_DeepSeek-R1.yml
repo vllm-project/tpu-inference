@@ -19,7 +19,7 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-R1_UnitTest"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"  # TODO: replace with execution environment
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
         if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then

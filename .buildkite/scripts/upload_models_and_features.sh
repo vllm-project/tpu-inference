@@ -21,25 +21,25 @@ MODEL_LIST_KEY="model-list"
 FEATURE_LIST_KEY="feature-list"
 
 declare -a TARGET_FOLDERS=(
-    # "quantization"
-    # "parallelism"
+    "quantization"
+    "parallelism"
     "models"
-    # "features"
-    # "rl"
+    "features"
+    "rl"
 )
 
 
 # Use find to append the kernel_microbenchmarks subdirectories
-# KERNEL_PARENT_DIR=".buildkite/kernel_microbenchmarks"
+KERNEL_PARENT_DIR=".buildkite/kernel_microbenchmarks"
 
-# if [[ -d "$KERNEL_PARENT_DIR" ]]; then
-#     while IFS= read -r dir; do
-#         folder_path_to_add="${dir#"${BUILDKITE_DIR}"/}"
-#         TARGET_FOLDERS+=("$folder_path_to_add")
-#     done < <(find "$KERNEL_PARENT_DIR" -maxdepth 1 -mindepth 1 -type d)
-# else
-#     echo "Warning: Kernel microbenchmarks directory '$KERNEL_PARENT_DIR' not found. Skipping dynamic folder discovery."
-# fi
+if [[ -d "$KERNEL_PARENT_DIR" ]]; then
+    while IFS= read -r dir; do
+        folder_path_to_add="${dir#"${BUILDKITE_DIR}"/}"
+        TARGET_FOLDERS+=("$folder_path_to_add")
+    done < <(find "$KERNEL_PARENT_DIR" -maxdepth 1 -mindepth 1 -type d)
+else
+    echo "Warning: Kernel microbenchmarks directory '$KERNEL_PARENT_DIR' not found. Skipping dynamic folder discovery."
+fi
 
 # Arrays to store YAML content fragments (without 'steps:' header)
 pipeline_v6e_fragments=()
