@@ -5,7 +5,6 @@
     "GCS_BUCKET": "vllm-cb-storage2",
     "GCP_INSTANCE_ID": "vllm-bm-inst",
     "GCP_DATABASE_ID": "vllm-bm-bk-runs",
-    "VLLM_USE_V1": "1",
     "MODELTAG": "NEW",
     "EXPECTED_ETEL": 3600000,
     "INPUT_LEN": 4096,

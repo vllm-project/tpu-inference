@@ -13,8 +13,6 @@
         "tpu_v6e_queue"
       ],
       "env": {
-        "VLLM_USE_V1": "1",
-        "MODEL_IMPL_TYPE": "vllm",
         "MODELTAG": "NEW",
         "EXPECTED_ETEL": 3600000,
         "INPUT_LEN": 4096,
@@ -70,8 +68,6 @@
         "tpu_v7x_2_queue"
       ],
       "env": {
-        "VLLM_USE_V1": "1",
-        "MODEL_IMPL_TYPE": "vllm",
         "MODELTAG": "NEW",
         "EXPECTED_ETEL": 3600000,
         "INPUT_LEN": 4096,
