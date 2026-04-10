@@ -139,7 +139,7 @@ class TestProcessedLogprobs:
                                  temperature,
                                  dtype=jnp.float32),
             top_k=jnp.full((batch_size, ), top_k, dtype=jnp.int32),
-            top_p=jnp.full((batch_size, ), top_p, dtype=jnp.bfloat16),
+            top_p=jnp.full((batch_size, ), top_p, dtype=jnp.bfloat),
             _cache_collision_dummy=None,
             do_sampling=do_sampling,
             logprobs=True,
