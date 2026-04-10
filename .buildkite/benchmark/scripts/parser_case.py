@@ -13,7 +13,6 @@
 # limitations under the License.
 # yapf: disable
 import json
-import os
 import shlex
 import sys
 
@@ -144,6 +143,9 @@ def main():
     else:
         case_data = data
         merged_env = case_data.get("env", {})
+
+    config_json_str = json.dumps(case_data)
+    print(f"export CASE_CONFIG_JSON={shlex.quote(config_json_str)}")
 
     # Export environment variables securely
     for k, v in merged_env.items():

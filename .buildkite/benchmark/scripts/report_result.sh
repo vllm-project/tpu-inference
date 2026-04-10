@@ -183,6 +183,7 @@ if [[ -n "${GCP_DATABASE_ID:-}" && -n "${GCP_PROJECT_ID:-}" && -n "${GCP_INSTANC
   SQL_CODE_HASH=$(prepare_sql_val "${CODE_HASH:-}" "")
   SQL_DATASET=$(prepare_sql_val "${DATASET:-}" "")
   SQL_MODELTAG=$(prepare_sql_val "${MODELTAG:-PROD}" "PROD")
+  SQL_CONFIG=$(prepare_sql_val "${CASE_CONFIG_JSON:-}" "{}")
 
   # Construct the atomic Upsert (Insert or Update) SQL statement
   SQL="INSERT INTO RunRecord (
@@ -191,19 +192,20 @@ if [[ -n "${GCP_DATABASE_ID:-}" && -n "${GCP_PROJECT_ID:-}" && -n "${GCP_INSTANC
       MaxNumSeqs, MaxNumBatchedTokens, TensorParallelSize, MaxModelLen,
       Dataset, InputLen, OutputLen,
       ExpectedETEL, NumPrompts, ModelTag, PrefixLen,
-      ExtraEnvs, AdditionalConfig, ExtraArgs, TryCount $insert_cols
+      ExtraEnvs, AdditionalConfig, ExtraArgs, TryCount, Config $insert_cols
     ) VALUES (
       $SQL_RECORD_ID, $SQL_STATUS, PENDING_COMMIT_TIMESTAMP(), PENDING_COMMIT_TIMESTAMP(), $SQL_USER, $SQL_JOB_REFERENCE, $SQL_AGENT_NAME,
       $SQL_DEVICE, $SQL_MODEL, $SQL_RUN_TYPE, $SQL_CODE_HASH,
       ${MAX_NUM_SEQS:-NULL}, ${MAX_NUM_BATCHED_TOKENS:-NULL}, ${TENSOR_PARALLEL_SIZE:-NULL}, ${MAX_MODEL_LEN:-NULL},
       $SQL_DATASET, ${INPUT_LEN:-NULL}, ${OUTPUT_LEN:-NULL},
       ${EXPECTED_ETEL:-3600000}, ${NUM_PROMPTS:-1000}, $SQL_MODELTAG, ${PREFIX_LEN:-0},
-      $SQL_EXTRA_ENVS, $SQL_ADDITIONAL_CONFIG, $SQL_EXTRA_ARGS, 1 $insert_vals
+      $SQL_EXTRA_ENVS, $SQL_ADDITIONAL_CONFIG, $SQL_EXTRA_ARGS, 1, JSON $SQL_CONFIG $insert_vals
     ) ON CONFLICT (RecordId) DO UPDATE SET
       Status = excluded.Status,
       LastUpdate = excluded.LastUpdate,
       RunBy = excluded.RunBy,
-      TryCount = RunRecord.TryCount + 1
+      TryCount = RunRecord.TryCount + 1,
+      Config = excluded.Config
       $update_metrics;"
 
   echo "Executing Atomic Upsert SQL:"
