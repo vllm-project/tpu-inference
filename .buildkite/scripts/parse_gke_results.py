@@ -1,13 +1,14 @@
 import json
-import sys
 import os
+import sys
 from datetime import datetime
+
 
 def fmt(val, is_str=False):
     """Helper to safely format python values to SQL values"""
-    if val is None or val == 'NULL': 
+    if val is None or val == 'NULL':
         return 'NULL'
-    if is_str: 
+    if is_str:
         return f"'{val}'"
     return str(val)
 
@@ -25,7 +26,9 @@ def parse_and_dump(file_path, record_id):
         input_len = int(input_len_str)
         output_len = int(output_len_str)
     except ValueError:
-        print(f"Warning: Could not parse input/output len from filename: {base_name}. Using NULL.", file=sys.stderr)
+	print(
+            f"Warning: Could not parse input/output len from filename: {base_name}. Using NULL.",
+            file=sys.stderr)
         input_len = 'NULL'
         output_len = 'NULL'
 
@@ -36,11 +39,11 @@ def parse_and_dump(file_path, record_id):
             try:
                 data = json.loads(line)
             except json.JSONDecodeError:
-                print(f"Error: Could not decode JSON from line: {line}", file=sys.stderr)
+		print(f"Error: Could not decode JSON from line: {line}",
+                      file=sys.stderr)
                 continue
 
             rate = data.get('request_rate')
-            
             # Parse date from JSON
             # Example: "20260402-195133" -> "2026-04-02T19:51:33Z"
             date_str = data.get('date')
@@ -77,12 +80,13 @@ def parse_and_dump(file_path, record_id):
                 {fmt(data.get('mean_itl_ms'))}, {fmt(data.get('median_itl_ms'))}, {fmt(data.get('std_itl_ms'))}, {fmt(data.get('p90_itl_ms'))}, {fmt(data.get('p99_itl_ms'))}
             );
             """
-            
+
             # Print as a single line for bash processing
             print(" ".join(sql.split()))
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Usage: python parse_gke_results.py <file_path> <record_id>", file=sys.stderr)
+	print("Usage: python parse_gke_results.py <file_path> <record_id>",
+              file=sys.stderr)
         sys.exit(1)
     parse_and_dump(sys.argv[1], sys.argv[2])
