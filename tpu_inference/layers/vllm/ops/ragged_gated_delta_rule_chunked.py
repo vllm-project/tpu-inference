@@ -17,6 +17,8 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 
+import tpu_inference.kernels.gdn.triangle_solver as triangle_solver
+
 
 def l2norm(x: jnp.ndarray, dim: int = -1, eps: float = 1e-6) -> jnp.ndarray:
     """Normalizes x along the specified dimension using L2 norm.
@@ -42,6 +44,7 @@ def pack_inputs_single_stream(
     beta: jnp.ndarray,
     query_start_loc: jnp.ndarray,
     chunk_size: int,
+    compute_dtype: jnp.dtype = jnp.bfloat16,
 ) -> tuple[
         jnp.ndarray,
         jnp.ndarray,
@@ -88,6 +91,7 @@ def pack_inputs_single_stream(
       beta: Beta tensor.
       query_start_loc: Start locations of each sequence in original stream.
       chunk_size: Chunk size for padding.
+      compute_dtype: Dtype for computation (Q, K, V, beta).
 
     Returns:
       A tuple containing:
@@ -116,31 +120,46 @@ def pack_inputs_single_stream(
     # For each token index, searchsorted finds the insertion point in query_start_loc
     # where the token would go to maintain order (using side="right").
     # Subtracting 1 gives the index of the sequence the token actually belongs to.
-    seq_id = (jnp.searchsorted(
-        query_start_loc, jnp.arange(num_tokens), side="right") - 1)
+    seq_id = jnp.searchsorted(
+        query_start_loc, jnp.arange(num_tokens), side="right") - 1
     original_start = query_start_loc[seq_id]
     new_start = new_query_start_loc[seq_id]
     padded_indices_valid = new_start + (jnp.arange(num_tokens) -
                                         original_start)
 
     max_packed_tokens = num_tokens + num_seqs * chunk_size
-    max_packed_tokens = ((max_packed_tokens + chunk_size - 1) // chunk_size *
-                         chunk_size)
+    max_packed_tokens = (max_packed_tokens + chunk_size -
+                         1) // chunk_size * chunk_size
 
-    def pad_and_concatenate(unpadded_data, fill_value=0.0):
-        """Pads unpadded_data to max_packed_tokens and places valid data at computed indices."""
-        output_shape = (max_packed_tokens, ) + unpadded_data.shape[1:]
-        packed_data = jnp.full(output_shape,
-                               fill_value,
-                               dtype=unpadded_data.dtype)
-        packed_data = packed_data.at[padded_indices_valid].set(unpadded_data)
-        return packed_data
+    # Concatenate by dtype to reduce scatter operations
+    beta_expanded = beta[..., None]
 
-    packed_query = pad_and_concatenate(query)
-    packed_key = pad_and_concatenate(key)
-    packed_value = pad_and_concatenate(value)
-    packed_g = pad_and_concatenate(g)
-    packed_beta = pad_and_concatenate(beta)
+    combined_qkvb = jnp.concatenate(
+        [
+            query.astype(compute_dtype),
+            key.astype(compute_dtype),
+            value.astype(compute_dtype),
+            beta_expanded.astype(compute_dtype),
+        ],
+        axis=-1,
+    )
+
+    output_shape = (max_packed_tokens, ) + combined_qkvb.shape[1:]
+    packed_combined_qkvb = jnp.zeros(output_shape, dtype=compute_dtype)
+    packed_combined_qkvb = packed_combined_qkvb.at[padded_indices_valid].set(
+        combined_qkvb)
+
+    K_dim = query.shape[2]
+    V_dim = value.shape[2]
+    packed_query = packed_combined_qkvb[..., :K_dim]
+    packed_key = packed_combined_qkvb[..., K_dim:2 * K_dim]
+    packed_value = packed_combined_qkvb[..., 2 * K_dim:2 * K_dim + V_dim]
+    packed_beta = packed_combined_qkvb[..., 2 * K_dim + V_dim]
+
+    # For g (float32)
+    output_shape_f32 = (max_packed_tokens, ) + g.shape[1:]
+    packed_g = jnp.zeros(output_shape_f32, dtype=jnp.float32)
+    packed_g = packed_g.at[padded_indices_valid].set(g.astype(jnp.float32))
 
     num_chunks_total = max_packed_tokens // chunk_size
     reset_mask = jnp.zeros((num_chunks_total, ), dtype=bool)
@@ -229,18 +248,12 @@ def ragged_gated_delta_rule_mixed_prefill(
         beta,
         query_start_loc,
         chunk_size,
+        compute_dtype=compute_dtype,
     )
 
     if use_qk_norm_in_gdn:
         packed_query = l2norm(packed_query, dim=-1, eps=1e-6)
         packed_key = l2norm(packed_key, dim=-1, eps=1e-6)
-
-    packed_g = packed_g.astype(jnp.float32)
-
-    packed_query = packed_query.astype(compute_dtype)
-    packed_key = packed_key.astype(compute_dtype)
-    packed_value = packed_value.astype(compute_dtype)
-    packed_beta = packed_beta.astype(compute_dtype)
 
     scale = jax.lax.rsqrt(jnp.array(packed_query.shape[-1],
                                     dtype=jnp.float32)).astype(compute_dtype)
@@ -285,12 +298,8 @@ def ragged_gated_delta_rule_mixed_prefill(
 
     identity = jnp.eye(chunk_size, dtype=jnp.float32)
 
-    identity_broadcasted = jnp.broadcast_to(identity, S.shape)
-
-    A = jax.scipy.linalg.solve_triangular(identity + S,
-                                          identity_broadcasted,
-                                          lower=True,
-                                          unit_diagonal=True)
+    A = triangle_solver.decompose_triangular_matrix_inverse_pallas(identity +
+                                                                   S)
 
     v_beta = v_c * beta_c[..., None]
     u_chunks = jnp.matmul(
@@ -428,35 +437,32 @@ def recurrent_gated_delta_rule_step(
     state: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Single-step recurrent update for decode."""
-    B, H, T, d_k = query.shape
+    B, H, d_k = query.shape
     d_v = value.shape[-1]
 
     if state is None:
         state = jnp.zeros((B, H, d_k, d_v), dtype=query.dtype)
 
-    q = query[:, :, 0]
-    k = key[:, :, 0]
-    v = value[:, :, 0]
-    beta_val = beta[:, :, 0]
-    g_val = g[:, :, 0]
-
     scale = d_k**-0.5
-    q = q * scale
+    query = query * scale
 
-    k_state = jnp.einsum("bhd, bhdm -> bhm", k, state)
-    v_diff = v - jnp.exp(g_val)[..., None] * k_state
+    exp_g = jnp.exp(g)
 
-    v_new = beta_val[..., None] * v_diff
+    k_state = jnp.einsum("bhd, bhdm -> bhm", key, state)
+    v_diff = value - exp_g[..., None] * k_state
 
-    q_state = jnp.einsum("bhd, bhdm -> bhm", q, state)
-    q_k = jnp.sum(q * k, axis=-1, keepdims=True)
+    v_new = beta[..., None] * v_diff
 
-    out = jnp.exp(g_val)[..., None] * q_state + q_k * v_new
+    q_state = jnp.einsum("bhd, bhdm -> bhm", query, state)
+    q_k = jnp.sum(query * key, axis=-1, keepdims=True)
 
-    k_v_new = jnp.einsum("bhd, bhm -> bhdm", k, v_new)
-    new_state = state * jnp.exp(g_val)[..., None, None] + k_v_new
+    out = exp_g[..., None] * q_state + q_k * v_new
 
-    return out[:, :, None, :], new_state
+    # Outer product using broadcasting
+    k_v_new = key[..., :, None] * v_new[..., None, :]
+    new_state = state * exp_g[..., None, None] + k_v_new
+
+    return out, new_state
 
 
 def ragged_gated_delta_rule_decode_only(
@@ -496,8 +502,7 @@ def ragged_gated_delta_rule_decode_only(
     max_reqs = recurrent_state.shape[0]
 
     token_idx = jnp.arange(num_tokens)
-    req_indices = (
-        jnp.sum(token_idx[:, None] >= query_start_loc[None, :], axis=1) - 1)
+    req_indices = token_idx
     req_indices = jnp.clip(req_indices, 0, max_reqs - 1)
     valid_mask = token_idx < query_start_loc[-1]
 
@@ -509,42 +514,35 @@ def ragged_gated_delta_rule_decode_only(
         query = l2norm(query)
         key = l2norm(key)
 
-    def scan_fn(carry, xs):
-        recurrent_state_all = carry
-        curr_q, curr_k, curr_v, curr_g, curr_beta, req_idx, is_valid = xs
+    req_state_indices = state_indices[req_indices]
+    curr_states = recurrent_state[req_state_indices]
 
-        curr_q = curr_q[None, :, None, :]
-        curr_k = curr_k[None, :, None, :]
-        curr_v = curr_v[None, :, None, :]
-        curr_g = curr_g[None, :, None]
-        curr_beta = curr_beta[None, :, None]
+    outputs, new_states = recurrent_gated_delta_rule_step(
+        query,
+        key,
+        value,
+        g,
+        beta,
+        state=curr_states,
+    )
 
-        state_idx = state_indices[req_idx]
-        state = recurrent_state_all[state_idx][None, ...]
+    outputs = outputs.reshape(num_tokens, -1)
 
-        output, new_state = recurrent_gated_delta_rule_step(curr_q,
-                                                            curr_k,
-                                                            curr_v,
-                                                            curr_g,
-                                                            curr_beta,
-                                                            state=state)
+    dummy_idx = max_reqs
+    recurrent_state_padded = jnp.pad(
+        recurrent_state,
+        ((0, 1), (0, 0), (0, 0), (0, 0)),
+        mode="constant",
+        constant_values=0,
+    )
 
-        output = output.reshape(1, -1)  # (1, H * d_v)
+    safe_indices = jnp.where(valid_mask, req_state_indices, dummy_idx)
+    updated_recurrent_state_padded = recurrent_state_padded.at[
+        safe_indices].set(new_states.astype(recurrent_state.dtype))
 
-        recurrent_state_all = jnp.where(
-            is_valid,
-            recurrent_state_all.at[state_idx].set(new_state[0].astype(
-                recurrent_state_all.dtype)),
-            recurrent_state_all,
-        )
+    new_recurrent_state = updated_recurrent_state_padded[:max_reqs]
 
-        return recurrent_state_all, output[0]
-
-    carry_init = recurrent_state
-    xs = (query, key, value, g, beta, req_indices, valid_mask)
-
-    new_recurrent_state, output = jax.lax.scan(scan_fn, carry_init, xs)
-    return new_recurrent_state, output
+    return new_recurrent_state, outputs
 
 
 def ragged_gated_delta_rule(
@@ -556,6 +554,8 @@ def ragged_gated_delta_rule(
     dt_bias: jnp.ndarray,
     query_start_loc: jnp.ndarray,
     state_indices: jnp.ndarray,
+    distribution: jnp.ndarray,
+    *,
     n_kq: int,
     n_v: int,
     d_k: int,
@@ -578,6 +578,7 @@ def ragged_gated_delta_rule(
       dt_bias: dt_bias tensor.
       query_start_loc: Start locations of sequences.
       state_indices: Indices mapping sequences to recurrent state slots.
+      distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end, mixed_end)`.
       n_kq: Number of key/query heads.
       n_v: Number of value heads.
       d_k: Key/query dimension.
@@ -639,11 +640,11 @@ def ragged_gated_delta_rule(
             use_qk_norm_in_gdn=use_qk_norm_in_gdn,
         )
 
-    # Decode-only is that all sequence lengths are 1
-    sequence_lengths = query_start_loc[1:] - query_start_loc[:-1]
-    is_all_seqlen_1 = jnp.all(sequence_lengths <= 1)
+    # distribution[0] is decode_end, distribution[2] is mixed_end.
+    # If decode_end == mixed_end, all sequences are decode requests.
+    is_decode_only = distribution[0] == distribution[2]
 
-    return jax.lax.cond(is_all_seqlen_1,
+    return jax.lax.cond(is_decode_only,
                         decode_only_branch,
                         mixed_prefill_branch,
                         operand=None)

@@ -73,6 +73,7 @@ export USE_UNFUSED_MEGABLOCKS_ENV=""
 export HF_CONFIG=""
 export USE_VLLM_LKG="true"
 export FORCE_MOE_RANDOM_ROUTING_ENV=""
+export LOAD_FORMAT=""
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -107,6 +108,7 @@ while [[ $# -gt 0 ]]; do
     --use-unfused-megablocks) export USE_UNFUSED_MEGABLOCKS_ENV="USE_UNFUSED_MEGABLOCKS=$2"; shift 2 ;;
     --hf-config) export HF_CONFIG="$2"; shift 2 ;;
     --force-moe-random-routing) export FORCE_MOE_RANDOM_ROUTING_ENV="FORCE_MOE_RANDOM_ROUTING=$2"; shift 2 ;;
+    --load-format) export LOAD_FORMAT="$2"; shift 2 ;;
     *) echo "Unknown parameter passed: $1"; exit 1 ;;
   esac
 done
@@ -131,6 +133,10 @@ fi
 
 if [[ -n "${HF_CONFIG}" ]]; then
   EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS} --hf-config=${HF_CONFIG}"
+fi
+
+if [[ -n "${LOAD_FORMAT}" ]]; then
+  EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS} --load-format=${LOAD_FORMAT}"
 fi
 
 # Define the commands utilizing the unified parameters
@@ -159,7 +165,6 @@ vllm serve \
   --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION} \
   ${ENABLE_EXPERT_PARALLEL} \
   ${ADDITIONAL_CONFIG} \
-  --load-format=runai_streamer \
   --trust-remote-code"
 
 BENCHMARK_CMD="vllm bench serve \

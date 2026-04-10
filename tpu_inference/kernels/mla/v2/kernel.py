@@ -23,8 +23,6 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
-
 
 def cdiv_on_kv_packing(a, kv_packing):
     assert kv_packing == 1 or kv_packing == 2 or kv_packing == 4
@@ -112,7 +110,7 @@ def static_validate_inputs(
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
-    mask_value: float | None = DEFAULT_MASK_VALUE,
+    mask_value: float | None = None,
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
@@ -272,9 +270,10 @@ def _mla_ragged_paged_attention_kernel(
     *,
     static_q_len: int,
     sm_scale: float,
+    mask_value: float,
+    s_dtype: jnp.dtype,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
-    mask_value: float = DEFAULT_MASK_VALUE,
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
@@ -394,6 +393,8 @@ def _mla_ragged_paged_attention_kernel(
 
         if soft_cap is not None:
             s = soft_cap * jnp.tanh(s / soft_cap)
+        s = s.astype(s_dtype)
+
         s = jnp.where(mask, mask_value, s)
         s_rowmax = jnp.max(s, axis=2, keepdims=True)
         m_prev = load_with_init(head_m_ref, -jnp.inf)
@@ -1368,6 +1369,7 @@ def prepare_outputs(
         "num_queries_per_block",
         "vmem_limit_bytes",
         "decode_batch_size",
+        "s_dtype",
         "debug_mode",
     ),
     donate_argnames=("cache_kv", ),
@@ -1387,7 +1389,7 @@ def mla_ragged_paged_attention(
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
-    mask_value: float | None = DEFAULT_MASK_VALUE,
+    mask_value: float | None = None,
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
@@ -1399,6 +1401,7 @@ def mla_ragged_paged_attention(
     num_queries_per_block: tuple[int, int, int] | int | None = None,
     vmem_limit_bytes: int | None = None,
     decode_batch_size: int = 1,
+    s_dtype: jnp.dtype = jnp.bfloat16,
     # Debug params.
     debug_mode: bool = False,
 ) -> tuple[
@@ -1435,12 +1438,17 @@ def mla_ragged_paged_attention(
       attention block in the pallas kernel. This is a tuple of (decode, prefill,
       mixed) cases.
     vmem_limit_bytes: the vmem limit for the pallas kernel.
+    decode_batch_size: the batch size for the decode case.
+    s_dtype: the dtype for q.k dot product.
     debug_mode: if true, RPA does not issue any DMAs or run flash attention but
       print debug info. Need to compile with `--xla_tpu_enable_log_recorder`.
 
   Returns:
     The output of attention and the updated kv cache.
   """
+    if mask_value is None:
+        mask_value = jnp.finfo(s_dtype).min
+
     if num_kv_pages_per_block is None or num_queries_per_block is None:
         raise ValueError(
             "num_kv_pages_per_block and num_queries_per_block must be specified."
@@ -1521,6 +1529,7 @@ def mla_ragged_paged_attention(
         static_q_len: int | None,
         num_kv_pages_per_block: int,
         num_queries_per_block: int,
+        s_dtype: jnp.dtype,
         batch_size: int = 1,
         case: MlaCase = MlaCase.MIXED,
     ):
@@ -1640,6 +1649,7 @@ def mla_ragged_paged_attention(
                     bq_sz=bq_sz,
                     bkv_p=bkv_p,
                     batch_size=batch_size,
+                    s_dtype=s_dtype,
                     debug_mode=debug_mode,
                 ),
                 grid_spec=pltpu.PrefetchScalarGridSpec(
@@ -1693,6 +1703,7 @@ def mla_ragged_paged_attention(
         end_seq_idx=batch_distribution,
         static_q_len=1,
         batch_size=decode_batch_size,
+        s_dtype=s_dtype,
         case=MlaCase.BATCHED_DECODE,
     )
 
@@ -1712,6 +1723,7 @@ def mla_ragged_paged_attention(
         end_seq_idx=distribution[0],
         static_q_len=1,
         batch_size=1,
+        s_dtype=s_dtype,
         case=MlaCase.DECODE,
     )
     # TODO: evaluate if chunk-prefill-only branch is needed
@@ -1731,6 +1743,8 @@ def mla_ragged_paged_attention(
         start_seq_idx=distribution[1],
         end_seq_idx=distribution[2],
         static_q_len=None,
+        batch_size=1,
+        s_dtype=s_dtype,
         case=MlaCase.MIXED,
     )
     output = prepare_outputs(
