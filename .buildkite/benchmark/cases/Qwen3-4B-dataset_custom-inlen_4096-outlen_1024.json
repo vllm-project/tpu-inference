@@ -17,6 +17,11 @@
   ],
   "server_command_options": {
     "command_type": "vllm_serve",
+    "env": {
+      "VLLM_USE_V1": "1",
+      "MODEL_IMPL_TYPE": "vllm",
+      "NEW_MODEL_DESIGN": "1"
+    },
     "args": {
       "model": "Qwen/Qwen3-4B",
       "seed": 42,
@@ -39,11 +44,6 @@
   },
   "client_command_options": {
     "command_type": "vllm_bench_serve",
-    "env": {
-      "VLLM_USE_V1": "1",
-      "MODEL_IMPL_TYPE": "vllm",
-      "NEW_MODEL_DESIGN": "1"
-    },
     "args": {
       "model": "Qwen/Qwen3-4B",
       "backend": "vllm",

@@ -176,6 +176,10 @@ def main():
     cli_env_parts = [f"{k}={v}" for k, v in cli_env.items()]
     quoted_cli_env = ' '.join(shlex.quote(p) for p in cli_env_parts)
     print(f"CLIENT_CMD_ENVS=({quoted_cli_env})")
+    srv_env = srv_opts.get("env", {})
+    srv_env_list = [f"{k}={v}" for k, v in srv_env.items()]
+    srv_env_str = ' '.join(shlex.quote(item) for item in srv_env_list)
+    print(f"SERVER_CMD_ENVS=({srv_env_str})")
 
     # TODO:
     # EXTRA_ENVS
