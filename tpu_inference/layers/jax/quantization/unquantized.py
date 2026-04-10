@@ -129,15 +129,6 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             w13_val = jnp.concatenate([w_gate, w_up], axis=1)
             del w_gate, w_up
 
-            # --- NEW DEBUG PRINTS: BEFORE JIT ---
-            print("\n[DEBUG] Before jax_common.process_unquantized_moe_weights:")
-            for name, w in [("w13_val", w13_val), ("w2_val", w2_val)]:
-                sharding_info = getattr(w, 'sharding', 'NO_SHARDING_INFO')
-                byte_size_mb = (w.nbytes / (1024 * 1024)) if hasattr(w, 'nbytes') else 'UNKNOWN'
-                print(f"  -> {name} | Shape: {w.shape} | Dtype: {w.dtype} | Size: {byte_size_mb} MB | Sharding: {sharding_info}")
-            print("-" * 50)
-            # ------------------------------------
-
             weights = jax_common.process_unquantized_moe_weights(
                 mesh=jax.sharding.get_mesh(),
                 moe_backend=layer.moe_backend,
@@ -148,23 +139,11 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
                 w2_bias=None,
             )
 
-            # --- NEW DEBUG PRINTS: AFTER JIT ---
-            print("\n[DEBUG] After jax_common.process_unquantized_moe_weights:")
-            # Use dataclass/NamedTuple attribute access depending on FusedMoEWeights implementation
-            for name, w in [("w13_weight", getattr(weights, 'w13_weight', None)), 
-                            ("w2_weight", getattr(weights, 'w2_weight', None))]:
-                if w is not None:
-                    sharding_info = getattr(w, 'sharding', 'NO_SHARDING_INFO')
-                    byte_size_mb = (w.nbytes / (1024 * 1024)) if hasattr(w, 'nbytes') else 'UNKNOWN'
-                    print(f"  -> {name} | Shape: {w.shape} | Dtype: {w.dtype} | Size: {byte_size_mb} MB | Sharding: {sharding_info}")
-            print("-" * 50 + "\n")
-            # -----------------------------------
-
             # TODO (jacobplatin): we probably want to make the sharding configurable
             # layer.kernel_gating_upproj_EDF = nnx.Param(weights.w13_weight)
             # layer.kernel_down_proj_EFD = nnx.Param(weights.w2_weight)
 
-            # --- MANUALLY CONSTRUCT PARTITION SPECS ---
+
             if layer.moe_backend == MoEBackend.GMM_EP:
                 # Expert Parallelism: Shard the Experts (0th dimension)
                 edf_spec = P('model', None, None)
@@ -176,14 +155,8 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
                 edf_spec = P(None, None, 'model')
                 efd_spec = P(None, 'model', None)
 
-            print(f"\n[DEBUG] Forcing Sharding Specs | w13: {edf_spec} | w2: {efd_spec}")
-
-            # Apply the explicit sharding
             sharded_w13 = shard_put(weights.w13_weight, shardings=edf_spec)
             sharded_w2 = shard_put(weights.w2_weight, shardings=efd_spec)
-            
-            print(f"[DEBUG] After shard_put | w13: {getattr(sharded_w13, 'sharding', 'UNKNOWN')}")
-            print("-" * 50 + "\n")
 
             layer.kernel_gating_upproj_EDF = nnx.Param(sharded_w13)
             layer.kernel_down_proj_EFD = nnx.Param(sharded_w2)
