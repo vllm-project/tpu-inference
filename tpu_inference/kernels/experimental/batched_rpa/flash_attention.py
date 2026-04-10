@@ -17,27 +17,7 @@ from jax import lax
 
 from tpu_inference.kernels.experimental.batched_rpa import \
     schedule as rpa_schedule
-
-_NUM_LANES = 128
-
-
-def cdiv(a, b):
-    return (a + b - 1) // b
-
-
-def align_to(a, b):
-    return cdiv(a, b) * b
-
-
-def broadcast_minor(src, shape):
-    if src.shape == shape:
-        return src
-    assert src.shape[:-1] == shape[:-1]
-    assert src.shape[-1] % 128 == 0
-    target_minor = align_to(shape[-1], src.shape[-1])
-    # no-op concatenation.
-    return jnp.concatenate([src for _ in range(target_minor // src.shape[-1])],
-                           axis=-1)[..., :shape[-1]]
+from tpu_inference.kernels.experimental.batched_rpa import utils
 
 
 def flash_attention(
@@ -72,7 +52,7 @@ def flash_attention(
         dimension_numbers=(([2], [2]), ([0], [0])),
         preferred_element_type=jnp.float32,
     )
-    qk = qk.reshape((b, k_heads, tq, s))
+    qk = qk.reshape((b, k_heads, tq, s)).astype(config.out_dtype)
 
     qk *= config.sm_scale
     if config.k_scale is not None:
@@ -83,26 +63,45 @@ def flash_attention(
     if config.soft_cap is not None:
         qk = config.soft_cap * jnp.tanh(qk / config.soft_cap)
 
-    qk_seq_masks: list[jnp.ndarray] = []
-    for i in range(b):
-        kv_idx_i = processed_kv_len[i] + lax.broadcasted_iota(
-            jnp.int32, (k_heads, tq, s), 2)
-        q_idx_i = (processed_q_len[i] +
-                   lax.broadcasted_iota(jnp.int32, (k_heads, tq, s), 1) //
-                   config.num_q_heads_per_kv_head)
-        mask_i = kv_idx_i < effective_kv_len[i]
-        mask_i &= q_idx_i < effective_kv_len[i]
-        mask_i &= q_idx_i >= kv_idx_i
-        if config.sliding_window is not None:
-            mask_i &= q_idx_i < kv_idx_i + config.sliding_window
-        qk_seq_masks.append(mask_i)
-    mask = jnp.stack(qk_seq_masks, axis=0)
+    qk_masked = []
+    v_masked = []
 
-    qk = jnp.where(mask, qk, config.mask_value)
+    int_ty = config.int_ty
+
+    for b_idx in range(config.batch_size):
+        kv_idx_b = (lax.broadcasted_iota(int_ty, (k_heads, tq, s), 2) +
+                    processed_kv_len[b_idx])
+        q_idx_b = (lax.broadcasted_iota(jnp.int32, (k_heads, tq, s), 1) //
+                   config.num_q_heads_per_kv_head
+                   ).astype(int_ty) + processed_q_len[b_idx]
+
+        eff_kv_len_b = effective_kv_len[b_idx]
+        mask_b = q_idx_b < eff_kv_len_b
+        mask_b = jnp.logical_and(mask_b, q_idx_b >= kv_idx_b)
+
+        if config.sliding_window is not None:
+            mask_b = jnp.logical_and(
+                mask_b, q_idx_b < kv_idx_b + config.sliding_window)
+
+        if not config.mask_v:
+            mask_b = jnp.logical_and(mask_b, kv_idx_b < eff_kv_len_b)
+
+        qk_masked.append(jnp.where(mask_b, qk[b_idx], config.mask_value))
+
+        if config.mask_v:
+            kv_idx_v = (lax.broadcasted_iota(int_ty, (k_heads, s, h), 1) +
+                        processed_kv_len[b_idx])
+            v_mask_b = kv_idx_v < eff_kv_len_b
+            v_masked.append(jnp.where(v_mask_b, v[b_idx], 0))
+        else:
+            v_masked.append(v[b_idx])
+
+    qk = jnp.stack(qk_masked, axis=0)
+    v = jnp.stack(v_masked, axis=0)
 
     m_curr = jnp.max(qk, axis=-1, keepdims=True)
     m_next = jnp.maximum(m_prev, m_curr)
-    p = jnp.exp(qk - broadcast_minor(m_next, qk.shape))
+    p = jnp.exp(qk - utils.broadcast_minor(m_next, qk.shape))
 
     pv = lax.dot_general(
         p.reshape((b * k_heads, tq, s)),
@@ -110,15 +109,15 @@ def flash_attention(
         dimension_numbers=(([2], [1]), ([0], [0])),
         preferred_element_type=jnp.float32,
     )
-    pv = pv.reshape((b, k_heads, tq, h))
+    pv = pv.reshape((b, k_heads, tq, h)).astype(config.out_dtype)
 
     if config.v_scale is not None:
         pv *= config.v_scale
 
-    p_rowsum = jnp.sum(p, axis=-1, keepdims=True)
+    p_rowsum = jnp.sum(p, axis=-1, keepdims=True, dtype=config.out_dtype)
     alpha = jnp.exp(m_prev - m_next)
     l_next = alpha * l_prev + p_rowsum
 
-    o_next = broadcast_minor(alpha, o_prev.shape) * o_prev + pv
+    o_next = utils.broadcast_minor(alpha, o_prev.shape) * o_prev + pv
 
-    return m_next, l_next, o_next.astype(o_prev.dtype)
+    return m_next, l_next, o_next

@@ -36,7 +36,7 @@ from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
 
 
-class VllmTPUMLAAttention(MLAAttention):
+class VllmMLAAttention(MLAAttention):
 
     def __init__(
         self,
@@ -68,7 +68,7 @@ class VllmTPUMLAAttention(MLAAttention):
 
         self.kv_cache_quantized_dtype = None
         if self.kv_cache_dtype != "auto":
-            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
+            self.kv_cache_quantized_dtype = utils.to_jax_dtype(
                 self.kv_cache_dtype)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
@@ -137,7 +137,8 @@ class VllmTPUMLAAttention(MLAAttention):
         return torch_view(outputs)
 
 
-class VllmTPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
+@MultiHeadLatentAttentionWrapper.register_oot
+class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
 
     def __init__(
         self,
@@ -182,7 +183,7 @@ class VllmTPUMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             self.topk_tokens = self.indexer.topk_tokens
             self.topk_indices_buffer = mla_modules.topk_indices_buffer
 
-        self.mla_attn = VllmTPUMLAAttention(
+        self.mla_attn = VllmMLAAttention(
             num_heads=self.num_heads,
             scale=scale,
             qk_nope_head_dim=self.qk_nope_head_dim,

@@ -35,7 +35,6 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
-from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
@@ -49,8 +48,6 @@ from tpu_inference.distributed.jax_parallel_state import \
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm import ops as patch_ops
-from tpu_inference.layers.vllm.mla_attention import \
-    VllmTPUMultiHeadLatentAttentionWrapper
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     shard_model_to_tpu
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
@@ -123,11 +120,6 @@ class VllmModelWrapper:
         self._apply_pp_patch()
         self._patch_vllm_ops()
 
-        from vllm.model_executor.custom_op import op_registry_oot
-        if MultiHeadLatentAttentionWrapper.__name__ not in op_registry_oot:
-            MultiHeadLatentAttentionWrapper.register_oot(
-                VllmTPUMultiHeadLatentAttentionWrapper)
-
     def _patch_vllm_ops(self):
         # Caution: there is no public api for restore the ops.
         # It need to patched again if the ops are jitted and mesh is change.
@@ -139,11 +131,15 @@ class VllmModelWrapper:
         # Patch sdpa from torch ops to flash attention to prevent OOM
         register_torch_function_op(
             torch.nn.functional.scaled_dot_product_attention,
-            functools.partial(patch_ops.scaled_dot_product_attention,
+            functools.partial(patch_ops.scaled_dot_product_attention.
+                              scaled_dot_product_attention,
                               mesh=self.mesh),
             is_jax_function=True,
             needs_env=False,
         )
+
+        patch_ops.gdn_attention.apply_gated_delta_net_torch_ops_patch(
+            mesh=self.mesh)
 
     def _apply_pp_patch(self):
         # patch `get_pp_group` in vLLM to jax's get_pp_group.

@@ -33,7 +33,7 @@ from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_moe_weights, shard_moe_weights)
 from tpu_inference.layers.common.quantization import ct_u32_unpack_u4
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm.moe import (
+from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.layers.vllm.quantization.unquantized import \

@@ -68,6 +68,29 @@ def get_side_channel_port() -> str:
     return port
 
 
+def get_transfer_channel_number() -> str:
+    n = os.getenv("TPU_KV_TRANSFER_CHANNEL_NUMBER", "8")
+    return int(n)
+
+
+def get_enable_d2h_transfer() -> bool:
+    """Check if device-to-host transfer is enabled via environment variable."""
+    enable_str = os.getenv("TPU_ENABLE_D2H_TRANSFER", "true").lower()
+    return enable_str in ("true", "1", "yes")
+
+
+def get_enable_block_kv_transfer() -> bool:
+    """Check if we block the KV-cache transfer until it is ready via environment variable."""
+    enable_str = os.getenv("TPU_ENABLE_BLOCK_KV_TRANSFER", "true").lower()
+    return enable_str in ("true", "1", "yes")
+
+
+def get_p2p_wait_pull_timeout() -> int:
+    """KV-cache transfer timeout in seconds."""
+    timeout_str = os.getenv("TPU_P2P_WAIT_PULL_TIMEOUT", "30")
+    return int(timeout_str)
+
+
 def get_device_topology_order_id(local_devices, global_devices) -> int:
     """
     Calculates the topology order ID for the local device set within the global topology.

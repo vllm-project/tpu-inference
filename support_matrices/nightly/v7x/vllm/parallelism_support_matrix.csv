@@ -1,7 +1,7 @@
 Feature,Single-Host CorrectnessTest,Single-Host PerformanceTest,Multi-Host CorrectnessTest,Multi-Host PerformanceTest
 "CP",❓ Untested,❓ Untested,❓ Untested,❓ Untested
-"DP",✅ Passing,❌ Failing,❓ Untested,❓ Untested
+"DP",✅ Passing,✅ Passing,❓ Untested,❓ Untested
 "EP",✅ Passing,✅ Passing,❓ Untested,❓ Untested
-"PP",❌ Failing,❓ Untested,❌ Failing,❓ Untested
-"SP",❌ Failing,❓ Untested,❓ Untested,❓ Untested
+"PP",✅ Passing,✅ Passing,✅ Passing,✅ Passing
+"SP",✅ Passing,❓ Untested,❓ Untested,❓ Untested
 "TP",✅ Passing,✅ Passing,❓ Untested,❓ Untested

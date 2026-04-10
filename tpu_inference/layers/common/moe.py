@@ -20,6 +20,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from vllm.model_executor.layers.fused_moe import FusedMoE
 
+from tpu_inference import envs
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.common.fused_moe_gmm import fused_moe_func
 from tpu_inference.logger import init_logger
@@ -136,6 +137,8 @@ def moe_apply(
                     use_ep=layer.use_ep,
                     activation=activation,
                     scoring_fn=layer.scoring_func,
+                    sc_kernel_threshold=envs.SC_KERNEL_THRESHOLD,
+                    sc_kernel_col_chunk_size=envs.SC_KERNEL_COL_CHUNK_SIZE,
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance

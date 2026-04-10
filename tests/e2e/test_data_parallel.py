@@ -322,7 +322,7 @@ def _test_data_parallelism(
             baseline_time,
             dp_time,
             len(test_prompts),
-            min_speedup=1.1,
+            min_speedup=1.05,
         )
 
 

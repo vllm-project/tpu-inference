@@ -21,7 +21,7 @@ Besides continuous integration and continuous delivery, a major goal of our pipe
 - kernel support matrix (microbenchmarks)
 - parallelism support matrix
 - quantization support matrix
-- RL support matrix
+- rl support matrix
 
 To support this requirement, each model and feature will go through a series of stages of testing, and the test results will be used to generate the support matrices automatically.
 
@@ -42,7 +42,7 @@ In the generated yml file, there are three TODOs that will need your input:
 3. The performance benchmark target for your model
 
 ## Adding a vLLM-native model
-vLLM-native models are models using the model definition from the vLLM upstream. These models will not go through benchmark on our pipeline. To add a vLLM-native model to CI, model owners can use the prepared [add_model_to_ci.py](pipeline_generation/add_model_to_ci.py) script. The script will populate a buildkite yaml config file in the `.buildkite/models` directory; config files under this directory will be integrated to our pipeline automatically. The python script takes 3 arguments:
+vLLM-native models are models using the model definition from the vLLM upstream. To add a vLLM-native model to CI, model owners can use the prepared [add_model_to_ci.py](pipeline_generation/add_model_to_ci.py) script. The script will populate a buildkite yaml config file in the `.buildkite/models` directory; config files under this directory will be integrated to our pipeline automatically. The python script takes 3 arguments:
 - **--model-name**: this is the **full name** of your model on Hugging Face. Please ensure to use the **full name** (ex: `meta-llama/Llama-3.1-8B` instead of `Llama-3.1-8B`) or else we won't be able to find your model.
 - **--queue**: this is the queue you want to run on (ex: `tpu_v6e_queue`)
 - **--category**: this parameter allows you to set the model category, with the following options available: "text-only" or "multimodal". (default: "text-only")
@@ -66,7 +66,7 @@ The python script takes the following arguments:
   - `"parallelism support matrix"`
   - `"quantization support matrix"`
   - `"kernel support matrix microbenchmarks"`
-  - `"RL support matrix"`
+  - `"rl support matrix"`
 - **--group**: [OPTIONAL] This argument is **required** only when the category is `"kernel support matrix microbenchmarks"`. The group name should be the name of the kernel you are testing (e.g., `all_gather_matmul`). Its purpose is to organize all related microbenchmark tests for that specific kernel into a single directory.
 
   For example, if you are adding multiple tests for the `all_gather_matmul` kernel (e.g., one for `w4a4` quantization and another for `w8a8`), you would use `--group "all_gather_matmul"` for all of them. The script will then create a directory at `.buildkite/kernel_microbenchmarks/all_gather_matmul/` and place the generated YAML test files inside. In this scenario, the `--feature-name` would describe the specific configuration being tested, like `'w4a4'` or `'w8a8'`.

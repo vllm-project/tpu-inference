@@ -77,6 +77,8 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes):
 
     engine_args["additional_config"][
         "enable_dynamic_image_sizes"] = enable_dynamic_image_sizes
+    engine_args["compilation_config"]["cudagraph_capture_sizes"] = []
+
     llm = LLM(**engine_args)
 
     sampling_params = SamplingParams(

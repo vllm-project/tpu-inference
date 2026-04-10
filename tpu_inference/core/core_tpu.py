@@ -623,6 +623,8 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
                                               bytes]]()
+        self.aborts_queue = queue.Queue()
+        self.tensor_ipc_receiver = None
 
         self.engine_index = engine_index
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
