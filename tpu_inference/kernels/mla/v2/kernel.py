@@ -1342,17 +1342,18 @@ def prepare_outputs(
     actual_num_q_heads: int,
     actual_head_dim: int,
 ):
-    (
-        max_num_tokens,
-        num_q_heads_per_q_packing,
-        q_packing,
-        head_dim,
-    ) = out.shape
-    return out.reshape(
-        max_num_tokens,
-        num_q_heads_per_q_packing * q_packing,
-        head_dim,
-    )[:, :actual_num_q_heads, :actual_head_dim]
+    # (
+    #     max_num_tokens,
+    #     num_q_heads_per_q_packing,
+    #     q_packing,
+    #     head_dim,
+    # ) = out.shape
+    # return out.reshape(
+    #     max_num_tokens,
+    #     num_q_heads_per_q_packing * q_packing,
+    #     head_dim,
+    # )[:, :actual_num_q_heads, :actual_head_dim]
+    return out[:, :actual_num_q_heads, :actual_head_dim]
 
 
 @functools.partial(

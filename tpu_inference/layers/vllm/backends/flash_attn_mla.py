@@ -204,14 +204,23 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             k_scale=k_scale,
             v_scale=v_scale,
             sm_scale=self.scale,
-        )
+        ) 
 
-        outputs = outputs.reshape(-1, self.num_heads, self.kv_lora_rank)
-        outputs = (jnp.einsum("bnl,nlv->bnv",
-                              outputs,
-                              jax_view(layer.W_UV),
-                              preferred_element_type=jnp.float32) *
-                   jax_view(layer.W_UV_scale)).astype(input_dtype)
-        outputs = outputs.reshape(-1, self.num_heads * self.v_head_dim)
+        W_UV_4d = jax_view(layer.W_UV).reshape(
+        self.num_heads // 4, 4, self.kv_lora_rank, self.v_head_dim
+        )  # [N/P, P, L, V]
+        W_UV_scale_reshaped = jax_view(layer.W_UV_scale).reshape(
+            1, self.num_heads // 4, 4, self.v_head_dim
+        )  # [1, N/P, P, V]
+
+        outputs = jnp.einsum(
+            "bncl,nclv->bncv",
+            outputs,          # [T, N/P, P, L] — raw kernel output, no reshape
+            W_UV_4d,
+            preferred_element_type=jnp.float32,
+        )  # [T, N/P, P, V]
+
+        outputs = (outputs * W_UV_scale_reshaped).astype(input_dtype)
+        outputs = outputs.reshape(-1, self.num_heads * self.v_head_dim)  # [T, N*V]
 
         return outputs, new_kv_cache
