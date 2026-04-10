@@ -13,12 +13,11 @@
 # limitations under the License.
 
 import pytest
-from vllm import SamplingParams
-from vllm.config import KVTransferConfig
-
 from tests.offload.tpu_offload_accuracy_test import (
     _test_kv_cache_cpu_offloading_accuracy, read_prompt_from_file)
 
+from vllm import SamplingParams
+from vllm.config import KVTransferConfig
 
 @pytest.fixture
 def sampling_config():
