@@ -511,6 +511,7 @@ def process_fp8_moe_weights(
     w13_weight_scale = weights.w13_weight_scale
     w2_weight = weights.w2_weight
     w2_weight_scale = weights.w2_weight_scale
+    logger.info(f"DEBUG: env MOE_REQUANTIZE_WEIGHT_DTYPE={envs.MOE_REQUANTIZE_WEIGHT_DTYPE}, weights.w13_weight.dtype={weights.w13_weight.dtype}")
     if not envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
         w13_interleave = activation == "swigluoai"
         w13_reorder_size = get_mesh_shape_product(mesh, ShardingAxisName.MLP_TENSOR)
