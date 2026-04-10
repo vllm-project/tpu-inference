@@ -23,14 +23,14 @@ import tpu_inference.kernels.gdn.triangle_solver as triangle_solver
 def l2norm(x: jnp.ndarray, dim: int = -1, eps: float = 1e-6) -> jnp.ndarray:
     """Normalizes x along the specified dimension using L2 norm.
 
-    Args:
-      x: Input array.
-      dim: Dimension along which to normalize.
-      eps: Epsilon value to avoid division by zero.
+  Args:
+    x: Input array.
+    dim: Dimension along which to normalize.
+    eps: Epsilon value to avoid division by zero.
 
-    Returns:
-      Normalized array.
-    """
+  Returns:
+    Normalized array.
+  """
     inv_norm = jax.lax.rsqrt((x * x).sum(axis=dim, keepdims=True) +
                              jnp.array(eps, dtype=x.dtype))
     return x * inv_norm
@@ -57,53 +57,53 @@ def pack_inputs_single_stream(
 ]:
     """Pads each sequence to multiple of chunk_size and concatenates.
 
-    This function takes ragged sequences and pads each of them so that their
-    lengths become a multiple of `chunk_size`. It then concatenates these
-    padded sequences into a single continuous stream. This allows for efficient
-    chunk-based processing on hardware like TPUs, where fixed-size operations
-    are preferred.
+  This function takes ragged sequences and pads each of them so that their
+  lengths become a multiple of `chunk_size`. It then concatenates these
+  padded sequences into a single continuous stream. This allows for efficient
+  chunk-based processing on hardware like TPUs, where fixed-size operations
+  are preferred.
 
-    It also computes a `reset_mask` to indicate where a new sequence starts
-    (aligned to chunk boundaries), which is used to reset the recurrent state
-    during processing.
+  It also computes a `reset_mask` to indicate where a new sequence starts
+  (aligned to chunk boundaries), which is used to reset the recurrent state
+  during processing.
 
-    Example:
-      Original sequences (ragged):
-      Seq 1: [A, A, A] (len 3)
-      Seq 2: [B, B, B, B, B] (len 5)
-      Seq 3: [C, C] (len 2)
+  Example:
+    Original sequences (ragged):
+    Seq 1: [A, A, A] (len 3)
+    Seq 2: [B, B, B, B, B] (len 5)
+    Seq 3: [C, C] (len 2)
 
-      Packed stream (chunk_size=4):
-      Chunk 1: [A, A, A, P]  <- Seq 1 padded (New sequence starts)
-      Chunk 2: [B, B, B, B]  <- Seq 2 (part 1) (New sequence starts)
-      Chunk 3: [B, P, P, P]  <- Seq 2 (part 2) padded
-      Chunk 4: [C, C, P, P]  <- Seq 3 padded (New sequence starts)
-      (where 'P' denotes padding)
+    Packed stream (chunk_size=4):
+    Chunk 1: [A, A, A, P]  <- Seq 1 padded (New sequence starts)
+    Chunk 2: [B, B, B, B]  <- Seq 2 (part 1) (New sequence starts)
+    Chunk 3: [B, P, P, P]  <- Seq 2 (part 2) padded
+    Chunk 4: [C, C, P, P]  <- Seq 3 padded (New sequence starts)
+    (where 'P' denotes padding)
 
-      reset_mask = [True, True, False, True]
-      (Indicates whether each chunk starts a new sequence)
+    reset_mask = [True, True, False, True]
+    (Indicates whether each chunk starts a new sequence)
 
-    Args:
-      query: Query tensor.
-      key: Key tensor.
-      value: Value tensor.
-      g: Gate tensor.
-      beta: Beta tensor.
-      query_start_loc: Start locations of each sequence in original stream.
-      chunk_size: Chunk size for padding.
-      compute_dtype: Dtype for computation (Q, K, V, beta).
+  Args:
+    query: Query tensor.
+    key: Key tensor.
+    value: Value tensor.
+    g: Gate tensor.
+    beta: Beta tensor.
+    query_start_loc: Start locations of each sequence in original stream.
+    chunk_size: Chunk size for padding.
+    compute_dtype: Dtype for computation (Q, K, V, beta).
 
-    Returns:
-      A tuple containing:
-        - packed_query: Packed query tensor.
-        - packed_key: Packed key tensor.
-        - packed_value: Packed value tensor.
-        - packed_g: Packed gate tensor.
-        - packed_beta: Packed beta tensor.
-        - reset_mask: Mask indicating start of sequences (per chunk).
-        - new_query_start_loc: Start locations in packed stream.
-        - padded_indices_valid: Indices mapping original to packed.
-    """
+  Returns:
+    A tuple containing:
+      - packed_query: Packed query tensor.
+      - packed_key: Packed key tensor.
+      - packed_value: Packed value tensor.
+      - packed_g: Packed gate tensor.
+      - packed_beta: Packed beta tensor.
+      - reset_mask: Mask indicating start of sequences (per chunk).
+      - new_query_start_loc: Start locations in packed stream.
+      - padded_indices_valid: Indices mapping original to packed.
+  """
     num_tokens = query.shape[0]
     num_seqs = len(query_start_loc) - 1
 
@@ -120,16 +120,16 @@ def pack_inputs_single_stream(
     # For each token index, searchsorted finds the insertion point in query_start_loc
     # where the token would go to maintain order (using side="right").
     # Subtracting 1 gives the index of the sequence the token actually belongs to.
-    seq_id = jnp.searchsorted(
-        query_start_loc, jnp.arange(num_tokens), side="right") - 1
+    seq_id = (jnp.searchsorted(
+        query_start_loc, jnp.arange(num_tokens), side="right") - 1)
     original_start = query_start_loc[seq_id]
     new_start = new_query_start_loc[seq_id]
     padded_indices_valid = new_start + (jnp.arange(num_tokens) -
                                         original_start)
 
     max_packed_tokens = num_tokens + num_seqs * chunk_size
-    max_packed_tokens = (max_packed_tokens + chunk_size -
-                         1) // chunk_size * chunk_size
+    max_packed_tokens = ((max_packed_tokens + chunk_size - 1) // chunk_size *
+                         chunk_size)
 
     # Concatenate by dtype to reduce scatter operations
     beta_expanded = beta[..., None]
@@ -178,6 +178,140 @@ def pack_inputs_single_stream(
     )
 
 
+def pack_inputs_single_stream_new(
+    query: jnp.ndarray,
+    key: jnp.ndarray,
+    value: jnp.ndarray,
+    g: jnp.ndarray,
+    beta: jnp.ndarray,
+    query_start_loc: jnp.ndarray,
+    chunk_size: int,
+    compute_dtype: jnp.dtype = jnp.bfloat16,
+    # max_total_tokens: int = 8192,
+) -> tuple[
+        jnp.ndarray,
+        jnp.ndarray,
+        jnp.ndarray,
+        jnp.ndarray,
+        jnp.ndarray,
+        jnp.ndarray,
+        jnp.ndarray,
+        jnp.ndarray,
+        jnp.ndarray,
+]:
+    """Pads each sequence to multiple of chunk_size and concatenates.
+
+  This function takes ragged sequences and pads each of them so that their
+  lengths become a multiple of chunk_size. It then concatenates these
+  padded sequences into a single continuous stream. This allows for efficient
+  chunk-based processing on hardware like TPUs, where fixed-size operations
+  are preferred.
+
+  It also computes a reset_mask to indicate where a new sequence starts
+  (aligned to chunk boundaries), which is used to reset the recurrent state
+  during processing.
+
+  Example:
+    Original sequences (ragged):
+    Seq 1: [A, A, A] (len 3)
+    Seq 2: [B, B, B, B, B] (len 5)
+    Seq 3: [C, C] (len 2)
+
+    Packed stream (chunk_size=4):
+    Chunk 1: [A, A, A, P]  <- Seq 1 padded (New sequence starts)
+    Chunk 2: [B, B, B, B]  <- Seq 2 (part 1) (New sequence starts)
+    Chunk 3: [B, P, P, P]  <- Seq 2 (part 2) padded
+    Chunk 4: [C, C, P, P]  <- Seq 3 padded (New sequence starts)
+    (where 'P' denotes padding)
+
+    reset_mask = [True, True, False, True]
+    (Indicates whether each chunk starts a new sequence)
+
+  Args:
+    query: Query tensor.
+    key: Key tensor.
+    value: Value tensor.
+    g: Gate tensor.
+    beta: Beta tensor.
+    query_start_loc: Start locations of each sequence in original stream.
+    chunk_size: Chunk size for padding.
+    compute_dtype: Dtype for computation (Q, K, V, beta).
+
+  Returns:
+    A tuple containing:
+      - packed_query: Packed query tensor.
+      - packed_key: Packed key tensor.
+      - packed_value: Packed value tensor.
+      - packed_g: Packed gate tensor.
+      - packed_beta: Packed beta tensor.
+      - reset_mask: Mask indicating start of sequences (per chunk).
+      - new_query_start_loc: Start locations in packed stream.
+      - original_idx: Indices mapping packed to original.
+      - is_valid: Mask indicating valid tokens in packed stream.
+  """
+
+    num_tokens = query.shape[0]
+    num_seqs = query_start_loc.shape[0] - 1
+
+    # --- 1. Compute Metadata ---
+    seq_lengths = query_start_loc[1:] - query_start_loc[:-1]
+    num_chunks = (seq_lengths + chunk_size - 1) // chunk_size
+    padded_lengths = num_chunks * chunk_size
+    new_query_start_loc = jnp.cumsum(
+        jnp.concatenate([jnp.array([0]), padded_lengths]))
+
+    static_max_len = num_tokens + (num_seqs * chunk_size)
+    static_max_len = (static_max_len + chunk_size -
+                      1) // chunk_size * chunk_size
+
+    # --- 1. Fast Sequence ID and Index Computation ---
+    token_starts = jnp.zeros((static_max_len, ), dtype=jnp.int32)
+    valid_starts = new_query_start_loc[1:num_seqs]
+    token_starts = token_starts.at[valid_starts].set(1)
+    seq_id = jnp.cumsum(token_starts)
+    safe_seq_id = jnp.clip(seq_id, 0, num_seqs - 1)
+
+    packed_token_idx = jnp.arange(static_max_len)
+    relative_offset = packed_token_idx - new_query_start_loc[safe_seq_id]
+    is_valid = relative_offset < seq_lengths[safe_seq_id]
+
+    # Point invalid indices to 0 (will be masked out later)
+    original_idx = jnp.where(is_valid,
+                             query_start_loc[safe_seq_id] + relative_offset, 0)
+
+    # --- 2. Separate Gathers with Masking ---
+    def gather_and_mask(tensor, orig_idx, out_dtype=compute_dtype):
+        flat = tensor.reshape(num_tokens, -1).astype(compute_dtype)
+        gathered = flat[orig_idx]
+        masked = jnp.where(is_valid[:, None], gathered, 0)
+        return masked.reshape(static_max_len,
+                              *tensor.shape[1:]).astype(out_dtype)
+
+    packed_query = gather_and_mask(query, original_idx)
+    packed_key = gather_and_mask(key, original_idx)
+    packed_value = gather_and_mask(value, original_idx)
+    packed_g = gather_and_mask(g, original_idx, out_dtype=jnp.float32)
+    packed_beta = gather_and_mask(beta, original_idx)
+
+    # --- 5. Reset Mask ---
+    num_chunks_total = static_max_len // chunk_size
+    reset_mask = jnp.zeros((num_chunks_total, ), dtype=bool)
+    start_chunk_indices = new_query_start_loc[:num_seqs] // chunk_size
+    reset_mask = reset_mask.at[start_chunk_indices].set(True)
+
+    return (
+        packed_query,
+        packed_key,
+        packed_value,
+        packed_g,
+        packed_beta,
+        reset_mask,
+        new_query_start_loc,
+        original_idx,
+        is_valid,
+    )
+
+
 def ragged_gated_delta_rule_mixed_prefill(
     query: jnp.ndarray,
     key: jnp.ndarray,
@@ -197,34 +331,35 @@ def ragged_gated_delta_rule_mixed_prefill(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Applies chunked gated delta rule for mixed prefill case.
 
-    This function handles the case where sequences can have lengths greater than
-    1.
-    It pads sequences to multiples of `chunk_size` and processes them in parallel
-    within chunks, and sequentially across chunks.
+  This function handles the case where sequences can have lengths greater than
+  1.
+  It pads sequences to multiples of `chunk_size` and processes them in parallel
+  within chunks, and sequentially across chunks.
 
-    Args:
-      query: Query tensor.
-      key: Key tensor.
-      value: Value tensor.
-      b_reshaped: Reshaped b tensor (for beta).
-      a_reshaped: Reshaped a tensor (for g).
-      A_log: A_log tensor.
-      dt_bias: dt_bias tensor.
-      query_start_loc: Start locations of sequences in original stream.
-      recurrent_state: Recurrent state tensor.
-      state_indices: Indices mapping sequences to recurrent state slots.
-      chunk_size: Chunk size for padding and processing.
-      use_qk_norm_in_gdn: Whether to use QK normalization.
-      compute_dtype: Dtype for computation.
-      precision: Precision for matrix multiplication.
-      preferred_element_type: Preferred element type for matrix multiplication.
+  Args:
+    query: Query tensor.
+    key: Key tensor.
+    value: Value tensor.
+    b_reshaped: Reshaped b tensor (for beta).
+    a_reshaped: Reshaped a tensor (for g).
+    A_log: A_log tensor.
+    dt_bias: dt_bias tensor.
+    query_start_loc: Start locations of sequences in original stream.
+    recurrent_state: Recurrent state tensor.
+    state_indices: Indices mapping sequences to recurrent state slots.
+    chunk_size: Chunk size for padding and processing.
+    use_qk_norm_in_gdn: Whether to use QK normalization.
+    compute_dtype: Dtype for computation.
+    precision: Precision for matrix multiplication.
+    preferred_element_type: Preferred element type for matrix multiplication.
 
-    Returns:
-      A tuple containing:
-        - updated_recurrent_state: Updated recurrent state tensor.
-        - output: Output tensor.
-    """
+  Returns:
+    A tuple containing:
+      - updated_recurrent_state: Updated recurrent state tensor.
+      - output: Output tensor.
+  """
     initial_dtype = query.dtype
+    num_tokens = query.shape[0]
 
     beta = jax.nn.sigmoid(b_reshaped)
     g = -jnp.exp(A_log.astype(jnp.float32)) * jax.nn.softplus(
@@ -239,8 +374,9 @@ def ragged_gated_delta_rule_mixed_prefill(
         packed_beta,
         reset_mask,
         new_query_start_loc,
-        padded_indices_valid,
-    ) = pack_inputs_single_stream(
+        original_idx,
+        is_valid,
+    ) = pack_inputs_single_stream_new(
         query,
         key,
         value,
@@ -417,7 +553,15 @@ def ragged_gated_delta_rule_mixed_prefill(
 
     # Unpack output
     packed_output_flat = o.reshape(-1, H * V_dim)
-    output = packed_output_flat[padded_indices_valid]
+
+    # Use scatter to map back to original tokens
+    safe_original_idx = jnp.where(is_valid, original_idx, num_tokens)
+
+    # Pad output array to handle invalid indices safely
+    output_padded = jnp.zeros((num_tokens + 1, H * V_dim),
+                              dtype=packed_output_flat.dtype)
+    output_padded = output_padded.at[safe_original_idx].set(packed_output_flat)
+    output = output_padded[:num_tokens]
 
     # Update recurrent state
     last_chunk_indices = (new_query_start_loc[1:] // chunk_size) - 1
@@ -437,32 +581,35 @@ def recurrent_gated_delta_rule_step(
     state: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Single-step recurrent update for decode."""
-    B, H, d_k = query.shape
+    B, H, T, d_k = query.shape
     d_v = value.shape[-1]
 
     if state is None:
         state = jnp.zeros((B, H, d_k, d_v), dtype=query.dtype)
 
+    q = query[:, :, 0]
+    k = key[:, :, 0]
+    v = value[:, :, 0]
+    beta_val = beta[:, :, 0]
+    g_val = g[:, :, 0]
+
     scale = d_k**-0.5
-    query = query * scale
+    q = q * scale
 
-    exp_g = jnp.exp(g)
+    k_state = jnp.einsum("bhd, bhdm -> bhm", k, state)
+    v_diff = v - jnp.exp(g_val)[..., None] * k_state
 
-    k_state = jnp.einsum("bhd, bhdm -> bhm", key, state)
-    v_diff = value - exp_g[..., None] * k_state
+    v_new = beta_val[..., None] * v_diff
 
-    v_new = beta[..., None] * v_diff
+    q_state = jnp.einsum("bhd, bhdm -> bhm", q, state)
+    q_k = jnp.sum(q * k, axis=-1, keepdims=True)
 
-    q_state = jnp.einsum("bhd, bhdm -> bhm", query, state)
-    q_k = jnp.sum(query * key, axis=-1, keepdims=True)
+    out = jnp.exp(g_val)[..., None] * q_state + q_k * v_new
 
-    out = exp_g[..., None] * q_state + q_k * v_new
+    k_v_new = jnp.einsum("bhd, bhm -> bhdm", k, v_new)
+    new_state = state * jnp.exp(g_val)[..., None, None] + k_v_new
 
-    # Outer product using broadcasting
-    k_v_new = key[..., :, None] * v_new[..., None, :]
-    new_state = state * exp_g[..., None, None] + k_v_new
-
-    return out, new_state
+    return out[:, :, None, :], new_state
 
 
 def ragged_gated_delta_rule_decode_only(
@@ -480,29 +627,30 @@ def ragged_gated_delta_rule_decode_only(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Applies gated delta rule for decode-only case (sequence lengths = 1).
 
-    Args:
-      query: Query tensor.
-      key: Key tensor.
-      value: Value tensor.
-      b_reshaped: Reshaped b tensor (for beta).
-      a_reshaped: Reshaped a tensor (for g).
-      recurrent_state: Recurrent state tensor.
-      A_log: A_log tensor.
-      dt_bias: dt_bias tensor.
-      query_start_loc: Start locations of sequences.
-      state_indices: Indices mapping sequences to recurrent state slots.
-      use_qk_norm_in_gdn: Whether to use QK normalization.
+  Args:
+    query: Query tensor.
+    key: Key tensor.
+    value: Value tensor.
+    b_reshaped: Reshaped b tensor (for beta).
+    a_reshaped: Reshaped a tensor (for g).
+    recurrent_state: Recurrent state tensor.
+    A_log: A_log tensor.
+    dt_bias: dt_bias tensor.
+    query_start_loc: Start locations of sequences.
+    state_indices: Indices mapping sequences to recurrent state slots.
+    use_qk_norm_in_gdn: Whether to use QK normalization.
 
-    Returns:
-      A tuple containing:
-        - updated_recurrent_state: Updated recurrent state tensor.
-        - output: Output tensor.
-    """
+  Returns:
+    A tuple containing:
+      - updated_recurrent_state: Updated recurrent state tensor.
+      - output: Output tensor.
+  """
     num_tokens = query.shape[0]
     max_reqs = recurrent_state.shape[0]
 
     token_idx = jnp.arange(num_tokens)
-    req_indices = token_idx
+    req_indices = (
+        jnp.sum(token_idx[:, None] >= query_start_loc[None, :], axis=1) - 1)
     req_indices = jnp.clip(req_indices, 0, max_reqs - 1)
     valid_mask = token_idx < query_start_loc[-1]
 
@@ -514,35 +662,42 @@ def ragged_gated_delta_rule_decode_only(
         query = l2norm(query)
         key = l2norm(key)
 
-    req_state_indices = state_indices[req_indices]
-    curr_states = recurrent_state[req_state_indices]
+    def scan_fn(carry, xs):
+        recurrent_state_all = carry
+        curr_q, curr_k, curr_v, curr_g, curr_beta, req_idx, is_valid = xs
 
-    outputs, new_states = recurrent_gated_delta_rule_step(
-        query,
-        key,
-        value,
-        g,
-        beta,
-        state=curr_states,
-    )
+        curr_q = curr_q[None, :, None, :]
+        curr_k = curr_k[None, :, None, :]
+        curr_v = curr_v[None, :, None, :]
+        curr_g = curr_g[None, :, None]
+        curr_beta = curr_beta[None, :, None]
 
-    outputs = outputs.reshape(num_tokens, -1)
+        state_idx = state_indices[req_idx]
+        state = recurrent_state_all[state_idx][None, ...]
 
-    dummy_idx = max_reqs
-    recurrent_state_padded = jnp.pad(
-        recurrent_state,
-        ((0, 1), (0, 0), (0, 0), (0, 0)),
-        mode="constant",
-        constant_values=0,
-    )
+        output, new_state = recurrent_gated_delta_rule_step(curr_q,
+                                                            curr_k,
+                                                            curr_v,
+                                                            curr_g,
+                                                            curr_beta,
+                                                            state=state)
 
-    safe_indices = jnp.where(valid_mask, req_state_indices, dummy_idx)
-    updated_recurrent_state_padded = recurrent_state_padded.at[
-        safe_indices].set(new_states.astype(recurrent_state.dtype))
+        output = output.reshape(1, -1)  # (1, H * d_v)
 
-    new_recurrent_state = updated_recurrent_state_padded[:max_reqs]
+        recurrent_state_all = jnp.where(
+            is_valid,
+            recurrent_state_all.at[state_idx].set(new_state[0].astype(
+                recurrent_state_all.dtype)),
+            recurrent_state_all,
+        )
 
-    return new_recurrent_state, outputs
+        return recurrent_state_all, output[0]
+
+    carry_init = recurrent_state
+    xs = (query, key, value, g, beta, req_indices, valid_mask)
+
+    new_recurrent_state, output = jax.lax.scan(scan_fn, carry_init, xs)
+    return new_recurrent_state, output
 
 
 def ragged_gated_delta_rule(
@@ -565,32 +720,33 @@ def ragged_gated_delta_rule(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Applies the gated delta rule over ragged seq lengths
 
-    This function separates mixed QKV, handles repeating for multi-query attention
-    if needed, and routes to either the decode-only or mixed-prefill branch
-    depending on sequence lengths.
+  This function separates mixed QKV, handles repeating for multi-query attention
+  if needed, and routes to either the decode-only or mixed-prefill branch
+  depending on sequence lengths.
 
-    Args:
-      mixed_qkv: Mixed query, key, value tensor.
-      b: b tensor (for beta).
-      a: a tensor (for g).
-      recurrent_state: Recurrent state tensor.
-      A_log: A_log tensor.
-      dt_bias: dt_bias tensor.
-      query_start_loc: Start locations of sequences.
-      state_indices: Indices mapping sequences to recurrent state slots.
-      distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end, mixed_end)`.
-      n_kq: Number of key/query heads.
-      n_v: Number of value heads.
-      d_k: Key/query dimension.
-      d_v: Value dimension.
-      chunk_size: Chunk size for padding in mixed prefill.
-      use_qk_norm_in_gdn: Whether to use QK normalization.
+  Args:
+    mixed_qkv: Mixed query, key, value tensor.
+    b: b tensor (for beta).
+    a: a tensor (for g).
+    recurrent_state: Recurrent state tensor.
+    A_log: A_log tensor.
+    dt_bias: dt_bias tensor.
+    query_start_loc: Start locations of sequences.
+    state_indices: Indices mapping sequences to recurrent state slots.
+    distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end,
+      mixed_end)`.
+    n_kq: Number of key/query heads.
+    n_v: Number of value heads.
+    d_k: Key/query dimension.
+    d_v: Value dimension.
+    chunk_size: Chunk size for padding in mixed prefill.
+    use_qk_norm_in_gdn: Whether to use QK normalization.
 
-    Returns:
-      A tuple containing:
-        - updated_recurrent_state: Updated recurrent state tensor.
-        - output: Output tensor.
-    """
+  Returns:
+    A tuple containing:
+      - updated_recurrent_state: Updated recurrent state tensor.
+      - output: Output tensor.
+  """
     num_tokens = mixed_qkv.shape[0]
     key_dim = n_kq * d_k
     query = mixed_qkv[..., :key_dim]
