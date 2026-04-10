@@ -1,6 +1,6 @@
 #!/bin/bash
 
-MODEL="BCCard/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic"
+MODEL="Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
 PREFILL_LABEL="app=vllm-prefill"
 DECODE_LABEL="app=vllm-decode"
 PROXY_LABEL="app=vllm-proxy"
