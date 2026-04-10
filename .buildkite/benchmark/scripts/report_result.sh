@@ -40,12 +40,21 @@ RUN_TYPE="${RUN_TYPE:-DAILY}"
 # Define Result_file name
 RESULT_FILE="${ARTIFACT_FOLDER}/${RECORD_ID}.result"
 
-# Temp write to another bucket
-# REMOTE_LOG_ROOT="gs://$GCS_BUCKET/job_logs/$RECORD_ID/"
-REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
+# Upload logs to GCS if bucket is provided
+if [[ -n "${GCS_BUCKET:-}" ]]; then
+  # Temp write to another bucket
+  # REMOTE_LOG_ROOT="gs://$GCS_BUCKET/job_logs/$RECORD_ID/"
+  # TODO: use $GCS_BUCKET instead the temp one
+  REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
+fi
 
 (
-  printf "[DEBUG] Start scan artifacts folder...\n"
+  if [ "${BUILDKITE:-false}" == "true" ]; then
+    ENV_CONTEXT="Buildkite environment"
+  else
+    ENV_CONTEXT="Local environment"
+  fi
+  printf "[DEBUG] Start scan artifacts folder (Environment: %s)...\n" "$ENV_CONTEXT"
   printf "[INFO] ARTIFACT_FOLDER=\n%s\n" "$ARTIFACT_FOLDER"
   if [ -d "$ARTIFACT_FOLDER" ]; then
     printf "[DEBUG] ls $ARTIFACT_FOLDER=\n%s\n" "$(ls "$ARTIFACT_FOLDER")"
@@ -55,8 +64,12 @@ REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
   # Handle log file
   
   if [[ -n "${GCS_BUCKET:-}" ]]; then
-    echo "gsutil cp $LOG_FOLDER/* $REMOTE_LOG_ROOT"
-    gsutil cp -r "$LOG_FOLDER"/* "$REMOTE_LOG_ROOT"
+    if command -v gsutil &> /dev/null; then
+      echo "gsutil cp $LOG_FOLDER/* $REMOTE_LOG_ROOT"
+      gsutil cp -r "$LOG_FOLDER"/* "$REMOTE_LOG_ROOT"
+    else
+      echo "Warning: gsutil not found. Skipping log upload to GCS."
+    fi
   else
     echo "Warning: GCS_BUCKET is not set. Skipping log upload to GCS."
   fi
@@ -98,8 +111,11 @@ REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
       exit 1
     fi
 
-    if (( $(echo "$throughput < ${EXPECTED_THROUGHPUT:-0}" | bc -l) )); then
-      echo "Error: throughput($throughput) is less than expected($EXPECTED_THROUGHPUT)"
+    # Compare throughput using awk for float support
+    EXPECTED_THROUGHPUT_VAL="${EXPECTED_THROUGHPUT:-0}"
+    IS_LOW_THROUGHPUT=$(echo "$throughput $EXPECTED_THROUGHPUT_VAL" | awk '{if ($1 < $2 || $1 == 0) print 1; else print 0}')
+    if [ "$IS_LOW_THROUGHPUT" -eq 1 ]; then
+      echo "Error: throughput($throughput) is less than expected($EXPECTED_THROUGHPUT_VAL) or is 0"
     fi
     echo "Throughput=$throughput" > "$RESULT_FILE"
 
@@ -183,6 +199,7 @@ if [[ -n "${GCP_DATABASE_ID:-}" && -n "${GCP_PROJECT_ID:-}" && -n "${GCP_INSTANC
   SQL_CODE_HASH=$(prepare_sql_val "${CODE_HASH:-}" "")
   SQL_DATASET=$(prepare_sql_val "${DATASET:-}" "")
   SQL_MODELTAG=$(prepare_sql_val "${MODELTAG:-PROD}" "PROD")
+  SQL_CONFIG=$(prepare_sql_val "${CASE_CONFIG_JSON:-}" "{}")
 
   # Construct the atomic Upsert (Insert or Update) SQL statement
   SQL="INSERT INTO RunRecord (
@@ -191,19 +208,20 @@ if [[ -n "${GCP_DATABASE_ID:-}" && -n "${GCP_PROJECT_ID:-}" && -n "${GCP_INSTANC
       MaxNumSeqs, MaxNumBatchedTokens, TensorParallelSize, MaxModelLen,
       Dataset, InputLen, OutputLen,
       ExpectedETEL, NumPrompts, ModelTag, PrefixLen,
-      ExtraEnvs, AdditionalConfig, ExtraArgs, TryCount $insert_cols
+      ExtraEnvs, AdditionalConfig, ExtraArgs, TryCount, Config $insert_cols
     ) VALUES (
       $SQL_RECORD_ID, $SQL_STATUS, PENDING_COMMIT_TIMESTAMP(), PENDING_COMMIT_TIMESTAMP(), $SQL_USER, $SQL_JOB_REFERENCE, $SQL_AGENT_NAME,
       $SQL_DEVICE, $SQL_MODEL, $SQL_RUN_TYPE, $SQL_CODE_HASH,
       ${MAX_NUM_SEQS:-NULL}, ${MAX_NUM_BATCHED_TOKENS:-NULL}, ${TENSOR_PARALLEL_SIZE:-NULL}, ${MAX_MODEL_LEN:-NULL},
       $SQL_DATASET, ${INPUT_LEN:-NULL}, ${OUTPUT_LEN:-NULL},
       ${EXPECTED_ETEL:-3600000}, ${NUM_PROMPTS:-1000}, $SQL_MODELTAG, ${PREFIX_LEN:-0},
-      $SQL_EXTRA_ENVS, $SQL_ADDITIONAL_CONFIG, $SQL_EXTRA_ARGS, 1 $insert_vals
+      $SQL_EXTRA_ENVS, $SQL_ADDITIONAL_CONFIG, $SQL_EXTRA_ARGS, 1, JSON r$SQL_CONFIG $insert_vals
     ) ON CONFLICT (RecordId) DO UPDATE SET
       Status = excluded.Status,
       LastUpdate = excluded.LastUpdate,
       RunBy = excluded.RunBy,
-      TryCount = RunRecord.TryCount + 1
+      TryCount = RunRecord.TryCount + 1,
+      Config = excluded.Config
       $update_metrics;"
 
   echo "Executing Atomic Upsert SQL:"
