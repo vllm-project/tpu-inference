@@ -78,10 +78,16 @@ def run_qwen_vl(questions: list[str], modality: str,
     )
 
 
-model_example_map = {
-    "Qwen/Qwen2.5-VL-3B-Instruct": run_qwen_vl,
-    "Qwen/Qwen3-VL-8B-Instruct": run_qwen_vl,
-}
+def get_model_runner(model_name: str):
+    """Returns the appropriate run function for the given model."""
+    if "qwen" in model_name.lower():
+        return run_qwen_vl
+        
+    raise ValueError(
+        f"Unsupported model: {model_name}. "
+        "Please add support for this model in get_model_runner."
+    )
+
 
 
 def get_multi_modal_input(args):
@@ -260,7 +266,7 @@ def main(args):
     model_key = args.model
 
         
-    req_data = model_example_map[model_key](questions, modality, args)
+    req_data = get_model_runner(model_key)(questions, modality, args)
 
     # Disable other modalities to save memory
     # Initial all modalities to be 0s and add the specifc modality limit later accordingly
