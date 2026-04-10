@@ -41,7 +41,6 @@ if TYPE_CHECKING:
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
     TPU_OFFLOAD_SKIP_JAX_PRECOMPILE: bool = False
-    TPU_OFFLOAD_SWAP_OP_TYPE: str = "jax"
     TPU_OFFLOAD_DECODE_SAVE: bool = False
     TPU_OFFLOAD_NUM_CPU_CHUNKS: int = 1024
     TPU_OFFLOAD_NUM_STAGING_BLOCKS: int = 128
@@ -250,9 +249,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # kv offload to dram: skip pre-compiling swap-related jax functions
     "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE":
     lambda: bool(int(os.getenv("TPU_OFFLOAD_SKIP_JAX_PRECOMPILE", "0"))),
-    # kv offload to dram: swap function type: jax, or pallas
-    "TPU_OFFLOAD_SWAP_OP_TYPE":
-    lambda: os.getenv("TPU_OFFLOAD_SWAP_OP_TYPE", "jax"),
     # kv offload to dram: save kv in the decode phase
     "TPU_OFFLOAD_DECODE_SAVE":
     lambda: bool(int(os.getenv("TPU_OFFLOAD_DECODE_SAVE", "0"))),

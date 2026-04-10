@@ -1677,13 +1677,9 @@ class TPUOffloadConnectorWorker:
 
         self.runner: Optional[TPUModelRunner] = None
         self.mesh: Optional[Mesh] = None
-        self.swap_op_type = envs.TPU_OFFLOAD_SWAP_OP_TYPE
-        # TODO(jcgu): check libtpu compatibility for pallas dma kernel
-        # assert self.swap_op_type in get_args(CPU_OFFLOADING_SWAP_OP_TYPE)
         self.use_bucketed_swap_ops = not envs.TPU_OFFLOAD_SKIP_JAX_PRECOMPILE
         self.batched_save = envs.TPU_OFFLOAD_BATCHED_SAVE
-        logger.info(f" swap operation type is {self.swap_op_type}, "
-                    f"use_bucketed_swap_ops={self.use_bucketed_swap_ops}, "
+        logger.info(f"use_bucketed_swap_ops={self.use_bucketed_swap_ops}, "
                     f"batched_save={self.batched_save}.")
 
         # cpu cache
