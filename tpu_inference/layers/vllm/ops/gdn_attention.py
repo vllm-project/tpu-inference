@@ -15,6 +15,8 @@
 Bridge the torch gdn_attention_core op for gated deltanet attention TPU impl
 
 """
+import dataclasses
+import enum
 import functools
 from typing import Optional, Tuple
 
@@ -25,14 +27,35 @@ from jax.sharding import PartitionSpec as P
 from torchax.interop import jax_view, torch_view
 from vllm.forward_context import get_forward_context
 
+from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     reorder_concatenated_tensor_for_sharding
-from tpu_inference.layers.vllm.ops.ragged_conv1d_jax import ragged_conv1d
+from tpu_inference.layers.vllm.ops.ragged_conv1d_jax import \
+    ragged_conv1d as ragged_conv1d_jax
 from tpu_inference.layers.vllm.ops.ragged_gated_delta_rule_chunked import \
-    ragged_gated_delta_rule
+    ragged_gated_delta_rule as ragged_gated_delta_rule_chunked
+from tpu_inference.layers.vllm.ops.ragged_gated_delta_rule_ref import \
+    ragged_gated_delta_rule as ragged_gated_delta_rule_ref
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
+
+
+class RaggedConv1dImpl(enum.Enum):
+    JAX = "ragged_conv1d_jax"
+
+
+class RaggedGatedDeltaRuleImpl(enum.Enum):
+    REF = "ragged_gated_delta_rule_ref"
+    CHUNKED = "ragged_gated_delta_rule_chunked"
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True)
+class GdnAttentionConfig:
+    ragged_conv1d_impl: RaggedConv1dImpl = RaggedConv1dImpl.JAX
+    ragged_gated_delta_rule_impl: RaggedGatedDeltaRuleImpl = (
+        RaggedGatedDeltaRuleImpl.REF)
 
 
 def run_jax_gdn_attention_local(
@@ -47,11 +70,13 @@ def run_jax_gdn_attention_local(
     dt_bias: jnp.ndarray,
     query_start_loc: jnp.ndarray,
     state_indices: jnp.ndarray,
+    distribution: jnp.ndarray,
     n_kq: int,
     n_v: int,
     d_k: int,
     d_v: int,
     kernel_size: int,
+    config: GdnAttentionConfig = GdnAttentionConfig(),
 ) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
     """Runs the local JAX GDN attention mechanism with combined QKV tensors.
 
@@ -71,21 +96,28 @@ def run_jax_gdn_attention_local(
           each sequence.
         state_indices: Tensor of shape `(max_reqs,)` mapping request index to
           state index.
+        distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end, mixed_end)`.
         n_kq: Number of key/query heads.
         n_v: Number of value heads.
         d_k: Dimension of key.
         d_v: Dimension of value.
         kernel_size: Convolution kernel size.
+        config: Configuration for implementation selection.
 
     Returns:
-        A tuple containing the new states and the output.
+        A tuple containing:
         - A tuple of (new_conv_state, new_recurrent_state).
         - The output tensor of shape `(num_tokens, n_v * d_v)`.
     """
-    # Ensure query_start_loc is monotonically increasing to handle padded slots
+
+    # Ensure query_start_loc is monotonically increasing. This is required to
+    # handle cases where query_start_loc might be padded with trailing zeros.
     query_start_loc = jnp.maximum.accumulate(query_start_loc)
 
-    out_mixed_qkv, new_conv_state = ragged_conv1d(
+    # TODO: Switch conv implementaion based on config once we have more than 1 impl
+    conv_impl = ragged_conv1d_jax
+
+    out_mixed_qkv, new_conv_state = conv_impl(
         mixed_qkv,
         conv_state,
         conv_weight,
@@ -97,7 +129,25 @@ def run_jax_gdn_attention_local(
 
     out_mixed_qkv = jax.nn.silu(out_mixed_qkv)
 
-    new_recurrent_state, output = ragged_gated_delta_rule(
+    if config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.REF:
+        ragged_gdn_impl = functools.partial(
+            ragged_gated_delta_rule_ref,
+            n_kq=n_kq,
+            n_v=n_v,
+            d_k=d_k,
+            d_v=d_v,
+        )
+    else:
+        ragged_gdn_impl = functools.partial(
+            ragged_gated_delta_rule_chunked,
+            n_kq=n_kq,
+            n_v=n_v,
+            d_k=d_k,
+            d_v=d_v,
+            use_qk_norm_in_gdn=True,
+        )
+
+    new_recurrent_state, output = ragged_gdn_impl(
         out_mixed_qkv,
         b,
         a,
@@ -106,10 +156,7 @@ def run_jax_gdn_attention_local(
         dt_bias,
         query_start_loc,
         state_indices,
-        n_kq,
-        n_v,
-        d_k,
-        d_v,
+        distribution,
     )
 
     return (new_conv_state, new_recurrent_state), output
@@ -127,12 +174,14 @@ def run_jax_gdn_attention(
     j_dt_bias: jnp.ndarray,
     state_indices: jnp.ndarray,
     query_start_loc: jnp.ndarray,
+    distribution: jnp.ndarray,
     n_kq: int,
     n_v: int,
     d_k: int,
     d_v: int,
     kernel_size: int,
     mesh: jax.sharding.Mesh,
+    config: GdnAttentionConfig = GdnAttentionConfig(),
 ) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
     """Runs the Jax GDN attention mechanism.
 
@@ -153,15 +202,17 @@ def run_jax_gdn_attention(
           state index.
         query_start_loc: Tensor of shape `(num_seqs + 1,)` with start locations of
           each sequence.
+        distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end, mixed_end)`.
         n_kq: Number of key/query heads.
         n_v: Number of value heads.
         d_k: Dimension of key.
         d_v: Dimension of value.
         kernel_size: Convolution kernel size.
         mesh: The device mesh for distributed computation.
+        config: Configuration for implementation selection.
 
     Returns:
-        A tuple containing the new states and the output.
+        A tuple containing:
         - A tuple of (new_conv_state, new_recurrent_state).
           - new_conv_state: `(max_reqs, kernel_size - 1, dim)`
           - new_recurrent_state: `(max_reqs, n_v, d_k, d_v)`
@@ -180,6 +231,7 @@ def run_jax_gdn_attention(
         P(ShardingAxisName.ATTN_HEAD),  # j_dt_bias
         P(),  # query_start_loc
         P(),  # state_indices
+        P(),  # distribution
     )
 
     out_specs = (
@@ -200,14 +252,15 @@ def run_jax_gdn_attention(
         d_k=d_k,
         d_v=d_v,
         kernel_size=kernel_size,
+        config=config,
     )
 
     mapped_fn = jax.shard_map(
         p_run_jax_gdn_attention_local,
         mesh=mesh,
-        check_vma=False,
         in_specs=in_specs,
         out_specs=out_specs,
+        check_vma=False,
     )
 
     (new_conv_state, new_recurrent_state), output = mapped_fn(
@@ -222,6 +275,7 @@ def run_jax_gdn_attention(
         j_dt_bias,
         query_start_loc,
         state_indices,
+        distribution,
     )
 
     return (new_conv_state, new_recurrent_state), output
@@ -296,6 +350,10 @@ def gdn_attention_core_tpu(
 
     # Map tokens to their respective requests
     q_loc = jax_view(attn_metadata.query_start_loc)
+    distribution = jax_view(attn_metadata.request_distribution)
+    config = GdnAttentionConfig(
+        ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl(
+            envs.RAGGED_GATED_DELTA_RULE_IMPL))
 
     (new_conv_state,
      new_recurrent_state), j_output = run_jax_gdn_attention(j_mixed_qkv,
@@ -309,12 +367,14 @@ def gdn_attention_core_tpu(
                                                             j_dt_bias,
                                                             state_indices,
                                                             q_loc,
+                                                            distribution,
                                                             n_kq,
                                                             n_v,
                                                             d_k,
                                                             d_v,
                                                             kernel_size,
-                                                            mesh=mesh)
+                                                            mesh=mesh,
+                                                            config=config)
 
     vllm_context.kv_caches[layer_idx] = (new_conv_state, new_recurrent_state)
 

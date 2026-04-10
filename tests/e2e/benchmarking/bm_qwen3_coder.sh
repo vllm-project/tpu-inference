@@ -26,14 +26,15 @@ set -ex
 
 
 # Usage:
-# bash tests/e2e/benchmarking/bm_qwen3_coder.sh --model BCCard/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic --tp 8 --req_tput_limit 1.05  --output_token_tput_limit 1926 --total_token_tput_limit 1948 --input_len 1024 --output_len 1024 --use_moe_ep_kernel 1
+# bash tests/e2e/benchmarking/bm_qwen3_coder.sh --model BCCard/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic --tp 8 --req_tput_limit 1.05  --output_token_tput_limit 1926 --total_token_tput_limit 1948 --input_len 1024 --output_len 1024 --use_moe_ep_kernel 1 --gpu_memory_utilization 0.95
 # bash tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 --tp 8 --req_tput_limit 1.05  --output_token_tput_limit 1926 --total_token_tput_limit 1948 --input_len 1024 --output_len 1024 --use_moe_ep_kernel 1
 
 
 OPTIONS=""
-LONGOPTS=model:,tp:,req_tput_limit:,output_token_tput_limit:,total_token_tput_limit:,input_len:,output_len:,use_moe_ep_kernel:,limit_mm_per_prompt:,hf_overrides:,block_size:,num_prompts:,num-prompts:
+LONGOPTS=model:,tp:,req_tput_limit:,output_token_tput_limit:,total_token_tput_limit:,input_len:,output_len:,use_moe_ep_kernel:,limit_mm_per_prompt:,hf_overrides:,block_size:,num_prompts:,num-prompts:,gpu_memory_utilization:,gpu-memory-utilization:
 
 num_prompts=320
+gpu_memory_utilization=0.95
 
 # Parse arguments
 if ! PARSED=$(getopt --options="$OPTIONS" --longoptions=$LONGOPTS --name "$0" -- "$@"); then
@@ -91,6 +92,10 @@ while true; do
       num_prompts=$2
       shift 2
       ;;
+    --gpu_memory_utilization|--gpu-memory-utilization)
+      gpu_memory_utilization=$2
+      shift 2
+      ;;
     --)
       shift
       break
@@ -138,7 +143,7 @@ if [ -n "$limit_mm_per_prompt" ]; then EXTRA_VLLM_ARGS+=("--limit-mm-per-prompt"
 if [ -n "$hf_overrides" ]; then EXTRA_VLLM_ARGS+=("--hf-overrides" "$hf_overrides"); fi
 if [ -n "$block_size" ]; then EXTRA_VLLM_ARGS+=("--block-size" "$block_size"); fi
 
-vllm serve --seed=42 --model="$model" --max-model-len=10240 --max-num-batched-tokens=8192 --max-num-seqs=512 --no-enable-prefix-caching --tensor-parallel-size="$tp" --kv-cache-dtype=fp8 --gpu-memory-utilization=0.95 --async-scheduling --enable-expert-parallel "${EXTRA_VLLM_ARGS[@]}"   2>&1 | tee vllm_server_out.txt &
+vllm serve --seed=42 --model="$model" --max-model-len=10240 --max-num-batched-tokens=8192 --max-num-seqs=512 --no-enable-prefix-caching --tensor-parallel-size="$tp" --kv-cache-dtype=fp8 --gpu-memory-utilization="$gpu_memory_utilization" --async-scheduling --enable-expert-parallel "${EXTRA_VLLM_ARGS[@]}"   2>&1 | tee vllm_server_out.txt &
 
 # Trap registers the cleanup as a handler for the EXIT. Whenever the shell exits, it runs `cleanup` before terminating.
 # The trap does not affect the exit status. When an EXIT trap fires, the script's exit status is whatever it was before the trap was triggered.
