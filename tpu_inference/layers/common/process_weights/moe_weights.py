@@ -500,6 +500,10 @@ def shard_moe_weights(
     "weight_block_size",
 ))
 def process_fp8_moe_weights(
+    weights: FusedMoEWeights, *args, **kwargs):
+    return weights
+
+def _process_fp8_moe_weights_disabled(
     weights: FusedMoEWeights,
     moe_backend: MoEBackend,
     mesh: Mesh,
