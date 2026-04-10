@@ -21,8 +21,8 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.envs as envs
-from tpu_inference.kernels.gather import gather_reduce as gather_reduce_sc
 from tpu_inference.kernels.gather.ragged_gather import ragged_gather
+from tpu_inference.kernels.gather import gather_reduce as gather_reduce_sc
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
@@ -168,8 +168,7 @@ def moe_gmm_local(
                       if parallelism == "tp" else ShardingAxisName.EXPERT)
 
     chunk_size = gmm2_res.shape[0] // sc_psum_num_chunks
-    if False:  # gather_reduce_sc.is_supported_by_sc_gather_reduce(
-        #     gmm1_res.shape[0], sc_kernel_threshold):
+    if gather_reduce_sc.is_supported_by_sc_gather_reduce(gmm1_res.shape[0], sc_kernel_threshold):
 
         if local_group_size < group_sizes.size:
             mask = mask.reshape(-1, topk)
@@ -243,6 +242,7 @@ def moe_gmm_local(
             token_hidden, chunk_out_reduced_final,
             ((sc_psum_num_chunks - 1) * (chunk_size // 8), 0))
     else:
+        chunk_size = 16384
         out_list = []
         for start in range(0, batch_size, chunk_size):
             end = min(batch_size, start + chunk_size)
