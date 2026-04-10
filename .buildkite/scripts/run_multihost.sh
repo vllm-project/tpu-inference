@@ -98,7 +98,7 @@ if [ ! -f ~/.ssh/id_rsa ]; then
     ssh-keygen -t rsa -b 4096 -N "" -f ~/.ssh/id_rsa -q
 fi
 
-SSH_OPTS=(-o StrictHostKeyChecking=no -o BatchMode=yes -o UserKnownHostsFile=/dev/null -i ~/.ssh/id_rsa)
+SSH_OPTS=(-vvv -o StrictHostKeyChecking=no -o BatchMode=yes -o UserKnownHostsFile=/dev/null -i ~/.ssh/id_rsa)
 
 # Cleanup function that runs on exit to tear down the Ray cluster
 cleanup() {
@@ -228,7 +228,7 @@ for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
     
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "mkdir -p ~/tpu-inference/scripts/multihost" || true
     # shellcheck disable=SC2002
-    cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "cat > ~/tpu-inference/scripts/multihost/run_cluster.sh"
+    cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | base64 | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "base64 -d > ~/tpu-inference/scripts/multihost/run_cluster.sh"
     
     REMOTE_CMD="bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_INTERNAL_IP}' --worker '${HOST_HF_HOME}' \
       -e HF_TOKEN='${HF_TOKEN:-}' \
