@@ -14,6 +14,7 @@
 
 import atexit
 import copy
+import gc
 import multiprocessing
 import multiprocessing.reduction
 import os
@@ -27,6 +28,7 @@ from time import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import cloudpickle
+import numpy as np
 import torch
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -38,7 +40,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
-from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, LogprobsLists, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -135,7 +137,12 @@ def _scheduler_worker_process(
     log_stats: bool,
     original_scheduler_cls: type,
 ):
-    """Worker process that manages a single scheduler instance."""
+    """Worker process that manages a single scheduler instance.
+
+    The worker caches its own SchedulerOutput from schedule() so the
+    parent never needs to send it back.  Per-rank model runner output
+    (with sampled_token_ids already sliced) is sent over the pipe.
+    """
     # Initialize the scheduler in this process
     scheduler = original_scheduler_cls(
         vllm_config=vllm_config,
@@ -147,7 +154,12 @@ def _scheduler_worker_process(
         log_stats=log_stats,
     )
 
-    logger.debug(f"Scheduler worker process {rank} started")
+    # Worker caches its own SchedulerOutput so the parent never has to
+    # send it back. 
+    _cached_scheduler_outputs: deque[SchedulerOutput] = deque()
+    _worker_step_id = 0  # monotonic, matches parent's step counter
+
+    logger.info(f"Scheduler worker process {rank} started (PID={os.getpid()})")
 
     def _send_result(result):
         """Send result back using cloudpickle serialization."""
@@ -166,6 +178,8 @@ def _scheduler_worker_process(
 
                 case SchedulerCommand.SCHEDULE:
                     output = scheduler.schedule()
+                    _cached_scheduler_outputs.append(output)
+                    _worker_step_id += 1
                     _send_result(output)
 
                 case SchedulerCommand.FINISH_REQUESTS:
@@ -179,14 +193,20 @@ def _scheduler_worker_process(
                     _send_result(None)  # Signal completion
 
                 case SchedulerCommand.UPDATE_FROM_OUTPUT:
-                    scheduler_output, model_runner_output = data
+                    step_id, model_runner_output = data
+                    scheduler_output = _cached_scheduler_outputs.popleft()
+
                     result = scheduler.update_from_output(
                         scheduler_output, model_runner_output)
                     _send_result(result)
 
                 case SchedulerCommand.GET_GRAMMAR_BITMASK:
-                    scheduler_output = data
-                    result = scheduler.get_grammar_bitmask(scheduler_output)
+                    if _cached_scheduler_outputs:
+                        cached_output = _cached_scheduler_outputs[-1]
+                    else:
+                        cached_output = None
+                    result = (scheduler.get_grammar_bitmask(cached_output)
+                              if cached_output is not None else None)
                     _send_result(result)
 
                 case SchedulerCommand.MAKE_STATS:
@@ -289,15 +309,21 @@ class DPSchedulerOutput(SchedulerOutput):
     # This is used by the Runner to calculate the global padded batch size
     # (padded_max * dp_size), ensuring consistent shapes across pipeline stages.
     max_num_scheduled_tokens_per_dp_rank: int = 0
+    req_ids_per_rank: Optional[Dict[int, List[str]]] = None
+    scheduled_tokens_per_rank: Optional[Dict[int, List[int]]] = None
 
     def __init__(self,
                  *args,
                  assigned_dp_rank=None,
                  max_num_scheduled_tokens_per_dp_rank=0,
+                 req_ids_per_rank=None,
+                 scheduled_tokens_per_rank=None,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.assigned_dp_rank = assigned_dp_rank or {}
         self.max_num_scheduled_tokens_per_dp_rank = max_num_scheduled_tokens_per_dp_rank
+        self.req_ids_per_rank = req_ids_per_rank or {}
+        self.scheduled_tokens_per_rank = scheduled_tokens_per_rank or {}
 
 
 class DPScheduler(SchedulerInterface):
@@ -438,10 +464,13 @@ class DPScheduler(SchedulerInterface):
         payload = cloudpickle.dumps((command, data))
         serialize_time = time() - start_time
         self.input_conns[rank].send_bytes(payload)
-        if serialize_time > 1.0:
-            logger.warning(f"Slow serialization ({serialize_time:.2f}s, "
-                           f"{len(payload)} bytes) for '{command.value}' "
-                           f"command to rank {rank}/{self.dp_size}.")
+        send_time = time() - start_time
+        if serialize_time > 1.0 or send_time > 1.0:
+            logger.warning(
+                f"Slow IPC send ({send_time:.2f}s, serialize={serialize_time:.2f}s, "
+                f"{len(payload)} bytes) for '{command.value}' "
+                f"to rank {rank}/{self.dp_size} at step {self._schedule_step_count}."
+            )
 
     def _get_result(self,
                     rank: int,
@@ -453,23 +482,42 @@ class DPScheduler(SchedulerInterface):
         threads that Queue uses, avoiding GIL contention and thread convoy
         effects at high DP sizes.
         """
+        self._total_ipc_recv_count += 1
+        cmd_name = command.value if command else "unknown"
+
         try:
             start_time = time()
             raw_bytes = self.output_conns[rank].recv_bytes()
             recv_time = time()
+
+            # --- GC hypothesis test: disable GC during deserialization ---
+            gc_was_enabled = gc.isenabled()
+            if gc_was_enabled:
+                gc.disable()
+
             result = cloudpickle.loads(raw_bytes)
+            deserialize_time = time()
+
+            if gc_was_enabled:
+                gc.enable()
+            # --- end GC hypothesis test ---
+
             end_time = time()
             total_time = end_time - start_time
-            if total_time > 1.0:
-                cmd_name = command.value if command else "unknown"
+            if total_time > 0.01:
                 pipe_wait = recv_time - start_time
-                deserialize = end_time - recv_time
-                logger.warning(f"Long wait time ({total_time:.2f}s) for "
-                               f"rank {rank}/{self.dp_size} response to "
-                               f"'{cmd_name}' command "
-                               f"(pipe_wait={pipe_wait:.2f}s, "
-                               f"deserialize={deserialize:.2f}s, "
-                               f"{len(raw_bytes)} bytes).")
+                deserialize = deserialize_time - recv_time
+                gc_overhead = end_time - deserialize_time
+                logger.warning(
+                    f"Long wait time ({total_time:.2f}s) for "
+                    f"rank {rank}/{self.dp_size} response to "
+                    f"'{cmd_name}' command at step {self._schedule_step_count} "
+                    f"(pipe_wait={pipe_wait:.2f}s, "
+                    f"deserialize={deserialize:.4f}s, "
+                    f"gc_re_enable={gc_overhead:.4f}s, "
+                    f"{len(raw_bytes)} bytes).")
+        except RuntimeError:
+            raise  # Re-raise our own timeout RuntimeError
         except Exception as e:
             # Check if the worker process is still alive for a better message
             proc = self.processes[rank]
@@ -477,12 +525,17 @@ class DPScheduler(SchedulerInterface):
                 exit_code = proc.exitcode
                 raise RuntimeError(
                     f"Pipe error for rank {rank}: "
-                    f"Worker process terminated with exit code {exit_code}. "
+                    f"Worker process (PID={proc.pid}) terminated with "
+                    f"exit code {exit_code}. "
+                    f"Step={self._schedule_step_count}, "
+                    f"cmd='{cmd_name}'. "
                     "This may indicate a crash or signal in the scheduler "
                     "worker process.") from e
             raise RuntimeError(
                 f"Pipe error for rank {rank}: "
-                "Worker process terminated unexpectedly. "
+                f"Worker process (PID={proc.pid}) terminated unexpectedly. "
+                f"Step={self._schedule_step_count}, "
+                f"cmd='{cmd_name}'. "
                 "This may indicate a crash in the scheduler worker process."
             ) from e
         if isinstance(result, SchedulerWorkerError):
@@ -554,6 +607,16 @@ class DPScheduler(SchedulerInterface):
         3. Combine outputs from all schedulers
         4. Return unified scheduling result
         """
+        self._schedule_step_count += 1
+        step = self._schedule_step_count
+        now = time()
+        if self._prev_schedule_start > 0:
+            e2e_step_time = now - self._prev_schedule_start
+            logger.info(
+                "Step %d e2e time: %.4f seconds", step - 1, e2e_step_time)
+        self._prev_schedule_start = now
+        schedule_start = time()
+
         # Run each scheduler independently
         for rank in range(self.dp_size):
             self._send_command(rank, SchedulerCommand.SCHEDULE)
@@ -561,7 +624,14 @@ class DPScheduler(SchedulerInterface):
         # Collect outputs from all workers (blocking)
         rank_outputs = []
         for rank in range(self.dp_size):
+            rank_recv_start = time()
             output = self._get_result(rank, SchedulerCommand.SCHEDULE)
+            rank_recv_elapsed = time() - rank_recv_start
+            if rank_recv_elapsed > 0.2:
+                logger.warning(
+                    f"Step {step}: Rank {rank} SCHEDULE response took "
+                    f"{rank_recv_elapsed:.2f}s"
+                )
             rank_outputs.append(output)
 
         # Cache scheduler outputs to use in `update_from_output`
@@ -570,12 +640,17 @@ class DPScheduler(SchedulerInterface):
         # Return combined scheduler outputs
         combined_output = self._combine_scheduler_outputs(rank_outputs)
 
-        logger.debug(
-            f"DPScheduler scheduled: "
-            f"{combined_output.total_num_scheduled_tokens} total tokens, "
-            f"{len(combined_output.scheduled_new_reqs)} new requests, "
-            f"{len(combined_output.scheduled_cached_reqs.req_ids)} cached requests"
-        )
+        total_elapsed = time() - schedule_start
+
+        # Per-rank token breakdown for load balance debugging
+        if total_elapsed > 0.2:
+            per_rank_tokens = [
+                output.total_num_scheduled_tokens for output in rank_outputs
+            ]
+            logger.info(
+                f"Step {step} per-rank scheduled tokens: {per_rank_tokens}, "
+                f"schedule_time={total_elapsed:.3f}s"
+            )
 
         return combined_output
 
@@ -622,6 +697,15 @@ class DPScheduler(SchedulerInterface):
         for req_id in combined_num_scheduled_tokens.keys():
             assigned_dp_rank[req_id] = self.assigned_dp_rank[req_id]
 
+        # Build pre-computed per-rank metadata so the runner can skip
+        # re-splitting requests by rank in _prepare_dp_input_metadata.
+        req_ids_per_rank: Dict[int, List[str]] = {}
+        scheduled_tokens_per_rank: Dict[int, List[int]] = {}
+        for rank, output in enumerate(rank_outputs):
+            req_ids_per_rank[rank] = list(output.num_scheduled_tokens.keys())
+            scheduled_tokens_per_rank[rank] = list(
+                output.num_scheduled_tokens.values())
+
         return DPSchedulerOutput(
             scheduled_new_reqs=all_new_reqs,
             scheduled_cached_reqs=combined_cached_data,
@@ -634,6 +718,8 @@ class DPScheduler(SchedulerInterface):
             free_encoder_mm_hashes=set(),
             assigned_dp_rank=assigned_dp_rank,
             max_num_scheduled_tokens_per_dp_rank=max_scheduled_tokens_per_rank,
+            req_ids_per_rank=req_ids_per_rank,
+            scheduled_tokens_per_rank=scheduled_tokens_per_rank,
         )
 
     def _combine_cached_request_data(
@@ -748,20 +834,15 @@ class DPScheduler(SchedulerInterface):
         This method calls get_grammar_bitmask on each underlying scheduler and
         combines their outputs, similar to how other operations are handled.
         """
-        # Use the most recent cached outputs from the schedule() call
         if not self.cached_schedulers_output:
             return None
-
-        rank_scheduler_outputs = self.cached_schedulers_output[
-            -1]  # Get the most recent
 
         combined_structured_output_request_ids = []
         combined_bitmasks = []
 
         # Get grammar bitmask from each DP rank scheduler
         for rank in range(self.dp_size):
-            self._send_command(rank, SchedulerCommand.GET_GRAMMAR_BITMASK,
-                               rank_scheduler_outputs[rank])
+            self._send_command(rank, SchedulerCommand.GET_GRAMMAR_BITMASK)
         for rank in range(self.dp_size):
             grammar_output = self._get_result(
                 rank, SchedulerCommand.GET_GRAMMAR_BITMASK)
@@ -782,6 +863,7 @@ class DPScheduler(SchedulerInterface):
         return GrammarOutput(combined_structured_output_request_ids,
                              combined_bitmask)
 
+    @time_function
     def update_from_output(
         self, scheduler_output: DPSchedulerOutput,
         model_runner_output: ModelRunnerOutput
@@ -792,16 +874,20 @@ class DPScheduler(SchedulerInterface):
         We need to route the model runner output to the appropriate scheduler
         based on which rank each request belongs to.
         """
+        self._update_from_output_count += 1
+        update_step = self._update_from_output_count
+
         # Split model output by DP rank (each rank gets only its req_ids).
         rank_model_outputs = self._split_model_output_by_rank(
-            model_runner_output)
-        rank_scheduler_outputs = self.cached_schedulers_output.popleft()
+            scheduler_output, model_runner_output)
+        # Pop from parent cache (keeps it in sync with worker's deque)
+        self.cached_schedulers_output.popleft()
 
-        # Send each rank its scheduler output + per-rank model output.
         for rank in range(self.dp_size):
+            rank_output = rank_model_outputs[rank]
             self._send_command(
                 rank, SchedulerCommand.UPDATE_FROM_OUTPUT,
-                (rank_scheduler_outputs[rank], rank_model_outputs[rank]))
+                (update_step, rank_output))
 
         combined_engine_outputs = defaultdict(list)
         rank_scheduler_stats: List[Optional[SchedulerStats]] = []
@@ -845,24 +931,125 @@ class DPScheduler(SchedulerInterface):
 
     def _split_model_output_by_rank(
             self,
+            scheduler_output: DPSchedulerOutput,
             global_model_output: ModelRunnerOutput) -> List[ModelRunnerOutput]:
-        """Split the model runner output by DP rank for individual scheduler updates."""
-        outputs = [
-            ModelRunnerOutput(
-                req_ids=[],
-                req_id_to_index=global_model_output.req_id_to_index,
-                sampled_token_ids=global_model_output.sampled_token_ids,
-                logprobs=global_model_output.logprobs,
-                prompt_logprobs_dict=global_model_output.prompt_logprobs_dict,
-                pooler_output=None,
-                num_nans_in_logits=global_model_output.num_nans_in_logits,
-                kv_connector_output=global_model_output.kv_connector_output,
-            ) for _ in range(self.dp_size)
-        ]
+        """Split the model runner output by DP rank for individual scheduler updates.
 
-        for req_id in global_model_output.req_ids:
-            rank = self.assigned_dp_rank[req_id]
-            outputs[rank].req_ids.append(req_id)
+        Instead of sharing full global arrays across all ranks (which causes
+        cloudpickle to serialize the entire data for every rank over IPC),
+        we slice/filter data per-rank so each worker only receives the subset
+        of data for its own requests. This dramatically reduces serialization
+        and IPC overhead.
+
+        Uses pre-computed req_ids_per_rank from the DPSchedulerOutput to
+        avoid re-grouping requests by rank via assigned_dp_rank lookups.
+        """
+        global_req_id_to_index = global_model_output.req_id_to_index
+        global_sampled_token_ids = global_model_output.sampled_token_ids
+        global_logprobs = global_model_output.logprobs
+        global_prompt_logprobs_dict = global_model_output.prompt_logprobs_dict
+        global_pooler_output = global_model_output.pooler_output
+        global_num_nans_in_logits = global_model_output.num_nans_in_logits
+        global_kv_connector_output = global_model_output.kv_connector_output
+
+        outputs = []
+        for rank in range(self.dp_size):
+            req_ids = scheduler_output.req_ids_per_rank.get(rank, [])
+
+            # Build compact per-rank index mapping and collect global indices.
+            rank_req_id_to_index: dict[str, int] = {}
+            global_indices: list[int] = []
+            for new_idx, req_id in enumerate(req_ids):
+                global_idx = global_req_id_to_index[req_id]
+                rank_req_id_to_index[req_id] = new_idx
+                global_indices.append(global_idx)
+
+            # Slice sampled_token_ids: only this rank's entries.
+            rank_sampled_token_ids = (
+                [global_sampled_token_ids[i] for i in global_indices]
+                if global_sampled_token_ids else [])
+
+            # Slice logprobs: only this rank's entries.
+            rank_logprobs = None
+            if global_logprobs is not None and global_indices:
+                # LogprobsLists stores cu_num_generated_tokens for
+                # variable-length slicing. Rebuild it for this rank.
+                cu = global_logprobs.cu_num_generated_tokens
+                if cu is not None:
+                    # cu[i] gives the start offset for request i in the
+                    # flattened logprob arrays. Gather slices for this rank's
+                    # requests and rebuild a compact cu list.
+                    slices = []
+                    new_cu = [0]
+                    for gi in global_indices:
+                        start = cu[gi]
+                        end = (cu[gi + 1] if gi + 1 < len(cu)
+                               else global_logprobs.logprob_token_ids.shape[0])
+                        length = end - start
+                        slices.append((start, end))
+                        new_cu.append(new_cu[-1] + length)
+                    rank_logprob_token_ids = np.concatenate(
+                        [global_logprobs.logprob_token_ids[s:e]
+                         for s, e in slices], axis=0
+                    ) if slices else global_logprobs.logprob_token_ids[:0]
+                    rank_logprobs_vals = np.concatenate(
+                        [global_logprobs.logprobs[s:e]
+                         for s, e in slices], axis=0
+                    ) if slices else global_logprobs.logprobs[:0]
+                    rank_sampled_token_ranks = np.concatenate(
+                        [global_logprobs.sampled_token_ranks[s:e]
+                         for s, e in slices], axis=0
+                    ) if slices else global_logprobs.sampled_token_ranks[:0]
+                    rank_logprobs = LogprobsLists(
+                        logprob_token_ids=rank_logprob_token_ids,
+                        logprobs=rank_logprobs_vals,
+                        sampled_token_ranks=rank_sampled_token_ranks,
+                        cu_num_generated_tokens=new_cu,
+                    )
+                else:
+                    # No cu_num_generated_tokens: arrays are indexed directly
+                    # by req_index. Slice rows for this rank.
+                    idx_array = np.array(global_indices, dtype=np.intp)
+                    rank_logprobs = LogprobsLists(
+                        logprob_token_ids=(
+                            global_logprobs.logprob_token_ids[idx_array]),
+                        logprobs=global_logprobs.logprobs[idx_array],
+                        sampled_token_ranks=(
+                            global_logprobs.sampled_token_ranks[idx_array]),
+                        cu_num_generated_tokens=None,
+                    )
+
+            # Slice prompt_logprobs_dict: only this rank's entries.
+            rank_prompt_logprobs_dict = {
+                req_id: global_prompt_logprobs_dict[req_id]
+                for req_id in req_ids
+                if req_id in global_prompt_logprobs_dict
+            }
+
+            # Slice pooler_output: only this rank's entries.
+            rank_pooler_output = (
+                [global_pooler_output[i] for i in global_indices]
+                if global_pooler_output else None)
+
+            # Slice num_nans_in_logits: only this rank's entries.
+            rank_num_nans_in_logits = (
+                {req_id: global_num_nans_in_logits[req_id]
+                 for req_id in req_ids
+                 if req_id in global_num_nans_in_logits}
+                if global_num_nans_in_logits else None)
+
+            outputs.append(ModelRunnerOutput(
+                req_ids=req_ids,
+                req_id_to_index=rank_req_id_to_index,
+                sampled_token_ids=rank_sampled_token_ids,
+                logprobs=rank_logprobs,
+                prompt_logprobs_dict=rank_prompt_logprobs_dict,
+                pooler_output=rank_pooler_output,
+                num_nans_in_logits=rank_num_nans_in_logits,
+                # kv_connector_output is shared (small metadata); only send
+                # if non-None to avoid serializing None per rank.
+                kv_connector_output=global_kv_connector_output,
+            ))
 
         return outputs
 
