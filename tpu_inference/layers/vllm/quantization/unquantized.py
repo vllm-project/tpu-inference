@@ -353,6 +353,10 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
             w13_bias=w13_bias,
             w2_weight=w2_weight,
             w2_bias=w2_bias)
+        # Free the pre-processed input weights immediately to avoid holding
+        # both the inputs and the JIT outputs on device simultaneously.
+        del w13_weight, w2_weight, w13_bias, w2_bias
+
         weights = torch_view(
             shard_moe_weights(weights, self.moe_backend, self.mesh))
         layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
@@ -361,6 +365,11 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         if self.moe.has_bias:
             layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
             layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
+
+        # Force JAX to release intermediate buffers before processing the next
+        # layer.  Without this barrier, async dispatch can keep old weight
+        # buffers alive across layers, accumulating until OOM.
+        jax.effects_barrier()
 
     def apply_monolithic(
         self,
