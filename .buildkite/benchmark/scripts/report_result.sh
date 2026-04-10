@@ -40,12 +40,21 @@ RUN_TYPE="${RUN_TYPE:-DAILY}"
 # Define Result_file name
 RESULT_FILE="${ARTIFACT_FOLDER}/${RECORD_ID}.result"
 
-# Temp write to another bucket
-# REMOTE_LOG_ROOT="gs://$GCS_BUCKET/job_logs/$RECORD_ID/"
-REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
+# Upload logs to GCS if bucket is provided
+if [[ -n "${GCS_BUCKET:-}" ]]; then
+  # Temp write to another bucket
+  # REMOTE_LOG_ROOT="gs://$GCS_BUCKET/job_logs/$RECORD_ID/"
+  # TODO: use $GCS_BUCKET instead the temp one
+  REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
+fi
 
 (
-  printf "[DEBUG] Start scan artifacts folder...\n"
+  if [ "${BUILDKITE:-false}" == "true" ]; then
+    ENV_CONTEXT="Buildkite environment"
+  else
+    ENV_CONTEXT="Local environment"
+  fi
+  printf "[DEBUG] Start scan artifacts folder (Environment: %s)...\n" "$ENV_CONTEXT"
   printf "[INFO] ARTIFACT_FOLDER=\n%s\n" "$ARTIFACT_FOLDER"
   if [ -d "$ARTIFACT_FOLDER" ]; then
     printf "[DEBUG] ls $ARTIFACT_FOLDER=\n%s\n" "$(ls "$ARTIFACT_FOLDER")"
@@ -55,8 +64,12 @@ REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
   # Handle log file
   
   if [[ -n "${GCS_BUCKET:-}" ]]; then
-    echo "gsutil cp $LOG_FOLDER/* $REMOTE_LOG_ROOT"
-    gsutil cp -r "$LOG_FOLDER"/* "$REMOTE_LOG_ROOT"
+    if command -v gsutil &> /dev/null; then
+      echo "gsutil cp $LOG_FOLDER/* $REMOTE_LOG_ROOT"
+      gsutil cp -r "$LOG_FOLDER"/* "$REMOTE_LOG_ROOT"
+    else
+      echo "Warning: gsutil not found. Skipping log upload to GCS."
+    fi
   else
     echo "Warning: GCS_BUCKET is not set. Skipping log upload to GCS."
   fi
@@ -98,8 +111,11 @@ REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
       exit 1
     fi
 
-    if (( $(echo "$throughput < ${EXPECTED_THROUGHPUT:-0}" | bc -l) )); then
-      echo "Error: throughput($throughput) is less than expected($EXPECTED_THROUGHPUT)"
+    # Compare throughput using awk for float support
+    EXPECTED_THROUGHPUT_VAL="${EXPECTED_THROUGHPUT:-0}"
+    IS_LOW_THROUGHPUT=$(echo "$throughput $EXPECTED_THROUGHPUT_VAL" | awk '{if ($1 < $2) print 1; else print 0}')
+    if [ "$IS_LOW_THROUGHPUT" -eq 1 ]; then
+      echo "Error: throughput($throughput) is less than expected($EXPECTED_THROUGHPUT_VAL)"
     fi
     echo "Throughput=$throughput" > "$RESULT_FILE"
 

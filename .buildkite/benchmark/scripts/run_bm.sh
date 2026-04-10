@@ -38,8 +38,8 @@ if [[ "${BUILDKITE:-false}" == "true" ]]; then
 fi
 
 if ! command -v gcloud &> /dev/null; then
-    echo "Error: gcloud is not installed and not running on Buildkite. Please install gcloud SDK manually."
-    exit 1
+    echo "Warning: gcloud is not installed. Some dataset or generation config downloads from GCS may be skipped or fail."
+    # We do not exit here anymore, to allow local runs without gcloud to proceed if datasets are already present or not needed.
 fi
 
 # Set umask so that any newly created files/directories have 777/666 permissions by default.
@@ -109,35 +109,45 @@ mkdir -p "$DATASET_DIR"
 DATASETS=("custom" "custom-token" "mmlu" "mlperf" "math500" "sharegpt")
 # shellcheck disable=SC2153
 if contains_element "$DATASET" "${DATASETS[@]}"; then
-  echo "Syncing dataset for $DATASET"
-  case "$DATASET" in
-    "custom-token")
-      gsutil -m cp gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/*.* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
-      ;;
-    "mmlu")
-      gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/mmlu/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
-      ;;
-    "mlperf")
-      gsutil -m cp gs://vllm-cb-storage2/dataset/mlperf/mlperf_shuffled.jsonl "$DATASET_DIR/mlperf.jsonl" || echo "Warning: failed to sync dataset ${DATASET}"
-      ;;
-    "math500")
-      gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/dataset/math500/math500.jsonl "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
-      ;;
-    "custom")
-      gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/bench-dataset/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
-      ;;
-    "sharegpt")
-      gsutil -m cp -r gs://"${GCS_BUCKET:-vllm-cb-storage2}"/sharegpt/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
-      ;;
-  esac
+  if [[ -z "${GCS_BUCKET:-}" ]]; then
+    echo "[INFO] GCS_BUCKET is not set. Skipping dataset download. Ensure datasets are present in $DATASET_DIR if needed."
+  elif command -v gsutil &> /dev/null; then
+    echo "Syncing dataset for $DATASET from gs://$GCS_BUCKET"
+    case "$DATASET" in
+      "custom-token")
+        gsutil -m cp gs://"$GCS_BUCKET"/dataset/*.* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
+        ;;
+      "mmlu")
+        gsutil -m cp -r gs://"$GCS_BUCKET"/dataset/mmlu/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
+        ;;
+      "mlperf")
+        gsutil -m cp gs://"$GCS_BUCKET"/dataset/mlperf/mlperf_shuffled.jsonl "$DATASET_DIR/mlperf.jsonl" || echo "Warning: failed to sync dataset ${DATASET}"
+        ;;
+      "math500")
+        gsutil -m cp -r gs://"$GCS_BUCKET"/dataset/math500/math500.jsonl "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
+        ;;
+      "custom")
+        gsutil -m cp -r gs://"$GCS_BUCKET"/bench-dataset/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
+        ;;
+      "sharegpt")
+        gsutil -m cp -r gs://"$GCS_BUCKET"/sharegpt/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
+        ;;
+    esac
+  else
+    echo "Warning: gsutil not found. Skipping dataset download from GCS."
+  fi
 fi
 
 # Prep specialized configurations (DeepSeek)
 if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
-  echo "Syncing generation configs for DeepSeek-R1"
-  GENERATION_CONFIG_FOLDER="$ARTIFACT_FOLDER/generation_configs"
-  mkdir -p "$GENERATION_CONFIG_FOLDER"
-  gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/* "$GENERATION_CONFIG_FOLDER" || echo "Warning: failed to sync generation configs ${DATASET}"
+  if command -v gsutil &> /dev/null; then
+    echo "Syncing generation configs for DeepSeek-R1"
+    GENERATION_CONFIG_FOLDER="$ARTIFACT_FOLDER/generation_configs"
+    mkdir -p "$GENERATION_CONFIG_FOLDER"
+    gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/* "$GENERATION_CONFIG_FOLDER" || echo "Warning: failed to sync generation configs ${DATASET}"
+  else
+    echo "Warning: gsutil not found. Skipping DeepSeek-R1 generation configs download from GCS."
+  fi
 fi
 
 if [ "$COMMAND_TYPE" = "lm_eval" ]; then
@@ -238,7 +248,12 @@ run_benchmark(){
   echo "$throughput $p99_e2el"
 }
 
-printf "[DEBUG] Checking folder structure ...\n"
+if [ "${BUILDKITE:-false}" == "true" ]; then
+  ENV_CONTEXT="Buildkite environment"
+else
+  ENV_CONTEXT="Local environment"
+fi
+printf "[DEBUG] Checking folder structure (Environment: %s)...\n" "$ENV_CONTEXT"
 printf "[DEBUG] pwd=%s\n\nls $ARTIFACT_FOLDER=\n%s\n" "$(pwd)" "$(ls "$ARTIFACT_FOLDER")" || true
 printf "[DEBUG] ls $ARTIFACT_FOLDER/temp_logs=\n%s\n" "$(ls "$ARTIFACT_FOLDER"/temp_logs)" || true
 
