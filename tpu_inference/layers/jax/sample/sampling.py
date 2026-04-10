@@ -84,11 +84,12 @@ def sample(
             logits, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
 
     greedy_tokens = jnp.argmax(logits, axis=-1)
+    logits_f32 = logits.astype(jnp.float32)
     if not tpu_sampling_metadata.do_sampling:
         ret_tokens = greedy_tokens
-        ret_logits = logits
+        ret_logits = logits_f32
     else:
-        processed_logits = _apply_sampling_transforms(logits,
+        processed_logits = _apply_sampling_transforms(logits_f32,
                                                       tpu_sampling_metadata)
         # (batch_size,)
         next_tokens = jax.random.categorical(rng, processed_logits)
@@ -96,7 +97,7 @@ def sample(
         # If temperature < 0, logits /= temperatures will flip the result, causing error.
         is_greedy = tpu_sampling_metadata.temperature < _SAMPLING_EPS
         ret_tokens = jnp.where(is_greedy, greedy_tokens, next_tokens)
-        ret_logits = jnp.where(jnp.expand_dims(is_greedy, axis=-1), logits,
+        ret_logits = jnp.where(jnp.expand_dims(is_greedy, axis=-1), logits_f32,
                                processed_logits)
     # Replicate the result so that in multi-controller jax setup
     # (i.e. Ray based multi-host setup), we won't hit error like

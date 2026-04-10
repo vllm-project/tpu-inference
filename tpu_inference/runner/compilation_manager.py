@@ -78,6 +78,13 @@ class CompilationManager:
 
     def _run_compilation(self, name: str, fn: Callable, *args,
                          **kwargs) -> None:
+        if args and hasattr(args[0], 'dtype'):
+            dtype_str = str(args[0].dtype)
+            sharding_obj = getattr(args[0], 'sharding', None)
+            sharding_str = "None"
+            if sharding_obj:
+                sharding_str = getattr(sharding_obj, 'spec', sharding_obj)
+            logger.info(f"[DEBUG-WARMUP] {name} input0 dtype: {dtype_str}, sharding: {sharding_str}")
         logger.info(f"Precompile {name} --> {kwargs}")
         start = time.perf_counter()
         result = fn(*args)
@@ -545,7 +552,7 @@ class CompilationManager:
             # function.
             sampling_metadata_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
-            logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
+            logits = self._create_dummy_tensor((num_reqs, hsize), jnp.float32,
                                                logits_sharding)
             for do_sampling in (True, False):
                 for logprobs in (True, False):
@@ -579,6 +586,10 @@ class CompilationManager:
                         _cache_collision_dummy=_cache_collision_dummy,
                         do_sampling=do_sampling,
                         logprobs=logprobs)
+                    print(f"\n[DEBUG-WARMUP] PRECOMPILING SAMPLE:")
+                    print(f"  - num_reqs: {num_reqs}")
+                    print(f"  - logits dtype: {logits.dtype}")
+                    print(f"  - logits sharding: {getattr(logits.sharding, 'spec', logits.sharding)}")
                     self._run_compilation(
                         f"worker{self.runner.rank} sample",
                         sample,
@@ -631,7 +642,7 @@ class CompilationManager:
                 self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA, )
             ) if dp_size > 1 else NamedSharding(self.runner.mesh,
                                                 PartitionSpec())
-            logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
+            logits = self._create_dummy_tensor((num_reqs, hsize), jnp.float32,
                                                logits_sharding)
             token_ids = self._create_dummy_tensor((num_reqs, ), jnp.int32,
                                                   token_ids_sharding)
@@ -663,7 +674,7 @@ class CompilationManager:
                     PartitionSpec(ShardingAxisName.MLP_DATA,
                                   ShardingAxisName.MLP_TENSOR))
                 target_probs = self._create_dummy_tensor(
-                    (num_logits, vocab_size), jnp.bfloat16, sharding)
+                    (num_logits, vocab_size), jnp.float32, sharding)
                 draft_token_ids = self._create_dummy_tensor((num_logits, ),
                                                             jnp.int32)
                 num_draft_tokens = self._create_dummy_tensor((num_reqs, ),
