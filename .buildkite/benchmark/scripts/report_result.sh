@@ -34,6 +34,9 @@ if [ $# -ne 1 ]; then
   exit 1
 fi
 
+RECORD_ID=$1
+RUN_TYPE="${RUN_TYPE:-DAILY}"
+
 # Define Result_file name
 RESULT_FILE="${ARTIFACT_FOLDER}/${RECORD_ID}.result"
 

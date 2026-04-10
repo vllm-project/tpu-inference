@@ -62,7 +62,7 @@ report_and_exit() {
   local report_exit_code
 
   echo "--- Calling report_result.sh for RECORD_ID=${record_id}"
-  bash .buildkite/benchmark/scripts/report_result.sh "$record_id"
+  bash "$SCRIPT_DIR/report_result.sh" "$record_id"
   report_exit_code=$?
 
   # Exit with the reporting script's failure code if it did not succeed.
@@ -238,7 +238,7 @@ run_benchmark(){
   echo "$throughput $p99_e2el"
 }
 
-printf "[DEBUG] Checking folder structure in container...\n"
+printf "[DEBUG] Checking folder structure ...\n"
 printf "[DEBUG] pwd=%s\n\nls $ARTIFACT_FOLDER=\n%s\n" "$(pwd)" "$(ls "$ARTIFACT_FOLDER")" || true
 printf "[DEBUG] ls $ARTIFACT_FOLDER/temp_logs=\n%s\n" "$(ls "$ARTIFACT_FOLDER"/temp_logs)" || true
 
