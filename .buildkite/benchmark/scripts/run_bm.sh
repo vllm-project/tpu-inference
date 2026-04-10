@@ -182,9 +182,9 @@ echo
 echo "[INFO] Starting vLLM Server in background..."
 
 echo "Printing the vllm serve command used to start the server:"
-printf "[DEBUG] Executing server_cmd: %s\n" "${SERVER_CMD[*]} > \"$VLLM_LOG\" 2>&1 &"
+printf "[DEBUG] Executing server_cmd: %s %s > \"%s\" 2>&1 &\n" "${SERVER_CMD_ENVS[*]}" "${SERVER_CMD[*]}" "$VLLM_LOG"
 
-"${SERVER_CMD[@]}" > "$VLLM_LOG" 2>&1 &
+env "${SERVER_CMD_ENVS[@]}" "${SERVER_CMD[@]}" > "$VLLM_LOG" 2>&1 &
 echo "wait for 60 minutes.."
 echo
 for _ in {1..360}; do
