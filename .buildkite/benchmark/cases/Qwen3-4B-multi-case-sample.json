@@ -29,8 +29,10 @@
           "max-num-seqs": 512,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "tpu_v6e_queue": 1,
-            "tpu_v7x_2_queue": 2,
+            "v6e-1": 1,
+            "v6e-8": 8,
+            "v7x-2": 2,
+            "v7x-8": 8,
             "default": 1
           },
           "no-enable-prefix-caching": true,
@@ -79,8 +81,10 @@
           "max-num-seqs": 512,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "tpu_v6e_queue": 1,
-            "tpu_v7x_2_queue": 2,
+            "v6e-1": 1,
+            "v6e-8": 8,
+            "v7x-2": 2,
+            "v7x-8": 8,
             "default": 1
           },
           "no-enable-prefix-caching": true,

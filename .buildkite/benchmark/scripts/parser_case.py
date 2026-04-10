@@ -25,24 +25,58 @@ CMD_MAP = {
     "benchmark_serving": "python3 scripts/bench_serving/benchmark_serving.py"
 }
 
-def resolve_queue_args(args_dict, current_queue):
+def get_current_machine_type():
     """
-    Resolves dictionary-based arguments based on the current CI queue.
+    Returns the current machine type string (e.g., 'v6e-8', 'v7x-2') 
+    using the tpu_info library.
+    """
+    try:
+        from tpu_info import device
+        chip_type, num_chips = device.get_local_chips()
+        if chip_type and num_chips > 0:
+            name = chip_type.value.name
+            # Normalize naming convention (e.g., '7x' -> 'v7x')
+            if name == "7x":
+                name = "v7x"
+                # For v7x, each core exposes its own PCI endpoint.
+                # Therefore, num_chips returned by get_local_chips() is already the total core count.
+                num_devices = num_chips
+            else:
+                if not name.startswith("v"):
+                    name = f"v{name}"
+                # For other types (e.g. v2, v3, v6e...)
+                num_devices = num_chips * chip_type.value.devices_per_chip
+
+            machine_type = f"{name}-{num_devices}"
+            print(f"echo '[DEBUG] Detected machine type: {machine_type}' >&2")
+            return machine_type
+        else:
+            print(f"echo '[WARNING] No TPU chips detected: chip_type={chip_type}, num_chips={num_chips}' >&2")
+    except ImportError:
+        print("echo '[WARNING] tpu_info library not found. Cannot determine machine type.' >&2")
+    except Exception as e:
+        print(f"echo '[WARNING] Failed to determine machine type: {e}' >&2")
+    return None
+
+
+def resolve_tensor_parallel_size_args(args_dict, current_machine):
+    """
+    Resolves dictionary-based arguments based on the current machine type.
     """
     resolved_args = {}
     if not args_dict:
         return resolved_args
 
     for key, value in args_dict.items():
-        # If the argument value is a dictionary, treat it as a queue-mapping configuration
+        # If the argument value is a dictionary, treat it as a machine-mapping configuration
         if isinstance(value, dict):
-            if current_queue and current_queue in value:
-                resolved_args[key] = value[current_queue]
+            if current_machine and current_machine in value:
+                resolved_args[key] = value[current_machine]
             elif "default" in value:
                 resolved_args[key] = value["default"]
             else:
                 # Fatal error if resolution fails and no default is provided
-                print(f"echo '[ERROR] Failed to resolve arg \"--{key}\" for queue \"{current_queue}\". No default found.' >&2")
+                print(f"echo '[ERROR] Failed to resolve arg \"--{key}\" for machine \"{current_machine}\". No default found.' >&2")
                 print("exit 1")
                 sys.exit(1)
         else:
@@ -77,8 +111,8 @@ def main():
     config_file = sys.argv[1]
     target_case = sys.argv[2] if len(sys.argv) > 2 else None
 
-    # Fetch queue name from environment, default to empty string
-    current_queue = os.environ.get("BUILDKITE_AGENT_META_DATA_QUEUE", "").strip()
+    # Determine current machine type from tpu_info
+    current_machine = get_current_machine_type()
 
     try:
         with open(config_file, 'r') as f:
@@ -142,9 +176,9 @@ def main():
 
     # Output execution strategy based on command_type
     if cli_cmd_type == "lm_eval":
-        # Resolve queue-specific args before building command
+        # Resolve machine-specific args before building command
         cli_raw_args = cli_opts.get("args", {})
-        cli_resolved_args = resolve_queue_args(cli_raw_args, current_queue)
+        cli_resolved_args = resolve_tensor_parallel_size_args(cli_raw_args, current_machine)
 
         print("export COMMAND_TYPE=\"lm_eval\"")
         lm_cmd = build_command(cli_cmd_type, cli_resolved_args)
@@ -156,8 +190,8 @@ def main():
         print(f"export TENSOR_PARALLEL_SIZE=\"{tensor_parallel_size}\"")
     else:
         srv_cmd_type = srv_opts.get("command_type", "")
-        srv_resolved_args = resolve_queue_args(srv_opts.get("args", {}), current_queue)
-        cli_resolved_args = resolve_queue_args(cli_opts.get("args", {}), current_queue)
+        srv_resolved_args = resolve_tensor_parallel_size_args(srv_opts.get("args", {}), current_machine)
+        cli_resolved_args = resolve_tensor_parallel_size_args(cli_opts.get("args", {}), current_machine)
 
         srv_cmd = build_command(srv_cmd_type, srv_resolved_args)
         cli_cmd = build_command(cli_cmd_type, cli_resolved_args)
