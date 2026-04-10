@@ -892,7 +892,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             # Return empty ModelRunnerOutput if there's no work to do.
             # TODO(fhzhang): We rely on empty cycles to remove requests in input batch. Fix it to reduce overhead.
-            logger.debug(f"Nothing scheduled: {scheduler_output}!")
+            logger.warning(f"Nothing scheduled: {scheduler_output}!")
             # NOTE(pooyam): There is no guarantee that scheduler is not sending empty output: https://github.com/vllm-project/vllm/blob/7cfea0df390c154c1026f77d3682e2733ca4aca8/vllm/v1/engine/core.py#L275
             # Why they are not preventing that is not clear to me.
             if len(scheduler_output.finished_req_ids) == 0:
@@ -1006,6 +1006,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padded_num_reqs=padded_num_reqs)
         return None
 
+    @time_function
     def _sample_from_logits(
         self,
         scheduler_output: "VllmSchedulerOutput",
@@ -1400,7 +1401,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             return self._prepare_inputs_dp(scheduler_output)
         else:
             return self._prepare_inputs_non_dp(scheduler_output)
-
+    
+    @time_function
     def _prepare_inputs_dp(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
