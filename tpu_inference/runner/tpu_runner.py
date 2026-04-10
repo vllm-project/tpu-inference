@@ -1144,14 +1144,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                    scheduler_output: "VllmSchedulerOutput"):
 
         dp_size = self.dp_size
-        num_reqs = self.input_batch.num_reqs
         max_num_reqs_per_dp_rank = self.max_num_reqs // dp_size
 
         # Use pre-computed per-rank metadata from DPSchedulerOutput when
         # available, avoiding an O(num_reqs) re-split by assigned_dp_rank.
-        req_ids_dp = getattr(scheduler_output, 'req_ids_per_rank', None)
-        scheduled_tokens_per_dp_rank = getattr(
-            scheduler_output, 'scheduled_tokens_per_rank', None)
+        req_ids_dp = req_ids_per_rank.req_ids_per_rank
+        scheduled_tokens_per_dp_rank = scheduler_output.scheduled_tokens_per_rank
 
         # Build the remaining derived structures from pre-computed data.
         req_indices_dp = {
@@ -1169,7 +1167,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             dp_rank: len(req_ids_dp[dp_rank])
             for dp_rank in range(dp_size)
         }
-    # Find maximum number of scheduled tokens across DP ranks
+        # Find maximum number of scheduled tokens across DP ranks
         max_num_scheduled_tokens_across_dp = max(
             num_scheduled_tokens_per_dp_rank.values())
 
