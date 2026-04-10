@@ -102,10 +102,6 @@ def run_jax_gdn_attention_local(
         - The output tensor of shape `(num_tokens, n_v * d_v)`.
     """
 
-    # Ensure query_start_loc is monotonically increasing. This is required to
-    # handle cases where query_start_loc might be padded with trailing zeros.
-    query_start_loc = jnp.maximum.accumulate(query_start_loc)
-
     # TODO: Switch conv implementaion based on config once we have more than 1 impl
     conv_impl = ragged_conv1d_jax
 
@@ -117,9 +113,14 @@ def run_jax_gdn_attention_local(
         query_start_loc,
         state_indices,
         kernel_size,
+        distribution,
     )
 
     out_mixed_qkv = jax.nn.silu(out_mixed_qkv)
+
+    # Ensure query_start_loc is monotonically increasing. This is required to
+    # handle cases where query_start_loc might be padded with trailing zeros.
+    #query_start_loc = jnp.maximum.accumulate(query_start_loc)
 
     if config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.REF:
         ragged_gdn_impl = functools.partial(
@@ -210,6 +211,7 @@ def run_jax_gdn_attention(
           - new_recurrent_state: `(max_reqs, n_v, d_k, d_v)`
         - The output tensor of shape `(num_tokens, n_v * d_v)`.
     """
+
     in_specs = (
         P(None, ShardingAxisName.ATTN_HEAD),  # j_mixed_qkv
         P(None, ShardingAxisName.ATTN_HEAD),  # j_b
