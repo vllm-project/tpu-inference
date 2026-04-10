@@ -499,11 +499,8 @@ def shard_moe_weights(
     "activation",
     "weight_block_size",
 ))
-def process_fp8_moe_weights(
-    weights: FusedMoEWeights, *args, **kwargs):
-    return weights
 
-def _process_fp8_moe_weights_disabled(
+def process_fp8_moe_weights(
     weights: FusedMoEWeights,
     moe_backend: MoEBackend,
     mesh: Mesh,
@@ -514,6 +511,10 @@ def _process_fp8_moe_weights_disabled(
     w13_weight_scale = weights.w13_weight_scale
     w2_weight = weights.w2_weight
     w2_weight_scale = weights.w2_weight_scale
+    if not envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
+        w13_interleave = activation == "swigluoai"
+        w13_reorder_size = get_mesh_shape_product(mesh, ShardingAxisName.MLP_TENSOR)
+        return process_moe_weights(weights, moe_backend=moe_backend, w13_reorder_size=w13_reorder_size, w13_interleave=w13_interleave)
     if desired_quant_dtype_from_env := envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
         desired_quant_dtype = to_jax_dtype(desired_quant_dtype_from_env)
     else:
