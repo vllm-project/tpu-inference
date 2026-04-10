@@ -113,9 +113,9 @@ fi
 
     # Compare throughput using awk for float support
     EXPECTED_THROUGHPUT_VAL="${EXPECTED_THROUGHPUT:-0}"
-    IS_LOW_THROUGHPUT=$(echo "$throughput $EXPECTED_THROUGHPUT_VAL" | awk '{if ($1 < $2) print 1; else print 0}')
+    IS_LOW_THROUGHPUT=$(echo "$throughput $EXPECTED_THROUGHPUT_VAL" | awk '{if ($1 < $2 || $1 == 0) print 1; else print 0}')
     if [ "$IS_LOW_THROUGHPUT" -eq 1 ]; then
-      echo "Error: throughput($throughput) is less than expected($EXPECTED_THROUGHPUT_VAL)"
+      echo "Error: throughput($throughput) is less than expected($EXPECTED_THROUGHPUT_VAL) or is 0"
     fi
     echo "Throughput=$throughput" > "$RESULT_FILE"
 
