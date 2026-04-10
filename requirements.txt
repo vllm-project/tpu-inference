@@ -7,7 +7,7 @@ numpy
 google-cloud-storage
 jax==0.9.2
 jaxlib==0.9.2
-libtpu==0.0.38
+libtpu==0.0.39
 jaxtyping
 flax==0.12.4
 torchax==0.0.11
