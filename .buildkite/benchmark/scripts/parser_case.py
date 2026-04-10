@@ -140,6 +140,9 @@ def main():
 
         merged_env = data.get("global_env", {}).copy()
         merged_env.update(case_data.get("env", {}))
+
+        # Inject global_env into case_data so it will be included in the DB `Config`
+        case_data["global_env"] = data.get("global_env", {})
     else:
         case_data = data
         merged_env = case_data.get("env", {})
