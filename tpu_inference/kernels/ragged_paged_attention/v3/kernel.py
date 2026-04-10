@@ -461,10 +461,10 @@ def _ragged_paged_attention_kernel_loop(
             s_scale *= q_scale
 
         s *= s_scale
+        s = s.astype(out_dtype)
 
         if soft_cap is not None:
             s = soft_cap * jnp.tanh(s / soft_cap)
-        s = s.astype(out_dtype)
 
         int_ty = jnp.int32
         if get_dtype_packing(q_dtype) != 1 and get_tpu_version() >= 6:
