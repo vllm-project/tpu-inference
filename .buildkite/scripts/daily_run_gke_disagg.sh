@@ -1,4 +1,18 @@
 #!/bin/bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 MODEL="Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
 PREFILL_LABEL="app=vllm-prefill"
@@ -10,11 +24,11 @@ TIMEOUT_SECONDS=7200
 init_env() {
     # Get credentials to GKE cluster
     echo "gcloud container clusters get-credentials $CLUSTER_NAME --zone $ZONE --project $PROJECT_NAME"
-    gcloud container clusters get-credentials $CLUSTER_NAME --zone $ZONE --project $PROJECT_NAME
+    gcloud container clusters get-credentials "$CLUSTER_NAME" --zone "$ZONE" --project "$PROJECT_NAME"
 
     # Ensure HF_TOKEN is set
     echo "kubectl create secret generic hf-token-secret --from-literal=token=$HF_TOKEN"
-    kubectl create secret generic hf-token-secret --from-literal=token=$HF_TOKEN --dry-run=client -o yaml | kubectl apply -f -
+    kubectl create secret generic hf-token-secret --from-literal=token="$HF_TOKEN" --dry-run=client -o yaml | kubectl apply -f -
 
     # Create storage class
     echo "kubectl apply -f ./kubernetes/manifests/storageclass.yaml"
@@ -52,7 +66,7 @@ wait_for_vllm() {
     while true; do
         # Check if we have exceeded the 2-hour timeout
         if [ "$SECONDS" -ge "$TIMEOUT_SECONDS" ]; then
-            echo "ERROR: Pods failed to start after the maximum timeout."
+            echo "ERROR: Po.ds failed to start after the maximum timeout."
             exit 1
         fi
 
@@ -85,19 +99,19 @@ run_disagg_benchmark() {
         echo "Starting Benchmark: Rate=$RATE, Input=$input_len, Output=$output_len"
         echo "-------------------------------------------------------"
 
-        kubectl exec $proxy -- vllm bench serve \
-            --model=$model \
+        kubectl exec "$proxy" -- vllm bench serve \
+            --model="$model" \
             --dataset-name=random \
-            --random-input-len=$input_len \
-            --random-output-len=$output_len \
-            --num-prompts=$num_prompts \
+            --random-input-len="$input_len" \
+            --random-output-len="$output_len" \
+            --num-prompts="$num_prompts" \
             --ignore-eos \
             --host=localhost \
             --port=10000 \
-            --request-rate=$RATE \
+            --request-rate="$RATE" \
             --metric-percentiles 90,99 \
             --append-result \
-            --result-file=$filename
+            --result-file="$filename"
 
         sleep 2
     done
@@ -148,10 +162,10 @@ echo "------------------------------------------------"
 PROXY_POD=$(kubectl get pods -l "$PROXY_LABEL" -o jsonpath="{.items[0].metadata.name}")
 
 # Run input=1024, output=8192
-run_disagg_benchmark $PROXY_POD $MODEL 1024 8192 256
+run_disagg_benchmark "$PROXY_POD" "$MODEL" 1024 8192 256
 
 # Run input=8192, output=1024
-run_disagg_benchmark $PROXY_POD $MODEL 8192 1024 256
+run_disagg_benchmark "$PROXY_POD" "$MODEL" 8192 1024 256
 
 # Benchmark results should be saved in local files 1024_8192.json and
 # 8192_1024.json.
@@ -169,8 +183,7 @@ for RESULT_FILE in "1024_8192.json" "8192_1024.json"; do
     
     RECORD_ID="${BASE_RECORD_ID}-${RESULT_FILE%.*}"
     
-    # Upload to GCS
-    GCS_BUCKET="${GCS_BUCKET}"
+    # Upload to GCS"
     GCS_PATH="gs://$GCS_BUCKET/$RECORD_ID/$RESULT_FILE"
     echo "Uploading results to GCS: $GCS_PATH"
     gsutil cp "$RESULT_FILE" "$GCS_PATH"

@@ -1,3 +1,17 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import json
 import os
 import sys
@@ -11,6 +25,7 @@ def fmt(val, is_str=False):
     if is_str:
         return f"'{val}'"
     return str(val)
+
 
 def parse_and_dump(file_path, record_id):
     if not os.path.exists(file_path):
@@ -26,7 +41,7 @@ def parse_and_dump(file_path, record_id):
         input_len = int(input_len_str)
         output_len = int(output_len_str)
     except ValueError:
-	print(
+        print(
             f"Warning: Could not parse input/output len from filename: {base_name}. Using NULL.",
             file=sys.stderr)
         input_len = 'NULL'
@@ -39,7 +54,7 @@ def parse_and_dump(file_path, record_id):
             try:
                 data = json.loads(line)
             except json.JSONDecodeError:
-		print(f"Error: Could not decode JSON from line: {line}",
+                print(f"Error: Could not decode JSON from line: {line}",
                       file=sys.stderr)
                 continue
 
@@ -53,7 +68,9 @@ def parse_and_dump(file_path, record_id):
                     dt = datetime.strptime(date_str, '%Y%m%d-%H%M%S')
                     spanner_timestamp = f"TIMESTAMP '{dt.strftime('%Y-%m-%dT%H:%M:%SZ')}'"
                 except ValueError:
-                    print(f"Warning: Could not parse date string: {date_str}. Using CURRENT_TIMESTAMP()", file=sys.stderr)
+                    print(
+                        f"Warning: Could not parse date string: {date_str}. Using CURRENT_TIMESTAMP()",
+                        file=sys.stderr)
 
             # Generate a unique RecordId for this rate
             unique_record_id = f"{record_id}_{rate}"
@@ -84,9 +101,10 @@ def parse_and_dump(file_path, record_id):
             # Print as a single line for bash processing
             print(" ".join(sql.split()))
 
+
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-	print("Usage: python parse_gke_results.py <file_path> <record_id>",
+        print("Usage: python parse_gke_results.py <file_path> <record_id>",
               file=sys.stderr)
         sys.exit(1)
     parse_and_dump(sys.argv[1], sys.argv[2])
