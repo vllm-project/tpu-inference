@@ -436,6 +436,12 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         if self.parallel_config.pipeline_parallel_size > 1:
             self.collective_rpc("initialize_pp_transfer_connect")
         self.collective_rpc("load_model")
+
+        def _update_block_size(worker):
+            current_platform.update_block_size_for_backend(worker.vllm_config)
+
+        self.collective_rpc(_update_block_size)
+
         if self.use_ray_spmd_worker:
             for pp_rank in range(self.parallel_config.pipeline_parallel_size):
                 self.pp_tp_workers.append([])
