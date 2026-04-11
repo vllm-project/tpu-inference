@@ -24,10 +24,10 @@ from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig, int4_w4a16_moe_quant_config)
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import \
-    CompressedTensorsMoEMethod  # CompressedTensorsW4A8Fp8MoEMethod,
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import \
-    CompressedTensorsW8A8Fp8MoEMethod  # noqa: E501
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe import \
+    CompressedTensorsMoEMethod
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8 import \
+    CompressedTensorsW8A8Fp8MoEMethod
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.scalar_type import ScalarType, scalar_types
 
@@ -325,8 +325,8 @@ class VllmCompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod,
         :param params_dtype: Data type for parameters like scale and bias.
         :param kwargs: Additional arguments like weight_loader.
         """
-        layer.intermediate_size_per_partition = intermediate_size_per_partition
-        layer.hidden_size = hidden_size
+        # layer.intermediate_size_per_partition = intermediate_size_per_partition
+        # layer.hidden_size = hidden_size
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None

@@ -44,9 +44,8 @@ class MockVllmConfig:
         self.ec_transfer_config = MagicMock()
 
 
-@patch(
-    "vllm.v1.executor.ray_distributed_executor.RayDistributedExecutor.__init__",
-    lambda x, y: None)
+@patch("vllm.v1.executor.ray_executor.RayDistributedExecutor.__init__",
+       lambda x, y: None)
 @patch("tpu_inference.executors.ray_distributed_executor.envs")
 @patch("tpu_inference.executors.ray_distributed_executor.ray")
 @patch("tpu_inference.executors.ray_distributed_executor.current_platform")
@@ -524,7 +523,7 @@ class TestRayDistributedExecutorExecuteDag(unittest.TestCase):
         self.executor.scheduler_config.async_scheduling = False
 
         with patch(
-                "vllm.v1.executor.ray_distributed_executor"
+                "vllm.v1.executor.ray_executor"
                 ".RayDistributedExecutor._execute_dag",
                 return_value="super_result") as mock_super:
             result = self.executor._execute_dag(MagicMock(),

@@ -29,7 +29,7 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     reorder_concatenated_tensor_for_sharding
 from tpu_inference.layers.vllm.ops.ragged_conv1d_jax import ragged_conv1d
-from tpu_inference.layers.vllm.ops.ragged_gated_delta_rule_jax import \
+from tpu_inference.layers.vllm.ops.ragged_gated_delta_rule_chunked import \
     ragged_gated_delta_rule
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
@@ -205,6 +205,7 @@ def run_jax_gdn_attention(
     mapped_fn = jax.shard_map(
         p_run_jax_gdn_attention_local,
         mesh=mesh,
+        check_vma=False,
         in_specs=in_specs,
         out_specs=out_specs,
     )
@@ -353,7 +354,7 @@ def gdn_in_proj_tpu(
     return mixed_qkvz, ba
 
 
-def apply_gated_delta_net_torch_ops_patch(mesh: jax.sharding.Mesh) -> None:
+def apply_gated_delta_net_torch_ops_patch() -> None:
     """
     This is a patch to inject the `gdn_attention_core` op so the
     Torch/GPU  kernel is bypassed in favor of the TPU kernel
@@ -365,13 +366,6 @@ def apply_gated_delta_net_torch_ops_patch(mesh: jax.sharding.Mesh) -> None:
         import vllm.model_executor.models.qwen3_next  # noqa: F401
     except ImportError:
         pass
-
-    # Ensure the op exists in the namespace, which initializes the OpOverloadPacket
-    if hasattr(torch.ops, "vllm") and hasattr(torch.ops.vllm,
-                                              "gdn_attention_core"):
-        # dummy call to ensure the op is registered
-        torch.ops.vllm.gdn_attention_core = functools.partial(
-            gdn_attention_core_tpu, mesh=mesh)
 
     if hasattr(torch.ops.vllm, "gdn_in_proj"):
         # dummy call to ensure the op is registered

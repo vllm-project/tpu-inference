@@ -45,7 +45,7 @@ def attach_incremental_weight_loader(model: torch.nn.Module) -> None:
 
             # Processing and sharding
             # For now, only handle unquantized linear and moe layers.
-            quant_method = layer.quant_method
+            quant_method = getattr(layer, "quant_method", None)
             if isinstance(quant_method, VllmQuantizationMethod):
                 quant_method.maybe_process_weights(layer, param_name, args,
                                                    kwargs)
