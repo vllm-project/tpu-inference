@@ -479,7 +479,17 @@ class DPScheduler(SchedulerInterface):
             start_time = time()
             raw_bytes = self.output_conns[rank].recv_bytes()
             recv_time = time()
+
+            gc_was_enabled = gc.isenabled()
+            if gc_was_enabled:
+                gc.disable()
+
             result = cloudpickle.loads(raw_bytes)
+            deserialize_time = time()
+
+            if gc_was_enabled:
+                gc.enable()
+
             deserialize_time = time()
 
             end_time = time()
