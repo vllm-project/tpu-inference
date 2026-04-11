@@ -14,6 +14,7 @@
 
 import atexit
 import copy
+import gc
 import multiprocessing
 import multiprocessing.reduction
 import os
