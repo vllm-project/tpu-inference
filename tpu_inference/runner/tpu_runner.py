@@ -927,9 +927,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             step_rng = self.rng_params_for_sampling
 
         if spec_decode_metadata is None:
-            logits = logits.astype(jnp.float32)
             with self.maybe_forbid_compile:
-                next_tokens, processed_logits = sample(
+                next_tokens = sample(
                     step_rng,
                     self.mesh,
                     logits,
@@ -947,7 +946,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 rejection_rng = step_rng
             bonus_logits = self._select_from_array_fn(
                 logits, spec_decode_metadata.bonus_logits_indices)
-            bonus_token_ids, _ = sample(
+            bonus_token_ids = sample(
                 bonus_rng,
                 self.mesh,
                 bonus_logits,
@@ -965,11 +964,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 key=rejection_rng,
             )
 
-        logits = logits.astype(jnp.float32)
         with self.maybe_forbid_compile:
-
             if tpu_sampling_metadata.logprobs:
-                logits = processed_logits if self.model_config.logprobs_mode == "processed_logprobs" else logits
                 logprobs = self._compute_and_gather_logprobs(
                     logits, next_tokens, self.model_config.max_logprobs)
                 logprobs = _jax_logprobs_copy_to_host_async(logprobs)
