@@ -586,22 +586,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         disable_mm_from_limits = False
         if self.model_config.is_multimodal_model:
             mm_limits = self.model_config.multimodal_config.limit_per_prompt
-            
-            image_limit = mm_limits.get("image")
-            video_limit = mm_limits.get("video")
-            
-            # We only disable multi-modality if the user EXPLICITLY provided limits
-            # AND both of those limits are set to 0.
-            # If a limit is not specified (None), we assume it is not limiting to 0.
-            if image_limit is not None or video_limit is not None:
-                image_count = image_limit.count if image_limit is not None else 1
-                video_count = video_limit.count if video_limit is not None else 1
-                
-                disable_mm_from_limits = image_count == 0 and video_count == 0
+            # According to https://github.com/vllm-project/vllm/blob/21d2b53f88d99f9ab369444f6d53ed2b9c260e4f/vllm/config/multimodal.py#L79-L95
+            # if a modality limit is missing, we should treat count as 999. So here we disable multi-modality only when all limits are set to 0.
+            if mm_limits and all(limit.count == 0
+                                 for limit in mm_limits.values()):
+                disable_mm_from_limits = True
 
             if disable_mm_from_limits:
-                logger.info(
-                    "Disabling multi-modality for model because limits are set to 0."
+                logger.warning(
+                    f"Disabling multi-modality for model because limits are set to 0. {mm_limits=}"
                 )
 
         self.is_multimodal_model = (self.model_config.is_multimodal_model
