@@ -72,6 +72,8 @@ export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=vllm"
 export USE_UNFUSED_MEGABLOCKS_ENV=""
 export HF_CONFIG=""
 export USE_VLLM_LKG="true"
+export FORCE_MOE_RANDOM_ROUTING_ENV=""
+export LOAD_FORMAT=""
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -105,6 +107,8 @@ while [[ $# -gt 0 ]]; do
     --model-impl-type) export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=$2"; shift 2 ;;
     --use-unfused-megablocks) export USE_UNFUSED_MEGABLOCKS_ENV="USE_UNFUSED_MEGABLOCKS=$2"; shift 2 ;;
     --hf-config) export HF_CONFIG="$2"; shift 2 ;;
+    --force-moe-random-routing) export FORCE_MOE_RANDOM_ROUTING_ENV="FORCE_MOE_RANDOM_ROUTING=$2"; shift 2 ;;
+    --load-format) export LOAD_FORMAT="$2"; shift 2 ;;
     *) echo "Unknown parameter passed: $1"; exit 1 ;;
   esac
 done
@@ -131,6 +135,10 @@ if [[ -n "${HF_CONFIG}" ]]; then
   EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS} --hf-config=${HF_CONFIG}"
 fi
 
+if [[ -n "${LOAD_FORMAT}" ]]; then
+  EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS} --load-format=${LOAD_FORMAT}"
+fi
+
 # Define the commands utilizing the unified parameters
 SERVER_CMD="${PRE_SERVER_CMD}VLLM_DISABLE_SHARED_EXPERTS_STREAM=${DISABLE_SHARED_EXPERTS_STREAM} \
 NEW_MODEL_DESIGN=${NEW_MODEL_DESIGN} \
@@ -139,6 +147,7 @@ ${MOE_REQUANTIZE_BLOCK_SIZE_ENV} \
 ${MOE_REQUANTIZE_WEIGHT_DTYPE_ENV} \
 ${PHASED_PROFILING_DIR_ENV} \
 ${USE_UNFUSED_MEGABLOCKS_ENV} \
+${FORCE_MOE_RANDOM_ROUTING_ENV} \
 TPU_BACKEND_TYPE=jax \
 ${MODEL_IMPL_TYPE_ENV} \
 vllm serve \
@@ -147,7 +156,6 @@ vllm serve \
   ${EXTRA_SERVER_ARGS} \
   --served-model-name ${TARGET_TOKENIZER} \
   --max-model-len=${MAX_MODEL_LEN} \
-  --api-server-count=3 \
   --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \
   --max-num-seqs ${MAX_NUM_SEQS} \
   --no-enable-prefix-caching \
@@ -157,7 +165,6 @@ vllm serve \
   --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION} \
   ${ENABLE_EXPERT_PARALLEL} \
   ${ADDITIONAL_CONFIG} \
-  --load-format=runai_streamer \
   --trust-remote-code"
 
 BENCHMARK_CMD="vllm bench serve \
@@ -194,8 +201,10 @@ echo "Logging output to: $BENCHMARK_LOG"
 if ! bash "$RUN_MULTIHOST_SCRIPT" "$SERVER_CMD" "$BENCHMARK_CMD" > "$BENCHMARK_LOG" 2>&1; then
   echo "Benchmarking failed. See log: $BENCHMARK_LOG"
   echo "Status=FAILED" > "$RESULT_FILE"
+  BENCHMARK_STATUS="FAILED"
 else
   echo "Benchmarking completed. Parsing results..."
+  BENCHMARK_STATUS="SUCCESS"
   
   # 2. Parse benchmark log and generate key-value .result file
   python3 -c '
@@ -272,14 +281,22 @@ NumPrompts=${NUM_PROMPTS}
 CodeHash=${CODE_HASH}
 Model=${MODEL_NAME}
 JobReference=${JOB_REFERENCE}
-ExtraArgs=${MODEL_IMPL_TYPE_ENV#*=}
+ExtraArgs=${MODEL_IMPL_TYPE_ENV#*=}${FORCE_MOE_RANDOM_ROUTING_ENV:+ ${FORCE_MOE_RANDOM_ROUTING_ENV}}
 EOF
 
 fi
 
 # Upload vllm_serve.log to GCS
 IMPL_TYPE="${MODEL_IMPL_TYPE_ENV#*=}"
-LOG_GCS_URI="gs://tpu-commons-ci/logs/${MODEL_NAME}_${INPUT_LEN}_${OUTPUT_LEN}_${IMPL_TYPE}_${CODE_HASH}_${JOB_REFERENCE}_vllm_serve.log"
+RUN_MODE="benchmark"
+if [ -n "$PHASED_PROFILING_DIR" ]; then
+  RUN_MODE="xprof"
+fi
+MOE_ROUTING_TAG=""
+if [ "${FORCE_MOE_RANDOM_ROUTING_ENV#*=}" = "1" ]; then
+  MOE_ROUTING_TAG="_force-moe-random-routing"
+fi
+LOG_GCS_URI="gs://tpu-commons-ci/logs/${MODEL_NAME}_${INPUT_LEN}_${OUTPUT_LEN}_${IMPL_TYPE}_${CODE_HASH}_${BENCHMARK_STATUS}_${RUN_MODE}${MOE_ROUTING_TAG}_${JOB_REFERENCE}_vllm_serve.log"
 if [ -f "/tmp/vllm_serve.log" ]; then
   echo "Uploading vllm_serve.log to $LOG_GCS_URI"
   gsutil cp /tmp/vllm_serve.log "$LOG_GCS_URI" || echo "Warning: Failed to upload vllm_serve.log"

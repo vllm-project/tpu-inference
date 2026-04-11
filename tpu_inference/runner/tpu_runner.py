@@ -589,15 +589,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         disable_mm_from_limits = False
         if self.model_config.is_multimodal_model:
             mm_limits = self.model_config.multimodal_config.limit_per_prompt
-            image_limit = mm_limits.get("image")
-            video_limit = mm_limits.get("video")
-            image_count = image_limit.count if image_limit else 0
-            video_count = video_limit.count if video_limit else 0
-            disable_mm_from_limits = image_count == 0 and video_count == 0
+            # According to https://github.com/vllm-project/vllm/blob/21d2b53f88d99f9ab369444f6d53ed2b9c260e4f/vllm/config/multimodal.py#L79-L95
+            # if a modality limit is missing, we should treat count as 999. So here we disable multi-modality only when all limits are set to 0.
+            if mm_limits and all(limit.count == 0
+                                 for limit in mm_limits.values()):
+                disable_mm_from_limits = True
 
             if disable_mm_from_limits:
-                logger.info(
-                    "Disabling multi-modality for model because limits are set to 0."
+                logger.warning(
+                    f"Disabling multi-modality for model because limits are set to 0. {mm_limits=}"
                 )
 
         self.is_multimodal_model = (self.model_config.is_multimodal_model
@@ -932,6 +932,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             step_rng = self.rng_params_for_sampling
 
         if spec_decode_metadata is None:
+            logits = logits.astype(jnp.float32)
             with self.maybe_forbid_compile:
                 next_tokens, processed_logits = sample(
                     step_rng,
@@ -969,12 +970,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 key=rejection_rng,
             )
 
+        logits = logits.astype(jnp.float32)
         with self.maybe_forbid_compile:
+
             if tpu_sampling_metadata.logprobs:
-                if self.model_config.logprobs_mode == "processed_logprobs":
-                    logits = processed_logits
-                else:
-                    logits = logits.astype(jnp.float32)
+                logits = processed_logits if self.model_config.logprobs_mode == "processed_logprobs" else logits
                 logprobs = self._compute_and_gather_logprobs(
                     logits, next_tokens, self.model_config.max_logprobs)
                 logprobs = _jax_logprobs_copy_to_host_async(logprobs)

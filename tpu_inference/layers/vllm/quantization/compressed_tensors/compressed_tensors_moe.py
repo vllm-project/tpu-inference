@@ -20,8 +20,10 @@ from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-    CompressedTensorsMoEMethod, CompressedTensorsW8A8Fp8MoEMethod)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe import \
+    CompressedTensorsMoEMethod
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8 import \
+    CompressedTensorsW8A8Fp8MoEMethod
 
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.moe_weights import (

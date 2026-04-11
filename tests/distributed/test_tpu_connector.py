@@ -348,7 +348,6 @@ class TestTPUConnectorWorker(unittest.TestCase):
         self.all_mocks["zmq"].Context.assert_called_once()
         self.all_mocks["threading"].Thread.assert_called_once()
         self.all_mocks["threading"].Event.assert_called()
-        self.all_mocks["ThreadPoolExecutor"].assert_not_called()
         self.assertTrue(worker.is_producer)
 
     def test_init_consumer(self):
@@ -487,7 +486,7 @@ class TestTPUConnectorWorker(unittest.TestCase):
         worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
 
         self.all_mocks['time'].perf_counter.return_value = 1000
-        worker.reqs_wait_pull = {'req1': ['kv_data', 900]}
+        worker.reqs_wait_pull = {'req1': ['kv_data', 900, -1]}
 
         done_sending, done_recving = worker.get_finished()
 

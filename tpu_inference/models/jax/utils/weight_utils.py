@@ -830,9 +830,14 @@ def load_nnx_param_from_reshaped_torch(
         mesh: Optional device mesh override used when sharding metadata does not
             already carry the target mesh.
     """
-    jax_weight = jax_array_from_reshaped_torch(torch_weight,
-                                               reshape_dims=reshape_dims,
-                                               permute_dims=permute_dims)
+    try:
+        jax_weight = jax_array_from_reshaped_torch(torch_weight,
+                                                   reshape_dims=reshape_dims,
+                                                   permute_dims=permute_dims)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to convert torch weight for '{param_name}' ({torch_weight.shape}) to JAX array, with reshape_dims={reshape_dims} and permute_dims={permute_dims}"
+        ) from e
 
     assert tuple(jax_weight.shape) == jax_param.value.shape, \
         f"Shape mismatch when loading weight '{param_name}': torch {jax_weight.shape} vs jax {jax_param.value.shape}"
@@ -891,6 +896,14 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         # Book mark those already done processing, skip if visited.
         self._process_weights_after_loading_per_module = defaultdict(
             lambda: False)
+
+    def _add_loadable_non_param_tensors(self, module: JaxModule,
+                                        child_params: dict[str, Any]):
+        """
+        Add tensor names that are not in the model params that may be in the
+        safetensors, e.g., batch normalization stats and registered buffers.
+        """
+        ...
 
     def _load_module(self, base_prefix: str, module: JaxModule,
                      weights: Iterable) -> Iterable:
