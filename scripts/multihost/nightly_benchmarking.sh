@@ -73,7 +73,6 @@ export USE_UNFUSED_MEGABLOCKS_ENV=""
 export HF_CONFIG=""
 export USE_VLLM_LKG="true"
 export FORCE_MOE_RANDOM_ROUTING_ENV=""
-export API_SERVER_COUNT=""
 export LOAD_FORMAT=""
 
 # Parse command line arguments
@@ -109,7 +108,6 @@ while [[ $# -gt 0 ]]; do
     --use-unfused-megablocks) export USE_UNFUSED_MEGABLOCKS_ENV="USE_UNFUSED_MEGABLOCKS=$2"; shift 2 ;;
     --hf-config) export HF_CONFIG="$2"; shift 2 ;;
     --force-moe-random-routing) export FORCE_MOE_RANDOM_ROUTING_ENV="FORCE_MOE_RANDOM_ROUTING=$2"; shift 2 ;;
-    --api-server-count) API_SERVER_COUNT="$2"; shift 2 ;;
     --load-format) export LOAD_FORMAT="$2"; shift 2 ;;
     *) echo "Unknown parameter passed: $1"; exit 1 ;;
   esac
@@ -149,7 +147,6 @@ ${MOE_REQUANTIZE_BLOCK_SIZE_ENV} \
 ${MOE_REQUANTIZE_WEIGHT_DTYPE_ENV} \
 ${PHASED_PROFILING_DIR_ENV} \
 ${USE_UNFUSED_MEGABLOCKS_ENV} \
-VLLM_ENGINE_READY_TIMEOUT_S=10800 \
 ${FORCE_MOE_RANDOM_ROUTING_ENV} \
 TPU_BACKEND_TYPE=jax \
 ${MODEL_IMPL_TYPE_ENV} \
@@ -159,7 +156,6 @@ vllm serve \
   ${EXTRA_SERVER_ARGS} \
   --served-model-name ${TARGET_TOKENIZER} \
   --max-model-len=${MAX_MODEL_LEN} \
-  ${API_SERVER_COUNT:+--api-server-count=${API_SERVER_COUNT}} \
   --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \
   --max-num-seqs ${MAX_NUM_SEQS} \
   --no-enable-prefix-caching \
