@@ -31,5 +31,4 @@ bash "${NIGHTLY_SCRIPT}" \
   --vllm-mla-disable "0" \
   --moe-requantize-block-size "512" \
   --moe-requantize-weight-dtype "fp4" \
-  --api-server-count 3 \
   --run-accuracy "mmlu"
