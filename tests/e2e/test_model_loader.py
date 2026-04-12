@@ -32,6 +32,10 @@ from tpu_inference.models.common.model_loader import (_MODEL_REGISTRY,
                                                       register_model)
 
 
+def _get_tensor_parallel_size():
+    return 2 if os.environ.get("TPU_VERSION", "tpu6e") == "tpu7x" else 1
+
+
 @pytest.fixture
 def cleanup_registries():
     """Cleans up the model registries before and after each test."""
@@ -145,7 +149,7 @@ def _run_server_and_bench(model_name: str, model_impl_type: str,
         "--max-model-len",
         "2048",
         "--tensor-parallel-size",
-        "1",
+        str(_get_tensor_parallel_size()),
         "--no-enable-prefix-caching",
         "--gpu-memory-utilization",
         "0.90",
