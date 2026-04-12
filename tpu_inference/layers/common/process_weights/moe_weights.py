@@ -361,10 +361,10 @@ def process_moe_weights(
                                         name="w13_weight")
 
             if w13_weight_scale is not None:
-                w13_weight_scale = process_w13_tp(tensor=w13_weight_scale,
-                                                  concat_dim=3,
-                                                  name="w13_weight_scale")
-
+                if w13_weight_scale.shape[-1] == intermediate_size * 2:
+                    w13_weight_scale = process_w13_tp(tensor=w13_weight_scale, concat_dim=3, name="w13_weight_scale")
+                else:
+                    w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
             if w13_bias is not None:
                 w13_bias = process_w13_tp(tensor=w13_bias,
                                           concat_dim=2,
@@ -382,10 +382,10 @@ def process_moe_weights(
                                         name="w13_weight")
 
             if w13_weight_scale is not None:
-                w13_weight_scale = process_w13_ep(tensor=w13_weight_scale,
-                                                  concat_dim=3,
-                                                  name="w13_weight_scale")
-
+                if w13_weight_scale.shape[-1] == intermediate_size * 2:
+                    w13_weight_scale = process_w13_ep(tensor=w13_weight_scale, concat_dim=3, name="w13_weight_scale")
+                else:
+                    w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
             if w13_bias is not None:
                 w13_bias = process_w13_ep(tensor=w13_bias,
                                           concat_dim=2,
