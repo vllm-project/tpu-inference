@@ -170,6 +170,9 @@ class ShardingConfigManager:
 
         if enable_dp_attention:
             # Replicate attention layer when num_kv_heads < TP
+            # Ensure ShardingAxisName is initialized before modifying _cls
+            _ = ShardingAxisName.ATTN_HEAD
+            ShardingAxisName._cls.ATTN_HEAD = None
             num_kv_heads = 1 if vllm_config.model_config.use_mla else vllm_config.model_config.get_total_num_kv_heads(
             )
             cache_dtype = vllm_config.cache_config.cache_dtype

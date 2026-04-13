@@ -35,6 +35,7 @@ from tpu_inference.layers.common.process_weights.linear_weights import (
     to_parameter_list)
 from tpu_inference.layers.common.quantization import (dequantize_tensor,
                                                       quantize_tensor)
+from tpu_inference.layers.common.quantization.fp8 import process_blockwise_fp8_linear_weights
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
 from tpu_inference.layers.vllm.quantization.configs import \
@@ -132,16 +133,36 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                 per_tensor=per_tensor,
             )
 
-        weights = process_fp8_linear_weights(weight, weight_scale, bias)
+        if self.weight_block_size is not None:
+            weights = process_blockwise_fp8_linear_weights(
+                weight=weight,
+                weight_scale=weight_scale,
+                bias=bias,
+                weight_block_size=tuple(self.weight_block_size),
+                requant_block_size=self.linear_config.requant_block_size,
+                output_sizes=tuple(self.linear_config.output_sizes),
+                requant_weight_dtype=self.linear_config.requant_weight_dtype,
+                fuse_matmuls=self.linear_config.fuse_matmuls,
+                n_shards=self.linear_config.n_shards)
+        else:
+            weights = process_fp8_linear_weights(weight, weight_scale, bias)
 
         if self.linear_config.enable_quantized_matmul_kernel and weights.weight_scale.ndim == 2:
             if weights.weight_scale.shape[0] > 1 and weights.weight_scale.shape[1] > 1:
                 # The quantized_matmul_kernel expects weight scales shaped (n_blocks, 1, n_out_features) for blockwisze quantization.
-                # Original weight_scale is (n_out_features, n_blocks)
-                weights.weight_scale = jnp.expand_dims(
-                    jnp.transpose(weights.weight_scale),
-                    axis=1,
-                )
+                if self.weight_block_size is not None:
+                    # process_blockwise_fp8_linear_weights returns weight_scale shaped (n_out_features, n_blocks)
+                    # We need it shaped (n_blocks, 1, n_out_features)
+                    weights.weight_scale = jnp.expand_dims(
+                        jnp.transpose(weights.weight_scale),
+                        axis=1,
+                    )
+                    print(f"DEBUG: compressed_tensors scale shape: {weights.weight_scale.shape}")
+                else:
+                    weights.weight_scale = jnp.expand_dims(
+                        jnp.transpose(weights.weight_scale),
+                        axis=1,
+                    )
 
         weights = torch_view(
             shard_linear_weights(
