@@ -577,9 +577,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logger.info("Loading drafter model...")
             self.drafter.load_model(self.state)
 
-        self.rng_params_for_sampling = nnx.Rngs(
-            jax.random.key(self.model_config.seed)).params()
-
+        rng_key = nnx.Rngs(jax.random.key(self.model_config.seed)).params()
+        self.rng_params_for_sampling = jax.device_put(
+            rng_key, NamedSharding(self.mesh, PartitionSpec()))
         # This allows a multi-modal model to be used as text-only, assuming the user
         # passes the following to vLLM (on the CLI):
         # --limit-mm-per-prompt '{"image": 0, "video": 0}'
