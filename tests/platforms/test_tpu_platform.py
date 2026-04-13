@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import jax.numpy as jnp
 import pytest
 import torch
-from vllm.config import CacheConfig, CompilationMode, VllmConfig
+from vllm.config import CacheConfig, CompilationMode, ModelConfig, VllmConfig
 
 from tpu_inference.platforms.tpu_platform import TpuPlatform
 
@@ -33,6 +33,7 @@ class TestTpuPlatform:
         vllm_config = MagicMock(spec=VllmConfig)
         vllm_config.cache_config = cache_config
         vllm_config.model_config = MagicMock(dtype='bfloat16')
+        vllm_config.model_config.use_mla = False
         vllm_config.scheduler_config = MagicMock(is_multimodal_model=False)
         vllm_config.parallel_config = MagicMock()
         vllm_config.compilation_config = MagicMock(mode="dynamo_trace_once",
@@ -270,6 +271,7 @@ class TestTpuPlatform:
             self, vllm_config):
         vllm_config.model_config.architecture = "Qwen3_5ForConditionalGeneration"
         vllm_config.model_config.is_hybrid = True
+        vllm_config.model_config.use_mla = True
         vllm_config.model_config.get_num_kv_heads.return_value = 2
         vllm_config.model_config.get_head_size.return_value = 256
         vllm_config.model_config.dtype = torch.uint8
@@ -290,3 +292,95 @@ class TestTpuPlatform:
             TpuPlatform.update_block_size_for_backend(vllm_config)
 
         assert vllm_config.cache_config.block_size == 1280
+
+    def test_check_and_update_config_mla_checks(self):
+        vllm_config = MagicMock()
+        vllm_config.model_config.use_mla = True
+        vllm_config.additional_config = {}
+
+        expected_msg = r"MLA models require both the NEW_MODEL_DESIGN=1 environment.*"
+
+        # Test both unset NEW_MODEL_DESIGN and unset additional_config to ensure they are both
+        # required
+        with patch("tpu_inference.envs.NEW_MODEL_DESIGN", False):
+            with pytest.raises(ValueError, match=expected_msg):
+                TpuPlatform.check_and_update_config(vllm_config)
+
+        # Next, test set NEW_MODEL_DESIGN and unset additional_config to ensure it is required
+        with patch("tpu_inference.envs.NEW_MODEL_DESIGN", True):
+            vllm_config.additional_config = {}
+            with pytest.raises(ValueError, match=expected_msg):
+                TpuPlatform.check_and_update_config(vllm_config)
+
+            # Test where sharding_strategy exists but missing `enable_dp_attention`
+            vllm_config.additional_config = {
+                "sharding": {
+                    "sharding_strategy": {
+                        "debug_key": True
+                    }
+                }
+            }
+            with pytest.raises(ValueError, match=expected_msg):
+                TpuPlatform.check_and_update_config(vllm_config)
+
+            # Test where `enable_dp_attention` exists but is explicitly set to False
+            vllm_config.additional_config = {
+                "sharding": {
+                    "sharding_strategy": {
+                        "enable_dp_attention": False
+                    }
+                }
+            }
+            with pytest.raises(ValueError, match=expected_msg):
+                TpuPlatform.check_and_update_config(vllm_config)
+
+        # Lastly, test both set NEW_MODEL_DESIGN and set additional_config -> success
+        with patch("tpu_inference.envs.NEW_MODEL_DESIGN", True):
+            with patch.object(TpuPlatform, "_initialize_sharding_config"):
+                with patch("vllm.config.CompilationMode"):
+                    vllm_config.additional_config = {
+                        "sharding": {
+                            "sharding_strategy": {
+                                "enable_dp_attention": True
+                            }
+                        }
+                    }
+                    try:
+                        TpuPlatform.check_and_update_config(vllm_config)
+                    except Exception as e:
+                        # We only care if it's the germane ValueError
+                        if isinstance(e, ValueError) and ("MLA models require"
+                                                          in str(e)):
+                            pytest.fail(
+                                f"MLA check failed even when config was correct: {e}"
+                            )
+
+    def test_check_and_update_config_mla_disabled_via_env(self, vllm_config):
+        vllm_config.additional_config = {}
+
+        mock_model_config = MagicMock(spec=ModelConfig)
+        mock_model_config.is_deepseek_mla = True
+
+        real_use_mla_getter = ModelConfig.use_mla.fget
+        type(mock_model_config).use_mla = PropertyMock(
+            side_effect=lambda: real_use_mla_getter(mock_model_config))
+
+        vllm_config.model_config = mock_model_config
+
+        with patch("vllm.envs.VLLM_MLA_DISABLE", True):
+            # Assert vLLM logic evaluates to False as expected when env var is set
+            assert vllm_config.model_config.use_mla is False
+
+            # Neither NEW_MODEL_DESIGN nor enable_dp_attention are set
+            # which should be fine since MLA is disabled
+            with patch("tpu_inference.envs.NEW_MODEL_DESIGN", False):
+                with patch.object(TpuPlatform, "_initialize_sharding_config"):
+                    with patch("vllm.config.CompilationMode"):
+                        try:
+                            TpuPlatform.check_and_update_config(vllm_config)
+                        except Exception as e:
+                            if isinstance(e, ValueError
+                                          ) and "MLA models require" in str(e):
+                                pytest.fail(
+                                    f"MLA check failed unexpectedly when VLLM_MLA_DISABLE was set: {e}"
+                                )
