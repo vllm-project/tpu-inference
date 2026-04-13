@@ -78,7 +78,7 @@ class VllmMLAAttention(MLAAttention):
             from jax.sharding import NamedSharding, PartitionSpec as P
             from tpu_inference.layers.common.sharding import ShardingAxisNameBase as ShardingAxisName
             import jax.numpy as jnp
-            from tpu_inference.utils import torch_view
+            from torchax.interop import torch_view
 
             mesh = self.kv_b_proj.quant_method.linear_config.mesh
             sharding = NamedSharding(mesh, P(ShardingAxisName.ATTN_HEAD, ))
