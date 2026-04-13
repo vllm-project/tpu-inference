@@ -176,8 +176,12 @@ def model_weights_single_file_generator(
     # Because otherwise the tensor will be loaded on TPU:0 by default,
     # although the tensor would eventually be sharded across multiple TPUs,
     # it would lead to OOM on TPU:0 for large models.
+    # Additionally, safetensors with framework="flax" can still materialize JAX
+    # arrays that trigger accelerator/HBM allocations during get_tensor(). Read
+    # the raw tensor as NumPy first and convert via ensure_cpu_jax_array later.
+    safe_framework = "np" if framework == "flax" else framework
     with jax.default_device(jax.devices("cpu")[0]):
-        with safe_open(weights_file, framework=framework) as f:
+        with safe_open(weights_file, framework=safe_framework) as f:
             for name in f.keys():
                 if filter_regex is not None and not re.match(
                         filter_regex, name):
@@ -227,8 +231,11 @@ def shard_put(x: jax.Array,
         mesh = get_mesh()
 
     x_mesh = None
-    if isinstance(x.sharding, NamedSharding):
-        x_mesh = x.sharding.mesh
+    if isinstance(x, jax.Array):
+        if envs.TPU_MULTIHOST_BACKEND == "ray" and x.is_fully_addressable:
+            x = np.asarray(jax.device_get(x))
+        elif isinstance(x.sharding, NamedSharding):
+            x_mesh = x.sharding.mesh
 
     if math.prod(mesh.axis_sizes) == 1:
         return jax.device_put(x, mesh.devices.flatten()[0])

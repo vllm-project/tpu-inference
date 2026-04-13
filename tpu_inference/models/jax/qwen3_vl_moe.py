@@ -7,6 +7,7 @@ from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
@@ -25,6 +26,7 @@ from tpu_inference.models.jax.qwen3_moe import (
 from tpu_inference.models.jax.qwen2 import Qwen2MLP as Qwen3MoeDenseMLP
 from tpu_inference.models.jax.qwen3_vl import (
     build_mrope_input_positions,
+    _inject_visual_features,
     _ModelConfigAdapter,
     _VllmConfigAdapter,
     Qwen3VLForConditionalGeneration,
@@ -32,7 +34,7 @@ from tpu_inference.models.jax.qwen3_vl import (
     Qwen3VLVisionTransformer,
 )
 from tpu_inference.models.jax.utils.multi_modal_utils import (
-    merge_multimodal_embeddings,
+    normalize_mm_grid_thw,
 )
 from tpu_inference.models.jax.utils.weight_utils import (
     _load_and_shard_weight,
@@ -46,6 +48,9 @@ from tpu_inference.models.jax.utils.weight_utils import (
 init_fn = nnx.initializers.uniform()
 
 logger = init_logger(__name__)
+
+_MOE_EXPERT_WEIGHT_REGEX = r".*\.mlp\.experts(?:\.\d+\.)?.*"
+_MOE_ROUTER_WEIGHT_REGEX = r".*layers\.(\d+)\.mlp\.gate\.weight$"
 
 
 class Qwen3VLMoeDecoderLayer(Qwen3MoeDecoderLayer):
@@ -196,37 +201,12 @@ class Qwen3VLMoeTextModel(Qwen3MoeModel):
         else:
             self.norm = PPMissingLayer()
 
-    def _inject_visual_features(
-        self,
-        hidden_states: jax.Array,
-        visual_pos_mask: jax.Array,
-        visual_embeds: jax.Array,
-    ) -> jax.Array:
-        """Add DeepStack visual features at masked positions.
-
-        Args:
-            hidden_states: (seq_len, hidden_size) or (batch, seq_len, hidden_size)
-            visual_pos_mask: Boolean mask matching hidden_states without the last dim
-            visual_embeds: Visual features (num_visual_tokens, hidden_size)
-
-        Returns:
-            Updated hidden_states with visual features added
-        """
-        flat_hidden = hidden_states.reshape(-1, hidden_states.shape[-1])
-        mask = jnp.broadcast_to(visual_pos_mask, hidden_states.shape[:-1])
-        flat_mask = mask.reshape(-1).astype(jnp.bool_)
-
-        visual_embeds = visual_embeds.astype(flat_hidden.dtype)
-        dummy_row = jnp.zeros((1, flat_hidden.shape[-1]), dtype=flat_hidden.dtype)
-        padded_embeds = jnp.concatenate([dummy_row, visual_embeds, dummy_row], axis=0)
-        gather_indices = jnp.cumsum(flat_mask, dtype=jnp.int32)
-        max_index = visual_embeds.shape[0] + 1
-        gather_indices = jnp.minimum(gather_indices, max_index)
-
-        updates = padded_embeds[gather_indices] * flat_mask[:, None]
-        updated = flat_hidden + updates
-
-        return updated.reshape(hidden_states.shape)
+        # Store DeepStack layer indices for injection during forward pass.
+        vision_config = getattr(vllm_config.model_config.hf_config,
+                                "vision_config", None)
+        self.deepstack_visual_indexes = getattr(
+            vision_config, "deepstack_visual_indexes", [8, 16, 24]
+        ) if vision_config is not None else []
 
     def __call__(
         self,
@@ -243,6 +223,13 @@ class Qwen3VLMoeTextModel(Qwen3MoeModel):
         else:
             x = self.embed_tokens(input_ids)
 
+        # Build a mapping from global layer index to deepstack embed index
+        ds_index_map = {}
+        if deepstack_visual_embeds is not None and visual_pos_mask is not None:
+            for ds_idx, layer_idx in enumerate(self.deepstack_visual_indexes):
+                if ds_idx < len(deepstack_visual_embeds):
+                    ds_index_map[layer_idx] = ds_idx
+
         new_kv_caches = []
         for i, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
@@ -256,13 +243,9 @@ class Qwen3VLMoeTextModel(Qwen3MoeModel):
             kv_cache, x = layer(kv_cache, x, attention_metadata)
             new_kv_caches.append(kv_cache)
 
-            if (
-                deepstack_visual_embeds is not None
-                and global_i < len(deepstack_visual_embeds)
-                and visual_pos_mask is not None
-            ):
-                x = self._inject_visual_features(
-                    x, visual_pos_mask, deepstack_visual_embeds[global_i]
+            if global_i in ds_index_map:
+                x = _inject_visual_features(
+                    x, visual_pos_mask, deepstack_visual_embeds[ds_index_map[global_i]]
                 )
 
         if self.is_last_rank:
@@ -319,65 +302,51 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                                              151652)
         self.spatial_merge_size = config.vision_config.spatial_merge_size
 
-    def get_input_embeddings(
-        self,
-        input_ids: jax.Array,
-        multimodal_embeddings: Optional[jax.Array],
-    ) -> jax.Array:
-        inputs_embeds = self.language_model.embed_tokens(input_ids)
-        if multimodal_embeddings is not None and multimodal_embeddings.shape[0] != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                [self.image_token_id, self.video_token_id],
-            )
-        return inputs_embeds
-
-    def embed_input_ids(
-        self,
-        input_ids: jax.Array,
-        multimodal_embeddings: Optional[jax.Array] = None,
-        *,
-        is_multimodal: jax.Array | None = None,
-    ) -> jax.Array:
-        del is_multimodal
-        return self.get_input_embeddings(input_ids, multimodal_embeddings)
-
     def get_mrope_input_positions(
         self,
         input_tokens: List[int],
-        hf_config=None,
-        image_grid_thw=None,
-        video_grid_thw=None,
-        second_per_grid_ts=None,
-        context_len: int = 0,
-        seq_len: Optional[int] = None,
-        audio_feature_lengths=None,
-        use_audio_in_video: bool = False,
+        mm_features: Optional[list] = None,
     ) -> Tuple[jax.Array, int]:
-        del second_per_grid_ts, audio_feature_lengths, use_audio_in_video
+        """Compute MRoPE 3D position IDs with video frame expansion.
 
-        if hf_config is None:
-            hf_config = self.config
+        For MoE VL, video grids with t>1 are expanded into per-frame entries
+        before position computation.
+        """
+        image_grid_thw = []
+        video_grid_thw = []
 
-        if video_grid_thw is not None:
+        if mm_features:
+            for mm_feature in mm_features:
+                item = mm_feature.data
+                if item is None:
+                    continue
+                mm_input = item.get_data()
+                if mm_input.get("image_grid_thw") is not None:
+                    image_grid_thw.extend(
+                        normalize_mm_grid_thw(mm_input["image_grid_thw"]))
+                if mm_input.get("video_grid_thw") is not None:
+                    video_grid_thw.extend(
+                        normalize_mm_grid_thw(mm_input["video_grid_thw"]))
+
+        # Expand multi-frame videos into per-frame entries
+        if video_grid_thw:
             expanded_video = []
             for t, h, w in video_grid_thw:
                 expanded_video.extend([(1, int(h), int(w))] * int(t))
             video_grid_thw = expanded_video
 
+        hf_config = self.config
+
         llm_positions, mrope_position_delta = build_mrope_input_positions(
             input_tokens=input_tokens,
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
+            image_grid_thw=image_grid_thw or None,
+            video_grid_thw=video_grid_thw or None,
             image_token_id=hf_config.image_token_id,
             video_token_id=hf_config.video_token_id,
             vision_start_token_id=getattr(hf_config, "vision_start_token_id",
                                           self.vision_start_token_id),
             spatial_merge_size=hf_config.vision_config.spatial_merge_size,
         )
-        llm_positions = llm_positions[:, context_len:seq_len]
         return llm_positions, mrope_position_delta
 
     @staticmethod
@@ -393,23 +362,22 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 continue
             param._weights_to_load = [None] * len(weights_to_load)
 
+    def _load_indexed_expert_weights(self, experts, weights) -> None:
+        loaded_names = experts.load_weights(weights)
+        if getattr(experts, "quant_method", None) is None:
+            self._clear_loaded_expert_buffers(experts, loaded_names)
+
     def _to_model_dtype(self,
                         torch_weight,
                         *,
                         permute_dims: Optional[tuple[int, ...]] = None):
-        jax_weight = ensure_cpu_jax_array(torch_weight)
-        if permute_dims is not None:
-            jax_weight = jnp.transpose(jax_weight, permute_dims)
-        model_dtype = self.vllm_config.model_config.dtype
-        if jax_weight.dtype != model_dtype:
-            jax_weight = jax_weight.astype(model_dtype)
-        return jax_weight
-
-    @staticmethod
-    def _split_moe_fused_weight(hf_weight, *, split_count: int, axis: int):
-        if hasattr(hf_weight, "chunk"):
-            return hf_weight.chunk(split_count, dim=axis)
-        return jnp.split(ensure_cpu_jax_array(hf_weight), split_count, axis=axis)
+        with jax.default_device(jax.devices("cpu")[0]):
+            cpu_weight = np.asarray(
+                jax.device_get(ensure_cpu_jax_array(torch_weight)))
+            if permute_dims is not None:
+                cpu_weight = np.transpose(cpu_weight, permute_dims)
+            return jnp.asarray(cpu_weight,
+                               dtype=self.vllm_config.model_config.dtype)
 
     def _skip_non_expert_weight(self, hf_key: str) -> bool:
         layer_match = re.match(r".*layers\.(\d+)\.(.*)", hf_key)
@@ -468,63 +436,52 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             expert_suffix = indexed_match.group(2)
             if not expert_suffix.endswith(".weight"):
                 expert_suffix += ".weight"
-            loaded_names = experts.load_weights([(expert_suffix, hf_weight)])
-            if getattr(experts, "quant_method", None) is None:
-                self._clear_loaded_expert_buffers(experts, loaded_names)
+            self._load_indexed_expert_weights(experts,
+                                              [(expert_suffix, hf_weight)])
             return
 
         fused_name = fused_match.group(2)
         if fused_name == "down_proj":
             target_shape = tuple(experts.kernel_down_proj_EFD.value.shape)
             source_shape = tuple(hf_weight.shape)
-            permute_dims = None
             if source_shape != target_shape:
                 swapped_shape = source_shape[:-2] + (
                     source_shape[-1], source_shape[-2])
-                if swapped_shape == target_shape:
-                    permute_dims = (0, 2, 1)
-                else:
+                if swapped_shape != target_shape:
                     raise ValueError(
                         "Unsupported fused down_proj layout for "
                         f"language_model.layers.{layer_idx}.mlp.experts: "
                         f"source {source_shape} vs target {target_shape}")
-            assign_and_shard_param(
-                experts.kernel_down_proj_EFD,
-                self._to_model_dtype(hf_weight, permute_dims=permute_dims),
-                param_name=(
-                    f"language_model.layers.{layer_idx}.mlp.experts.down_proj"),
-                mesh=self.mesh,
+            self._load_indexed_expert_weights(
+                experts,
+                ((f"{expert_id}.down_proj.weight", hf_weight[expert_id, ...])
+                 for expert_id in range(target_shape[0])),
             )
             return
 
         E, D, F = experts.kernel_gating_EDF.value.shape
         fused_shape = tuple(hf_weight.shape)
         if fused_shape == (E, 2 * F, D):
-            chunk_dim = 1
-            permute_dims = (0, 2, 1)
+            expert_split_axis = 0
         elif fused_shape == (E, D, 2 * F):
-            chunk_dim = 2
-            permute_dims = None
+            expert_split_axis = 1
         else:
             raise ValueError(
                 "Unsupported fused gate_up_proj layout for "
                 f"language_model.layers.{layer_idx}.mlp.experts: "
                 f"source {fused_shape} vs expected EDF=({E}, {D}, {F})")
-        gate_proj, up_proj = self._split_moe_fused_weight(
-            hf_weight, split_count=2, axis=chunk_dim)
-        assign_and_shard_param(
-            experts.kernel_gating_EDF,
-            self._to_model_dtype(gate_proj, permute_dims=permute_dims),
-            param_name=(
-                f"language_model.layers.{layer_idx}.mlp.experts.gate_proj"),
-            mesh=self.mesh,
-        )
-        assign_and_shard_param(
-            experts.kernel_up_proj_EDF,
-            self._to_model_dtype(up_proj, permute_dims=permute_dims),
-            param_name=(
-                f"language_model.layers.{layer_idx}.mlp.experts.up_proj"),
-            mesh=self.mesh,
+        self._load_indexed_expert_weights(
+            experts,
+            ((f"{expert_id}.{proj_name}.weight", proj_weight)
+             for expert_id in range(E)
+             for proj_name, proj_weight in (
+                 ("gate_proj",
+                  hf_weight[expert_id, :F, :]
+                  if expert_split_axis == 0 else hf_weight[expert_id, :, :F]),
+                 ("up_proj",
+                  hf_weight[expert_id, F:, :]
+                  if expert_split_axis == 0 else hf_weight[expert_id, :, F:]),
+             )),
         )
 
     def _finalize_loaded_expert_modules(self, loaded_expert_modules) -> None:
@@ -546,13 +503,96 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             model_name_or_path=self.vllm_config.model_config.model,
             download_dir=self.vllm_config.load_config.download_dir,
             framework="flax",
-            filter_regex=r".*\.mlp\.experts(?:\.\d+\.)?.*",
+            filter_regex=_MOE_EXPERT_WEIGHT_REGEX,
         )
         loaded_expert_modules = {}
         for hf_key, hf_weight in weights_iterator:
             self._load_moe_expert_weight(hf_key, hf_weight,
                                          loaded_expert_modules)
         self._finalize_loaded_expert_modules(loaded_expert_modules)
+
+    def _load_moe_router_weights(self) -> None:
+        """Load MoE router gate weights after generic params are synced.
+
+        These weights are loaded directly onto live nnx params because the
+        sparse MoE block exposes the router through aliasing modules
+        (``mlp.gate`` and ``mlp.experts.router``). They must run after the
+        generic `nnx.update(self, params)` pass; otherwise a stale pre-update
+        state snapshot will overwrite the direct assignments.
+        """
+        weights_iterator = model_weights_generator(
+            model_name_or_path=self.vllm_config.model_config.model,
+            download_dir=self.vllm_config.load_config.download_dir,
+            framework="flax",
+            filter_regex=_MOE_ROUTER_WEIGHT_REGEX,
+        )
+        for hf_key, hf_weight in weights_iterator:
+            self._load_moe_router_weight(hf_key, hf_weight)
+
+    @staticmethod
+    def _is_moe_expert_weight(hf_key: str) -> bool:
+        return re.match(_MOE_EXPERT_WEIGHT_REGEX, hf_key) is not None
+
+    @staticmethod
+    def _is_moe_router_weight(hf_key: str) -> bool:
+        return re.match(_MOE_ROUTER_WEIGHT_REGEX, hf_key) is not None
+
+    def _load_weights_with_iterator(self, params, shardings, metadata_map,
+                                    pp_missing_layers, weights_iterator) -> None:
+        """Fallback single-pass load path for one-shot iterators (e.g. RunAI)."""
+        loaded_expert_modules = {}
+        for hf_key, hf_weight in weights_iterator:
+            if self._skip_non_expert_weight(hf_key):
+                continue
+            if self._load_moe_router_weight(hf_key, hf_weight):
+                continue
+            if self._is_moe_expert_weight(hf_key):
+                self._load_moe_expert_weight(hf_key, hf_weight,
+                                             loaded_expert_modules)
+                continue
+
+            _load_and_shard_weight(
+                self.vllm_config,
+                params,
+                shardings,
+                metadata_map,
+                self.mesh,
+                hf_key,
+                ensure_cpu_jax_array(hf_weight),
+                keep_hf_weight_suffix_when_match=[],
+                pp_missing_layers=pp_missing_layers,
+            )
+
+        self._finalize_loaded_expert_modules(loaded_expert_modules)
+        check_all_loaded(params)
+        nnx.update(self, params)
+
+    def _load_non_expert_weights(self, params, shardings, metadata_map,
+                                 pp_missing_layers) -> None:
+        """Load all non-MoE-special weights into the staged params state."""
+        weights_iterator = model_weights_generator(
+            model_name_or_path=self.vllm_config.model_config.model,
+            download_dir=self.vllm_config.load_config.download_dir,
+            framework="flax",
+        )
+        for hf_key, hf_weight in weights_iterator:
+            if self._skip_non_expert_weight(hf_key):
+                continue
+            if (self._is_moe_router_weight(hf_key)
+                    or self._is_moe_expert_weight(hf_key)):
+                continue
+
+            _load_and_shard_weight(
+                self.vllm_config,
+                params,
+                shardings,
+                metadata_map,
+                self.mesh,
+                hf_key,
+                ensure_cpu_jax_array(hf_weight),
+                keep_hf_weight_suffix_when_match=[],
+                pp_missing_layers=pp_missing_layers,
+            )
 
     def _load_moe_router_weight(self, hf_key, hf_weight) -> bool:
         """Load MoE router gate weights via the standard CPU-safe conversion path.
@@ -563,7 +603,7 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         forcing the temporary tensor onto CPU avoids accidental TPU/HBM spikes
         before final sharding.
         """
-        gate_match = re.match(r".*layers\.(\d+)\.mlp\.gate\.weight$", hf_key)
+        gate_match = re.match(_MOE_ROUTER_WEIGHT_REGEX, hf_key)
         if gate_match is None:
             return False
 
@@ -661,7 +701,6 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         metadata_map = get_default_maps(adapted_model_config, self.mesh,
                                         mappings)
         metadata_map.transpose_map["mlp.gate"] = (1, 0)
-        loaded_expert_modules = {}
         params = nnx.state(self)
         try:
             shardings = nnx.get_named_sharding(params, self.mesh)
@@ -669,35 +708,21 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             shardings = params
         weights_iterator = getattr(self.vllm_config.model_config,
                                    "runai_model_weights_iterator", None)
-        if weights_iterator is None:
-            weights_iterator = model_weights_generator(
-                model_name_or_path=self.vllm_config.model_config.model,
-                download_dir=self.vllm_config.load_config.download_dir,
-                framework="flax",
-            )
+        if weights_iterator is not None:
+            self._load_weights_with_iterator(params, shardings, metadata_map,
+                                             pp_missing_layers,
+                                             weights_iterator)
+            return
 
-        for hf_key, hf_weight in weights_iterator:
-            if self._skip_non_expert_weight(hf_key):
-                continue
-            if self._load_moe_router_weight(hf_key, hf_weight):
-                continue
-            if re.match(r".*\.mlp\.experts(?:\.\d+\.)?.*", hf_key):
-                self._load_moe_expert_weight(hf_key, hf_weight,
-                                             loaded_expert_modules)
-                continue
+        self._load_non_expert_weights(params, shardings, metadata_map,
+                                      pp_missing_layers)
 
-            _load_and_shard_weight(
-                self.vllm_config,
-                params,
-                shardings,
-                metadata_map,
-                self.mesh,
-                hf_key,
-                ensure_cpu_jax_array(hf_weight),
-                keep_hf_weight_suffix_when_match=[],
-                pp_missing_layers=pp_missing_layers,
-            )
-
-        self._finalize_loaded_expert_modules(loaded_expert_modules)
-        check_all_loaded(params)
+        # `params` is a snapshot of the pre-load nnx state. Direct MoE/router
+        # loaders mutate live module attributes and may even replace params
+        # entirely during post-load fusion. Apply the staged generic weights
+        # first so the later direct updates are not clobbered by a stale state
+        # snapshot.
         nnx.update(self, params)
+        self._load_moe_router_weights()
+        self._load_moe_expert_weights()
+        check_all_loaded(nnx.state(self))

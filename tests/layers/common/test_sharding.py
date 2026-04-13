@@ -159,6 +159,9 @@ class TestShardingConfigManager(unittest.TestCase):
 
 class TestLazyShardingAxisName(unittest.TestCase):
 
+    def test_base_attention_head_uses_model_axis_only(self):
+        self.assertEqual(ShardingAxisNameBase.ATTN_HEAD, "model")
+
     def test_initial_state_is_uninitialized(self):
         lazy = LazyShardingAxisName()
         self.assertIsNone(lazy._cls)

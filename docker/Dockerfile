@@ -65,6 +65,11 @@ WORKDIR /workspace/tpu_inference
 # Install requirements first and cache so we don't need to re-install on code change.
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt --retries 3
+RUN --mount=type=cache,target=/root/.cache/pip pip install --upgrade --pre \
+    jax==0.9.2 jaxlib==0.9.2 libtpu==0.0.39 \
+    -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
+    -f https://storage.googleapis.com/jax-releases/libtpu_releases.html \
+    --retries 3
 COPY requirements_benchmarking.txt .
 # These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh)
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements_benchmarking.txt --retries 3

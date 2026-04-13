@@ -30,6 +30,7 @@ from tpu_inference.models.jax.qwen3 import (
     Qwen3Model,
 )
 from tpu_inference.models.jax.utils.multi_modal_utils import (
+    _merge_multimodal_embeddings,
     merge_multimodal_embeddings,
     normalize_mm_grid_thw,
     reshape_mm_tensor,
@@ -98,9 +99,13 @@ class _ModelConfigAdapter:
 
 class _VllmConfigAdapter:
     def __init__(self, vllm_config: VllmConfig):
+        self._vllm_config = vllm_config
         self.model_config = _ModelConfigAdapter(vllm_config.model_config)
         self.cache_config = vllm_config.cache_config
         self.quant_config = vllm_config.quant_config
+
+    def __getattr__(self, name):
+        return getattr(self._vllm_config, name)
 
 
 def _infer_pos_embed_grid_hw(num_position_embeddings: int) -> Tuple[int, int]:
@@ -309,7 +314,7 @@ def build_mrope_input_positions(
             ) + st_idx
         )
 
-        # t_index alaways zero
+        # t_index always zero
         num_vision_tokens = llm_grid_t * llm_grid_h * llm_grid_w
 
         t_index = jnp.broadcast_to(
@@ -1212,6 +1217,38 @@ class Qwen3VLVisionTransformer(nnx.Module):
 
 
 
+def _inject_visual_features(
+    hidden_states: jax.Array,
+    visual_pos_mask: jax.Array,
+    visual_embeds: jax.Array,
+) -> jax.Array:
+    """Add DeepStack visual features at masked positions.
+
+    Args:
+        hidden_states: (seq_len, hidden_size) or (batch, seq_len, hidden_size)
+        visual_pos_mask: Boolean mask matching hidden_states without the last dim
+        visual_embeds: Visual features (num_visual_tokens, hidden_size)
+
+    Returns:
+        Updated hidden_states with visual features added
+    """
+    flat_hidden = hidden_states.reshape(-1, hidden_states.shape[-1])
+    mask = jnp.broadcast_to(visual_pos_mask, hidden_states.shape[:-1])
+    flat_mask = mask.reshape(-1).astype(jnp.bool_)
+
+    visual_embeds = visual_embeds.astype(flat_hidden.dtype)
+    dummy_row = jnp.zeros((1, flat_hidden.shape[-1]), dtype=flat_hidden.dtype)
+    padded_embeds = jnp.concatenate([dummy_row, visual_embeds, dummy_row], axis=0)
+    gather_indices = jnp.cumsum(flat_mask, dtype=jnp.int32)
+    max_index = visual_embeds.shape[0] + 1
+    gather_indices = jnp.minimum(gather_indices, max_index)
+
+    updates = padded_embeds[gather_indices] * flat_mask[:, None]
+    updated = flat_hidden + updates
+
+    return updated.reshape(hidden_states.shape)
+
+
 class Qwen3VLModel(Qwen3Model):
     """Text model for Qwen3VL with MRoPE and DeepStack support.
 
@@ -1276,37 +1313,12 @@ class Qwen3VLModel(Qwen3Model):
         else:
             self.norm = PPMissingLayer()
 
-    def _inject_visual_features(
-        self,
-        hidden_states: jax.Array,
-        visual_pos_mask: jax.Array,
-        visual_embeds: jax.Array,
-    ) -> jax.Array:
-        """Add DeepStack visual features at masked positions.
-
-        Args:
-            hidden_states: (seq_len, hidden_size) or (batch, seq_len, hidden_size)
-            visual_pos_mask: Boolean mask matching hidden_states without the last dim
-            visual_embeds: Visual features (num_visual_tokens, hidden_size)
-
-        Returns:
-            Updated hidden_states with visual features added
-        """
-        flat_hidden = hidden_states.reshape(-1, hidden_states.shape[-1])
-        mask = jnp.broadcast_to(visual_pos_mask, hidden_states.shape[:-1])
-        flat_mask = mask.reshape(-1).astype(jnp.bool_)
-
-        visual_embeds = visual_embeds.astype(flat_hidden.dtype)
-        dummy_row = jnp.zeros((1, flat_hidden.shape[-1]), dtype=flat_hidden.dtype)
-        padded_embeds = jnp.concatenate([dummy_row, visual_embeds, dummy_row], axis=0)
-        gather_indices = jnp.cumsum(flat_mask, dtype=jnp.int32)
-        max_index = visual_embeds.shape[0] + 1
-        gather_indices = jnp.minimum(gather_indices, max_index)
-
-        updates = padded_embeds[gather_indices] * flat_mask[:, None]
-        updated = flat_hidden + updates
-
-        return updated.reshape(hidden_states.shape)
+        # Store DeepStack layer indices for injection during forward pass.
+        vision_config = getattr(vllm_config.model_config.hf_config,
+                                "vision_config", None)
+        self.deepstack_visual_indexes = getattr(
+            vision_config, "deepstack_visual_indexes", [8, 16, 24]
+        ) if vision_config is not None else []
 
     def __call__(
         self,
@@ -1323,6 +1335,13 @@ class Qwen3VLModel(Qwen3Model):
         else:
             x = self.embed_tokens(input_ids)
 
+        # Build a mapping from global layer index to deepstack embed index
+        ds_index_map = {}
+        if deepstack_visual_embeds is not None and visual_pos_mask is not None:
+            for ds_idx, layer_idx in enumerate(self.deepstack_visual_indexes):
+                if ds_idx < len(deepstack_visual_embeds):
+                    ds_index_map[layer_idx] = ds_idx
+
         for i, layer in enumerate(islice(self.layers, self.start_layer,
                                          self.end_layer)):
             global_i = self.start_layer + i
@@ -1330,16 +1349,13 @@ class Qwen3VLModel(Qwen3Model):
             kv_cache, x = layer(kv_cache, x, attention_metadata)
             kv_caches[i] = kv_cache
 
-            if (
-                deepstack_visual_embeds is not None
-                and global_i < len(deepstack_visual_embeds)
-                and visual_pos_mask is not None
-            ):
-                x = self._inject_visual_features(
-                    x, visual_pos_mask, deepstack_visual_embeds[global_i]
+            if global_i in ds_index_map:
+                x = _inject_visual_features(
+                    x, visual_pos_mask, deepstack_visual_embeds[ds_index_map[global_i]]
                 )
 
-        x = self.norm(x)
+        if self.is_last_rank:
+            x = self.norm(x)
 
         return kv_caches, x
 
@@ -1395,25 +1411,43 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         self,
         input_ids: jax.Array,
         multimodal_embeddings: Optional[jax.Array],
+        *,
+        is_multimodal: jax.Array | None = None,
+        do_language_embed_multimodal: bool = True,
     ) -> jax.Array:
         """Get input embeddings with multimodal content merged.
 
         Args:
             input_ids: Input token IDs
             multimodal_embeddings: Flattened multimodal embeddings
+            is_multimodal: Optional boolean mask of multimodal token positions.
+            do_language_embed_multimodal: Whether to compute language embeddings
+                for multimodal placeholder tokens before merging.
 
         Returns:
             Input embeddings with multimodal content merged
         """
-        inputs_embeds = self.language_model.embed_tokens(input_ids)
+        if do_language_embed_multimodal:
+            inputs_embeds = self.language_model.embed_tokens(input_ids)
+        else:
+            embed_shape = (*input_ids.shape, self.config.hidden_size)
+            inputs_embeds = jnp.zeros(
+                embed_shape, dtype=self.vllm_config.model_config.dtype)
 
         if multimodal_embeddings is not None and multimodal_embeddings.shape[0] != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                [self.image_token_id, self.video_token_id],
-            )
+            if is_multimodal is not None:
+                inputs_embeds = _merge_multimodal_embeddings(
+                    inputs_embeds,
+                    is_multimodal,
+                    multimodal_embeddings,
+                )
+            else:
+                inputs_embeds = merge_multimodal_embeddings(
+                    input_ids,
+                    inputs_embeds,
+                    multimodal_embeddings,
+                    [self.image_token_id, self.video_token_id],
+                )
 
         return inputs_embeds
 
@@ -1425,8 +1459,11 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         is_multimodal: jax.Array | None = None,
     ) -> jax.Array:
         """Compute input embeddings and merge multimodal embeddings if present."""
-        del is_multimodal
-        return self.get_input_embeddings(input_ids, multimodal_embeddings)
+        return self.get_input_embeddings(
+            input_ids,
+            multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
 
     def _parse_and_validate_image_input(
             self, image_grid_thw: Tuple[Tuple[int, int, int], ...],
@@ -1583,41 +1620,40 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
     def get_mrope_input_positions(
         self,
         input_tokens: List[int],
-        hf_config=None,
-        image_grid_thw=None,
-        video_grid_thw=None,
-        second_per_grid_ts=None,
-        context_len: int = 0,
-        seq_len: Optional[int] = None,
-        audio_feature_lengths=None,
-        use_audio_in_video: bool = False,
+        mm_features: Optional[list] = None,
     ) -> Tuple[jax.Array, int]:
         """Compute MRoPE 3D position IDs for input sequence.
 
-        This is a wrapper around the module-level build_mrope_input_positions function
-        that uses the model's configuration.
-
         Args:
             input_tokens: List of token IDs for the sequence
-            hf_config: Optional HF config (defaults to self.config)
-            image_grid_thw: List of (T, H, W) tuples for each image
-            video_grid_thw: List of (T, H, W) tuples for each video
-            context_len: Context length for slicing positions
-            seq_len: Sequence length for slicing positions
+            mm_features: List of MultiModalFeatureSpec from the scheduler
 
         Returns:
-            llm_positions: (3, sliced_seq_len) position IDs for [T, H, W]
+            llm_positions: (3, seq_len) position IDs for [T, H, W]
             mrope_position_delta: Delta for rope calculation
         """
-        del second_per_grid_ts, audio_feature_lengths, use_audio_in_video
+        image_grid_thw = []
+        video_grid_thw = []
 
-        if hf_config is None:
-            hf_config = self.config
+        if mm_features:
+            for mm_feature in mm_features:
+                item = mm_feature.data
+                if item is None:
+                    continue
+                mm_input = item.get_data()
+                if mm_input.get("image_grid_thw") is not None:
+                    image_grid_thw.extend(
+                        normalize_mm_grid_thw(mm_input["image_grid_thw"]))
+                if mm_input.get("video_grid_thw") is not None:
+                    video_grid_thw.extend(
+                        normalize_mm_grid_thw(mm_input["video_grid_thw"]))
+
+        hf_config = self.config
 
         llm_positions, mrope_position_delta = build_mrope_input_positions(
             input_tokens=input_tokens,
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
+            image_grid_thw=image_grid_thw or None,
+            video_grid_thw=video_grid_thw or None,
             image_token_id=hf_config.image_token_id,
             video_token_id=hf_config.video_token_id,
             vision_start_token_id=getattr(
@@ -1625,7 +1661,6 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             spatial_merge_size=hf_config.vision_config.spatial_merge_size,
         )
 
-        llm_positions = llm_positions[:, context_len:seq_len]
         return llm_positions, mrope_position_delta
 
     def precompile_vision_encoder(

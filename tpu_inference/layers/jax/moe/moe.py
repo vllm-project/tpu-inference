@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 from dataclasses import InitVar, dataclass
 from typing import Any, Iterable, Iterator, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
 from flax.typing import Sharding
 from jax.sharding import NamedSharding, PartitionSpec
@@ -300,14 +302,15 @@ class JaxMoE(JaxModule):
                     f"Unexpected {param_type} weight layout for {param_name}: "
                     f"source {source_shape} vs target {target_shape}")
 
-            with jax.default_device(jax.devices("cpu")[0]):
-                jax_weight = ensure_cpu_jax_array(torch_weight)
+            with cpu_mesh_context(), jax.default_device(jax.devices("cpu")[0]):
+                cpu_weight = np.asarray(
+                    jax.device_get(ensure_cpu_jax_array(torch_weight)))
                 if permute_dims is not None:
-                    jax_weight = jnp.transpose(jax_weight, permute_dims)
-                if jax_weight.dtype != jax_param.value.dtype:
-                    jax_weight = jax_weight.astype(jax_param.value.dtype)
-                jax_weight = jnp.expand_dims(jax_weight, axis=0)
-            jax_param._weights_to_load[expert_id] = jax_weight
+                    cpu_weight = np.transpose(cpu_weight, permute_dims)
+                if cpu_weight.dtype != np.dtype(jax_param.value.dtype):
+                    cpu_weight = cpu_weight.astype(jax_param.value.dtype)
+                cpu_weight = np.expand_dims(cpu_weight, axis=0)
+            jax_param._weights_to_load[expert_id] = cpu_weight
 
         logger.debug(f"Loaded {cnt} weights for {self.prefix} MoE layer.")
 
@@ -321,12 +324,18 @@ class JaxMoE(JaxModule):
         }.items():
             weights_to_load = param._weights_to_load
             if all(w is not None for w in weights_to_load):
-                with cpu_mesh_context():
-                    weights = jnp.concatenate(param._weights_to_load, axis=0)
+                weights = np.concatenate(weights_to_load, axis=0)
+                target_dtype = param.value.dtype
+                with cpu_mesh_context(), jax.default_device(jax.devices("cpu")[0]):
+                    param.set_raw_value(jnp.zeros((1,), dtype=target_dtype),
+                                        _unsafe_bypass_check=True)
+                gc.collect()
                 try:
-                    param.value = shard_put(weights,
-                                            param.sharding,
-                                            mesh=self.mesh)
+                    loaded_value = shard_put(weights,
+                                             param.sharding,
+                                             mesh=self.mesh)
+                    param.set_raw_value(loaded_value,
+                                        _unsafe_bypass_check=True)
                     loaded_names.add(param_name)
                 except Exception as e:
                     raise RuntimeError(

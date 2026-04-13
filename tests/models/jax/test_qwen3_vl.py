@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import torch
 from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
@@ -24,6 +25,7 @@ from tpu_inference.models.jax.qwen3_vl import (
     Qwen3VLVisionTransformer,
     SegmentIds,
     _infer_pos_embed_grid_hw,
+    _inject_visual_features,
     apply_rotary_pos_emb_vision,
     build_mrope_input_positions,
     compute_vision_counts_per_sequence,
@@ -770,12 +772,35 @@ class TestQwen3VLForConditionalGeneration:
     ):
         """embed_input_ids should delegate to get_input_embeddings."""
         input_ids = jnp.array([1, 2, 3, 4, 5], dtype=jnp.int32)
+        is_multimodal = jnp.array([False, True, False, True, False])
         mock_embeds = jnp.ones((5, model.config.hidden_size))
 
         with patch.object(model, 'get_input_embeddings', return_value=mock_embeds) as mock_get:
-            result = model.embed_input_ids(input_ids)
+            result = model.embed_input_ids(
+                input_ids, is_multimodal=is_multimodal)
             np.testing.assert_array_equal(np.array(result), np.array(mock_embeds))
-            mock_get.assert_called_once_with(input_ids, None)
+            mock_get.assert_called_once_with(
+                input_ids, None, is_multimodal=is_multimodal)
+
+    @patch('tpu_inference.models.jax.qwen3_vl._merge_multimodal_embeddings')
+    def test_get_input_embeddings_with_mask_uses_mask_merge(
+        self, mock_merge: MagicMock, model: Qwen3VLForConditionalGeneration, rng: PRNGKey
+    ):
+        input_ids = jnp.array([1, 2, 3, 4, 5], dtype=jnp.int32)
+        is_multimodal = jnp.array([False, True, True, False, False])
+        mock_text_embeds = jnp.ones((5, model.config.hidden_size))
+        model.language_model.embed_tokens = MagicMock(
+            return_value=mock_text_embeds)
+
+        mm_embeds = jnp.ones((2, model.config.hidden_size))
+        mock_merged = jnp.ones((5, model.config.hidden_size))
+        mock_merge.return_value = mock_merged
+
+        result = model.get_input_embeddings(
+            input_ids, mm_embeds, is_multimodal=is_multimodal)
+        np.testing.assert_array_equal(np.array(result), np.array(mock_merged))
+        mock_merge.assert_called_once_with(
+            mock_text_embeds, is_multimodal, mm_embeds)
 
     def test_call_delegates_to_language_model(
         self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey
@@ -841,7 +866,7 @@ class TestServingIntegration:
             np.array(out_1)[:-1, :], np.array(out_2)[:-1, :], rtol=0, atol=0
         )
 
-    def test_get_mrope_input_positions_wrapper_signature_and_slicing(
+    def test_get_mrope_input_positions_wrapper_signature(
         self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
         model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
@@ -850,17 +875,36 @@ class TestServingIntegration:
         n_img = _num_placeholders_for_grid(grid, model.spatial_merge_size)
         tokens = [1, model.vision_start_token_id] + [model.image_token_id] * n_img + [2, 3]
 
+        # Test with no mm_features (text-only)
         positions, delta = model.get_mrope_input_positions(
             input_tokens=tokens,
-            hf_config=model.config,
-            image_grid_thw=[grid],
-            video_grid_thw=None,
-            context_len=2,
-            seq_len=len(tokens) - 1,
-            audio_feature_lengths=[0],
-            use_audio_in_video=False,
+            mm_features=None,
         )
-        assert positions.shape == (3, (len(tokens) - 1) - 2)
+        assert positions.shape == (3, len(tokens))
+        assert isinstance(delta, int)
+
+    def test_get_mrope_input_positions_with_2d_image_grid_mm_feature(
+        self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
+    ):
+        model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+
+        grid = (1, 4, 4)
+        n_img = _num_placeholders_for_grid(grid, model.spatial_merge_size)
+        tokens = [1, model.vision_start_token_id] + [model.image_token_id] * n_img + [2]
+
+        mock_item = MagicMock()
+        mock_item.get_data.return_value = {
+            "image_grid_thw": torch.tensor([list(grid)], dtype=torch.int32),
+        }
+        mock_feature = MagicMock()
+        mock_feature.data = mock_item
+
+        positions, delta = model.get_mrope_input_positions(
+            input_tokens=tokens,
+            mm_features=[mock_feature],
+        )
+
+        assert positions.shape == (3, len(tokens))
         assert isinstance(delta, int)
 
     def test_vision_encoder_and_embedding_merge_end_to_end(
@@ -923,13 +967,14 @@ class TestServingIntegration:
         np.testing.assert_allclose(merged_np[~placeholder_mask], base_np[~placeholder_mask], rtol=0, atol=0)
 
         # The serving wrapper should produce positions compatible with apply_rope's MRoPE path.
-        positions_3d, _ = model.get_mrope_input_positions(
+        positions_3d, _ = build_mrope_input_positions(
             input_tokens=input_ids_list,
-            hf_config=model.config,
             image_grid_thw=[img_grid],
             video_grid_thw=[vid_grid],
-            context_len=0,
-            seq_len=len(input_ids_list),
+            image_token_id=model.image_token_id,
+            video_token_id=model.video_token_id,
+            vision_start_token_id=model.vision_start_token_id,
+            spatial_merge_size=model.spatial_merge_size,
         )
         assert positions_3d.shape == (3, len(input_ids_list))
 
@@ -945,54 +990,25 @@ class TestServingIntegration:
         )
         assert q_rot.shape == q.shape
 
-    def test_mrope_wrapper_context_len_slicing(
+    def test_mrope_wrapper_text_only_positions(
         self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
-        """Test context_len and seq_len slicing behavior in wrapper."""
+        """Text-only input should produce sequential 3D positions."""
         model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
         tokens = [1, 2, 3, 4, 5, 6, 7, 8]
 
-        # Full positions
-        positions_full, _ = model.get_mrope_input_positions(
-            input_tokens=tokens,
-            hf_config=model.config,
-            image_grid_thw=None,
-            video_grid_thw=None,
-            context_len=0,
-            seq_len=len(tokens),
-        )
-        assert positions_full.shape == (3, 8)
-
-        # Sliced positions: context_len=2, seq_len=6 -> positions[2:6]
-        positions_sliced, _ = model.get_mrope_input_positions(
-            input_tokens=tokens,
-            hf_config=model.config,
-            image_grid_thw=None,
-            video_grid_thw=None,
-            context_len=2,
-            seq_len=6,
-        )
-        assert positions_sliced.shape == (3, 4)
-        np.testing.assert_array_equal(
-            np.array(positions_sliced), np.array(positions_full[:, 2:6])
-        )
-
-    def test_mrope_wrapper_seq_len_none_uses_full_length(
-        self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
-    ):
-        """When seq_len is None, should use full token length."""
-        model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
-        tokens = [1, 2, 3, 4]
         positions, _ = model.get_mrope_input_positions(
             input_tokens=tokens,
-            hf_config=model.config,
-            image_grid_thw=None,
-            video_grid_thw=None,
-            context_len=0,
-            seq_len=None,
+            mm_features=None,
         )
-        # seq_len=None means slice [:, 0:None] which is the full array
-        assert positions.shape == (3, 4)
+        assert positions.shape == (3, 8)
+        # All three axes should be identical for text-only
+        np.testing.assert_array_equal(
+            np.array(positions[0]), np.array(positions[1])
+        )
+        np.testing.assert_array_equal(
+            np.array(positions[1]), np.array(positions[2])
+        )
 
     def test_kv_cache_updates_after_forward(
         self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
@@ -1068,27 +1084,30 @@ class TestServingIntegration:
             injected.append(np.array(visual_embeds))
             return x
 
-        language_model._inject_visual_features = MagicMock(
-            side_effect=record_injection)
+        # Set deepstack_visual_indexes to target layers 1 and 2 (within start_layer..end_layer)
+        language_model.deepstack_visual_indexes = [1, 2]
 
         kv_caches = [jnp.zeros((1,), dtype=jnp.int32) for _ in range(2)]
         attn_meta = _make_attention_metadata(seq_len)
         visual_mask = jnp.array([True, False, False, False], dtype=jnp.bool_)
+        # Two deepstack embeds, one per deepstack index
         deepstack = [
             jnp.full((1, hidden_size), float(i),
                      dtype=model.vllm_config.model_config.dtype)
-            for i in range(4)
+            for i in range(2)
         ]
 
-        language_model(
-            kv_caches=kv_caches,
-            input_ids=jnp.arange(seq_len, dtype=jnp.int32),
-            attention_metadata=attn_meta,
-            inputs_embeds=base_hidden,
-            visual_pos_mask=visual_mask,
-            deepstack_visual_embeds=deepstack,
-        )
+        with patch('tpu_inference.models.jax.qwen3_vl._inject_visual_features',
+                   side_effect=record_injection):
+            language_model(
+                kv_caches=kv_caches,
+                input_ids=jnp.arange(seq_len, dtype=jnp.int32),
+                attention_metadata=attn_meta,
+                inputs_embeds=base_hidden,
+                visual_pos_mask=visual_mask,
+                deepstack_visual_embeds=deepstack,
+            )
 
         assert len(injected) == 2
-        np.testing.assert_array_equal(injected[0], np.array(deepstack[1]))
-        np.testing.assert_array_equal(injected[1], np.array(deepstack[2]))
+        np.testing.assert_array_equal(injected[0], np.array(deepstack[0]))
+        np.testing.assert_array_equal(injected[1], np.array(deepstack[1]))
