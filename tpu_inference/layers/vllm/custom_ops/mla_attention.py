@@ -72,9 +72,35 @@ class VllmMLAAttention(MLAAttention):
                 self.kv_cache_dtype)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        from tpu_inference.models.common.pathways_dummy_loader import is_pathways_dummy_load
+        from tpu_inference.models.common.pathways_dummy_loader import (
+            create_dummy_weights_on_tpu, is_pathways_dummy_load)
         if is_pathways_dummy_load():
+            from jax.sharding import NamedSharding, PartitionSpec as P
+            from tpu_inference.models.common.sharding_defs import ShardingAxisName
+            import jax.numpy as jnp
+            from tpu_inference.utils import torch_view
+
+            mesh = self.kv_b_proj.quant_method.linear_config.mesh
+            sharding = NamedSharding(mesh, P(ShardingAxisName.ATTN_HEAD, ))
+
+            shape_UK_T = (self.num_heads, self.qk_nope_head_dim, self.kv_lora_rank)
+            shape_UV = (self.num_heads, self.kv_lora_rank, self.v_head_dim)
+            shape_scale_UK = (1, self.num_heads, 1, self.kv_lora_rank)
+            shape_scale_UV = (1, self.num_heads, 1, self.v_head_dim)
+
+            dtype = self.kv_cache_quantized_dtype if self.kv_cache_quantized_dtype is not None else jnp.float8_e4m3fn
+
+            w_uk_t = create_dummy_weights_on_tpu(sharding, shape_UK_T, dtype)
+            w_uk_t_scale = create_dummy_weights_on_tpu(sharding, shape_scale_UK, jnp.float32)
+            w_uv = create_dummy_weights_on_tpu(sharding, shape_UV, dtype)
+            w_uv_scale = create_dummy_weights_on_tpu(sharding, shape_scale_UV, jnp.float32)
+
+            self.W_UK_T = torch.nn.Parameter(torch_view(w_uk_t), requires_grad=False)
+            self.W_UK_T_scale = torch.nn.Parameter(torch_view(w_uk_t_scale), requires_grad=False)
+            self.W_UV = torch.nn.Parameter(torch_view(w_uv), requires_grad=False)
+            self.W_UV_scale = torch.nn.Parameter(torch_view(w_uv_scale), requires_grad=False)
             return
+
         with torchax.default_env():
             super().process_weights_after_loading(act_dtype)
 
