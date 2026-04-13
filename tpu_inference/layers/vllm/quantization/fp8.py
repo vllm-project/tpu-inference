@@ -292,12 +292,29 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
                 w2_weight = t2j(layer.w2_weight, use_dlpack=False)
                 w2_weight_scale = t2j(layer.w2_weight_scale_inv, use_dlpack=False)
 
+                from tpu_inference.layers.common.process_weights.moe_weights import process_moe_weights
                 def _shard_dummy_moe_weights(w13, w13s, w2, w2s):
+                    # We MUST run process_moe_weights so the dummy weights have the 
+                    # correct swapped/padded shapes for the EP kernel, otherwise 
+                    # the warmup forward pass crashes with shape mismatch.
+                    dummy_weights = FusedMoEWeights(
+                        w13_weight=w13, w13_weight_scale=w13s, w13_bias=None,
+                        w2_weight=w2, w2_weight_scale=w2s, w2_bias=None
+                    )
+                    
+                    w13_interleave = layer.activation.value == "swigluoai"
+                    processed = process_moe_weights(
+                        dummy_weights, 
+                        moe_backend=self.moe_backend, 
+                        w13_reorder_size=1, # Default for GMM_EP
+                        w13_interleave=w13_interleave
+                    )
+                    
                     return (
-                        jax.lax.with_sharding_constraint(w13, ep_sharding),
-                        jax.lax.with_sharding_constraint(w13s, ep_sharding),
-                        jax.lax.with_sharding_constraint(w2, ep_sharding),
-                        jax.lax.with_sharding_constraint(w2s, ep_sharding),
+                        jax.lax.with_sharding_constraint(processed.w13_weight, ep_sharding),
+                        jax.lax.with_sharding_constraint(processed.w13_weight_scale, ep_sharding),
+                        jax.lax.with_sharding_constraint(processed.w2_weight, ep_sharding),
+                        jax.lax.with_sharding_constraint(processed.w2_weight_scale, ep_sharding),
                     )
 
                 w13, w13s, w2, w2s = jax.jit(_shard_dummy_moe_weights)(
