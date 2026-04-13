@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
     RAGGED_GATED_DELTA_RULE_IMPL: str = "ragged_gated_delta_rule_chunked"
+    MOE_ALL_GATHER_ACTIVATION_DTYPE: str = "float8_e4m3fn"
 
 
 def env_with_choices(
@@ -248,6 +249,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_with_choices(
         "RAGGED_GATED_DELTA_RULE_IMPL", "ragged_gated_delta_rule_chunked",
         ["ragged_gated_delta_rule_ref", "ragged_gated_delta_rule_chunked"]),
+    "MOE_ALL_GATHER_ACTIVATION_DTYPE":
+    lambda: os.getenv("MOE_ALL_GATHER_ACTIVATION_DTYPE", "float8_e4m3fn"),
 }
 
 
