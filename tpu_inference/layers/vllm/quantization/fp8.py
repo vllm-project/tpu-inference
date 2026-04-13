@@ -127,8 +127,39 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
         assert isinstance(layer, vllm_linear.LinearBase)
 
         assert self.block_quant
-        from tpu_inference.models.common.pathways_dummy_loader import is_pathways_dummy_load
+        from tpu_inference.models.common.pathways_dummy_loader import (
+            create_dummy_weights_on_tpu, is_pathways_dummy_load)
         if is_pathways_dummy_load():
+            # Skip fp8 requantization — the MaxText→vLLM converter will set
+            # proper fp8 weights and scales. But we must register weight and
+            # weight_scale as TPU-resident Parameters so:
+            #  (a) the warmup forward pass doesn't crash, and
+            #  (b) weight_scale appears in llm_state for the converter.
+            #
+            # Scale shape (n_out,) float32 matches what the converter produces
+            # via tpu_quantize_tensor(axis=-1) — per-output-channel scaling,
+            # consumed by xla_quantized_matmul (1D scale path).
+            from jax.sharding import NamedSharding
+            from tpu_inference.utils import to_jax_dtype
+            weight_spec = self.linear_config.weight_sharding
+            out_axis = weight_spec[0] if weight_spec else None
+            mesh = self.linear_config.mesh
+            w_sharding = NamedSharding(mesh, weight_spec)
+            s_sharding = NamedSharding(mesh, PartitionSpec(out_axis))
+
+            n_out = layer.weight.shape[0]
+            w_tpu = create_dummy_weights_on_tpu(
+                sharding=w_sharding,
+                weight_shape=tuple(layer.weight.shape),
+                weight_dtype=to_jax_dtype(layer.weight.dtype),
+            )
+            s_tpu = create_dummy_weights_on_tpu(
+                sharding=s_sharding,
+                weight_shape=(n_out,),
+                weight_dtype=jnp.float32,
+            )
+            layer.weight = Parameter(torch_view(w_tpu), requires_grad=False)
+            layer.weight_scale = Parameter(torch_view(s_tpu), requires_grad=False)
             return
         weight = t2j(layer.weight, use_dlpack=False)
         delattr(layer, "weight")
