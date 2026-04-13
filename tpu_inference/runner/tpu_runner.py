@@ -603,6 +603,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                                 "architectures")
                                     and not disable_mm_from_limits)
 
+        # Clear JIT compilation caches from weight loading to free XLA
+        # program reservations (bytes_reserved) on TPU HBM.
+        jax.clear_caches()
+        logger.info("Cleared JIT caches after weight loading")
+
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
 
