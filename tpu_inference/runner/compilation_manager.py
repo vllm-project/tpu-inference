@@ -502,11 +502,17 @@ class CompilationManager:
         logger.info("Compiling compute_logits with different input shapes.")
         hsize = self.runner.model_config.get_hidden_size()
         leading_shape = self.runner.num_reqs_paddings if not self.runner.speculative_config else self.runner.num_logits_paddings
-        dp_sharding = NamedSharding(self.runner.mesh,
-                                    PartitionSpec(ShardingAxisName.ATTN_DATA))
+        # Use PartitionSpec(ATTN_DATA, None) (2D explicit) to match the sharding
+        # that _select_from_array_fn produces at inference time. The backbone
+        # output hidden_states has spec=P('data', None), so after passing through
+        # _select_from_array_fn the output also has spec=P('data', None). Using
+        # PartitionSpec(ATTN_DATA) (1D) here causes a jit cache miss because
+        # P('data',) != P('data', None) as partition spec keys.
+        hidden_states_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
         for num_reqs in leading_shape:
             hidden_states = self._create_dummy_tensor(
-                (num_reqs, hsize), jnp.bfloat16, dp_sharding)
+                (num_reqs, hsize), jnp.bfloat16, hidden_states_sharding)
             with self.runner.maybe_select_dummy_loras(
                     self.runner.lora_config,
                     np.array([num_reqs], dtype=np.int32)):
