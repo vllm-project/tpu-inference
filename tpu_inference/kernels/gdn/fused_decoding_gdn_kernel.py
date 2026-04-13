@@ -14,7 +14,7 @@
 """Fused recurrent GDN decoding kernel for TPU.
 
 Processes ``bt`` decode tokens per pipeline step using ``emit_pipeline``
-for q/k/v/g/beta tiling, with bulk manual DMA for state load/store via
+for q/k/v/g/b tiling, with bulk manual DMA for state load/store via
 ``state_indices``.
 """
 
@@ -27,6 +27,8 @@ import jax.numpy as jnp
 from jax._src import dtypes
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
+
+from tpu_inference.kernels.gdn.common import validate_gdn_inputs
 
 
 def get_default_block_sizes(
@@ -43,27 +45,28 @@ def get_default_block_sizes(
 
     Accounts for state scratch ``(bt, H_v, K, V)`` float32, optional
     a_log / dt_bias, and bt-proportional tiles that ``emit_pipeline``
-    double-buffers (q, k, v, g, beta, o).
+    double-buffers (q, k, v, g, b, o).
     """
     ibits = dtypes.itemsize_bits(dtype)
 
     # Fixed (not bt-dependent), in bits
+    num_lanes = pltpu.get_tpu_info().num_lanes
     fixed_bits = 0
     if use_gate_in_kernel:
-        num_lanes = pltpu.get_tpu_info().num_lanes
-        H_padded = ((H_v + num_lanes - 1) // num_lanes) * num_lanes
-        fixed_bits += 2 * 1 * H_padded * 32  # a_log: (1, H_padded) f32
+        fixed_bits += 2 * H_v * num_lanes * 32  # a_log: (H_v, num_lanes) f32
     if has_dt_bias:
-        fixed_bits += 2 * H_v * K * 32  # dt_bias: (H_v, K) f32
+        fixed_bits += 2 * H_v * num_lanes * 32  # dt_bias: (H_v, num_lanes) f32
 
     # bt-proportional (in bits):
     #   state scratch: (2*bt, H_v, K, V) float32 (double buffer)
     #   pipeline tiles (×2 for emit_pipeline double buffering):
     #     q(bt,H_qk,K) + k(bt,H_qk,K)           -> 2·H_qk·K·ibits
     #     g(bt,H_v,K) float32                     -> H_v·K·32
-    #     v(bt,H_v,V) + beta(bt,H_v,V) + o(bt,H_v,V) -> 3·H_v·V·ibits
+    #     v(bt,H_v,V) + o(bt,H_v,V)              -> 2·H_v·V·ibits
+    #     b(bt,H_v,num_lanes)                     -> H_v·num_lanes·ibits
     per_bt_bits = 2 * H_v * K * V * 32 + 2 * (
-        2 * H_qk * K * ibits + H_v * K * 32 + 3 * H_v * V * ibits)
+        2 * H_qk * K * ibits + H_v * K * 32 + 2 * H_v * V * ibits +
+        H_v * num_lanes * ibits)
 
     bt = max(1, (vmem_bytes_limit * 8 - fixed_bits) // per_bt_bits)
     # Round down to nearest power of 2
@@ -78,10 +81,10 @@ def _decode_kernel_main(
     k_hbm,  # [T, H_qk, K]
     v_hbm,  # [T, H_v, V]
     g_hbm,  # [T, H_v, K] float32
-    beta_hbm,  # [T, H_v, V]
+    b_hbm,  # [T, H_v, num_lanes]
     state_indices_ref,  # [max_num_req] int32 (SMEM)
-    a_log_hbm,  # [1, H_padded] or None
-    dt_bias_hbm,  # [H_v, K] or None
+    a_log_hbm,  # [H_v, num_lanes] or None
+    dt_bias_hbm,  # [H_v, num_lanes] or None
     distribution_ref,  # [2] int32 (SMEM)
     _state_init_ref,  # [num_states, H_v, K, V] aliased to state_hbm
     o_hbm,  # [T, H_v, V]
@@ -114,14 +117,17 @@ def _decode_kernel_main(
     qk_spec = pl.BlockSpec((bounded_bt, H_qk, K), token_map)
     g_spec = pl.BlockSpec((bounded_bt, H_v, K), token_map)
     v_spec = pl.BlockSpec((bounded_bt, H_v, V), token_map)
+    if b_hbm is not None:
+        b_last = b_hbm.shape[2]
+        b_spec = pl.BlockSpec((bounded_bt, H_v, b_last), token_map)
+    else:
+        b_spec = None
 
-    if use_gate_in_kernel:
-        num_lanes = pltpu.get_tpu_info().num_lanes
-        H_padded = ((H_v + num_lanes - 1) // num_lanes) * num_lanes
-        a_log_spec = pl.BlockSpec((1, H_padded), lambda _: (0, 0))
+    if use_gate_in_kernel and a_log_hbm is not None:
+        a_log_spec = pl.BlockSpec((H_v, a_log_hbm.shape[1]), lambda _: (0, 0))
     else:
         a_log_spec = None
-    dt_bias_spec = (pl.BlockSpec((H_v, K), lambda _:
+    dt_bias_spec = (pl.BlockSpec((H_v, dt_bias_hbm.shape[1]), lambda _:
                                  (0, 0)) if dt_bias_hbm is not None else None)
 
     # ── Prologue: start loading first bt-block's states ──
@@ -142,9 +148,9 @@ def _decode_kernel_main(
             k_ref,  # [<=bt, H_qk, K]
             v_ref,  # [<=bt, H_v, V]
             g_ref,  # [<=bt, H_v, K]
-            beta_ref,  # [<=bt, H_v, V]
-            a_log_ref,  # [1, H_padded] or None
-            dt_bias_ref,  # [H_v, K] or None
+            b_ref,  # [<=bt, H_v, num_lanes]
+            a_log_ref,  # [H_v, num_lanes] or None
+            dt_bias_ref,  # [H_v, num_lanes] or None
             o_ref,  # [<=bt, H_v, V]
             h_bufs_s,  # [2*bt, H_v, K, V] VMEM scratch (double buffer)
             state_indices_s,  # [max_num_req] int32 (SMEM)
@@ -159,9 +165,14 @@ def _decode_kernel_main(
         next_buf_offset = ((block_id + 1) % 2) * bt
 
         if use_gate_in_kernel:
-            a_val = jnp.exp(a_log_ref[0][:H_v].astype(jnp.float32))
+            a_val = jnp.exp(a_log_ref[:, 0].astype(jnp.float32))
             if dt_bias_ref is not None:
-                dt_bias_val = dt_bias_ref[...].astype(jnp.float32)
+                dt_bias_tile = dt_bias_ref[...].astype(jnp.float32)  # [H_v, num_lanes]
+                if K > dt_bias_tile.shape[-1]:
+                    dt_bias_val = jnp.concatenate(
+                        [dt_bias_tile] * (K // dt_bias_tile.shape[-1]), axis=-1)
+                else:
+                    dt_bias_val = dt_bias_tile
 
         # ── Step 1: Prefetch next bt-block's states ──
         next_t_start = t_start + bt
@@ -198,8 +209,14 @@ def _decode_kernel_main(
                 q_t = q_ref[i_t].astype(jnp.float32)
                 k_t = k_ref[i_t].astype(jnp.float32)
                 v_t = v_ref[i_t].astype(jnp.float32)
-                g_t = g_ref[i_t]
-                beta_t = beta_ref[i_t].astype(jnp.float32)
+                g_t = g_ref[i_t].astype(jnp.float32)
+                if b_ref is not None:
+                    b_tile = b_ref[i_t].astype(jnp.float32)  # [H_v, num_lanes]
+                    if V > b_tile.shape[-1]:
+                        beta_t = jax.nn.sigmoid(jnp.concatenate(
+                            [b_tile] * (V // b_tile.shape[-1]), axis=-1))  # [H_v, V]
+                    else:
+                        beta_t = jax.nn.sigmoid(b_tile)  # [H_v, num_lanes] (== [H_v, V])
 
                 if use_qk_l2norm:
                     q_t = q_t / jnp.sqrt(
@@ -226,7 +243,8 @@ def _decode_kernel_main(
                     gk = g_t
 
                 h_new = h0 * jnp.exp(gk[:, :, None])
-                b_v = beta_t * (v_t - jnp.sum(h_new * k_t[:, :, None], axis=1))
+                v_diff = v_t - jnp.sum(h_new * k_t[:, :, None], axis=1)
+                b_v = beta_t * v_diff if b_ref is not None else v_diff
                 h_new = h_new + k_t[:, :, None] * b_v[:, None, :]
                 o_t = jnp.sum(h_new * q_t[:, :, None], axis=1)
 
@@ -266,7 +284,7 @@ def _decode_kernel_main(
         _inner_kernel,
         grid=(nb_t, ),
         in_specs=[
-            qk_spec, qk_spec, v_spec, g_spec, v_spec, a_log_spec, dt_bias_spec
+            qk_spec, qk_spec, v_spec, g_spec, b_spec, a_log_spec, dt_bias_spec
         ],
         out_specs=v_spec,
     )(
@@ -274,7 +292,7 @@ def _decode_kernel_main(
         k_hbm,
         v_hbm,
         g_hbm,
-        beta_hbm,
+        b_hbm,
         a_log_hbm,
         dt_bias_hbm,
         o_hbm,
@@ -332,13 +350,13 @@ def fused_decoding_gdn(
     initial_state: jax.Array,  # [num_states, H_v, K, V] float32
     state_indices: jax.Array,  # [max_num_req] int32
     distribution: jax.Array,  # [2] int32
-    beta: jax.Array,  # [T, H_v, V]
+    b: jax.Array | None,  # [T, H_v, num_lanes] or None
     *,
     scale: float,
     use_qk_l2norm_in_kernel: bool = False,
     use_gate_in_kernel: bool = False,
-    a_log_input: jax.Array | None = None,  # [1, H_padded] float32 or None
-    dt_bias: jax.Array | None = None,  # [H_v, K] float32 or None
+    A_log: jax.Array | None = None,  # [H_v, num_lanes] float32 or None
+    dt_bias: jax.Array | None = None,  # [H_v, num_lanes] float32 or None
     lower_bound: float | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     r"""Fused recurrent GDN single-step decode.
@@ -351,77 +369,27 @@ def fused_decoding_gdn(
         initial_state: State cache ``[num_states, H_v, K, V]`` float32.
         state_indices: ``i32[max_num_req]`` — indices into the state cache.
         distribution: ``i32[2]`` — ``(decode_end, total)``.
-        beta: Betas ``[T, H_v, V]``.
+        b: Raw betas ``[T, H_v, num_lanes]`` (sigmoid applied inside kernel).
         scale: Scale factor.
         use_qk_l2norm_in_kernel: L2-normalize q, k inside the kernel.
         use_gate_in_kernel: Apply gate transformation inside kernel.
-        a_log_input: Padded per-head log gate ``[1, H_padded]`` float32.
-        dt_bias: Per-head-key bias ``[H_v, K]`` float32.
+        A_log: Per-head log gate ``[H_v, num_lanes]`` float32.
+        dt_bias: Per-head bias ``[H_v, num_lanes]`` float32.
         lower_bound: If set, use sigmoid gate instead of softplus.
 
     Returns:
         ``(o, updated_state)`` — *o* is ``[T, H_v, V]``,
         *updated_state* is ``[num_states, H_v, K, V]``.
     """
-    T, H_qk, K = q.shape
-    H_v = v.shape[1]
-    V = v.shape[-1]
-    dtype = q.dtype
-    num_states = initial_state.shape[0]
-
-    if k.shape != (T, H_qk, K):
-        raise ValueError(f"k shape {k.shape} != q shape {q.shape}")
-    if H_v % H_qk != 0:
-        raise ValueError(f"H_v={H_v} must be a multiple of H_qk={H_qk}")
-    if v.shape != (T, H_v, V):
-        raise ValueError(f"v shape {v.shape} must be [{T}, {H_v}, {V}]")
-    if g.shape != (T, H_v, K):
-        raise ValueError(f"g shape {g.shape} must be [{T}, {H_v}, {K}]")
-    num_lanes = pltpu.get_tpu_info().num_lanes
-    packing = 32 // dtypes.itemsize_bits(dtype)
-    if K % num_lanes != 0 or V % num_lanes != 0:
-        raise ValueError(f"K={K}, V={V} must be multiples of {num_lanes}")
-    if H_qk % packing != 0:
-        raise ValueError(
-            f"H_qk={H_qk} must be a multiple of packing={packing} (32 // bitwidth)"
-        )
-    if H_v % packing != 0:
-        raise ValueError(
-            f"H_v={H_v} must be a multiple of packing={packing} (32 // bitwidth)"
-        )
-    if initial_state.shape[1:] != (H_v, K, V):
-        raise ValueError(
-            f"initial_state trailing dims {initial_state.shape[1:]} "
-            f"must be ({H_v}, {K}, {V})")
-    if state_indices.dtype != jnp.int32:
-        raise ValueError(
-            f"state_indices must be int32, got {state_indices.dtype}")
-    if beta.shape != (T, H_v, V):
-        raise ValueError(f"beta shape {beta.shape} must be [{T}, {H_v}, {V}]")
-    if k.dtype != dtype or v.dtype != dtype or beta.dtype != dtype:
-        raise ValueError(
-            f"q/k/v/beta must share the same dtype, got q={dtype}, "
-            f"k={k.dtype}, v={v.dtype}, beta={beta.dtype}")
-    if g.dtype != jnp.float32:
-        raise ValueError(f"g must be float32, got {g.dtype}")
-    if initial_state.dtype != jnp.float32:
-        raise ValueError(
-            f"initial_state must be float32, got {initial_state.dtype}")
-    if use_gate_in_kernel:
-        if a_log_input is None:
-            raise ValueError(
-                "a_log_input is required when use_gate_in_kernel=True")
-        if dt_bias is not None and dt_bias.shape != (H_v, K):
-            raise ValueError(
-                f"dt_bias shape {dt_bias.shape} must be [{H_v}, {K}]")
-        if dt_bias is not None and dt_bias.dtype != jnp.float32:
-            raise ValueError(f"dt_bias must be float32, got {dt_bias.dtype}")
+    T, H_qk, H_v, K, V, dtype, num_states, num_lanes, _ = (
+        validate_gdn_inputs(
+            q, k, v, g, initial_state, state_indices,
+            b=b, use_gate_in_kernel=use_gate_in_kernel,
+            A_log=A_log, dt_bias=dt_bias))
 
     vmem_bytes_limit = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9)
     bt = get_default_block_sizes(H_qk, H_v, K, V, dtype, use_gate_in_kernel,
                                  dt_bias is not None, vmem_bytes_limit)
-
-    dt_bias_input = dt_bias
 
     any_spec = pl.BlockSpec(memory_space=pl.ANY)
     smem_spec = pl.BlockSpec(memory_space=pltpu.SMEM)
@@ -429,7 +397,8 @@ def fused_decoding_gdn(
     decode_end = distribution[0]
     grid_dim = jnp.where(decode_end > 0, 1, 0)
 
-    n_gate = (a_log_input is not None) + (dt_bias is not None)
+    n_b = (b is not None)
+    n_gate = (A_log is not None) + (dt_bias is not None)
 
     scope_name = f"decoding_gdn-bt_{bt}"
 
@@ -449,9 +418,10 @@ def fused_decoding_gdn(
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
             in_specs=[
-                *([any_spec] * 5),  # q, k, v, g, beta
+                *([any_spec] * 4),  # q, k, v, g
+                any_spec if b is not None else None,  # b
                 smem_spec,  # state_indices
-                any_spec if a_log_input is not None else None,
+                any_spec if A_log is not None else None,
                 any_spec if dt_bias is not None else None,
                 smem_spec,  # distribution
                 any_spec,  # state_init
@@ -467,7 +437,7 @@ def fused_decoding_gdn(
         ),
         input_output_aliases={
             2: 0,
-            7 + n_gate: 1
+            6 + n_b + n_gate: 1
         },
         out_shape=[
             jax.ShapeDtypeStruct((T, H_v, V), dtype),
@@ -483,10 +453,10 @@ def fused_decoding_gdn(
         k,
         v,
         g,
-        beta,
+        b,
         state_indices,
-        a_log_input,
-        dt_bias_input,
+        A_log,
+        dt_bias,
         distribution,
         initial_state,
     )

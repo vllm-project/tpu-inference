@@ -20,7 +20,6 @@ import jax.numpy as jnp
 import numpy as np
 from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
-
 from tpu_inference.kernels.gdn import fused_gdn
 
 jax.config.parse_flags_with_absl()
@@ -40,9 +39,10 @@ def naive_recurrent_gdn(
     initial_state=None,
     output_final_state=False,
     cu_seqlens=None,
+    output_dtype=None,
 ):
     """Pure JAX reference GDN forward pass."""
-    dtype = v.dtype
+    dtype = output_dtype if output_dtype is not None else v.dtype
     B, T, H, K = q.shape
     V = v.shape[-1]
     if scale is None:
@@ -72,8 +72,7 @@ def naive_recurrent_gdn(
                 g_t, b_t = g[0, t], beta[0, t]
                 S_new = S * jnp.exp(g_t[..., None])
                 residual = v_t - jnp.sum(k_t[..., None] * S_new, axis=-2)
-                S_new = S_new + (b_t[..., None] *
-                                 k_t)[..., None] * residual[:, None, :]
+                S_new = S_new + (b_t[..., None] * k_t)[..., None] * residual[:, None, :]
                 o_t = jnp.sum(q_t[..., None] * S_new, axis=-2)
                 S = jnp.where(active, S_new, S)
                 o_t = jnp.where(active, o_t, jnp.zeros_like(o_t))
@@ -84,8 +83,7 @@ def naive_recurrent_gdn(
             if output_final_state:
                 final_states.append(S_final_n)
 
-        S_final = jnp.stack(final_states,
-                            axis=0) if output_final_state else None
+        S_final = jnp.stack(final_states, axis=0) if output_final_state else None
         return o.astype(dtype), S_final
 
     S_init = jnp.zeros((B, H, K, V), dtype=jnp.float32)
@@ -142,23 +140,25 @@ def _make_inputs(
 
     if max_num_req is not None:
         padded_cu = np.full(max_num_req + 1, T, dtype=np.int32)
-        padded_cu[:len(cu_seqlens)] = cu_seqlens
+        padded_cu[: len(cu_seqlens)] = cu_seqlens
         cu_seqlens = padded_cu
 
-    q = rng.randn(1, T, H_qk, K).astype(np.float32) * 0.1
-    k = rng.randn(1, T, H_qk, K).astype(np.float32) * 0.1
-    v = rng.randn(1, T, H_v, V).astype(np.float32) * 0.1
+    q = rng.randn(1, T, H_qk, K).astype(np.float32)
+    k = rng.randn(1, T, H_qk, K).astype(np.float32)
+    v = rng.randn(1, T, H_v, V).astype(np.float32)
     g = -np.log1p(np.exp(-rng.randn(1, T, H_v, K).astype(np.float32)))
-    beta = (1.0 / (1.0 + np.exp(-rng.randn(1, T, H_v)))).astype(np.float32)
+    b_raw = rng.randn(1, T, H_v).astype(np.float32)
+    beta = (1.0 / (1.0 + np.exp(-b_raw))).astype(np.float32)
     h0_N = max_num_req if max_num_req is not None else N
-    h0 = rng.randn(h0_N, H_v, K, V).astype(np.float32) * 0.01
+    h0 = rng.randn(h0_N, H_v, K, V).astype(np.float32)
     state_indices = np.arange(h0_N, dtype=np.int32)
 
     if dtype != np.float32:
-        q, k, v, g, beta = (jnp.array(x, dtype=dtype)
-                            for x in [q, k, v, g, beta])
+        q, k, v, g, beta, b_raw = (
+            jnp.array(x, dtype=dtype) for x in [q, k, v, g, beta, b_raw]
+        )
     else:
-        q, k, v, g, beta = (jnp.array(x) for x in [q, k, v, g, beta])
+        q, k, v, g, beta, b_raw = (jnp.array(x) for x in [q, k, v, g, beta, b_raw])
 
     return (
         q,
@@ -166,6 +166,7 @@ def _make_inputs(
         v,
         g,
         beta,
+        b_raw,
         jnp.array(h0),
         jnp.array(cu_seqlens),
         jnp.array(state_indices),
@@ -213,14 +214,13 @@ class FusedGdnKernelTest(jtu.JaxTestCase):
         V,
         *,
         max_num_req=None,
-        use_l2norm=False,
         use_gate_in_kernel=False,
         use_dt_bias=False,
         lower_bound=None,
         atol=1e-2,
     ):
         rng = np.random.RandomState(42)
-        q, k, v, g, beta, h0, cu_seqlens, state_indices, N = _make_inputs(
+        q, k, v, g, beta, b_raw, h0, cu_seqlens, state_indices, N = _make_inputs(
             rng,
             decode_N,
             mixed_seqlens,
@@ -236,48 +236,39 @@ class FusedGdnKernelTest(jtu.JaxTestCase):
         dt_bias_arr = None
         if use_gate_in_kernel:
             g = jnp.array(
-                rng.randn(*g.shape).astype(np.float32) * 0.5,
+                rng.randn(*g.shape).astype(np.float32),
                 dtype=jnp.bfloat16,
             )
-            A_log = jnp.array(rng.randn(H_v).astype(np.float32) * 0.5)
-            dt_bias_arr = (jnp.array(
-                rng.randn(H_v, K).astype(np.float32) *
-                0.1) if use_dt_bias else None)
+            A_log = jnp.array(rng.randn(H_v).astype(np.float32))
+            dt_bias_arr = (
+                jnp.array(rng.randn(H_v).astype(np.float32)) if use_dt_bias else None
+            )
 
         # ── Reference ──
         if use_gate_in_kernel:
             g_f32 = g.astype(jnp.float32)
             a = jnp.exp(A_log)
             if use_dt_bias:
-                g_f32 = g_f32 + dt_bias_arr[None, None, :, :]
+                g_f32 = g_f32 + dt_bias_arr[None, None, :, None]
             if lower_bound is not None:
-                gk = lower_bound / (1.0 +
-                                    jnp.exp(-(a[None, None, :, None] * g_f32)))
+                gk = lower_bound / (1.0 + jnp.exp(-(a[None, None, :, None] * g_f32)))
             else:
                 gk = -a[None, None, :, None] * jnp.log(1.0 + jnp.exp(g_f32))
             ref_g = gk
         else:
             ref_g = g
 
-        if use_l2norm:
-            q_norm = _l2_normalize(np.array(q.astype(jnp.float32)))
-            k_norm = _l2_normalize(np.array(k.astype(jnp.float32)))
-            q_ref, k_ref = jnp.array(q_norm), jnp.array(k_norm)
-        else:
-            q_ref, k_ref = q, k
+        q_ref = jnp.array(_l2_normalize(np.array(q.astype(jnp.float32))))
+        k_ref = jnp.array(_l2_normalize(np.array(k.astype(jnp.float32))))
 
         # GQA repeat for reference
         if H_v > H_qk:
             repeat_factor = H_v // H_qk
-            q_ref = jnp.repeat(q_ref.astype(jnp.float32),
-                               repeat_factor,
-                               axis=2)
-            k_ref = jnp.repeat(k_ref.astype(jnp.float32),
-                               repeat_factor,
-                               axis=2)
+            q_ref = jnp.repeat(q_ref.astype(jnp.float32), repeat_factor, axis=2)
+            k_ref = jnp.repeat(k_ref.astype(jnp.float32), repeat_factor, axis=2)
 
         ref_h0 = h0[:N] if max_num_req is not None else h0
-        ref_cu = cu_seqlens[:N + 1] if max_num_req is not None else cu_seqlens
+        ref_cu = cu_seqlens[: N + 1] if max_num_req is not None else cu_seqlens
 
         ref_o, ref_ht = naive_recurrent_gdn(
             q_ref.astype(jnp.float32),
@@ -288,37 +279,34 @@ class FusedGdnKernelTest(jtu.JaxTestCase):
             initial_state=ref_h0,
             cu_seqlens=ref_cu,
             output_final_state=True,
+            output_dtype=jnp.bfloat16,
         )
 
-        # ── Kernel ──
+        # ── Kernel (no batch dim) ──
         pallas_o, pallas_state = fused_gdn(
-            q,
-            k,
-            v,
+            q[0],
+            k[0],
+            v[0],
             cu_seqlens,
-            g,
+            g[0],
             h0,
             state_indices,
-            beta=beta,
+            b=b_raw[0],
             distribution=jnp.array([decode_N, N], dtype=jnp.int32),
-            use_qk_l2norm_in_kernel=use_l2norm,
+            use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=use_gate_in_kernel,
             A_log=A_log,
             dt_bias=dt_bias_arr,
             lower_bound=lower_bound,
         )
 
-        # ── Compare ──
-        self.assertAllClose(pallas_o,
-                            ref_o,
-                            atol=atol,
-                            rtol=atol,
-                            check_dtypes=False)
-        self.assertAllClose(pallas_state[:N],
-                            ref_ht,
-                            atol=atol,
-                            rtol=atol,
-                            check_dtypes=False)
+        # ── Compare (add batch dim back for reference) ──
+        self.assertAllClose(
+            pallas_o[None], ref_o, atol=atol, rtol=atol, check_dtypes=False
+        )
+        self.assertAllClose(
+            pallas_state[:N], ref_ht, atol=atol, rtol=atol, check_dtypes=False
+        )
 
     # ── Distribution forward (decode / mixed) ──
 
@@ -329,11 +317,6 @@ class FusedGdnKernelTest(jtu.JaxTestCase):
     )
     def test_basic(self, decode_N, mixed_seqlens):
         self._test_fused_gdn(decode_N, mixed_seqlens, 2, 2, 128, 128)
-
-    # ── L2 normalization ──
-
-    def test_l2norm(self):
-        self._test_fused_gdn(5, [9, 15], 2, 2, 128, 128, use_l2norm=True)
 
     # ── Padded max_num_req ──
 
@@ -382,9 +365,9 @@ class FusedGdnKernelTest(jtu.JaxTestCase):
     def test_gqa(self, decode_N, mixed_seqlens):
         self._test_fused_gdn(decode_N, mixed_seqlens, 2, 8, 128, 128)
 
-    # ── GQA + gate in kernel + L2 norm ──
+    # ── GQA + gate in kernel ──
 
-    def test_gqa_gate_l2norm(self):
+    def test_gqa_gate(self):
         self._test_fused_gdn(
             5,
             [9, 15],
@@ -392,7 +375,6 @@ class FusedGdnKernelTest(jtu.JaxTestCase):
             8,
             128,
             128,
-            use_l2norm=True,
             use_gate_in_kernel=True,
         )
 

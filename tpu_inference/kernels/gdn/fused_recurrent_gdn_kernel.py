@@ -25,6 +25,8 @@ from jax._src import dtypes
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference.kernels.gdn.common import validate_gdn_inputs
+
 
 def get_default_block_sizes(
     H_qk: int,
@@ -44,20 +46,20 @@ def get_default_block_sizes(
     ibits = dtypes.itemsize_bits(dtype)
 
     # Fixed (in bits): h_bufs (2, H_v, K, V) float32 — always 2 buffers
+    num_lanes = pltpu.get_tpu_info().num_lanes
     fixed_bits = 2 * H_v * K * V * 32
     if use_gate_in_kernel:
-        num_lanes = pltpu.get_tpu_info().num_lanes
-        H_padded = ((H_v + num_lanes - 1) // num_lanes) * num_lanes
-        fixed_bits += 2 * 1 * H_padded * 32  # a_log: (1, H_padded) f32
+        fixed_bits += 2 * H_v * num_lanes * 32  # a_log: (H_v, num_lanes) f32
     if has_dt_bias:
-        fixed_bits += 2 * H_v * K * 32  # dt_bias: (H_v, K) f32
+        fixed_bits += 2 * H_v * num_lanes * 32  # dt_bias: (H_v, num_lanes) f32
 
     # bt-proportional (in bits): pipeline tiles (×2 for emit_pipeline double buffering)
     #   q(bt,H_qk,K) + k(bt,H_qk,K)           -> 2·H_qk·K·ibits
     #   g(bt,H_v,K) float32                     -> H_v·K·32
-    #   v(bt,H_v,V) + beta(bt,H_v,V) + o(bt,H_v,V) -> 3·H_v·V·ibits
+    #   v(bt,H_v,V) + o(bt,H_v,V)              -> 2·H_v·V·ibits
+    #   b(bt,H_v,num_lanes)                     -> H_v·num_lanes·ibits
     per_bt_bits = 2 * (2 * H_qk * K * ibits + H_v * K * 32 +
-                       3 * H_v * V * ibits)
+                       2 * H_v * V * ibits + H_v * num_lanes * ibits)
 
     bt = max(1, (vmem_bytes_limit * 8 - fixed_bits) // per_bt_bits)
     # Round down to nearest power of 2
@@ -69,21 +71,21 @@ def get_default_block_sizes(
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
-class GDNMetadata:
+class GDNChunkIndices:
     num_blocks: jax.Array  # [1] int32
     block_id_to_seq_idx: jax.Array  # [max_num_blocks + 1] int32 (sentinel at end)
     block_id_to_t_offset: jax.Array  # [max_num_blocks + 1] int32
 
 
-@jax.named_scope("fill_metadata")
-def fill_metadata(cu_seqlens, distribution, max_num_blocks, bt: int):
+@jax.named_scope("calculate_chunk_indices")
+def calculate_chunk_indices(cu_seqlens, distribution, max_num_blocks, bt: int):
     """Pre-compute per-block metadata as a standalone Pallas kernel.
 
     Iterates over sequences and splits each into BT-sized work
     items.  A sequence boundary that falls mid-block creates two work
     items for that block (one per sequence).
 
-    Returns a GDNMetadata with num_blocks, block_id_to_seq_idx, block_id_to_t_offset.
+    Returns a GDNChunkIndices with num_blocks, block_id_to_seq_idx, block_id_to_t_offset.
     """
 
     def _kernel(
@@ -145,14 +147,14 @@ def fill_metadata(cu_seqlens, distribution, max_num_blocks, bt: int):
         functools.partial(_kernel, bt=bt),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=2,
-            out_specs=GDNMetadata(
+            out_specs=GDNChunkIndices(
                 num_blocks=smem_spec,
                 block_id_to_seq_idx=smem_spec,
                 block_id_to_t_offset=smem_spec,
             ),
             grid=(1, ),
         ),
-        out_shape=GDNMetadata(
+        out_shape=GDNChunkIndices(
             num_blocks=jax.ShapeDtypeStruct((1, ), jnp.int32),
             block_id_to_seq_idx=jax.ShapeDtypeStruct((max_num_blocks + 1, ),
                                                      jnp.int32),
@@ -171,7 +173,7 @@ def fill_metadata(cu_seqlens, distribution, max_num_blocks, bt: int):
 class _MetadataIndexMaps:
     """Index maps driven by pre-computed metadata arrays."""
 
-    def __init__(self, meta: GDNMetadata):
+    def __init__(self, meta: GDNChunkIndices):
         self.meta = meta
 
     def token_map(self, block_id):
@@ -185,15 +187,15 @@ class _MetadataIndexMaps:
 
 
 def _recurrent_gdn_main(
-    meta,  # GDNMetadata (SMEM)
+    meta,  # GDNChunkIndices (SMEM)
     q_hbm,  # [T, H_qk, K]
     k_hbm,  # [T, H_qk, K]
     v_hbm,  # [T, H_v, V]
     g_hbm,  # [T, H_v, K]
-    beta_hbm,  # [T, H_v, V]
+    b_hbm,  # [T, H_v, num_lanes]
     state_indices_ref,  # [max_num_req] int32 (SMEM)
-    a_log_hbm,  # [1, H_padded] or None
-    dt_bias_hbm,  # [H_v, K] or None
+    a_log_hbm,  # [H_v, num_lanes] or None
+    dt_bias_hbm,  # [H_v, num_lanes] or None
     _state_init_ref,  # [num_states, H_v, K, V] aliased to state_hbm
     o_hbm,  # [T, H_v, V]
     state_hbm,  # [num_states, H_v, K, V]
@@ -221,6 +223,11 @@ def _recurrent_gdn_main(
     g_spec = pl.BlockSpec((bounded_bt, H_v, K), idx_maps.token_map)
     v_spec = pl.BlockSpec((bounded_bt, H_v, V), idx_maps.token_map)
     o_spec = pl.BlockSpec((bounded_bt, H_v, V), idx_maps.token_map)
+    if b_hbm is not None:
+        b_last = b_hbm.shape[2]
+        b_spec = pl.BlockSpec((bounded_bt, H_v, b_last), idx_maps.token_map)
+    else:
+        b_spec = None
 
     # ── Prologue: start h0 load for first sequence (don't wait) ──
     first_seq = meta.block_id_to_seq_idx[0]
@@ -238,12 +245,12 @@ def _recurrent_gdn_main(
             k_ref,  # [<=bt, H_qk, K]
             v_ref,  # [<=bt, H_v, V]
             g_ref,  # [<=bt, H_v, K]
-            beta_ref,  # [<=bt, H_v, V]
-            a_log_ref,  # [1, H_padded] or None
-            dt_bias_ref,  # [H_v, K] or None
+            b_ref,  # [<=bt, H_v, num_lanes]
+            a_log_ref,  # [H_v, num_lanes] or None
+            dt_bias_ref,  # [H_v, num_lanes] or None
             o_ref,  # [<=bt, H_v, V]
             h_bufs_s,  # [2, H_v, K, V] VMEM scratch
-            meta_s,  # GDNMetadata (SMEM)
+            meta_s,  # GDNChunkIndices (SMEM)
             state_indices_s,  # [max_num_req] int32 (SMEM)
             h_load_sems_s,  # [2] DMA semaphores
             h_store_sems_s,  # [2] DMA semaphores
@@ -295,16 +302,27 @@ def _recurrent_gdn_main(
         h = h_bufs_s[buf_idx].astype(jnp.float32)
 
         if use_gate_in_kernel:
-            a_val = jnp.exp(a_log_ref[0][:H_v].astype(jnp.float32))
+            a_val = jnp.exp(a_log_ref[:, 0].astype(jnp.float32))
             if dt_bias_ref is not None:
-                dt_bias_val = dt_bias_ref[...].astype(jnp.float32)
+                dt_bias_tile = dt_bias_ref[...].astype(jnp.float32)  # [H_v, num_lanes]
+                if K > dt_bias_tile.shape[-1]:
+                    dt_bias_val = jnp.concatenate(
+                        [dt_bias_tile] * (K // dt_bias_tile.shape[-1]), axis=-1)
+                else:
+                    dt_bias_val = dt_bias_tile
 
         def step(local_t, h):
             q_t = q_ref[local_t].astype(jnp.float32)
             k_t = k_ref[local_t].astype(jnp.float32)
             v_t = v_ref[local_t].astype(jnp.float32)
-            g_t = g_ref[local_t]
-            beta_t = beta_ref[local_t].astype(jnp.float32)
+            g_t = g_ref[local_t].astype(jnp.float32)
+            if b_ref is not None:
+                b_tile = b_ref[local_t].astype(jnp.float32)  # [H_v, num_lanes]
+                if V > b_tile.shape[-1]:
+                    beta_t = jax.nn.sigmoid(jnp.concatenate(
+                        [b_tile] * (V // b_tile.shape[-1]), axis=-1))  # [H_v, V]
+                else:
+                    beta_t = jax.nn.sigmoid(b_tile)  # [H_v, num_lanes] (== [H_v, V])
 
             if use_qk_l2norm:
                 q_t = q_t / jnp.sqrt(
@@ -329,7 +347,8 @@ def _recurrent_gdn_main(
                 gk = g_t
 
             h = h * jnp.exp(gk[:, :, None])
-            b_v = beta_t * (v_t - jnp.sum(h * k_t[:, :, None], axis=1))
+            v_diff = v_t - jnp.sum(h * k_t[:, :, None], axis=1)
+            b_v = beta_t * v_diff if b_ref is not None else v_diff
             h = h + k_t[:, :, None] * b_v[:, None, :]
             o_t = jnp.sum(h * q_t[:, :, None], axis=1)
 
@@ -360,20 +379,18 @@ def _recurrent_gdn_main(
             store_cp.start()
 
     # Run pipeline — None specs/inputs are passed through as None refs
-    if use_gate_in_kernel:
-        num_lanes = pltpu.get_tpu_info().num_lanes
-        H_padded = ((H_v + num_lanes - 1) // num_lanes) * num_lanes
-        a_log_spec = pl.BlockSpec((1, H_padded), lambda _: (0, 0))
+    if use_gate_in_kernel and a_log_hbm is not None:
+        a_log_spec = pl.BlockSpec((H_v, a_log_hbm.shape[1]), lambda _: (0, 0))
     else:
         a_log_spec = None
-    dt_bias_spec = (pl.BlockSpec((H_v, K), lambda _:
+    dt_bias_spec = (pl.BlockSpec((H_v, dt_bias_hbm.shape[1]), lambda _:
                                  (0, 0)) if dt_bias_hbm is not None else None)
 
     pltpu.emit_pipeline(
         _inner_kernel_body,
         grid=(num_blocks, ),
         in_specs=[
-            qk_spec, qk_spec, v_spec, g_spec, v_spec, a_log_spec, dt_bias_spec
+            qk_spec, qk_spec, v_spec, g_spec, b_spec, a_log_spec, dt_bias_spec
         ],
         out_specs=o_spec,
     )(
@@ -381,7 +398,7 @@ def _recurrent_gdn_main(
         k_hbm,
         v_hbm,
         g_hbm,
-        beta_hbm,
+        b_hbm,
         a_log_hbm,
         dt_bias_hbm,
         o_hbm,
@@ -421,82 +438,28 @@ def fused_recurrent_gdn(
         g,  # [T, H_v, K] float32
         initial_state,  # [num_states, H_v, K, V] float32
         state_indices,  # [max_num_req] int32
-        beta,  # [T, H_v, V]
+        b,  # [T, H_v, num_lanes] or None
         *,
         scale,  # float
         use_qk_l2norm,  # bool
         use_gate_in_kernel=False,  # bool
-        a_log_input=None,  # [1, H_padded] or None
-        dt_bias=None,  # [H_v, K] or None
+        A_log=None,  # [H_v, num_lanes] or None
+        dt_bias=None,  # [H_v, num_lanes] or None
         lower_bound=None,  # float or None
         distribution,  # [2] int32
 ):
     """Run the pre-computed-metadata recurrent GDN pallas kernel.
     """
-    T, H_qk, K = q.shape
-    H_v = v.shape[1]
-    V = v.shape[2]
+    T, H_qk, H_v, K, V, dtype, num_states, num_lanes, _ = (
+        validate_gdn_inputs(
+            q, k, v, g, initial_state, state_indices,
+            b=b, use_gate_in_kernel=use_gate_in_kernel,
+            A_log=A_log, dt_bias=dt_bias))
     max_num_req = cu_seqlens.shape[0] - 1
-    num_states = initial_state.shape[0]
-    dtype = q.dtype
-
-    if k.shape != (T, H_qk, K):
-        raise ValueError(f"k shape {k.shape} != q shape {q.shape}")
-    if H_v % H_qk != 0:
-        raise ValueError(f"H_v={H_v} must be a multiple of H_qk={H_qk}")
-    if v.shape != (T, H_v, V):
-        raise ValueError(f"v shape {v.shape} must be [{T}, {H_v}, {V}]")
-    if g.shape != (T, H_v, K):
-        raise ValueError(f"g shape {g.shape} must be [{T}, {H_v}, {K}]")
-    num_lanes = pltpu.get_tpu_info().num_lanes
-    packing = 32 // dtypes.itemsize_bits(dtype)
-    if K % num_lanes != 0 or V % num_lanes != 0:
-        raise ValueError(f"K={K}, V={V} must be multiples of {num_lanes}")
-    if H_qk % packing != 0:
-        raise ValueError(
-            f"H_qk={H_qk} must be a multiple of packing={packing} (32 // bitwidth)"
-        )
-    if H_v % packing != 0:
-        raise ValueError(
-            f"H_v={H_v} must be a multiple of packing={packing} (32 // bitwidth)"
-        )
-    if initial_state.shape[1:] != (H_v, K, V):
-        raise ValueError(
-            f"initial_state trailing dims {initial_state.shape[1:]} must be ({H_v}, {K}, {V})"
-        )
-    if state_indices.shape != (max_num_req, ):
-        raise ValueError(
-            f"state_indices shape {state_indices.shape} must be ({max_num_req},)"
-        )
-    if state_indices.dtype != jnp.int32:
-        raise ValueError(
-            f"state_indices must be int32, got {state_indices.dtype}")
-    if beta.shape != (T, H_v, V):
-        raise ValueError(f"beta shape {beta.shape} must be [{T}, {H_v}, {V}]")
-    if k.dtype != dtype or v.dtype != dtype or beta.dtype != dtype:
-        raise ValueError(
-            f"q/k/v/beta must share the same dtype, got q={dtype}, "
-            f"k={k.dtype}, v={v.dtype}, beta={beta.dtype}")
-    if g.dtype != jnp.float32:
-        raise ValueError(f"g must be float32, got {g.dtype}")
-    if initial_state.dtype != jnp.float32:
-        raise ValueError(
-            f"initial_state must be float32, got {initial_state.dtype}")
-    if use_gate_in_kernel:
-        if a_log_input is None:
-            raise ValueError(
-                "a_log_input is required when use_gate_in_kernel=True")
-        if dt_bias is not None and dt_bias.shape != (H_v, K):
-            raise ValueError(
-                f"dt_bias shape {dt_bias.shape} must be [{H_v}, {K}]")
-        if dt_bias is not None and dt_bias.dtype != jnp.float32:
-            raise ValueError(f"dt_bias must be float32, got {dt_bias.dtype}")
 
     vmem_bytes_limit = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9)
     bt = get_default_block_sizes(H_qk, H_v, K, V, dtype, use_gate_in_kernel,
                                  dt_bias is not None, vmem_bytes_limit)
-
-    dt_bias_input = dt_bias
 
     # Worst case: cdiv(T, bt) base blocks + up to max_num_req-1 boundary splits
     max_num_blocks = (T + bt - 1) // bt + max_num_req - 1
@@ -507,12 +470,13 @@ def fused_recurrent_gdn(
     o_shape = jax.ShapeDtypeStruct((T, H_v, V), dtype)
     state_shape = jax.ShapeDtypeStruct((num_states, H_v, K, V), jnp.float32)
 
-    meta = fill_metadata(cu_seqlens, distribution, max_num_blocks, bt)
+    meta = calculate_chunk_indices(cu_seqlens, distribution, max_num_blocks, bt)
 
     n_seqs = distribution[1] - distribution[0]
     grid_dim = jnp.where(n_seqs > 0, 1, 0)
 
-    n_gate = (a_log_input is not None) + (dt_bias is not None)
+    n_b = (b is not None)
+    n_gate = (A_log is not None) + (dt_bias is not None)
 
     scope_name = f"recurrent_gdn-bt_{bt}"
 
@@ -532,14 +496,15 @@ def fused_recurrent_gdn(
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
             in_specs=[
-                GDNMetadata(
+                GDNChunkIndices(
                     num_blocks=smem_spec,
                     block_id_to_seq_idx=smem_spec,
                     block_id_to_t_offset=smem_spec,
                 ),
-                *([any_spec] * 5),  # q, k, v, g, beta
+                *([any_spec] * 4),  # q, k, v, g
+                any_spec if b is not None else None,  # b
                 smem_spec,  # state_indices
-                any_spec if a_log_input is not None else None,
+                any_spec if A_log is not None else None,
                 any_spec if dt_bias is not None else None,
                 any_spec,  # state_init (= initial_state)
             ],
@@ -554,7 +519,7 @@ def fused_recurrent_gdn(
         ),
         input_output_aliases={
             5: 0,
-            3 + 6 + n_gate: 1
+            8 + n_b + n_gate: 1
         },
         out_shape=[o_shape, state_shape],
         compiler_params=pltpu.CompilerParams(
@@ -568,10 +533,10 @@ def fused_recurrent_gdn(
         k,
         v,
         g,
-        beta,
+        b,
         state_indices,
-        a_log_input,
-        dt_bias_input,
+        A_log,
+        dt_bias,
         initial_state,
     )
 

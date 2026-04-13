@@ -24,6 +24,8 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
+from tpu_inference.kernels.gdn.fused_gdn_kernel_wrapper import \
+    ragged_gated_delta_rule as ragged_gated_delta_rule_fused
 from tpu_inference.layers.common.ragged_conv1d_jax import \
     ragged_conv1d as ragged_conv1d_jax
 from tpu_inference.layers.common.ragged_gated_delta_rule_chunked import \
@@ -40,6 +42,7 @@ class RaggedConv1dImpl(enum.Enum):
 class RaggedGatedDeltaRuleImpl(enum.Enum):
     REF = "ragged_gated_delta_rule_ref"
     CHUNKED = "ragged_gated_delta_rule_chunked"
+    FUSED = "fused_gdn_kernel"
 
 
 @jax.tree_util.register_dataclass
@@ -121,7 +124,15 @@ def run_jax_gdn_attention_local(
 
     out_mixed_qkv = jax.nn.silu(out_mixed_qkv)
 
-    if config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.REF:
+    if config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.FUSED:
+        ragged_gdn_impl = functools.partial(
+            ragged_gated_delta_rule_fused,
+            n_kq=n_kq,
+            n_v=n_v,
+            d_k=d_k,
+            d_v=d_v,
+        )
+    elif config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.REF:
         ragged_gdn_impl = functools.partial(
             ragged_gated_delta_rule_ref,
             n_kq=n_kq,

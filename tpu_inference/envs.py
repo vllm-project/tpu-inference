@@ -247,7 +247,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "RAGGED_GATED_DELTA_RULE_IMPL":
     env_with_choices(
         "RAGGED_GATED_DELTA_RULE_IMPL", "ragged_gated_delta_rule_chunked",
-        ["ragged_gated_delta_rule_ref", "ragged_gated_delta_rule_chunked"]),
+        ["ragged_gated_delta_rule_ref", "ragged_gated_delta_rule_chunked",
+         "fused_gdn_kernel"]),
 }
 
 
