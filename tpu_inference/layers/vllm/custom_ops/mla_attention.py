@@ -72,6 +72,9 @@ class VllmMLAAttention(MLAAttention):
                 self.kv_cache_dtype)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
+        from tpu_inference.models.common.pathways_dummy_loader import is_pathways_dummy_load
+        if is_pathways_dummy_load():
+            return
         with torchax.default_env():
             super().process_weights_after_loading(act_dtype)
 
