@@ -35,6 +35,10 @@ if [[ "${BUILDKITE:-false}" == "true" ]]; then
   pip install rouge-score==0.1.2 || true
   # Install lm_eval with dependencies, version is same as https://github.com/vllm-project/vllm/blob/main/.buildkite/scripts/hardware_ci/run-tpu-v1-test.sh#L64
   pip install "lm-eval[api,math]>=0.4.9.2" || true
+
+  # Set umask so that any newly created files/directories have 777/666 permissions by default.
+  # This ensures that the host user can delete artifacts created by the docker root user.
+  umask 000
 fi
 
 if ! command -v gcloud &> /dev/null; then
@@ -42,19 +46,16 @@ if ! command -v gcloud &> /dev/null; then
     # We do not exit here anymore, to allow local runs without gcloud to proceed if datasets are already present or not needed.
 fi
 
-# Set umask so that any newly created files/directories have 777/666 permissions by default.
-# This ensures that the host user can delete artifacts created by the docker root user.
-umask 000
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ARTIFACT_FOLDER is provided by Buildkite via environment variable. 
 # Default to a local path relative to the script for local runs.
 ARTIFACT_FOLDER="${ARTIFACT_FOLDER:-$SCRIPT_DIR/artifacts}"
 LOG_FOLDER="$ARTIFACT_FOLDER/temp_logs"
-PROFILE_FOLDER="$LOG_FOLDER/profile"
+VLLM_TORCH_PROFILER_DIR="$LOG_FOLDER/profile"
 export ARTIFACT_FOLDER
 export LOG_FOLDER
-export PROFILE_FOLDER
+export VLLM_TORCH_PROFILER_DIR
 
 report_and_exit() {
   local exit_code=${1:-0}
@@ -77,7 +78,7 @@ report_and_exit() {
 echo "--- Preparing Local Artifacts Folder"
 mkdir -p "$ARTIFACT_FOLDER"
 mkdir -p "$LOG_FOLDER"
-mkdir -p "$PROFILE_FOLDER"
+mkdir -p "$VLLM_TORCH_PROFILER_DIR"
 
 PYTHON_PARSER="$SCRIPT_DIR/parser_case.py"
 # Evaluate the Python output to set variables in the current shell context
@@ -86,8 +87,6 @@ eval "$(python3 "$PYTHON_PARSER" "$CASE_FILE" "$TARGET_CASE_NAME")"
 VLLM_LOG="$LOG_FOLDER/vllm_log.txt"
 BM_LOG="$LOG_FOLDER/bm_log.txt"
 BEST_BM_LOG="$LOG_FOLDER/best_bm_log.txt"
-VLLM_TORCH_PROFILER_DIR="$PROFILE_FOLDER"
-export VLLM_TORCH_PROFILER_DIR
 printf "[INFO] %-25s = %s\n" "VLLM_LOG" "$VLLM_LOG"
 printf "[INFO] %-25s = %s\n" "BM_LOG" "$BM_LOG"
 printf "[INFO] %-25s = %s\n" "ARTIFACT_FOLDER" "$ARTIFACT_FOLDER"
