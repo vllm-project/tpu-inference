@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import time
+import functools
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 
 import jax
@@ -139,10 +140,12 @@ class CompilationManager:
                 sharding=sharding)
             dummy_input_ids = self._create_dummy_tensor(
                 (num_tokens, ), jnp.int32, sharding=input_sharding)
+            dummy_is_multimodal = self._create_dummy_tensor(
+                (num_tokens, ), jnp.bool_, sharding=input_sharding)
 
             self._run_compilation(
                 "input_embeddings_merger",
-                self.runner.embed_input_ids_fn,
+                functools.partial(self.runner.embed_input_ids_fn, is_multimodal=dummy_is_multimodal),
                 self.runner.state,
                 dummy_input_ids,
                 dummy_multimodal_embeddings,
@@ -151,7 +154,7 @@ class CompilationManager:
 
             self._run_compilation(
                 "input_embeddings_merger_text_only",
-                self.runner.embed_input_ids_fn,
+                functools.partial(self.runner.embed_input_ids_fn, is_multimodal=dummy_is_multimodal),
                 self.runner.state,
                 dummy_input_ids,
                 None,
