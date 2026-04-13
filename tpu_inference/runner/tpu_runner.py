@@ -144,7 +144,9 @@ class AsyncPreResults:
     next_tokens: jax.Array
     request_seq_lens: list[tuple[int, CachedRequestState, int]]
     discard_sampled_tokens_req_indices: list[int]
-    placeholder_req_id_to_index: dict[str, int]
+    # Dense lookup table indexed by batch req_idx. Value is the index into
+    # the previous step's next_tokens (or -1 if no placeholder).
+    placeholder_token_idx_lookup: np.ndarray
     logits_indices_selector: Optional[List[int]] = None
 
 
@@ -505,6 +507,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                             dtype=np.int32)
         self.seq_lens_cpu = np.zeros(self.max_num_reqs, dtype=np.int32)
         self.logits_indices_cpu = np.zeros(self.max_num_reqs, dtype=np.int32)
+        # Dense lookup table for async placeholder token substitution.
+        # Indexed by batch req_idx.  -1 means "no placeholder".
+        # Avoids per-request string dict lookups in the hot path.
+        self.placeholder_token_idx_lookup = np.full(self.max_num_reqs, -1,
+                                                    dtype=np.int32)
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
         # Keep in int64 to avoid overflow with long context
@@ -746,7 +753,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                             discard_sampled_tokens_req_indices,
                             request_seq_lens,
                             logits_indices_selector=None):
-        placeholder_req_id_to_index: dict[str, int] = {}
+        # Reset the dense lookup table; -1 means "no placeholder".
+        placeholder_lookup = self.placeholder_token_idx_lookup
+        placeholder_lookup[:] = -1
+
         discard_sampled_tokens_req_indices_set = set(
             discard_sampled_tokens_req_indices)
         for req_idx, req_state, _ in request_seq_lens:
@@ -768,11 +778,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # For placeholder, should be update on next execute.
             req_state.output_token_ids.extend([0])
             if logits_indices_selector is None:
-                placeholder_req_id_to_index[req_state.req_id] = req_idx
+                placeholder_lookup[req_idx] = req_idx
             else:
-                placeholder_req_id_to_index[
-                    req_state.req_id] = logits_indices_selector[req_idx]
-        return placeholder_req_id_to_index
+                placeholder_lookup[req_idx] = logits_indices_selector[req_idx]
+        return placeholder_lookup
 
     def _execute_model(
         self,
@@ -1018,8 +1027,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self._modify_prev_results()
 
             # Set placeholder for next tokens that is not yet generated
-            placeholder_req_id_to_index: dict[
-                str, int] = self._update_placeholder(
+            placeholder_token_idx_lookup = self._update_placeholder(
                     discard_sampled_tokens_req_indices, request_seq_lens,
                     logits_indices_selector)
 
@@ -1031,7 +1039,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 request_seq_lens=request_seq_lens,
                 discard_sampled_tokens_req_indices=
                 discard_sampled_tokens_req_indices,
-                placeholder_req_id_to_index=placeholder_req_id_to_index,
+                placeholder_token_idx_lookup=placeholder_token_idx_lookup.copy(),
                 logits_indices_selector=logits_indices_selector)
 
             # Return Model output to executor
@@ -1202,54 +1210,63 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 logits_indices_selector, max_num_reqs_per_dp_rank)
 
     def _prepare_async_token_substitution_indices_dp(
-            self, req_ids_dp, scheduled_tokens_per_dp_rank,
+            self, req_indices_dp, scheduled_tokens_per_dp_rank,
             padded_num_scheduled_tokens_per_dp_rank, dp_size):
         """Prepare token substitution indices for async scheduling in DP mode."""
+        placeholder_lookup = self._pre_async_results.placeholder_token_idx_lookup
         token_in_tpu_cur_input_indices_dp = {}
         token_in_tpu_pre_next_tokens_indices_dp = {}
 
         for dp_rank in range(dp_size):
-            token_in_tpu_cur_input_indices_dp[dp_rank] = []
-            token_in_tpu_pre_next_tokens_indices_dp[dp_rank] = []
+            req_indices = req_indices_dp[dp_rank]
+            if len(req_indices) == 0:
+                token_in_tpu_cur_input_indices_dp[dp_rank] = np.array(
+                    [], dtype=np.int32)
+                token_in_tpu_pre_next_tokens_indices_dp[dp_rank] = np.array(
+                    [], dtype=np.int32)
+                continue
 
+            tokens_per_req = np.asarray(
+                scheduled_tokens_per_dp_rank[dp_rank], dtype=np.int32)
             token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
-            acc_cur_len = token_offset
 
-            for i, req_id in enumerate(req_ids_dp[dp_rank]):
-                acc_cur_len += scheduled_tokens_per_dp_rank[dp_rank][i]
-                if req_id not in self._pre_async_results.placeholder_req_id_to_index:
-                    continue
+            # Cumulative end positions for each request (1-indexed),
+            # shifted by the DP-rank token offset.
+            # acc_cur_len[i] = token_offset + sum(tokens_per_req[:i+1])
+            end_positions = np.cumsum(tokens_per_req) + token_offset
 
-                token_in_tpu_cur_input_indices_dp[dp_rank].append(acc_cur_len -
-                                                                  1)
-                token_in_tpu_pre_next_tokens_indices_dp[dp_rank].append(
-                    self._pre_async_results.placeholder_req_id_to_index[req_id]
-                )
+            # Vectorized lookup: index the dense table with batch indices.
+            # Values >= 0 indicate a placeholder; -1 means absent.
+            req_indices_arr = np.asarray(req_indices, dtype=np.int32)
+            pre_indices = placeholder_lookup[req_indices_arr]
+            mask = pre_indices >= 0
+
+            # The cur_input index is the last token of each request (end - 1).
+            token_in_tpu_cur_input_indices_dp[dp_rank] = (
+                end_positions[mask] - 1)
+            token_in_tpu_pre_next_tokens_indices_dp[dp_rank] = (
+                pre_indices[mask])
 
         return token_in_tpu_cur_input_indices_dp, token_in_tpu_pre_next_tokens_indices_dp
 
     def _prepare_async_token_substitution_indices_non_dp(
             self, num_reqs, num_scheduled_tokens_per_req):
         """Prepare token substitution indices for async scheduling in non-DP mode."""
-        token_in_tpu_cur_input_indices_list = []
-        token_in_tpu_pre_next_tokens_indices_list = []
-        acc_cur_len = 0
+        placeholder_lookup = self._pre_async_results.placeholder_token_idx_lookup
 
-        for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-            acc_cur_len += num_scheduled_tokens_per_req[i]
-            assert req_id is not None
-            if req_id not in self._pre_async_results.placeholder_req_id_to_index:
-                continue
+        # Vectorized lookup: batch indices are 0..num_reqs-1 in non-DP mode.
+        pre_indices = placeholder_lookup[:num_reqs]
+        mask = pre_indices >= 0
 
-            token_in_tpu_cur_input_indices_list.append(acc_cur_len - 1)
-            token_in_tpu_pre_next_tokens_indices_list.append(
-                self._pre_async_results.placeholder_req_id_to_index[req_id])
+        if not np.any(mask):
+            return np.array([], dtype=np.int32), np.array([], dtype=np.int32)
 
-        if len(token_in_tpu_cur_input_indices_list) > 0:
-            return (np.array(token_in_tpu_cur_input_indices_list),
-                    np.array(token_in_tpu_pre_next_tokens_indices_list))
-        else:
-            return np.array([]), np.array([])
+        # Cumulative token positions (end position of each request).
+        tokens_arr = np.asarray(num_scheduled_tokens_per_req[:num_reqs],
+                                dtype=np.int32)
+        end_positions = np.cumsum(tokens_arr)
+
+        return (end_positions[mask] - 1, pre_indices[mask].copy())
 
     def _apply_async_token_substitution(self, input_ids,
                                         token_in_tpu_cur_input_indices,
@@ -1324,7 +1341,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             (token_in_tpu_cur_input_indices_dp,
              token_in_tpu_pre_next_tokens_indices_dp
              ) = self._prepare_async_token_substitution_indices_dp(
-                 req_ids_dp, scheduled_tokens_per_dp_rank,
+                 req_indices_dp, scheduled_tokens_per_dp_rank,
                  padded_num_scheduled_tokens_per_dp_rank, dp_size)
 
         # Populates input_ids and positions
@@ -1548,20 +1565,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Async scheduling: substitute placeholder tokens for DP
         if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
             # Collect all token indices that need substitution across all DP ranks
-            all_token_indices_to_substitute = []
-            all_pre_next_tokens_indices = []
+            token_in_tpu_cur_input_indices = np.concatenate([
+                token_in_tpu_cur_input_indices_dp[dp_rank]
+                for dp_rank in range(dp_size)
+            ])
+            token_in_tpu_pre_next_tokens_indices = np.concatenate([
+                token_in_tpu_pre_next_tokens_indices_dp[dp_rank]
+                for dp_rank in range(dp_size)
+            ])
 
-            for dp_rank in range(dp_size):
-                cur_indices = token_in_tpu_cur_input_indices_dp[dp_rank]
-                pre_indices = token_in_tpu_pre_next_tokens_indices_dp[dp_rank]
-                all_token_indices_to_substitute.extend(cur_indices)
-                all_pre_next_tokens_indices.extend(pre_indices)
-
-            if len(all_token_indices_to_substitute) > 0:
-                token_in_tpu_cur_input_indices = np.array(
-                    all_token_indices_to_substitute)
-                token_in_tpu_pre_next_tokens_indices = np.array(
-                    all_pre_next_tokens_indices)
+            if len(token_in_tpu_cur_input_indices) > 0:
                 input_ids = self._apply_async_token_substitution(
                     input_ids, token_in_tpu_cur_input_indices,
                     token_in_tpu_pre_next_tokens_indices)
