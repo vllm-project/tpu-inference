@@ -27,6 +27,7 @@ class BlockSizes:
     """Tuning parameters for the RPA kernel."""
 
     bq_sz: int
+    bq_c_sz: int
     bkv_sz: int
     batch_size: int
     n_buffer: int
@@ -142,6 +143,10 @@ class RPAConfig:
     @property
     def bq_sz(self) -> int:
         return self.block.bq_sz
+
+    @property
+    def bq_c_sz(self) -> int:
+        return self.block.bq_c_sz
 
     @property
     def bkv_sz(self) -> int:
