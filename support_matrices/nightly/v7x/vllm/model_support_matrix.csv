@@ -6,7 +6,7 @@ Model,Type,UnitTest,Accuracy/Correctness,Benchmark
 "deepseek-ai/DeepSeek-OCR",Multimodal,❓ Untested,❓ Untested,❓ Untested
 "moonshotai/Kimi-K2.5",Multimodal,❓ Untested,❓ Untested,❓ Untested
 "MiniMaxAI/MiniMax-M2.5",Text,❓ Untested,❓ Untested,❓ Untested
-"Qwen/Qwen3-30B-A3B",Text,✅ Passing,✅ Passing,✅ Passing
+"Qwen/Qwen3-30B-A3B",Text,✅ Passing,✅ Passing,❌ Failing
 "Qwen/Qwen3-32B",Text,✅ Passing,✅ Passing,✅ Passing
 "Qwen/Qwen3-4B",Text,✅ Passing,❌ Failing,❓ Untested
 "Qwen/Qwen3-Coder-480B-A35B-Instruct",Text,✅ Passing,✅ Passing,✅ Passing
