@@ -35,6 +35,10 @@ if [[ "${BUILDKITE:-false}" == "true" ]]; then
   pip install rouge-score==0.1.2 || true
   # Install lm_eval with dependencies, version is same as https://github.com/vllm-project/vllm/blob/main/.buildkite/scripts/hardware_ci/run-tpu-v1-test.sh#L64
   pip install "lm-eval[api,math]>=0.4.9.2" || true
+
+  # Set umask so that any newly created files/directories have 777/666 permissions by default.
+  # This ensures that the host user can delete artifacts created by the docker root user.
+  umask 000
 fi
 
 if ! command -v gcloud &> /dev/null; then
@@ -42,9 +46,6 @@ if ! command -v gcloud &> /dev/null; then
     # We do not exit here anymore, to allow local runs without gcloud to proceed if datasets are already present or not needed.
 fi
 
-# Set umask so that any newly created files/directories have 777/666 permissions by default.
-# This ensures that the host user can delete artifacts created by the docker root user.
-umask 000
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ARTIFACT_FOLDER is provided by Buildkite via environment variable. 
