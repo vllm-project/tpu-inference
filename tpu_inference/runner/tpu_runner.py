@@ -1760,6 +1760,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Monolithic stack packing for small 1D metadata buffers
         self.device_buffer.reset()
+        self.device_buffer.append(input_ids, key="input_ids")
+        self.device_buffer.append(logits_indices, key="logits_indices")
+        self.device_buffer.append(positions, key="positions")
         self.device_buffer.append(query_start_loc, key="query_start_loc")
         self.device_buffer.append(seq_lens, key="seq_lens")
         self.device_buffer.append(request_distribution,
@@ -1789,36 +1792,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         metadata_blob, metadata_layout = self.device_buffer.build()
 
         host_arrays_payload = {
-            "input_ids": input_ids,
-            "positions": positions,
             "metadata_blob": metadata_blob,
-            "logits_indices": logits_indices,
         }
-        if self.uses_mrope:
-            host_arrays_payload["positions"] = mrope_positions
-
-        # Build sharding pytree payload.
-        # All arrays are sharded on ATTN_DATA (the DP axis), since all
-        # metadata and block tables are laid out in contiguous per-DP-rank
-        # chunks.
         sharding_payload = {
-            k: data_parallel_attn_sharding
-            for k in host_arrays_payload
+            "metadata_blob": data_parallel_attn_sharding,
         }
 
-        # Fire a SINGLE structural Compounded Monolithic transport flushes silencer silence voids!
         dev_arrays_payload = jax.device_put(
             host_arrays_payload,
             sharding_payload,
         )
 
-        input_ids = dev_arrays_payload["input_ids"]
-        positions = dev_arrays_payload["positions"]
         metadata_blob_dev = dev_arrays_payload["metadata_blob"]
-        logits_indices = dev_arrays_payload["logits_indices"]
-
         metadata = common_utils.DeviceBuffer.unpack_arrays(
             metadata_blob_dev, metadata_layout)
+        input_ids = metadata["input_ids"]
+        logits_indices = metadata["logits_indices"]
+        positions = metadata["positions"]
         query_start_loc = metadata["query_start_loc"]
         seq_lens = metadata["seq_lens"]
         request_distribution = metadata["request_distribution"]
