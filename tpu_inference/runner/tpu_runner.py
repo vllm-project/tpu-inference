@@ -548,6 +548,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.mrope_positions_cpu = np.zeros((3, self.max_num_tokens),
                                             dtype=np.int64)
 
+        # Monolithic stack packing for small 1D metadata buffers.
+        # This buffer grows dynamically to accommodate metadata and block tables.
+        # We start with a larger capacity to avoid resizing jitter in early steps.
+        self.device_buffer = common_utils.DeviceBuffer(initial_capacity=1024 *
+                                                       1024)
+
     def load_model(self):
         with set_current_vllm_config(self.vllm_config):
             self.model_fn, self.compute_logits_fn, self.pooler_fn, self.combine_hidden_states_fn, multimodal_fns, self.state, self.lora_manager, self.model = get_model(
@@ -1499,13 +1505,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 (self.max_num_reqs, self.max_num_blocks_per_req),
                 key=f"block_tables_gid_{kv_cache_gid}")
 
+            # Zero out the view once for correct padding
+            block_tables_view.fill(0)
+
+            cpu_tensor = self.input_batch.block_table[
+                kv_cache_gid].get_cpu_tensor()
             for dp_rank in range(dp_size):
-                req_offset = dp_rank * max_num_reqs_per_dp_rank
                 _num_reqs = num_req_per_dp_rank[dp_rank]
-                block_tables_view[
-                    req_offset:req_offset + _num_reqs, :self.
-                    max_num_blocks_per_req] = self.input_batch.block_table[
-                        kv_cache_gid].get_cpu_tensor()[req_indices_dp[dp_rank]]
+                if _num_reqs == 0:
+                    continue
+
+                req_offset = dp_rank * max_num_reqs_per_dp_rank
+                # Use np.take with out= to avoid intermediate copies from advanced indexing
+                np.take(cpu_tensor,
+                        req_indices_dp[dp_rank],
+                        axis=0,
+                        out=block_tables_view[req_offset:req_offset +
+                                              _num_reqs])
 
         if len(self.kv_cache_config.kv_cache_groups) <= 1:
             no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0
@@ -1755,10 +1771,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 (self.max_num_reqs, self.max_num_blocks_per_req),
                 key=f"block_tables_gid_{kv_cache_gid}")
 
-            block_tables_view[:num_reqs] = (
-                self.input_batch.block_table[kv_cache_gid].get_cpu_tensor()
-                [:num_reqs])
-            block_tables_view[num_reqs:] = 0
+            cpu_tensor = self.input_batch.block_table[
+                kv_cache_gid].get_cpu_tensor()
+            np.copyto(block_tables_view[:num_reqs], cpu_tensor[:num_reqs])
+            block_tables_view[num_reqs:].fill(0)
 
         if len(self.kv_cache_config.kv_cache_groups) <= 1:
             # Pooling model will not using kv cache
