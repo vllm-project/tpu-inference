@@ -33,6 +33,7 @@ class TestTpuPlatform:
         vllm_config = MagicMock(spec=VllmConfig)
         vllm_config.cache_config = cache_config
         vllm_config.model_config = MagicMock(dtype='bfloat16')
+        vllm_config.model_config.use_mla = False
         vllm_config.scheduler_config = MagicMock(is_multimodal_model=False)
         vllm_config.parallel_config = MagicMock()
         vllm_config.compilation_config = MagicMock(mode="dynamo_trace_once",
@@ -290,3 +291,45 @@ class TestTpuPlatform:
             TpuPlatform.update_block_size_for_backend(vllm_config)
 
         assert vllm_config.cache_config.block_size == 1280
+
+    def test_check_and_update_config_mla_checks(self):
+        vllm_config = MagicMock()
+        vllm_config.model_config.use_mla = True
+        vllm_config.additional_config = {}
+
+        expected_msg = r"MLA models require both the NEW_MODEL_DESIGN=1 environment.*"
+
+        # 1. Test NEW_MODEL_DESIGN=0 (False)
+        with patch("tpu_inference.envs.NEW_MODEL_DESIGN", False):
+            with pytest.raises(ValueError, match=expected_msg):
+                TpuPlatform.check_and_update_config(vllm_config)
+
+        # 2. Test NEW_MODEL_DESIGN=1 but sharding_strategy missing
+        with patch("tpu_inference.envs.NEW_MODEL_DESIGN", True):
+            vllm_config.additional_config = {}
+            with pytest.raises(ValueError, match=expected_msg):
+                TpuPlatform.check_and_update_config(vllm_config)
+
+        # 3. Test both set correctly - should not raise the MLA errors
+        # (It might raise other errors if the rest of the method is not mocked, so we mock _initialize_sharding_config)
+        with patch("tpu_inference.envs.NEW_MODEL_DESIGN", True):
+            with patch.object(TpuPlatform, "_initialize_sharding_config"):
+                # Mocking imports inside check_and_update_config
+                with patch("vllm.config.CompilationMode"):
+                    vllm_config.additional_config = {
+                        "sharding": {
+                            "sharding_strategy": {
+                                "enable_dp_attention": True
+                            }
+                        }
+                    }
+                    # It will continue and might fail later if not everything is mocked, but we care about the MLA checks.
+                    try:
+                        TpuPlatform.check_and_update_config(vllm_config)
+                    except Exception as e:
+                        # If it's not our ValueError, it's fine for this test
+                        if isinstance(e, ValueError) and ("MLA models require"
+                                                          in str(e)):
+                            pytest.fail(
+                                f"MLA check failed even when config was correct: {e}"
+                            )
