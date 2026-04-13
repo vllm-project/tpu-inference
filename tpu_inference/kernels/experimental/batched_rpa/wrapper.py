@@ -303,11 +303,13 @@ def get_default_block_sizes(
     if actual_num_q_heads == 32 and actual_num_kv_heads == 4 and is_8bit:
         return configs.BlockSizes(
             bq_sz=1,
+            bq_c_sz=1,
             bkv_sz=512,
             batch_size=10,
             n_buffer=2,
         ), configs.BlockSizes(
             bq_sz=256,
+            bq_c_sz=32,
             bkv_sz=512,
             batch_size=2,
             n_buffer=2,
@@ -316,11 +318,13 @@ def get_default_block_sizes(
     if actual_num_q_heads == 12 and actual_num_kv_heads == 1 and is_8bit:
         return configs.BlockSizes(
             bq_sz=1,
-            bkv_sz=2304,
+            bq_c_sz=1,
+            bkv_sz=4096,
             batch_size=8,
             n_buffer=3,
         ), configs.BlockSizes(
             bq_sz=512,
+            bq_c_sz=32,
             bkv_sz=512,
             batch_size=3,
             n_buffer=3,
@@ -328,6 +332,7 @@ def get_default_block_sizes(
 
     default_block_sizes = configs.BlockSizes(
         bq_sz=1,
+        bq_c_sz=1,
         bkv_sz=page_size,
         batch_size=1,
         n_buffer=2,
