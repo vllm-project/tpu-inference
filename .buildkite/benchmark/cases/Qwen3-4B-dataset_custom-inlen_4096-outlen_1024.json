@@ -1,7 +1,6 @@
 {
   "env": {
     "GCP_PROJECT_ID": "cloud-tpu-inference-test",
-    "GCP_REGION": "southamerica-west1",
     "GCS_BUCKET": "vllm-cb-storage2",
     "GCP_INSTANCE_ID": "vllm-bm-inst",
     "GCP_DATABASE_ID": "vllm-bm-bk-runs",
@@ -29,9 +28,7 @@
       "max-num-batched-tokens": 8192,
       "tensor-parallel-size": {
         "v6e-1": 1,
-        "v6e-8": 8,
         "v7x-2": 2,
-        "v7x-8": 8,
         "default": 1
       },
       "no-enable-prefix-caching": false,

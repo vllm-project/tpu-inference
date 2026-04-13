@@ -42,7 +42,7 @@ RESULT_FILE="${ARTIFACT_FOLDER}/${RECORD_ID}.result"
 
 # Upload logs to GCS if bucket is provided
 if [[ -n "${GCS_BUCKET:-}" ]]; then
-  # Temp write to another bucket
+  # Temp write to dev bucket
   # REMOTE_LOG_ROOT="gs://$GCS_BUCKET/job_logs/$RECORD_ID/"
   # TODO: use $GCS_BUCKET instead the temp one
   REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
@@ -213,7 +213,7 @@ if [[ -n "${GCP_DATABASE_ID:-}" && -n "${GCP_PROJECT_ID:-}" && -n "${GCP_INSTANC
       $SQL_RECORD_ID, $SQL_STATUS, PENDING_COMMIT_TIMESTAMP(), PENDING_COMMIT_TIMESTAMP(), $SQL_USER, $SQL_JOB_REFERENCE, $SQL_AGENT_NAME,
       $SQL_DEVICE, $SQL_MODEL, $SQL_RUN_TYPE, $SQL_CODE_HASH,
       ${MAX_NUM_SEQS:-NULL}, ${MAX_NUM_BATCHED_TOKENS:-NULL}, ${TENSOR_PARALLEL_SIZE:-NULL}, ${MAX_MODEL_LEN:-NULL},
-      $SQL_DATASET, ${INPUT_LEN:-NULL}, ${OUTPUT_LEN:-NULL},
+      $SQL_DATASET, $INPUT_LEN, $OUTPUT_LEN,
       ${EXPECTED_ETEL:-3600000}, ${NUM_PROMPTS:-1000}, $SQL_MODELTAG, ${PREFIX_LEN:-0},
       $SQL_EXTRA_ENVS, $SQL_ADDITIONAL_CONFIG, $SQL_EXTRA_ARGS, 1, JSON r$SQL_CONFIG $insert_vals
     ) ON CONFLICT (RecordId) DO UPDATE SET

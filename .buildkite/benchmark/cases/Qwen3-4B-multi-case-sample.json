@@ -1,7 +1,6 @@
 {
   "global_env": {
     "GCP_PROJECT_ID": "cloud-tpu-inference-test",
-    "GCP_REGION": "southamerica-west1",
     "GCS_BUCKET": "vllm-cb-storage2",
     "GCP_INSTANCE_ID": "vllm-bm-inst",
     "GCP_DATABASE_ID": "vllm-bm-bk-runs"

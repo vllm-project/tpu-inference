@@ -31,14 +31,7 @@ echo "--- Generating Record ID"
 # Use Buildkite step ID to ensure retries map to the same RecordId
 RECORD_ID="${BUILDKITE_STEP_ID}"
 export RECORD_ID
-
 echo "--- Prepare benchmark Record ID: ${RECORD_ID}"
-
-# # --- Prepare Default Configuration ---
-# export EXPECTED_ETEL="${EXPECTED_ETEL:-3600000}"
-# export NUM_PROMPTS="${NUM_PROMPTS:-1000}"
-# export MODELTAG="${MODELTAG:-PROD}"
-# export PREFIX_LEN="${PREFIX_LEN:-0}"
 
 CODE_HASH=$(buildkite-agent meta-data get "CODE_HASH")
 export CODE_HASH
