@@ -19,14 +19,14 @@ environment variable.
 
 Compared to the default RPA kernel, this kernel does the following:
 
-1. Batches multiple sequences together to replace per-request flash_attention loops. 
+1. Batches multiple sequences together to replace per-request flash_attention loops.
 
 2. Enables triple-buffering via Pallas emit_pipeline
 
-3. Precomputes expensive metadata upfront (e.g., page locations and bounds clipping) via 
-scheduler.py kernel. Kernel is calculated once and ammortized across different layers in a model. 
+3. Precomputes expensive metadata upfront (e.g., page locations and bounds clipping) via
+scheduler.py kernel. Kernel is calculated once and ammortized across different layers in a model.
 
-Note: batched_rpa is build on top / derived from RPA3. 
+Note: batched_rpa is build on top / derived from RPA3.
 """
 
 import dataclasses

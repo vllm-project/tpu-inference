@@ -47,23 +47,23 @@ cleanup_docker_resource() {
     # $1 == img          -> Matches exact local image (e.g., "vllm-tpu")
     # $1 ~ "/"img"$"     -> Matches Google Artifact Registry paths (e.g., ".../.../vllm-tpu")
     OLD_IMAGES=$(docker images --format '{{.Repository}} {{.ID}}' | awk -v img="${IMG}" '$1 == img || $1 ~ "/"img"$" {print $2}' | sort -u)
-    
+
     if [[ -n "$OLD_IMAGES" ]]; then
       echo "Found matching images for ${IMG}. Checking for dependent containers..."
-      
+
       TOTAL_CONTAINERS=""
       for img_id in $OLD_IMAGES; do
         # Find containers using this image ID
         TOTAL_CONTAINERS="$TOTAL_CONTAINERS $(docker ps -a -q --filter "ancestor=$img_id")"
       done
-      
+
       # Format and remove any found containers
       CLEANED_CONTAINERS=$(echo "$TOTAL_CONTAINERS" | tr ' ' '\n' | grep -v '^$' | sort -u || true)
       if [[ -n "$CLEANED_CONTAINERS" ]]; then
         echo "Removing leftover containers using ${IMG} image(s)..."
         echo "$CLEANED_CONTAINERS" | xargs -r docker rm -f
       fi
-      
+
       echo "Removing old ${IMG} image(s) by ID..."
       # Using ID directly ensures all tags of that specific image are untagged and removed
       echo "$OLD_IMAGES" | xargs -r docker rmi -f
@@ -84,7 +84,7 @@ setup_environment() {
   local push_to_ci_cache=${3:-"false"}
   IMAGE_NAME="$image_name_param"
   local CI_IMAGE_REPO="us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/${IMAGE_NAME}"
-  local LOCAL_TPU_VERSION="${TPU_VERSION:-tpu6e}" 
+  local LOCAL_TPU_VERSION="${TPU_VERSION:-tpu6e}"
 
   local DOCKERFILE_NAME="Dockerfile"
 
@@ -119,7 +119,7 @@ setup_environment() {
       VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
       TPU_INFERENCE_HASH="$BUILDKITE_COMMIT"
   fi
- 
+
   local CACHE_TAG="${TPU_INFERENCE_HASH}-${LOCAL_TPU_VERSION}"
 
   # ==========================================

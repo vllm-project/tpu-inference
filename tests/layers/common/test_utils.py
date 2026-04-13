@@ -72,13 +72,25 @@ class UtilsTest(jtu.JaxTestCase):
                 result = general_device_put(tensor, self.sharding)
 
                 mock_make_array.assert_called_once()
-                args, _ = mock_make_array.call_args
+                args, kwargs = mock_make_array.call_args
                 self.assertEqual(args[0], tensor.shape)
                 self.assertEqual(args[1], self.sharding)
-                # Check that x_split contains device_put result
-                # Since we didn't mock device_put, it runs on the tensor slice.
-                # We can check the length of x_split
+                self.assertEqual(kwargs["dtype"], tensor.dtype)
                 self.assertAllClose(result, tensor)
+
+    def test_general_device_put_multihost_callback_materializes_jax_slice(self):
+        tensor = jnp.arange(16).reshape(4, 4)
+
+        with mock.patch.object(envs, 'TPU_MULTIHOST_BACKEND', 'ray'):
+            with mock.patch('jax.make_array_from_callback') as mock_make_array:
+                mock_make_array.return_value = tensor
+
+                general_device_put(tensor, self.sharding)
+
+                callback = mock_make_array.call_args.args[2]
+                with mock.patch('jax.device_get', wraps=jax.device_get) as mock_device_get:
+                    callback((slice(0, 2), slice(0, 2)))
+                    mock_device_get.assert_called_once()
 
     def test_general_device_put_multihost_pytree(self):
         t1 = jnp.ones((8, 8))
@@ -91,6 +103,8 @@ class UtilsTest(jtu.JaxTestCase):
                 result = general_device_put(tree, self.sharding)
 
                 self.assertEqual(mock_make_array.call_count, 2)
+                for _, kwargs in mock_make_array.call_args_list:
+                    self.assertEqual(kwargs["dtype"], t1.dtype)
                 self.assertIsInstance(result, list)
                 self.assertEqual(len(result), 2)
 

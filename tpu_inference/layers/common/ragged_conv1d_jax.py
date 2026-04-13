@@ -39,7 +39,7 @@ def ragged_conv1d(
       state_indices: Tensor of shape `(max_reqs,)` mapping request index to state
         index.
       kernel_size: The size of the convolution kernel.
-  
+
     Returns:
       A tuple containing:
       - output: The output tensor of shape `(num_tokens, dim)`.

@@ -40,7 +40,10 @@ class ShardingAxisNameBase:
     ATTN_DATA = ('data', 'attn_dp', 'attn_dp_expert')
     ATTN_DATA_EXPERT = ('attn_dp_expert', 'expert')
     MLP_DATA = 'data'
-    ATTN_HEAD = ('model', 'expert')
+    # Attention heads should shard only across tensor-parallel model slices.
+    # MoE expert shards are handled separately by expert-specific weights and
+    # should not multiply the KV-head partition count.
+    ATTN_HEAD = 'model'
     ATTN_TENSOR = None
     MLP_TENSOR = ('attn_dp', 'attn_dp_expert', 'model', 'expert')
     MOE_TENSOR = ('attn_dp', 'model')

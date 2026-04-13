@@ -27,6 +27,7 @@ from typing import Any, Iterable, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import torch
 import torchax
 from flax import nnx
@@ -175,8 +176,12 @@ def model_weights_single_file_generator(
     # Because otherwise the tensor will be loaded on TPU:0 by default,
     # although the tensor would eventually be sharded across multiple TPUs,
     # it would lead to OOM on TPU:0 for large models.
+    # Additionally, safetensors with framework="flax" can still materialize JAX
+    # arrays that trigger accelerator/HBM allocations during get_tensor(). Read
+    # the raw tensor as NumPy first and convert via ensure_cpu_jax_array later.
+    safe_framework = "np" if framework == "flax" else framework
     with jax.default_device(jax.devices("cpu")[0]):
-        with safe_open(weights_file, framework=framework) as f:
+        with safe_open(weights_file, framework=safe_framework) as f:
             for name in f.keys():
                 if filter_regex is not None and not re.match(
                         filter_regex, name):
@@ -226,8 +231,11 @@ def shard_put(x: jax.Array,
         mesh = get_mesh()
 
     x_mesh = None
-    if isinstance(x.sharding, NamedSharding):
-        x_mesh = x.sharding.mesh
+    if isinstance(x, jax.Array):
+        if envs.TPU_MULTIHOST_BACKEND == "ray" and x.is_fully_addressable:
+            x = np.asarray(jax.device_get(x))
+        elif isinstance(x.sharding, NamedSharding):
+            x_mesh = x.sharding.mesh
 
     if math.prod(mesh.axis_sizes) == 1:
         return jax.device_put(x, mesh.devices.flatten()[0])
@@ -315,6 +323,20 @@ def get_default_maps(model_config, mesh: Mesh,
                        bias_pad_map=bias_pad_keys)
 
 
+def ensure_cpu_jax_array(weight: Any) -> jax.Array:
+    """Materialize any incoming weight as a CPU-backed JAX array.
+
+    This avoids accidental TPU/HBM allocations during reshape/transpose/cast
+    before the final sharded device_put step.
+    """
+    with jax.default_device(jax.devices("cpu")[0]):
+        if isinstance(weight, torch.Tensor):
+            return t2j(weight, use_dlpack=False)
+        if isinstance(weight, jax.Array):
+            return jnp.asarray(jax.device_get(weight))
+        return jnp.asarray(np.asarray(weight))
+
+
 def _load_and_shard_weight(vllm_config,
                            params: nnx.State,
                            shardings: Any,
@@ -341,6 +363,8 @@ def _load_and_shard_weight(vllm_config,
     head_dim_original = model_config.get_head_size()
     head_dim = utils.get_padded_head_dim(head_dim_original)
     head_dim_pad = head_dim - head_dim_original
+
+    hf_weight = ensure_cpu_jax_array(hf_weight)
 
     # Check if the key should retain its original dtype
     keep_original_dtype = False
@@ -525,16 +549,13 @@ def load_hf_weights(
     weights_iterator = None
     if hasattr(vllm_config.model_config, "runai_model_weights_iterator"):
         weights_iterator = vllm_config.model_config.runai_model_weights_iterator
-    env = torchax.default_env()
     # The weights_iterator is used in RunAI model streamer integration.
     if weights_iterator is not None:
         for hf_key, hf_weight in weights_iterator:
             if filter_regex and not re.match(filter_regex, hf_key):
                 continue
 
-            # Since the weights_iterator yields Pytorch tensors (torch.Tensor),
-            # we need to convert them to JAX arrays (jax.Array).
-            hf_weight_jax = env.t2j_copy(hf_weight)
+            hf_weight_jax = ensure_cpu_jax_array(hf_weight)
 
             _load_and_shard_weight(
                 vllm_config,
@@ -757,8 +778,7 @@ def jax_array_from_reshaped_torch(
     if permute_dims is not None:
         torch_weight = torch_weight.permute(*permute_dims)
 
-    with cpu_mesh_context():
-        return t2j(torch_weight, use_dlpack=False)
+    return ensure_cpu_jax_array(torch_weight)
 
 
 def assign_and_shard_param(jax_param: nnx.Param,
@@ -773,12 +793,15 @@ def assign_and_shard_param(jax_param: nnx.Param,
         param_name: The name of the parameter, used for error logging.
         mesh: The device mesh to shard the parameter on.
     """
-    spec = jax_param.get_metadata().get("sharding", ())
+    spec = getattr(jax_param, "sharding", None)
+    if spec is None:
+        spec = jax_param.get_metadata().get("sharding", ())
     if isinstance(spec, NamedSharding):
         spec = spec.spec
     elif isinstance(spec, SingleDeviceSharding):
         spec = ()
-    param_mesh = jax_param.get_metadata().get("mesh") or mesh
+    param_mesh = getattr(jax_param, "mesh",
+                         None) or jax_param.get_metadata().get("mesh") or mesh
     shape = jax_weight.shape
     try:
         jax_param.value = shard_put(jax_weight, spec, mesh=param_mesh)
@@ -787,7 +810,8 @@ def assign_and_shard_param(jax_param: nnx.Param,
         jax.clear_caches()
     except Exception as e:
         raise RuntimeError(
-            f"Failed to load weight '{param_name}' with shape {shape} into param with shape {jax_param.value.shape}"
+            f"Failed to load weight '{param_name}' with shape {shape} into param "
+            f"with shape {jax_param.value.shape}: {type(e).__name__}: {e}"
         ) from e
 
 
@@ -797,7 +821,8 @@ def load_nnx_param_from_reshaped_torch(
         *,
         reshape_dims: Optional[tuple[int, ...]] = None,
         permute_dims: Optional[tuple[int, ...]] = None,
-        param_name: str = "Unknown"):
+        param_name: str = "Unknown",
+        mesh: Optional[Mesh] = None):
     """Load a nnx.Param from a torch.Tensor with reshaping and transposing.
 
     HuggingFace model almost always store linear layer weights with contracting dimension
@@ -809,6 +834,8 @@ def load_nnx_param_from_reshaped_torch(
         torch_weight: The source torch.Tensor weight.
         reshape_dims: Optional tuple specifying the shape to reshape the torch weight to before permutation. If None, no reshaping is applied.
         permute_dims: Optional tuple specifying the permutation of dimensions. If None, no-op for 1D tensors and transpose for 2D tensors is applied.
+        mesh: Optional device mesh override used when sharding metadata does not
+            already carry the target mesh.
     """
     try:
         jax_weight = jax_array_from_reshaped_torch(torch_weight,
@@ -822,7 +849,7 @@ def load_nnx_param_from_reshaped_torch(
     assert tuple(jax_weight.shape) == jax_param.value.shape, \
         f"Shape mismatch when loading weight '{param_name}': torch {jax_weight.shape} vs jax {jax_param.value.shape}"
 
-    assign_and_shard_param(jax_param, jax_weight, param_name)
+    assign_and_shard_param(jax_param, jax_weight, param_name, mesh=mesh)
 
 
 class JaxAutoWeightsLoader(AutoWeightsLoader):
