@@ -248,7 +248,7 @@ class VllmModelWrapper:
             with set_current_vllm_config(vllm_config_for_load):
                 vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
                 if hasattr(vllm_model, "config") and hasattr(vllm_model.config, "architectures"):
-                    if "Qwen3VLForConditionalGeneration" in vllm_model.config.architectures:
+                    if "Qwen3VLForConditionalGeneration" in vllm_model.config.architectures or "Qwen3VLMoeForConditionalGeneration" in vllm_model.config.architectures:
                         from tpu_inference.models.vllm.patches.qwen3_vl import apply_qwen3_vl_patches
                         apply_qwen3_vl_patches(vllm_model)
 
@@ -509,7 +509,8 @@ class VllmModelWrapper:
                     else:
                         torch_mm_embeds = torch_view(mm_embeds)
                     
-                    if type(self.model.vllm_model).__name__ == "Qwen3VLForConditionalGeneration" and not isinstance(torch_mm_embeds, list):
+                    # XXX: dirty hack again on dirty hack
+                    if type(self.model.vllm_model).__name__ in ("Qwen3VLForConditionalGeneration", "Qwen3VLMoeForConditionalGeneration") and not isinstance(torch_mm_embeds, list):
                         torch_mm_embeds = [torch_mm_embeds]
                                 
                     call_args = (torch_view(input_ids), torch_mm_embeds)
