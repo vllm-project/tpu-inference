@@ -14,16 +14,17 @@
 
 import functools
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Dict, Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-import torch
 from jax.sharding import Mesh
 
 from tpu_inference.runner.input_batch import InputBatch
-from tpu_inference.utils import device_array
+
+if TYPE_CHECKING:
+    from tpu_inference.utils import DeviceBuffer
 
 DEFAULT_SAMPLING_PARAMS = dict(
     temperature=-1.0,
@@ -52,55 +53,70 @@ class TPUSupportedSamplingMetadata:
     logprobs: bool = False
 
     @classmethod
-    def from_input_batch(
+    def add_to_device_buffer(
         cls,
-        mesh: Mesh,
         input_batch: InputBatch,
         padded_num_reqs: int,
-        sharding: Optional[jax.sharding.Sharding] = None,
-    ) -> "TPUSupportedSamplingMetadata":
-        needs_logprobs = input_batch.max_num_logprobs > 0 if input_batch.max_num_logprobs else False
+        device_buffer: "DeviceBuffer",
+    ):
+        needs_logprobs = (input_batch.max_num_logprobs > 0
+                          if input_batch.max_num_logprobs else False)
 
         # Use a dummy tensor with a unique shape for each logprobs config.
         # This avoids persistent cache collisions.
         dummy_shape = (1 if needs_logprobs else 2, )
-        cache_collision_dummy = np.zeros(dummy_shape, dtype=np.int32)
-        # Use replicated sharding for dummy tensor.
-        cache_collision_dummy = device_array(mesh,
-                                             cache_collision_dummy,
-                                             sharding=None)
+        cache_collision_dummy_view = device_buffer.get_view(
+            dummy_shape, key="cache_collision_dummy")
+        cache_collision_dummy_view.fill(0)
+
+        if input_batch.all_greedy:
+            return
+
+        num_reqs = input_batch.num_reqs
+
+        temp_view = device_buffer.get_view((padded_num_reqs, ),
+                                           key="temperature")
+        top_k_view = device_buffer.get_view((padded_num_reqs, ), key="top_k")
+        top_p_view = device_buffer.get_view((padded_num_reqs, ), key="top_p")
+
+        # Pad values
+        temp_view[num_reqs:].fill(
+            np.array(DEFAULT_SAMPLING_PARAMS["temperature"],
+                     dtype=np.float32).view(np.int32))
+        top_k_view[num_reqs:].fill(DEFAULT_SAMPLING_PARAMS["top_k"])
+        top_p_view[num_reqs:].fill(
+            np.array(DEFAULT_SAMPLING_PARAMS["top_p"],
+                     dtype=np.float32).view(np.int32))
+
+        # Copy data
+        np.copyto(temp_view[:num_reqs],
+                  input_batch.temperature_cpu[:num_reqs].view(np.int32))
+        np.copyto(top_k_view[:num_reqs], input_batch.top_k_cpu[:num_reqs])
+        np.copyto(top_p_view[:num_reqs],
+                  input_batch.top_p_cpu[:num_reqs].view(np.int32))
+
+    @classmethod
+    def from_unpacked_arrays(
+        cls,
+        mesh: Mesh,
+        unpacked_metadata: Dict[str, jax.Array],
+        input_batch: InputBatch,
+    ) -> "TPUSupportedSamplingMetadata":
+        needs_logprobs = (input_batch.max_num_logprobs > 0
+                          if input_batch.max_num_logprobs else False)
+
+        cache_collision_dummy = unpacked_metadata["cache_collision_dummy"]
 
         if input_batch.all_greedy:
             return cls(do_sampling=False,
                        logprobs=needs_logprobs,
                        _cache_collision_dummy=cache_collision_dummy)
-        num_reqs = input_batch.num_reqs
 
-        def fill_slice(cpu_torch_tensor: torch.Tensor,
-                       fill_val: float) -> torch.Tensor:
-            # Pad value is the default one.
-            cpu_torch_tensor[num_reqs:padded_num_reqs] = fill_val
-            return cpu_torch_tensor
-
-        temp_tensor = fill_slice(input_batch.temperature_cpu,
-                                 DEFAULT_SAMPLING_PARAMS["temperature"])
-        top_k_tensor = fill_slice(input_batch.top_k_cpu,
-                                  DEFAULT_SAMPLING_PARAMS["top_k"])
-        top_p_tensor = fill_slice(input_batch.top_p_cpu,
-                                  DEFAULT_SAMPLING_PARAMS["top_p"])
-
-        # Slice persistent device tensors to a fixed pre-compiled padded shape.
         return cls(
-            temperature=device_array(mesh,
-                                     temp_tensor[:padded_num_reqs],
-                                     sharding=sharding),
-            top_p=device_array(mesh,
-                               top_p_tensor[:padded_num_reqs],
-                               sharding=sharding),
-            top_k=device_array(mesh,
-                               top_k_tensor[:padded_num_reqs],
-                               sharding=sharding),
+            temperature=unpacked_metadata["temperature"].view(jnp.float32),
+            top_k=unpacked_metadata["top_k"],
+            top_p=unpacked_metadata["top_p"].view(jnp.float32),
             _cache_collision_dummy=cache_collision_dummy,
-            do_sampling=not input_batch.all_greedy,
+            do_sampling=True,
             logprobs=needs_logprobs,
         )

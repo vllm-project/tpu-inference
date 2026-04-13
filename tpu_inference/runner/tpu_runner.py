@@ -1491,6 +1491,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Monolithic stack packing for small 1D metadata buffers
         self.device_buffer.reset()
+        TPUSupportedSamplingMetadata.add_to_device_buffer(
+            self.input_batch, padded_num_reqs, self.device_buffer)
         self.device_buffer.append(input_ids, key="input_ids")
         self.device_buffer.append(positions, key="positions")
         self.device_buffer.append(query_start_loc, key="query_start_loc")
@@ -1534,20 +1536,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         metadata_blob, metadata_layout = self.device_buffer.build()
 
-        host_arrays_payload = {
-            "metadata_blob": metadata_blob,
-        }
-        sharding_payload = {
-            "metadata_blob": data_parallel_attn_sharding,
-        }
         dev_arrays_payload = jax.device_put(
-            host_arrays_payload,
-            sharding_payload,
+            metadata_blob,
+            data_parallel_attn_sharding,
         )
 
-        metadata_blob_dev = dev_arrays_payload["metadata_blob"]
         metadata = common_utils.DeviceBuffer.unpack_arrays(
-            metadata_blob_dev, metadata_layout)
+            dev_arrays_payload, metadata_layout)
+        sampling_metadata = TPUSupportedSamplingMetadata.from_unpacked_arrays(
+            self.mesh, metadata, self.input_batch)
         input_ids = metadata["input_ids"]
         positions = metadata["positions"]
         query_start_loc = metadata["query_start_loc"]
@@ -1747,13 +1744,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 padded_num_reqs)
             logits_indices = spec_decode_metadata.final_logits_indices
 
-        # Put to device
-        sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
-            self.mesh,
-            self.input_batch,
-            padded_num_reqs,
-            sharding=data_parallel_attn_sharding,
-        )
         if self.uses_mrope:
             positions = mrope_positions
         query_start_loc_cpu = query_start_loc
@@ -1761,6 +1751,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Monolithic stack packing for small 1D metadata buffers
         self.device_buffer.reset()
+        TPUSupportedSamplingMetadata.add_to_device_buffer(
+            self.input_batch, padded_num_reqs, self.device_buffer)
         self.device_buffer.append(input_ids, key="input_ids")
         self.device_buffer.append(logits_indices, key="logits_indices")
         self.device_buffer.append(positions, key="positions")
@@ -1791,21 +1783,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         metadata_blob, metadata_layout = self.device_buffer.build()
 
-        host_arrays_payload = {
-            "metadata_blob": metadata_blob,
-        }
-        sharding_payload = {
-            "metadata_blob": data_parallel_attn_sharding,
-        }
-
         dev_arrays_payload = jax.device_put(
-            host_arrays_payload,
-            sharding_payload,
+            metadata_blob,
+            data_parallel_attn_sharding,
         )
 
-        metadata_blob_dev = dev_arrays_payload["metadata_blob"]
         metadata = common_utils.DeviceBuffer.unpack_arrays(
-            metadata_blob_dev, metadata_layout)
+            dev_arrays_payload, metadata_layout)
+        sampling_metadata = TPUSupportedSamplingMetadata.from_unpacked_arrays(
+            self.mesh, metadata, self.input_batch)
         input_ids = metadata["input_ids"]
         positions = metadata["positions"]
         query_start_loc = metadata["query_start_loc"]
