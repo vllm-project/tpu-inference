@@ -1287,8 +1287,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 input_ids, padded_token_in_tpu_cur_input_indices,
                 padded_token_in_tpu_pre_next_tokens_indices,
                 self._pre_async_results.next_tokens,
-                jnp.asarray(len(token_in_tpu_cur_input_indices),
-                            dtype=jnp.int32))
+                len(token_in_tpu_cur_input_indices))
 
         return input_ids
 
