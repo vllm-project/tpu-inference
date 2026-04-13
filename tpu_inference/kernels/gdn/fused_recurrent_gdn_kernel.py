@@ -304,10 +304,12 @@ def _recurrent_gdn_main(
         if use_gate_in_kernel:
             a_val = jnp.exp(a_log_ref[:, 0].astype(jnp.float32))
             if dt_bias_ref is not None:
-                dt_bias_tile = dt_bias_ref[...].astype(jnp.float32)  # [H_v, num_lanes]
+                dt_bias_tile = dt_bias_ref[...].astype(
+                    jnp.float32)  # [H_v, num_lanes]
                 if K > dt_bias_tile.shape[-1]:
                     dt_bias_val = jnp.concatenate(
-                        [dt_bias_tile] * (K // dt_bias_tile.shape[-1]), axis=-1)
+                        [dt_bias_tile] * (K // dt_bias_tile.shape[-1]),
+                        axis=-1)
                 else:
                     dt_bias_val = dt_bias_tile
 
@@ -319,10 +321,12 @@ def _recurrent_gdn_main(
             if b_ref is not None:
                 b_tile = b_ref[local_t].astype(jnp.float32)  # [H_v, num_lanes]
                 if V > b_tile.shape[-1]:
-                    beta_t = jax.nn.sigmoid(jnp.concatenate(
-                        [b_tile] * (V // b_tile.shape[-1]), axis=-1))  # [H_v, V]
+                    beta_t = jax.nn.sigmoid(
+                        jnp.concatenate([b_tile] * (V // b_tile.shape[-1]),
+                                        axis=-1))  # [H_v, V]
                 else:
-                    beta_t = jax.nn.sigmoid(b_tile)  # [H_v, num_lanes] (== [H_v, V])
+                    beta_t = jax.nn.sigmoid(
+                        b_tile)  # [H_v, num_lanes] (== [H_v, V])
 
             if use_qk_l2norm:
                 q_t = q_t / jnp.sqrt(
@@ -450,11 +454,17 @@ def fused_recurrent_gdn(
 ):
     """Run the pre-computed-metadata recurrent GDN pallas kernel.
     """
-    T, H_qk, H_v, K, V, dtype, num_states, num_lanes, _ = (
-        validate_gdn_inputs(
-            q, k, v, g, initial_state, state_indices,
-            b=b, use_gate_in_kernel=use_gate_in_kernel,
-            A_log=A_log, dt_bias=dt_bias))
+    T, H_qk, H_v, K, V, dtype, num_states, num_lanes, _ = (validate_gdn_inputs(
+        q,
+        k,
+        v,
+        g,
+        initial_state,
+        state_indices,
+        b=b,
+        use_gate_in_kernel=use_gate_in_kernel,
+        A_log=A_log,
+        dt_bias=dt_bias))
     max_num_req = cu_seqlens.shape[0] - 1
 
     vmem_bytes_limit = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9)
@@ -470,7 +480,8 @@ def fused_recurrent_gdn(
     o_shape = jax.ShapeDtypeStruct((T, H_v, V), dtype)
     state_shape = jax.ShapeDtypeStruct((num_states, H_v, K, V), jnp.float32)
 
-    meta = calculate_chunk_indices(cu_seqlens, distribution, max_num_blocks, bt)
+    meta = calculate_chunk_indices(cu_seqlens, distribution, max_num_blocks,
+                                   bt)
 
     n_seqs = distribution[1] - distribution[0]
     grid_dim = jnp.where(n_seqs > 0, 1, 0)

@@ -81,14 +81,12 @@ def validate_gdn_inputs(
         raise ValueError(
             f"H_qk={H_qk} must be a multiple of packing={packing}")
     if H_v % packing != 0:
-        raise ValueError(
-            f"H_v={H_v} must be a multiple of packing={packing}")
+        raise ValueError(f"H_v={H_v} must be a multiple of packing={packing}")
 
     # Dtype checks
     if k.dtype != dtype or v.dtype != dtype:
-        raise ValueError(
-            f"q/k/v must share the same dtype, got q={dtype}, "
-            f"k={k.dtype}, v={v.dtype}")
+        raise ValueError(f"q/k/v must share the same dtype, got q={dtype}, "
+                         f"k={k.dtype}, v={v.dtype}")
     if g.dtype != jnp.float32:
         raise ValueError(f"g must be float32, got {g.dtype}")
     if initial_state.dtype != jnp.float32:
@@ -101,10 +99,9 @@ def validate_gdn_inputs(
     # Gate-in-kernel checks
     if use_gate_in_kernel:
         if A_log is None:
-            raise ValueError(
-                "A_log is required when use_gate_in_kernel=True")
-        if dt_bias is not None and (
-                dt_bias.ndim != 2 or dt_bias.shape[0] != H_v):
+            raise ValueError("A_log is required when use_gate_in_kernel=True")
+        if dt_bias is not None and (dt_bias.ndim != 2
+                                    or dt_bias.shape[0] != H_v):
             raise ValueError(
                 f"dt_bias shape {dt_bias.shape} must be [{H_v}, ...]")
         if dt_bias is not None and dt_bias.dtype != jnp.float32:

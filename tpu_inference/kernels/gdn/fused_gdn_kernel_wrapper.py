@@ -20,8 +20,11 @@ import functools
 import jax
 import jax.numpy as jnp
 from jax.experimental.pallas import tpu as pltpu
-from tpu_inference.kernels.gdn.fused_decoding_gdn_kernel import fused_decoding_gdn
-from tpu_inference.kernels.gdn.fused_recurrent_gdn_kernel import fused_recurrent_gdn
+
+from tpu_inference.kernels.gdn.fused_decoding_gdn_kernel import \
+    fused_decoding_gdn
+from tpu_inference.kernels.gdn.fused_recurrent_gdn_kernel import \
+    fused_recurrent_gdn
 
 
 def _dispatch_with_distribution(
@@ -161,9 +164,9 @@ def fused_gdn(
     # Validate pre-broadcast inputs.
     if b is not None and b.shape != (T, H_v):
         raise ValueError(f"b shape {b.shape} must be [{T}, {H_v}]")
-    if A_log is not None and A_log.shape != (H_v,):
+    if A_log is not None and A_log.shape != (H_v, ):
         raise ValueError(f"A_log shape {A_log.shape} must be [{H_v}]")
-    if dt_bias is not None and dt_bias.shape != (H_v,):
+    if dt_bias is not None and dt_bias.shape != (H_v, ):
         raise ValueError(f"dt_bias shape {dt_bias.shape} must be [{H_v}]")
 
     cu_seqlens = cu_seqlens.astype(jnp.int32)
@@ -173,15 +176,16 @@ def fused_gdn(
         scale = K**-0.5
     num_lanes = pltpu.get_tpu_info().num_lanes
     if b is not None:
-        b = jnp.broadcast_to(b[:, :, None], (T, H_v, num_lanes))  # [T, H_v, num_lanes]
+        b = jnp.broadcast_to(b[:, :, None],
+                             (T, H_v, num_lanes))  # [T, H_v, num_lanes]
     if dt_bias is not None:
-        dt_bias = jnp.broadcast_to(
-            dt_bias[:, None], (H_v, num_lanes)).astype(jnp.float32)  # [H_v, num_lanes]
+        dt_bias = jnp.broadcast_to(dt_bias[:, None], (H_v, num_lanes)).astype(
+            jnp.float32)  # [H_v, num_lanes]
     distribution = distribution.astype(jnp.int32)
 
     if A_log is not None:
-        A_log = jnp.broadcast_to(
-            A_log[:, None], (H_v, num_lanes)).astype(jnp.float32)  # [H_v, num_lanes]
+        A_log = jnp.broadcast_to(A_log[:, None], (H_v, num_lanes)).astype(
+            jnp.float32)  # [H_v, num_lanes]
 
     o, state = _dispatch_with_distribution(
         q,
@@ -248,8 +252,8 @@ def ragged_gated_delta_rule(
     key_dim = n_kq * d_k
 
     q = mixed_qkv[..., :key_dim].reshape(num_tokens, n_kq, d_k)
-    k = mixed_qkv[..., key_dim : key_dim * 2].reshape(num_tokens, n_kq, d_k)
-    v = mixed_qkv[..., key_dim * 2 :].reshape(num_tokens, n_v, d_v)
+    k = mixed_qkv[..., key_dim:key_dim * 2].reshape(num_tokens, n_kq, d_k)
+    v = mixed_qkv[..., key_dim * 2:].reshape(num_tokens, n_v, d_v)
 
     g = a
 
