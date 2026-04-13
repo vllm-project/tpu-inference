@@ -79,7 +79,5 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install -e .
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-ENV HF_HUB_DISABLE_XET=1
-
 ENTRYPOINT ["/entrypoint.sh"]
 CMD []
