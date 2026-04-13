@@ -241,6 +241,13 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         assert self.block_quant
         assert not self.moe.has_bias
 
+        # Skip processing dummy weights — they will be overwritten by MaxText weight sync.
+        # Running _process_with_expert_sharding on dummy weights dispatches 3.5GB+ per MoE
+        # layer through the Pathways proxy (61 layers x bottleneck = minutes of stall).
+        from tpu_inference.models.common.pathways_dummy_loader import is_pathways_dummy_load
+        if is_pathways_dummy_load():
+            return
+
         w13_weight = t2j(layer.w13_weight, use_dlpack=False)
         w13_weight_scale = t2j(layer.w13_weight_scale_inv, use_dlpack=False)
 
