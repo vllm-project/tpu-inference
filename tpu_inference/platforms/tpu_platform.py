@@ -194,6 +194,14 @@ class TpuPlatform(Platform):
             assert not vllm_envs.VLLM_ENABLE_V1_MULTIPROCESSING, (
                 "VLLM_ENABLE_V1_MULTIPROCESSING must be 0 when using Pathways(JAX_PLATFORMS=proxy)"
             )
+
+        if vllm_config.model_config and vllm_config.model_config.use_mla:
+            if not envs.NEW_MODEL_DESIGN or not vllm_config.additional_config.get(
+                    "sharding", {}).get("sharding_strategy", {}):
+                raise ValueError(
+                    "MLA models require both the NEW_MODEL_DESIGN=1 environment "
+                    "variable to be set and DP attention set via: --additional_config \'{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}\'"
+                )
         cls._initialize_sharding_config(vllm_config)
 
         from vllm.config import CompilationMode
