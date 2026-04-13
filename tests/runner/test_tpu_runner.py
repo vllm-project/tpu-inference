@@ -208,7 +208,8 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
              patch('jax.random.key', return_value=self.mock_rng_key), \
              patch('tpu_inference.runner.tpu_runner.nnx.Rngs', return_value=self.mock_rng_key), \
              patch('tpu_inference.runner.tpu_runner.get_model', return_value=self._model_get_model()), \
-             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh', return_value=self.mock_mesh):
+             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh', return_value=self.mock_mesh), \
+             patch('jax.device_put', side_effect=lambda x, *args, **kwargs: x):
 
             model_config = ModelConfig(tokenizer_mode="auto",
                                        trust_remote_code=False,
@@ -338,7 +339,8 @@ class TestTPUJaxRunnerDisableMM:
              patch('jax.random.key', return_value=self.mock_rng_key), \
              patch('tpu_inference.runner.tpu_runner.nnx.Rngs', return_value=self.mock_rng_key), \
              patch('tpu_inference.runner.tpu_runner.get_model', return_value=self._model_get_model()), \
-             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh', return_value=self.mock_mesh):
+             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh', return_value=self.mock_mesh), \
+             patch('jax.device_put', side_effect=lambda x, *args, **kwargs: x):
 
             model_config = ModelConfig(tokenizer_mode="auto",
                                        trust_remote_code=False,
