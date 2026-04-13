@@ -12,40 +12,41 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Callable
+from typing import Callable, Optional
 
 import jax
 import jax.numpy as jnp
 import torch
-from compressed_tensors.quantization import ActivationOrdering, QuantizationArgs, QuantizationStrategy
+from compressed_tensors.quantization import (ActivationOrdering,
+                                             QuantizationArgs,
+                                             QuantizationStrategy)
 from jax.sharding import PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
-from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w4a8_fp8 import \
-        CompressedTensorsW4A8Fp8, W4A8_SUPPORTED_TYPES_MAP
-from vllm.scalar_type import scalar_types
+from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w4a8_fp8 import (
+    W4A8_SUPPORTED_TYPES_MAP, CompressedTensorsW4A8Fp8)
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     unpack_quantized_values_into_int32
-
+from vllm.model_executor.parameter import (BasevLLMParameter,
+                                           ChannelQuantScaleParameter,
+                                           GroupQuantScaleParameter,
+                                           PackedvLLMParameter)
+from vllm.scalar_type import scalar_types
 
 from tpu_inference.layers.common.linear import sharded_quantized_matmul
 from tpu_inference.layers.common.process_weights.linear_weights import (
-    LinearWeights, process_linear_weights, shard_linear_weights, to_parameter_list)
-from tpu_inference.layers.common.utils import slice_sharded_tensor_for_concatenation
-from tpu_inference.layers.vllm.quantization.configs import VllmQuantLinearConfig
+    LinearWeights, process_linear_weights, shard_linear_weights,
+    to_parameter_list)
+from tpu_inference.layers.common.utils import \
+    slice_sharded_tensor_for_concatenation
+from tpu_inference.layers.vllm.quantization.configs import \
+    VllmQuantLinearConfig
 from tpu_inference.logger import init_logger
 
 P = PartitionSpec
 logger = init_logger(__name__)
 
-
-from vllm.model_executor.parameter import (
-    BasevLLMParameter,
-    ChannelQuantScaleParameter,
-    GroupQuantScaleParameter,
-    PackedvLLMParameter,
-)
 
 class VllmCompressedTensorsW4A8Fp8(CompressedTensorsW4A8Fp8):
 
@@ -57,7 +58,7 @@ class VllmCompressedTensorsW4A8Fp8(CompressedTensorsW4A8Fp8):
     ):
         # Skips calling super().__init__() because the parent currently requires
         # group_size = 128, which is often disadvantageous on TPU.
-        self.pack_factor =  32 // weight_quant.num_bits
+        self.pack_factor = 32 // weight_quant.num_bits
         self.strategy = weight_quant.strategy
         self.num_bits = weight_quant.num_bits
         self.symmetric = weight_quant.symmetric
@@ -67,16 +68,18 @@ class VllmCompressedTensorsW4A8Fp8(CompressedTensorsW4A8Fp8):
 
         if self.num_bits == 4:
             self.wtype = scalar_types.uint4
-        elif self.num_bits == 8:
-            self.wtype = scalar_types.uint8
         else:
             raise ValueError(
                 f"Unsupported num_bits = {weight_quant.num_bits}. "
-                f"Supported num_bits = {W4A8_SUPPORTED_TYPES_MAP.keys()}"
-            )
+                f"Supported num_bits = {W4A8_SUPPORTED_TYPES_MAP.keys()}")
+
+        if is_static_input_scheme:
+            raise NotImplementedError(
+                "Static input scheme is not yet supported for W4A8.")
 
         if not weight_quant.symmetric:
-            raise ValueError("Scheme W4A8Fp8 only supports symmetric quantization.")
+            raise ValueError(
+                "Scheme W4A8Fp8 only supports symmetric quantization.")
         self.quant_type = W4A8_SUPPORTED_TYPES_MAP[weight_quant.num_bits]
 
         self.weight_quant = weight_quant
@@ -125,25 +128,27 @@ class VllmCompressedTensorsW4A8Fp8(CompressedTensorsW4A8Fp8):
         )
 
         weight_scale_args = {
-            "data": torch.empty(
+            "data":
+            torch.empty(
                 output_size_per_partition,
                 scales_and_zp_size,
                 dtype=params_dtype,
             ),
-            "weight_loader": weight_loader,
+            "weight_loader":
+            weight_loader,
         }
 
         if partition_scales:
-            weight_scale = GroupQuantScaleParameter(
-                output_dim=0, input_dim=1, **weight_scale_args
-            )
+            weight_scale = GroupQuantScaleParameter(output_dim=0,
+                                                    input_dim=1,
+                                                    **weight_scale_args)
         else:
-            weight_scale = ChannelQuantScaleParameter(output_dim=0, **weight_scale_args)
+            weight_scale = ChannelQuantScaleParameter(output_dim=0,
+                                                      **weight_scale_args)
 
-
-        weight_shape = BasevLLMParameter(
-            data=torch.empty(2, dtype=torch.int64), weight_loader=weight_loader
-        )
+        weight_shape = BasevLLMParameter(data=torch.empty(2,
+                                                          dtype=torch.int64),
+                                         weight_loader=weight_loader)
 
         layer.register_parameter("weight_packed", weight)
         layer.register_parameter("weight_scale", weight_scale)
@@ -152,16 +157,15 @@ class VllmCompressedTensorsW4A8Fp8(CompressedTensorsW4A8Fp8):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
 
         # TODO(dmolitor): Handle the case where weights are stored unpacked.
-        unpacked_weights = unpack_quantized_values_into_int32(layer.weight_packed, self.wtype, packed_dim=1)
-        # Convert from uint4 to int4.
-        unpacked_weights = unpacked_weights.to(torch.int8) - 8
-
-        weight = t2j(unpacked_weights, use_dlpack=False)
+        unpacked_weights = unpack_quantized_values_into_int32(
+            layer.weight_packed, self.wtype, packed_dim=1)
+        uint_weight = t2j(unpacked_weights, use_dlpack=False)
         delattr(layer, "weight_packed")
         weight_scale = t2j(layer.weight_scale, use_dlpack=False)
         delattr(layer, "weight_scale")
 
-        if getattr(layer, "bias", None) is not None and not layer.skip_bias_add:
+        if getattr(layer, "bias",
+                   None) is not None and not layer.skip_bias_add:
             if layer.return_bias:
                 logger.warning_once("Bias might return incorrect value.")
             bias = t2j(layer.bias, use_dlpack=False)
@@ -172,12 +176,13 @@ class VllmCompressedTensorsW4A8Fp8(CompressedTensorsW4A8Fp8):
         per_tensor = self.strategy == QuantizationStrategy.TENSOR
 
         @jax.jit
-        def process_int4_linear_weights(
-            weight: jax.Array,
+        def process_uint4_linear_weights(
+            uint_weight: jax.Array,
             weight_scale: jax.Array,
             bias: jax.Array | None,
         ) -> LinearWeights:
-            weight = weight.astype(jnp.int4)
+            # Convert from uint4 to int4.
+            weight = (uint_weight - 8).astype(jnp.int4)
 
             if weight_scale.shape[-1] == 1:
                 weight_scale = jnp.squeeze(weight_scale, -1)
@@ -202,11 +207,12 @@ class VllmCompressedTensorsW4A8Fp8(CompressedTensorsW4A8Fp8):
                 raise ValueError("Unexpected weight scale format.")
 
             if processed_weights.weight_scale is not None and processed_weights.weight_scale.ndim == 2:
-                processed_weights.weight_scale = jnp.expand_dims(jnp.transpose(processed_weights.weight_scale, (1, 0)), 1)
+                processed_weights.weight_scale = jnp.expand_dims(
+                    jnp.transpose(processed_weights.weight_scale, (1, 0)), 1)
 
             return processed_weights
 
-        weights = process_int4_linear_weights(weight, weight_scale, bias)
+        weights = process_uint4_linear_weights(uint_weight, weight_scale, bias)
         weights = torch_view(
             shard_linear_weights(
                 weights,
@@ -228,10 +234,6 @@ class VllmCompressedTensorsW4A8Fp8(CompressedTensorsW4A8Fp8):
             if bias is not None:
                 layer.bias = to_parameter_list(weights.bias)
 
-        # TODO(dmolitor): Handle layer input scales for static input scheme once supported.
-        if self.is_static_input_scheme:
-            raise NotImplementedError("Static W4A8 is not yet supported")
-
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         with jax.named_scope(layer._get_name()):
@@ -246,15 +248,12 @@ class VllmCompressedTensorsW4A8Fp8(CompressedTensorsW4A8Fp8):
         weight_jax = jax_view(layer.weight)
         weight_scale_jax = jax_view(layer.weight_scale)
 
-        if self.is_static_input_scheme:
-            raise NotImplementedError("Static W4A8 is not yet supported")
-        else:
-            outs = sharded_quantized_matmul(x_jax,
-                                            weight_jax,
-                                            weight_scale_jax,
-                                            self.linear_config.weight_sharding,
-                                            mesh=self.linear_config.mesh,
-                                            x_q_dtype=jnp.float8_e4m3fn)
+        outs = sharded_quantized_matmul(x_jax,
+                                        weight_jax,
+                                        weight_scale_jax,
+                                        self.linear_config.weight_sharding,
+                                        mesh=self.linear_config.mesh,
+                                        x_q_dtype=jnp.float8_e4m3fn)
 
         if bias is not None and not layer.skip_bias_add:
             outs += jax_view(bias)
@@ -273,18 +272,15 @@ class VllmCompressedTensorsW4A8Fp8(CompressedTensorsW4A8Fp8):
             weight_jax = jax_view(weight)
             weight_scale_jax = jax_view(weight_scale)
 
-            if self.is_static_input_scheme:
-                raise NotImplementedError("Static W4A8 is not yet supported")
-            else:
-                out = sharded_quantized_matmul(
-                    x_jax,
-                    weight_jax,
-                    weight_scale_jax,
-                    self.linear_config.weight_sharding,
-                    mesh=self.linear_config.mesh,
-                    x_q_dtype=jnp.float8_e4m3fn,
-                    acc_dtype=jnp.float32,
-                )
+            out = sharded_quantized_matmul(
+                x_jax,
+                weight_jax,
+                weight_scale_jax,
+                self.linear_config.weight_sharding,
+                mesh=self.linear_config.mesh,
+                x_q_dtype=jnp.float8_e4m3fn,
+                acc_dtype=jnp.float32,
+            )
 
             if bias is not None and not layer.skip_bias_add:
                 out += jax_view(bias[i])

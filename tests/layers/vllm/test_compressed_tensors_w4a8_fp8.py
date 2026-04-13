@@ -15,10 +15,8 @@
 import tempfile
 from typing import Optional
 from unittest.mock import MagicMock, patch
-import logging
 
 import jax
-import jax.numpy as jnp
 import pytest
 import torch
 import torchax
@@ -26,28 +24,31 @@ from jax.sharding import PartitionSpec
 from torchax.interop import torch_view
 from torchax.ops.mappings import j2t, t2j
 from vllm.config import set_current_vllm_config
-from vllm.scalar_type import scalar_types
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.model_executor.layers.quantization.utils.quant_utils import \
-    pack_quantized_values_into_int32, quantize_weights
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import     CompressedTensorsLinearMethod
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import \
+    CompressedTensorsLinearMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    pack_quantized_values_into_int32, quantize_weights)
 from vllm.model_executor.model_loader import get_model as vllm_get_model
+from vllm.scalar_type import scalar_types
 
 from tests.layers.common import utils as test_utils
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
-from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors import     VllmCompressedTensorsConfig
-from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w4a8_fp8 import     VllmCompressedTensorsW4A8Fp8
-from tpu_inference.layers.vllm.quantization.configs import     VllmQuantLinearConfig
+from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors import \
+    VllmCompressedTensorsConfig
+from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w4a8_fp8 import \
+    VllmCompressedTensorsW4A8Fp8
+from tpu_inference.layers.vllm.quantization.configs import \
+    VllmQuantLinearConfig
 
 P = PartitionSpec
-logger = logging.getLogger(__name__)
 
 torch.manual_seed(42)
 
@@ -56,44 +57,36 @@ MODELS = [
     "nm-testing/SmolLM-1.7B-Instruct-quantized.w4a16",
 ]
 
-def ref_quantize_fp8(x: torch.Tensor,
-                     dtype: torch.dtype = torch.float8_e4m3fn,
-                     per_tensor: bool = False):
-    dtype_info = torch.finfo(dtype)
-    dtype_max = float(dtype_info.max)
-    dtype_min = float(dtype_info.min)
 
-    dim = () if per_tensor else 1
-    x_abs_max = torch.amax(torch.abs(x), dim=dim, keepdim=True)
-    if per_tensor:
-        x_abs_max = torch.squeeze(x_abs_max, dim=-1)
-    x_s = x_abs_max / dtype_max
-    x_q = torch.clip(x / x_s, dtype_min, dtype_max).to(dtype)
-    return x_q, x_s.to(torch.float32)
+def ref_w4a8_fp8_dynamic(
+        x: torch.Tensor,
+        w_float: torch.Tensor,
+        b: Optional[torch.Tensor]):
 
+    x_q, x_s = test_utils.ref_quantize_fp8(x, dtype=torch.float8_e4m3fn)
 
-def ref_w4a8_fp8_dynamic(x: torch.Tensor, w_float: torch.Tensor, # w_s: torch.Tensor,
-                         b: Optional[torch.Tensor]):
-
-    x_q, x_s = ref_quantize_fp8(x)
-
-    out = torch.einsum('bd,fd->bf', x_q.to(torch.float32), w_float.to(torch.float32))
+    out = torch.einsum('bd,fd->bf', x_q.to(torch.float32),
+                       w_float.to(torch.float32))
     out = out * x_s
 
     if b is not None:
         out += b
     return out.to(x.dtype)
 
-def override_activation_quant_config(vllm_config, num_bits=8, strategy="token"):
+
+def override_activation_quant_config(vllm_config,
+                                     num_bits=8,
+                                     strategy="token"):
     # Add activation quantization since the test checkpoints use w4a16 quant.
-    vllm_config.model_config.hf_config.quantization_config["config_groups"]["group_0"]["input_activations"] = {
-        "num_bits": num_bits,
-        "type": "float",
-        "symmetric": True,
-        "strategy": strategy,
-        "dynamic": True,
-        "observer_kwargs": {},
-    }
+    vllm_config.model_config.hf_config.quantization_config["config_groups"][
+        "group_0"]["input_activations"] = {
+            "num_bits": num_bits,
+            "type": "float",
+            "symmetric": True,
+            "strategy": strategy,
+            "dynamic": True,
+            "observer_kwargs": {},
+        }
     vllm_config.model_config.hf_text_config.quantization_config = vllm_config.model_config.hf_config.quantization_config
 
 
@@ -104,7 +97,9 @@ def initialize_layer_weights(layer: torch.nn.Module) -> torch.Tensor:
     quant_config = scheme.linear_config
     assert isinstance(quant_config, VllmQuantLinearConfig)
 
-    group_size = scheme.weight_quant.group_size if hasattr(scheme, "weight_quant") and hasattr(scheme.weight_quant, "group_size") else None
+    group_size = scheme.weight_quant.group_size if hasattr(
+        scheme, "weight_quant") and hasattr(scheme.weight_quant,
+                                            "group_size") else None
 
     weight_list = []
     weight_ref_list = []
@@ -119,7 +114,9 @@ def initialize_layer_weights(layer: torch.nn.Module) -> torch.Tensor:
 
         # Offset to uint4 range [0, 15] for storage packing simulation
         weight_uint4 = weight_q_t.T + 8
-        packed_weight_ = pack_quantized_values_into_int32(weight_uint4, scalar_types.uint4, packed_dim=1)
+        packed_weight_ = pack_quantized_values_into_int32(weight_uint4,
+                                                          scalar_types.uint4,
+                                                          packed_dim=1)
 
         # Transpose back to original layout
         weight_list.append(packed_weight_)
@@ -157,7 +154,7 @@ def return_ref_and_layer_output(layer: torch.nn.Module, batch_size: int = 16):
     input_tensor = input_tensor.to('cpu')
 
     # Run reference implementation
-    ref_output = ref_w4a8_fp8_dynamic( input_tensor, weight_ref, layer.bias)
+    ref_output = ref_w4a8_fp8_dynamic(input_tensor, weight_ref, layer.bias)
 
     # Run torchax/jax function
     with torchax.default_env():
@@ -166,10 +163,6 @@ def return_ref_and_layer_output(layer: torch.nn.Module, batch_size: int = 16):
         jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
         layer_output = layer(jax_input_tensor)
         layer_output = j2t(layer_output.to(torch.float32)).to(torch.bfloat16)
-
-    print(f"\nMax diff: {torch.max(torch.abs(ref_output - layer_output))}")
-    print(f"ref_output max: {torch.max(ref_output)}, min: {torch.min(ref_output)}")
-    print(f"layer_output max: {torch.max(layer_output)}, min: {torch.min(layer_output)}")
 
     return ref_output, layer_output
 
