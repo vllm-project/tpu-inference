@@ -150,7 +150,6 @@ def fused_gdn(
     """
     T, H_qk, K = q.shape
     H_v = v.shape[1]
-    V = v.shape[2]
 
     # Broadcast g from [T, H_v] to [T, H_v, K] if needed.
     if g.shape == (T, H_v):
