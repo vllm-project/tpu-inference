@@ -24,6 +24,7 @@ def ragged_conv1d(
     query_start_loc,
     state_indices,
     kernel_size,
+    distribution,
 ):
     """Applies 1D convolution over ragged sequences and updates state.
 
@@ -39,7 +40,7 @@ def ragged_conv1d(
       state_indices: Tensor of shape `(max_reqs,)` mapping request index to state
         index.
       kernel_size: The size of the convolution kernel.
-  
+
     Returns:
       A tuple containing:
       - output: The output tensor of shape `(num_tokens, dim)`.
@@ -50,12 +51,19 @@ def ragged_conv1d(
     max_reqs = state_indices.shape[0]
     token_idx = jnp.arange(num_tokens)
 
-    req_indices = (
-        jnp.sum(token_idx[:, None] >= query_start_loc[None, :], axis=1) - 1)
-    req_indices = jnp.clip(req_indices, 0, max_reqs - 1)
-    local_indices = token_idx - query_start_loc[req_indices]
+    num_valid_seqs = distribution[2]
+    valid_loc_mask = jnp.arange(query_start_loc.shape[0]) <= num_valid_seqs
+    # Handle case where query_start_loc has trailing zeros by filling them with the last valid location.
+    last_valid_loc = query_start_loc[num_valid_seqs]
+    effective_query_start_loc = jnp.where(valid_loc_mask, query_start_loc,
+                                          last_valid_loc)
 
-    lengths = query_start_loc[1:] - query_start_loc[:-1]
+    req_indices = (jnp.sum(
+        token_idx[:, None] >= effective_query_start_loc[None, :], axis=1) - 1)
+    req_indices = jnp.clip(req_indices, 0, max_reqs - 1)
+    local_indices = token_idx - effective_query_start_loc[req_indices]
+
+    lengths = (effective_query_start_loc[1:] - effective_query_start_loc[:-1])
 
     # 1. Compute Convolution
     out = jnp.zeros_like(x)
@@ -83,10 +91,10 @@ def ragged_conv1d(
     padded_lengths = padded_lengths.at[:lengths.shape[0]].set(lengths)
 
     padded_q_loc = jnp.zeros(max_reqs + 1, dtype=jnp.int32)
-    padded_q_loc = padded_q_loc.at[:query_start_loc.shape[0]].set(
-        query_start_loc)
-    padded_q_loc = padded_q_loc.at[query_start_loc.shape[0]:].set(
-        query_start_loc[-1])
+    padded_q_loc = padded_q_loc.at[:effective_query_start_loc.shape[0]].set(
+        effective_query_start_loc)
+    padded_q_loc = padded_q_loc.at[effective_query_start_loc.shape[0]:].set(
+        effective_query_start_loc[-1])
 
     r_grid = jnp.arange(max_reqs)[:, None]
     j_grid = jnp.arange(kernel_size - 1)[None, :]
@@ -102,10 +110,10 @@ def ragged_conv1d(
                                     gathered_state[r_grid,
                                                    idx_state], x[idx_x])
 
-    valid_seq_mask = jnp.arange(max_reqs) < lengths.shape[0]
+    true_valid_seq_mask = jnp.arange(max_reqs) < num_valid_seqs
     updated_conv_state = conv_state.at[state_indices].set(
         jnp.where(
-            valid_seq_mask[:, None, None],
+            true_valid_seq_mask[:, None, None],
             new_state_extracted,
             conv_state[state_indices],
         ))
