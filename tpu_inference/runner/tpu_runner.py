@@ -1501,15 +1501,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Collect block tables host arrays loops zone presence zones legality
         def build_block_table_host(kv_cache_gid: int) -> None:
+            block_table_obj = self.input_batch.block_table[kv_cache_gid]
             block_tables_view = self.device_buffer.get_view(
-                (self.max_num_reqs, self.max_num_blocks_per_req),
+                (self.max_num_reqs, block_table_obj.max_num_blocks_per_req),
                 key=f"block_tables_gid_{kv_cache_gid}")
 
             # Zero out the view once for correct padding
             block_tables_view.fill(0)
 
-            cpu_tensor = self.input_batch.block_table[
-                kv_cache_gid].get_cpu_tensor()
+            cpu_tensor = block_table_obj.get_cpu_tensor()
             for dp_rank in range(dp_size):
                 _num_reqs = num_req_per_dp_rank[dp_rank]
                 if _num_reqs == 0:
@@ -1552,6 +1552,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         positions = metadata["positions"]
         query_start_loc = metadata["query_start_loc"]
         seq_lens = metadata["seq_lens"]
+        logits_indices = metadata["logits_indices"]
         request_distribution = metadata["request_distribution"]
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
@@ -1768,7 +1769,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.device_buffer.append(request_distribution,
                                   key="request_distribution")
 
-        # Collect block tables host arrays loops zone presence zones legality
         def build_block_table_host(kv_cache_gid: int) -> None:
             block_table_obj = self.input_batch.block_table[kv_cache_gid]
             block_tables_view = self.device_buffer.get_view(
@@ -1807,10 +1807,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         metadata = common_utils.DeviceBuffer.unpack_arrays(
             metadata_blob_dev, metadata_layout)
         input_ids = metadata["input_ids"]
-        logits_indices = metadata["logits_indices"]
         positions = metadata["positions"]
         query_start_loc = metadata["query_start_loc"]
         seq_lens = metadata["seq_lens"]
+        logits_indices = metadata["logits_indices"]
         request_distribution = metadata["request_distribution"]
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
