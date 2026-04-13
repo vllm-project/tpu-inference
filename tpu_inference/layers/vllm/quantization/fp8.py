@@ -244,11 +244,40 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         assert self.block_quant
         assert not self.moe.has_bias
 
-        # Skip processing dummy weights — they will be overwritten by MaxText weight sync.
-        # Running _process_with_expert_sharding on dummy weights dispatches 3.5GB+ per MoE
-        # layer through the Pathways proxy (61 layers x bottleneck = minutes of stall).
         from tpu_inference.models.common.pathways_dummy_loader import is_pathways_dummy_load
         if is_pathways_dummy_load():
+            if self.moe_backend == MoEBackend.GMM_EP:
+                # Dummy weights will be overwritten by MaxText weight sync, so skip
+                # fp8 quantization. But we MUST EP-shard them to avoid full replication
+                # across 128 devices (~80TB HBM usage).
+                # Use with_sharding_constraint inside JIT (not device_put) to avoid
+                # host-initiated proxy DMA — same technique as _process_with_expert_sharding.
+                from jax.sharding import NamedSharding
+                ep_sharding = NamedSharding(self.mesh,
+                                            PartitionSpec(ShardingAxisName.EXPERT))
+
+                w13_weight = t2j(layer.w13_weight, use_dlpack=False)
+                w13_weight_scale = t2j(layer.w13_weight_scale_inv, use_dlpack=False)
+                w2_weight = t2j(layer.w2_weight, use_dlpack=False)
+                w2_weight_scale = t2j(layer.w2_weight_scale_inv, use_dlpack=False)
+
+                def _shard_dummy_moe_weights(w13, w13s, w2, w2s):
+                    return (
+                        jax.lax.with_sharding_constraint(w13, ep_sharding),
+                        jax.lax.with_sharding_constraint(w13s, ep_sharding),
+                        jax.lax.with_sharding_constraint(w2, ep_sharding),
+                        jax.lax.with_sharding_constraint(w2s, ep_sharding),
+                    )
+
+                w13, w13s, w2, w2s = jax.jit(_shard_dummy_moe_weights)(
+                    w13_weight, w13_weight_scale, w2_weight, w2_weight_scale)
+
+                layer.w13_weight = Parameter(torch_view(w13), requires_grad=False)
+                layer.w2_weight = Parameter(torch_view(w2), requires_grad=False)
+                layer.w13_weight_scale_inv = Parameter(torch_view(w13s),
+                                                       requires_grad=False)
+                layer.w2_weight_scale_inv = Parameter(torch_view(w2s),
+                                                      requires_grad=False)
             return
 
         w13_weight = t2j(layer.w13_weight, use_dlpack=False)
