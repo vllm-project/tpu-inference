@@ -58,7 +58,7 @@ def get_current_machine_type():
     return None
 
 
-def resolve_tensor_parallel_size_args(args_dict, current_machine):
+def resolve_device_args(args_dict, current_machine):
     """
     Resolves dictionary-based arguments based on the current machine type.
     """
@@ -191,7 +191,7 @@ def main():
     if cli_cmd_type == "lm_eval":
         # Resolve machine-specific args before building command
         cli_raw_args = cli_opts.get("args", {})
-        cli_resolved_args = resolve_tensor_parallel_size_args(cli_raw_args, current_machine)
+        cli_resolved_args = resolve_device_args(cli_raw_args, current_machine)
 
         print("export COMMAND_TYPE=\"lm_eval\"")
         lm_cmd = build_command(cli_cmd_type, cli_resolved_args)
@@ -203,8 +203,8 @@ def main():
         print(f"export TENSOR_PARALLEL_SIZE=\"{tensor_parallel_size}\"")
     else:
         srv_cmd_type = srv_opts.get("command_type", "")
-        srv_resolved_args = resolve_tensor_parallel_size_args(srv_opts.get("args", {}), current_machine)
-        cli_resolved_args = resolve_tensor_parallel_size_args(cli_opts.get("args", {}), current_machine)
+        srv_resolved_args = resolve_device_args(srv_opts.get("args", {}), current_machine)
+        cli_resolved_args = resolve_device_args(cli_opts.get("args", {}), current_machine)
 
         srv_cmd = build_command(srv_cmd_type, srv_resolved_args)
         cli_cmd = build_command(cli_cmd_type, cli_resolved_args)
