@@ -127,9 +127,6 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
         assert isinstance(layer, vllm_linear.LinearBase)
 
         assert self.block_quant
-        from tpu_inference.models.common.pathways_dummy_loader import is_pathways_dummy_load
-        if is_pathways_dummy_load():
-            return
         weight = t2j(layer.weight, use_dlpack=False)
         delattr(layer, "weight")
 
