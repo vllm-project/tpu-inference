@@ -91,7 +91,7 @@ def pack_inputs_single_stream(
       g: Gate tensor.
       beta: Beta tensor.
       query_start_loc: Start locations of each sequence in original stream.
-      distribution: Distribution tensor containing number of valid sequences at index 2.
+      distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end, mixed_end)`.
       chunk_size: Chunk size for padding.
       compute_dtype: Dtype for computation (Q, K, V, beta).
 
@@ -222,7 +222,7 @@ def ragged_gated_delta_rule_mixed_prefill(
       query_start_loc: Start locations of sequences in original stream.
       recurrent_state: Recurrent state tensor.
       state_indices: Indices mapping sequences to recurrent state slots.
-      distribution: Distribution tensor containing number of valid sequences at index 2.
+      distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end, mixed_end)`.
       chunk_size: Chunk size for padding and processing.
       use_qk_norm_in_gdn: Whether to use QK normalization.
       compute_dtype: Dtype for computation.

@@ -118,10 +118,6 @@ def run_jax_gdn_attention_local(
 
     out_mixed_qkv = jax.nn.silu(out_mixed_qkv)
 
-    # Ensure query_start_loc is monotonically increasing. This is required to
-    # handle cases where query_start_loc might be padded with trailing zeros.
-    #query_start_loc = jnp.maximum.accumulate(query_start_loc)
-
     if config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.REF:
         ragged_gdn_impl = functools.partial(
             ragged_gated_delta_rule_ref,
