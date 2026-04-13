@@ -32,29 +32,29 @@ init_env() {
 
     # Create storage class
     echo "kubectl apply -f ./kubernetes/manifests/storageclass.yaml"
-    kubectl apply -f ./kubernetes/manifests/storageclass.yaml
+    kubectl apply -f ./.buildkite/kubernetes/manifests/storageclass.yaml
 }
 
 deploy_1p1d() {
     echo "kubectl apply -f ./kubernetes/manifests/v7x/single_prefill.yaml"
-    kubectl apply -f ./kubernetes/manifests/v7x/single_prefill.yaml
+    kubectl apply -f ./.buildkite/kubernetes/manifests/v7x/single_prefill.yaml
 
     echo "kubectl apply -f ./kubernetes/manifests/v7x/single_decode.yaml"
-    kubectl apply -f ./kubernetes/manifests/v7x/single_decode.yaml
+    kubectl apply -f ./.buildkite/kubernetes/manifests/v7x/single_decode.yaml
 
     echo "kubectl apply -f ./kubernetes/manifests/v7x/proxy1p1d.yaml"
-    kubectl apply -f ./kubernetes/manifests/v7x/proxy1p1d.yaml
+    kubectl apply -f ./.buildkite/kubernetes/manifests/v7x/proxy1p1d.yaml
 }
 
 cleanup_1p1d() {
     echo "kubectl delete -f ./kubernetes/manifests/v7x/single_prefill.yaml"
-    kubectl delete -f ./kubernetes/manifests/v7x/single_prefill.yaml
+    kubectl delete -f ./.buildkite/kubernetes/manifests/v7x/single_prefill.yaml
 
     echo "kubectl delete -f ./kubernetes/manifests/v7x/single_decode.yaml"
-    kubectl delete -f ./kubernetes/manifests/v7x/single_decode.yaml
+    kubectl delete -f ./.buildkite/kubernetes/manifests/v7x/single_decode.yaml
 
     echo "kubectl delete -f ./kubernetes/manifests/v7x/proxy1p1d.yaml"
-    kubectl delete -f ./kubernetes/manifests/v7x/proxy1p1d.yaml
+    kubectl delete -f ./.buildkite/kubernetes/manifests/v7x/proxy1p1d.yaml
 }
 
 wait_for_vllm() {
