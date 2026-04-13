@@ -158,14 +158,11 @@ class TestTPUJaxRunner:
         # Mock block tables
         # there will be 2 block tables since there are 2 kv cache groups
         mock_block_table = MagicMock()
-        mock_block_table.get_cpu_tensor.return_value = np.zeros(
-            self.runner.block_tables_cpu[0].shape)
+        mock_block_table.max_num_blocks_per_req = 8
+        mock_block_table.get_cpu_tensor.return_value = np.zeros((1, 8),
+                                                                dtype=np.int32)
         self.runner.input_batch.block_table = [
             mock_block_table, mock_block_table
-        ]
-        self.runner.block_tables_cpu = [
-            np.zeros(self.runner.block_tables_cpu[0].shape, dtype=np.int32),
-            np.zeros(self.runner.block_tables_cpu[0].shape, dtype=np.int32)
         ]
 
         mock_sampling_instance = MagicMock()
