@@ -1170,7 +1170,7 @@ def gmm_v2(
             group_offset = group_offset[None]
 
     if vmem_limit_bytes is None:
-        vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9)
+        vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.85)
 
     cfgs = make_gmm_configs(
         lhs,

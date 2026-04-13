@@ -27,7 +27,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_moe_weights, shard_moe_weights)
+    FusedMoEWeights, process_moe_weights, shard_moe_weights,
+    process_fp8_moe_weights)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
@@ -141,40 +142,30 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         else:
             w13_bias = w2_bias = None
 
-        @jax.jit
-        def process_fp8_moe_weights(
-            w13_weight: jax.Array,
-            w13_weight_scale: jax.Array,
-            w13_bias: jax.Array | None,
-            w2_weight: jax.Array,
-            w2_weight_scale: jax.Array,
-            w2_bias: jax.Array | None,
-        ) -> FusedMoEWeights:
-            w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
-            w13_reorder_size = get_mesh_shape_product(
-                self.mesh, ShardingAxisName.MLP_TENSOR)
+        weight_block_size = None
+        if self.weight_quant.block_structure is not None:
+            weight_block_size = tuple(self.weight_quant.block_structure)
 
-            return process_moe_weights(
-                weights=FusedMoEWeights(
-                    w13_weight=w13_weight,
-                    w13_weight_scale=w13_weight_scale,
-                    w13_bias=w13_bias,
-                    w2_weight=w2_weight,
-                    w2_weight_scale=w2_weight_scale,
-                    w2_bias=w2_bias,
-                ),
-                moe_backend=self.moe_backend,
-                w13_reorder_size=w13_reorder_size,
-                w13_interleave=w13_interleave,
-            )
+        input_weights = FusedMoEWeights(
+            w13_weight=w13_weight,
+            w13_weight_scale=w13_weight_scale,
+            w13_bias=w13_bias,
+            w2_weight=w2_weight,
+            w2_weight_scale=w2_weight_scale,
+            w2_bias=w2_bias,
+        )
 
-        weights = process_fp8_moe_weights(
-            w13_weight,
-            w13_weight_scale,
-            w13_bias,
-            w2_weight,
-            w2_weight_scale,
-            w2_bias,
+        # JIT the global processing function to run fast on TPU
+        _jitted_process = jax.jit(
+            process_fp8_moe_weights,
+            static_argnames=("moe_backend", "mesh", "activation", "weight_block_size")
+        )
+        weights = _jitted_process(
+            input_weights,
+            moe_backend=self.moe_backend,
+            mesh=self.mesh,
+            activation=layer.activation.value,
+            weight_block_size=weight_block_size,
         )
         weights = torch_view(
             shard_moe_weights(weights, self.moe_backend, self.mesh))

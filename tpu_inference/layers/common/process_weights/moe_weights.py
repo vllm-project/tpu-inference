@@ -431,6 +431,11 @@ def process_moe_weights(
                 "process_moe_weights is not yet implemented for megablox gmm backend"
             )
 
+    if w13_weight_scale is not None:
+        w13_weight_scale = jnp.array(w13_weight_scale, copy=True)
+    if w2_weight_scale is not None:
+        w2_weight_scale = jnp.array(w2_weight_scale, copy=True)
+
     return FusedMoEWeights(
         w13_weight=w13_weight,
         w13_weight_scale=w13_weight_scale,
@@ -576,10 +581,10 @@ def process_fp8_moe_weights(
         FusedMoEWeights(
             w13_weight=w13_weight,
             w13_weight_scale=None,
-            w13_bias=None,
+            w13_bias=weights.w13_bias,
             w2_weight=w2_weight,
             w2_weight_scale=None,
-            w2_bias=None,
+            w2_bias=weights.w2_bias,
         ),
         desired_quant_dtype,
         requant_block_size,
