@@ -43,6 +43,7 @@ def pack_inputs_single_stream(
     g: jnp.ndarray,
     beta: jnp.ndarray,
     query_start_loc: jnp.ndarray,
+    distribution: jnp.ndarray,
     chunk_size: int,
     compute_dtype: jnp.dtype = jnp.bfloat16,
 ) -> tuple[
@@ -90,6 +91,7 @@ def pack_inputs_single_stream(
       g: Gate tensor.
       beta: Beta tensor.
       query_start_loc: Start locations of each sequence in original stream.
+      distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end, mixed_end)`.
       chunk_size: Chunk size for padding.
       compute_dtype: Dtype for computation (Q, K, V, beta).
 
@@ -107,8 +109,14 @@ def pack_inputs_single_stream(
     num_tokens = query.shape[0]
     num_seqs = len(query_start_loc) - 1
 
+    num_valid_seqs = distribution[2]
+    valid_loc_mask = jnp.arange(query_start_loc.shape[0]) <= num_valid_seqs
+    last_valid_loc = query_start_loc[num_valid_seqs]
+    effective_query_start_loc = jnp.where(valid_loc_mask, query_start_loc,
+                                          last_valid_loc)
+
     # Calculate sequence lengths and pad them to multiples of chunk_size.
-    seq_lengths = query_start_loc[1:] - query_start_loc[:-1]
+    seq_lengths = effective_query_start_loc[1:] - effective_query_start_loc[:-1]
     num_chunks = (seq_lengths + chunk_size - 1) // chunk_size
     padded_lengths = num_chunks * chunk_size
 
@@ -117,19 +125,19 @@ def pack_inputs_single_stream(
         jnp.concatenate([jnp.array([0]), padded_lengths]))
 
     # Map each original token index to its sequence ID in a JIT-friendly way.
-    # For each token index, searchsorted finds the insertion point in query_start_loc
+    # For each token index, searchsorted finds the insertion point in effective_query_start_loc
     # where the token would go to maintain order (using side="right").
     # Subtracting 1 gives the index of the sequence the token actually belongs to.
-    seq_id = jnp.searchsorted(
-        query_start_loc, jnp.arange(num_tokens), side="right") - 1
-    original_start = query_start_loc[seq_id]
+    seq_id = (jnp.searchsorted(
+        effective_query_start_loc, jnp.arange(num_tokens), side="right") - 1)
+    original_start = effective_query_start_loc[seq_id]
     new_start = new_query_start_loc[seq_id]
     padded_indices_valid = new_start + (jnp.arange(num_tokens) -
                                         original_start)
 
     max_packed_tokens = num_tokens + num_seqs * chunk_size
-    max_packed_tokens = (max_packed_tokens + chunk_size -
-                         1) // chunk_size * chunk_size
+    max_packed_tokens = ((max_packed_tokens + chunk_size - 1) // chunk_size *
+                         chunk_size)
 
     # Concatenate by dtype to reduce scatter operations
     beta_expanded = beta[..., None]
@@ -189,6 +197,7 @@ def ragged_gated_delta_rule_mixed_prefill(
     query_start_loc: jnp.ndarray,
     recurrent_state: jnp.ndarray,
     state_indices: jnp.ndarray,
+    distribution: jnp.ndarray,
     chunk_size: int = 64,
     use_qk_norm_in_gdn: bool = False,
     compute_dtype: jnp.dtype = jnp.bfloat16,
@@ -213,6 +222,7 @@ def ragged_gated_delta_rule_mixed_prefill(
       query_start_loc: Start locations of sequences in original stream.
       recurrent_state: Recurrent state tensor.
       state_indices: Indices mapping sequences to recurrent state slots.
+      distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end, mixed_end)`.
       chunk_size: Chunk size for padding and processing.
       use_qk_norm_in_gdn: Whether to use QK normalization.
       compute_dtype: Dtype for computation.
@@ -247,6 +257,7 @@ def ragged_gated_delta_rule_mixed_prefill(
         g,
         beta,
         query_start_loc,
+        distribution,
         chunk_size,
         compute_dtype=compute_dtype,
     )
@@ -476,6 +487,7 @@ def ragged_gated_delta_rule_decode_only(
     dt_bias: jnp.ndarray,
     query_start_loc: jnp.ndarray,
     state_indices: jnp.ndarray,
+    distribution: jnp.ndarray,
     use_qk_norm_in_gdn: bool,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Applies gated delta rule for decode-only case (sequence lengths = 1).
@@ -491,6 +503,7 @@ def ragged_gated_delta_rule_decode_only(
       dt_bias: dt_bias tensor.
       query_start_loc: Start locations of sequences.
       state_indices: Indices mapping sequences to recurrent state slots.
+      distribution: Distribution tensor containing number of valid sequences at index 2.
       use_qk_norm_in_gdn: Whether to use QK normalization.
 
     Returns:
@@ -504,7 +517,7 @@ def ragged_gated_delta_rule_decode_only(
     token_idx = jnp.arange(num_tokens)
     req_indices = token_idx
     req_indices = jnp.clip(req_indices, 0, max_reqs - 1)
-    valid_mask = token_idx < query_start_loc[-1]
+    valid_mask = token_idx < distribution[2]
 
     beta = jax.nn.sigmoid(b_reshaped)
     g = -jnp.exp(A_log.astype(jnp.float32)) * jax.nn.softplus(
@@ -620,6 +633,7 @@ def ragged_gated_delta_rule(
             dt_bias=dt_bias,
             query_start_loc=query_start_loc,
             state_indices=state_indices,
+            distribution=distribution,
             use_qk_norm_in_gdn=use_qk_norm_in_gdn,
         )
         return new_state, output.astype(mixed_qkv.dtype)
@@ -636,6 +650,7 @@ def ragged_gated_delta_rule(
             query_start_loc=query_start_loc,
             recurrent_state=recurrent_state,
             state_indices=state_indices,
+            distribution=distribution,
             chunk_size=chunk_size,
             use_qk_norm_in_gdn=use_qk_norm_in_gdn,
         )
