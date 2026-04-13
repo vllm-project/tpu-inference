@@ -191,8 +191,10 @@ class CompilationManager:
                                             sharding=dp_sharding)
 
         def build_block_table(kv_cache_gid: int) -> jax.Array:
-            block_tables = self.runner.block_tables_cpu[
-                kv_cache_gid][:self.runner.max_num_reqs]
+            block_table_obj = self.runner.input_batch.block_table[kv_cache_gid]
+            shape = (self.runner.max_num_reqs,
+                     block_table_obj.max_num_blocks_per_req)
+            block_tables = np.zeros(shape, dtype=np.int32)
             block_tables = block_tables.reshape(-1)
             block_tables = device_array(self.runner.mesh,
                                         block_tables,

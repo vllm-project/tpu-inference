@@ -1767,12 +1767,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Collect block tables host arrays loops zone presence zones legality
         def build_block_table_host(kv_cache_gid: int) -> None:
+            block_table_obj = self.input_batch.block_table[kv_cache_gid]
             block_tables_view = self.device_buffer.get_view(
-                (self.max_num_reqs, self.max_num_blocks_per_req),
+                (self.max_num_reqs, block_table_obj.max_num_blocks_per_req),
                 key=f"block_tables_gid_{kv_cache_gid}")
 
-            cpu_tensor = self.input_batch.block_table[
-                kv_cache_gid].get_cpu_tensor()
+            cpu_tensor = block_table_obj.get_cpu_tensor()
             np.copyto(block_tables_view[:num_reqs], cpu_tensor[:num_reqs])
             block_tables_view[num_reqs:].fill(0)
 
