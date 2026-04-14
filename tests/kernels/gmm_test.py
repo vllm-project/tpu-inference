@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import collections
+import functools
 
 import jax
 import jax.numpy as jnp
@@ -20,7 +21,7 @@ from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 
 from tpu_inference.kernels.megablox.gmm_v2 import (TileSizes, apply_act_fn,
-                                                   gmm_v2)
+                                                   gmm_v2, _tgmm_v2_impl)
 
 jax.config.parse_flags_with_absl()
 
@@ -65,12 +66,12 @@ def quantize_tensor(
 
 
 def reference_gmm(
-    lhs: jax.Array,
-    rhs: jax.Array,
-    group_sizes: jax.Array,
+    lhs: jax.Array,  # [m, k]
+    rhs: jax.Array,  # [num_groups, k, n]
+    group_sizes: jax.Array,  # [num_groups]
     rhs_scale: jax.Array | None = None,
     rhs_bias: jax.Array | None = None,
-    group_offset: jax.Array | None = None,
+    group_offset: jax.Array | None = None,  # int32[1]
 ):
   num_tokens = lhs.shape[0]
   num_groups, in_size, out_size = rhs.shape
@@ -123,6 +124,36 @@ def reference_gmm(
   return jnp.concat(gmm_out, axis=0)
 
 
+def reference_tgmm(
+    lhs,  # [k, m]
+    rhs,  # [m, n]
+    group_sizes,  # [num_groups]
+    # num_actual_groups comes from weights.shape[0]
+    num_actual_groups,  # int32
+    # group_offset is obtained from
+    # jnp.arange(0, num_experts, num_experts_per_shard)
+    group_offset=None,
+):  # [num_groups, k, n]
+  # Compute lhs[:, sizes[i-1]:sizes[i]] @ rhs[sizes[i-1]:sizes[i], :]
+  if group_offset is None:
+    group_offset = jnp.array([0], dtype=jnp.int32)
+  elif jnp.isscalar(group_offset):
+    assert group_offset.size == 1
+    if jnp.isscalar(group_offset):
+      group_offset = group_offset[None]
+
+  start = 0
+  out = []
+  for global_group in range(group_sizes.size):
+    group_size = group_sizes[global_group]
+    group = global_group - group_offset[0]
+    end = start + group_size
+    if 0 <= group and group < num_actual_groups:
+      out.append(lhs[:, start:end] @ rhs[start:end, :])
+    start = end
+  return jnp.stack(out)
+
+
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
 class GmmTest(jtu.JaxTestCase):
 
@@ -134,7 +165,7 @@ class GmmTest(jtu.JaxTestCase):
       has_bias=[True, False],
       group_offset=[0, 2, 3],
   )
-  def test_gmm(
+  def test_gmm_basic(
       self, batch_size, in_size, out_size, num_groups, has_bias, group_offset
   ):
     num_local_groups = num_groups - group_offset
@@ -153,18 +184,81 @@ class GmmTest(jtu.JaxTestCase):
     group_sizes = get_group_sizes(batch_size, num_groups)
     group_offset = jnp.array(group_offset, dtype=jnp.int32)
 
-    expected = reference_gmm(
-        lhs, rhs, group_sizes, rhs_bias=rhs_bias, group_offset=group_offset
-    )
-
-    actual = gmm_v2(
+    expected, reference_vjpfunc = jax.vjp(
+        functools.partial(
+            reference_gmm, rhs_bias=rhs_bias, group_offset=group_offset
+        ),
         lhs,
         rhs,
         group_sizes,
-        rhs_bias=rhs_bias,
-        group_offset=group_offset,
     )
 
+    actual, vjpfunc = jax.vjp(
+        functools.partial(gmm_v2, rhs_bias=rhs_bias, group_offset=group_offset),
+        lhs,
+        rhs,
+        group_sizes,
+    )
+
+    self.assertArraysAllClose(actual, expected)
+
+    cotangent = jax.random.normal(
+        key, (batch_size, out_size), dtype=jnp.bfloat16
+    )
+    expected_grad_lhs, expected_grad_rhs, *_ = reference_vjpfunc(cotangent)
+    grad_lhs, grad_rhs, *_ = vjpfunc(cotangent)
+    self.assertArraysAllClose(grad_lhs, expected_grad_lhs)
+    self.assertArraysAllClose(grad_rhs, expected_grad_rhs)
+
+  # pytest -s -v tests/kernels/gmm_v2_test.py -k test_tgmm
+  # blaze test -c opt //experimental/users/kyuyeunk/vllm/tests:gmm_test_gf --test_filter=test_tgmm
+  # blaze test -c opt --test_output=errors  //experimental/users/kyuyeunk/vllm/tests:gmm_test_gf --test_filter=test_tgmm  --test_arg=--xla_tpu_enable_log_recorder
+  # Step 1: Make num_tile_m=num_tile_k=num_tile_n=1,
+  #   make the test pass for various num_groups.
+  #   make the test pass for various group_offset.
+  # Step 2: Make num_tile_m=2, make sure the test pass.
+  # Step 3: Make num_tile_k=num_tile_n=2, make sure the test pass.
+  @parameterized.product(
+      batch_size=[128, 512],
+      in_size=[512, 1024],
+      out_size=[512, 1024],
+      num_groups=[5, 16, 32],
+      group_offset=[0, 2, 3],
+      # batch_size=[512],
+      # in_size=[512],
+      # out_size=[512],
+      # num_groups=[1],
+      # group_offset=[0],
+  )
+  def test_tgmm(self, batch_size, in_size, out_size, num_groups, group_offset):
+    num_local_groups = num_groups - group_offset
+    key = jax.random.key(0)
+    key1, key2 = jax.random.split(key, 2)
+    # [m, k]
+    lhs = jax.random.normal(key1, (batch_size, in_size), dtype=jnp.bfloat16)
+    grad = jax.random.normal(
+        key2, (batch_size, out_size), dtype=jnp.bfloat16
+    )  # [m, n]
+    group_sizes = get_group_sizes(batch_size, num_groups)
+    print("xw32 test line241 group_sizes={}", group_sizes)
+    # if batch_size=128, num_groups=3, an example group_size is
+    # group_sizes=Array([14, 14, ..., 7]).
+    group_offset = jnp.array(group_offset, dtype=jnp.int32)
+
+    lhs_t = lhs.swapaxes(0, 1)  # [k, m]
+    expected = reference_tgmm(
+        lhs_t, grad, group_sizes, num_local_groups, group_offset=group_offset
+    )
+    actual = _tgmm_v2_impl(
+        lhs, grad, group_sizes, num_local_groups, group_offset=group_offset
+    )
+    self.assertEqual(actual.shape, (num_local_groups, in_size, out_size))
+    # self.assertArraysAllClose(actual[10], expected[10])
+    # self.assertArraysAllClose(actual[11], expected[11])
+    diff = jnp.abs(expected - actual)
+    max_diff_idx = jnp.unravel_index(jnp.argmax(diff), diff.shape)
+    print(f"Output max diff: {jnp.max(diff)} at index {max_diff_idx}")
+    print(f"Output mean diff: {jnp.mean(jnp.abs(expected - actual))}")
     self.assertArraysAllClose(actual, expected)
 
   @parameterized.product(
@@ -696,4 +790,4 @@ class GmmTest(jtu.JaxTestCase):
 
 
 if __name__ == "__main__":
-    absltest.main(testLoader=jtu.JaxTestLoader())
+  absltest.main(testLoader=jtu.JaxTestLoader())

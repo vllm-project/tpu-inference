@@ -553,6 +553,7 @@ def fill_metadata(
     metadata_ref: MetadataRef,
     *,
     cfgs: GmmConfigs,
+    process_empty_groups: bool = False,
 ) -> jax.Array:
   """Fills the metadata for the given lhs group sizes and group offset.
 
@@ -567,6 +568,9 @@ def fill_metadata(
     metadata_ref: Metadata that is used to determine the group id and m offsets
       for each gmm tile.
     cfgs: GmmConfigs.
+    process_empty_groups: Whether to process empty groups. If True, do not
+          squeeze tiles for empty groups out of the metadata. This is necessary
+          for tgmm, where we at least need to zero the output for each group.
 
   Returns:
       The number of gm tiles to process lhs with given group offset.
@@ -620,7 +624,9 @@ def fill_metadata(
     # We need to handle cases where we should not process the group.
     # 1. Even if group_size is 0, if local_offset is not 0, cdiv will return 1.
     # 2. If group comes before the group_offset, we should not process it.
-    should_process = jnp.logical_and(group_size > 0, group_id >= 0)
+    should_process = jnp.logical_and(
+        jnp.logical_or(group_size > 0, process_empty_groups), group_id >= 0
+    )
     curr_num_gm = jnp.where(should_process, curr_num_gm, 0)
     next_num_gm = num_gm + curr_num_gm
 
@@ -1109,7 +1115,7 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
         "fuse_act",
     ]
 )
-def gmm_v2(
+def _gmm_v2_impl(
     lhs: jax.Array,  # [size_m, size_k]
     rhs: jax.Array,  # [size_group, size_k, size_n]
     group_sizes: jax.Array,  # int32[size_lhs_group]
@@ -1259,3 +1265,523 @@ def gmm_v2(
       cost_estimate=get_cost_estimate(cfgs),
       metadata=get_metadata(cfgs),
   )(group_sizes, group_offset, lhs, rhs_weights)[:, : cfgs.out_size_n]
+
+def make_tgmm_configs(
+    lhs: jax.Array,  # [m, k]
+    rhs: jax.Array,  # [m, n]
+    group_sizes: jax.Array,
+    num_actual_groups: int,
+    *,
+    tile_info: TileSizes | TileFn,
+    vmem_limit_bytes: int | None,
+    out_dtype: jnp.dtype | None,
+    acc_dtype: jnp.dtype | None,
+):
+  """Fills the GMM config for the TGMM kernel."""
+  # dims = validate_inputs(lhs, rhs, None, None, group_sizes, group_offset)
+  assert lhs.shape[0] == rhs.shape[0], f'lhs and rhs m-dim mismatch: {lhs.shape} vs {rhs.shape}'
+  size_m, size_k = lhs.shape
+  _, size_n = rhs.shape
+  # xw32q: when do we use size_lhs_sublane?
+  size_lhs_sublane = pltpu.get_tpu_info().get_sublane_tiling(lhs.dtype)
+  size_lhs_sublane = min(size_lhs_sublane, size_m)
+  dims = Dimensions(
+      size_m=size_m,
+      size_k=size_k,
+      size_n=size_n,
+      size_group=num_actual_groups,
+      size_lhs_group=group_sizes.shape[0],
+      size_lhs_sublane=size_lhs_sublane
+  )
+  
+  rhs_cfgs = InputConfigs(
+      quant_dtype=None,
+      # xw32q: when we need to use this quant_block_size?
+      quant_block_size=-1,
+      dtype=rhs.dtype,
+  )
+  lhs_cfgs = InputConfigs(
+      quant_dtype=None,
+      quant_block_size=-1,
+      dtype=lhs.dtype,
+  )
+  if out_dtype is None:
+    out_dtype = lhs.dtype
+
+  fuse_act = None
+  if acc_dtype is None:
+    acc_dtype = jnp.float32.dtype
+  if isinstance(tile_info, TileSizes):
+    tiles = tile_info
+  else:
+    tiles = tile_info(dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes, fuse_act)
+
+  return GmmConfigs(
+      dims=dims,
+      tiles=tiles,
+      lhs_cfgs=lhs_cfgs,
+      rhs_cfgs=rhs_cfgs,
+      out_dtype=jnp.dtype(out_dtype),
+      acc_dtype=jnp.dtype(acc_dtype),
+      # GMM's 'zero_init' zeros unvisited m-rows via DMA, which doesn't apply to tgmm's [num_groups, k, n] output. The actual zero-initialization for tgmm accumulation happens at the 'pallas_call' level
+      zero_init=False,
+      fuse_act=fuse_act,
+  )
+
+
+def tgmm_inner_kernel(
+    tiled_lhs_ref: jax.Array, # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_k]
+    tiled_rhs_ref: jax.Array, # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_n]
+    tiled_out_ref: jax.Array, # [None, tile_k, tile_n]
+    # scratch
+    partial_out_ref: jax.Array,  # probably we dont need it. delete it later.
+    acc_ref: jax.Array,  # for accumulation [tile_k, tile_n]
+    metadata_ref: MetadataRef, # contains gm_id_to_group_id and gm_id_to_m_offset in SMEM.
+    *,
+    cfgs: GmmConfigs,
+):
+  # NB: grid=(num_n, num_k, num_gm)
+  tiled_lhs_ref = tiled_lhs_ref.reshape(-1, tiled_lhs_ref.shape[-1])
+  tiled_rhs_ref = tiled_rhs_ref.reshape(-1, tiled_rhs_ref.shape[-1])
+  gm_id = pl.program_id(2)
+  
+  prev_gm_id = jnp.where(gm_id > 0, gm_id - 1, 0)
+  is_first_gm = gm_id == 0
+  group_id_changed = (
+      metadata_ref.gm_id_to_group_id[gm_id]
+      != metadata_ref.gm_id_to_group_id[prev_gm_id]
+  )
+  new_group = jnp.logical_or(is_first_gm, group_id_changed)
+
+  @pl.when(new_group)
+  def _():
+    # pl.debug_print("xw32line1342 tiled_lhs_ref={}", tiled_lhs_ref[...])
+    acc_ref[...] = jnp.zeros_like(acc_ref)
+    print("xw32line1387 acc_ref.dtype={}", acc_ref.dtype)
+
+  # Now we compute a mask to zero out invalid rows in the LHS/RHS tiles.
+  # Why it's needed: The DMA loads tiles aligned to sublane boundaries, but the actual group data may not start/end on those boundaries. For example, with 'size_lhs_sublane=8' and a group spanning rows 5-20:
+  # - DMA loads rows 0-23 (aligned to sublane boundary: 0 = 5 - 5%8, 24 = cdiv(20,8)*8)
+  # - Rows 0-4 and 20-23 contain data from other groups and must be masked out.
+  m_start = metadata_ref.gm_id_to_m_offset[gm_id]
+  m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
+  m_offset = m_start - m_start % cfgs.dims.size_lhs_sublane
+  m_start_local = m_start - m_offset
+  m_end_local = m_end - m_offset
+  lhs_iota = lax.broadcasted_iota(jnp.int32, tiled_lhs_ref.shape, 0)
+  lhs_mask = jnp.logical_and(m_start_local <= lhs_iota, lhs_iota < m_end_local)
+  lhs_masked = jnp.where(lhs_mask, tiled_lhs_ref[...], 0)
+  rhs_iota = lax.broadcasted_iota(jnp.int32, tiled_rhs_ref.shape, 0)
+  rhs_mask = jnp.logical_and(m_start_local <= rhs_iota, rhs_iota < m_end_local)
+  rhs_masked = jnp.where(rhs_mask, tiled_rhs_ref[...], 0)
+
+  acc_ref[...] += jax.lax.dot_general(
+      lhs_masked,
+      rhs_masked,
+      (((0,), (0,)), ((), ())),
+      preferred_element_type=jnp.float32,
+  )
+
+  """
+      is_end_of_grid = grid_id == (pl.num_programs(2) - 1)
+    next_grid_id = jnp.where(is_end_of_grid, grid_id, grid_id + 1)
+    next_group = group_ids[next_grid_id]
+
+    group_is_changing = jnp.logical_or(is_end_of_grid, group != next_group)
+
+    @pl.when(group_is_changing)
+    def _store_accum():
+      to_store = acc_scratch[...]
+      if existing_out is not None:
+        to_store += existing_out[...].astype(jnp.float32)
+      out[...] = to_store.astype(preferred_element_type)
+  """
+  is_last_gm = gm_id == (pl.num_programs(2) - 1)
+  next_gm_id = jnp.where(is_last_gm, gm_id, gm_id + 1)
+  next_group_id = metadata_ref.gm_id_to_group_id[next_gm_id]
+  cur_group_id = metadata_ref.gm_id_to_group_id[gm_id]
+  group_is_changing = jnp.logical_or(is_last_gm, cur_group_id != next_group_id)
+  @pl.when(group_is_changing)
+  def _store_accum():
+    tiled_out_ref[...] = acc_ref[...].astype(tiled_out_ref.dtype)
+
+
+class TgmmIndexMaps:
+
+  def __init__(self, metadata_ref: MetadataRef, cfgs: GmmConfigs):
+    self.metadata_ref = metadata_ref
+    self.cfgs = cfgs
+
+  def lhs_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array):
+    m_start = self.metadata_ref.gm_id_to_m_offset[gm_id]
+    m_end = self.metadata_ref.gm_id_to_m_offset[gm_id + 1]
+
+    row_start = m_start // self.cfgs.dims.size_lhs_sublane
+    row_end = pl.cdiv(m_end, self.cfgs.dims.size_lhs_sublane)
+    row_size = row_end - row_start
+    return (pl.ds(row_start, row_size), 0, k_id)
+  
+  def rhs_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array):
+    m_start = self.metadata_ref.gm_id_to_m_offset[gm_id]
+    m_end = self.metadata_ref.gm_id_to_m_offset[gm_id + 1]
+
+    row_start = m_start // self.cfgs.dims.size_lhs_sublane
+    row_end = pl.cdiv(m_end, self.cfgs.dims.size_lhs_sublane)
+    row_size = row_end - row_start
+    return (pl.ds(row_start, row_size), 0, n_id)
+  
+  def out_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array):
+    group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
+    return (group_id, k_id, n_id)
+
+def generate_tgmm_block_specs(
+        metadata_ref: MetadataRef, cfgs: GmmConfigs
+) -> Tuple[Tuple[pl.BlockSpec, pl.BlockSpec], pl.BlockSpec]:
+  """Generates block specs for the given lhs, rhs, and out refs."""
+  index_map = TgmmIndexMaps(metadata_ref, cfgs)
+  # NB: in tgmm, LHS is reshaped from (M, K) to (-1, size_lhs_sublane, K) so that DMA transfers are aligned to sublane boundaries. The first dimension after this reshape has size tile_m // size_lhs_sublane — i.e., the number of "sublane-rows" in a tile.
+  bounded_slice_gm = pl.BoundedSlice(cfgs.tiles.tile_m //
+                                     cfgs.dims.size_lhs_sublane)
+  lhs_block_spec = pl.BlockSpec(
+      (bounded_slice_gm, cfgs.dims.size_lhs_sublane, cfgs.tiles.tile_k),
+      index_map.lhs_index_map,
+  )
+  rhs_block_spec = pl.BlockSpec(
+      (bounded_slice_gm, cfgs.dims.size_lhs_sublane, cfgs.tiles.tile_n),
+      index_map.rhs_index_map,
+  )
+  # xw32q: do I need `cfgs.tiles.tile_k // cfgs.rhs_cfgs.packing` as in the function "generate_block_specs"?
+  out_block_spec = pl.BlockSpec(
+      (None, cfgs.tiles.tile_k, cfgs.tiles.tile_n),
+      index_map.out_index_map,
+  )
+
+  return (lhs_block_spec, rhs_block_spec), out_block_spec
+
+
+def tgmm_kernel_main(
+    lhs_group_sizes_ref,  # int32[size_lhs_group]
+    group_offset_ref,  # int32[1]
+    lhs_ref,  # [m, k]
+    rhs_ref,  # [m, n]
+    out_ref,  # [num_groups, k, n]
+    # scratch memory
+    partial_out_ref: jax.Array,  # 
+    acc_ref: jax.Array,  # [tile_k, tile_n]
+    metadata_ref: MetadataRef, # contains gm_id_to_group_id and gm_id_to_m_offset in SMEM.
+    *, cfgs,
+):
+  num_k = pl.cdiv(cfgs.dims.size_k, cfgs.tiles.tile_k)
+  num_n = pl.cdiv(cfgs.dims.size_n, cfgs.tiles.tile_n)
+  # xw32: is the num_gm here within the limit?
+  num_gm = fill_metadata(
+      lhs_group_sizes_ref,
+      group_offset_ref,
+      metadata_ref,
+      cfgs=cfgs,
+      process_empty_groups=True,
+  )
+
+  # debug_print metadata begins.
+  jax.debug.print('xw32 line1419 num_gm={}', num_gm)  # num_gm=3
+  def print_metadata(i, _):
+    jax.debug.print(
+        'xw32 line1419 i={} group_id={} m_offset={}',
+        i,
+        metadata_ref.gm_id_to_group_id[i],
+        metadata_ref.gm_id_to_m_offset[i]
+    )
+    return _
+
+  jax.lax.fori_loop(0, num_gm, print_metadata, None)
+  # debug_print metadata ends.
+
+  # 3. Prepare grid, block specs, scratch shapes, etc.
+  # grid doesn't need to have a dimension num_groups because it can be determined by "group_ids[grid_id] - group_offset[0]"
+  # grid = (n, k, gm)
+  # lhs_block_spec=((m_blk, k_blk), (n_i, k_i, gm_i)->(k_i, pl.ds(row_start, row_size)))
+  # rhs_block_spec=((m_blk, n_blk), (n_i, k_i, gm_i)->(pl.ds(row_start, row_size), n_i))
+  # out_block_spec((None, k_blk, n_blk), (n_i, k_i, gm_i)->(group_ids[grid_id] - group_offset[0], k_blk, n_blk))
+  # out_shape=(ng, k, n)
+  in_specs, out_specs = generate_tgmm_block_specs(metadata_ref, cfgs)
+  pipeline_fn = pltpu.emit_pipeline(
+      functools.partial(tgmm_inner_kernel, cfgs=cfgs),
+      grid=(num_n, num_k, num_gm),
+      in_specs=in_specs,
+      out_specs=out_specs,
+  )
+  lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, lhs_ref.shape[-1])
+  rhs_in = rhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, rhs_ref.shape[-1])
+  scratches = [partial_out_ref, acc_ref, metadata_ref]
+  pipeline_fn(lhs_in, rhs_in, out_ref, scratches=scratches)
+
+# TODO(xw32): Add back jax.jit.
+@functools.partial(
+    jax.jit,
+    static_argnames=[
+        "num_actual_groups",
+        "tile_info",
+        "vmem_limit_bytes",
+        "precision",
+        "preferred_element_type",
+        "acc_dtype",
+        "maybe_quantize_lhs",
+        "zero_initialize", # xw32q: do we need this? No, we dont.
+    ],
+)
+def _tgmm_v2_impl(
+    lhs: jax.Array,  # [size_m, size_k]
+    rhs: jax.Array,  # [size_m, size_n]
+    group_sizes: jax.Array,
+    num_actual_groups: int,
+    group_offset: jax.Array | None = None,
+    *,
+    tile_info: TileSizes | TileFn = calculate_tiling,
+    vmem_limit_bytes: int | None = None,
+    precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
+    preferred_element_type: jnp.dtype | None = None,
+    acc_dtype: jnp.dtype | None = None,
+    maybe_quantize_lhs: bool = True,
+    zero_initialize: bool = True,
+):
+  # Compute grad_rhs=lhs[sizes[i-1]:sizes[i], :].T @ rhs[sizes[i-1]:sizes[i], :]
+  # aka grad_rhs = lhs.T @ grad
+  
+  # Step 1. delete precision, normalize group_offset, set vmem_limit_bytes
+  del precision
+  if group_offset is None:
+    group_offset = jnp.array([0], dtype=jnp.int32)
+  else:
+    if jnp.isscalar(group_offset):
+      group_offset = group_offset[None]
+  if vmem_limit_bytes is None:
+    vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9)
+
+  # Step 2. Make gmm configs (create a 'Dimensions' and a 'GmmConfigs):
+  # - Dimensions( size_m=size_m, size_k=size_k, size_n=size_n, size_group=size_group, size_lhs_group=size_lhs_group, size_lhs_sublane=size_lhs_sublane,)
+  # - calculate_tiling
+  # - GmmConfigs( dims=dims, tiles=tiles, lhs_cfgs=lhs_cfgs, rhs_cfgs=rhs_cfgs, out_dtype=out_dtype, acc_dtype=acc_dtype, zero_init=zero_initialize,)
+  cfgs = make_tgmm_configs(
+      lhs,
+      rhs,
+      group_sizes,
+      num_actual_groups,
+      tile_info=tile_info,
+      vmem_limit_bytes=vmem_limit_bytes,
+      out_dtype=preferred_element_type,
+      acc_dtype=acc_dtype,
+  )
+  dims = cfgs.dims
+  tiles = cfgs.tiles
+  jax.debug.print("xw32 line1508 dims={}", dims)
+  jax.debug.print("xw32 line1509 tiles={}", tiles)
+  jax.debug.print("xw32 line1510 cfgs={}", cfgs)
+  # cfgs=GmmConfigs(tiles=TileSizes(tile_m=128, tile_k=512, tile_n=512), dims=Dimensions(size_m=128, size_k=512, size_n=512, size_group=16, size_lhs_group=16, size_lhs_sublane=16), lhs_cfgs=InputConfigs(quant_dtype=None, quant_block_size=-1, dtype=dtype(bfloat16), has_bias=False, has_scale=False, packing=1, num_quant_blocks=1), rhs_cfgs=InputConfigs(quant_dtype=None, quant_block_size=-1, dtype=dtype(bfloat16), has_bias=False, has_scale=False, packing=1, num_quant_blocks=1), out_dtype=dtype(bfloat16), acc_dtype=dtype(bfloat16), zero_init=False)
+
+  # 4. Form pl.pallas_call calling tgmm_kernel_main
+  num_lanes = pltpu.get_tpu_info().num_lanes
+  aligned_n = align_to(dims.size_n, num_lanes)
+  # xw32q: do I need to align size_k to sublane boundary? If not, why not?
+  out_init = jax.ShapeDtypeStruct((num_actual_groups, dims.size_k, aligned_n), cfgs.out_dtype)
+  max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
+  scratch_shapes = [
+      # partial_out_ref
+      pltpu.VMEM((dims.size_lhs_sublane, tiles.tile_n), cfgs.out_dtype),
+      # acc_ref
+      pltpu.VMEM((tiles.tile_k, tiles.tile_n), cfgs.acc_dtype),
+      # metadata_ref
+      MetadataRef(
+          gm_id_to_group_id=pltpu.SMEM((max_num_gm,), jnp.int32),
+          # xw32q: why +1?
+          gm_id_to_m_offset=pltpu.SMEM((max_num_gm + 1,), jnp.int32),
+      ),
+  ]
+  
+  return pl.pallas_call(
+      functools.partial(tgmm_kernel_main, cfgs=cfgs),
+      out_shape=out_init,
+      grid_spec=pltpu.PrefetchScalarGridSpec(
+          num_scalar_prefetch=2,
+          in_specs=[
+              pl.BlockSpec(memory_space=pltpu.HBM), # x
+              pl.BlockSpec(memory_space=pltpu.HBM), # dout
+          ],
+          out_specs=pl.BlockSpec(memory_space=pltpu.HBM),
+          scratch_shapes=scratch_shapes,
+      ),
+      compiler_params=pltpu.CompilerParams(
+          vmem_limit_bytes=vmem_limit_bytes,
+          disable_bounds_checks=True,
+      ),
+      name=get_scope_name(cfgs),
+      # the metadata here is for profiling, debugging, and cost modeling. It does not affect the kernel's computation.
+      metadata=get_metadata(cfgs),
+  )(group_sizes, group_offset, lhs, rhs)[:, :, :dims.size_n]
+
+
+@functools.partial(
+    jax.custom_vjp,
+    nondiff_argnames=(
+        "tile_info",
+        "vmem_limit_bytes",
+        "precision",
+        "preferred_element_type",
+        "acc_dtype",
+        "maybe_quantize_lhs",
+        "zero_initialize",
+        "fuse_act",
+    ),
+)
+def gmm_v2(
+    lhs: jax.Array,  # [size_m, size_k]
+    rhs: jax.Array,  # [size_group, size_k, size_n]
+    group_sizes: jax.Array,  # int32[size_lhs_group]
+    rhs_scale: jax.Array | None = None,  # [size_group, num_blocks, 1, out_size]
+    rhs_bias: jax.Array | None = None,  # [size_group, 1, out_size]
+    group_offset: jax.Array | None = None,  # int32[1]
+    *,
+    tile_info: TileSizes | TileFn = calculate_tiling,
+    vmem_limit_bytes: int | None = None,
+    precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
+    preferred_element_type: jnp.dtype | None = None,
+    acc_dtype: jnp.dtype | None = None,
+    maybe_quantize_lhs: bool = True,
+    zero_initialize: bool = True,
+    fuse_act: str | None = None,
+):
+  """GMM kernel"""
+  return _gmm_v2_impl(
+      lhs,
+      rhs,
+      group_sizes,
+      rhs_scale,
+      rhs_bias,
+      group_offset,
+      tile_info=tile_info,
+      vmem_limit_bytes=vmem_limit_bytes,
+      precision=precision,
+      preferred_element_type=preferred_element_type,
+      acc_dtype=acc_dtype,
+      maybe_quantize_lhs=maybe_quantize_lhs,
+      zero_initialize=zero_initialize,
+      fuse_act=fuse_act,
+  )
+
+
+def _gmm_v2_fwd(
+    lhs: jax.Array,  # [size_m, size_k]
+    rhs: jax.Array,  # [size_group, size_k, size_n]
+    group_sizes: jax.Array,  # int32[size_lhs_group]
+    rhs_scale: jax.Array | None = None,  # [size_group, num_blocks, 1, out_size]
+    rhs_bias: jax.Array | None = None,  # [size_group, 1, out_size]
+    group_offset: jax.Array | None = None,  # int32[1]
+    *,
+    tile_info: TileSizes | TileFn = calculate_tiling,
+    vmem_limit_bytes: int | None = None,
+    precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
+    preferred_element_type: jnp.dtype | None = None,
+    acc_dtype: jnp.dtype | None = None,
+    maybe_quantize_lhs: bool = True,
+    zero_initialize: bool = True,
+    fuse_act: str | None = None,
+):
+  """Forward pass for GMM kernel."""
+  out = _gmm_v2_impl(
+      lhs,
+      rhs,
+      group_sizes,
+      rhs_scale,
+      rhs_bias,
+      group_offset,
+      tile_info=tile_info,
+      vmem_limit_bytes=vmem_limit_bytes,
+      precision=precision,
+      preferred_element_type=preferred_element_type,
+      acc_dtype=acc_dtype,
+      maybe_quantize_lhs=maybe_quantize_lhs,
+      zero_initialize=zero_initialize,
+      fuse_act=fuse_act,
+  )
+  num_actual_groups = rhs.shape[0]
+  return out, (
+      lhs,
+      rhs,
+      group_sizes,
+      rhs_scale,
+      rhs_bias,
+      group_offset,
+      num_actual_groups,
+  )
+
+
+def _gmm_v2_bwd(
+    # residual
+    residuals: tuple[
+        jnp.ndarray,  # lhs
+        jnp.ndarray,  # rhs
+        jnp.ndarray,  # group_sizes
+        jnp.ndarray,  # rhs_scale
+        jnp.ndarray,  # rhs_bias
+        jnp.ndarray,  # group_offset
+        int,  # num_actual_groups
+    ],
+    grad: jnp.ndarray,
+    *,
+    # non-diff argnames
+    # NB: if you use nondiff_argnums in jax.custom_vjp, the arguments below
+    # should be args instead of kwargs.
+    tile_info: TileSizes | TileFn = calculate_tiling,
+    vmem_limit_bytes: int | None = None,
+    precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
+    preferred_element_type: jnp.dtype | None = None,
+    acc_dtype: jnp.dtype | None = None,
+    maybe_quantize_lhs: bool = True,
+    zero_initialize: bool = True,
+    fuse_act: str | None = None,
+):
+  """Backward pass for GMM kernel."""
+  (
+      lhs,
+      rhs,
+      group_sizes,
+      rhs_scale,
+      rhs_bias,
+      group_offset,
+      num_actual_groups,
+  ) = residuals
+  grad_lhs = _gmm_v2_impl(
+      grad,
+      rhs,
+      group_sizes,
+      rhs_scale,
+      rhs_bias,
+      group_offset,
+      tile_info=tile_info,
+      vmem_limit_bytes=vmem_limit_bytes,
+      precision=precision,
+      preferred_element_type=lhs.dtype,
+      acc_dtype=acc_dtype,
+      maybe_quantize_lhs=maybe_quantize_lhs,
+      zero_initialize=zero_initialize,
+      fuse_act=fuse_act,
+  )
+  grad_rhs = _tgmm_v2_impl(
+      lhs,  # [m, k]
+      grad,  # [m, n]
+      group_sizes,
+      num_actual_groups,
+      group_offset,
+      tile_info=tile_info,
+      vmem_limit_bytes=vmem_limit_bytes,
+      precision=precision,
+      preferred_element_type=rhs.dtype,
+      acc_dtype=acc_dtype,
+      maybe_quantize_lhs=maybe_quantize_lhs,
+      zero_initialize=zero_initialize
+  )
+  # Return a gradient per each differentiable argument except for the
+  # nondiff_argnames.
+  # TODO(xw32): how should we calculate the gradient of rhs_bias?
+  return grad_lhs, grad_rhs, None, None, None, None
+
+gmm_v2.defvjp(_gmm_v2_fwd, _gmm_v2_bwd)
