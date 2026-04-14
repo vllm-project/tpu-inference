@@ -21,9 +21,9 @@ import jax
 import jax.numpy as jnp
 from jax.experimental.pallas import tpu as pltpu
 
-from tpu_inference.kernels.gdn.fused_decoding_gdn_kernel import \
+from tpu_inference.kernels.gdn.fused_gdn_decode_kernel import \
     fused_decoding_gdn
-from tpu_inference.kernels.gdn.fused_recurrent_gdn_kernel import \
+from tpu_inference.kernels.gdn.fused_gdn_recurrent_kernel import \
     fused_recurrent_gdn
 
 

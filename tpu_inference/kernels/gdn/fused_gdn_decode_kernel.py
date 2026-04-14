@@ -28,7 +28,8 @@ from jax._src import dtypes
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from tpu_inference.kernels.gdn.common import validate_gdn_inputs
+from tpu_inference.kernels.gdn.fused_gdn_kernel_common import \
+    validate_gdn_inputs
 
 
 def get_default_block_sizes(
