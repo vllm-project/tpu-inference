@@ -419,7 +419,7 @@ def fused_moe_func(
         )
         # Forcing random routing is useful to get rid of the effect
         # of routing imbalance during performance debugging.
-        rng_key = jax.random.PRNGKey(0)
+        rng_key = jax.random.PRNGKey(42)
         topk_indices = jax.vmap(lambda key: jax.random.choice(
             key, global_num_experts, shape=(topk, ), replace=False))(
                 jax.random.split(rng_key, num_tokens))
