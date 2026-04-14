@@ -35,6 +35,8 @@ from tpu_inference.layers.vllm.interface.moe import (
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedFusedMoEMethod
+from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w4a16_fp4 import \
+    VllmCompressedTensorsW4A16Fp4MoEMethod
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product, t2j
 
@@ -75,6 +77,14 @@ class VllmCompressedTensorsMoEMethod(CompressedTensorsMoEMethod):
 
         weight_quant = scheme_dict.get("weights")
         input_quant = scheme_dict.get("input_activations")
+
+        if quant_config._is_nvfp4_format(weight_quant):
+            return VllmCompressedTensorsW4A16Fp4MoEMethod(
+                weight_quant=weight_quant,
+                input_quant=input_quant,
+                moe=layer.moe_config,
+                mesh=quant_config.mesh
+            )
 
         if quant_config._is_fp8_w8a8(weight_quant, input_quant):
             return VllmCompressedTensorsW8A8Fp8MoEMethod(
