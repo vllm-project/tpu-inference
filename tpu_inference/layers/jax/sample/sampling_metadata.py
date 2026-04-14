@@ -58,13 +58,16 @@ class TPUSupportedSamplingMetadata:
         input_batch: InputBatch,
         padded_num_reqs: int,
         device_buffer: "DeviceBuffer",
+        dp_size: int = 1,
     ):
         needs_logprobs = (input_batch.max_num_logprobs > 0
                           if input_batch.max_num_logprobs else False)
 
         # Use a dummy tensor with a unique shape for each logprobs config.
         # This avoids persistent cache collisions.
-        dummy_shape = (1 if needs_logprobs else 2, )
+        # We use a multiple of dp_size to ensure the total metadata buffer size
+        # is divisible by dp_size for sharding in DP mode.
+        dummy_shape = (dp_size if needs_logprobs else 2 * dp_size, )
         cache_collision_dummy_view = device_buffer.get_view(
             dummy_shape, key="cache_collision_dummy")
         cache_collision_dummy_view.fill(0)

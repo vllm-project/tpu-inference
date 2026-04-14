@@ -1492,7 +1492,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Monolithic stack packing for small 1D metadata buffers
         self.device_buffer.reset()
         TPUSupportedSamplingMetadata.add_to_device_buffer(
-            self.input_batch, padded_num_reqs, self.device_buffer)
+            self.input_batch, padded_num_reqs, self.device_buffer,
+            self.dp_size)
         self.device_buffer.append(input_ids, key="input_ids")
         self.device_buffer.append(positions, key="positions")
         self.device_buffer.append(query_start_loc, key="query_start_loc")
@@ -1752,7 +1753,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Monolithic stack packing for small 1D metadata buffers
         self.device_buffer.reset()
         TPUSupportedSamplingMetadata.add_to_device_buffer(
-            self.input_batch, padded_num_reqs, self.device_buffer)
+            self.input_batch, padded_num_reqs, self.device_buffer,
+            self.dp_size)
         self.device_buffer.append(input_ids, key="input_ids")
         self.device_buffer.append(logits_indices, key="logits_indices")
         self.device_buffer.append(positions, key="positions")
