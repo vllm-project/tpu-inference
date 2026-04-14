@@ -568,12 +568,12 @@ class CompilationManager:
 
                     # Use a dummy tensor with a unique shape for each logprobs config.
                     # This avoids persistent cache collisions.
-                    dp_size = self.runner.dp_size
-                    dummy_shape = (dp_size if logprobs else 2 * dp_size, )
+                    dummy_shape = (1 if logprobs else 2, )
                     _cache_collision_dummy = jnp.zeros(dummy_shape,
                                                        dtype=jnp.int32)
                     _cache_collision_dummy = jax.device_put(
-                        _cache_collision_dummy, sampling_metadata_sharding)
+                        _cache_collision_dummy,
+                        NamedSharding(self.runner.mesh, PartitionSpec(None)))
 
                     sampling_metadata = TPUSupportedSamplingMetadata(
                         temperature=temperature,

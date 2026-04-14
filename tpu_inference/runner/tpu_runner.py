@@ -627,16 +627,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         query_start_loc_size = self.max_num_reqs + self.dp_size
         seq_lens_size = self.max_num_reqs
         logits_indices_size = self.max_num_reqs
-        request_distribution_size = 3 * self.dp_size
         # Block tables for each KV cache group.
         block_tables_size = num_kv_groups * self.max_num_reqs * self.max_num_blocks_per_req
-        cache_collision_dummy_size = 2 * self.dp_size
 
         initial_capacity = (sampling_params_size + input_ids_size +
                             positions_size + query_start_loc_size +
                             seq_lens_size + logits_indices_size +
-                            request_distribution_size + block_tables_size +
-                            cache_collision_dummy_size + 1024)
+                            block_tables_size + 1024)
         self.device_buffer = common_utils.DeviceBuffer(
             initial_capacity=initial_capacity)
 
@@ -1345,9 +1342,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Monolithic stack packing for small 1D metadata buffers
         self.device_buffer.reset()
-        TPUSupportedSamplingMetadata.add_to_device_buffer(
-            self.input_batch, padded_num_reqs, self.device_buffer,
-            self.dp_size)
 
         input_ids_view = self.device_buffer.get_view(
             (padded_total_num_scheduled_tokens, ), key="input_ids")
@@ -1495,10 +1489,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     num_decode_in_dp_rank += 1
             _request_distribution.append(
                 [num_decode_in_dp_rank, num_decode_in_dp_rank, _num_reqs])
-        request_distribution_view = self.device_buffer.get_view(
-            (dp_size * 3, ), key="request_distribution")
-        request_distribution_view[:] = np.array(_request_distribution,
-                                                dtype=np.int32).ravel()
+        request_distribution = np.array(_request_distribution,
+                                        dtype=np.int32).ravel()
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -1521,6 +1513,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 ))
             logits_indices_view[:] = spec_decode_metadata.final_logits_indices.ravel(
             )
+
+        # Put to device
+        sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
+            self.mesh,
+            self.input_batch,
+            padded_num_reqs,
+            sharding=data_parallel_attn_sharding,
+        )
 
         # Collect block tables host arrays loops zone presence zones legality
         def build_block_table_host(kv_cache_gid: int) -> None:
@@ -1558,15 +1558,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         metadata_blob, metadata_layout = self.device_buffer.build()
 
-        dev_arrays_payload = jax.device_put(
-            metadata_blob,
-            data_parallel_attn_sharding,
-        )
+        request_distribution = jax.device_put(request_distribution,
+                                              data_parallel_attn_sharding)
+
+        dev_arrays_payload = jax.device_put(metadata_blob,
+                                            data_parallel_attn_sharding)
 
         metadata = common_utils.DeviceBuffer.unpack_arrays(
             dev_arrays_payload, metadata_layout)
-        sampling_metadata = TPUSupportedSamplingMetadata.from_unpacked_arrays(
-            self.mesh, metadata, self.input_batch)
         input_ids = metadata["input_ids"]
         positions = metadata["positions"]
         if self.uses_mrope:
@@ -1574,7 +1573,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         query_start_loc = metadata["query_start_loc"]
         seq_lens = metadata["seq_lens"]
         logits_indices = metadata["logits_indices"]
-        request_distribution = metadata["request_distribution"]
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
@@ -1673,9 +1671,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Monolithic stack packing for small 1D metadata buffers
         self.device_buffer.reset()
-        TPUSupportedSamplingMetadata.add_to_device_buffer(
-            self.input_batch, padded_num_reqs, self.device_buffer,
-            self.dp_size)
 
         input_ids_view = self.device_buffer.get_view(
             (padded_total_num_scheduled_tokens, ), key="input_ids")
@@ -1784,10 +1779,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices_view[:] = spec_decode_metadata.final_logits_indices.ravel(
             )
 
-        request_distribution_view = self.device_buffer.get_view(
-            (3, ), key="request_distribution")
-        request_distribution_view[:] = np.array(
-            self.input_batch.request_distribution, dtype=np.int32).ravel()
+    # Put to device
+        sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
+            self.mesh,
+            self.input_batch,
+            padded_num_reqs,
+            sharding=data_parallel_attn_sharding,
+        )
+
+        request_distribution = np.array(self.input_batch.request_distribution)
+        request_distribution = jax.device_put(request_distribution,
+                                              data_parallel_attn_sharding)
 
         def build_block_table_host(kv_cache_gid: int) -> None:
             block_table_obj = self.input_batch.block_table[kv_cache_gid]
@@ -1818,8 +1820,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         metadata = common_utils.DeviceBuffer.unpack_arrays(
             dev_arrays_payload, metadata_layout)
-        sampling_metadata = TPUSupportedSamplingMetadata.from_unpacked_arrays(
-            self.mesh, metadata, self.input_batch)
         input_ids = metadata["input_ids"]
         positions = metadata["positions"]
         if self.uses_mrope:
@@ -1827,7 +1827,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         query_start_loc = metadata["query_start_loc"]
         seq_lens = metadata["seq_lens"]
         logits_indices = metadata["logits_indices"]
-        request_distribution = metadata["request_distribution"]
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
