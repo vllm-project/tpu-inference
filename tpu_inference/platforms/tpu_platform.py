@@ -56,6 +56,8 @@ class TpuPlatform(Platform):
         "NEW_MODEL_DESIGN",
         "MODEL_IMPL_TYPE",
         "VLLM_DISABLE_SHARED_EXPERTS_STREAM",
+        "JITTED_MM_MODULE_KEYS",
+        "REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES",
     ]
 
     @classmethod
