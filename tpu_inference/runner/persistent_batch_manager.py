@@ -49,6 +49,28 @@ class PersistentBatchManager:
         swap_cnt = 0
         if num_reqs <= 0:
             return swap_cnt
+
+        prev_distribution = list(self.input_batch.request_distribution)
+
+        # If total_num_scheduled_tokens == num_reqs, every request
+        # is scheduled for exactly 1 token (all decode). No reordering needed.
+        if scheduler_output.total_num_scheduled_tokens == num_reqs:
+            num_decode = num_reqs
+            self.input_batch.request_distribution = [
+                num_decode, num_decode, num_reqs
+            ]
+            return swap_cnt
+
+        # Log the pre-reorder request layout.
+        pre_order = [(self.input_batch.req_ids[idx],
+                      scheduler_output.num_scheduled_tokens[
+                          self.input_batch.req_ids[idx]])
+                     for idx in range(num_reqs)]
+        logger.info(
+            "Batch reorder: num_reqs=%d, prev_distribution=%s, "
+            "pre_reorder layout (req_id, num_scheduled_tokens): %s", num_reqs,
+            prev_distribution, pre_order)
+
         # Use two-pointer approach to reorder the decode requests to front.
         i, j = 0, num_reqs - 1
         while i < j:
@@ -74,6 +96,13 @@ class PersistentBatchManager:
         self.input_batch.request_distribution = [
             num_decode, num_decode, num_reqs
         ]
+
+        if swap_cnt > 0 or prev_distribution != self.input_batch.request_distribution:
+            logger.info(
+                "Batch reordered: swaps=%d, distribution %s -> %s "
+                "(num_decode=%d, num_prefill=%d)", swap_cnt, prev_distribution,
+                self.input_batch.request_distribution, num_decode,
+                num_reqs - num_decode)
 
         return swap_cnt
 
