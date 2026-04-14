@@ -31,9 +31,12 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.scalar_type import ScalarType, scalar_types
 
+from tpu_inference import envs
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_moe_weights, shard_moe_weights)
+    FusedMoEWeights, process_fp8_moe_weights, process_moe_weights,
+    quantize_moe_weights, shard_moe_weights)
+from tpu_inference.layers.common.quantization import dequantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
@@ -41,7 +44,7 @@ from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedFusedMoEMethod
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_mesh_shape_product, t2j
+from tpu_inference.utils import get_mesh_shape_product, t2j, to_jax_dtype
 
 logger = init_logger(__name__)
 
@@ -192,40 +195,18 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         else:
             w13_bias = w2_bias = None
 
-        @jax.jit
-        def process_fp8_moe_weights(
-            w13_weight: jax.Array,
-            w13_weight_scale: jax.Array,
-            w13_bias: jax.Array | None,
-            w2_weight: jax.Array,
-            w2_weight_scale: jax.Array,
-            w2_bias: jax.Array | None,
-        ) -> FusedMoEWeights:
-            w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
-            w13_reorder_size = get_mesh_shape_product(
-                self.mesh, ShardingAxisName.MLP_TENSOR)
-
-            return process_moe_weights(
-                weights=FusedMoEWeights(
-                    w13_weight=w13_weight,
-                    w13_weight_scale=w13_weight_scale,
-                    w13_bias=w13_bias,
-                    w2_weight=w2_weight,
-                    w2_weight_scale=w2_weight_scale,
-                    w2_bias=w2_bias,
-                ),
-                moe_backend=self.moe_backend,
-                w13_reorder_size=w13_reorder_size,
-                w13_interleave=w13_interleave,
-            )
-
         weights = process_fp8_moe_weights(
-            w13_weight,
-            w13_weight_scale,
-            w13_bias,
-            w2_weight,
-            w2_weight_scale,
-            w2_bias,
+            weights=FusedMoEWeights(
+                w13_weight=w13_weight,
+                w13_weight_scale=w13_weight_scale,
+                w13_bias=w13_bias,
+                w2_weight=w2_weight,
+                w2_weight_scale=w2_weight_scale,
+                w2_bias=w2_bias,
+            ),
+            moe_backend=self.moe_backend,
+            mesh=self.mesh,
+            activation=layer.activation.value,
         )
         weights = torch_view(
             shard_moe_weights(weights, self.moe_backend, self.mesh))
@@ -449,7 +430,7 @@ class VllmCompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod,
             w13_bias = w2_bias = None
 
         @jax.jit
-        def process_fp4_moe_weights(
+        def process_quantized_moe_weights(
             w13_weight: jax.Array,
             w13_weight_scale: jax.Array,
             w13_bias: jax.Array | None,
@@ -461,21 +442,61 @@ class VllmCompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod,
             w13_reorder_size = get_mesh_shape_product(
                 self.mesh, ShardingAxisName.MLP_TENSOR)
 
+            weights = FusedMoEWeights(
+                w13_weight=w13_weight,
+                w13_weight_scale=w13_weight_scale,
+                w13_bias=w13_bias,
+                w2_weight=w2_weight,
+                w2_weight_scale=w2_weight_scale,
+                w2_bias=w2_bias,
+            )
+
+            if desired_quant_dtype_from_env := envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
+                desired_quant_dtype = to_jax_dtype(
+                    desired_quant_dtype_from_env)
+                requant_block_size = None
+                if requant_block_size_from_env := envs.MOE_REQUANTIZE_BLOCK_SIZE:
+                    requant_block_size = (int(requant_block_size_from_env)
+                                          if requant_block_size_from_env else
+                                          None)
+
+                moe_logging_str = (
+                    f"[MoE requantization]: re-quantizing MoE weights to {desired_quant_dtype}"
+                )
+                if requant_block_size is not None:
+                    moe_logging_str += f" with block size {requant_block_size}"
+                logger.info(moe_logging_str)
+
+                # Dequantize first
+                # NOTE: we assume per-channel or group-wise dequantization here
+                # For W4A8, it's usually group-wise.
+                # we can use dequantize_tensor
+                w13_weight = dequantize_tensor(w13_weight, w13_weight_scale,
+                                               (1, 2), jnp.float32)
+                w2_weight = dequantize_tensor(w2_weight, w2_weight_scale,
+                                              (1, 2), jnp.float32)
+
+                weights = quantize_moe_weights(
+                    FusedMoEWeights(
+                        w13_weight=w13_weight,
+                        w13_weight_scale=None,
+                        w13_bias=None,
+                        w2_weight=w2_weight,
+                        w2_weight_scale=None,
+                        w2_bias=None,
+                    ),
+                    desired_quant_dtype,
+                    requant_block_size,
+                )
+
             return process_moe_weights(
-                weights=FusedMoEWeights(
-                    w13_weight=w13_weight,
-                    w13_weight_scale=w13_weight_scale,
-                    w13_bias=w13_bias,
-                    w2_weight=w2_weight,
-                    w2_weight_scale=w2_weight_scale,
-                    w2_bias=w2_bias,
-                ),
+                weights=weights,
                 moe_backend=self.moe_backend,
                 w13_reorder_size=w13_reorder_size,
                 w13_interleave=w13_interleave,
             )
 
-        weights = process_fp4_moe_weights(
+        weights = process_quantized_moe_weights(
             w13_weight,
             w13_weight_scale,
             w13_bias,
@@ -543,10 +564,10 @@ class VllmCompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
         weights = FusedMoEWeights(
-            w13_weight=jax_view(layer.w13_weight).astype(jnp.int4),
+            w13_weight=jax_view(layer.w13_weight),
             w13_weight_scale=jax_view(layer.w13_weight_scale),
             w13_bias=jax_view(layer.w13_bias) if self.moe.has_bias else None,
-            w2_weight=jax_view(layer.w2_weight).astype(jnp.int4),
+            w2_weight=jax_view(layer.w2_weight),
             w2_weight_scale=jax_view(layer.w2_weight_scale),
             w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
         )
