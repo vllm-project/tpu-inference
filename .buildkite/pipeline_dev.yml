@@ -15,7 +15,25 @@
 # Dev pipeline for tpu-inference-dev.
 # Demo/sample steps showing how to run custom tests on tpu7x.
 # Copy and adapt any step for your own experiments.
-# soft_fail is set so failures don't block other engineers.
+#
+# HOW TO TRIGGER THIS PIPELINE
+# ─────────────────────────────
+# Option A — Buildkite UI:
+#   Go to https://buildkite.com/tpu-commons/tpu-inference-dev
+#   Click "New Build", set branch to your branch, click "Create Build".
+#
+# Option B — Buildkite API (requires BUILDKITE_API_TOKEN in your env):
+#   curl -s -X POST \
+#     -H "Authorization: Bearer $BUILDKITE_API_TOKEN" \
+#     -H "Content-Type: application/json" \
+#     "https://api.buildkite.com/v2/organizations/tpu-commons/pipelines/tpu-inference-dev/builds" \
+#     -d "{\"commit\": \"$(git rev-parse HEAD)\", \"branch\": \"$(git rev-parse --abbrev-ref HEAD)\", \"message\": \"my test\"}"
+#
+# HOW TO CUSTOMIZE
+# ─────────────────
+# 1. On your branch, edit this file — use any demo step below as a starting point.
+# 2. Change the command, model, env vars, or queue as needed.
+# 3. Trigger the pipeline — only your branch's file is used.
 
 steps:
 
