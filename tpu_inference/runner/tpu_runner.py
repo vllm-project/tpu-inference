@@ -510,7 +510,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Dense lookup table for async placeholder token substitution.
         # Indexed by batch req_idx.  -1 means "no placeholder".
         # Avoids per-request string dict lookups in the hot path.
-        self.placeholder_token_idx_lookup = np.full(self.max_num_reqs, -1,
+        self.placeholder_token_idx_lookup = np.full(self.max_num_reqs,
+                                                    -1,
                                                     dtype=np.int32)
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
@@ -1028,8 +1029,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             # Set placeholder for next tokens that is not yet generated
             placeholder_token_idx_lookup = self._update_placeholder(
-                    discard_sampled_tokens_req_indices, request_seq_lens,
-                    logits_indices_selector)
+                discard_sampled_tokens_req_indices, request_seq_lens,
+                logits_indices_selector)
 
             # Save the previous results
             next_tokens = jax.copy_to_host_async(next_tokens)
@@ -1039,7 +1040,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 request_seq_lens=request_seq_lens,
                 discard_sampled_tokens_req_indices=
                 discard_sampled_tokens_req_indices,
-                placeholder_token_idx_lookup=placeholder_token_idx_lookup.copy(),
+                placeholder_token_idx_lookup=placeholder_token_idx_lookup.copy(
+                ),
                 logits_indices_selector=logits_indices_selector)
 
             # Return Model output to executor
@@ -1226,8 +1228,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     [], dtype=np.int32)
                 continue
 
-            tokens_per_req = np.asarray(
-                scheduled_tokens_per_dp_rank[dp_rank], dtype=np.int32)
+            tokens_per_req = np.asarray(scheduled_tokens_per_dp_rank[dp_rank],
+                                        dtype=np.int32)
             token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
 
             # Cumulative end positions for each request (1-indexed),
@@ -1242,8 +1244,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             mask = pre_indices >= 0
 
             # The cur_input index is the last token of each request (end - 1).
-            token_in_tpu_cur_input_indices_dp[dp_rank] = (
-                end_positions[mask] - 1)
+            token_in_tpu_cur_input_indices_dp[dp_rank] = (end_positions[mask] -
+                                                          1)
             token_in_tpu_pre_next_tokens_indices_dp[dp_rank] = (
                 pre_indices[mask])
 

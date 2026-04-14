@@ -792,21 +792,26 @@ class TestTPUJaxRunnerDPInputsLightweight:
             mock_named_sharding):
 
         # Setup test data
-        req_ids_dp = {0: ["req1", "req2"], 1: ["req3"]}
+        # req_indices_dp maps dp_rank -> list of batch indices (not req IDs)
+        req_indices_dp = {0: [0, 1], 1: [2]}
         scheduled_tokens_per_dp_rank = {0: [3, 2], 1: [4]}
         padded_num_scheduled_tokens_per_dp_rank = 8
         dp_size = 2
 
-        # Setup _pre_async_results with placeholder mapping
+        # Setup _pre_async_results with placeholder lookup table.
+        # Dense numpy array indexed by batch req_idx; value >= 0 means
+        # placeholder, -1 means absent.  req_idx 0 and 2 are placeholders.
         self.runner._pre_async_results = MagicMock()
-        self.runner._pre_async_results.placeholder_req_id_to_index = {
-            "req1": 0,
-            "req3": 2
-        }  # req2 is not a placeholder
+        placeholder_lookup = np.full(self.runner.max_num_reqs,
+                                     -1,
+                                     dtype=np.int32)
+        placeholder_lookup[0] = 0  # req1 (batch idx 0) -> next_tokens idx 0
+        placeholder_lookup[2] = 2  # req3 (batch idx 2) -> next_tokens idx 2
+        self.runner._pre_async_results.placeholder_token_idx_lookup = placeholder_lookup
 
         # Call the method
         result = self.runner._prepare_async_token_substitution_indices_dp(
-            req_ids_dp, scheduled_tokens_per_dp_rank,
+            req_indices_dp, scheduled_tokens_per_dp_rank,
             padded_num_scheduled_tokens_per_dp_rank, dp_size)
 
         token_in_tpu_cur_input_indices_dp, token_in_tpu_pre_next_tokens_indices_dp = result
@@ -814,13 +819,17 @@ class TestTPUJaxRunnerDPInputsLightweight:
         # Verify DP rank 0
         # req1: token_offset=0, acc_cur_len starts at 0, after 3 tokens: 3, so last token at 2
         # req2: not a placeholder, should be skipped
-        assert token_in_tpu_cur_input_indices_dp[0] == [2]
-        assert token_in_tpu_pre_next_tokens_indices_dp[0] == [0]
+        np.testing.assert_array_equal(token_in_tpu_cur_input_indices_dp[0],
+                                      [2])
+        np.testing.assert_array_equal(
+            token_in_tpu_pre_next_tokens_indices_dp[0], [0])
 
         # Verify DP rank 1
         # req3: token_offset=8, acc_cur_len starts at 8, after 4 tokens: 12, so last token at 11
-        assert token_in_tpu_cur_input_indices_dp[1] == [11]
-        assert token_in_tpu_pre_next_tokens_indices_dp[1] == [2]
+        np.testing.assert_array_equal(token_in_tpu_cur_input_indices_dp[1],
+                                      [11])
+        np.testing.assert_array_equal(
+            token_in_tpu_pre_next_tokens_indices_dp[1], [2])
 
     @patch('tpu_inference.runner.tpu_runner.NamedSharding')
     @patch('tpu_inference.runner.tpu_runner.runner_utils')
@@ -832,26 +841,29 @@ class TestTPUJaxRunnerDPInputsLightweight:
             mock_named_sharding):
         """Test when no requests are placeholders."""
 
-        req_ids_dp = {0: ["req1", "req2"], 1: ["req3"]}
+        req_indices_dp = {0: [0, 1], 1: [2]}
         scheduled_tokens_per_dp_rank = {0: [3, 2], 1: [4]}
         padded_num_scheduled_tokens_per_dp_rank = 8
         dp_size = 2
 
-        # No placeholders
+        # No placeholders - all entries are -1
         self.runner._pre_async_results = MagicMock()
-        self.runner._pre_async_results.placeholder_req_id_to_index = {}
+        placeholder_lookup = np.full(self.runner.max_num_reqs,
+                                     -1,
+                                     dtype=np.int32)
+        self.runner._pre_async_results.placeholder_token_idx_lookup = placeholder_lookup
 
         result = self.runner._prepare_async_token_substitution_indices_dp(
-            req_ids_dp, scheduled_tokens_per_dp_rank,
+            req_indices_dp, scheduled_tokens_per_dp_rank,
             padded_num_scheduled_tokens_per_dp_rank, dp_size)
 
         token_in_tpu_cur_input_indices_dp, token_in_tpu_pre_next_tokens_indices_dp = result
 
-        # All lists should be empty since no placeholders
-        assert token_in_tpu_cur_input_indices_dp[0] == []
-        assert token_in_tpu_pre_next_tokens_indices_dp[0] == []
-        assert token_in_tpu_cur_input_indices_dp[1] == []
-        assert token_in_tpu_pre_next_tokens_indices_dp[1] == []
+        # All arrays should be empty since no placeholders
+        assert len(token_in_tpu_cur_input_indices_dp[0]) == 0
+        assert len(token_in_tpu_pre_next_tokens_indices_dp[0]) == 0
+        assert len(token_in_tpu_cur_input_indices_dp[1]) == 0
+        assert len(token_in_tpu_pre_next_tokens_indices_dp[1]) == 0
 
     def test_apply_async_token_substitution_empty_indices(self):
         """Test _apply_async_token_substitution with empty indices (line 1025)."""
@@ -998,9 +1010,11 @@ class TestTPUJaxRunnerDPInputsLightweight:
         # Enable async scheduling
         self.runner.scheduler_config.async_scheduling = True
         self.runner._pre_async_results = MagicMock()
-        self.runner._pre_async_results.placeholder_req_id_to_index = {
-            "req1": 0
-        }
+        placeholder_lookup = np.full(self.runner.max_num_reqs,
+                                     -1,
+                                     dtype=np.int32)
+        placeholder_lookup[0] = 0  # req1 (batch idx 0) -> next_tokens idx 0
+        self.runner._pre_async_results.placeholder_token_idx_lookup = placeholder_lookup
         self.runner._pre_async_results.next_tokens = np.array([100])
 
         # Setup required attributes
@@ -1015,13 +1029,14 @@ class TestTPUJaxRunnerDPInputsLightweight:
         self.runner.lora_utils = MagicMock()
 
         # Mock the token substitution preparation
-        mock_prepare_async = MagicMock(return_value=({
-            0: [2],
-            1: []
-        }, {
-            0: [0],
-            1: []
-        }))
+        mock_prepare_async = MagicMock(
+            return_value=({
+                0: np.array([2], dtype=np.int32),
+                1: np.array([], dtype=np.int32)
+            }, {
+                0: np.array([0], dtype=np.int32),
+                1: np.array([], dtype=np.int32)
+            }))
         self.runner._prepare_async_token_substitution_indices_dp = mock_prepare_async
 
         # Execute the method
@@ -1070,10 +1085,12 @@ class TestTPUJaxRunnerDPInputsLightweight:
         # Enable async scheduling with placeholders
         self.runner.scheduler_config.async_scheduling = True
         self.runner._pre_async_results = MagicMock()
-        self.runner._pre_async_results.placeholder_req_id_to_index = {
-            "req1": 0,
-            "req2": 1
-        }
+        placeholder_lookup = np.full(self.runner.max_num_reqs,
+                                     -1,
+                                     dtype=np.int32)
+        placeholder_lookup[0] = 0  # req1 (batch idx 0) -> next_tokens idx 0
+        placeholder_lookup[1] = 1  # req2 (batch idx 1) -> next_tokens idx 1
+        self.runner._pre_async_results.placeholder_token_idx_lookup = placeholder_lookup
         self.runner._pre_async_results.next_tokens = np.array([100, 200])
 
         # Setup required attributes
