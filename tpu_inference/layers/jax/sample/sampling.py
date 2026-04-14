@@ -26,28 +26,27 @@ from tpu_inference.layers.jax.sample.sampling_metadata import \
 _SAMPLING_EPS = 1e-5
 
 
-@jax.jit(static_argnames=["mesh"])
-def sample(
-    rng: jax.Array,
-    mesh: Mesh,
+def _apply_sampling_transforms(
     logits: jax.Array,
     tpu_sampling_metadata: TPUSupportedSamplingMetadata,
 ) -> jax.Array:
-    # (B, vocab_size)
-    if tpu_sampling_metadata.do_sampling:
-        # Unshard the logits explicity to avoid latency increase.
-        logits = jax.lax.with_sharding_constraint(
-            logits, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
-    greedy_sampled = jnp.argmax(logits, axis=-1)
-    if not tpu_sampling_metadata.do_sampling:
-        return greedy_sampled
+    """Apply temperature scaling, top-k, and top-p filtering to logits.
 
-    logits = logits.astype(jnp.float32)
+    This extracts the common logit processing logic used by both the sampling
+    path and the processed-logprobs path so that the transformations are
+    applied identically.
 
+    Args:
+        logits: (B, vocab_size) raw logits in float32.
+        tpu_sampling_metadata: Sampling parameters (temperature, top_k, top_p).
+
+    Returns:
+        Processed logits with temperature, top-k, and top-p applied.
+    """
     # Temperature scaling
     temperatures = tpu_sampling_metadata.temperature.astype(logits.dtype)
     temperatures = jnp.expand_dims(temperatures, axis=-1)
-    logits /= temperatures
+    logits = logits / temperatures
 
     # Only apply top-k masking if k > 0 for each token
     top_k = tpu_sampling_metadata.top_k
@@ -61,12 +60,52 @@ def sample(
     topp_masked = topp_mask(logits, top_p, replace_val=-1e12)
     logits = jnp.where(should_apply_topp, topp_masked, logits)
 
-    # (batch_size,)
-    next_tokens = jax.random.categorical(rng, logits)
-    # Note: avoid using the sample result when temperature < _SAMPLING_EPS
-    # If temperature < 0, logits /= temperatures will flip the result, causing error.
-    return jnp.where(tpu_sampling_metadata.temperature < _SAMPLING_EPS,
-                     greedy_sampled, next_tokens)
+    return logits
+
+
+@jax.jit(static_argnames=["mesh"])
+def sample(
+    rng: jax.Array,
+    mesh: Mesh,
+    logits: jax.Array,
+    tpu_sampling_metadata: TPUSupportedSamplingMetadata,
+) -> jax.Array:
+    # (B, vocab_size)
+    if tpu_sampling_metadata._cache_collision_dummy is not None:
+        # Force a dependency on the dummy tensor's shape to ensure unique HLO.
+        logits = logits + 0 * jnp.sum(
+            tpu_sampling_metadata._cache_collision_dummy)
+
+    if tpu_sampling_metadata.do_sampling:
+        # Unshard the logits explicity to avoid latency increase.
+        # TODO(gxd3): revisit if the 2nd dimension of the logits can be sharded
+        # instead of being replicated.
+        logits = jax.lax.with_sharding_constraint(
+            logits, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
+
+    greedy_tokens = jnp.argmax(logits, axis=-1)
+    logits = logits.astype(jnp.float32)
+    if not tpu_sampling_metadata.do_sampling:
+        ret_tokens = greedy_tokens
+        ret_logits = logits
+    else:
+        processed_logits = _apply_sampling_transforms(logits,
+                                                      tpu_sampling_metadata)
+        # (batch_size,)
+        next_tokens = jax.random.categorical(rng, processed_logits)
+        # Note: avoid using the sample result when temperature < _SAMPLING_EPS
+        # If temperature < 0, logits /= temperatures will flip the result, causing error.
+        is_greedy = tpu_sampling_metadata.temperature < _SAMPLING_EPS
+        ret_tokens = jnp.where(is_greedy, greedy_tokens, next_tokens)
+        ret_logits = jnp.where(jnp.expand_dims(is_greedy, axis=-1), logits,
+                               processed_logits)
+    # Replicate the result so that in multi-controller jax setup
+    # (i.e. Ray based multi-host setup), we won't hit error like
+    # RuntimeError: Fetching value for `jax.Array` that spans non-addressable
+    # (non process local) devices is not possible.
+    next_tokens = jax.lax.with_sharding_constraint(ret_tokens,
+                                                   NamedSharding(mesh, P()))
+    return next_tokens, ret_logits
 
 
 def compute_logprobs(logits: jax.Array) -> jax.Array:

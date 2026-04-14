@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     SKIP_JAX_PRECOMPILE: bool = False
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     MODEL_IMPL_TYPE: str = "auto"
+    DRAFT_MODEL_IMPL_TYPE: str = "auto"
     NEW_MODEL_DESIGN: bool = False
     PHASED_PROFILING_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
     USE_UNFUSED_MEGABLOCKS: bool = False
     USE_DENSE_MOE: bool = False
     NUM_SLICES: int = 1
-    RAY_USAGE_STATS_ENABLED: str = "0"
+    RAY_USAGE_STATS_ENABLED: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "shm"
     ENABLE_QUANTIZED_MATMUL_KERNEL: bool = False
     REQUANTIZE_BLOCK_SIZE: int | None = None
@@ -32,6 +33,15 @@ if TYPE_CHECKING:
     MOE_REQUANTIZE_BLOCK_SIZE: int | None = None
     MOE_REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
     LAYOUT_Q_PROJ_AS_NDH: bool = False
+    USE_JAX_PROFILER_SERVER: bool = False
+    JAX_PROFILER_SERVER_PORT: int = 9999
+    USE_BATCHED_RPA_KERNEL: bool = False
+    FORCE_MOE_RANDOM_ROUTING: bool = False
+    SC_KERNEL_THRESHOLD: int = 16777216
+    SC_KERNEL_COL_CHUNK_SIZE: int = 1024
+    JITTED_MM_MODULE_KEYS: list[str] = []
+    REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
+    RAGGED_GATED_DELTA_RULE_IMPL: str = "ragged_gated_delta_rule_chunked"
 
 
 def env_with_choices(
@@ -39,6 +49,7 @@ def env_with_choices(
     default: str | None,
     choices: list[str] | Callable[[], list[str]],
     case_sensitive: bool = True,
+    allow_csv: bool = False,
 ) -> Callable[[], str | None]:
     """
     Create a lambda that validates environment variable against allowed choices
@@ -48,6 +59,8 @@ def env_with_choices(
         default: Default value if not set (can be None)
         choices: List of valid string options or callable that returns list
         case_sensitive: Whether validation should be case sensitive
+        allow_csv: Whether to allow comma-separated values, validating each
+            part individually against the choices
 
     Returns:
         Lambda function for environment_variables dict
@@ -62,15 +75,16 @@ def env_with_choices(
         actual_choices = choices() if callable(choices) else choices
 
         if not case_sensitive:
-            check_value = value.lower()
             check_choices = [choice.lower() for choice in actual_choices]
         else:
-            check_value = value
             check_choices = actual_choices
 
-        if check_value not in check_choices:
-            raise ValueError(f"Invalid value '{value}' for {env_name}. "
-                             f"Valid options: {actual_choices}.")
+        parts = value.split(",") if allow_csv else [value]
+        for part in parts:
+            check_part = part.lower() if not case_sensitive else part
+            if check_part not in check_choices:
+                raise ValueError(f"Invalid value '{part}' for {env_name}. "
+                                 f"Valid options: {actual_choices}.")
 
         return value
 
@@ -105,10 +119,31 @@ def env_bool(env_name: str, default: bool = False) -> Callable[[], bool]:
     return _get_bool_env
 
 
+def env_str_list(env_name: str) -> Callable[[], list[str]]:
+    """
+    Accepts a comma-separated string and returns a list of strings.
+
+    Args:
+        env_name: Name of the environment variable
+        default: Default list of strings if not set
+    """
+
+    def _get_str_list_env() -> list[str]:
+        value = os.getenv(env_name)
+        if value is None or value == "":
+            return []
+
+        return [v.strip() for v in value.split(",")]
+
+    return _get_str_list_env
+
+
 environment_variables: dict[str, Callable[[], Any]] = {
-    # JAX platform selection (e.g., "tpu", "cpu", "proxy")
+    # JAX platform selection (e.g., "tpu", "cpu", "proxy", "proxy,cpu")
     "JAX_PLATFORMS":
-    lambda: os.getenv("JAX_PLATFORMS", "").lower(),
+    env_with_choices("JAX_PLATFORMS",
+                     "", ["", "tpu", "cpu", "proxy"],
+                     allow_csv=True),
     # TPU accelerator type (e.g., "v5litepod-16", "v4-8")
     "TPU_ACCELERATOR_TYPE":
     lambda: os.getenv("TPU_ACCELERATOR_TYPE", None),
@@ -137,6 +172,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "MODEL_IMPL_TYPE":
     env_with_choices("MODEL_IMPL_TYPE", "auto",
                      ["auto", "vllm", "flax_nnx", "jetpack"]),
+    "DRAFT_MODEL_IMPL_TYPE":
+    env_with_choices("DRAFT_MODEL_IMPL_TYPE", "auto",
+                     ["auto", "vllm", "flax_nnx"]),
     # Enable 2D tensor parallelism, shard attention heads across multiple axes
     "USE_2D_TP":
     env_bool("USE_2D_TP", default=False),
@@ -165,12 +203,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("NUM_SLICES") or "1"),
     # Enable/disable Ray usage statistics collection
     "RAY_USAGE_STATS_ENABLED":
-    lambda: os.getenv("RAY_USAGE_STATS_ENABLED", "0"),
+    env_bool("RAY_USAGE_STATS_ENABLED"),
     # Ray compiled DAG channel type for TPU
     "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE":
     env_with_choices("VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "shm", ["shm"]),
     "ENABLE_QUANTIZED_MATMUL_KERNEL":
-    lambda: bool(int(os.getenv("ENABLE_QUANTIZED_MATMUL_KERNEL") or "0")),
+    env_bool("ENABLE_QUANTIZED_MATMUL_KERNEL"),
     # Specify block quantization size
     "REQUANTIZE_BLOCK_SIZE":
     lambda: int(block_size) if
@@ -188,7 +226,28 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # dictates whether to layout q-proj as NDH (q-heads, model dim, head dim)
     # or DNH (model dim, q-heads, head dim), which is the default (False)
     "LAYOUT_Q_PROJ_AS_NDH":
-    lambda: bool(int(os.getenv("LAYOUT_Q_PROJ_AS_NDH") or "0")),
+    env_bool("LAYOUT_Q_PROJ_AS_NDH"),
+    "USE_JAX_PROFILER_SERVER":
+    env_bool("USE_JAX_PROFILER_SERVER"),
+    "JAX_PROFILER_SERVER_PORT":
+    lambda: int(os.getenv("JAX_PROFILER_SERVER_PORT") or "9999"),
+    "USE_BATCHED_RPA_KERNEL":
+    env_bool("USE_BATCHED_RPA_KERNEL"),
+    # Force random expert routing in MoE layers (for testing purposes only)
+    "FORCE_MOE_RANDOM_ROUTING":
+    env_bool("FORCE_MOE_RANDOM_ROUTING", default=False),
+    "SC_KERNEL_THRESHOLD":
+    lambda: int(os.getenv("SC_KERNEL_THRESHOLD") or "16777216"),
+    "SC_KERNEL_COL_CHUNK_SIZE":
+    lambda: int(os.getenv("SC_KERNEL_COL_CHUNK_SIZE") or "3072"),
+    "JITTED_MM_MODULE_KEYS":
+    env_str_list("JITTED_MM_MODULE_KEYS"),
+    "REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES":
+    env_str_list("REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES"),
+    "RAGGED_GATED_DELTA_RULE_IMPL":
+    env_with_choices(
+        "RAGGED_GATED_DELTA_RULE_IMPL", "ragged_gated_delta_rule_chunked",
+        ["ragged_gated_delta_rule_ref", "ragged_gated_delta_rule_chunked"]),
 }
 
 

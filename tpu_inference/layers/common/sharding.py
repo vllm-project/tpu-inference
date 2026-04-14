@@ -69,15 +69,32 @@ class ShardingAxisName2D:
     VOCAB = ('data', 'model')
 
 
-try:
-    _use_2d_tp_sharding = envs.USE_2D_TP
-    _use_base_sharding = envs.NEW_MODEL_DESIGN
-    if _use_2d_tp_sharding or _use_base_sharding:
-        ShardingAxisName = ShardingAxisNameBase
-    else:
-        ShardingAxisName = ShardingAxisName2D
-except Exception:
-    ShardingAxisName = ShardingAxisName2D
+# Lazily initialize the ShardingAxisName so that we can decide which one to use based on the
+# propagated / updated environment variables in the multi-host setup.
+class LazyShardingAxisName:
+    """Lazy loading for ShardingAxisName."""
+
+    def __init__(self):
+        self._cls = None
+
+    def _initialize(self):
+        if self._cls is None:
+            try:
+                _use_2d_tp_sharding = envs.USE_2D_TP
+                _use_base_sharding = envs.NEW_MODEL_DESIGN
+                if _use_2d_tp_sharding or _use_base_sharding:
+                    self._cls = ShardingAxisNameBase
+                else:
+                    self._cls = ShardingAxisName2D
+            except Exception:
+                self._cls = ShardingAxisName2D
+
+    def __getattr__(self, name):
+        self._initialize()
+        return getattr(self._cls, name)
+
+
+ShardingAxisName = LazyShardingAxisName()
 
 
 @dataclass

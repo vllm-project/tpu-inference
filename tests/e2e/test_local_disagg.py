@@ -3,12 +3,11 @@
 
 import os
 import time
-from dataclasses import asdict
 from unittest.mock import patch
 
 import pytest
 import vllm.envs as vllm_envs
-from vllm import LLM, EngineArgs, SamplingParams
+from vllm import LLM, SamplingParams
 
 from tpu_inference.core.core_tpu import DisaggEngineCore, DisaggEngineCoreProc
 
@@ -96,15 +95,13 @@ def test_disaggregated_serving(test_prompts, sampling_params):
 
             model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
             os.system(f"rm -rf {vllm_envs.VLLM_XLA_CACHE_PATH}/*")
-            engine_args = EngineArgs(
+            llm = LLM(
                 model=model_name,
                 max_model_len=2048,
                 tensor_parallel_size=4,
                 gpu_memory_utilization=0.90,
                 enforce_eager=False,
             )
-
-            llm = LLM(**asdict(engine_args))
 
             try:
                 outputs = llm.generate(test_prompts, sampling_params)
@@ -134,15 +131,13 @@ def _run_inference(model_name: str,
 
     # Define the inner execution logic
     def run_inner():
-        engine_args = EngineArgs(
+        llm = LLM(
             model=model_name,
             max_model_len=2048,
             tensor_parallel_size=tensor_parallel_size,
             gpu_memory_utilization=0.90,
             enforce_eager=False,
         )
-
-        llm = LLM(**asdict(engine_args))
         try:
             return llm.generate(test_prompts, sampling_params)
         finally:

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+from dataclasses import dataclass
 from typing import List
 
 import jax
@@ -33,9 +33,22 @@ logger = init_logger(__name__)
 DEFAULT_KV_CACHE_DTYPE = jnp.bfloat16
 
 
+@dataclass
+class KVCacheMetadata:
+    """
+    Used to store metadata about the KV cache for logging in the KV cache manager.
+    Specifcally, with Hybrid KV cache, we can have multiple KV cache types
+    so we need to store the metadata for each KV cache type separately
+    """
+    count: int = 0
+    shape: tuple = None
+    dtype: jnp.dtype = None
+    sharding: NamedSharding = None
+
+
 def get_kv_cache_shape_with_mesh(mesh: Mesh,
                                  total_num_pages: int,
-                                 page_size: int,
+                                 block_size: int,
                                  actual_num_kv_heads: int,
                                  actual_head_dim: int,
                                  kv_dtype: any,
@@ -54,7 +67,7 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
         # so actual_num_kv_heads is never used in mla.get_kv_cache_shape().
         get_kv_cache_shape_fn = mla.get_kv_cache_shape
         shape = list(
-            get_kv_cache_shape_fn(total_num_pages, page_size, actual_head_dim,
+            get_kv_cache_shape_fn(total_num_pages, block_size, actual_head_dim,
                                   kv_dtype))
     else:
         assert actual_num_kv_heads % model_cnt == 0
@@ -63,7 +76,7 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
                 else rpa.get_kv_cache_shape
         )
         shape = list(
-            get_kv_cache_shape_fn(total_num_pages, page_size,
+            get_kv_cache_shape_fn(total_num_pages, block_size,
                                   actual_num_kv_heads // model_cnt,
                                   actual_head_dim, kv_dtype))
         shape[2] *= model_cnt
@@ -136,10 +149,10 @@ def get_attention_page_size_bytes(mesh, block_size, num_kv_heads, head_size,
     kv_cache_shape = get_kv_cache_shape_with_mesh(
         mesh=mesh,
         total_num_pages=1,
-        page_size=block_size,
+        block_size=block_size,
         actual_num_kv_heads=num_kv_heads,
         actual_head_dim=head_size,
         kv_dtype=jax_dtype,
         use_mla=use_mla,
     )
-    return (bits * np.prod(kv_cache_shape)) // 8
+    return int(bits * np.prod(kv_cache_shape)) // 8

@@ -233,6 +233,12 @@ class TestPallasMLAttentionBackendImpl:
                 jax.random.normal(key, (NUM_HEADS, KV_LORA_RANK, V_HEAD_DIM),
                                   dtype=jnp.bfloat16),
                 env=torchax.default_env())
+            layer.W_UK_T_scale = torchax.tensor.Tensor(
+                jnp.ones((1, NUM_HEADS, KV_LORA_RANK), dtype=jnp.float32),
+                env=torchax.default_env())
+            layer.W_UV_scale = torchax.tensor.Tensor(jnp.ones(
+                (1, NUM_HEADS, V_HEAD_DIM), dtype=jnp.float32),
+                                                     env=torchax.default_env())
             outputs, new_kv_cache = impl.forward(q, kv_c_normed, k_pe,
                                                  kv_cache, metadata, mesh,
                                                  layer)
@@ -262,7 +268,7 @@ class TestPallasMLAttentionBackendImpl:
 
         layer = MagicMock()
         layer.kv_cache_quantized_dtype = jnp.float8_e4m3fn
-        layer._q_scale_float = None
+        layer._q_scale_float = 1.0
         layer._k_scale_float = 1.0
         layer._v_scale_float = 1.0
 
@@ -279,6 +285,12 @@ class TestPallasMLAttentionBackendImpl:
                 jax.random.normal(key, (NUM_HEADS, KV_LORA_RANK, V_HEAD_DIM),
                                   dtype=jnp.bfloat16),
                 env=torchax.default_env())
+            layer.W_UK_T_scale = torchax.tensor.Tensor(
+                jnp.ones((1, NUM_HEADS, KV_LORA_RANK), dtype=jnp.float32),
+                env=torchax.default_env())
+            layer.W_UV_scale = torchax.tensor.Tensor(jnp.ones(
+                (1, NUM_HEADS, V_HEAD_DIM), dtype=jnp.float32),
+                                                     env=torchax.default_env())
 
             outputs, new_kv_cache = impl.forward(q, kv_c_normed, k_pe,
                                                  kv_cache, metadata, mesh,
@@ -326,6 +338,12 @@ class TestPallasMLAttentionBackendImpl:
                 jax.random.normal(key, (NUM_HEADS, KV_LORA_RANK, V_HEAD_DIM),
                                   dtype=jnp.bfloat16),
                 env=torchax.default_env())
+            layer.W_UK_T_scale = torchax.tensor.Tensor(
+                jnp.ones((1, NUM_HEADS, KV_LORA_RANK), dtype=jnp.float32),
+                env=torchax.default_env())
+            layer.W_UV_scale = torchax.tensor.Tensor(jnp.ones(
+                (1, NUM_HEADS, V_HEAD_DIM), dtype=jnp.float32),
+                                                     env=torchax.default_env())
             outputs, new_kv_cache = impl.forward(q, kv_c_normed, k_pe,
                                                  kv_cache, metadata, mesh,
                                                  layer)

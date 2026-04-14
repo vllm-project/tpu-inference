@@ -46,6 +46,11 @@ class JaxEinsum(nnx.Einsum, JaxModule):
                  kernel_metadata={},
                  bias_metadata={},
                  **kwargs):
+        # nnx.Einsum uses `param_dtype` for parameter initialization dtype.
+        # Accept `dtype` as an alias for backward compatibility, but forward it
+        # as `param_dtype` so that weights are created with the correct dtype.
+        if "dtype" in kwargs and "param_dtype" not in kwargs:
+            kwargs["param_dtype"] = kwargs.pop("dtype")
         if "eager_sharding" not in kernel_metadata:
             kernel_metadata["eager_sharding"] = False
         if "eager_sharding" not in bias_metadata:

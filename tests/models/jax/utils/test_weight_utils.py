@@ -23,6 +23,7 @@ from flax import nnx
 from jax.sharding import Mesh
 from safetensors.torch import save_file
 from torch import nn
+from vllm.config import set_current_vllm_config
 from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
 from tpu_inference.layers.jax import JaxModule
@@ -73,6 +74,10 @@ class TestJaxAutoWeightsLoader:
             torch_model.w2.weight.fill_(0.9)
             torch_model.w2.bias.fill_(0.1)
 
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.parallel_config = MagicMock()
+        mock_vllm_config.parallel_config.enable_expert_parallel = False
+
         # Save the PyTorch model weights to a safetensors file. Load them
         # into the JAX model.
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -81,7 +86,7 @@ class TestJaxAutoWeightsLoader:
 
             devices = jax.local_devices()
             mesh = Mesh(devices, axis_names=('p', ))
-            with jax.set_mesh(mesh):
+            with jax.set_mesh(mesh), set_current_vllm_config(mock_vllm_config):
                 jax_model = JaxMLP(rngs=nnx.Rngs(0))
 
                 model_config = MagicMock()

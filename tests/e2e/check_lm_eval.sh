@@ -34,6 +34,11 @@ usage() {
     echo "  --enable_expert_parallel <0|1>  Whether to enable expert parallel."
     echo "  --flex_threshold <float>        Threshold for flexible-extract score."
     echo "  --strict_threshold <float>      Threshold for strict-match score."
+    echo "  --limit_mm_per_prompt <json>    (Optional) Limit multimodal items per prompt."
+    echo "  --hf_overrides <json>           (Optional) HuggingFace overrides."
+    echo "  --block_size <int>              (Optional) Block size."
+    echo "  --limit <int>                   (Optional) Limit the number of examples evaluated (e.g., 10)."
+    echo "  --enable_thinking <true|false>  (Optional) Enable thinking inside model_args."
     echo "  -h, --help                      Display this help message."
     exit 1
 }
@@ -48,6 +53,11 @@ MAX_GEN_TOKS=""
 ENABLE_EXPERT_PARALLEL=""
 FLEX_THRESHOLD=""
 STRICT_THRESHOLD=""
+LIMIT_MM_PER_PROMPT=""
+HF_OVERRIDES=""
+BLOCK_SIZE=""
+LIMIT=""
+ENABLE_THINKING=""
 
 # Parse named arguments
 while [[ "$#" -gt 0 ]]; do
@@ -61,6 +71,11 @@ while [[ "$#" -gt 0 ]]; do
         --enable_expert_parallel) ENABLE_EXPERT_PARALLEL="$2"; shift ;;
         --flex_threshold) FLEX_THRESHOLD="$2"; shift ;;
         --strict_threshold) STRICT_THRESHOLD="$2"; shift ;;
+        --limit_mm_per_prompt) LIMIT_MM_PER_PROMPT="$2"; shift ;;
+        --hf_overrides) HF_OVERRIDES="$2"; shift ;;
+        --block_size) BLOCK_SIZE="$2"; shift ;;
+        --limit) LIMIT="$2"; shift ;;
+        --enable_thinking) ENABLE_THINKING="$2"; shift ;;
         -h|--help) usage ;;
         *) echo "Unknown parameter passed: $1"; usage ;;
     esac
@@ -73,14 +88,38 @@ if [ -z "$MODEL_NAME" ] || [ -z "$USE_MOE_EP_KERNEL" ] || [ -z "$TENSOR_PARALLEL
     usage
 fi
 
-model_args_json=$(printf '{"pretrained": "%s", "tensor_parallel_size": %d, "max_model_len": %d, "max_num_batched_tokens": %d, "max_gen_toks": %d, "enable_expert_parallel": %d}' "$MODEL_NAME" "$TENSOR_PARALLEL_SIZE" "$MAX_MODEL_LEN" "$MAX_NUM_BATCHED_TOKENS" "$MAX_GEN_TOKS" "$ENABLE_EXPERT_PARALLEL")
-output=$(VLLM_XLA_CHECK_RECOMPILATION=0 USE_MOE_EP_KERNEL=${USE_MOE_EP_KERNEL} MODEL_IMPL_TYPE=vllm lm_eval \
-    --model vllm \
-    --model_args "${model_args_json}" \
-    --tasks gsm8k_cot \
-    --batch_size auto \
-    --apply_chat_template \
-    --num_fewshot 8)
+extra_json=""
+if [ -n "$LIMIT_MM_PER_PROMPT" ]; then
+    extra_json+=$(printf ', "limit_mm_per_prompt": %s' "$LIMIT_MM_PER_PROMPT")
+fi
+if [ -n "$HF_OVERRIDES" ]; then
+    extra_json+=$(printf ', "hf_overrides": %s' "$HF_OVERRIDES")
+fi
+if [ -n "$BLOCK_SIZE" ]; then
+    extra_json+=$(printf ', "block_size": %s' "$BLOCK_SIZE")
+fi
+if [ -n "$ENABLE_THINKING" ]; then
+    extra_json+=$(printf ', "enable_thinking": %s' "$ENABLE_THINKING")
+fi
+
+
+model_args_json=$(printf '{"pretrained": "%s", "tensor_parallel_size": %d, "max_model_len": %d, "max_num_batched_tokens": %d, "max_gen_toks": %d, "enable_expert_parallel": %d%s}' "$MODEL_NAME" "$TENSOR_PARALLEL_SIZE" "$MAX_MODEL_LEN" "$MAX_NUM_BATCHED_TOKENS" "$MAX_GEN_TOKS" "$ENABLE_EXPERT_PARALLEL" "$extra_json")
+# Build lm_eval arguments
+lm_eval_args=(
+    --model vllm
+    --model_args "${model_args_json}"
+    --tasks gsm8k_cot
+    --batch_size auto
+    --apply_chat_template
+    --num_fewshot 8
+)
+
+# Append --limit if provided
+if [ -n "$LIMIT" ]; then
+    lm_eval_args+=(--limit "$LIMIT")
+fi
+
+output=$(VLLM_XLA_CHECK_RECOMPILATION=0 USE_MOE_EP_KERNEL=${USE_MOE_EP_KERNEL} MODEL_IMPL_TYPE=vllm lm_eval "${lm_eval_args[@]}")
 
 echo "Evaluation output:"
 echo "$output"

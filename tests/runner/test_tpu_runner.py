@@ -17,8 +17,10 @@ from unittest.mock import MagicMock, patch
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
+from vllm.config.multimodal import BaseDummyOptions
 
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
@@ -45,7 +47,6 @@ class TestTPUJaxRunner:
             cache_config = CacheConfig(
                 block_size=16,
                 gpu_memory_utilization=0.9,
-                swap_space=4,
                 cache_dtype="auto",
             )
             scheduler_config = SchedulerConfig(max_num_seqs=16,
@@ -83,6 +84,7 @@ class TestTPUJaxRunner:
         # 1. ===== Setup =====
         dummy_input_ids = jnp.array([1, 2, 3])
         dummy_mm_embeds = jnp.ones((10, 128))
+        dummy_is_mm_embed = jnp.array([False, True, True], dtype=jnp.bool_)
         dummy_final_embeds = jnp.ones((3, 128))
 
         # Mock the embedding function
@@ -95,20 +97,36 @@ class TestTPUJaxRunner:
         self.runner.is_multimodal_model = True
 
         input_ids_res, inputs_embeds_res = self.runner._get_input_ids_embeds(
-            dummy_input_ids, dummy_mm_embeds)
+            dummy_input_ids, dummy_mm_embeds, dummy_is_mm_embed)
 
         assert input_ids_res is None
         np.testing.assert_array_equal(np.asarray(inputs_embeds_res),
                                       np.asarray(dummy_final_embeds))
         self.mock_get_input_embed_fn.assert_called_once_with(
-            self.runner.state, dummy_input_ids, dummy_mm_embeds)
+            self.runner.state,
+            dummy_input_ids,
+            dummy_mm_embeds,
+            is_multimodal=dummy_is_mm_embed)
 
-        # 3. ===== Act & Assert (Text-only) =====
+        # 3. ===== Act & Assert (Multimodal w/o mm embeds) =====
+        self.mock_get_input_embed_fn.reset_mock()
+        self.runner.is_multimodal_model = True
+
+        # Without mm_embeds in the current scheduled tokens
+        input_ids_res, inputs_embeds_res = self.runner._get_input_ids_embeds(
+            dummy_input_ids, None, None)
+
+        assert inputs_embeds_res is None
+        np.testing.assert_array_equal(np.asarray(input_ids_res),
+                                      np.asarray(dummy_input_ids))
+        self.mock_get_input_embed_fn.assert_not_called()
+
+        # 4. ===== Act & Assert (Text-only) =====
         self.mock_get_input_embed_fn.reset_mock()
         self.runner.is_multimodal_model = False
 
         input_ids_res, inputs_embeds_res = self.runner._get_input_ids_embeds(
-            dummy_input_ids, dummy_mm_embeds)
+            dummy_input_ids, dummy_mm_embeds, dummy_is_mm_embed)
 
         assert inputs_embeds_res is None
         np.testing.assert_array_equal(np.asarray(input_ids_res),
@@ -190,7 +208,8 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
              patch('jax.random.key', return_value=self.mock_rng_key), \
              patch('tpu_inference.runner.tpu_runner.nnx.Rngs', return_value=self.mock_rng_key), \
              patch('tpu_inference.runner.tpu_runner.get_model', return_value=self._model_get_model()), \
-             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh', return_value=self.mock_mesh):
+             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh', return_value=self.mock_mesh), \
+             patch('jax.device_put', side_effect=lambda x, *args, **kwargs: x):
 
             model_config = ModelConfig(tokenizer_mode="auto",
                                        trust_remote_code=False,
@@ -202,7 +221,6 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
             cache_config = CacheConfig(
                 block_size=16,
                 gpu_memory_utilization=0.9,
-                swap_space=4,
                 cache_dtype="auto",
             )
             scheduler_config = SchedulerConfig(max_num_seqs=16,
@@ -256,5 +274,106 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
         self.runner.embed_input_ids_fn = MagicMock()
         dummy_input_ids = jnp.array([1, 2, 3])
         dummy_mm_embeds = jnp.ones((10, 128))
-        _ = self.runner._get_input_ids_embeds(dummy_input_ids, dummy_mm_embeds)
+        dummy_is_mm_embed = jnp.array([False, True, True], dtype=jnp.bool_)
+        _ = self.runner._get_input_ids_embeds(dummy_input_ids, dummy_mm_embeds,
+                                              dummy_is_mm_embed)
         self.runner.embed_input_ids_fn.assert_not_called()
+
+
+class TestTPUJaxRunnerDisableMM:
+
+    def setup_method(self):
+        # Mock JAX dependencies
+        self.mock_devices = [MagicMock(coords=i) for i in range(4)]
+        self.mock_rng_key = MagicMock()
+        device_array = np.array(jax.devices()[:1]).reshape(1, 1, 1, -1)
+        self.mock_mesh = jax.make_mesh(device_array.shape,
+                                       ('data', 'attn_dp', 'expert', 'model'))
+
+    def _model_get_model(self):
+        mock_multimodal_fns = {
+            "precompile_vision_encoder_fn": None,
+            "embed_multimodal_fn": MagicMock(),
+            "embed_input_ids_fn": MagicMock(),
+            "get_mrope_input_positions_fn": None
+        }
+        return (
+            MagicMock(),  # TPUModelRunner.model_fn
+            MagicMock(),  # TPUModelRunner.compute_logits_fn
+            MagicMock(),  # TPUModelRunner.pooler_fn
+            MagicMock(),  # TPUModelRunner.combine_hidden_states_fn
+            mock_multimodal_fns,  # TPUModelRunner.multimodal_fns
+            MagicMock(),  # TPUModelRunner.state (model params)
+            None,  # TPUModelRunner.lora_manager
+            None,  # TPUModelRunner.model
+        )
+
+    @pytest.mark.parametrize(
+        "limit_per_prompt, still_mm_after_loading_model",
+        [
+            ({
+                "image": BaseDummyOptions(count=0),
+                "video": BaseDummyOptions(count=0)
+            }, False),
+            ({
+                "video": BaseDummyOptions(count=0)
+            }, False),
+            ({
+                "image": BaseDummyOptions(count=0),
+                "video": BaseDummyOptions(count=1)
+            }, True),
+            (
+                {
+                    # Empty limit means no limit, which should not disable MM.
+                },
+                True)
+        ])
+    def test_multimodal_model_loading_with_limits(
+            self, limit_per_prompt, still_mm_after_loading_model):
+        """Test that "--limit-mm-per-prompt" config can disable multi-modality for a multi-modal model.
+
+        If an user *explicitly* sets the limit for all modalities to 0, then we can safely disable multi-modality even if the model itself claims to be multimodal.
+        """
+        with patch('jax.devices', return_value=self.mock_devices), \
+             patch('jax.make_mesh', return_value=self.mock_mesh), \
+             patch('jax.random.key', return_value=self.mock_rng_key), \
+             patch('tpu_inference.runner.tpu_runner.nnx.Rngs', return_value=self.mock_rng_key), \
+             patch('tpu_inference.runner.tpu_runner.get_model', return_value=self._model_get_model()), \
+             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh', return_value=self.mock_mesh), \
+             patch('jax.device_put', side_effect=lambda x, *args, **kwargs: x):
+
+            model_config = ModelConfig(tokenizer_mode="auto",
+                                       trust_remote_code=False,
+                                       seed=0,
+                                       dtype='bfloat16')
+            model_config.multimodal_config = MagicMock()
+            model_config.multimodal_config.limit_per_prompt = limit_per_prompt
+
+            cache_config = CacheConfig(
+                block_size=16,
+                gpu_memory_utilization=0.9,
+                cache_dtype="auto",
+            )
+            scheduler_config = SchedulerConfig(max_num_seqs=16,
+                                               max_model_len=1024,
+                                               is_encoder_decoder=False)
+            parallel_config = ParallelConfig(
+                pipeline_parallel_size=1,
+                tensor_parallel_size=1,
+            )
+            vllm_config = VllmConfig(
+                model_config=model_config,
+                cache_config=cache_config,
+                scheduler_config=scheduler_config,
+                parallel_config=parallel_config,
+                speculative_config=None,
+                observability_config={},
+                additional_config={},
+            )
+
+            runner = TPUModelRunner(vllm_config, devices=self.mock_devices)
+            # Precondition: make sure the model_config claims the model supports MM.
+            assert runner.model_config.is_multimodal_model
+            runner.load_model()
+
+            assert runner.is_multimodal_model == still_mm_after_loading_model

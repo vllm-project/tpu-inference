@@ -19,7 +19,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
-from transformers import LlamaConfig, modeling_flax_utils
+from transformers import LlamaConfig
 from vllm.config import VllmConfig
 
 from tpu_inference import utils
@@ -28,6 +28,7 @@ from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.logger import init_logger
@@ -39,6 +40,7 @@ from tpu_inference.utils import get_mesh_shape_product
 logger = init_logger(__name__)
 
 init_fn = nnx.initializers.uniform()
+modeling_flax_utils = FlaxUtils()
 
 
 class LlamaMLP(nnx.Module):

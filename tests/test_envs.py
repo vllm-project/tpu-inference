@@ -63,6 +63,7 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ENABLE_QUANTIZED_MATMUL_KERNEL", "0")
     monkeypatch.setenv("USE_MOE_EP_KERNEL", "0")
     monkeypatch.setenv("LAYOUT_Q_PROJ_AS_NDH", "0")
+    monkeypatch.setenv("USE_BATCHED_RPA_KERNEL", "0")
 
     # Test SKIP_JAX_PRECOMPILE (default False)
     assert envs.SKIP_JAX_PRECOMPILE is False
@@ -97,6 +98,11 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert envs.LAYOUT_Q_PROJ_AS_NDH is False
     monkeypatch.setenv("LAYOUT_Q_PROJ_AS_NDH", "1")
     assert envs.LAYOUT_Q_PROJ_AS_NDH is True
+
+    # Test USE_BATCHED_RPA_KERNEL (default False)
+    assert envs.USE_BATCHED_RPA_KERNEL is False
+    monkeypatch.setenv("USE_BATCHED_RPA_KERNEL", "1")
+    assert envs.USE_BATCHED_RPA_KERNEL is True
 
 
 def test_boolean_env_vars_string_values(monkeypatch: pytest.MonkeyPatch):
@@ -209,6 +215,12 @@ def test_model_impl_type_choices(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("MODEL_IMPL_TYPE", "vllm")
     assert envs.MODEL_IMPL_TYPE == "vllm"
 
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "flax_nnx")
+    assert envs.DRAFT_MODEL_IMPL_TYPE == "flax_nnx"
+
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "vllm")
+    assert envs.DRAFT_MODEL_IMPL_TYPE == "vllm"
+
 
 def test_string_env_vars_defaults(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("JAX_PLATFORMS", raising=False)
@@ -236,9 +248,9 @@ def test_none_default_env_vars(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_ray_env_vars(monkeypatch: pytest.MonkeyPatch):
-    assert envs.RAY_USAGE_STATS_ENABLED == "0"
+    assert not envs.RAY_USAGE_STATS_ENABLED
     monkeypatch.setenv("RAY_USAGE_STATS_ENABLED", "1")
-    assert envs.RAY_USAGE_STATS_ENABLED == "1"
+    assert envs.RAY_USAGE_STATS_ENABLED
 
     assert envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE == "shm"
 

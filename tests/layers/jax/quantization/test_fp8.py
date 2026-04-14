@@ -273,7 +273,7 @@ class TestFp8BlockwiseJaxLinear:
         )
 
         devices = jax.devices()
-        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
+        mesh = jax.sharding.Mesh(np.array(devices).reshape(1, -1), ('data', 'model'))
         with jax.set_mesh(mesh):
             assert layer.quant_method.process_weights_after_loading(layer)
 
@@ -303,7 +303,7 @@ class TestFp8BlockwiseJaxLinear:
         )
 
         devices = jax.devices()
-        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
+        mesh = jax.sharding.Mesh(np.array(devices).reshape(1, -1), ('data', 'model'))
         with jax.set_mesh(mesh):
             assert layer.quant_method.process_weights_after_loading(layer)
 
@@ -387,7 +387,7 @@ class TestFp8TensorwiseJaxLinear:
         )
 
         devices = jax.devices()
-        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
+        mesh = jax.sharding.Mesh(np.array(devices).reshape(1, -1), ('data', 'model'))
         with jax.set_mesh(mesh):
             x = jax.random.normal(rngs.params(), (batch_size, N, H))
             output = layer(x)
@@ -423,7 +423,7 @@ class TestFp8TensorwiseJaxLinear:
         input_shape = tuple(dim_sizes[d] for d in input_dims)
 
         devices = jax.devices()
-        mesh = jax.sharding.Mesh(np.array(devices), ('device', ))
+        mesh = jax.sharding.Mesh(np.array(devices).reshape(1, -1), ('data', 'model'))
         with jax.set_mesh(mesh):
             x = jax.random.normal(rngs.params(), input_shape,
                                   dtype=jnp.bfloat16)

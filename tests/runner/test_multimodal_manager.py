@@ -53,7 +53,6 @@ class TestMultiModalManager:
             cache_config = CacheConfig(
                 block_size=16,
                 gpu_memory_utilization=0.9,
-                swap_space=4,
                 cache_dtype="auto",
             )
             scheduler_config = SchedulerConfig(max_num_seqs=16,
@@ -143,24 +142,19 @@ class TestMultiModalManager:
         call_args = self.mock_get_mm_embed_fn.call_args
 
         # Positional args: (state, image_grid_thw)
-        state_arg, grid_arg = call_args.args
+        state_arg, = call_args.args
         # Keyword args: **batched_mm_inputs
         kwargs_arg = call_args.kwargs
 
         assert state_arg == self.runner.state
-        assert grid_arg == ((1, 1, 1), )
+        assert "image_grid_thw" in kwargs_arg
         assert "pixel_values" in kwargs_arg
 
         # Verify the pixel values tensor passed to the mock
         passed_pixel_values = kwargs_arg['pixel_values']
-        assert isinstance(passed_pixel_values, np.ndarray)
-        assert passed_pixel_values.dtype == jnp.bfloat16
-
-        # Convert torch tensor for comparison
-        expected_pixel_values = dummy_pixel_values.unsqueeze(0).to(
-            torch.float32).numpy().astype(jnp.bfloat16)
-        np.testing.assert_array_equal(np.asarray(passed_pixel_values),
-                                      expected_pixel_values)
+        assert isinstance(passed_pixel_values, torch.Tensor)
+        assert passed_pixel_values.shape == (1, 3, 224, 224)
+        assert torch.equal(passed_pixel_values[0], dummy_pixel_values)
 
     def test_execute_mm_encoder_multiple_images(self):
         import torch
@@ -254,20 +248,18 @@ class TestMultiModalManager:
         self.mock_get_mm_embed_fn.assert_called_once()
         call_args = self.mock_get_mm_embed_fn.call_args
 
-        state_arg, grid_arg = call_args.args
+        state_arg, = call_args.args
         kwargs_arg = call_args.kwargs
 
         assert state_arg == self.runner.state
-        assert grid_arg == ((1, 1, 1), (1, 2, 2))
+        assert "image_grid_thw" in kwargs_arg
         assert "pixel_values" in kwargs_arg
 
         passed_pixel_values = kwargs_arg['pixel_values']
+        assert isinstance(passed_pixel_values, torch.Tensor)
         assert passed_pixel_values.shape == (2, 3, 224, 224)
-
-        expected_pixel_values = torch.stack([px_1, px_2], dim=0).to(
-            torch.float32).numpy().astype(jnp.bfloat16)
-        np.testing.assert_array_equal(np.asarray(passed_pixel_values),
-                                      expected_pixel_values)
+        assert torch.equal(passed_pixel_values[0], px_1)
+        assert torch.equal(passed_pixel_values[1], px_2)
 
     def test_gather_mm_embeddings_chunked_prefill(self):
         """Tests _gather_mm_embeddings with chunked prefill scenarios."""
@@ -293,9 +285,14 @@ class TestMultiModalManager:
         mock_sampling_params.all_stop_token_ids = set()
 
         # Mock request state
+        prompt_token_len = 100
+        mm_position = PlaceholderRange(offset=10, length=56)
+        is_mm_embed_cpu = np.zeros(prompt_token_len, dtype=np.bool_)
+        is_mm_embed_cpu[mm_position.offset:mm_position.offset +
+                        mm_position.length] = True
         req_state = CachedRequestState(
             req_id=req_id,
-            prompt_token_ids=list(range(100)),
+            prompt_token_ids=list(range(prompt_token_len)),
             output_token_ids=[],
             sampling_params=mock_sampling_params,
             block_ids=([], ),
@@ -304,8 +301,7 @@ class TestMultiModalManager:
                 MultiModalFeatureSpec(data=None,
                                       identifier=req_id,
                                       modality="image",
-                                      mm_position=PlaceholderRange(offset=10,
-                                                                   length=56))
+                                      mm_position=mm_position)
             ],
             lora_request=None,
             pooling_params=None,
@@ -319,41 +315,69 @@ class TestMultiModalManager:
         # ----- Step 1: First chunk of prefill -----
         req_state.num_computed_tokens = 0
         mock_scheduler_output_1 = MagicMock(spec=VllmSchedulerOutput)
+        mock_scheduler_output_1.total_num_scheduled_tokens = 20
         mock_scheduler_output_1.num_scheduled_tokens = {req_id: 20}
 
-        gathered_embeds_1 = self.runner.mm_manager.gather_mm_embeddings(
-            mock_scheduler_output_1, target_pad_len=10)
+        gathered_embeds_1_padded, gathered_is_mm_embed_1 = self.runner.mm_manager.gather_mm_embeddings(
+            mock_scheduler_output_1,
+            target_pad_len=mock_scheduler_output_1.total_num_scheduled_tokens)
 
+        assert gathered_embeds_1_padded is not None
+        assert gathered_is_mm_embed_1 is not None
         expected_embeds_1 = encoder_embedding[0:10]
+        assert gathered_embeds_1_padded.shape[
+            0] == mock_scheduler_output_1.total_num_scheduled_tokens
+        gathered_embeds_1 = gathered_embeds_1_padded[:10]
         assert gathered_embeds_1.shape == expected_embeds_1.shape
         np.testing.assert_array_equal(np.asarray(gathered_embeds_1),
                                       np.asarray(expected_embeds_1))
+        assert gathered_is_mm_embed_1.shape == (20, )
+        np.testing.assert_array_equal(np.asarray(gathered_is_mm_embed_1),
+                                      is_mm_embed_cpu[:20])
 
         # ----- Step 2: Middle chunk of prefill -----
         req_state.num_computed_tokens = 20
         mock_scheduler_output_2 = MagicMock(spec=VllmSchedulerOutput)
+        mock_scheduler_output_2.total_num_scheduled_tokens = 30
         mock_scheduler_output_2.num_scheduled_tokens = {req_id: 30}
 
-        gathered_embeds_2 = self.runner.mm_manager.gather_mm_embeddings(
-            mock_scheduler_output_2, target_pad_len=30)
+        gathered_embeds_2_padded, gathered_is_mm_embed_2 = self.runner.mm_manager.gather_mm_embeddings(
+            mock_scheduler_output_2,
+            target_pad_len=mock_scheduler_output_2.total_num_scheduled_tokens)
 
+        assert gathered_embeds_2_padded is not None
+        assert gathered_is_mm_embed_2 is not None
         expected_embeds_2 = encoder_embedding[10:40]
-        assert gathered_embeds_2.shape == expected_embeds_2.shape
+        assert gathered_embeds_2_padded.shape[
+            0] == mock_scheduler_output_2.total_num_scheduled_tokens
+        gathered_embeds_2 = gathered_embeds_2_padded[:30]
         np.testing.assert_array_equal(np.asarray(gathered_embeds_2),
                                       np.asarray(expected_embeds_2))
+        assert gathered_is_mm_embed_2.shape == (30, )
+        np.testing.assert_array_equal(np.asarray(gathered_is_mm_embed_2),
+                                      is_mm_embed_cpu[20:50])
 
         # ----- Step 3: Last chunk of prefill -----
         req_state.num_computed_tokens = 50
         mock_scheduler_output_3 = MagicMock(spec=VllmSchedulerOutput)
+        mock_scheduler_output_3.total_num_scheduled_tokens = 30
         mock_scheduler_output_3.num_scheduled_tokens = {req_id: 30}
 
-        gathered_embeds_3 = self.runner.mm_manager.gather_mm_embeddings(
-            mock_scheduler_output_3, target_pad_len=16)
+        gathered_embeds_3_padded, gathered_is_mm_embed_3 = self.runner.mm_manager.gather_mm_embeddings(
+            mock_scheduler_output_3,
+            target_pad_len=mock_scheduler_output_3.total_num_scheduled_tokens)
 
+        assert gathered_embeds_3_padded is not None
+        assert gathered_is_mm_embed_3 is not None
         expected_embeds_3 = encoder_embedding[40:56]
-        assert gathered_embeds_3.shape == expected_embeds_3.shape
+        assert gathered_embeds_3_padded.shape[
+            0] == mock_scheduler_output_3.total_num_scheduled_tokens
+        gathered_embeds_3 = gathered_embeds_3_padded[:16]
         np.testing.assert_array_equal(np.asarray(gathered_embeds_3),
                                       np.asarray(expected_embeds_3))
+        assert gathered_is_mm_embed_3.shape == (30, )
+        np.testing.assert_array_equal(np.asarray(gathered_is_mm_embed_3),
+                                      is_mm_embed_cpu[50:80])
 
     def test_calc_mrope_positions(self):
         """Tests the calculation of M-RoPE positions for mixed prompt/completion."""

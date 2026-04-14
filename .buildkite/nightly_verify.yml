@@ -32,7 +32,7 @@ steps:
      allow_dependency_failure: true 
      agents: { queue: cpu }
      env:
-       TPU_VERSION: "v6"
+       TPU_VERSION: "v6e"
      command: |
       if [ "$(buildkite-agent meta-data get run_v6_matrix --default 'false')" = "true" ]; then
           bash .buildkite/scripts/generate_support_matrices.sh
@@ -46,7 +46,7 @@ steps:
      allow_dependency_failure: true 
      agents: { queue: cpu }
      env:
-      TPU_VERSION: "v7"
+      TPU_VERSION: "v7x"
      command: |
       if [ "$(buildkite-agent meta-data get run_v7_matrix --default 'false')" = "true" ]; then
         bash .buildkite/scripts/generate_support_matrices.sh

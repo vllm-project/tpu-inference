@@ -22,7 +22,6 @@ import jax.numpy as jnp
 import torch
 from flax import nnx
 from jax.sharding import PartitionSpec as P
-from torchax.ops.mappings import t2j
 
 from tpu_inference.layers.common.linear import sharded_quantized_batched_matmul
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
@@ -45,6 +44,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
     jax_array_from_reshaped_torch, load_nnx_param_from_reshaped_torch,
     shard_put)
+from tpu_inference.utils import t2j
 
 logger = init_logger(__name__)
 
@@ -199,7 +199,8 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             # Weight stays in FP8 and is used with sharded_quantized_batched_matmul.
             param_dtype = jnp.float8_e4m3
             layer.weight = nnx.Param(
-                kernel_init(rngs.params(), self.kernel_shape, param_dtype),
+                nnx.initializers.uniform()(rngs.params(), self.kernel_shape,
+                                           param_dtype),
                 weight_loader=partial(load_nnx_param_from_reshaped_torch,
                                       permute_dims=None,
                                       param_name=layer.prefix + ".weight"),
@@ -284,7 +285,11 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 weight_scale_inv,
                 bias=bias,
                 weight_block_size=tuple(self.quant_config.weight_block_size),
-                linear_config=self.linear_config)
+                requant_block_size=self.linear_config.requant_block_size,
+                output_sizes=tuple(self.linear_config.output_sizes),
+                requant_weight_dtype=self.linear_config.requant_weight_dtype,
+                fuse_matmuls=self.linear_config.fuse_matmuls,
+                n_shards=self.linear_config.n_shards)
             delattr(layer, 'weight')
             delattr(layer, 'weight_scale_inv')
             delattr(layer, 'bias')
@@ -517,10 +522,6 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 w13_weight = jnp.concatenate([w_gate, w_up], axis=1)
                 w13_weight_scale = jnp.concatenate([s_gate, s_up], axis=1)
 
-                weight_block_size = None
-                if self.weight_block_size is not None:
-                    weight_block_size = tuple(self.weight_block_size)
-
                 # TODO (jacobplatin): we should support bias
                 input_weights = FusedMoEWeights(
                     w13_weight=w13_weight,
@@ -535,8 +536,8 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                     moe_backend=layer.moe_backend,
                     mesh=layer.mesh,
                     activation=layer.activation,
-                    # Convert to tuple so jax jit can hash it
-                    weight_block_size=weight_block_size,
+                    # Source block size should be inferred from scale shape
+                    weight_block_size=None,
                 )
 
             del layer.kernel_gating_EDF
@@ -572,7 +573,8 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
 
         return True
 
-    def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
+    def apply_jax(self, layer: JaxModule, x: jax.Array, *,
+                  router_logits: jax.Array) -> jax.Array:
         """
         Run the forward pass of the MoE layer.
 
@@ -591,11 +593,9 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
             jax.sharding.NamedSharding(layer.mesh,
                                        P(*layer.activation_ffw_td)))
 
-        router_logits = None
         # Fused weight backends
         if layer.moe_backend in FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS:
-            # of shape TE -- we don't return the indices
-            router_logits = layer.router(x_TD)
+            # router_logits is of shape TE -- we don't return the indices
 
             if layer.moe_backend == MoEBackend.FUSED_MOE:
                 w13_weight = layer.kernel_gating_upproj_E2DF[...]

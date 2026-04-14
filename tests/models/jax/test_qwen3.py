@@ -21,7 +21,7 @@ import torch
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from transformers import AutoModelForCausalLM
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, set_current_vllm_config
 from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
 from tpu_inference.distributed.jax_parallel_state import \
@@ -46,6 +46,7 @@ class MockVllmConfig:
         self.cache_config = MagicMock(cache_dtype=kv_cache_dtype)
         self.quant_config = None
         self.additional_config = {}
+        self.parallel_config = None
 
 
 @pytest.fixture(scope="module")
@@ -181,7 +182,7 @@ class TestQwen3ForCausalLM:
         assert mlp.down_proj.weight.shape == (intermediate_size, hidden_size)
 
         # Test model load
-        with jax.set_mesh(mesh):
+        with jax.set_mesh(mesh), set_current_vllm_config(mock_vllm_config):
             loader = get_model_loader(LoadConfig(load_format="hf"))
             loader.load_weights(model, model_config)
 
@@ -216,19 +217,57 @@ class TestQwen3ForCausalLM:
         logits = model.compute_logits(hidden_states)
         assert logits.shape == (1, hf_config.vocab_size)
 
+    def test_expected_error_with_tight_threshold(
+            self, rng, mesh, mock_vllm_config,
+            assert_weight_loading_memory_bounded):
+        """Verifies assert_weight_loading_memory_bounded raises on an
+        unreasonably tight threshold, ensuring the guard itself works."""
+        model_name = "Qwen/Qwen3-0.6B"
+        kv_cache_type = "auto"
+        config = mock_vllm_config(model_name, kv_cache_type)
+        config.model_config.hf_config.num_hidden_layers = 4
+        config.load_config.load_format = "skip_layers_model_loader_for_test"
+        config.load_config.num_layers_to_load_for_test = 4
+        config.parallel_config = None
+
+        init_pp_distributed_environment(
+            ip="",
+            rank=0,
+            world_size=1,
+            device=jax.devices()[0],
+            need_pp=False,
+        )
+
+        with jax.set_mesh(mesh):
+            model = Qwen3ForCausalLM(config, rng, mesh)
+            loader = get_model_loader(config.load_config)
+
+            with pytest.raises(AssertionError, match="exceeded threshold"):
+                with assert_weight_loading_memory_bounded(
+                        model,
+                        description=f"load_weights({model_name})",
+                        threshold_multiplier=0.001,
+                        min_threshold_bytes=1,
+                ), set_current_vllm_config(config):
+                    loader.load_weights(model, config.model_config)
+
     @pytest.mark.parametrize("model_name",
                              ["Qwen/Qwen3-0.6B", "Qwen/Qwen3-0.6B-FP8"])
     @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
                                                        (3, 4)])
-    def test_model_loading(self, model_name, pp_rank, pp_world_size, rng, mesh,
-                           mock_vllm_config):
+    @pytest.mark.parametrize(
+        "load_format", ["skip_layers_model_loader_for_test", "jax_dummy"])
+    def test_model_loading(self, model_name, pp_rank, pp_world_size,
+                           load_format, rng, mesh, mock_vllm_config,
+                           assert_weight_loading_memory_bounded):
         """Tests loading weights from HF model"""
         kv_cache_type = "auto"
         mock_vllm_config = mock_vllm_config(model_name, kv_cache_type)
         # No need to load full model.
         mock_vllm_config.model_config.hf_config.num_hidden_layers = 4
-        mock_vllm_config.load_config.load_format = "skip_layers_model_loader_for_test"
+        mock_vllm_config.load_config.load_format = load_format
         mock_vllm_config.load_config.num_layers_to_load_for_test = 4
+        mock_vllm_config.parallel_config = None
 
         init_pp_distributed_environment(
             ip="",
@@ -251,9 +290,17 @@ class TestQwen3ForCausalLM:
 
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
-            # load weights from HF model
+
+            # load weights from HF model, monitoring device memory
             loader = get_model_loader(mock_vllm_config.load_config)
-            loader.load_weights(model, model_config)
+            # Monitor device memory during weight loading to catch
+            # regressions.
+            with assert_weight_loading_memory_bounded(
+                    model,
+                    description=f"load_weights({model_name})",
+                    threshold_multiplier=0.3,
+            ), set_current_vllm_config(mock_vllm_config):
+                loader.load_weights(model, model_config)
 
         layer_idx = model.model.start_layer
         jax_layer_0 = model.model.layers[layer_idx]
