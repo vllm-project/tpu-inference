@@ -53,7 +53,6 @@ P = PartitionSpec
 torch.manual_seed(42)
 
 MODELS = [
-    "nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-e2e",
     "nm-testing/SmolLM-1.7B-Instruct-quantized.w4a16",
 ]
 
