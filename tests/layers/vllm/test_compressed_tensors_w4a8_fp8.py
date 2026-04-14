@@ -58,10 +58,8 @@ MODELS = [
 ]
 
 
-def ref_w4a8_fp8_dynamic(
-        x: torch.Tensor,
-        w_float: torch.Tensor,
-        b: Optional[torch.Tensor]):
+def ref_w4a8_fp8_dynamic(x: torch.Tensor, w_float: torch.Tensor,
+                         b: Optional[torch.Tensor]):
 
     x_q, x_s = test_utils.ref_quantize_fp8(x, dtype=torch.float8_e4m3fn)
 

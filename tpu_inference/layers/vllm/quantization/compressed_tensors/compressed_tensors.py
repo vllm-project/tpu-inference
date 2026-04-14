@@ -32,10 +32,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
 from tpu_inference.layers.common.quant_methods import COMPRESSED_TENSORS
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors_moe import \
     VllmCompressedTensorsMoEMethod
-from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
-    VllmCompressedTensorsW8A8Fp8
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w4a8_fp8 import \
     VllmCompressedTensorsW4A8Fp8
+from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
+    VllmCompressedTensorsW8A8Fp8
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_int8 import \
     VllmCompressedTensorsW8A8Int8
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
