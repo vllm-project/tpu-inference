@@ -182,7 +182,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
             num_scheduled_tokens, assigned_dp_ranks)
 
         mock_runner_utils.get_padded_token_len.return_value = 16
-        mock_sampling_metadata.from_input_batch.return_value = MagicMock()
+        mock_sampling_metadata.from_unpacked_arrays.return_value = MagicMock()
         self.runner.uses_mrope = True
 
         mock_mesh = MagicMock(spec=Mesh)
@@ -194,6 +194,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         assert len(result) == 8
 
+    @patch('jax.device_put', side_effect=lambda x, y: x)
     @patch('tpu_inference.runner.tpu_runner.NamedSharding')
     @patch('tpu_inference.runner.tpu_runner.runner_utils')
     @patch('tpu_inference.runner.tpu_runner.device_array',
@@ -205,7 +206,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         """Test basic functionality of _prepare_inputs_dp."""
         # Mock utility functions
         mock_runner_utils.get_padded_token_len.return_value = 16
-        mock_sampling_metadata.from_input_batch.return_value = MagicMock()
+        mock_sampling_metadata.from_unpacked_arrays.return_value = MagicMock()
         mock_named_sharding.return_value = MagicMock()
 
         # Create test data - only use req1 and req2 to match num_reqs=2
@@ -255,7 +256,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         """Test basic functionality of _prepare_inputs_dp."""
         # Mock utility functions
         mock_runner_utils.get_padded_token_len.return_value = 16
-        mock_sampling_metadata.from_input_batch.return_value = MagicMock()
+        mock_sampling_metadata.from_unpacked_arrays.return_value = MagicMock()
         mock_named_sharding.return_value = MagicMock()
 
         # Create test data - only use req1 and req2 to match num_reqs=2
@@ -505,7 +506,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         mock_runner_utils.get_padded_token_len.side_effect = mock_get_padded_token_len
         mock_sampling_instance = MagicMock()
-        mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
+        mock_sampling_metadata.from_unpacked_arrays.return_value = mock_sampling_instance
         mock_named_sharding.return_value = MagicMock()
 
         # Setup deterministic test data
@@ -618,7 +619,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         mock_runner_utils.get_padded_token_len.side_effect = mock_get_padded_token_len
         mock_sampling_instance = MagicMock()
-        mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
+        mock_sampling_metadata.from_unpacked_arrays.return_value = mock_sampling_instance
         mock_named_sharding.return_value = MagicMock()
 
         # Setup test data with all requests on rank 0 (empty rank 1)
@@ -744,7 +745,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         mock_runner_utils.get_padded_token_len.side_effect = mock_get_padded_token_len
         mock_sampling_instance = MagicMock()
-        mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
+        mock_sampling_metadata.from_unpacked_arrays.return_value = mock_sampling_instance
         mock_named_sharding.return_value = MagicMock()
 
         # Setup test data with decode requests (1 token) and prefill requests (>1 token)
@@ -806,7 +807,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         mock_runner_utils.get_padded_token_len.side_effect = mock_get_padded_token_len
         mock_sampling_instance = MagicMock()
-        mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
+        mock_sampling_metadata.from_unpacked_arrays.return_value = mock_sampling_instance
         mock_named_sharding.return_value = MagicMock()
 
         # All requests are decode (1 token each)
@@ -1043,7 +1044,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         mock_runner_utils.get_padded_token_len.side_effect = mock_get_padded_token_len
         mock_sampling_instance = MagicMock()
-        mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
+        mock_sampling_metadata.from_unpacked_arrays.return_value = mock_sampling_instance
         mock_named_sharding.return_value = MagicMock()
 
         # Setup test data
@@ -1116,7 +1117,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         mock_runner_utils.get_padded_token_len.side_effect = mock_get_padded_token_len
         mock_sampling_instance = MagicMock()
-        mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
+        mock_sampling_metadata.from_unpacked_arrays.return_value = mock_sampling_instance
         mock_named_sharding.return_value = MagicMock()
 
         # Setup test data
@@ -1322,7 +1323,7 @@ class TestSamplingMetadataPassthrough:
             runner)
 
         mock_runner_utils.get_padded_token_len.side_effect = lambda paddings, val: 8
-        mock_sampling_metadata.from_input_batch.return_value = MagicMock()
+        mock_sampling_metadata.from_unpacked_arrays.return_value = MagicMock()
         mock_named_sharding.return_value = MagicMock()
 
         scheduler_output = MagicMock()
@@ -1335,13 +1336,10 @@ class TestSamplingMetadataPassthrough:
 
         TPUModelRunner._prepare_inputs_dp(runner, scheduler_output)
 
-        # Verify from_input_batch was called exactly once with the ATTN_DATA sharding
-        mock_sampling_metadata.from_input_batch.assert_called_once()
-        sharding_arg = mock_sampling_metadata.from_input_batch.call_args.kwargs.get(
-            'sharding')
-        assert sharding_arg is mock_named_sharding.return_value, (
-            "from_input_batch should receive the data_parallel_attn_sharding instance"
-        )
+        # Verify from_unpacked_arrays was called exactly once
+        mock_sampling_metadata.from_unpacked_arrays.assert_called_once()
+        # Verify add_to_device_buffer was called exactly once
+        mock_sampling_metadata.add_to_device_buffer.assert_called_once()
 
         # Verify NamedSharding was called with ATTN_DATA PartitionSpec.
         call_partition_specs = [
@@ -1387,9 +1385,9 @@ class TestSamplingMetadataPassthrough:
                 padded_num_reqs=8,
             )
         except Exception:
-            pass  # only care that from_input_batch was never called
+            pass  # only care that from_unpacked_arrays was never called
 
-        mock_sampling_metadata.from_input_batch.assert_not_called()
+        mock_sampling_metadata.from_unpacked_arrays.assert_not_called()
 
 
 if __name__ == "__main__":
