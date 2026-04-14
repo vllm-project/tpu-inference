@@ -537,9 +537,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.mrope_positions_cpu = np.zeros((3, self.max_num_tokens),
                                             dtype=np.int64)
 
-        # Monolithic stack packing for small 1D metadata buffers.
-        # This buffer grows dynamically to accommodate metadata and block tables.
-        # We start with a safe default and refine it in initialize_kv_cache.
+        # Contiguous buffer for metadata array. By using a single buffer, we are
+        # able to avoid the overhead of multiple device_put operations.
+        # Initialize to a constant size, and resize later after kv cache size is
+        # known.
         self.device_buffer = common_utils.DeviceBuffer(initial_capacity=1024)
 
     def load_model(self):
@@ -1368,7 +1369,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 dp_rank]
             total_num_scheduled_tokens = num_scheduled_tokens_per_dp_rank[
                 dp_rank]
-
+            input_ids_cpu = input_ids_view[
+                token_offset:token_offset +
+                padded_num_scheduled_tokens_per_dp_rank]
+            positions_cpu = positions_view[
+                token_offset:token_offset +
+                padded_num_scheduled_tokens_per_dp_rank]
             # Get request indices.
             # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
             # For each scheduled token, what are the corresponding req index.
@@ -1381,19 +1387,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 [self.arange_cpu[:n] for n in num_scheduled_tokens_per_req])
 
             # Get positions.
+            positions_np = positions_cpu[:total_num_scheduled_tokens]
             np.add(
                 self.input_batch.num_computed_tokens_cpu[req_indices],
                 arange,
-                out=positions_view[token_offset:token_offset +
-                                   total_num_scheduled_tokens],
+                out=positions_np,
             )
             # Get token indices.
             # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
             # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
             # where M is the max_model_len.
             token_indices = (
-                positions_view[token_offset:token_offset +
-                               total_num_scheduled_tokens] +
+                positions_np +
                 req_indices * self.input_batch.token_ids_cpu.shape[1])
             # NOTE(woosuk): We use torch.index_select instead of np.take here
             # because torch.index_select is much faster than np.take for large
@@ -1401,45 +1406,40 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             np.take(
                 self.input_batch.token_ids_cpu.ravel(),
                 token_indices,
-                out=input_ids_view[token_offset:token_offset +
-                                   total_num_scheduled_tokens],
+                out=input_ids_cpu[:total_num_scheduled_tokens],
             )
 
-            input_ids_view[token_offset +
-                           total_num_scheduled_tokens:token_offset +
-                           padded_num_scheduled_tokens_per_dp_rank] = 0
+            input_ids_cpu[total_num_scheduled_tokens:] = 0
 
         # Prepare the attention metadata (query_start_loc_cpu, seq_lens_cpu)
         for dp_rank in range(dp_size):
             req_offset = dp_rank * max_num_reqs_per_dp_rank
-            query_loc_offset = req_offset + dp_rank
+            query_start_loc_cpu = query_start_loc_view[
+                req_offset + dp_rank:req_offset + max_num_reqs_per_dp_rank +
+                dp_rank + 1]
+            seq_lens_cpu = seq_lens_view[req_offset:req_offset +
+                                         max_num_reqs_per_dp_rank]
             _num_reqs = num_req_per_dp_rank[dp_rank]
             req_indices = req_indices_dp[dp_rank]
             num_scheduled_tokens_per_req = scheduled_tokens_per_dp_rank[
                 dp_rank]
 
             if _num_reqs == 0:
-                query_start_loc_view[query_loc_offset:query_loc_offset +
-                                     max_num_reqs_per_dp_rank + 1] = 0
-                seq_lens_view[req_offset:req_offset +
-                              max_num_reqs_per_dp_rank] = 0
+                query_start_loc_cpu[:] = 0
+                seq_lens_cpu[:] = 0
                 continue
 
-            query_start_loc_view[query_loc_offset] = 0
+            query_start_loc_cpu[0] = 0
             np.cumsum(
                 num_scheduled_tokens_per_req,
-                out=query_start_loc_view[query_loc_offset +
-                                         1:query_loc_offset + _num_reqs + 1],
+                out=query_start_loc_cpu[1:_num_reqs + 1],
             )
-            query_start_loc_view[query_loc_offset + _num_reqs +
-                                 1:query_loc_offset +
-                                 max_num_reqs_per_dp_rank + 1] = 1
+            query_start_loc_cpu[_num_reqs + 1:] = 1
 
-            seq_lens_view[req_offset:req_offset + _num_reqs] = (
+            seq_lens_cpu[:_num_reqs] = (
                 self.input_batch.num_computed_tokens_cpu[req_indices] +
                 num_scheduled_tokens_per_req)
-            seq_lens_view[req_offset + _num_reqs:req_offset +
-                          max_num_reqs_per_dp_rank] = 0
+            seq_lens_cpu[_num_reqs:] = 0
 
         # populate logits_indices
         for dp_rank in range(dp_size):
@@ -1447,12 +1447,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank + 1)
             _num_reqs = num_req_per_dp_rank[dp_rank]
 
-            logits_indices_view[req_offset:req_offset + _num_reqs] = (
+            logits_indices_cpu = logits_indices_view[
+                req_offset:req_offset + padded_num_reqs_per_dp_rank]
+            logits_indices_cpu[:_num_reqs] = (
                 query_start_loc_view[query_loc_req_offset +
                                      1:query_loc_req_offset + _num_reqs + 1] -
                 1)
-            logits_indices_view[req_offset + _num_reqs:req_offset +
-                                padded_num_reqs_per_dp_rank] = -1
+            logits_indices_cpu[_num_reqs:] = -1
 
         # Please see runner_utils.PhasedBasedProfiler for details
         if self.phase_based_profiler:
@@ -1704,9 +1705,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             [self.arange_cpu[:n] for n in num_scheduled_tokens_per_req])
 
         # Get positions.
+        positions_np = positions_view[:total_num_scheduled_tokens]
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
                arange,
-               out=positions_view[:total_num_scheduled_tokens])
+               out=positions_np)
         positions_view[total_num_scheduled_tokens:] = 0
 
         # Multi-modal support
@@ -1722,7 +1724,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
         # where M is the max_model_len.
-        token_indices = (positions_view[:total_num_scheduled_tokens] +
+        token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
 
         # NOTE(woosuk): We use torch.index_select instead of np.take here

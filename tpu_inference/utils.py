@@ -3,6 +3,7 @@ import functools
 import time
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import dataclass
 from functools import wraps
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -412,6 +413,13 @@ def time_function(func):
     return wrapper
 
 
+@dataclass(frozen=True)
+class DeviceBufferMetadata:
+    """Metadata for the layout of a DeviceBuffer."""
+    keys: Tuple[str, ...]
+    sizes: Tuple[int, ...]
+
+
 class DeviceBuffer:
     """
     A utility to pack 1D numpy arrays into a monolithic buffer.
@@ -423,7 +431,8 @@ class DeviceBuffer:
         self.buffer = np.zeros(initial_capacity, dtype=np.int32)
         self._offset = 0
         self._last_offset = 0
-        self._metadata = []
+        self._keys: List[str] = []
+        self._sizes: List[int] = []
 
     def _ensure_capacity(self, size: int):
         """Ensure the internal buffer has enough space for 'size' more elements."""
@@ -463,29 +472,30 @@ class DeviceBuffer:
     def set_key(self, key: str):
         """Tag all data accumulated since the last set_key() call."""
         size = self._offset - self._last_offset
-        self._metadata.append((key, size))
+        self._keys.append(key)
+        self._sizes.append(size)
         self._last_offset = self._offset
 
-    def build(self) -> Tuple[np.ndarray, Tuple[Tuple[str, int], ...]]:
+    def build(self) -> Tuple[np.ndarray, DeviceBufferMetadata]:
         """Return the active portion of the buffer and its layout metadata."""
-        return self.buffer[:self._offset], tuple(self._metadata)
+        return self.buffer[:self._offset], DeviceBufferMetadata(
+            keys=tuple(self._keys), sizes=tuple(self._sizes))
 
     def reset(self):
         """Reset offsets and metadata for reuse. Keeps the allocated buffer."""
         self._offset = 0
         self._last_offset = 0
-        self._metadata = []
+        self._keys = []
+        self._sizes = []
 
     @staticmethod
     @functools.partial(jax.jit, static_argnums=(1, ))
-    def unpack_arrays(
-            blob: jax.Array, metadata: Tuple[Tuple[str, int],
-                                             ...]) -> Dict[str, jax.Array]:
+    def unpack_arrays(blob: jax.Array,
+                      metadata: DeviceBufferMetadata) -> Dict[str, jax.Array]:
         """
         Unpack a 1D blob into a dictionary of arrays based on provided metadata.
         Uses JIT and jnp.split to minimize dispatch overhead.
         """
-        sizes = [size for _, size in metadata]
-        indices = tuple(np.cumsum(sizes)[:-1])
+        indices = tuple(np.cumsum(metadata.sizes)[:-1])
         parts = jnp.split(blob, indices)
-        return {metadata[i][0]: parts[i] for i in range(len(metadata))}
+        return {key: parts[i] for i, key in enumerate(metadata.keys)}
