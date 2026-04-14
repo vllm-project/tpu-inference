@@ -108,8 +108,10 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 <!--
 
+### Release Support Matrices
+
 <details open markdown="1">
-<summary><h3>Release Support Matrices</h3></summary>
+<summary><b>Click to expand support matrices</b></summary>
 
 <blockquote>
 
@@ -500,8 +502,10 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 <br>
 
+### Nightly Support Matrices
+
 <details markdown="1">
-<summary><h3>Nightly Support Matrices</h3></summary>
+<summary><b>Click to expand support matrices</b></summary>
 
 <blockquote>
 
