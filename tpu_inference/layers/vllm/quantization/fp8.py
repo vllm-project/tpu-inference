@@ -288,9 +288,17 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
                                             PartitionSpec(ShardingAxisName.EXPERT))
 
                 w13_weight = t2j(layer.w13_weight, use_dlpack=False)
-                w13_weight_scale = t2j(layer.w13_weight_scale_inv, use_dlpack=False)
                 w2_weight = t2j(layer.w2_weight, use_dlpack=False)
-                w2_weight_scale = t2j(layer.w2_weight_scale_inv, use_dlpack=False)
+                # Use per-channel (1 scale per output row) placeholder scales for dummy
+                # weights. The block-quant scale from vLLM's create_weights has shape
+                # (E, 2*N//bs, H//bs); process_w13_ep in process_moe_weights splits at
+                # intermediate_size (>> 2*N//bs) causing a reshape error. Per-channel
+                # shape (E, 2*N, 1) splits correctly at N. MaxText sync will overwrite
+                # with real scales before any real inference runs.
+                w13_weight_scale = jnp.ones(
+                    (w13_weight.shape[0], w13_weight.shape[1], 1), dtype=jnp.float32)
+                w2_weight_scale = jnp.ones(
+                    (w2_weight.shape[0], w2_weight.shape[1], 1), dtype=jnp.float32)
 
                 from tpu_inference.layers.common.process_weights.moe_weights import process_moe_weights
                 def _shard_dummy_moe_weights(w13, w13s, w2, w2s):

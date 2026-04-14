@@ -361,10 +361,10 @@ def process_moe_weights(
                                         name="w13_weight")
 
             if w13_weight_scale is not None:
-                if w13_weight_scale.shape[-1] == intermediate_size * 2:
-                    w13_weight_scale = process_w13_tp(tensor=w13_weight_scale, concat_dim=3, name="w13_weight_scale")
-                else:
-                    w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
+                w13_weight_scale = process_w13_tp(tensor=w13_weight_scale,
+                                                  concat_dim=3,
+                                                  name="w13_weight_scale")
+
             if w13_bias is not None:
                 w13_bias = process_w13_tp(tensor=w13_bias,
                                           concat_dim=2,
@@ -382,10 +382,10 @@ def process_moe_weights(
                                         name="w13_weight")
 
             if w13_weight_scale is not None:
-                if w13_weight_scale.shape[-1] == intermediate_size * 2:
-                    w13_weight_scale = process_w13_ep(tensor=w13_weight_scale, concat_dim=3, name="w13_weight_scale")
-                else:
-                    w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
+                w13_weight_scale = process_w13_ep(tensor=w13_weight_scale,
+                                                  concat_dim=3,
+                                                  name="w13_weight_scale")
+
             if w13_bias is not None:
                 w13_bias = process_w13_ep(tensor=w13_bias,
                                           concat_dim=2,
@@ -511,11 +511,6 @@ def process_fp8_moe_weights(
     w13_weight_scale = weights.w13_weight_scale
     w2_weight = weights.w2_weight
     w2_weight_scale = weights.w2_weight_scale
-    logger.info(f"DEBUG: env MOE_REQUANTIZE_WEIGHT_DTYPE={envs.MOE_REQUANTIZE_WEIGHT_DTYPE}, weights.w13_weight.dtype={weights.w13_weight.dtype}")
-    if not envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
-        w13_interleave = activation == "swigluoai"
-        w13_reorder_size = get_mesh_shape_product(mesh, ShardingAxisName.MLP_TENSOR)
-        return process_moe_weights(weights, moe_backend=moe_backend, w13_reorder_size=w13_reorder_size, w13_interleave=w13_interleave)
     if desired_quant_dtype_from_env := envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
         desired_quant_dtype = to_jax_dtype(desired_quant_dtype_from_env)
     else:
