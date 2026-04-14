@@ -201,6 +201,9 @@ fi
 echo "=== Starting nightly benchmark (Record ID: $RECORD_ID) ==="
 echo "Logging output to: $BENCHMARK_LOG"
 
+# Ensure stale logs from previous runs are cleared
+rm -f /tmp/vllm_serve.log
+
 # 1. Run the benchmark using multihost launcher script
 if ! bash "$RUN_MULTIHOST_SCRIPT" "$SERVER_CMD" "$BENCHMARK_CMD" > "$BENCHMARK_LOG" 2>&1; then
   echo "Benchmarking failed. See log: $BENCHMARK_LOG"
