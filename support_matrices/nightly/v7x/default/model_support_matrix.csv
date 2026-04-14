@@ -8,7 +8,7 @@ Model,Type,UnitTest,Accuracy/Correctness,Benchmark
 "MiniMaxAI/MiniMax-M2.5",Text,❓ Untested,❓ Untested,❓ Untested
 "Qwen/Qwen3-30B-A3B",Text,✅ Passing,✅ Passing,✅ Passing
 "Qwen/Qwen3-32B",Text,✅ Passing,✅ Passing,✅ Passing
-"Qwen/Qwen3-4B",Text,✅ Passing,❌ Failing,❓ Untested
+"Qwen/Qwen3-4B",Text,✅ Passing,✅ Passing,✅ Passing
 "Qwen/Qwen3-Coder-480B-A35B-Instruct",Text,✅ Passing,✅ Passing,✅ Passing
 "Qwen/Qwen3.5-397B-A17B",Text,✅ Passing,✅ Passing,❌ Failing
 "deepseek-ai/DeepSeek-Math-V2",Text,❓ Untested,❓ Untested,❓ Untested

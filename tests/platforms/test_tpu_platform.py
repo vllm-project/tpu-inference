@@ -36,6 +36,7 @@ class TestTpuPlatform:
         vllm_config.model_config.use_mla = False
         vllm_config.scheduler_config = MagicMock(is_multimodal_model=False)
         vllm_config.parallel_config = MagicMock()
+        vllm_config.sharding_config = MagicMock()
         vllm_config.compilation_config = MagicMock(mode="dynamo_trace_once",
                                                    backend="openxla")
         vllm_config.kv_transfer_config = None
@@ -292,6 +293,28 @@ class TestTpuPlatform:
             TpuPlatform.update_block_size_for_backend(vllm_config)
 
         assert vllm_config.cache_config.block_size == 1280
+
+    def test_update_block_size_for_backend_tp_override(self, vllm_config):
+        vllm_config.model_config.is_hybrid = True
+        vllm_config.parallel_config.tensor_parallel_size = 8
+        vllm_config.sharding_config = MagicMock()
+        vllm_config.sharding_config.tp_size = 4
+
+        mock_backend = MagicMock()
+
+        # We temporarily override the tensor parallel size to the sharding
+        # tp_size when aligning hybrid block size.
+        def assert_tp_is_sharding_tp_size(*args, **kwargs):
+            assert vllm_config.parallel_config.tensor_parallel_size == 4
+
+        with patch.object(TpuPlatform, '_find_non_ssm_backend', return_value=mock_backend), \
+             patch.object(TpuPlatform, '_align_hybrid_block_size', side_effect=assert_tp_is_sharding_tp_size) as mock_align:
+            TpuPlatform.update_block_size_for_backend(vllm_config)
+
+            mock_align.assert_called_once_with(vllm_config, mock_backend)
+
+        # Ensure the tensor parallel size is restored in the `finally` block
+        assert vllm_config.parallel_config.tensor_parallel_size == 8
 
     def test_check_and_update_config_mla_checks(self):
         vllm_config = MagicMock()
