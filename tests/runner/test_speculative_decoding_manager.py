@@ -250,6 +250,7 @@ class TestSpeculativeDecodingManager:
         num_draft_tokens_np = np.array(num_draft_tokens, dtype=np.int32)
         cu_num_scheduled_tokens_np = np.array(cu_num_scheduled_tokens,
                                               dtype=np.int32)
+        input_ids = np.arange(1024, dtype=np.int32) * 10
 
         # Act
         with patch(
@@ -258,7 +259,8 @@ class TestSpeculativeDecodingManager:
             metadata = self.runner.speculative_decoding_manager.get_spec_decode_metadata(
                 num_draft_tokens_np,
                 cu_num_scheduled_tokens_np,
-                padded_num_reqs=padded_num_reqs)
+                padded_num_reqs=padded_num_reqs,
+                input_ids=input_ids)
 
         # Assert basic properties
         assert isinstance(metadata, SpecDecodeMetadata)

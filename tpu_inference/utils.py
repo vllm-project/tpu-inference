@@ -428,9 +428,6 @@ class DeviceBuffer:
     def _ensure_capacity(self, size: int):
         """Ensure the internal buffer has enough space for 'size' more elements."""
         if self._offset + size > self.buffer.size:
-            logger.error(
-                "DeviceBuffer: Buffer overflow. Current size: %d, "
-                "Requested size: %d", self.buffer.size, self._offset + size)
             new_capacity = max(self.buffer.size * 2,
                                self._offset + size + 1024)
             new_buffer = np.zeros(new_capacity, dtype=np.int32)
