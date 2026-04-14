@@ -550,9 +550,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Monolithic stack packing for small 1D metadata buffers.
         # This buffer grows dynamically to accommodate metadata and block tables.
-        # We start with a larger capacity to avoid resizing jitter in early steps.
-        self.device_buffer = common_utils.DeviceBuffer(initial_capacity=1024 *
-                                                       1024)
+        # We start with a safe default and refine it in initialize_kv_cache.
+        self.device_buffer = common_utils.DeviceBuffer(initial_capacity=1024)
 
     def load_model(self):
         with set_current_vllm_config(self.vllm_config):
@@ -626,6 +625,31 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.kv_cache_config = kv_cache_config
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
+
+        # Monolithic stack packing for small 1D metadata buffers.
+        # This buffer grows dynamically to accommodate metadata and block tables.
+        # We re-initialize with a precise capacity now that kv_cache_config is known.
+        num_kv_groups = len(kv_cache_config.kv_cache_groups)
+        sampling_params_size = 3 * self.max_num_reqs
+        input_ids_size = self.max_num_tokens
+        # Positions can be 3D for M-RoPE models (e.g. Qwen2-VL)
+        positions_size = (3 if self.uses_mrope else 1) * self.max_num_tokens
+        query_start_loc_size = self.max_num_reqs + self.dp_size
+        seq_lens_size = self.max_num_reqs
+        logits_indices_size = self.max_num_reqs
+        request_distribution_size = 3 * self.dp_size
+        # Block tables for each KV cache group.
+        block_tables_size = num_kv_groups * self.max_num_reqs * self.max_num_blocks_per_req
+        cache_collision_dummy_size = 2 * self.dp_size
+
+        initial_capacity = (sampling_params_size + input_ids_size +
+                            positions_size + query_start_loc_size +
+                            seq_lens_size + logits_indices_size +
+                            request_distribution_size + block_tables_size +
+                            cache_collision_dummy_size + 1024)
+        self.device_buffer = common_utils.DeviceBuffer(
+            initial_capacity=initial_capacity)
+
         if has_kv_transfer_group():
             get_kv_transfer_group().register_runner(self)
 
