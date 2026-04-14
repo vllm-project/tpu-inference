@@ -1558,11 +1558,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         metadata_blob, metadata_layout = self.device_buffer.build()
 
-        request_distribution = jax.device_put(request_distribution,
-                                              data_parallel_attn_sharding)
-
-        dev_arrays_payload = jax.device_put(metadata_blob,
-                                            data_parallel_attn_sharding)
+        (request_distribution, dev_arrays_payload) = device_array(
+            self.mesh, (request_distribution, metadata_blob),
+            sharding=data_parallel_attn_sharding)
 
         metadata = common_utils.DeviceBuffer.unpack_arrays(
             dev_arrays_payload, metadata_layout)
@@ -1788,8 +1786,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
 
         request_distribution = np.array(self.input_batch.request_distribution)
-        request_distribution = jax.device_put(request_distribution,
-                                              data_parallel_attn_sharding)
 
         def build_block_table_host(kv_cache_gid: int) -> None:
             block_table_obj = self.input_batch.block_table[kv_cache_gid]
@@ -1813,10 +1809,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         metadata_blob, metadata_layout = self.device_buffer.build()
 
-        dev_arrays_payload = jax.device_put(
-            metadata_blob,
-            data_parallel_attn_sharding,
-        )
+        (request_distribution, dev_arrays_payload) = device_array(
+            self.mesh, (request_distribution, metadata_blob),
+            sharding=data_parallel_attn_sharding)
 
         metadata = common_utils.DeviceBuffer.unpack_arrays(
             dev_arrays_payload, metadata_layout)
