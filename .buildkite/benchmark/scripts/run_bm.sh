@@ -17,11 +17,60 @@ set -euo pipefail
 
 CASE_FILE="$1"
 TARGET_CASE_NAME=${2:-""}
+VLLM_PID=""
+CLEANUP_DONE="false"
 
 if [ -z "$CASE_FILE" ]; then
     echo "Usage: $0 <case.json> [TARGET_CASE_NAME]"
     exit 1
 fi
+
+# shellcheck disable=SC2317
+cleanup() {
+    local exit_code=$?
+
+    # Only perform cleanup if NOT in Buildkite (Local only)
+    if [[ "${BUILDKITE:-false}" == "true" ]]; then
+        return
+    fi
+
+    # Prevent multiple executions of the cleanup logic
+    if [[ "${CLEANUP_DONE}" == "true" ]]; then
+        return
+    fi
+    
+    CLEANUP_DONE="true"
+
+    # Only show cleanup info if exiting with an error or interrupted
+    if [[ $exit_code -ne 0 ]]; then
+        echo -e "\n[INFO] Running cleanup procedure (Exit code: $exit_code)..."
+    fi
+
+    if [[ -n "${VLLM_PID:-}" ]]; then
+        # Check if the process is still running
+        if kill -0 "$VLLM_PID" 2>/dev/null; then
+            echo "[INFO] Stopping vLLM server (PID: $VLLM_PID)..."
+            # Send TERM to the process group (using negative PID) to ensure all children close
+            kill -TERM -"$VLLM_PID" 2>/dev/null || kill -TERM "$VLLM_PID" 2>/dev/null
+            
+            # Wait up to 10 seconds for resources (HBM) to be released
+            for _ in {1..10}; do
+                if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+                    break
+                fi
+                sleep 1
+            done
+        fi
+        
+        # Force kill if still alive after timeout
+        if kill -0 "$VLLM_PID" 2>/dev/null; then
+            echo "[WARN] Server not responding, force terminating..."
+            kill -9 -"$VLLM_PID" 2>/dev/null || kill -9 "$VLLM_PID" 2>/dev/null
+        fi
+    fi
+}
+
+trap cleanup EXIT INT TERM
 
 if [[ "${BUILDKITE:-false}" == "true" ]]; then
   apt-get update && apt-get install -y gnupg curl
@@ -183,7 +232,17 @@ echo "[INFO] Starting vLLM Server in background..."
 echo "Printing the vllm serve command used to start the server:"
 printf "[DEBUG] Executing server_cmd: %s %s > \"%s\" 2>&1 &\n" "${SERVER_CMD_ENVS[*]}" "${SERVER_CMD[*]}" "$VLLM_LOG"
 
+# Start the server and capture its PID
 env "${SERVER_CMD_ENVS[@]}" "${SERVER_CMD[@]}" > "$VLLM_LOG" 2>&1 &
+VLLM_PID=$!
+
+# Immediate check to see if it crashed on startup
+sleep 2
+if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+    echo "[ERROR] vLLM Server failed to start immediately. Check log: $VLLM_LOG"
+    exit 1
+fi
+
 echo "wait for 60 minutes.."
 echo
 for _ in {1..360}; do
