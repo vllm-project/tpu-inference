@@ -15,9 +15,12 @@
 from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
 
+import jax
 import numpy as np
 import pytest
+from jax.sharding import Mesh
 
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
@@ -57,6 +60,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         # Initialize CPU arrays that the method modifies
         self.runner.input_ids_cpu = np.zeros(64, dtype=np.int32)
         self.runner.positions_cpu = np.zeros(64, dtype=np.int32)
+        self.runner.mrope_positions_cpu = np.zeros((3, 64), dtype=np.int64)
         self.runner.query_start_loc_cpu = np.zeros(10, dtype=np.int32)
         self.runner.seq_lens_cpu = np.zeros(8, dtype=np.int32)
         self.runner.logits_indices_cpu = np.zeros(8, dtype=np.int32)
@@ -123,6 +127,72 @@ class TestTPUJaxRunnerDPInputsLightweight:
         ]
         self.runner.kv_cache_config = mock_kv_cache_config
         self.runner.use_hybrid_kvcache = True
+
+    @patch('jax.device_put')
+    @patch('tpu_inference.runner.tpu_runner.NamedSharding')
+    @patch('tpu_inference.runner.tpu_runner.runner_utils')
+    @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
+    def test_prepare_inputs_dp_mrope(self, mock_sampling_metadata,
+                                     mock_runner_utils, mock_named_sharding,
+                                     mock_device_put):
+
+        def _mock_named_sharding(mesh, spec):
+            mock = MagicMock()
+            mock.mesh = mesh
+            mock.spec = spec
+            return mock
+
+        mock_named_sharding.side_effect = _mock_named_sharding
+
+        def _mock_device_put(x, *args, **kwargs):
+            sharding = args[0] if len(
+                args) > 0 else kwargs.get('device') or kwargs.get('sharding')
+            if sharding and hasattr(sharding, 'spec') and hasattr(
+                    sharding, 'mesh'):
+                spec = sharding.spec
+                mesh_obj = sharding.mesh
+
+                def check_array(arr):
+                    if hasattr(arr, 'shape') and spec is not None:
+                        for i, axes in enumerate(spec):
+                            if axes is not None and i < len(arr.shape):
+                                axes_tuple = (axes, ) if isinstance(
+                                    axes, str) else axes
+                                axis_size = 1
+                                for a in axes_tuple:
+                                    axis_size *= mesh_obj.shape.get(
+                                        a, 1) if isinstance(
+                                            mesh_obj.shape,
+                                            dict) else mesh_obj.shape[a]
+                                if arr.shape[i] % axis_size != 0:
+                                    raise ValueError(
+                                        f"Cannot shard array of shape {arr.shape} "
+                                        f"along dimension {i} with mesh axes {axes} of size {axis_size}"
+                                    )
+                    return arr
+
+                jax.tree_util.tree_map(check_array, x)
+            return x
+
+        mock_device_put.side_effect = _mock_device_put
+        """Test that M-RoPE positions are prepared and sharded correctly."""
+        num_scheduled_tokens = {"req1": 5, "req2": 3}
+        assigned_dp_ranks = {"req1": 0, "req2": 1}
+        scheduler_output = self._create_mock_scheduler_output(
+            num_scheduled_tokens, assigned_dp_ranks)
+
+        mock_runner_utils.get_padded_token_len.return_value = 16
+        mock_sampling_metadata.from_input_batch.return_value = MagicMock()
+        self.runner.uses_mrope = True
+
+        mock_mesh = MagicMock(spec=Mesh)
+        mock_mesh.shape = {ShardingAxisName.ATTN_DATA: 2}
+        self.runner.mesh = mock_mesh
+        self.runner.data_parallel_attn_sharding = MagicMock()
+
+        result = self.runner._prepare_inputs_dp(scheduler_output)
+
+        assert len(result) == 8
 
     @patch('tpu_inference.runner.tpu_runner.NamedSharding')
     @patch('tpu_inference.runner.tpu_runner.runner_utils')
