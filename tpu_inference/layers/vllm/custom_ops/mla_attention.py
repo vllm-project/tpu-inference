@@ -85,8 +85,8 @@ class VllmMLAAttention(MLAAttention):
 
             shape_UK_T = (self.num_heads, self.qk_nope_head_dim, self.kv_lora_rank)
             shape_UV = (self.num_heads, self.kv_lora_rank, self.v_head_dim)
-            shape_scale_UK = (1, self.num_heads, 1, self.kv_lora_rank)
-            shape_scale_UV = (1, self.num_heads, 1, self.v_head_dim)
+            shape_scale_UK = (1, self.num_heads, self.kv_lora_rank)
+            shape_scale_UV = (1, self.num_heads, self.v_head_dim)
 
             dtype = self.kv_cache_quantized_dtype if self.kv_cache_quantized_dtype is not None else jnp.float8_e4m3fn
 
