@@ -164,21 +164,28 @@ class GmmTest(jtu.JaxTestCase):
       num_groups=[16, 32],
       has_bias=[True, False],
       group_offset=[0, 2, 3],
+      # batch_size=[128],
+      # in_size=[512],
+      # out_size=[1024],
+      # num_groups=[16],
+      # has_bias=[True],
+      # group_offset=[1],
   )
   def test_gmm_basic(
       self, batch_size, in_size, out_size, num_groups, has_bias, group_offset
   ):
     num_local_groups = num_groups - group_offset
     key = jax.random.key(0)
+    k0, k1, k2, k3 = jax.random.split(key, 4)
 
-    lhs = jax.random.normal(key, (batch_size, in_size), dtype=jnp.bfloat16)
+    lhs = jax.random.normal(k0, (batch_size, in_size), dtype=jnp.bfloat16)
     rhs = jax.random.normal(
-        key, (num_local_groups, in_size, out_size), dtype=jnp.bfloat16
+        k1, (num_local_groups, in_size, out_size), dtype=jnp.bfloat16
     )
     rhs_bias = None
     if has_bias:
       rhs_bias = jax.random.normal(
-          key, (num_local_groups, 1, out_size), dtype=jnp.bfloat16
+          k2, (num_local_groups, 1, out_size), dtype=jnp.bfloat16
       )
 
     group_sizes = get_group_sizes(batch_size, num_groups)
@@ -202,22 +209,17 @@ class GmmTest(jtu.JaxTestCase):
 
     self.assertArraysAllClose(actual, expected)
 
+    if has_bias:
+      # has_bias is not supported in TGMM yet.
+      return
     cotangent = jax.random.normal(
-        key, (batch_size, out_size), dtype=jnp.bfloat16
+        k3, (batch_size, out_size), dtype=jnp.bfloat16
     )
     expected_grad_lhs, expected_grad_rhs, *_ = reference_vjpfunc(cotangent)
     grad_lhs, grad_rhs, *_ = vjpfunc(cotangent)
     self.assertArraysAllClose(grad_lhs, expected_grad_lhs)
     self.assertArraysAllClose(grad_rhs, expected_grad_rhs)
 
-  # pytest -s -v tests/kernels/gmm_v2_test.py -k test_tgmm
-  # blaze test -c opt //experimental/users/kyuyeunk/vllm/tests:gmm_test_gf --test_filter=test_tgmm
-  # blaze test -c opt --test_output=errors  //experimental/users/kyuyeunk/vllm/tests:gmm_test_gf --test_filter=test_tgmm  --test_arg=--xla_tpu_enable_log_recorder
-  # Step 1: Make num_tile_m=num_tile_k=num_tile_n=1,
-  #   make the test pass for various num_groups.
-  #   make the test pass for various group_offset.
-  # Step 2: Make num_tile_m=2, make sure the test pass.
-  # Step 3: Make num_tile_k=num_tile_n=2, make sure the test pass.
   @parameterized.product(
       batch_size=[128, 512],
       in_size=[512, 1024],
@@ -234,13 +236,13 @@ class GmmTest(jtu.JaxTestCase):
     num_local_groups = num_groups - group_offset
     key = jax.random.key(0)
     key1, key2 = jax.random.split(key, 2)
-    # [m, k]
-    lhs = jax.random.normal(key1, (batch_size, in_size), dtype=jnp.bfloat16)
+    lhs = jax.random.normal(
+        key1, (batch_size, in_size), dtype=jnp.bfloat16
+    )  # [m, k]
     grad = jax.random.normal(
         key2, (batch_size, out_size), dtype=jnp.bfloat16
     )  # [m, n]
     group_sizes = get_group_sizes(batch_size, num_groups)
-    print("xw32 test line241 group_sizes={}", group_sizes)
     # if batch_size=128, num_groups=3, an example group_size is
     # group_sizes=Array([14, 14, ..., 7]).
     group_offset = jnp.array(group_offset, dtype=jnp.int32)
@@ -253,12 +255,10 @@ class GmmTest(jtu.JaxTestCase):
         lhs, grad, group_sizes, num_local_groups, group_offset=group_offset
     )
     self.assertEqual(actual.shape, (num_local_groups, in_size, out_size))
-    # self.assertArraysAllClose(actual[10], expected[10])
-    # self.assertArraysAllClose(actual[11], expected[11])
-    diff = jnp.abs(expected - actual)
-    max_diff_idx = jnp.unravel_index(jnp.argmax(diff), diff.shape)
-    print(f"Output max diff: {jnp.max(diff)} at index {max_diff_idx}")
-    print(f"Output mean diff: {jnp.mean(jnp.abs(expected - actual))}")
+    # diff = jnp.abs(expected - actual)
+    # max_diff_idx = jnp.unravel_index(jnp.argmax(diff), diff.shape)
+    # print(f"Output max diff: {jnp.max(diff)} at index {max_diff_idx}")
+    # print(f"Output mean diff: {jnp.mean(jnp.abs(expected - actual))}")
     self.assertArraysAllClose(actual, expected)
 
   @parameterized.product(

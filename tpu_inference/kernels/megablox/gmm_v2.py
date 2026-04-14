@@ -1516,19 +1516,19 @@ def tgmm_kernel_main(
   pipeline_fn(lhs_in, rhs_in, out_ref, scratches=scratches)
 
 # TODO(xw32): Add back jax.jit.
-@functools.partial(
-    jax.jit,
-    static_argnames=[
-        "num_actual_groups",
-        "tile_info",
-        "vmem_limit_bytes",
-        "precision",
-        "preferred_element_type",
-        "acc_dtype",
-        "maybe_quantize_lhs",
-        "zero_initialize", # xw32q: do we need this? No, we dont.
-    ],
-)
+# @functools.partial(
+#     jax.jit,
+#     static_argnames=[
+#         "num_actual_groups",
+#         "tile_info",
+#         "vmem_limit_bytes",
+#         "precision",
+#         "preferred_element_type",
+#         "acc_dtype",
+#         "maybe_quantize_lhs",
+#         "zero_initialize", # xw32q: do we need this? No, we dont.
+#     ],
+# )
 def _tgmm_v2_impl(
     lhs: jax.Array,  # [size_m, size_k]
     rhs: jax.Array,  # [size_m, size_n]
@@ -1649,7 +1649,7 @@ def gmm_v2(
     zero_initialize: bool = True,
     fuse_act: str | None = None,
 ):
-  """GMM kernel"""
+  """GMM kernel."""
   return _gmm_v2_impl(
       lhs,
       rhs,
@@ -1725,6 +1725,7 @@ def _gmm_v2_bwd(
         jnp.ndarray,  # group_offset
         int,  # num_actual_groups
     ],
+    # cotangent
     grad: jnp.ndarray,
     *,
     # non-diff argnames
@@ -1749,12 +1750,17 @@ def _gmm_v2_bwd(
       group_offset,
       num_actual_groups,
   ) = residuals
+  # TODO: Consider supporting rhs_bias if needed.
+  assert rhs_bias is None, "rhs_bias is not yet supported in TGMM."
+  # d(lhs) = dout @ rhs^T — no bias term so rhs_scale and rhs_bias should be
+  # None. So should the fuse_act.
+  # TODO: Consider fusing the transposition of rhs into the gmm kernel.
   grad_lhs = _gmm_v2_impl(
-      grad,
-      rhs,
+      grad,  # [m, n]
+      rhs.swapaxes(1, 2),  # [num_groups, n, k]
       group_sizes,
-      rhs_scale,
-      rhs_bias,
+      None,  # rhs_scale
+      None,  # rhs_bias
       group_offset,
       tile_info=tile_info,
       vmem_limit_bytes=vmem_limit_bytes,
@@ -1763,7 +1769,7 @@ def _gmm_v2_bwd(
       acc_dtype=acc_dtype,
       maybe_quantize_lhs=maybe_quantize_lhs,
       zero_initialize=zero_initialize,
-      fuse_act=fuse_act,
+      fuse_act=None,
   )
   grad_rhs = _tgmm_v2_impl(
       lhs,  # [m, k]
@@ -1781,7 +1787,6 @@ def _gmm_v2_bwd(
   )
   # Return a gradient per each differentiable argument except for the
   # nondiff_argnames.
-  # TODO(xw32): how should we calculate the gradient of rhs_bias?
   return grad_lhs, grad_rhs, None, None, None, None
 
 gmm_v2.defvjp(_gmm_v2_fwd, _gmm_v2_bwd)
