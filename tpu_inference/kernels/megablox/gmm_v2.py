@@ -1089,20 +1089,20 @@ def make_gmm_configs(
         tiles=tiles,
         lhs_cfgs=lhs_cfgs,
         rhs_cfgs=rhs_cfgs,
-        out_dtype=out_dtype,
-        acc_dtype=acc_dtype,
+        out_dtype=jnp.dtype(out_dtype),
+        acc_dtype=jnp.dtype(acc_dtype),
         zero_init=zero_initialize,
         fuse_act=fuse_act,
     )
 
 
-def get_metadata(cfgs: GmmConfigs):
+def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
     cfgs_dict = dataclasses.asdict(cfgs)
     ret = {}
     for path, val in jax.tree_util.tree_leaves_with_path(cfgs_dict):
         key = jax.tree_util.keystr(path, simple=True, separator=".")
-        if isinstance(val, jnp.dtype):
-            val = val.name
+        if not isinstance(val, str | int | float):
+            val = str(val)
         ret[key] = val
     return ret
 
