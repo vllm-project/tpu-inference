@@ -20,7 +20,7 @@ import pytest
 import torch
 from jax.sharding import Mesh
 
-from tpu_inference.layers.vllm.custom_ops.gdn_attention_custom_op import \
+from tpu_inference.layers.vllm.custom_ops.gdn_attention_op import \
     VllmGatedDeltaNetAttention
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     set_vllm_model_wrapper_context
@@ -38,7 +38,7 @@ def mesh():
 class TestVllmGatedDeltaNetAttention:
 
     @patch(
-        "tpu_inference.layers.vllm.custom_ops.gdn_attention_custom_op.gdn_attention_core_tpu"
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.gdn_attention_core_tpu"
     )
     def test_forward_cuda_lora(self, mock_gdn_attention_core_tpu, mesh):
         attn = VllmGatedDeltaNetAttention.__new__(VllmGatedDeltaNetAttention)
@@ -100,7 +100,7 @@ class TestVllmGatedDeltaNetAttention:
         assert torch.all(output[num_tokens:] == 0)
 
     @patch(
-        "tpu_inference.layers.vllm.custom_ops.gdn_attention_custom_op.gdn_attention_core_tpu"
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.gdn_attention_core_tpu"
     )
     def test_forward_cuda_non_lora_no_gqa(self, mock_gdn_attention_core_tpu,
                                           mesh):
@@ -165,7 +165,7 @@ class TestVllmGatedDeltaNetAttention:
         assert torch.all(output[num_tokens:] == 0)
 
     @patch(
-        "tpu_inference.layers.vllm.custom_ops.gdn_attention_custom_op.gdn_attention_core_tpu"
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.gdn_attention_core_tpu"
     )
     def test_forward_cuda_non_lora_gqa(self, mock_gdn_attention_core_tpu,
                                        mesh):
