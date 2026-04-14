@@ -75,11 +75,6 @@ class VllmMLAAttention(MLAAttention):
         from tpu_inference.models.common.pathways_dummy_loader import (
             create_dummy_weights_on_tpu, is_pathways_dummy_load)
         if is_pathways_dummy_load():
-            from jax.sharding import NamedSharding, PartitionSpec as P
-            from tpu_inference.layers.common.sharding import ShardingAxisNameBase as ShardingAxisName
-            import jax.numpy as jnp
-            from torchax.interop import torch_view
-
             mesh = self.kv_b_proj.quant_method.linear_config.mesh
             sharding = NamedSharding(mesh, P(ShardingAxisName.ATTN_HEAD, ))
 
