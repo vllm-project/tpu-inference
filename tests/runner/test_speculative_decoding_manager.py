@@ -196,7 +196,6 @@ class TestSpeculativeDecodingManager:
         # Mock runner attributes needed by the function
         self.runner.arange_cpu = np.arange(1024, dtype=np.int64)
         # Make input_ids_cpu a sequence of numbers for easy verification
-        self.runner.input_ids_cpu = np.arange(1024, dtype=np.int32) * 10
         self.runner.num_tokens_paddings = [16, 32, 64, 128, 256, 512, 1024]
 
         # Mock the device_array function to just return the numpy arrays

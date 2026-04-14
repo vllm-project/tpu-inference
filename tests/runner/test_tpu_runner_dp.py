@@ -59,12 +59,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         self.runner.input_batch.block_table = [mock_block_table]
 
         # Initialize CPU arrays that the method modifies
-        self.runner.input_ids_cpu = np.zeros(64, dtype=np.int32)
-        self.runner.positions_cpu = np.zeros(64, dtype=np.int32)
         self.runner.mrope_positions_cpu = np.zeros((3, 64), dtype=np.int64)
-        self.runner.query_start_loc_cpu = np.zeros(10, dtype=np.int32)
-        self.runner.seq_lens_cpu = np.zeros(8, dtype=np.int32)
-        self.runner.logits_indices_cpu = np.zeros(8, dtype=np.int32)
         self.runner.arange_cpu = np.arange(64, dtype=np.int64)
         self.runner.uses_mrope = False
         self.runner.mrope_positions_cpu = np.zeros((3, 64), dtype=np.int64)
@@ -1307,11 +1302,6 @@ class TestSamplingMetadataPassthrough:
         mock_block_table.get_cpu_tensor.return_value = np.arange(32).reshape(
             4, 8)
         runner.input_batch.block_table = [mock_block_table]
-        runner.input_ids_cpu = np.zeros(64, dtype=np.int32)
-        runner.positions_cpu = np.zeros(64, dtype=np.int32)
-        runner.query_start_loc_cpu = np.zeros(10, dtype=np.int32)
-        runner.seq_lens_cpu = np.zeros(8, dtype=np.int32)
-        runner.logits_indices_cpu = np.zeros(8, dtype=np.int32)
         runner.arange_cpu = np.arange(64, dtype=np.int64)
 
         from tpu_inference.utils import DeviceBuffer

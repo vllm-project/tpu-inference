@@ -164,6 +164,7 @@ class SpeculativeDecodingManager:
         num_draft_tokens: np.ndarray,
         cu_num_scheduled_tokens: np.ndarray,
         padded_num_reqs: int,
+        input_ids: np.ndarray,
     ) -> SpecDecodeMetadata:
         # Inputs:
         # cu_num_scheduled_tokens:  [  4, 104, 107, 207, 209]
@@ -204,7 +205,7 @@ class SpeculativeDecodingManager:
 
         # Compute the draft token ids.
         # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
-        draft_token_ids = self.runner.input_ids_cpu[logits_indices]
+        draft_token_ids = input_ids[logits_indices]
         draft_token_ids = draft_token_ids[target_logits_indices + 1]
         padded_logits_length = runner_utils.get_padded_token_len(
             self.runner.num_logits_paddings, logits_indices.shape[0])
