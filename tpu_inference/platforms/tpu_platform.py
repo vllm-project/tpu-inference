@@ -292,14 +292,23 @@ class TpuPlatform(Platform):
         # TODO: TPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
 
-        # Align block/mamba sizes for hybrid model (may override user settings).
-        if vllm_config.model_config.is_hybrid:
-            backend_cls = cls._find_non_ssm_backend(vllm_config)
-            if backend_cls is None:
-                return
-            cls._align_hybrid_block_size(vllm_config, backend_cls)
-
-        return
+        # vLLM uses `tensor_parallel_size` to calculate the number of KV heads
+        # per partition. When data parallelism is enabled, the global
+        # `tensor_parallel_size` (total workers) is larger than the actual
+        # `tp_size` used.
+        # https://github.com/vllm-project/tpu-inference/blob/618dea5f5c0ca556a6c76a2e1cc130ff6a30893c/tpu_inference/layers/common/sharding.py#L196
+        # Use the sharding calculated `tp_size` for block size calculations.
+        orig_tp_size = vllm_config.parallel_config.tensor_parallel_size
+        vllm_config.parallel_config.tensor_parallel_size = vllm_config.sharding_config.tp_size
+        try:
+            if vllm_config.model_config.is_hybrid:
+                backend_cls = cls._find_non_ssm_backend(vllm_config)
+                if backend_cls is not None:
+                    # Align block/mamba sizes for hybrid model (may override
+                    # user settings).
+                    cls._align_hybrid_block_size(vllm_config, backend_cls)
+        finally:
+            vllm_config.parallel_config.tensor_parallel_size = orig_tp_size
 
     @classmethod
     def is_pin_memory_available(cls):
