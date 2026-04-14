@@ -414,14 +414,16 @@ def fused_moe_func(
 
     topk_weights = apply_scoring_fn(scoring_fn, gating_output)
     if envs.FORCE_MOE_RANDOM_ROUTING:
+        print(
+            "[WARNING] Forcing random routing should be used for performance testing purpose only."
+        )
         # Forcing random routing is useful to get rid of the effect
         # of routing imbalance during performance debugging.
-        rng_key = jax.random.PRNGKey(0)
+        rng_key = jax.random.PRNGKey(42)
         topk_indices = jax.vmap(lambda key: jax.random.choice(
             key, global_num_experts, shape=(topk, ), replace=False))(
                 jax.random.split(rng_key, num_tokens))
-        topk_weights = topk_weights[jnp.arange(num_tokens)[:, None],
-                                    topk_indices]
+        topk_weights = jax.random.uniform(rng_key, shape=(num_tokens, topk))
     else:
         topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
     if renormalize:
