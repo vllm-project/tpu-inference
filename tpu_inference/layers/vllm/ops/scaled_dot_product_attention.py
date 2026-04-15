@@ -83,3 +83,15 @@ def scaled_dot_product_attention(
         out = out[:, :, :q_seq_len, :]
 
     return out
+
+def vllm_vit_sdpa(
+    query,
+    key,
+    value,
+    scale=None,
+    cu_seqlens=None,
+    enable_gqa=False,
+    *,
+    mesh,
+):
+    pass
