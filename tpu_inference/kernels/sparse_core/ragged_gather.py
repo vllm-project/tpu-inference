@@ -225,9 +225,9 @@ def calculate_col_size(hidden_size: int) -> int:
         case _:
             target_bytes = (128 * 1024) * 0.8
 
-
     base_bytes = num_simd_lanes * hidden_size * (32 // 8)
     num_cols = 1
+
     while pl.cdiv(base_bytes, num_cols * num_lanes) * num_lanes > target_bytes:
         num_cols += 1
     return pl.cdiv(hidden_size, (num_cols * num_lanes)) * num_lanes
