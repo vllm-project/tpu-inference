@@ -38,7 +38,7 @@
 steps:
 
   # -----------------------------------------------------------------
-  # Build Step (required by all demo steps below)
+  # Build Step (required by all steps below)
   # -----------------------------------------------------------------
   - label: ":docker: Build and Push Base Image (tpu7x)"
     key: tpu7x_build_docker
@@ -50,99 +50,50 @@ steps:
       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
   # -----------------------------------------------------------------
-  # Demo 1: offline_inference.py
-  # Shows the simplest pattern: run a Python script inside Docker.
-  # Use this as a starting point for any offline batch inference test.
+  # lm_eval raw run: Qwen3-Coder-480B-A35B-Instruct-FP8
+  # Runs the lm_eval harness directly with mmlu_llama task.
   # -----------------------------------------------------------------
-  - label: "tpu7x [demo] offline_inference.py"
-    key: tpu7x_demo_offline_inference
+  - label: "tpu7x lm_eval Qwen3-Coder-480B-A35B-Instruct-FP8"
+    key: tpu7x_lm_eval_qwen3_coder_480b
     depends_on: tpu7x_build_docker
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu7x"
-    agents:
-      queue: tpu_v7x_2_queue
-    commands:
-      - |
-        # Run offline inference with a small model.
-        # --tensor-parallel-size 2: tp=1 is currently unsupported on tpu7x.
-        # Customize --model, --max-model-len, --max-tokens as needed.
-        .buildkite/scripts/run_in_docker.sh bash -c '
-          python3 examples/offline_inference.py \
-            --model Qwen/Qwen3-0.6B \
-            --tensor-parallel-size 2 \
-            --max-model-len 1024 \
-            --max-tokens 128'
-
-  # -----------------------------------------------------------------
-  # Demo 2: vllm serve + vllm bench serve
-  # Shows how to start a server and run a benchmark against it.
-  # Uses --dataset-name random so no dataset file is needed.
-  # -----------------------------------------------------------------
-  - label: "tpu7x [demo] vllm serve + vllm bench serve"
-    key: tpu7x_demo_serve_bench
-    depends_on: tpu7x_build_docker
-    env:
-      USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu7x"
-    agents:
-      queue: tpu_v7x_2_queue
-    commands:
-      - |
-        # Customize behaviour via env vars: MODEL, PORT, TENSOR_PARALLEL_SIZE,
-        # MAX_MODEL_LEN, RANDOM_INPUT_LEN, RANDOM_OUTPUT_LEN, NUM_PROMPTS, NUM_WARMUPS.
-        .buildkite/scripts/run_in_docker.sh bash .buildkite/scripts/run_benchmark_demo.sh
-
-  # -----------------------------------------------------------------
-  # Demo 3: DCN-based P/D disaggregation
-  # Mirrors test_25 in pipeline_jax.yml.
-  # Uses run_disagg.sh which delegates to examples/disagg/.
-  # Requires a multi-chip queue (tpu_v7x_8_queue).
-  # -----------------------------------------------------------------
-  - label: "tpu7x [demo] E2E disaggregation (DCN P/D)"
-    key: tpu7x_demo_disagg
-    depends_on: tpu7x_build_docker
-    env:
-      USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu7x"
-      # Customize these to change the disagg benchmark behaviour.
-      MODEL: "Qwen/Qwen3-0.6B"
-      INPUT_LEN: 1024
-      OUTPUT_LEN: 128
-      NUM_PROMPTS: 5
-      RANDOM_SEED: 10
-      MAX_CONCURRENCY: 4
-      TEST_MODE: 1
     agents:
       queue: tpu_v7x_8_queue
     commands:
-      - .buildkite/scripts/run_disagg.sh
+      - |
+        .buildkite/scripts/run_in_docker.sh bash -c '
+          lm_eval --model vllm \
+            --model_args pretrained=Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8,tensor_parallel_size=8,dtype=auto,max_num_seqs=512,max_num_batched_tokens=4096,gpu_memory_utilization=0.9,max_model_len=8192,enable_prefix_caching=False,enable_expert_parallel=True,download_dir=/mnt/disks/persist \
+            --tasks mmlu_llama \
+            --num_fewshot 0 \
+            --apply_chat_template \
+            --batch_size auto \
+            --output_path ./results/_Qwen-Qwen3-Coder-480B-A35B-Instruct-FP8.json \
+            --limit 100'
 
   # -----------------------------------------------------------------
-  # Demo 4: Ray-based multi-host inference
-  # Mirrors test_26 in pipeline_jax.yml.
-  # Uses run_multihost.sh to serve a large model across 16 chips (2 hosts).
-  # Requires a 16-chip queue (tpu_v7x_16_queue).
+  # Accuracy test: Qwen3-Coder-480B-A35B-Instruct-FP8
+  # Uses check_lm_eval.sh with thresholds from the model YAML.
   # -----------------------------------------------------------------
-  - label: "tpu7x [demo] Ray-based multi-host"
-    key: tpu7x_demo_multihost
+  - label: "tpu7x accuracy Qwen3-Coder-480B-A35B-Instruct-FP8"
+    key: tpu7x_accuracy_qwen3_coder_480b
+    depends_on: tpu7x_build_docker
     env:
+      USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu7x"
     agents:
-      queue: tpu_v7x_16_queue
+      queue: tpu_v7x_8_queue
     commands:
       - |
-        MODEL="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
-        .buildkite/scripts/run_multihost.sh \
-          "vllm serve \${MODEL} \
-            --port 8000 \
-            --tensor-parallel-size 16 \
-            --trust-remote-code \
-            --max-model-len 1024 \
-            --no-async-scheduling \
-            --load-format=runai_streamer \
-            --no-enable-prefix-caching" \
-          "curl http://localhost:8000/v1/completions \
-            -X POST \
-            -H 'Content-Type: application/json' \
-            -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'"
+        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh \
+          --model_name "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8" \
+          --use_moe_ep_kernel 0 \
+          --tensor_parallel_size 8 \
+          --max_model_len 2048 \
+          --max_num_batched_tokens 2048 \
+          --max_gen_toks 256 \
+          --enable_expert_parallel 1 \
+          --flex_threshold 0.85 \
+          --strict_threshold 0.70
