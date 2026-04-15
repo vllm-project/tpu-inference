@@ -30,7 +30,8 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
-from torchax.ops.ops_registry import register_torch_function_op
+from torchax.ops.ops_registry import (register_torch_dispatch_op,
+                                      register_torch_function_op)
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
@@ -144,6 +145,17 @@ class VllmModelWrapper:
             functools.partial(patch_ops.scaled_dot_product_attention.
                               scaled_dot_product_attention,
                               mesh=self.mesh),
+            is_jax_function=True,
+            needs_env=False,
+        )
+
+        # Patch  vllm_vit_sdpa from torch ops to flash attention
+        register_torch_dispatch_op(
+            torch.ops.vllm.torch_sdpa_wrapper,
+            functools.partial(
+                patch_ops.scaled_dot_product_attention.vllm_vit_sdpa,
+                mesh=self.mesh,
+            ),
             is_jax_function=True,
             needs_env=False,
         )
