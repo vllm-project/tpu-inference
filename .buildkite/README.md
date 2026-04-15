@@ -32,8 +32,8 @@ The python script takes the following arguments:
 - **--model-name**: this is the **full name** of your model on Hugging Face. Please ensure to use the **full name** (ex: `meta-llama/Llama-3.1-8B` instead of `Llama-3.1-8B`) or else we won't be able to find your model.
 - **--category**: this parameter allows you to set the model category, which determines the **Type** field in the `model_support_matrix.csv` under the `support_matrices/` directory. Options: "text-only" or "multimodal". (default: "text-only")
 - **--type**: [OPTIONAL] Specify the model type. Defaults to a `tpu-optimized` model.
-  - `tpu-optimized`: A model with specific optimizations for TPU. Includes performance benchmark tests.
-  - `vllm-native`: A model using the upstream vLLM definition. These models will not go through performance benchmarks on our pipeline.
+  - `tpu-optimized`: A model with specific optimizations for TPU. Includes unit tests, accuracy tests, and performance benchmark tests.
+  - `vllm-native`: A model using the upstream vLLM definition. Includes unit tests and accuracy tests. These models will not go through performance benchmarks on our pipeline.
 
 ```bash
 # For a TPU-optimized model (default type, includes performance benchmarks)
