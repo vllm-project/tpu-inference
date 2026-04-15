@@ -270,15 +270,17 @@ class VllmModelWrapper:
         return jax_view(params_and_buffers), lora_manager
 
     def jit_step_func(self):
+        out_shardings = [
+            None,  # kv_caches - keep original sharding
+            NamedSharding(self.mesh,
+                          PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
+            None,  # empty list
+            None,  # expert ids
+        ]
 
         @jax.jit(
             donate_argnames=("kv_caches", ),
-            out_shardings=(
-                None,  # kv_caches - keep original sharding
-                NamedSharding(self.mesh,
-                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
-                None,  # empty list
-            ),
+            out_shardings=tuple(out_shardings),
             compiler_options={
                 "xla_tpu_all_gather_collective_matmul_mode":
                 "post_spmd_conservative",
@@ -304,7 +306,8 @@ class VllmModelWrapper:
             is_first_rank: bool = True,
             is_last_rank: bool = True,
             *args,
-        ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
+        ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
+                List[jax.Array], jax.Array, List[jax.Array], jax.Array]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
             lora_metadata = torch_view(lora_metadata)
             with torchax.default_env(), set_vllm_model_wrapper_context(
@@ -334,6 +337,10 @@ class VllmModelWrapper:
                                       self.vllm_config.lora_config)
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
+
+                expert_indices_list = getattr(vllm_model_wrapper_context,
+                                              "expert_indices_list", [])
+
             # Wrap the output(hidden states or intermediate tensor)
             # from torch land into a JaxValue for the jax code to consume.
             aux_hidden_states = []
@@ -344,7 +351,13 @@ class VllmModelWrapper:
                     output, aux_hidden_states = jax_view(output_from_torch)
                 else:
                     output = jax_view(output_from_torch)
-            return new_kv_caches, output, aux_hidden_states
+
+            if expert_indices_list:
+                import jax.numpy as jnp
+                expert_indices = jnp.stack(expert_indices_list, axis=0)
+            else:
+                expert_indices = None
+            return new_kv_caches, output, aux_hidden_states, expert_indices
 
         @jax.jit(
             donate_argnames=("kv_caches", ),

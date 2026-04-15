@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 import jax
@@ -25,6 +25,7 @@ class VllmModelWrapperContext:
     kv_caches: List[jax.Array]
     mesh: Mesh
     layer_name_to_kvcache_index: Dict[str, int]
+    expert_indices_list: List[jax.Array] = field(default_factory=list)
 
 
 _vllm_model_wrapper_context: Optional[VllmModelWrapperContext] = None

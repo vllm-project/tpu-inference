@@ -38,11 +38,12 @@ class TransformerBlock(nnx.Module):
     attn: nnx.Module
     use_attention_rope: bool = True
     quant: Any | None = None
+    enable_return_routed_experts: bool = False
 
     def __call__(
-            self, x_TD: jax.Array, is_prefill: bool, kv_cache: KVCache,
-            attention_metadata: AttentionMetadata
-    ) -> Tuple[KVCache, jax.Array]:
+        self, x_TD: jax.Array, is_prefill: bool, kv_cache: KVCache,
+        attention_metadata: AttentionMetadata
+    ) -> Tuple[KVCache, jax.Array, Optional[jax.Array]]:
         # Attn Block
         attn_residual_TD = x_TD
         x_TD = self.pre_attention_norm(x_TD)
@@ -54,9 +55,16 @@ class TransformerBlock(nnx.Module):
         # FFW Block
         ffw_residual_TD = attn_output_TD
         normed_ffw_input_TD = self.pre_mlp_norm(attn_output_TD)
-        logits_TD = self.custom_module(normed_ffw_input_TD)
+
+        expert_ids = None
+        if isinstance(self.custom_module, JaxMoE):
+            logits_TD, expert_ids = self.custom_module(normed_ffw_input_TD)
+        else:
+            logits_TD = self.custom_module(normed_ffw_input_TD)
+
         logits_TD += ffw_residual_TD
-        return new_cache, logits_TD
+
+        return new_cache, logits_TD, expert_ids
 
 
 @dataclass(kw_only=True)
@@ -81,6 +89,7 @@ class SharedExpertsTransformerBlock(TransformerBlock):
     moe_ffw: Optional[JaxMoE] = None
     dense_ffw: Optional[DenseFFW] = None
     shared_experts: Optional[DenseFFW] = None
+    enable_return_routed_experts: bool = False
 
     def __call__(self, x_TD, is_prefill, kv_cache, attention_metadata):
         # Attn Block
@@ -105,8 +114,9 @@ class SharedExpertsTransformerBlock(TransformerBlock):
         else:
             dense_layer = self.dense_ffw
 
+        expert_ids = None
         if moe_layer is not None:
-            logits_TD = moe_layer(normed_ffw_input_TD)
+            logits_TD, expert_ids = moe_layer(normed_ffw_input_TD)
             # Add the shared expert outputs to the MoE outputs.
             shared_expert_output_TD = self.shared_experts(normed_ffw_input_TD)
             logits_TD += shared_expert_output_TD
@@ -118,4 +128,5 @@ class SharedExpertsTransformerBlock(TransformerBlock):
             )
 
         logits_TD += ffw_residual_TD
-        return new_cache, logits_TD
+
+        return new_cache, logits_TD, expert_ids
