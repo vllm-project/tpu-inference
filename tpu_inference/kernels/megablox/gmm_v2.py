@@ -1525,8 +1525,6 @@ def tgmm_kernel_main(
 #         "precision",
 #         "preferred_element_type",
 #         "acc_dtype",
-#         "maybe_quantize_lhs",
-#         "zero_initialize", # xw32q: do we need this? No, we dont.
 #     ],
 # )
 def _tgmm_v2_impl(
@@ -1541,8 +1539,6 @@ def _tgmm_v2_impl(
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
     preferred_element_type: jnp.dtype | None = None,
     acc_dtype: jnp.dtype | None = None,
-    maybe_quantize_lhs: bool = True,
-    zero_initialize: bool = True,
 ):
   # Compute grad_rhs=lhs[sizes[i-1]:sizes[i], :].T @ rhs[sizes[i-1]:sizes[i], :]
   # aka grad_rhs = lhs.T @ grad
@@ -1780,10 +1776,9 @@ def _gmm_v2_bwd(
       tile_info=tile_info,
       vmem_limit_bytes=vmem_limit_bytes,
       precision=precision,
+      # TODO: we may want a user provided preferred_element_type (drhs's dtype).
       preferred_element_type=rhs.dtype,
       acc_dtype=acc_dtype,
-      maybe_quantize_lhs=maybe_quantize_lhs,
-      zero_initialize=zero_initialize
   )
   # Return a gradient per each differentiable argument except for the
   # nondiff_argnames.
