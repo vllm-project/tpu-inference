@@ -22,6 +22,8 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.config.multimodal import BaseDummyOptions
 
+from tpu_inference.models.common.interface import (ModelInterface,
+                                                   MultiModalInterface)
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
@@ -242,13 +244,12 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
             self.runner.load_model()
 
     def _model_get_model(self):
-        mock_multimodal_fns = {
-            "precompile_vision_encoder_fn": None,
-            "embed_multimodal_fn": None,
-            "embed_input_ids_fn": None,
-            "get_mrope_input_positions_fn": None
-        }
-        return (
+        mock_multimodal_fns = MultiModalInterface(
+            precompile_vision_encoder_fn=None,
+            embed_multimodal_fn=None,
+            embed_input_ids_fn=None,
+            get_mrope_input_positions_fn=None)
+        return ModelInterface(
             MagicMock(),  # TPUModelRunner.model_fn
             MagicMock(),  # TPUModelRunner.compute_logits_fn
             MagicMock(),  # TPUModelRunner.pooler_fn
@@ -288,13 +289,12 @@ class TestTPUJaxRunnerDisableMM:
                                        ('data', 'attn_dp', 'expert', 'model'))
 
     def _model_get_model(self):
-        mock_multimodal_fns = {
-            "precompile_vision_encoder_fn": None,
-            "embed_multimodal_fn": MagicMock(),
-            "embed_input_ids_fn": MagicMock(),
-            "get_mrope_input_positions_fn": None
-        }
-        return (
+        mock_multimodal_fns = MultiModalInterface(
+            precompile_vision_encoder_fn=None,
+            embed_multimodal_fn=MagicMock(),
+            embed_input_ids_fn=MagicMock(),
+            get_mrope_input_positions_fn=None)
+        return ModelInterface(
             MagicMock(),  # TPUModelRunner.model_fn
             MagicMock(),  # TPUModelRunner.compute_logits_fn
             MagicMock(),  # TPUModelRunner.pooler_fn

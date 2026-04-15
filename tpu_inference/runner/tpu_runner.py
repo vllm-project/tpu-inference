@@ -546,21 +546,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def load_model(self):
         with set_current_vllm_config(self.vllm_config):
-            self.model_fn, self.compute_logits_fn, self.pooler_fn, self.combine_hidden_states_fn, multimodal_fns, self.state, self.lora_manager, self.model = get_model(
+            model = get_model(
                 self.vllm_config,
                 self.rng_key,
                 self.mesh,
             )
 
-        multimodal_fns = multimodal_fns or {}
-        self.precompile_vision_encoder_fn = multimodal_fns.get(
-            "precompile_vision_encoder_fn", None)
-        self.embed_multimodal_fn = multimodal_fns.get("embed_multimodal_fn",
-                                                      None)
-        self.embed_input_ids_fn = multimodal_fns.get("embed_input_ids_fn",
-                                                     None)
-        self.get_mrope_input_positions_fn = multimodal_fns.get(
-            "get_mrope_input_positions_fn", None)
+        self.model_fn = model.model_fn
+        self.compute_logits_fn = model.compute_logits_fn
+        self.pooler_fn = model.pooler_fn
+        self.combine_hidden_states_fn = model.combine_hidden_states_fn
+        self.state = model.state
+        self.lora_manager = model.lora_manager
+        self.model = model.model
+
+        self.precompile_vision_encoder_fn = model.multimodal_fns.precompile_vision_encoder_fn
+        self.embed_multimodal_fn = model.multimodal_fns.embed_multimodal_fn
+        self.embed_input_ids_fn = model.multimodal_fns.embed_input_ids_fn
+        self.get_mrope_input_positions_fn = model.multimodal_fns.get_mrope_input_positions_fn
 
         if self.drafter is not None:
             logger.info("Loading drafter model...")
