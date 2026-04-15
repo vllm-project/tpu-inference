@@ -31,6 +31,7 @@ Note: batched_rpa is build on top / derived from RPA3.
 
 import jax
 import jax.numpy as jnp
+from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.experimental.batched_rpa import (configs, kernel,
@@ -279,66 +280,181 @@ def get_kv_cache_shape(
     )
 
 
-def get_default_block_sizes(
-    q_dtype: jnp.dtype,
-    kv_dtype: jnp.dtype,
-    actual_num_q_heads: int,
-    actual_num_kv_heads: int,
-    head_dim: int,
-    page_size: int,
-    max_num_tokens: int,
-    max_num_seqs: int,
-    pages_per_seq: int,
+def calculate_block_sizes(
+    model_cfgs: configs.ModelConfigs,
+    serve_cfgs: configs.ServingConfigs,
+    vmem_limit_bytes: int,
 ) -> tuple[configs.BlockSizes, configs.BlockSizes]:
-    """Get (bq_sz, bkv_sz, batch_size) by some heuristic formulas."""
-    del (
-        q_dtype,
-        head_dim,
-        max_num_tokens,
-        max_num_seqs,
-        pages_per_seq,
-    )
-    is_8bit = utils.get_dtype_packing(kv_dtype) == 4
-    # Qwen32b
-    if actual_num_q_heads == 32 and actual_num_kv_heads == 4 and is_8bit:
+
+    tpu_info = pltpu.get_tpu_info()
+    num_lanes = tpu_info.num_lanes
+    mxu_column_size = tpu_info.mxu_column_size
+
+    # Calculate aligned model dimensions.
+    aligned_head_dim = utils.align_to(model_cfgs.head_dim, num_lanes)
+    aligned_num_q_heads_per_kv_head = utils.align_to(
+        model_cfgs.num_q_heads_per_kv_head, serve_cfgs.packing_q)
+    aligned_num_q_heads = (aligned_num_q_heads_per_kv_head *
+                           model_cfgs.num_kv_heads)
+
+    bkv_stride = pl.cdiv(model_cfgs.num_kv_heads * 2, serve_cfgs.packing_kv)
+    if utils.has_bank_conflicts(bkv_stride):
+        bkv_stride += 1
+    aligned_num_kv_heads_x2 = bkv_stride * serve_cfgs.packing_kv
+
+    q_bytes = jnp.dtype(serve_cfgs.dtype_q).itemsize
+    kv_bytes = jnp.dtype(serve_cfgs.dtype_kv).itemsize
+    out_bytes = jnp.dtype(serve_cfgs.dtype_out).itemsize
+
+    def calculate_vmem_usage(batch_size: int, n_buffer: int, bq_sz: int,
+                             bkv_sz: int) -> int:
+        """Calculate VMEM usage of the kernel."""
+
+        # Step 1: Calculate buffer sizes.
+
+        # Calculate bq & bkv elements for a single buffer.
+        bq_array_size = bq_sz * aligned_num_q_heads * aligned_head_dim
+        bkv_array_size = bkv_sz * aligned_num_kv_heads_x2 * aligned_head_dim
+
+        # Get output buffer size as well - which has same size as bq_bytes.
+        bo_bytes = bq_array_size
+
+        # Convert to bytes.
+        bq_bytes = bq_array_size * q_bytes
+        bkv_bytes = bkv_array_size * kv_bytes
+        bo_bytes = bo_bytes * out_bytes
+
+        # Account for multiple buffers. For output, we always use double buffer.
+        bq_bytes *= n_buffer
+        bkv_bytes *= n_buffer
+        bo_bytes *= 2
+
+        # Sum up all buffer memory usage.
+        buffer_bytes = bq_bytes + bkv_bytes + bo_bytes
+
+        # Step 2: Calculate worse case memory usage during compute
+
+        # Calculate the size of loaded bq and bkv size.
+        loaded_bq_size = bq_sz * model_cfgs.num_q_heads * aligned_head_dim
+        loaded_bkv_size = bkv_sz * model_cfgs.num_kv_heads * aligned_head_dim
+
+        loaded_bq_bytes = loaded_bq_size * q_bytes
+        loaded_bkv_bytes = loaded_bkv_size * kv_bytes
+
+        # Calculate the size of full attention mask.
+        qk_size = bq_sz * bkv_sz * model_cfgs.num_q_heads
+
+        # Convert to bytes.
+        qk_bytes = qk_size * out_bytes
+
+        # Sum up all compute memory usage.
+        compute_bytes = loaded_bq_bytes + loaded_bkv_bytes + qk_bytes
+
+        # Sum up all memory usage.
+        total_bytes = buffer_bytes + compute_bytes
+
+        # Account for batch size.
+        total_bytes *= batch_size
+
+        return total_bytes
+
+    def calculate_compute_buffer_time(batch_size: int, bq_c_sz: int,
+                                      bkv_sz: int) -> int:
+        num_k_rows = pl.cdiv(bkv_sz, mxu_column_size)
+        num_k_cols = pl.cdiv(model_cfgs.head_dim, mxu_column_size)
+        num_k = num_k_rows * num_k_cols
+
+        num_muls = bq_c_sz * num_k * model_cfgs.num_q_heads
+        return batch_size * num_muls
+
+    def find_best_block_sizes(
+            max_batch_size: int,
+            max_n_buffer: int,
+            fixed_bq_sz: int | None = None) -> configs.BlockSizes:
+        """Loop through different block sizes to find the most optimal one."""
+
+        capped_vmem_limit_bytes = vmem_limit_bytes * 0.8
+
+        bkv_sz = mxu_column_size
+        bq_sz = fixed_bq_sz or mxu_column_size
+        batch_size = max_batch_size
+        n_buffer = max_n_buffer
+
+        # Step 1: Lower batch_size and/or n_buffer if even the smallest bq and bkv
+        # size can trigger OOM.
+
+        # If current batch size triggers OOM, decrease batch size until the kernel
+        # fits within VMEM limit.
+        while (calculate_vmem_usage(batch_size, n_buffer, bq_sz, bkv_sz)
+               > capped_vmem_limit_bytes):
+            batch_size -= 1
+
+        # As a last resort, attempt to decrease number of buffers to avoid OOM.
+        while (calculate_vmem_usage(batch_size, n_buffer, bq_sz, bkv_sz)
+               > capped_vmem_limit_bytes):
+            n_buffer -= 1
+
+        # Indicates OOM was triggered even when batch_size=1 or n_buffer=1.
+        # NOTE: If the program did not exit at this point even when either values
+        # were zero, it will trigger infinite loop at the next while loop.
+        if batch_size == 0 or n_buffer == 0:
+            raise ValueError(
+                "Cannot find batch size that fits within VMEM limit.")
+
+        # Step 2: Increase block sizes until the kernel is unable to fit into VMEM.
+        while (calculate_vmem_usage(batch_size, n_buffer, bq_sz, bkv_sz)
+               < capped_vmem_limit_bytes):
+            bkv_sz += mxu_column_size
+            # Unless bq is a fixed value, we want to ensure bq size is the same as bkv
+            # size. When using causal masking, if bq size is larger than bkv size,
+            # entire kv tile can be masked out for some query tokens. Similarly, if
+            # bkv size is larger than bq size, entire query tile can be masked out for
+            # some kv tokens.
+            bq_sz = fixed_bq_sz or bkv_sz
+
+        # Rollback one step since the last attempted value triggered OOM.
+        bkv_sz -= mxu_column_size
+        bq_sz = fixed_bq_sz or bkv_sz
+
+        # Indicates OOM was triggered from the starting bkv size.
+        if bkv_sz == 0:
+            raise ValueError(
+                "Cannot find block sizes that fit within VMEM limit.")
+
+        # Step 3: Given current tile size, calculate compute tile size.
+
+        # Fixed value based on hardware.
+        threshold = 1000
+
+        num_bq_c = 1
+        last_valid_bq_c_sz = bq_c_sz = bq_sz
+        bq_c_rem = 0
+
+        while (calculate_compute_buffer_time(batch_size, bq_c_sz, bkv_sz)
+               > threshold or bq_c_rem != 0) and num_bq_c < bq_sz:
+            if bq_c_rem == 0:
+                last_valid_bq_c_sz = bq_c_sz
+            num_bq_c += 1
+            bq_c_sz, bq_c_rem = divmod(bq_sz, num_bq_c)
+
         return configs.BlockSizes(
-            bq_sz=1,
-            bq_c_sz=1,
-            bkv_sz=512,
-            batch_size=10,
-            n_buffer=2,
-        ), configs.BlockSizes(
-            bq_sz=256,
-            bq_c_sz=32,
-            bkv_sz=512,
-            batch_size=2,
-            n_buffer=2,
-        )
-    # Qwen-coder
-    if actual_num_q_heads == 12 and actual_num_kv_heads == 1 and is_8bit:
-        return configs.BlockSizes(
-            bq_sz=1,
-            bq_c_sz=1,
-            bkv_sz=4096,
-            batch_size=8,
-            n_buffer=3,
-        ), configs.BlockSizes(
-            bq_sz=512,
-            bq_c_sz=32,
-            bkv_sz=512,
-            batch_size=3,
-            n_buffer=3,
+            bq_sz=bq_sz,
+            bq_c_sz=last_valid_bq_c_sz,
+            bkv_sz=bkv_sz,
+            batch_size=batch_size,
+            n_buffer=n_buffer,
         )
 
-    default_block_sizes = configs.BlockSizes(
-        bq_sz=1,
-        bq_c_sz=1,
-        bkv_sz=page_size,
-        batch_size=1,
-        n_buffer=2,
-    )
+    # Default to triple buffer as its almost always beneficial.
+    n_buffer = 3
+    # Fixed value based on experimental results.
+    decode_batch_size = 8
+    prefill_batch_size = 2
 
-    return default_block_sizes, default_block_sizes
+    decode_block_sizes = find_best_block_sizes(decode_batch_size, n_buffer, 1)
+    prefill_block_sizes = find_best_block_sizes(prefill_batch_size, n_buffer)
+
+    return decode_block_sizes, prefill_block_sizes
 
 
 @jax.jit(
@@ -465,28 +581,40 @@ def ragged_paged_attention(
     head_dim = queries.shape[2]
     num_kv_heads = keys.shape[1]
     num_page_indices = page_indices.shape[0]
-    pages_per_seq = num_page_indices // max_num_seqs
-    total_q_tokens = queries.shape[0]
+
+    model_cfgs = configs.ModelConfigs(
+        num_q_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        sliding_window=sliding_window,
+        sm_scale=sm_scale,
+        soft_cap=soft_cap,
+        mask_value=mask_value,
+    )
+    serve_cfgs = configs.ServingConfigs(
+        num_seqs=max_num_seqs,
+        num_page_indices=num_page_indices,
+        total_q_tokens=queries.shape[0],
+        dtype_q=queries.dtype,
+        dtype_kv=kv_cache.dtype,
+        dtype_out=out_dtype,
+        page_size=page_size,
+        scale_q=q_scale,
+        scale_k=k_scale,
+        scale_v=v_scale,
+    )
 
     q_hbm, new_kv_hbm = prepare_inputs(queries, keys, values, queries.dtype,
                                        kv_cache.dtype)
+
+    default_decode, default_prefill = calculate_block_sizes(
+        model_cfgs, serve_cfgs, vmem_limit_bytes)
 
     def run_rpa_kernel(
         mode: configs.RpaCase,
         o_hbm_alias_q_hbm: jax.Array,
         kv_cache: jax.Array,
     ):
-        default_decode, default_prefill = get_default_block_sizes(
-            queries.dtype,
-            kv_cache.dtype,
-            num_q_heads,
-            num_kv_heads,
-            head_dim,
-            page_size,
-            total_q_tokens,
-            max_num_seqs,
-            pages_per_seq,
-        )
         if mode == configs.RpaCase.DECODE:
             effective_blocks = decode_block_sizes or default_decode
         else:
@@ -494,36 +622,15 @@ def ragged_paged_attention(
 
         cfgs = configs.RPAConfig(
             block=effective_blocks,
-            model=configs.ModelConfigs(
-                num_q_heads=num_q_heads,
-                num_kv_heads=num_kv_heads,
-                head_dim=head_dim,
-                sliding_window=sliding_window,
-                sm_scale=sm_scale,
-                soft_cap=soft_cap,
-                mask_value=mask_value,
-            ),
-            serve=configs.ServingConfigs(
-                num_seqs=max_num_seqs,
-                num_page_indices=num_page_indices,
-                total_q_tokens=total_q_tokens,
-                dtype_q=queries.dtype,
-                dtype_kv=kv_cache.dtype,
-                dtype_out=out_dtype,
-                page_size=page_size,
-                scale_q=q_scale,
-                scale_k=k_scale,
-                scale_v=v_scale,
-            ),
+            model=model_cfgs,
+            serve=serve_cfgs,
             vmem_limit_bytes=vmem_limit_bytes,
             mode=mode,
         )
-        schedule_hbm = schedule.generate_rpa_metadata(
-            cu_q_lens,
-            kv_lens,
-            distribution,
-            cfgs=cfgs,
-        )
+        schedule_hbm = schedule.generate_rpa_metadata(cu_q_lens,
+                                                      kv_lens,
+                                                      distribution,
+                                                      cfgs=cfgs)
         return kernel.rpa_kernel(
             cu_q_lens,
             kv_lens,

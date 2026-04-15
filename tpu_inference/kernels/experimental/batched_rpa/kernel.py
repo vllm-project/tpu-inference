@@ -215,17 +215,16 @@ def rpa_body(
     l_val = l_scratch_ref[...]
     acc_val = acc_scratch_ref[...]
 
+    prev_p = prev_alpha = prev_q_slice = None
     for bq_start in range(0, cfgs.bq_sz, cfgs.bq_c_sz):
         bq_end = min(bq_start + cfgs.bq_c_sz, cfgs.bq_sz)
         q_start = bq_start * cfgs.model.num_q_heads_per_kv_head
         q_end = bq_end * cfgs.model.num_q_heads_per_kv_head
         q_slice = slice(q_start, q_end)
 
-        m_next, l_next, o_next = flash_attention.flash_attention(
+        p, alpha, m_next, l_next = flash_attention.flash_attention_qk_softmax(
             q[:, :, q_slice],
             k,
-            v,
-            acc_val[:, :, q_slice],
             m_val[:, :, q_slice],
             l_val[:, :, q_slice],
             processed_q_len=processed_q_len,
@@ -236,7 +235,30 @@ def rpa_body(
         )
         m_scratch_ref[:, :, q_slice] = m_next
         l_scratch_ref[:, :, q_slice] = l_next
-        acc_scratch_ref[:, :, q_slice] = o_next
+
+        if prev_p is not None:
+            o_next = flash_attention.flash_attention_pv(
+                prev_p,
+                v,
+                prev_alpha,
+                acc_val[:, :, prev_q_slice],
+                cfgs=cfgs,
+            )
+            acc_scratch_ref[:, :, prev_q_slice] = o_next
+
+        prev_p = p
+        prev_alpha = alpha
+        prev_q_slice = q_slice
+
+    assert prev_p is not None
+    o_next = flash_attention.flash_attention_pv(
+        prev_p,
+        v,
+        prev_alpha,
+        acc_val[:, :, prev_q_slice],
+        cfgs=cfgs,
+    )
+    acc_scratch_ref[:, :, prev_q_slice] = o_next
 
     # Step 4: Write back outputs.
     calculate_and_store_out(
