@@ -7,3 +7,4 @@ python-markdown-math
 mkdocs-same-dir
 mkdocs-open-in-new-tab
 mkdocs-table-reader-plugin
+mkdocs-command-generator
