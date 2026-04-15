@@ -92,7 +92,6 @@ def _run_multi_request_test_logic(
         monkeypatch,
         sampling_config,
         kv_transfer_config,
-        swap_op_type="jax",
         skip_precompile="0",
         decode_save="0",
         batched_save="0",

@@ -19,6 +19,7 @@ from typing import Literal, Optional, Tuple
 from vllm.v1.core.kv_cache_utils import BlockHash
 
 from tpu_inference.logger import init_logger
+from tpu_inference.offload.metrics import TPUKVCacheMetrics
 from tpu_inference.offload.utils import CpuChunkId, ReqId
 
 logger = init_logger(__name__)
@@ -303,6 +304,8 @@ class StagingBufferManager():
         self._num_total_free_blocks_for_save: int = 0
         self._num_total_free_blocks_for_load: int = 0
 
+        self.metrics_collector = TPUKVCacheMetrics.get_or_create()
+
     def get_num_blocks_for_save(self) -> int:
         return self._num_blocks_for_save
 
@@ -370,6 +373,10 @@ class StagingBufferManager():
         logger.debug(
             f"  allocate {num_blocks} staging blocks to Req:{req_id} for {usage}."
         )
+        self.metrics_collector.record_staging_buffer_usage(
+            self.get_num_used_staging_blocks())
+        self.metrics_collector.record_staging_buffer_free(
+            self.get_num_free_staging_blocks())
         return num_blocks
 
     def free(self,
@@ -430,6 +437,10 @@ class StagingBufferManager():
         logger.debug(
             f"  free {num_freed_blocks} staging blocks (usage: {usage}) from Req:{req_id}"
         )
+        self.metrics_collector.record_staging_buffer_usage(
+            self.get_num_used_staging_blocks())
+        self.metrics_collector.record_staging_buffer_free(
+            self.get_num_free_staging_blocks())
         return num_freed_blocks
 
     def get_usage(self, with_details: bool = False):
