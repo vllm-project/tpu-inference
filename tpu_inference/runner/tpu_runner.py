@@ -616,7 +616,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
 
-        # Monolithic stack packing for small 1D metadata buffers.
         # This buffer grows dynamically to accommodate metadata and block tables.
         # We re-initialize with a precise capacity now that kv_cache_config is known.
         num_kv_groups = len(kv_cache_config.kv_cache_groups)
@@ -633,7 +632,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         initial_capacity = (sampling_params_size + input_ids_size +
                             positions_size + query_start_loc_size +
                             seq_lens_size + logits_indices_size +
-                            block_tables_size + 1024)
+                            block_tables_size)
         self.device_buffer = common_utils.DeviceBuffer(
             initial_capacity=initial_capacity)
 
@@ -1340,7 +1339,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                  req_ids_dp, scheduled_tokens_per_dp_rank,
                  padded_num_scheduled_tokens_per_dp_rank, dp_size)
 
-        # Monolithic stack packing for small 1D metadata buffers
         self.device_buffer.reset()
 
         input_ids_view = self.device_buffer.get_view(
@@ -1667,7 +1665,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             self.phase_based_profiler.step(batch_composition_stats)
 
-        # Monolithic stack packing for small 1D metadata buffers
         self.device_buffer.reset()
 
         input_ids_view = self.device_buffer.get_view(
