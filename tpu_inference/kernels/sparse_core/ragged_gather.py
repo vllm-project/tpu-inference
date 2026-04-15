@@ -116,12 +116,9 @@ def main_kernel(
             col_hbm_start = col_tile_start + col_vmem_start
             for row_vmem in range(num_simd_lanes):
                 row_hbm = indices[row_vmem] // packing
-<<<<<<< HEAD
                 # Since we have changed layout from (8, 128) to (1, 128), continuous
                 # memory addresss does not yield desired values anymore. Therefore,
                 # we break up a dmas into multiple num_lanes sized requests.
-=======
->>>>>>> 65e77c1c (add back gather)
                 pltpu.make_async_copy(
                     in_32b_hbm_ref.at[row_hbm,
                                       pl.ds(col_hbm_start, num_lanes)],
@@ -231,7 +228,6 @@ def calculate_col_size(hidden_size: int) -> int:
 
     base_bytes = num_simd_lanes * hidden_size * (32 // 8)
     num_cols = 1
-
     while pl.cdiv(base_bytes, num_cols * num_lanes) * num_lanes > target_bytes:
         num_cols += 1
     return pl.cdiv(hidden_size, (num_cols * num_lanes)) * num_lanes
