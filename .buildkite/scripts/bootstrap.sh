@@ -115,16 +115,20 @@ set_jax_envs() {
             export TPU_VERSION="tpu6e"
             export TPU_QUEUE_SINGLE="tpu_v6e_queue"
             export TPU_QUEUE_MULTI="tpu_v6e_8_queue"
+            export TENSOR_PARALLEL_SIZE_SINGLE=1
+            export TENSOR_PARALLEL_SIZE_MULTI=8
             ;;
         v7)
             export TESTS_GROUP_LABEL="[jax] TPU7x Tests Group"
             export TPU_VERSION="tpu7x"
             export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
             export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
+            export TENSOR_PARALLEL_SIZE_SINGLE=2
+            export TENSOR_PARALLEL_SIZE_MULTI=8
             export COV_FAIL_UNDER="67"
             ;;
         unset)
-            unset TESTS_GROUP_LABEL TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI COV_FAIL_UNDER
+            unset TESTS_GROUP_LABEL TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI TENSOR_PARALLEL_SIZE_SINGLE TENSOR_PARALLEL_SIZE_MULTI COV_FAIL_UNDER
             ;;
     esac
 }
