@@ -1749,7 +1749,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.uses_mrope:
             self.mm_manager.calc_mrope_positions(scheduler_output)
             mrope_positions = self.mrope_positions_cpu[:, :
-                                                       padded_total_num_scheduled_tokens]
+                                                       total_num_scheduled_tokens]
             positions_view[:, :total_num_scheduled_tokens] = mrope_positions
             positions_view[:, total_num_scheduled_tokens:] = 0
             # Use first dimension for token indices calculation
