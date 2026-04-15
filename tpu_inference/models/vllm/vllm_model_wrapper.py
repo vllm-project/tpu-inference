@@ -479,6 +479,8 @@ class VllmModelWrapper:
                         torch_mm_embeds = [torch_view(x) for x in mm_embeds]
                     else:
                         torch_mm_embeds = torch_view(mm_embeds)
+                    # dirty hack for flatten_embeddings in MultiModalManager
+                    torch_mm_embeds = [torch_mm_embeds]
                     call_args = (torch_view(input_ids), torch_mm_embeds)
                 else:
                     call_args = (torch_view(input_ids), )
