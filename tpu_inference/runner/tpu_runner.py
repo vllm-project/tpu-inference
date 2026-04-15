@@ -1352,7 +1352,28 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             (self.max_num_reqs + dp_size, ), key="query_start_loc")
         seq_lens_view = self.device_buffer.get_view((self.max_num_reqs, ),
                                                     key="seq_lens")
-        logits_indices_view = self.device_buffer.get_view((padded_num_reqs, ),
+
+        use_spec_decode = len(
+            scheduler_output.scheduled_spec_decode_tokens) > 0
+
+        if use_spec_decode:
+            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+            for (
+                    req_id,
+                    draft_token_ids,
+            ) in scheduler_output.scheduled_spec_decode_tokens.items():
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                num_draft_tokens[req_idx] = len(draft_token_ids)
+
+            num_sampled_tokens = num_draft_tokens + 1
+            total_sampled_tokens = np.sum(num_sampled_tokens)
+            padded_logits_length = runner_utils.get_padded_token_len(
+                self.num_logits_paddings, total_sampled_tokens)
+            logits_indices_shape = (padded_logits_length, )
+        else:
+            logits_indices_shape = (padded_num_reqs, )
+
+        logits_indices_view = self.device_buffer.get_view(logits_indices_shape,
                                                           key="logits_indices")
 
         # Populates input_ids and positions
@@ -1494,14 +1515,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             scheduler_output.scheduled_spec_decode_tokens) > 0
         spec_decode_metadata = None
         if use_spec_decode:
-            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
-            for (
-                    req_id,
-                    draft_token_ids,
-            ) in scheduler_output.scheduled_spec_decode_tokens.items():
-                req_idx = self.input_batch.req_id_to_index[req_id]
-                num_draft_tokens[req_idx] = len(draft_token_ids)
-
             spec_decode_metadata = (
                 self.speculative_decoding_manager.get_spec_decode_metadata(
                     num_draft_tokens,
@@ -1669,7 +1682,26 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         input_ids_view = self.device_buffer.get_view(
             (padded_total_num_scheduled_tokens, ), key="input_ids")
-        logits_indices_view = self.device_buffer.get_view((padded_num_reqs, ),
+
+        use_spec_decode = len(
+            scheduler_output.scheduled_spec_decode_tokens) > 0
+
+        if use_spec_decode:
+            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+            for req_id, draft_token_ids in (
+                    scheduler_output.scheduled_spec_decode_tokens.items()):
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                num_draft_tokens[req_idx] = len(draft_token_ids)
+
+            num_sampled_tokens = num_draft_tokens + 1
+            total_sampled_tokens = np.sum(num_sampled_tokens)
+            padded_logits_length = runner_utils.get_padded_token_len(
+                self.num_logits_paddings, total_sampled_tokens)
+            logits_indices_shape = (padded_logits_length, )
+        else:
+            logits_indices_shape = (padded_num_reqs, )
+
+        logits_indices_view = self.device_buffer.get_view(logits_indices_shape,
                                                           key="logits_indices")
         positions_view = self.device_buffer.get_view(
             (3 if self.uses_mrope else 1, padded_total_num_scheduled_tokens),
@@ -1762,12 +1794,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices_view[:padded_num_reqs] = (
                 query_start_loc_view[1:padded_num_reqs + 1] - 1)
         else:
-            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
-            for req_id, draft_token_ids in (
-                    scheduler_output.scheduled_spec_decode_tokens.items()):
-                req_idx = self.input_batch.req_id_to_index[req_id]
-                num_draft_tokens[req_idx] = len(draft_token_ids)
-
             spec_decode_metadata = self.speculative_decoding_manager.get_spec_decode_metadata(
                 num_draft_tokens, query_start_loc_view[1:num_reqs + 1],
                 padded_num_reqs, input_ids_view)
