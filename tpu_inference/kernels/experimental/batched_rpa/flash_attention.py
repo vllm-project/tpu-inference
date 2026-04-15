@@ -20,22 +20,20 @@ from jax.experimental.pallas import tpu as pltpu
 from tpu_inference.kernels.experimental.batched_rpa import configs, utils
 
 
-def flash_attention(
+def flash_attention_qk_softmax(
     q: jax.Array,  # [B, KV, TQ, H]
     k: jax.Array,  # [B, KV, S, H]
-    v: jax.Array,  # [B, KV, S, H]
-    o_prev: jax.Array,  # [B, KV, TQ, H]
     m_prev: jax.Array,  # [B, KV, TQ, 128]
     l_prev: jax.Array,  # [B, KV, TQ, 128]
     *,
     processed_q_len: list[jax.Array],  # [B]
     processed_kv_len: list[jax.Array],  # [B]
     effective_kv_len: list[jax.Array],  # [B]
-    cfgs: configs.RPAConfig,
+    cfgs: configs.RpaConfigs,
     bq_start: int,
 ):
     """Flash attention kernel."""
-    b, k_heads, tq, h = q.shape
+    b, k_heads, tq, _ = q.shape
     s = k.shape[2]
 
     if cfgs.serve.scale_q is not None:
@@ -89,7 +87,23 @@ def flash_attention(
     m_curr = jnp.max(qk, axis=-1, keepdims=True)
     m_next = jnp.maximum(m_prev, m_curr)
     p = jnp.exp(qk - utils.broadcast_minor(m_next, qk.shape))
+    p_rowsum = jnp.sum(p, axis=-1, keepdims=True, dtype=cfgs.serve.dtype_out)
 
+    alpha = jnp.exp(m_prev - m_next)
+    l_next = alpha * l_prev + p_rowsum
+
+    return p, alpha, m_next, l_next
+
+
+def flash_attention_pv(
+    p: jax.Array,  # [B, KV, TQ, S]
+    v: jax.Array,  # [B, KV, S, H]
+    alpha: jax.Array,  # [B, KV, TQ, 128]
+    o_prev: jax.Array,  # [B, KV, TQ, H]
+    cfgs: configs.RpaConfigs,
+):
+    """Flash attention kernel."""
+    b = p.shape[0]
     pv = lax.dot_general(
         pltpu.einshape("bkts->(bk)ts", p, True),
         pltpu.einshape("bksh->(bk)sh", v, True),
@@ -101,10 +115,6 @@ def flash_attention(
     if cfgs.serve.scale_v is not None:
         pv *= cfgs.serve.scale_v
 
-    p_rowsum = jnp.sum(p, axis=-1, keepdims=True, dtype=cfgs.serve.dtype_out)
-    alpha = jnp.exp(m_prev - m_next)
-    l_next = alpha * l_prev + p_rowsum
-
     o_next = utils.broadcast_minor(alpha, o_prev.shape) * o_prev + pv
 
-    return m_next, l_next, o_next
+    return o_next
