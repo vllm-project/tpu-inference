@@ -22,7 +22,6 @@ from jax.sharding import PartitionSpec as P
 
 import tpu_inference.envs as envs
 from tpu_inference.kernels.gather import gather_reduce as gather_reduce_sc
-from tpu_inference.kernels.gather.ragged_gather import ragged_gather
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
@@ -307,7 +306,7 @@ def expert_parallel_gmm(
     num_experts_per_shard = num_experts // ep_size
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
 
-    x_p_spec = P(ShardingAxisName.EXPERT_DATA)
+    x_p_spec = P(ShardingAxisName.MLP_DATA)
     w1_scale_spec = None if w1_scale is None else ep_p_spec
     w1_bias_spec = None if w1_bias is None else ep_p_spec
     w2_scale_spec = None if w2_scale is None else ep_p_spec
@@ -450,31 +449,28 @@ def fused_moe_func(
                                            dtype=jnp.int32).sum(axis=0)
         topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
 
-        if use_ep:
-            num_ep_shard = get_mesh_shape_product(mesh,
-                                                  ShardingAxisName.EXPERT)
-            local_num_experts = global_num_experts // num_ep_shard
-            shard_idx = jax.lax.axis_index(ShardingAxisName.EXPERT)
-
-            experts_start = shard_idx * local_num_experts
-            experts_end = experts_start + local_num_experts
-            group_offsets = jnp.cumulative_sum(group_sizes_local,
-                                               include_initial=True)
-            shard_output_start = group_offsets[experts_start]
-            shard_output_end = group_offsets[experts_end]
-            x = ragged_gather(
-                hidden_states_local,
-                token_indices_sorted,
-                shard_output_start,
-                shard_output_end,
-            )
-        else:
-            x = hidden_states_local[token_indices_sorted]
+        # The EP path previously sharded ``x`` by EXPERT_DATA via ragged_gather
+        # (#2137) so that every EP rank only materialised the tokens routed
+        # to its local experts.  ``expert_parallel_gmm`` still does a
+        # ``psum(EXPERT)`` at the end, which adds tensors across every axis
+        # of ``EXPERT = ('attn_dp', 'attn_dp_expert', 'expert', 'model')``
+        # (all 32 devices on v4-64 TP=4 EP=8).  Because each rank now holds
+        # *different* tokens at the same local offsets, the psum combines
+        # unrelated tokens' partial outputs.  The per-layer error compounds
+        # (~1.05x per layer) and, on deep MoE models such as GLM-5.1-FP8
+        # (78 layers) or DeepSeek-V3 (61 layers), inflates the MoE output
+        # by ~10x at the final layer, overflows bf16 to NaN on the next
+        # forward, and decode collapses to ``"!!!"``.
+        #
+        # Revert to the pre-#2137 behaviour for EP: keep ``x`` replicated
+        # along non-data axes so every rank sees every token, compute the
+        # local experts' contribution, and let ``psum(EXPERT)`` aggregate
+        # non-overlapping expert-range contributions correctly.
+        x = hidden_states_local[token_indices_sorted]
 
         return x, group_sizes_local, topk_argsort_revert_indices
 
-    x_out_spec = (P(ShardingAxisName.EXPERT_DATA)
-                  if use_ep else P(ShardingAxisName.MLP_DATA))
+    x_out_spec = P(ShardingAxisName.MLP_DATA)
     x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
         _process_tokens_locally,
         mesh=mesh,
