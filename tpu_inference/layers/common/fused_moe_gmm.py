@@ -449,23 +449,12 @@ def fused_moe_func(
                                            dtype=jnp.int32).sum(axis=0)
         topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
 
-        # The EP path previously sharded ``x`` by EXPERT_DATA via ragged_gather
-        # (#2137) so that every EP rank only materialised the tokens routed
-        # to its local experts.  ``expert_parallel_gmm`` still does a
-        # ``psum(EXPERT)`` at the end, which adds tensors across every axis
-        # of ``EXPERT = ('attn_dp', 'attn_dp_expert', 'expert', 'model')``
-        # (all 32 devices on v4-64 TP=4 EP=8).  Because each rank now holds
-        # *different* tokens at the same local offsets, the psum combines
-        # unrelated tokens' partial outputs.  The per-layer error compounds
-        # (~1.05x per layer) and, on deep MoE models such as GLM-5.1-FP8
-        # (78 layers) or DeepSeek-V3 (61 layers), inflates the MoE output
-        # by ~10x at the final layer, overflows bf16 to NaN on the next
-        # forward, and decode collapses to ``"!!!"``.
-        #
-        # Revert to the pre-#2137 behaviour for EP: keep ``x`` replicated
-        # along non-data axes so every rank sees every token, compute the
-        # local experts' contribution, and let ``psum(EXPERT)`` aggregate
-        # non-overlapping expert-range contributions correctly.
+        # In the EP path, ``x`` must stay replicated across the same axes
+        # that ``expert_parallel_gmm`` reduces over at the end. If ranks hold
+        # different token layouts at the same local offsets, the final
+        # reduction/indexing will mix unrelated token contributions.
+        # Keeping every rank's token ordering aligned lets the reduction
+        # correctly combine only the local experts' non-overlapping outputs.
         x = hidden_states_local[token_indices_sorted]
 
         return x, group_sizes_local, topk_argsort_revert_indices
