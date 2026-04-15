@@ -38,11 +38,13 @@ class UnquantizedLinearMethod:
     def __init__(self, linear_config: QuantLinearConfig):
         self.linear_config = linear_config
 
-    def _apply_fused(self,
-                     x_jax: jax.Array,
-                     weight_jax: jax.Array,
-                     bias_jax: Optional[jax.Array] = None,
-                     einsum_str: str = "mn,pn->mp") -> jax.Array:
+    def _apply_fused(
+        self,
+        x_jax: jax.Array,
+        weight_jax: jax.Array,
+        bias_jax: Optional[jax.Array] = None,
+        einsum_str: str = "...mn,pn->...mp",
+    ) -> jax.Array:
         outs = jnp.einsum(einsum_str, x_jax, weight_jax)
         if bias_jax is not None:
             outs += bias_jax
@@ -53,13 +55,15 @@ class UnquantizedLinearMethod:
         return out
 
     def _apply_split(
-            self,
-            x_jax: jax.Array,
-            weights: Sequence[jax.Array],
-            bias_jax: Optional[Sequence[jax.Array]] = None) -> jax.Array:
+        self,
+        x_jax: jax.Array,
+        weights: Sequence[jax.Array],
+        bias_jax: Optional[Sequence[jax.Array]] = None,
+        einsum_str: str = "...mn,pn->...mp",
+    ) -> jax.Array:
         outs = []
         for i, weight_jax in enumerate(weights):
-            out = jnp.einsum("mn,pn->mp", x_jax, weight_jax)
+            out = jnp.einsum(einsum_str, x_jax, weight_jax)
             if bias_jax is not None:
                 out += bias_jax[i]
 
