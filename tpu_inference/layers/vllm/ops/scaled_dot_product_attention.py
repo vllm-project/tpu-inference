@@ -94,7 +94,11 @@ def vllm_vit_sdpa(
     *,
     mesh,
 ):
-    """JAX implementation for ViT SDPA used by vLLM."""
+    """Custom JAX implementation of ViT SDPA as an alternative of upstream vLLM SDPA implementation."""
+
+    # The custom vLLM operator `torch.ops.vllm.torch_sdpa_wrapper` used in ViT, passes tensors in 
+    # shape (batch, seq_len, num_heads, head_dim)
+    # while `sharded_flash_attention` expects shape (batch, num_heads, seq_len, head_dim)
     query = jnp.swapaxes(query, 1, 2)
     key = jnp.swapaxes(key, 1, 2)
     value = jnp.swapaxes(value, 1, 2)
@@ -104,9 +108,11 @@ def vllm_vit_sdpa(
     q_seq_len = query.shape[2]
     kv_seq_len = key.shape[2]
 
+    # The `sharded_flash_attention` kernel requires sequence lengths to be multiples of 128. So, padding accordingly.
     q_pad = (128 - (q_seq_len % 128)) % 128
     kv_pad = (128 - (kv_seq_len % 128)) % 128
-
+    
+    # Pad the sequence dimension (axis 2) with zeros at the end.
     if q_pad > 0:
         query = jnp.pad(query, ((0, 0), (0, 0), (0, q_pad), (0, 0)))
     if kv_pad > 0:
@@ -114,13 +120,16 @@ def vllm_vit_sdpa(
         value = jnp.pad(value, ((0, 0), (0, 0), (0, kv_pad), (0, 0)))
 
     if cu_seqlens is not None:
+        # Compute individual sequence lengths from cumulative sequence lengths.
         cu_seqlens_arr = jnp.array(cu_seqlens)
         lens = cu_seqlens_arr[1:] - cu_seqlens_arr[:-1]
         num_segs = lens.shape[0]
 
+        # Create segment IDs for each token by repeating the sequence index by its length.
         q_real_seg = jnp.repeat(jnp.arange(num_segs), lens, total_repeat_length=q_seq_len)
         kv_real_seg = q_real_seg
 
+        # Pad segment IDs if sequence lengths are not multiples of 128.
         if q_pad > 0:
             q_pad_seg = jnp.full((q_pad,), num_segs)
             q_seg = jnp.concatenate([q_real_seg, q_pad_seg])
@@ -133,6 +142,7 @@ def vllm_vit_sdpa(
         else:
             kv_seg = kv_real_seg
 
+        # Broadcast from 1D (seq_len,) to 2D (batch, seq_len) to match kernel expectations.
         q_seg = jnp.broadcast_to(q_seg, (batch, q_seg.shape[0]))
         kv_seg = jnp.broadcast_to(kv_seg, (batch, kv_seg.shape[0]))
 
@@ -141,6 +151,9 @@ def vllm_vit_sdpa(
     else:
         seg_ids = None
 
+    # Note: 
+    # 1. causal=False as ViT attention is bidirectional (non-causal)
+    # 2. use_attention_bias=False as sequence boundaries are handled by seg_ids instead of an explicit attention bias matrix.
     attn_fn = sharded_flash_attention(
         mesh,
         causal=False,
@@ -153,6 +166,7 @@ def vllm_vit_sdpa(
     if q_pad > 0:
         out = out[:, :, :q_seq_len, :]
 
+    # Reshape back to (batch, seq_len, num_heads, head_dim) to match the original input shape.
     out = jnp.swapaxes(out, 1, 2)
 
     return out
