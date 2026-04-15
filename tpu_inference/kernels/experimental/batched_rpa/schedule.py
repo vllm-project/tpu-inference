@@ -56,7 +56,7 @@ class SmemWrapper:
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
-class RPASchedule:
+class RpaSchedule:
     """Container for metadata arrays with integrated shape/spec logic."""
 
     s_idx: SmemWrapper  # [steps, batch]
@@ -69,10 +69,10 @@ class RPASchedule:
     dma_kv_new: SmemWrapper  # [steps, batch, bkv_p_new, 4]
     actual_steps: Any  # [1]
 
-    cfgs: configs.RPAConfig = dataclasses.field(metadata=dict(static=True))
+    cfgs: configs.RpaConfigs = dataclasses.field(metadata=dict(static=True))
 
     @classmethod
-    def create_shape_dtype(cls, cfgs: configs.RPAConfig):
+    def create_shape_dtype(cls, cfgs: configs.RpaConfigs):
 
         idx_wrapper = SmemWrapper.create_shape_dtype(
             (cfgs.max_steps_ub, cfgs.batch_size))
@@ -162,10 +162,10 @@ def compute_metadata(
     cu_q_lens_ref: jax.Ref,
     kv_lens_ref: jax.Ref,
     distribution_ref: jax.Ref,
-    schedule: RPASchedule,
+    schedule: RpaSchedule,
     lane_lengths_ref: jax.Ref,
     *,
-    cfgs: configs.RPAConfig,
+    cfgs: configs.RpaConfigs,
 ):
     """Fill metadata using triple nested loop of seq->q->k loop."""
 
@@ -332,13 +332,13 @@ def rpa_metadata_schedule_kernel(
     kv_lens_ref: jax.Ref,
     distribution_ref: jax.Ref,
     # Outputs.
-    schedule_hbm_ref: RPASchedule,
+    schedule_hbm_ref: RpaSchedule,
     # Scratch.
-    schedule_ref: RPASchedule,
+    schedule_ref: RpaSchedule,
     lane_lengths_ref: jax.Ref,
     dma_sem: jax.Ref,
     *,
-    cfgs: configs.RPAConfig,
+    cfgs: configs.RpaConfigs,
 ):
     """Generates the HBM-to-VMEM DMA schedule.
 
@@ -444,11 +444,11 @@ def generate_rpa_metadata(
     cu_q_lens: jax.Array,
     kv_lens: jax.Array,
     distribution: jax.Array,
-    cfgs: configs.RPAConfig,
+    cfgs: configs.RpaConfigs,
     *,
     interpret=False,
-) -> RPASchedule:
-    schedule_shaped_dtype = RPASchedule.create_shape_dtype(cfgs)
+) -> RpaSchedule:
+    schedule_shaped_dtype = RpaSchedule.create_shape_dtype(cfgs)
 
     return pl.pallas_call(
         functools.partial(rpa_metadata_schedule_kernel, cfgs=cfgs),
