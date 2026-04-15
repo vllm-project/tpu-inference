@@ -1336,7 +1336,6 @@ def tgmm_inner_kernel(
     tiled_rhs_ref: jax.Array, # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_n]
     tiled_out_ref: jax.Array, # [None, tile_k, tile_n]
     # scratch
-    partial_out_ref: jax.Array,  # probably we dont need it. delete it later.
     acc_ref: jax.Array,  # for accumulation [tile_k, tile_n]
     metadata_ref: MetadataRef, # contains gm_id_to_group_id and gm_id_to_m_offset in SMEM.
     *,
@@ -1469,7 +1468,6 @@ def tgmm_kernel_main(
     rhs_ref,  # [m, n]
     out_ref,  # [num_groups, k, n]
     # scratch memory
-    partial_out_ref: jax.Array,  # 
     acc_ref: jax.Array,  # [tile_k, tile_n]
     metadata_ref: MetadataRef, # contains gm_id_to_group_id and gm_id_to_m_offset in SMEM.
     *, cfgs,
@@ -1499,13 +1497,6 @@ def tgmm_kernel_main(
   jax.lax.fori_loop(0, num_gm, print_metadata, None)
   # debug_print metadata ends.
 
-  # 3. Prepare grid, block specs, scratch shapes, etc.
-  # grid doesn't need to have a dimension num_groups because it can be determined by "group_ids[grid_id] - group_offset[0]"
-  # grid = (n, k, gm)
-  # lhs_block_spec=((m_blk, k_blk), (n_i, k_i, gm_i)->(k_i, pl.ds(row_start, row_size)))
-  # rhs_block_spec=((m_blk, n_blk), (n_i, k_i, gm_i)->(pl.ds(row_start, row_size), n_i))
-  # out_block_spec((None, k_blk, n_blk), (n_i, k_i, gm_i)->(group_ids[grid_id] - group_offset[0], k_blk, n_blk))
-  # out_shape=(ng, k, n)
   in_specs, out_specs = generate_tgmm_block_specs(metadata_ref, cfgs)
   pipeline_fn = pltpu.emit_pipeline(
       functools.partial(tgmm_inner_kernel, cfgs=cfgs),
@@ -1515,7 +1506,7 @@ def tgmm_kernel_main(
   )
   lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, lhs_ref.shape[-1])
   rhs_in = rhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, rhs_ref.shape[-1])
-  scratches = [partial_out_ref, acc_ref, metadata_ref]
+  scratches = [acc_ref, metadata_ref]
   pipeline_fn(lhs_in, rhs_in, out_ref, scratches=scratches)
 
 # TODO(xw32): Add back jax.jit.
@@ -1584,8 +1575,6 @@ def _tgmm_v2_impl(
   out_init = jax.ShapeDtypeStruct((num_actual_groups, dims.size_k, aligned_n), cfgs.out_dtype)
   max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
   scratch_shapes = [
-      # partial_out_ref
-      pltpu.VMEM((dims.size_lhs_sublane, tiles.tile_n), cfgs.out_dtype),
       # acc_ref
       pltpu.VMEM((tiles.tile_k, tiles.tile_n), cfgs.acc_dtype),
       # metadata_ref
