@@ -19,7 +19,7 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_EP_CorrectnessTest_Single_Host"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_MULTI:-tpu_v7x_8_queue}"
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
@@ -46,7 +46,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_record_EP_CorrectnessTest_Single_Host"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_MULTI:-tpu_v7x_8_queue}"
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
@@ -69,7 +69,7 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_EP_CorrectnessTest_Multi_Host"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_MULTI:-tpu_v7x_8_queue}"
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - |
         buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_EP_CorrectnessTest_Multi_Host" "unverified"
@@ -91,7 +91,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_record_EP_CorrectnessTest_Multi_Host"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_MULTI:-tpu_v7x_8_queue}"
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - |
         buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_EP_PerformanceTest_Multi_Host" "unverified"
