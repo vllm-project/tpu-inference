@@ -181,10 +181,6 @@ def main():
     srv_env_str = ' '.join(shlex.quote(item) for item in srv_env_list)
     print(f"SERVER_CMD_ENVS=({srv_env_str})")
 
-    # TODO:
-    # EXTRA_ENVS
-    # EXTRA_ARGS
-
     cli_cmd_type = cli_opts.get("command_type", "vllm_bench_serve")
 
     # Output execution strategy based on command_type

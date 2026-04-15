@@ -26,10 +26,19 @@ bash run_bm.sh <path_to_case.json> [TARGET_CASE_NAME]
 
 The `run_bm.sh` script is designed to be environment-aware. When running locally, please ensure the following preconditions and behaviors are noted:
 
-* **Prerequisites**: You must have a pre-configured Conda environment with `vllm` and the `tpu-inference` packages already installed.
+* **Prerequisites**: You must have a pre-configured Python environment with `vllm` and the `tpu-inference` packages already installed.
 * **Dataset Handling (`GCS_BUCKET`)**: If `GCS_BUCKET` is *not* set, the script will skip downloading datasets from Google Cloud Storage. It will fallback to using local dataset files. Ensure your dataset exists locally unless the specific benchmark (`lm_eval`, etc.) does not require one.
 * **Log Uploads**: If `GCS_BUCKET` is *not* set, the script will silently skip uploading `bm_log.txt` and `vllm_log.txt` to GCS. Logs will remain in the local folder.
 * **Database Reporting (`GCP_DATABASE_ID`, etc.)**: If database-related variables (e.g., `GCP_PROJECT_ID`, `GCP_INSTANCE_ID`, `GCP_DATABASE_ID`) are *not* set, `report_result.sh` will skip inserting the benchmark results into the Spanner DB. Results will only be printed to stdout and saved in the local `.result` file.
+
+***Note: The GCP-related environment variables used below point to the Staging DB and Bucket. When officially launched in the future, the settings will be changed to point to the Production DB and Bucket.***
+
+```json
+"GCP_PROJECT_ID": "cloud-tpu-inference-test",
+"GCS_BUCKET": "vllm-cb-storage2",
+"GCP_INSTANCE_ID": "vllm-bm-inst",
+"GCP_DATABASE_ID": "vllm-bm-bk-runs"
+```
 
 ## 3. Configuration Guide (JSON Cases)
 
@@ -75,7 +84,7 @@ These variables are injected inline via the `env` command right before binary ex
 
 #### C. The `dataset-path` Constraint
 When supplying a custom dataset file via `dataset-path`:
-* **Buildkite CI**: The path *must* be prefixed with `/workspace/tpu_inference/artifacts/dataset/` because the CI mounts the artifacts folder to this specific container path.
+* **Buildkite CI**: The path *must* be prefixed with `/workspace/tpu_inference/artifacts/dataset/` because the CI mounts the artifacts folder to this specific container path, and the Dataset File will be synced from the Bucket to this folder.
 * **Local Execution**: The path should be an absolute path or relative to the directory where `run_bm.sh` is executed.
 
 #### D. Implicit DB Tracking Variables

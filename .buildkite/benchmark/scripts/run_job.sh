@@ -43,7 +43,6 @@ export RUN_TYPE="${RUN_TYPE:-DAILY}"
 BK_RECORD_ID_LABEL=" RecordId: ${RECORD_ID}"
 buildkite-agent step update "label" "$BK_RECORD_ID_LABEL" --append
 
-# TODO: Checking
 echo "--- Verifying Submodule Commit"
 git submodule status
 
