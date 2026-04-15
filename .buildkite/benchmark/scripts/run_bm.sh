@@ -78,7 +78,6 @@ if [[ "${BUILDKITE:-false}" == "true" ]]; then
   curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
   apt-get update && apt-get install -y google-cloud-cli
 
-  # TODO: Move to image building.
   # Ingore the error because in case of using uv, the packages are installed outside this script.
   pip install evaluate==0.4.5 || true
   pip install rouge-score==0.1.2 || true
@@ -246,7 +245,6 @@ fi
 echo "wait for 60 minutes.."
 echo
 for _ in {1..360}; do
-    # TODO: detect other type of errors.
     if grep -Fq "raise RuntimeError" "$VLLM_LOG"; then
         echo "Detected RuntimeError, exiting."
         cat "$VLLM_LOG"
