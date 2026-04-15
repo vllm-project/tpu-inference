@@ -252,7 +252,7 @@ class GmmTest(jtu.JaxTestCase):
         lhs_t, grad, group_sizes, num_local_groups, group_offset=group_offset
     )
     actual = _tgmm_v2_impl(
-        lhs, grad, group_sizes, num_local_groups, group_offset=group_offset
+        lhs, grad, group_sizes, num_local_groups, group_offset=group_offset, preferred_element_type=jnp.bfloat16
     )
     self.assertEqual(actual.shape, (num_local_groups, in_size, out_size))
     # diff = jnp.abs(expected - actual)

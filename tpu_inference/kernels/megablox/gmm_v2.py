@@ -1274,22 +1274,26 @@ def make_tgmm_configs(
     *,
     tile_info: TileSizes | TileFn,
     vmem_limit_bytes: int | None,
-    out_dtype: jnp.dtype | None,
+    out_dtype: jnp.dtype,
     acc_dtype: jnp.dtype | None,
 ):
   """Fills the GMM config for the TGMM kernel."""
-  # dims = validate_inputs(lhs, rhs, None, None, group_sizes, group_offset)
-  assert lhs.shape[0] == rhs.shape[0], f'lhs and rhs m-dim mismatch: {lhs.shape} vs {rhs.shape}'
+  assert lhs.shape[0] == rhs.shape[0], f'lhs and rhs m-dim mismatch: {lhs.shape[0]}!={rhs.shape[0]} {lhs.shape} vs {rhs.shape}'
   size_m, size_k = lhs.shape
   _, size_n = rhs.shape
-  # xw32q: when do we use size_lhs_sublane?
+  # size_lhs_sublane is used in tgmm_inner_kernel to set the
+  # (m/size_lhs_sublane, size_lhs_sublane, ...) reshape tile used on the m-axis
+  # for both 'tiled_lhs_ref' and 'tiled_rhs_ref'.
   size_lhs_sublane = pltpu.get_tpu_info().get_sublane_tiling(lhs.dtype)
   size_lhs_sublane = min(size_lhs_sublane, size_m)
+  size_rhs_sublane = pltpu.get_tpu_info().get_sublane_tiling(rhs.dtype)
+  size_rhs_sublane = min(size_rhs_sublane, size_m)
+  assert size_lhs_sublane == size_rhs_sublane, f"size_lhs_sublane should be the same as size_rhs_sublane {lhs.dtype=}, {rhs.dtype=}"
   dims = Dimensions(
       size_m=size_m,
       size_k=size_k,
       size_n=size_n,
-      size_group=num_actual_groups,
+      size_group=num_actual_groups,  # weight.shape[0]
       size_lhs_group=group_sizes.shape[0],
       size_lhs_sublane=size_lhs_sublane
   )
@@ -1305,10 +1309,8 @@ def make_tgmm_configs(
       quant_block_size=-1,
       dtype=lhs.dtype,
   )
-  if out_dtype is None:
-    out_dtype = lhs.dtype
 
-  fuse_act = None
+  fuse_act = None  # fuse_act has to be None in tgmm.
   if acc_dtype is None:
     acc_dtype = jnp.float32.dtype
   if isinstance(tile_info, TileSizes):
@@ -1403,6 +1405,7 @@ def tgmm_inner_kernel(
   group_is_changing = jnp.logical_or(is_last_gm, cur_group_id != next_group_id)
   @pl.when(group_is_changing)
   def _store_accum():
+    print(f'xw32 {tiled_out_ref.dtype=}, {acc_ref.dtype=}')
     tiled_out_ref[...] = acc_ref[...].astype(tiled_out_ref.dtype)
 
 
