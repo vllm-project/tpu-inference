@@ -65,7 +65,9 @@ class TestTPUJaxRunnerDPInputsLightweight:
         self.runner.uses_mrope = False
 
         from tpu_inference.utils import DeviceBuffer
-        self.runner.device_buffer = DeviceBuffer(initial_capacity=1024 * 1024)
+        self.runner.device_buffer = DeviceBuffer(
+            leading_shape=(self.runner.dp_size, ),
+            initial_capacity=1024 * 1024)
 
         # mock kv cache group
         mock_kv_cache_config = MagicMock()
@@ -1307,7 +1309,8 @@ class TestSamplingMetadataPassthrough:
         runner.arange_cpu = np.arange(64, dtype=np.int64)
 
         from tpu_inference.utils import DeviceBuffer
-        runner.device_buffer = DeviceBuffer(initial_capacity=1024 * 1024)
+        runner.device_buffer = DeviceBuffer(leading_shape=(runner.dp_size, ),
+                                            initial_capacity=1024 * 1024)
         runner.num_tokens_paddings_per_dp = [8, 16, 32]
         runner.num_reqs_paddings_per_dp = [4, 8]
         runner.uses_mrope = False
