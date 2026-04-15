@@ -1356,12 +1356,10 @@ def tgmm_inner_kernel(
 
   @pl.when(new_group)
   def _():
-    # pl.debug_print("xw32line1342 tiled_lhs_ref={}", tiled_lhs_ref[...])
     acc_ref[...] = jnp.zeros_like(acc_ref)
-    print("xw32line1387 acc_ref.dtype={}", acc_ref.dtype)
 
   # Now we compute a mask to zero out invalid rows in the LHS/RHS tiles.
-  # Why it's needed: The DMA loads tiles aligned to sublane boundaries, but the actual group data may not start/end on those boundaries. For example, with 'size_lhs_sublane=8' and a group spanning rows 5-20:
+  # Why is it needed? The DMA loads tiles aligned to sublane boundaries, but the actual group data may not start/end on those boundaries. For example, with 'size_lhs_sublane=8' and a group spanning rows 5-20:
   # - DMA loads rows 0-23 (aligned to sublane boundary: 0 = 5 - 5%8, 24 = cdiv(20,8)*8)
   # - Rows 0-4 and 20-23 contain data from other groups and must be masked out.
   m_start = metadata_ref.gm_id_to_m_offset[gm_id]
@@ -1383,20 +1381,6 @@ def tgmm_inner_kernel(
       preferred_element_type=jnp.float32,
   )
 
-  """
-      is_end_of_grid = grid_id == (pl.num_programs(2) - 1)
-    next_grid_id = jnp.where(is_end_of_grid, grid_id, grid_id + 1)
-    next_group = group_ids[next_grid_id]
-
-    group_is_changing = jnp.logical_or(is_end_of_grid, group != next_group)
-
-    @pl.when(group_is_changing)
-    def _store_accum():
-      to_store = acc_scratch[...]
-      if existing_out is not None:
-        to_store += existing_out[...].astype(jnp.float32)
-      out[...] = to_store.astype(preferred_element_type)
-  """
   is_last_gm = gm_id == (pl.num_programs(2) - 1)
   next_gm_id = jnp.where(is_last_gm, gm_id, gm_id + 1)
   next_group_id = metadata_ref.gm_id_to_group_id[next_gm_id]
@@ -1404,7 +1388,6 @@ def tgmm_inner_kernel(
   group_is_changing = jnp.logical_or(is_last_gm, cur_group_id != next_group_id)
   @pl.when(group_is_changing)
   def _store_accum():
-    print(f'xw32 {tiled_out_ref.dtype=}, {acc_ref.dtype=}')
     tiled_out_ref[...] = acc_ref[...].astype(tiled_out_ref.dtype)
 
 
@@ -1452,7 +1435,6 @@ def generate_tgmm_block_specs(
       (bounded_slice_gm, cfgs.dims.size_lhs_sublane, cfgs.tiles.tile_n),
       index_map.rhs_index_map,
   )
-  # xw32q: do I need `cfgs.tiles.tile_k // cfgs.rhs_cfgs.packing` as in the function "generate_block_specs"?
   out_block_spec = pl.BlockSpec(
       (None, cfgs.tiles.tile_k, cfgs.tiles.tile_n),
       index_map.out_index_map,
@@ -1474,7 +1456,6 @@ def tgmm_kernel_main(
 ):
   num_k = pl.cdiv(cfgs.dims.size_k, cfgs.tiles.tile_k)
   num_n = pl.cdiv(cfgs.dims.size_n, cfgs.tiles.tile_n)
-  # xw32: is the num_gm here within the limit?
   num_gm = fill_metadata(
       lhs_group_sizes_ref,
       group_offset_ref,
