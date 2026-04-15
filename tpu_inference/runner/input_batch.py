@@ -315,6 +315,10 @@ class InputBatch:
     def swap_states(self, i1: int, i2: int) -> None:
         old_id_i1 = self._req_ids[i1]
         old_id_i2 = self._req_ids[i2]
+        # Only swap the active token prefix for each request. Copying full
+        # max_model_len rows is expensive and unnecessary during reordering.
+        max_active_token_count = max(
+            int(self.num_tokens[i1]), int(self.num_tokens[i2]))
         self._req_ids[i1], self._req_ids[i2] =\
             self._req_ids[i2], self._req_ids[i1] # noqa
         self.req_output_token_ids[i1], self.req_output_token_ids[i2] =\
@@ -337,14 +341,12 @@ class InputBatch:
         self.top_k_cpu[i1], self.top_k_cpu[i2] =\
             self.top_k_cpu[i2], self.top_k_cpu[i1]
 
-        # NOTE: the following is unsafe
-        # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
-        #     self.token_ids_cpu[i2, ...], self.token_ids_cpu[i1, ...]
-        # instead, we need to temporiarily copy the data for one of the indices
-        # TODO(lucas): optimize this by only copying valid indices
-        tmp = self.token_ids_cpu[i1, ...].copy()
-        self.token_ids_cpu[i1, ...] = self.token_ids_cpu[i2, ...]
-        self.token_ids_cpu[i2, ...] = tmp
+        # NOTE: Basic slice indexing (e.g. arr[i1, :]) returns a view, so
+        # a naive swap is unsafe due to aliasing. Fancy indexing with a list
+        # (e.g. arr[[i1, i2]]) returns a copy, making this single-expression
+        # swap safe without an explicit tmp buffer.
+        self.token_ids_cpu[[i1, i2], :max_active_token_count] = \
+            self.token_ids_cpu[[i2, i1], :max_active_token_count]
 
         swap_dict_values(self.generators, i1, i2)
         swap_dict_values(self.min_tokens, i1, i2)
