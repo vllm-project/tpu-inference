@@ -40,6 +40,7 @@ def scaled_dot_product_attention(
 
     # Q, K, V shapes: (batch, num_heads, seq_len, head_dim)
     batch = query.shape[0]
+    num_heads = query.shape[1]
     q_seq_len = query.shape[2]
     kv_seq_len = key.shape[2]
 
@@ -93,7 +94,7 @@ def vllm_vit_sdpa(
     *,
     mesh,
 ):
-    """Custom JAX implementation of ViT SDPA as an alternative of upstream vLLM SDPA implementation."""
+    """Custom JAX implementation of ViT SDPA as an alternative of [upstream vLLM SDPA](https://github.com/vllm-project/vllm/blob/bcc2306cefa4179c548d3e638e7a22a88d281733/vllm/v1/attention/ops/vit_attn_wrappers.py#L211-L239) implementation."""
 
     # The custom vLLM operator `torch.ops.vllm.torch_sdpa_wrapper` used in ViT, passes tensors in 
     # shape (batch, seq_len, num_heads, head_dim)
@@ -103,7 +104,6 @@ def vllm_vit_sdpa(
     value = jnp.swapaxes(value, 1, 2)
 
     batch = query.shape[0]
-    num_heads = query.shape[1]
     q_seq_len = query.shape[2]
     kv_seq_len = key.shape[2]
 
