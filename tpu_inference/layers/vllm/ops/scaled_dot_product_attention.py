@@ -40,7 +40,6 @@ def scaled_dot_product_attention(
 
     # Q, K, V shapes: (batch, num_heads, seq_len, head_dim)
     batch = query.shape[0]
-    num_heads = query.shape[1]
     q_seq_len = query.shape[2]
     kv_seq_len = key.shape[2]
 
