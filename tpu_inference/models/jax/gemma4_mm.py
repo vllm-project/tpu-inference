@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from functools import partial
 from itertools import islice
 from typing import Any, Callable, Iterable, List, NamedTuple, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import torch
 from flax import nnx
 from jax.sharding import Mesh
 from transformers import PretrainedConfig
@@ -262,9 +262,6 @@ class Gemma4VisionFlashAttention(JaxModule):
         return final_output
 
 
-# --- From gemma4_vision.py ---
-
-
 class VisionEntry(JaxModule):
     """
     Handles converting input [B, H, W, C] to patches [B, L, D],
@@ -410,15 +407,12 @@ class Gemma4VisionEncoderLayer(JaxModule):
                                                      rngs=rng,
                                                      quant_config=quant_config)
 
-        # self.layer_scalar = nnx.Param(jnp.ones((), dtype=dtype))
-
     def __call__(self,
                  inputs: jax.Array,
                  positions: jax.Array,
                  input_mask: Optional[jax.Array] = None) -> jax.Array:
         normed_inputs = self.input_layernorm(inputs)
 
-        # Pass the 1D mask down to the Flash Attention kernel
         attn_output = self.self_attn(normed_inputs,
                                      positions,
                                      input_mask=input_mask)
@@ -431,7 +425,6 @@ class Gemma4VisionEncoderLayer(JaxModule):
         outputs = self.post_feedforward_layernorm(outputs)
         outputs += attn_output
 
-        # outputs = outputs * self.layer_scalar.value
         return outputs
 
 
@@ -543,8 +536,6 @@ class Gemma4VisionModel(JaxModule):
             num_layers, lambda *_: Gemma4VisionEncoderLayer(
                 config, dtype, rng, self.mesh, quant_config))
 
-        # self.final_norm = JaxRmsNorm(self.config.hidden_size, param_dtype=self.dtype, rngs=rng)
-
         # 3. Vision Exit (Spatial Pooling)
         self.vision_exit = VisionExit(config, dtype)
 
@@ -602,8 +593,19 @@ class Gemma4MultimodalEmbedder(JaxModule):
             quant_config=quant_config,
             prefix=prefix + ".embedding_projection",
         )
+        self.embedding_pre_projection_norm = JaxRmsNorm(
+            vision_hidden_size,
+            epsilon=rms_norm_eps,
+            param_dtype=dtype,
+            use_scale=False,
+            scale_init=None,
+            rngs=rng,
+            quant_config=quant_config,
+            prefix=prefix + ".embedding_pre_projection_norm",
+        )
 
     def __call__(self, x: jax.Array) -> jax.Array:
+        x = self.embedding_pre_projection_norm(x)
         x = self.embedding_projection(x)
         return x
 
@@ -765,20 +767,14 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
         return inputs_embeds.astype(target_dtype)
 
-    @partial(jax.jit, static_argnames=["has_positions"])
+    @jax.jit
     def get_single_image_embedding(self, pixel_values: jax.Array,
-                                   positions_xy: jax.Array,
-                                   has_positions: bool) -> jax.Array:
-        input_mask = None
-        if has_positions:
-            input_mask = positions_xy[..., 0] != -1
-            pos_xy = positions_xy
-        else:
-            pos_xy = None
+                                   positions_xy: jax.Array) -> jax.Array:
+        input_mask = positions_xy[..., 0] != -1
 
         vision_outputs = self.vision_tower(pixel_values,
                                            input_mask=input_mask,
-                                           positions_xy=pos_xy)
+                                           positions_xy=positions_xy)
 
         projected_vision_features = vision_outputs[0][0]
         pooler_mask = vision_outputs[0][1]
@@ -800,75 +796,44 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
     def _parse_and_validate_image_input(self,
                                         **kwargs: object) -> Optional[dict]:
-        pixel_values = kwargs.pop("pixel_values", None)
-        positions_xy = kwargs.pop("pixel_position_ids", None)
-        patches_per_image = kwargs.pop("patches_per_image", None)
-
+        pixel_values = kwargs.get("pixel_values")
+        positions_xy = kwargs.get("pixel_position_ids")
         if pixel_values is None:
             return None
 
-        # Ensure correct layout for JAX Vision Model
-        from tpu_inference import utils
-        dtype_str = str(self.vllm_config.model_config.dtype).split('.')[-1]
-        jax_dtype = utils.get_jax_dtype_from_str_dtype(dtype_str)
-        pixel_values = jnp.asarray(pixel_values, dtype=jax_dtype)
-
-        if positions_xy is not None:
-            positions_xy = jnp.asarray(positions_xy, dtype=jnp.int32)
+        def to_numpy(tensor):
+            if isinstance(tensor, torch.Tensor):
+                if tensor.dtype == torch.bfloat16:
+                    return tensor.to(torch.float32).numpy().astype(
+                        jnp.bfloat16)
+                return tensor.numpy()
+            return tensor
 
         return {
-            "type": "pixel_values",
-            "pixel_values": pixel_values,
-            "positions_xy": positions_xy,
-            "patches_per_image": patches_per_image
+            "pixel_values": to_numpy(pixel_values),
+            "positions_xy": to_numpy(positions_xy)
         }
 
     def _process_image_input(self, image_input: dict) -> list[jax.Array]:
-        pixel_values = image_input["pixel_values"]
-        positions_xy = image_input["positions_xy"]
-        patches_per_image = image_input["patches_per_image"]
+        pv_jax = jnp.asarray(image_input["pixel_values"])
+        pos_jax = jnp.asarray(image_input["positions_xy"], dtype=jnp.int32)
 
-        num_images = pixel_values.shape[0]
+        if pv_jax.ndim == 2:
+            pv_jax = jnp.expand_dims(pv_jax, axis=0)
+        if pos_jax.ndim == 2:
+            pos_jax = jnp.expand_dims(pos_jax, axis=0)
 
         image_embeds = []
-        has_positions = positions_xy is not None
+        batch_size = pv_jax.shape[0]
 
-        for i in range(num_images):
-            pv = pixel_values[i:i + 1]  # Keep batch dim
-            if has_positions:
-                pos = positions_xy[i:i + 1]
-            else:
-                # Dummy array to keep JAX happy, since it must be an array for JIT
-                pos = jnp.zeros((1, 1, 2), dtype=jnp.int32)
+        for i in range(batch_size):
+            single_pv = pv_jax[i:i + 1, ...]
+            single_pos = pos_jax[i:i + 1, ...]
+            emb = self.get_single_image_embedding(single_pv, single_pos)
+            image_embeds.append(emb[0])
+        return image_embeds
 
-            emb = self.get_single_image_embedding(pv, pos, has_positions)
-            image_embeds.append(emb)
-
-        if not image_embeds:
-            return []
-
-        projected_vision_features = jnp.concatenate(image_embeds, axis=0)
-
-        # Reshape and Split logic
-        tokens_per_tile = projected_vision_features.shape[1]
-        hidden_dim = projected_vision_features.shape[2]
-        all_tokens_flat = projected_vision_features.reshape(-1, hidden_dim)
-
-        if hasattr(patches_per_image, 'tolist'):
-            tile_counts = patches_per_image.tolist()
-        else:
-            tile_counts = list(
-                patches_per_image) if patches_per_image is not None else [1]
-
-        split_sizes = [c * tokens_per_tile for c in tile_counts]
-        split_indices = jnp.cumsum(jnp.array(split_sizes[:-1]))
-        output_list = jnp.split(all_tokens_flat, split_indices)
-
-        return list(output_list)
-
-    def embed_multimodal(self,
-                         image_grid_thw=None,
-                         **kwargs) -> List[jax.Array]:
+    def embed_multimodal(self, **kwargs) -> List[jax.Array]:
         jax.debug.print(
             "\n[BACKEND DEBUG] embed_multimodal called! pixel_values present: {p}",
             p=1 if "pixel_values" in kwargs
@@ -914,14 +879,12 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             p = self.vision_tower.patch_embedder.patch_size
             h_p, w_p = h_input // p, w_input // p
             dummy_positions_xy = jnp.ones((1, h_p * w_p, 2), dtype=jnp.int32)
-            has_positions = True
 
             # Trigger JIT
             run_compilation_fn("vision_encoder",
                                self.get_single_image_embedding,
                                dummy_pixel_values,
                                dummy_positions_xy,
-                               has_positions,
                                image_shape=input_hw)
 
     def __call__(
