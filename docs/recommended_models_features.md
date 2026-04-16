@@ -15,7 +15,7 @@ If you’d like us to prioritize something specific, please submit a GitHub feat
 > - 🧪 **Experimental:** Works, but unoptimized or pending community validation.
 > - 📝 **Planned:** Not yet implemented, but on the official roadmap.
 > - ⛔️ **Unplanned:** There is no benefit to adding this.
-> - ❓ **Untested:** The functionality exists but has not been recently or thoroughly verified.
+> - ❔ **Untested:** The functionality exists but has not been recently or thoroughly verified.
 </details>
 
 ## Recommended Models

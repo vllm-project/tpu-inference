@@ -47,10 +47,10 @@ case $OUTCOME in
     message="✅ Passing"
     ;;
   "skipped")
-    message="❓ Untested"
+    message="❔ Untested"
     ;;
   "unverified")
-    message="❓ Untested"
+    message="❔ Untested"
     ;;
   "not enough HBM")
     message="not enough HBM"

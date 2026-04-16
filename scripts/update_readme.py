@@ -152,7 +152,7 @@ def generate_markdown_table(headers, data):
 
         text_str = str(text)
         # If the cell is a status cell (contains our standard emojis), format it as an icon tooltip
-        if any(emoji in text_str for emoji in ["✅", "❌", "❓", "⚠️"]):
+        if any(emoji in text_str for emoji in ["✅", "❌", "❔", "⚠️"]):
             return _format_cell(text_str)
 
         return _nbsp(text_str)
@@ -225,7 +225,7 @@ def _merge_hw_status(status_v6, status_v7):
     if "n/a" in s6 and "n/a" in s7:
         return _format_cell("N/A")
 
-    return _format_cell("❓&nbsp;Untested")
+    return _format_cell("❔&nbsp;Untested")
 
 
 def _merge_model_status_text(status_v6, status_v7):
@@ -257,7 +257,7 @@ def _merge_model_status_text(status_v6, status_v7):
     if "📝" in s6 or "plan" in s6 or "📝" in s7 or "plan" in s7:
         return "📝 Planned"
 
-    return "❓ Untested"
+    return "❔ Untested"
 
 
 def generate_html_feature_table(headers, data):
@@ -336,26 +336,26 @@ def merge_metrics(c, p):
                                                or "pass" in p_clean.lower()):
         return "✅&nbsp;Passing"
 
-    if "❓" in c_clean or "❓" in p_clean:
-        return "❓&nbsp;Untested"
+    if "❔" in c_clean or "❔" in p_clean:
+        return "❔&nbsp;Untested"
 
-    return "❓&nbsp;Untested"
+    return "❔&nbsp;Untested"
 
 
 def _score_status(cell):
-    """Scores status cell: ✅=0, ❌=1, ❓=2, others=3."""
+    """Scores status cell: ✅=0, ❌=1, ❔=2, others=3."""
     s = str(cell)
     if '✅' in s:
         return 0
     if '❌' in s:
         return 1
-    if '❓' in s:
+    if '❔' in s:
         return 2
     return 3
 
 
 def _get_model_status_rank(row):
-    """Ranks model row status: Has ✅ -> 0, Has ❌ -> 1, Only ❓ -> 2."""
+    """Ranks model row status: Has ✅ -> 0, Has ❌ -> 1, Only ❔ -> 2."""
     cells = [str(c) for c in row[2:]]
     if any('✅' in c for c in cells):
         return 0
@@ -367,7 +367,7 @@ def _get_model_status_rank(row):
 def _find_quantization_status(weight, method, nightly_rows):
     """Finds quantization status recursively inside nightly CSV arrays."""
     if not nightly_rows:
-        return "❓ Untested"
+        return "❔ Untested"
     weight = weight.lower().replace(" ", "")
     method = method.lower().replace(" ", "").rstrip('s')
 
@@ -383,7 +383,7 @@ def _find_quantization_status(weight, method, nightly_rows):
                 matched.append(nr)
 
     if not matched:
-        return "❓ Untested"
+        return "❔ Untested"
 
     overall_corr, overall_perf = "✅", "✅"
     for nr in matched:
@@ -392,14 +392,14 @@ def _find_quantization_status(weight, method, nightly_rows):
         if "fail" in c.lower() or "❌" in c:
             overall_corr = "❌"
         elif ("unverified" in c.lower() or "untested" in c.lower()
-              or "❓" in c) and overall_corr != "❌":
-            overall_corr = "❓"
+              or "❔" in c) and overall_corr != "❌":
+            overall_corr = "❔"
 
         if "fail" in p.lower() or "❌" in p:
             overall_perf = "❌"
         elif ("unverified" in p.lower() or "untested" in p.lower()
-              or "❓" in p) and overall_perf != "❌":
-            overall_perf = "❓"
+              or "❔" in p) and overall_perf != "❌":
+            overall_perf = "❔"
 
     return merge_metrics(overall_corr, overall_perf)
 
@@ -496,7 +496,7 @@ def generate_html_microbenchmark_table(headers, data):
 
             for i in range(1, 7):
                 cell_data = row[i] if i < len(
-                    row) else '<span title="❓&nbsp;Untested">❓</span>'
+                    row) else '<span title="❔&nbsp;Untested">❔</span>'
                 html.append(f"      <td>{cell_data}</td>")
             html.append("    </tr>")
         html.append("  </tbody>")
@@ -561,22 +561,22 @@ def _process_model_support(file_sources):
                 continue
             model_name = row[0].strip()
             m_type = row[1] if len(row) > 1 else ""
-            unit = row[2] if len(row) > 2 else "❓ Untested"
-            corr = row[3] if len(row) > 3 else "❓ Untested"
-            bench = row[4] if len(row) > 4 else "❓ Untested"
+            unit = row[2] if len(row) > 2 else "❔ Untested"
+            corr = row[3] if len(row) > 3 else "❔ Untested"
+            bench = row[4] if len(row) > 4 else "❔ Untested"
 
             if model_name not in merged_models:
                 merged_models[model_name] = {
                     "Type": m_type,
                     "v6": {
-                        "u": "❓ Untested",
-                        "c": "❓ Untested",
-                        "b": "❓ Untested"
+                        "u": "❔ Untested",
+                        "c": "❔ Untested",
+                        "b": "❔ Untested"
                     },
                     "v7": {
-                        "u": "❓ Untested",
-                        "c": "❓ Untested",
-                        "b": "❓ Untested"
+                        "u": "❔ Untested",
+                        "c": "❔ Untested",
+                        "b": "❔ Untested"
                     }
                 }
 
@@ -667,20 +667,20 @@ def _process_parallelism(file_sources):
                 if feature not in merged_features:
                     merged_features[feature] = {
                         "v6_flax": {
-                            "c": "❓",
-                            "p": "❓"
+                            "c": "❔",
+                            "p": "❔"
                         },
                         "v6_pytorch": {
-                            "c": "❓",
-                            "p": "❓"
+                            "c": "❔",
+                            "p": "❔"
                         },
                         "v7_flax": {
-                            "c": "❓",
-                            "p": "❓"
+                            "c": "❔",
+                            "p": "❔"
                         },
                         "v7_pytorch": {
-                            "c": "❓",
-                            "p": "❓"
+                            "c": "❔",
+                            "p": "❔"
                         }
                     }
                 single_merged = merge_metrics(row[1] if len(row) > 1 else "",
@@ -697,7 +697,7 @@ def _process_parallelism(file_sources):
         metrics = merged_features[feature]
 
         def _get_status(hw_key, type_key):
-            return metrics.get(hw_key, {}).get(type_key, "❓ Untested")
+            return metrics.get(hw_key, {}).get(type_key, "❔ Untested")
 
         flax_single = _merge_hw_status(_get_status("v6_flax", "single"),
                                        _get_status("v7_flax", "single"))
