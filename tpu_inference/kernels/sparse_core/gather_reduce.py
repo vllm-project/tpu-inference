@@ -196,6 +196,31 @@ def sc_gather_reduce(
                             ty, ir.IntegerAttr.get(ty, val))
                 return constants[(val, ty)]
 
+            # ADD THIS NEW FUNCTION HERE:
+            def round_to_bf16_bitwise(x_f32_vec):
+                return x_f32_vec
+
+                # """Rounds f32 vector to bf16 precision using bitwise ops."""
+                # x_i32 = arith.bitcast(_I32[vreg_size], x_f32_vec)
+
+                # def bcast(val):
+                #     return vector.broadcast(_I32[vreg_size], const_lut(val, i32))
+
+                # # Extract 16th bit (LSB of the resulting bf16)
+                # shifted = arith.shrui(x_i32, bcast(16))
+                # lsb = arith.andi(shifted, bcast(1))
+
+                # # Compute rounding bias: 0x7FFF + lsb
+                # bias = arith.addi(bcast(0x7FFF), lsb)
+
+                # # Add bias and mask lower 16 bits (0xFFFF0000 = -65536)
+                # rounded = arith.addi(x_i32, bias)
+                # mask = arith.constant(i32, ir.IntegerAttr.get(i32, -65536))
+                # mask_vec = vector.broadcast(_I32[vreg_size], mask)
+                # masked = arith.andi(rounded, mask_vec)
+
+                # return arith.bitcast(_F32[vreg_size], masked)
+
             def fill_load_offset_tile(offset_tile_local, idx_tile_local,
                                       col_pos):
                 """Fills the offset tile for indirect DMA gather.
@@ -521,6 +546,51 @@ def sc_gather_reduce(
                         ) for i in range(16)
                     ]
 
+                def round_to_bf16(val_f32):
+                    val_i32 = arith.bitcast(_I32[vreg_size], val_f32)
+                    vec_16 = vector.broadcast(_I32[vreg_size],
+                                              const_lut(16, i32))
+                    vec_1 = vector.broadcast(_I32[vreg_size],
+                                             const_lut(1, i32))
+                    vec_7fff = vector.broadcast(_I32[vreg_size],
+                                                const_lut(0x7FFF, i32))
+                    vec_ffff0000 = vector.broadcast(_I32[vreg_size],
+                                                    const_lut(-65536, i32))
+
+                    shifted = arith.shrui(val_i32, vec_16)
+                    lsb = arith.andi(shifted, vec_1)
+                    add_val = arith.addi(vec_7fff, lsb)
+                    val_i32 = arith.addi(val_i32, add_val)
+                    val_i32 = arith.andi(val_i32, vec_ffff0000)
+
+                    # Preserve NaNness if necessary
+                    vec_7f800000 = vector.broadcast(_I32[vreg_size],
+                                                    const_lut(0x7F800000, i32))
+                    vec_007fffff = vector.broadcast(_I32[vreg_size],
+                                                    const_lut(0x007FFFFF, i32))
+                    vec_0 = vector.broadcast(_I32[vreg_size],
+                                             const_lut(0, i32))
+                    vec_ff800000 = vector.broadcast(
+                        _I32[vreg_size], const_lut(-8388608,
+                                                   i32))  # 0xFF800000
+                    vec_00400000 = vector.broadcast(_I32[vreg_size],
+                                                    const_lut(0x00400000, i32))
+
+                    u_orig = arith.bitcast(_I32[vreg_size], val_f32)
+                    u_and_7f80 = arith.andi(u_orig, vec_7f800000)
+                    is_nan_or_inf = arith.cmpi(arith.CmpIPredicate.eq,
+                                               u_and_7f80, vec_7f800000)
+                    u_and_007f = arith.andi(u_orig, vec_007fffff)
+                    mantissa_nz = arith.cmpi(arith.CmpIPredicate.ne,
+                                             u_and_007f, vec_0)
+                    is_nan = arith.andi(is_nan_or_inf, mantissa_nz)
+
+                    nan_val = arith.ori(arith.andi(val_i32, vec_ff800000),
+                                        vec_00400000)
+                    final_v = arith.select(is_nan, nan_val, val_i32)
+
+                    return arith.bitcast(_F32[vreg_size], final_v)
+
                 # reinterpret cast to correct shape to read from it
                 if not is_bf16:
                     new_scratch_shape = (row_chunk_size, col_chunk_size)
@@ -609,62 +679,42 @@ def sc_gather_reduce(
                                 enable_all_sublanes_mask,
                             )
 
-                    row0 = get_row_val(0)
-                    if weights_local is not None:
-                        row0 = arith.mulf(row0, weights_vecs[0])
-                        if topk_wgt_zero_nan:
-                            row0 = arith.select(
-                                arith.cmpf(arith.CmpFPredicate.OEQ,
-                                           weights_vecs[0], zero_vec_f32),
-                                zero_vec_f32,
-                                row0,
-                            )
-
-                    row8 = get_row_val(8)
-                    if weights_local is not None:
-                        row8 = arith.mulf(row8, weights_vecs[8])
-                        if topk_wgt_zero_nan:
-                            row8 = arith.select(
-                                arith.cmpf(arith.CmpFPredicate.OEQ,
-                                           weights_vecs[8], zero_vec_f32),
-                                zero_vec_f32,
-                                row8,
-                            )
-
-                    for sum_idx in range(7):
-                        tmp_row0 = get_row_val(sum_idx + 1)
+                    def get_val_weighted(idx):
+                        val = get_row_val(idx)
                         if weights_local is not None:
-                            tmp_row0 = arith.mulf(tmp_row0,
-                                                  weights_vecs[sum_idx + 1])
+                            val = arith.mulf(val, weights_vecs[idx])
                             if topk_wgt_zero_nan:
-                                tmp_row0 = arith.select(
-                                    arith.cmpf(
-                                        arith.CmpFPredicate.OEQ,
-                                        weights_vecs[sum_idx + 1],
-                                        zero_vec_f32,
-                                    ),
+                                val = arith.select(
+                                    arith.cmpf(arith.CmpFPredicate.OEQ,
+                                               weights_vecs[idx],
+                                               zero_vec_f32),
                                     zero_vec_f32,
-                                    tmp_row0,
+                                    val,
                                 )
+                        return val
 
-                        row0 = arith.addf(row0, tmp_row0)
+                    vals0 = [get_val_weighted(i) for i in range(8)]
+                    vals8 = [get_val_weighted(8 + i) for i in range(8)]
 
-                        tmp_row8 = get_row_val(8 + sum_idx + 1)
-                        if weights_local is not None:
-                            tmp_row8 = arith.mulf(
-                                tmp_row8, weights_vecs[8 + sum_idx + 1])
-                            if topk_wgt_zero_nan:
-                                tmp_row8 = arith.select(
-                                    arith.cmpf(
-                                        arith.CmpFPredicate.OEQ,
-                                        weights_vecs[8 + sum_idx + 1],
-                                        zero_vec_f32,
-                                    ),
-                                    zero_vec_f32,
-                                    tmp_row8,
-                                )
+                    def tree_reduce(vals):
+                        # Stride-based reduction for 8 elements to match JAX exactly
+                        # Level 1
+                        s1 = arith.addf(vals[0], vals[4])
+                        s2 = arith.addf(vals[1], vals[5])
+                        s3 = arith.addf(vals[2], vals[6])
+                        s4 = arith.addf(vals[3], vals[7])
+                        # Level 2
+                        s12 = arith.addf(s1, s3)
+                        s34 = arith.addf(s2, s4)
+                        # Level 3
+                        return arith.addf(s12, s34)
 
-                        row8 = arith.addf(row8, tmp_row8)
+                    row0 = tree_reduce(vals0)
+                    row8 = tree_reduce(vals8)
+
+                    if is_bf16:
+                        row0 = round_to_bf16(row0)
+                        row8 = round_to_bf16(row8)
 
                     packed = tpu.pack_subelements(
                         _BF16[2, vreg_size],
