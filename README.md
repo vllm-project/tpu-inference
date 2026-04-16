@@ -106,8 +106,6 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 <br>
 
-<!--
-
 ### Release Support Matrices
 
 <details open markdown="1">
@@ -120,7 +118,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <details open markdown="1">
 <summary><b> ✅ Tested Models </b></summary>
 
-<!-- START: release_model_support -- >
+<!-- START: release_model_support-->
 | Model | Type | Unit&nbsp;Test | Correctness&nbsp;Test | Performance&nbsp;Test |
 | --- | --- | --- | --- | --- |
 | [deepseek-ai/DeepSeek-OCR](https://huggingface.co/deepseek-ai/DeepSeek-OCR) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
@@ -148,7 +146,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 | [Qwen/Qwen3_5-397B-A17B](https://huggingface.co/Qwen/Qwen3_5-397B-A17B) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
 | [zai-org/GLM-5](https://huggingface.co/zai-org/GLM-5) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
 
-<!-- END: release_model_support -- >
+<!-- END: release_model_support-->
 
 </details>
 
@@ -159,7 +157,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <details open markdown="1">
 <summary>Core Features</summary>
 
-<!-- START: release_core_features -- >
+<!-- START: release_core_features-->
 <table>
   <thead>
     <tr>
@@ -274,14 +272,14 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
   </tbody>
 </table>
-<!-- END: release_core_features -- >
+<!-- END: release_core_features-->
 
 </details>
 
 <details open markdown="1">
 <summary>Parallelism Techniques</summary>
 
-<!-- START: release_parallelism -- >
+<!-- START: release_parallelism-->
 <table>
   <thead>
     <tr>
@@ -341,14 +339,14 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
   </tbody>
 </table>
-<!-- END: release_parallelism -- >
+<!-- END: release_parallelism-->
 
 </details>
 
 <details open markdown="1">
 <summary>Quantization Methods</summary>
 
-<!-- START: release_quantization -- >
+<!-- START: release_quantization-->
 <table>
   <thead>
     <tr>
@@ -400,7 +398,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 > **Note:**
 > - *This table only tests checkpoint loading compatibility.*
-<!-- END: release_quantization -- >
+<!-- END: release_quantization-->
 
 </details>
 
@@ -410,7 +408,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 <summary><b> 🔬 Microbenchmark Kernel Support </b></summary>
 <blockquote>
 
-<!-- START: release_microbenchmarks -- >
+<!-- START: release_microbenchmarks-->
 <table>
   <thead>
     <tr>
@@ -491,14 +489,12 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 > **Note:**
 > - *For attention kernels, W[x]A[y] denotes KV cache as W, A as compute, and x, y as bit precision.*
-<!-- END: release_microbenchmarks -- >
+<!-- END: release_microbenchmarks-->
 
 </details>
 
 </blockquote>
 </details>
-
--->
 
 <br>
 
