@@ -77,9 +77,11 @@ def run_jax_gdn_attention_local(
         mixed_qkv: Combined QKV tensor of shape `(num_tokens, dim)`.
         b: B tensor of shape `(num_tokens, n_v)`.
         a: A tensor of shape `(num_tokens, n_v)`.
-        conv_state: Combined convolutional state of shape `(max_reqs, kernel_size
-          - 1, dim)`.
-        recurrent_state: Recurrent state of shape `(max_reqs, n_v, d_k, d_v)`.
+        conv_state: Combined convolutional state of shape `(num_blocks,
+          kernel_size - 1, dim)`. `num_blocks` is always equal or larger than
+          `max_seqs + 1`. The first block is a null_block and only used for
+          padded / invalid tokens.
+        recurrent_state: Recurrent state of shape `(num_blocks, n_v, d_k, d_v)`.
         conv_weight: Combined convolutional weight of shape `(dim, 1,
           kernel_size)`.
         conv_bias: Optional combined convolutional bias of shape `(dim,)`.
@@ -89,7 +91,8 @@ def run_jax_gdn_attention_local(
           each sequence.
         state_indices: Tensor of shape `(max_reqs,)` mapping request index to
           state index.
-        distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end, mixed_end)`.
+        distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end,
+          mixed_end)`.
         n_kq: Number of key/query heads.
         n_v: Number of value heads.
         d_k: Dimension of key.
@@ -179,9 +182,11 @@ def run_jax_gdn_attention(
         j_mixed_qkv: Input tensor of shape `(num_tokens, dim)`.
         j_b: Input tensor of shape `(num_tokens, n_v)`.
         j_a: Input tensor of shape `(num_tokens, n_v)`.
-        conv_state: Convolutional state tensor of shape `(max_reqs, kernel_size -
-          1, dim)`.
-        recurrent_state: Recurrent state tensor of shape `(max_reqs, n_v, d_k,
+        conv_state: Convolutional state tensor of shape `(num_blocks, kernel_size
+          - 1, dim)`. `num_blocks` is always equal or larger than `max_seqs +
+          1`. The first block is a null_block and only used for padded / invalid
+          tokens.
+        recurrent_state: Recurrent state tensor of shape `(num_blocks, n_v, d_k,
           d_v)`.
         j_conv_weight: Convolutional weight tensor of shape `(dim, 1,
           kernel_size)`.
@@ -192,7 +197,8 @@ def run_jax_gdn_attention(
           state index.
         query_start_loc: Tensor of shape `(num_seqs + 1,)` with start locations of
           each sequence.
-        distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end, mixed_end)`.
+        distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end,
+          mixed_end)`.
         n_kq: Number of key/query heads.
         n_v: Number of value heads.
         d_k: Dimension of key.
@@ -204,11 +210,10 @@ def run_jax_gdn_attention(
     Returns:
         A tuple containing:
         - A tuple of (new_conv_state, new_recurrent_state).
-          - new_conv_state: `(max_reqs, kernel_size - 1, dim)`
-          - new_recurrent_state: `(max_reqs, n_v, d_k, d_v)`
+          - new_conv_state: `(num_blocks, kernel_size - 1, dim)`
+          - new_recurrent_state: `(num_blocks, n_v, d_k, d_v)`
         - The output tensor of shape `(num_tokens, n_v * d_v)`.
     """
-
     in_specs = (
         P(ShardingAxisName.ATTN_DATA,
           ShardingAxisName.ATTN_HEAD),  # j_mixed_qkv

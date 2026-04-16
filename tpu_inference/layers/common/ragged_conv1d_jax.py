@@ -30,8 +30,9 @@ def ragged_conv1d(
 
     Args:
       x: Input tensor of shape `(num_tokens, dim)`.
-      conv_state: Combined convolutional state of shape `(max_reqs, kernel_size -
-        1, dim)`.
+      conv_state: Combined convolutional state of shape `(num_blocks, kernel_size
+        - 1, dim)`. `num_blocks` is always equal or larger than `max_seqs + 1`.
+        The first block is a null_block and only used for padded / invalid tokens.
       conv_weight: Convolutional weight of shape `(dim, 1, kernel_size)`.
       conv_bias: Optional convolutional bias of shape `(dim,)`.
       query_start_loc: Tensor of shape `(num_seqs + 1,)` containing the start
@@ -40,11 +41,13 @@ def ragged_conv1d(
       state_indices: Tensor of shape `(max_reqs,)` mapping request index to state
         index.
       kernel_size: The size of the convolution kernel.
+      distribution: Distribution tensor containing number of valid sequences at
+        index 2.
 
     Returns:
       A tuple containing:
       - output: The output tensor of shape `(num_tokens, dim)`.
-      - updated_conv_state: The updated convolutional state of shape `(max_reqs,
+      - updated_conv_state: The updated convolutional state of shape `(num_blocks,
         kernel_size - 1, dim)`.
     """
     num_tokens = x.shape[0]
@@ -63,7 +66,7 @@ def ragged_conv1d(
     req_indices = jnp.clip(req_indices, 0, max_reqs - 1)
     local_indices = token_idx - effective_query_start_loc[req_indices]
 
-    lengths = (effective_query_start_loc[1:] - effective_query_start_loc[:-1])
+    lengths = effective_query_start_loc[1:] - effective_query_start_loc[:-1]
 
     # 1. Compute Convolution
     out = jnp.zeros_like(x)

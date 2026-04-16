@@ -136,16 +136,19 @@ class VllmUnquantizedEmbeddingMethod(UnquantizedEmbeddingMethod):
         self.mesh = mesh
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        weight = t2j(layer.weight, use_dlpack=False)
-        weight = general_device_put(
-            weight,
-            NamedSharding(self.mesh, P(ShardingAxisName.MLP_TENSOR, None)))
+        weight_sharding = NamedSharding(self.mesh,
+                                        P(ShardingAxisName.MLP_TENSOR, None))
+        weight = _load_weight_for_layer(layer, "weight", weight_sharding)
+        delattr(layer, 'weight')
+        weight = general_device_put(weight, weight_sharding)
         layer.weight = Parameter(torch_view(weight), requires_grad=False)
 
         if isinstance(layer, ParallelLMHead) and layer.bias is not None:
-            bias = t2j(layer.bias, use_dlpack=False)
-            bias = general_device_put(
-                bias, NamedSharding(self.mesh, P(ShardingAxisName.MLP_TENSOR)))
+            bias_sharding = NamedSharding(self.mesh,
+                                          P(ShardingAxisName.MLP_TENSOR))
+            bias = _load_weight_for_layer(layer, "bias", bias_sharding)
+            delattr(layer, 'bias')
+            bias = general_device_put(bias, bias_sharding)
             layer.bias = Parameter(torch_view(bias), requires_grad=False)
 
 
@@ -347,6 +350,9 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
             w13_bias=w13_bias,
             w2_weight=w2_weight,
             w2_bias=w2_bias)
+
+        del w13_weight, w2_weight, w13_bias, w2_bias
+
         weights = torch_view(
             shard_moe_weights(weights, self.moe_backend, self.mesh))
         layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
@@ -355,6 +361,11 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         if self.moe.has_bias:
             layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
             layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
+
+        # Force JAX to release intermediate buffers before processing the next
+        # layer.  Without this barrier, async dispatch can keep old weight
+        # buffers alive across layers, accumulating until OOM.
+        jax.effects_barrier()
 
     def apply_monolithic(
         self,
