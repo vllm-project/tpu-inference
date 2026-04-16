@@ -161,7 +161,7 @@ def _patched_forward(vllm_model, orig_forward, input_ids, positions, intermediat
                 start = idx * per_level_dim
                 end = (idx + 1) * per_level_dim
                 sliced = deepstack_packed[..., start:end]
-                # Convert to JAX view for JIT compatibility
+                # Convert to torchax view for JIT compatibility
                 sliced = torch_view(jax_view(sliced))
                 deepstack_input_embeds[f"deepstack_input_embeds_{idx}"] = sliced
 
@@ -174,18 +174,7 @@ def _patched_forward(vllm_model, orig_forward, input_ids, positions, intermediat
                         inputs_embeds=inputs_embeds, **kwargs)
 
 def apply_qwen3_vl_patches(vllm_model):
-    """Apply Qwen3-VL specific monkey-patches for stateless Deepstack support.
-
-    These patches are required for TPU execution because JAX JIT requires functions
-    to be pure and stateless. Native vLLM stores Deepstack vision embeddings
-    directly on the model object and reads them during the language model pass.
-    This reading from instance variables instead of arguments breaks JAX tracing.
-
-    To resolve this, these patches intercept the embeddings, pack them into the
-    hidden dimension of the text embeddings (`inputs_embeds`) so they can cross
-    the JIT compilation boundary as standard input arguments, and then unpack
-    them back into a JAX-friendly cache inside the execution step.
-    """
+    """Apply Qwen3-VL specific patches for stateless Deepstack support."""
     if not getattr(vllm_model, "use_deepstack", False):
         return
 
@@ -207,3 +196,9 @@ def apply_qwen3_vl_patches(vllm_model):
     # 4. Patch forward to unpack vision features and restore them before execution
     orig_forward = vllm_model.forward
     vllm_model.forward = lambda *args, **kwargs: _patched_forward(vllm_model, orig_forward, *args, **kwargs)
+
+def maybe_apply_qwen3_vl_patches(vllm_model):
+    
+    if hasattr(vllm_model, "config") and hasattr(vllm_model.config, "architectures"):
+        if "Qwen3VLForConditionalGeneration" in vllm_model.config.architectures:
+            apply_qwen3_vl_patches(vllm_model)
