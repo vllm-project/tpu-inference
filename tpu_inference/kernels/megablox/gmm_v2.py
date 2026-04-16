@@ -1266,6 +1266,81 @@ def _gmm_v2_impl(
       metadata=get_metadata(cfgs),
   )(group_sizes, group_offset, lhs, rhs_weights)[:, : cfgs.out_size_n]
 
+def calculate_tgmm_tiling(
+    dims: Dimensions,
+    lhs_cfgs: InputConfigs,
+    rhs_cfgs: InputConfigs,
+    vmem_limit_bytes: int,
+    out_dtype: jnp.dtype,
+    acc_dtype: jnp.dtype,
+) -> TileSizes:
+  """Calculate optimal tile sizes for TGMM kernel."""
+  # In tgmm, we calculate lhs.T @ dout which doesn't require quantization.
+  # Since we use it in MOE, the m can be dynamic and small. So we don't
+  # want it to be too big.
+  bf16_bf16_tile_m = 128
+  tile_m = min(bf16_bf16_tile_m, dims.size_m)
+  tile_m = max(tile_m, dims.size_lhs_sublane)
+
+  num_k_tiles = num_n_tiles = 1
+  num_lanes = pltpu.get_tpu_info().num_lanes
+  tile_n = align_to(dims.size_n, num_lanes)
+  # To avoid stalling MXU, we add some buffer room where tile_n cannot go
+  # smaller than 2x of mxu_column_size.
+  tile_n_lower_bound = pltpu.get_tpu_info().mxu_column_size * 2
+  tile_n_lower_bound = min(tile_n_lower_bound, dims.size_n)
+  tile_k = align_to(dims.size_k, num_lanes)
+
+  def within_vmem_limit(tile_m, tile_k, tile_n):
+    acc_bytes = jax.dtypes.itemsize_bits(acc_dtype) // 8
+    out_bytes = jax.dtypes.itemsize_bits(out_dtype) // 8
+    lhs_bytes = jax.dtypes.itemsize_bits(lhs_cfgs.dtype) // 8
+    rhs_bytes = jax.dtypes.itemsize_bits(rhs_cfgs.dtype) // 8
+    num_buffers = 2
+    budget = tile_k * tile_n * (acc_bytes + num_buffers * out_bytes) + num_buffers * (tile_m*tile_k*lhs_bytes + tile_m*tile_n*rhs_bytes)
+    return budget <= vmem_limit_bytes
+
+  prev_tile_n = tile_n
+  while not within_vmem_limit(tile_m, tile_k, tile_n):
+    num_n_tiles += 1
+    # The reason why we do "tile_n * num_n_tiles must cover size_n." is
+    # tile_n must be a multiple of num_lanes and
+    # tile_n * num_n_tiles must cover size_n.
+    tile_n = align_to(dims.size_n, num_n_tiles * num_lanes) // num_n_tiles
+    # If size_n is small and awkwardly sized (e.g., size_n=100, num_lanes=128),
+    # align_to(100, N*128) // N can get stuck at a constant value (128) as N
+    # grows. If that constant value is above the floor and budget still
+    # doesn't fit, the loop never terminates. That's why we need to check if
+    # "tile_n >= prev_tile_n".
+    if tile_n < tile_n_lower_bound or tile_n >= prev_tile_n:
+      break
+    prev_tile_n = tile_n
+
+  if tile_n >= tile_n_lower_bound and within_vmem_limit(tile_m, tile_k, tile_n):
+    return TileSizes(tile_m=tile_m, tile_k=tile_k, tile_n=tile_n)
+
+  if tile_n < tile_n_lower_bound:
+    num_n_tiles -= 1
+    tile_n = align_to(dims.size_n, num_n_tiles * num_lanes) // num_n_tiles
+
+  prev_tile_k = tile_k
+  while not within_vmem_limit(tile_m, tile_k, tile_n):
+    num_k_tiles += 1
+    tile_k = align_to(dims.size_k, num_k_tiles * num_lanes) // num_k_tiles
+    if tile_k < num_lanes or tile_k >= prev_tile_k:
+      break
+    prev_tile_k = tile_k
+
+
+  if tile_k < num_lanes:
+    num_k_tiles -= 1
+    tile_k = align_to(dims.size_k, num_k_tiles * num_lanes) // num_k_tiles
+    
+  if not within_vmem_limit(tile_m, tile_k, tile_n):
+    raise ValueError(f"Could not find valid tile sizes for tgmm. dims={dims}, tiles=({tile_m},{tile_k},{tile_n}), vmem={vmem_limit_bytes}")
+  return TileSizes(tile_m=tile_m, tile_k=tile_k, tile_n=tile_n)
+
+                     
 def make_tgmm_configs(
     lhs: jax.Array,  # [m, k]
     rhs: jax.Array,  # [m, n]
@@ -1316,7 +1391,7 @@ def make_tgmm_configs(
   if isinstance(tile_info, TileSizes):
     tiles = tile_info
   else:
-    tiles = tile_info(dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes, fuse_act)
+    tiles = tile_info(dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes, out_dtype, acc_dtype)
 
   return GmmConfigs(
       dims=dims,
@@ -1509,7 +1584,7 @@ def _tgmm_v2_impl(
     num_actual_groups: int,
     group_offset: jax.Array | None = None,
     *,
-    tile_info: TileSizes | TileFn = calculate_tiling,
+    tile_info: TileSizes | TileFn = calculate_tgmm_tiling,
     vmem_limit_bytes: int | None = None,
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
     preferred_element_type: jnp.dtype | None = None,
@@ -1746,7 +1821,8 @@ def _gmm_v2_bwd(
       group_sizes,
       num_actual_groups,
       group_offset,
-      tile_info=tile_info,
+      # TODO: consider letting users provide tiling for bwd.
+      tile_info=calculate_tgmm_tiling,
       vmem_limit_bytes=vmem_limit_bytes,
       precision=precision,
       # TODO: we may want a user provided preferred_element_type (drhs's dtype).
