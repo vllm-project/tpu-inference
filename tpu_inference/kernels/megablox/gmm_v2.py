@@ -1683,7 +1683,6 @@ def gmm_v2(
     rhs_scale: jax.Array | None = None,  # [size_group, num_blocks, 1, out_size]
     rhs_bias: jax.Array | None = None,  # [size_group, 1, out_size]
     group_offset: jax.Array | None = None,  # int32[1]
-    *,
     tile_info: TileSizes | TileFn = calculate_tiling,
     vmem_limit_bytes: int | None = None,
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
