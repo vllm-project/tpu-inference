@@ -59,8 +59,8 @@ from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.vllm.experimental.model_patcher import patch_mm_model
-from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import (
-    maybe_apply_qwen3_vl_patches)
+from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
+    maybe_apply_qwen3_vl_patches
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_inference.runner.lora_utils import replace_lora_metadata
