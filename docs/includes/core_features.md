@@ -9,13 +9,31 @@
   </thead>
   <tbody>
     <tr>
+      <td>async scheduler</td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+    </tr>
+    <tr>
       <td>Chunked Prefill</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
+      <td>DCN-based P/D disaggregation</td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+    </tr>
+    <tr>
       <td>LoRA_Torch</td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+    </tr>
+    <tr>
+      <td>Out-of-tree model support</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
@@ -39,38 +57,20 @@
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
+      <td>Multimodal Inputs</td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+    </tr>
+    <tr>
       <td>Speculative Decoding: Eagle3</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
-      <td>DCN-based P/D disaggregation</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-    </tr>
-    <tr>
-      <td>async scheduler</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-    </tr>
-    <tr>
-      <td>Multimodal Inputs</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-    </tr>
-    <tr>
-      <td>Out-of-tree model support</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-    </tr>
-    <tr>
       <td>hybrid kv cache</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
