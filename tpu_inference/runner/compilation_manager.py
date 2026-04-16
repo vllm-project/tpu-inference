@@ -292,13 +292,10 @@ class CompilationManager:
 
                 input_ids = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32, dp_sharding)
-                # Need align to the sampling output sharding (sharded by ATTN_DATA in DP)
                 next_tokens = self._create_dummy_tensor(
                     (num_reqs, ),
                     jnp.int32,
-                    sharding=NamedSharding(
-                        self.runner.mesh,
-                        PartitionSpec(ShardingAxisName.ATTN_DATA)))
+                    sharding=NamedSharding(self.runner.mesh, PartitionSpec()))
 
                 placeholder_num = jnp.asarray(1, dtype=jnp.int32)
                 self._run_compilation(
@@ -500,11 +497,17 @@ class CompilationManager:
         logger.info("Compiling compute_logits with different input shapes.")
         hsize = self.runner.model_config.get_hidden_size()
         leading_shape = self.runner.num_reqs_paddings if not self.runner.speculative_config else self.runner.num_logits_paddings
-        dp_sharding = NamedSharding(self.runner.mesh,
-                                    PartitionSpec(ShardingAxisName.ATTN_DATA))
+        # Use PartitionSpec(ATTN_DATA, None) (2D explicit) to match the sharding
+        # that _select_from_array_fn produces at inference time. shard_map with
+        # out_specs=P('data') returns arrays with spec P('data', None); since
+        # compute_logits_fn has no in_shardings, JAX uses the actual input
+        # sharding as the jit cache key. P('data',) != P('data', None) as cache
+        # keys, causing a cache miss inside ForbidCompile → RuntimeError for VLMs.
+        hidden_states_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
         for num_reqs in leading_shape:
             hidden_states = self._create_dummy_tensor(
-                (num_reqs, hsize), jnp.bfloat16, dp_sharding)
+                (num_reqs, hsize), jnp.bfloat16, hidden_states_sharding)
             with self.runner.maybe_select_dummy_loras(
                     self.runner.lora_config,
                     np.array([num_reqs], dtype=np.int32)):
@@ -543,7 +546,7 @@ class CompilationManager:
             # function.
             sampling_metadata_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
-            logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
+            logits = self._create_dummy_tensor((num_reqs, hsize), jnp.float32,
                                                logits_sharding)
             for do_sampling in (True, False):
                 for logprobs in (True, False):
@@ -624,9 +627,9 @@ class CompilationManager:
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.MLP_DATA,
                               ShardingAxisName.MLP_TENSOR))
-            token_ids_sharding = NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA, ))
-            logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
+            token_ids_sharding = NamedSharding(self.runner.mesh,
+                                               PartitionSpec())
+            logits = self._create_dummy_tensor((num_reqs, hsize), jnp.float32,
                                                logits_sharding)
             token_ids = self._create_dummy_tensor((num_reqs, ), jnp.int32,
                                                   token_ids_sharding)
@@ -658,7 +661,7 @@ class CompilationManager:
                     PartitionSpec(ShardingAxisName.MLP_DATA,
                                   ShardingAxisName.MLP_TENSOR))
                 target_probs = self._create_dummy_tensor(
-                    (num_logits, vocab_size), jnp.bfloat16, sharding)
+                    (num_logits, vocab_size), jnp.float32, sharding)
                 draft_token_ids = self._create_dummy_tensor((num_logits, ),
                                                             jnp.int32)
                 num_draft_tokens = self._create_dummy_tensor((num_reqs, ),
@@ -864,10 +867,11 @@ class CompilationManager:
                 input_ids,
                 draft_hidden_states,
                 attention_metadata,
+                layer_name_to_kvcache_index,
             ):
                 kv_caches, hidden_states, _ = self.runner.drafter.model_fn(
                     state, kv_caches, input_ids, draft_hidden_states,
-                    attention_metadata)
+                    attention_metadata, layer_name_to_kvcache_index)
                 self.runner.kv_caches = kv_caches
                 return hidden_states
 
@@ -888,6 +892,7 @@ class CompilationManager:
                 input_ids,
                 draft_hidden_states,
                 attention_metadata,
+                tuple(self.runner.layer_name_to_kvcache_index.items()),
                 num_tokens=num_tokens,
             )
             target_token_ids = self._create_dummy_tensor((num_tokens, ),
@@ -921,6 +926,7 @@ class CompilationManager:
                 input_ids_loop,
                 draft_hidden_state_loop,
                 attention_metadata,
+                tuple(self.runner.layer_name_to_kvcache_index.items()),
                 num_tokens=num_tokens,
             )
 

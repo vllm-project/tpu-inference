@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     SKIP_JAX_PRECOMPILE: bool = False
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     MODEL_IMPL_TYPE: str = "auto"
+    DRAFT_MODEL_IMPL_TYPE: str = "auto"
     NEW_MODEL_DESIGN: bool = False
     PHASED_PROFILING_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
@@ -35,8 +36,12 @@ if TYPE_CHECKING:
     USE_JAX_PROFILER_SERVER: bool = False
     JAX_PROFILER_SERVER_PORT: int = 9999
     USE_BATCHED_RPA_KERNEL: bool = False
-    SC_KERNEL_THRESHOLD: int = 8192
-    SC_KERNEL_COL_CHUNK_SIZE: int = 3072
+    FORCE_MOE_RANDOM_ROUTING: bool = False
+    SC_KERNEL_THRESHOLD: int = 16777216
+    SC_KERNEL_COL_CHUNK_SIZE: int = 1024
+    JITTED_MM_MODULE_KEYS: list[str] = []
+    REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
+    RAGGED_GATED_DELTA_RULE_IMPL: str = "ragged_gated_delta_rule_chunked"
 
 
 def env_with_choices(
@@ -114,6 +119,25 @@ def env_bool(env_name: str, default: bool = False) -> Callable[[], bool]:
     return _get_bool_env
 
 
+def env_str_list(env_name: str) -> Callable[[], list[str]]:
+    """
+    Accepts a comma-separated string and returns a list of strings.
+
+    Args:
+        env_name: Name of the environment variable
+        default: Default list of strings if not set
+    """
+
+    def _get_str_list_env() -> list[str]:
+        value = os.getenv(env_name)
+        if value is None or value == "":
+            return []
+
+        return [v.strip() for v in value.split(",")]
+
+    return _get_str_list_env
+
+
 environment_variables: dict[str, Callable[[], Any]] = {
     # JAX platform selection (e.g., "tpu", "cpu", "proxy", "proxy,cpu")
     "JAX_PLATFORMS":
@@ -148,6 +172,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "MODEL_IMPL_TYPE":
     env_with_choices("MODEL_IMPL_TYPE", "auto",
                      ["auto", "vllm", "flax_nnx", "jetpack"]),
+    "DRAFT_MODEL_IMPL_TYPE":
+    env_with_choices("DRAFT_MODEL_IMPL_TYPE", "auto",
+                     ["auto", "vllm", "flax_nnx"]),
     # Enable 2D tensor parallelism, shard attention heads across multiple axes
     "USE_2D_TP":
     env_bool("USE_2D_TP", default=False),
@@ -206,10 +233,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("JAX_PROFILER_SERVER_PORT") or "9999"),
     "USE_BATCHED_RPA_KERNEL":
     env_bool("USE_BATCHED_RPA_KERNEL"),
+    # Force random expert routing in MoE layers (for testing purposes only)
+    "FORCE_MOE_RANDOM_ROUTING":
+    env_bool("FORCE_MOE_RANDOM_ROUTING", default=False),
     "SC_KERNEL_THRESHOLD":
-    lambda: int(os.getenv("SC_KERNEL_THRESHOLD") or "8192"),
+    lambda: int(os.getenv("SC_KERNEL_THRESHOLD") or "16777216"),
     "SC_KERNEL_COL_CHUNK_SIZE":
     lambda: int(os.getenv("SC_KERNEL_COL_CHUNK_SIZE") or "3072"),
+    "JITTED_MM_MODULE_KEYS":
+    env_str_list("JITTED_MM_MODULE_KEYS"),
+    "REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES":
+    env_str_list("REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES"),
+    "RAGGED_GATED_DELTA_RULE_IMPL":
+    env_with_choices(
+        "RAGGED_GATED_DELTA_RULE_IMPL", "ragged_gated_delta_rule_chunked",
+        ["ragged_gated_delta_rule_ref", "ragged_gated_delta_rule_chunked"]),
 }
 
 

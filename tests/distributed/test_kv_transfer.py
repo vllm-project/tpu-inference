@@ -23,7 +23,8 @@ from absl.testing import absltest, parameterized
 from jax._src import compilation_cache as cc
 from jax._src import test_util as jtu
 
-from tpu_inference.distributed.kv_transfer import multi_layer_copy
+from tpu_inference.distributed.kv_transfer import (copy_to_host,
+                                                   multi_layer_copy)
 
 P = jax.sharding.PartitionSpec
 
@@ -92,6 +93,28 @@ class KVTransferTest(jtu.JaxTestCase):
 
         # Force Python GC
         gc.collect()
+
+    def _run_copy_to_host_test(self, src_memory_kind, dest_memory_kind):
+        dtype = jnp.bfloat16
+        shape = (8, 128)
+        mesh = jax.sharding.Mesh(jax.devices(), 'x')
+        partition_spec = jax.sharding.PartitionSpec(None, 'x')
+
+        src_sharding = jax.sharding.NamedSharding(mesh,
+                                                  partition_spec,
+                                                  memory_kind=src_memory_kind)
+        dest_sharding = jax.sharding.NamedSharding(
+            mesh, partition_spec, memory_kind=dest_memory_kind)
+
+        x = jnp.arange(np.prod(shape), dtype=dtype).reshape(shape)
+        x = jax.device_put(x, src_sharding)
+
+        dest = jnp.zeros(shape, dtype=dtype)
+        dest = jax.device_put(dest, dest_sharding)
+
+        y = copy_to_host(x, dest, mesh, partition_spec)
+        np.testing.assert_array_equal(y, x)
+        self.assertEqual(y.sharding.memory_kind, dest_memory_kind)
 
     @parameterized.named_parameters(
         dict(
@@ -229,6 +252,9 @@ class KVTransferTest(jtu.JaxTestCase):
                 for p_d_off in poison_dest_offsets:
                     np.testing.assert_array_equal(
                         np.asarray(y[layer_idx])[p_d_off], 0)
+
+    def test_hbm_to_host_dma(self):
+        self._run_copy_to_host_test('device', 'pinned_host')
 
 
 if __name__ == '__main__':

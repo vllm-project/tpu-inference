@@ -577,24 +577,27 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logger.info("Loading drafter model...")
             self.drafter.load_model(self.state)
 
-        self.rng_params_for_sampling = nnx.Rngs(
-            jax.random.key(self.model_config.seed)).params()
-
+        rng_key = nnx.Rngs(jax.random.key(self.model_config.seed)).params()
+        self.rng_params_for_sampling = device_array(self.mesh,
+                                                    rng_key,
+                                                    sharding=NamedSharding(
+                                                        self.mesh,
+                                                        PartitionSpec()))
         # This allows a multi-modal model to be used as text-only, assuming the user
         # passes the following to vLLM (on the CLI):
         # --limit-mm-per-prompt '{"image": 0, "video": 0}'
         disable_mm_from_limits = False
         if self.model_config.is_multimodal_model:
             mm_limits = self.model_config.multimodal_config.limit_per_prompt
-            image_limit = mm_limits.get("image")
-            video_limit = mm_limits.get("video")
-            image_count = image_limit.count if image_limit else 0
-            video_count = video_limit.count if video_limit else 0
-            disable_mm_from_limits = image_count == 0 and video_count == 0
+            # According to https://github.com/vllm-project/vllm/blob/21d2b53f88d99f9ab369444f6d53ed2b9c260e4f/vllm/config/multimodal.py#L79-L95
+            # if a modality limit is missing, we should treat count as 999. So here we disable multi-modality only when all limits are set to 0.
+            if mm_limits and all(limit.count == 0
+                                 for limit in mm_limits.values()):
+                disable_mm_from_limits = True
 
             if disable_mm_from_limits:
-                logger.info(
-                    "Disabling multi-modality for model because limits are set to 0."
+                logger.warning(
+                    f"Disabling multi-modality for model because limits are set to 0. {mm_limits=}"
                 )
 
         self.is_multimodal_model = (self.model_config.is_multimodal_model
@@ -927,8 +930,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             step_rng = self.rng_params_for_sampling
 
         if spec_decode_metadata is None:
+            logits = logits.astype(jnp.float32)
             with self.maybe_forbid_compile:
-                next_tokens = sample(
+                next_tokens, processed_logits = sample(
                     step_rng,
                     self.mesh,
                     logits,
@@ -946,7 +950,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 rejection_rng = step_rng
             bonus_logits = self._select_from_array_fn(
                 logits, spec_decode_metadata.bonus_logits_indices)
-            bonus_token_ids = sample(
+            bonus_token_ids, _ = sample(
                 bonus_rng,
                 self.mesh,
                 bonus_logits,
@@ -964,8 +968,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 key=rejection_rng,
             )
 
+        logits = logits.astype(jnp.float32)
         with self.maybe_forbid_compile:
+
             if tpu_sampling_metadata.logprobs:
+                logits = processed_logits if self.model_config.logprobs_mode == "processed_logprobs" else logits
                 logprobs = self._compute_and_gather_logprobs(
                     logits, next_tokens, self.model_config.max_logprobs)
                 logprobs = _jax_logprobs_copy_to_host_async(logprobs)
@@ -1140,31 +1147,26 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                    scheduler_output: "VllmSchedulerOutput"):
 
         dp_size = self.dp_size
-        num_reqs = self.input_batch.num_reqs
         max_num_reqs_per_dp_rank = self.max_num_reqs // dp_size
-        req_ids_dp = {dp_rank: [] for dp_rank in range(dp_size)}
-        req_indices_dp = {dp_rank: [] for dp_rank in range(dp_size)}
+
+        req_ids_dp = scheduler_output.req_ids_per_rank
+        scheduled_tokens_per_dp_rank = scheduler_output.scheduled_tokens_per_rank
+
+        req_indices_dp = {
+            dp_rank: [
+                self.input_batch.req_id_to_index[req_id]
+                for req_id in req_ids_dp[dp_rank]
+            ]
+            for dp_rank in range(dp_size)
+        }
         num_scheduled_tokens_per_dp_rank = {
-            dp_rank: 0
+            dp_rank: sum(scheduled_tokens_per_dp_rank[dp_rank])
             for dp_rank in range(dp_size)
         }
-        scheduled_tokens_per_dp_rank = {
-            dp_rank: []
+        num_req_per_dp_rank = {
+            dp_rank: len(req_ids_dp[dp_rank])
             for dp_rank in range(dp_size)
         }
-        num_req_per_dp_rank = {dp_rank: 0 for dp_rank in range(dp_size)}
-
-        for req_id in self.input_batch.req_ids[:num_reqs]:
-            dp_rank = scheduler_output.assigned_dp_rank[req_id]
-            req_ids_dp[dp_rank].append(req_id)
-            req_indices_dp[dp_rank].append(
-                self.input_batch.req_id_to_index[req_id])
-            num_scheduled_tokens_per_dp_rank[
-                dp_rank] += scheduler_output.num_scheduled_tokens[req_id]
-            scheduled_tokens_per_dp_rank[dp_rank].append(
-                scheduler_output.num_scheduled_tokens[req_id])
-            num_req_per_dp_rank[dp_rank] += 1
-
         # Find maximum number of scheduled tokens across DP ranks
         max_num_scheduled_tokens_across_dp = max(
             num_scheduled_tokens_per_dp_rank.values())
@@ -1483,20 +1485,32 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padded_num_reqs,
             sharding=data_parallel_attn_sharding,
         )
-        if self.uses_mrope:
-            positions = mrope_positions
 
         query_start_loc_cpu = query_start_loc
         logits_indices_cpu = logits_indices
         seq_lens_cpu = seq_lens
 
-        (input_ids, positions, query_start_loc, seq_lens, logits_indices,
+        (input_ids, query_start_loc, seq_lens, logits_indices,
          request_distribution) = device_array(
              self.mesh,
-             (input_ids, positions, query_start_loc, seq_lens, logits_indices,
+             (input_ids, query_start_loc, seq_lens, logits_indices,
               request_distribution),
              sharding=data_parallel_attn_sharding,
          )
+
+        if self.uses_mrope:
+            # M-RoPE positions are of the shape (3, max_num_tokens).
+            # https://github.com/vllm-project/tpu-inference/blob/efc9608acd925bb3b64db6fda509514f799ab7be/tpu_inference/runner/tpu_runner.py#L555
+            # Shard the positions accordingly.
+            mrope_sharding = NamedSharding(
+                self.mesh, PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+            positions = device_array(self.mesh,
+                                     mrope_positions,
+                                     sharding=mrope_sharding)
+        else:
+            positions = device_array(self.mesh,
+                                     positions,
+                                     sharding=data_parallel_attn_sharding)
 
         def build_block_table(kv_cache_gid: int) -> jax.Array:
             block_tables = self.block_tables_cpu[kv_cache_gid][:self.

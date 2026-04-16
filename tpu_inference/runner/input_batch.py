@@ -163,6 +163,7 @@ class InputBatch:
             prompt_lens=torch.from_numpy(
                 self.num_prompt_tokens[:self.num_reqs]),
             prompt_token_ids=None,
+            prompt_token_ids_cpu=None,
             pooling_params=pooling_params,
             pooling_states=pooling_states,
         )
@@ -314,6 +315,8 @@ class InputBatch:
     def swap_states(self, i1: int, i2: int) -> None:
         old_id_i1 = self._req_ids[i1]
         old_id_i2 = self._req_ids[i2]
+        max_active_token_count = max(int(self.num_tokens[i1]),
+                                     int(self.num_tokens[i2]))
         self._req_ids[i1], self._req_ids[i2] =\
             self._req_ids[i2], self._req_ids[i1] # noqa
         self.req_output_token_ids[i1], self.req_output_token_ids[i2] =\
@@ -336,14 +339,8 @@ class InputBatch:
         self.top_k_cpu[i1], self.top_k_cpu[i2] =\
             self.top_k_cpu[i2], self.top_k_cpu[i1]
 
-        # NOTE: the following is unsafe
-        # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
-        #     self.token_ids_cpu[i2, ...], self.token_ids_cpu[i1, ...]
-        # instead, we need to temporiarily copy the data for one of the indices
-        # TODO(lucas): optimize this by only copying valid indices
-        tmp = self.token_ids_cpu[i1, ...].copy()
-        self.token_ids_cpu[i1, ...] = self.token_ids_cpu[i2, ...]
-        self.token_ids_cpu[i2, ...] = tmp
+        self.token_ids_cpu[[i1, i2], :max_active_token_count] = \
+            self.token_ids_cpu[[i2, i1], :max_active_token_count]
 
         swap_dict_values(self.generators, i1, i2)
         swap_dict_values(self.min_tokens, i1, i2)

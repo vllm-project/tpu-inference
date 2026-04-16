@@ -210,6 +210,42 @@ def test_swap_states(input_batch: InputBatch):
                                   req1_tokens_before)
 
 
+def test_swap_states_only_swaps_active_tokens(input_batch: InputBatch):
+    """Tests that swap_states only swaps up to max_active_token_count columns,
+    leaving data beyond that range untouched (optimization correctness)."""
+    # Create requests with very different lengths.
+    req_short = create_dummy_request("req-short", prompt_len=5, output_len=1)
+    req_long = create_dummy_request("req-long", prompt_len=50, output_len=10)
+
+    input_batch.add_request(req_short)
+    input_batch.add_request(req_long)
+
+    # max_active_token_count = max(6, 60) = 60
+    max_active = max(
+        int(input_batch.num_tokens[0]),
+        int(input_batch.num_tokens[1]),
+    )
+    assert max_active == 60
+
+    # Capture only the active region before swap.
+    short_active_before = input_batch.token_ids_cpu[0, :max_active].copy()
+    long_active_before = input_batch.token_ids_cpu[1, :max_active].copy()
+
+    input_batch.swap_states(0, 1)
+
+    # Active region should be swapped.
+    np.testing.assert_array_equal(input_batch.token_ids_cpu[0, :max_active],
+                                  long_active_before)
+    np.testing.assert_array_equal(input_batch.token_ids_cpu[1, :max_active],
+                                  short_active_before)
+
+    # num_tokens should also be swapped correctly.
+    assert input_batch.num_tokens[0] == 60
+    assert input_batch.num_tokens[1] == 6
+    assert input_batch.num_tokens_no_spec[0] == 60
+    assert input_batch.num_tokens_no_spec[1] == 6
+
+
 def test_all_greedy_property(input_batch: InputBatch):
     """Tests the `all_greedy` property."""
     # Initially true
@@ -261,6 +297,7 @@ def test_get_pooling_metadata(input_batch: InputBatch):
         PoolingMetadata(
             prompt_lens=torch.tensor([], dtype=torch.int32),
             prompt_token_ids=None,
+            prompt_token_ids_cpu=None,
             pooling_params=[],
             pooling_states=[],
         ),
@@ -281,6 +318,7 @@ def test_get_pooling_metadata(input_batch: InputBatch):
         PoolingMetadata(
             prompt_lens=torch.tensor([10], dtype=torch.int32),
             prompt_token_ids=None,
+            prompt_token_ids_cpu=None,
             pooling_params=[pooling_param],
             pooling_states=[pooling_state],
         ),
@@ -292,6 +330,7 @@ def test_get_pooling_metadata(input_batch: InputBatch):
         PoolingMetadata(
             prompt_lens=torch.tensor([], dtype=torch.int32),
             prompt_token_ids=None,
+            prompt_token_ids_cpu=None,
             pooling_params=[],
             pooling_states=[],
         ),

@@ -664,7 +664,11 @@ class TestKVCacheManager:
             self.runner.vllm_config.sharding_config = MagicMock()
             self.runner.vllm_config.sharding_config.total_dp_size = 1
 
-        self.runner.initialize_kv_cache(kv_cache_config)
+        with patch('dataclasses.replace') as mock_replace:
+            mock_replaced_spec = MagicMock()
+            mock_replaced_spec.page_size_bytes = page_size_bytes
+            mock_replace.return_value = mock_replaced_spec
+            self.runner.initialize_kv_cache(kv_cache_config)
 
         assert len(self.runner.kv_caches) == 2
         for i in range(2):
@@ -763,7 +767,11 @@ class TestKVCacheManager:
             self.runner.vllm_config.sharding_config.total_dp_size = 1
 
         with patch('tpu_inference.runner.kv_cache_manager.logger.warning_once'
-                   ) as mock_warning_once:
+                   ) as mock_warning_once, patch(
+                       'dataclasses.replace') as mock_replace:
+            mock_replaced_spec = MagicMock()
+            mock_replaced_spec.page_size_bytes = page_size_bytes
+            mock_replace.return_value = mock_replaced_spec
             self.runner.initialize_kv_cache(kv_cache_config)
 
         # Even though DUPLICATE_SHARED_KV_CACHE_LAYERS=False, Mamba does not
@@ -836,3 +844,62 @@ class TestKVCacheManager:
         with patch('tpu_inference.runner.kv_cache_manager.get_layers_from_vllm_config', return_value=layers), \
              patch.object(self.runner.kv_cache_manager, 'update_mamba_page_size_padded') as mock_update:
             mock_update.assert_not_called()
+
+    def test_hybrid_mamba_num_blocks(self):
+        num_blocks = 100
+        attn_page_size = 67584
+
+        mamba_shapes = ((4, 128), (8, 32, 32))
+        mamba_dtypes = (torch.bfloat16, torch.float32)
+
+        mamba_unpadded_page_size = sum(
+            int(np.prod(shape)) * torch.tensor([], dtype=dtype).element_size()
+            for shape, dtype in zip(mamba_shapes, mamba_dtypes))
+
+        mamba_spec = MambaSpec(
+            block_size=self.runner.vllm_config.cache_config.block_size,
+            shapes=mamba_shapes,
+            dtypes=mamba_dtypes,
+            page_size_padded=67584)
+
+        # Total tensor size derived from sum of the unpadded Mamba page size and the Attention page size
+        tensor_size = num_blocks * (mamba_unpadded_page_size + attn_page_size)
+
+        attn_spec = MagicMock(spec=FullAttentionSpec)
+        attn_spec.block_size = self.runner.vllm_config.cache_config.block_size
+        attn_spec.page_size_bytes = attn_page_size
+        attn_spec.num_kv_heads = 8
+        attn_spec.head_size = 128
+        attn_spec.dtype = torch.bfloat16
+
+        layer_names = ['layer.0', 'layer.1']
+        kv_cache_groups = [
+            KVCacheGroupSpec(layer_names=['layer.0'],
+                             kv_cache_spec=mamba_spec),
+            KVCacheGroupSpec(layer_names=['layer.1'], kv_cache_spec=attn_spec),
+        ]
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=tensor_size,
+                shared_by=layer_names,
+            )
+        ]
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        self.runner.initialize_kv_cache(kv_cache_config)
+
+        # Should duplicate the shared cache and allocate successfully with the appropriate num_blocks
+        assert len(self.runner.kv_caches) == 2
+
+        # Check that num_blocks are set using unpadded mamba page size.
+        mamba_states = self.runner.kv_caches[0]
+        assert len(mamba_states) == 2
+        assert mamba_states[0].shape[0] == num_blocks
+        assert mamba_states[1].shape[0] == num_blocks
+
+        attn_cache = self.runner.kv_caches[1]
+        assert attn_cache.shape[0] == num_blocks

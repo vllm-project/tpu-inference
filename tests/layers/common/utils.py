@@ -124,6 +124,24 @@ def ref_moe(x: torch.Tensor,
     return torch.einsum("tai,ta->ti", x, expert_weights)
 
 
+def ref_quantize_fp8(
+        x: torch.Tensor,
+        dtype: torch.dtype,
+        axis: Optional[int] = None) -> tuple[torch.Tensor, torch.Tensor]:
+    per_tensor = axis is None
+    dtype_info = torch.finfo(dtype)
+    dtype_max = float(dtype_info.max)
+    dtype_min = float(dtype_info.min)
+
+    dim = () if per_tensor else (axis, )
+    x_abs_max = torch.amax(torch.abs(x), dim=dim, keepdim=True)
+    if per_tensor:
+        x_abs_max = torch.squeeze(x_abs_max, dim=-1)
+    x_s = x_abs_max / dtype_max
+    x_q = torch.clip(x / x_s, dtype_min, dtype_max).to(dtype)
+    return x_q, x_s.to(torch.float32)
+
+
 def ref_moe_jax(x: jax.Array,
                 router_logits: jax.Array,
                 w1: jax.Array,

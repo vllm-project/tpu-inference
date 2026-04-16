@@ -73,8 +73,8 @@ class GptOssRouter(Router):
 def _swiglu_split(gate: Float, up: Float, alpha: Float, limit: Float) -> Float:
     """Implements SwiGLU using separate Gate and Up projections."""
     # Clip both inputs
-    x_glu = jnp.clip(gate, a_max=limit)
-    x_linear = jnp.clip(up, a_min=-limit, a_max=limit)
+    x_glu = jnp.clip(gate, max=limit)
+    x_linear = jnp.clip(up, min=-limit, max=limit)
 
     # Compute Activation: (Gate * Sigmoid(Alpha * Gate)) * (Up + 1)
     gated_activation = x_glu * jax.nn.sigmoid(alpha * x_glu)

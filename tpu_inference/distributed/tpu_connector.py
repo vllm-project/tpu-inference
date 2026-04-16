@@ -59,7 +59,6 @@ D workflow:
 """
 
 import copy
-import functools
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -87,7 +86,9 @@ if TYPE_CHECKING:
 
 import tpu_inference.distributed.utils as dist_utils
 from tpu_inference import envs
-from tpu_inference.distributed.kv_transfer import multi_layer_copy
+from tpu_inference.distributed.host_kv_pool import HostKVPool
+from tpu_inference.distributed.kv_transfer import (copy_to_host,
+                                                   multi_layer_copy)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 from tpu_inference.utils import device_array
@@ -444,12 +445,13 @@ class TPUConnectorWorker:
         self.node_id = 0
 
         # req_id: (kv, expiration_time)
-        self.reqs_wait_pull: dict[ReqId, list[list[jax.Array], float]] = {}
+        self.reqs_wait_pull: dict[ReqId, list[list[jax.Array], float,
+                                              int]] = {}
         # req_id: thread_future
         self.reqs_pulling: dict[ReqId, Future] = {}
         # req_id: (kv, indices)
-        self.reqs_ready_to_scatter: dict[ReqId, tuple[list[jax.Array],
-                                                      jax.Array]] = {}
+        self.reqs_ready_to_insert: dict[ReqId, tuple[list[jax.Array],
+                                                     jax.Array]] = {}
         # the KV cache strafer uuid to request mapping
         # the reason is vllm add prefix + external uuid suffix for each request id
         # for example: prefill req_id:cmpl-cd70b21e-0f2b-46ed-910c-9525f706389a-0-99ae74c8
@@ -464,6 +466,7 @@ class TPUConnectorWorker:
         self.kv_transfer_server = None
         self.zmq_cxt = zmq.Context()
         if self.is_producer:
+            self.kv_d2h_executor = ThreadPoolExecutor(max_workers=128)
             ready_event = threading.Event()
             self.pull_notify_listener_t = threading.Thread(
                 target=self._pull_notify_listener,
@@ -514,6 +517,18 @@ class TPUConnectorWorker:
                     f"ip={self.host_ip} | "
                     f"kv_transfer_port={self.kv_transfer_port}")
         self._maybe_start_p2p_server()
+
+        if self.is_producer and dist_utils.get_enable_d2h_transfer(
+        ) and not self.multi_host:
+            block_size = self.vllm_config.cache_config.block_size
+            max_blocks = self.vllm_config.model_config.max_model_len // block_size
+            self.host_kv_pool = HostKVPool(
+                pool_size=dist_utils.get_max_host_kv_buffer_size(),
+                num_layers=self.num_layers,
+                max_blocks_per_req=max_blocks,
+                cache_inner_shape=kv_layer.shape[1:],
+                dtype=self.dtype,
+                host_sharding=self.host_sharding)
 
     def _maybe_start_p2p_server(self):
         if self.kv_transfer_server is not None:
@@ -600,11 +615,13 @@ class TPUConnectorWorker:
                 self.reqs_pulling[req_id] = self.pull_executor.submit(
                     self._pull_kv, req_id, conn, req_meta, indices)
             else:
-                if req_id in self.reqs_ready_to_scatter:
-                    kv, indices = self.reqs_ready_to_scatter.pop(req_id)
-                    self.runner.kv_caches = scatter_kv_slices(
-                        self.runner.kv_caches, kv, indices, self.mesh,
-                        self.sharding.spec)
+                if req_id in self.reqs_ready_to_insert:
+                    kv, indices, block_numbers = self.reqs_ready_to_insert.pop(
+                        req_id)
+                    if len(block_numbers) > 0:
+                        self.runner.kv_caches = insert_kv_chunks(
+                            self.runner.kv_caches, kv, block_numbers,
+                            self.mesh, self.sharding.spec)
 
                 # The request has finished pulling the KV from remote, or it has full local
                 # prefix cache, need to notify P to let it free blocks.
@@ -616,22 +633,65 @@ class TPUConnectorWorker:
         # TODO(xiang): pad block_ids to avoid recompilation
         indices = device_array(self.mesh, np.array(local_block_ids))
         kv = select_from_kv_caches(self.runner.kv_caches, indices)
-        if dist_utils.get_enable_d2h_transfer():
-            # (mrjunwan): we directly put the kv to host memory to reduce the memory pressure on device
-            # add time log here to monitor the transfer speed.
-            logger.info(
-                f"Worker {self.node_id} --> Doing D2H kv transfer for req_id={req_id}"
-            )
-            kv = jax.device_put(kv, self.host_sharding)
+        if dist_utils.get_enable_d2h_transfer() and not self.multi_host:
+            self.kv_d2h_executor.submit(self._async_d2h_and_transfer, req_id,
+                                        req_meta, kv, len(local_block_ids))
+        else:
+            buffer_idx = -1
+            # NOTE(xiang): We need to manually store the kv because:
+            # Although we can set use_raw_buffers=True to let kv be safely destroyed after
+            # calling await_pull, it could be a stranding buffer if D never pulls it.
+            # So we have to set use_raw_buffers=False and stores the kv, then the kv buffer
+            # will be safely destroyed by either D notifying or expiration.
+            self.reqs_wait_pull[req_id] = [
+                kv, req_meta.expiration_time, buffer_idx
+            ]
+            self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
+            self.kv_transfer_server.await_pull(req_meta.uuid, kv)
 
-        # NOTE(xiang): We need to manually store the kv because:
-        # Although we can set use_raw_buffers=True to let kv be safely destroyed after
-        # calling await_pull, it could be a stranding buffer if D never pulls it.
-        # So we have to set use_raw_buffers=False and stores the kv, then the kv buffer
-        # will be safely destroyed by either D notifying or expiration.
-        self.reqs_wait_pull[req_id] = [kv, req_meta.expiration_time]
+    def _async_d2h_and_transfer(self, req_id: str, req_meta: SendMeta,
+                                kv_src: list[jax.Array],
+                                num_valid_blocks: int):
+        # (mrjunwan): we directly put the kv to host memory to reduce the memory pressure on device
+        # add time log here to monitor the transfer speed.
+        logger.info(
+            f"Worker {self.node_id} --> Doing D2H kv transfer for req_id={req_id}"
+        )
+        buffer_idx, dest_buffer = self.host_kv_pool.get_buffer()
+        updated_dest_buffer = []
+
+        start_time = time.perf_counter()
+        sliced_dest_buffer = [
+            jax.lax.slice_in_dim(dest, 0, num_valid_blocks)
+            for dest in dest_buffer
+        ]
+        time_1 = time.perf_counter()
+        for src_layer, dest_layer in zip(kv_src, sliced_dest_buffer):
+            updated_dest = copy_to_host(src=src_layer,
+                                        dest=dest_layer,
+                                        mesh=self.mesh,
+                                        sharding_spec=self.sharding.spec)
+            updated_dest_buffer.append(updated_dest)
+
+        # Wait for physical hardware transfer
+        while True:
+            end_time = time.perf_counter()
+            if all(
+                    chunk.is_ready() for chunk in updated_dest_buffer
+            ) or end_time - time_1 > dist_utils.get_p2p_wait_pull_timeout():
+                break
+            time.sleep(0.001)
+
+        logger.info(
+            f"Worker {self.node_id} --> Done D2H kv transfer for req_id={req_id} | slice time={(time_1 - start_time)*1000:.2f}ms | copy time={(end_time - time_1)*1000:.2f}ms"
+        )
+
+        # 4. Network transfer
+        self.reqs_wait_pull[req_id] = [
+            dest_buffer, req_meta.expiration_time, buffer_idx
+        ]
         self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
-        self.kv_transfer_server.await_pull(req_meta.uuid, kv)
+        self.kv_transfer_server.await_pull(req_meta.uuid, updated_dest_buffer)
 
     def _maybe_build_kv_connection(self, req_meta: LoadMeta) -> Any:
         if isinstance(req_meta.remote_host, list):
@@ -685,7 +745,7 @@ class TPUConnectorWorker:
             f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | "
             f"uuid={req_meta.uuid} | prepare time={prepare_time_ms:.2f}ms | "
             f"pull time={pull_time_ms:.2f}ms | size={kv_size_mb:.2f}MB")
-        return kv, indices
+        return kv, indices, req_meta.local_block_ids
 
     def _get_kv_spec(self, num_blocks: int) -> list[jax.ShapeDtypeStruct]:
         assert num_blocks <= self.shape[0]
@@ -732,8 +792,9 @@ class TPUConnectorWorker:
         for req_id in list(self.reqs_pulling.keys()):
             future = self.reqs_pulling[req_id]
             if future.done():
-                kv, indices = future.result()
-                self.reqs_ready_to_scatter[req_id] = (kv, indices)
+                kv, indices, block_numbers = future.result()
+                self.reqs_ready_to_insert[req_id] = (kv, indices,
+                                                     block_numbers)
                 del self.reqs_pulling[req_id]
                 done_recving.add(req_id)
 
@@ -741,10 +802,14 @@ class TPUConnectorWorker:
         # This req can then be released blocks in the current scheduler step.
         now = time.perf_counter()
         for req_id in list(self.reqs_wait_pull):
-            _, expires = self.reqs_wait_pull[req_id]
+            buffer, expires, buffer_index = self.reqs_wait_pull[req_id]
             if now > expires:
+                if buffer_index != -1 and self.host_kv_pool is not None:
+                    self.host_kv_pool.return_buffer(buffer_index, buffer)
                 del self.reqs_wait_pull[req_id]
                 done_sending.add(req_id)
+                # Return the buffer to the pool
+
         if done_sending:
             logger.info(
                 f"Worker {self.node_id} -->  done_sending={done_sending}")
@@ -768,29 +833,49 @@ def select_from_kv_caches(kv_caches: list[jax.Array],
     return selected
 
 
-@functools.partial(
-    jax.jit,
-    donate_argnames=("kv_caches", ),
-    static_argnames=("mesh", "spec"),
-)
-def scatter_kv_slices(kv_caches: list[jax.Array], kv_slices: list[jax.Array],
-                      indices: jax.Array, mesh: jax.sharding.Mesh,
-                      spec) -> list[jax.Array]:
-    num_slices = kv_slices[0].shape[0]
-    src_offsets = jnp.arange(num_slices, dtype=jnp.int32)
-    dest_offsets = indices
-    chunk_sizes = jnp.ones(num_slices, dtype=jnp.int32)
-    num_chunks = jnp.array([num_slices], dtype=jnp.int32)
+def insert_kv_chunks(kv_caches: list[jax.Array], kv_slices: list[jax.Array],
+                     block_numbers: list[int], mesh: jax.sharding.Mesh,
+                     spec) -> list[jax.Array]:
+    src_offsets = []
+    dest_offsets = []
+    chunk_sizes = []
+
+    start_idx = 0
+    for i in range(1, len(block_numbers) + 1):
+        if i == len(block_numbers) or block_numbers[i] != block_numbers[i -
+                                                                        1] + 1:
+            start_block = block_numbers[start_idx]
+            chunk_size = i - start_idx
+
+            src_offsets.append(start_idx)
+            dest_offsets.append(start_block)
+            chunk_sizes.append(chunk_size)
+
+            start_idx = i
+
+    num_chunks = len(src_offsets)
+    total_len = len(block_numbers)
+
+    # Pad to total_len to avoid recompilation
+    while len(src_offsets) < total_len:
+        src_offsets.append(0)
+        dest_offsets.append(0)
+        chunk_sizes.append(0)
+
+    src_offsets_arr = jnp.array(src_offsets, dtype=jnp.int32)
+    dest_offsets_arr = jnp.array(dest_offsets, dtype=jnp.int32)
+    chunk_sizes_arr = jnp.array(chunk_sizes, dtype=jnp.int32)
+    num_chunks_arr = jnp.array([num_chunks], dtype=jnp.int32)
 
     replicated_spec = jax.sharding.PartitionSpec()
 
     return multi_layer_copy(
         src_array=kv_slices,
         dest_array=kv_caches,
-        src_offsets=src_offsets,
-        dest_offsets=dest_offsets,
-        chunk_sizes=chunk_sizes,
-        num_chunks=num_chunks,
+        src_offsets=src_offsets_arr,
+        dest_offsets=dest_offsets_arr,
+        chunk_sizes=chunk_sizes_arr,
+        num_chunks=num_chunks_arr,
         mesh=mesh,
         src_sharding_spec=spec,
         dest_sharding_spec=spec,

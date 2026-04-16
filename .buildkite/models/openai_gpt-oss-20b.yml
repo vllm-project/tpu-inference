@@ -1,0 +1,92 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# pipeline-name: openai/gpt-oss-20b
+# pipeline-type: text-only
+steps:
+  - label: "${TPU_VERSION:-tpu6e} Unit tests for openai/gpt-oss-20b"
+    key: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-20b_UnitTest"
+    soft_fail: true
+    agents:
+      queue: cpu  # TODO: replace with execution environment
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_openai_gpt-oss-20b_UnitTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record unit test result for openai/gpt-oss-20b"
+    key: "${TPU_VERSION:-tpu6e}_record_openai_gpt-oss-20b_UnitTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-20b_UnitTest"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "openai/gpt-oss-20b"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "text-only"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_openai_gpt-oss-20b_UnitTest
+
+  - label: "${TPU_VERSION:-tpu6e} Accuracy for openai/gpt-oss-20b"
+    key: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-20b_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_openai_gpt-oss-20b_UnitTest"
+    soft_fail: true
+    agents:
+      queue: cpu  # TODO: replace with execution environment
+    env:
+      TEST_MODEL: openai/gpt-oss-20b
+      TENSOR_PARALLEL_SIZE: 1
+      MINIMUM_ACCURACY_THRESHOLD: 0  # TODO : replace 0 with your accuracy threshold
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_openai_gpt-oss-20b_Accuracy" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record accuracy result for openai/gpt-oss-20b"
+    key: "${TPU_VERSION:-tpu6e}_record_openai_gpt-oss-20b_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-20b_Accuracy"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "openai/gpt-oss-20b"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "text-only"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_openai_gpt-oss-20b_Accuracy
+
+  - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for openai/gpt-oss-20b"
+    key: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-20b_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_openai_gpt-oss-20b_Accuracy"
+    soft_fail: true
+    agents:
+      queue: cpu  # TODO: replace with execution environment
+    env:
+      TEST_MODEL: openai/gpt-oss-20b
+      TENSOR_PARALLEL_SIZE: 1
+      MINIMUM_THROUGHPUT_THRESHOLD: 0  # TODO : replace 0 with your performance threshold
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_openai_gpt-oss-20b_Benchmark" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for openai/gpt-oss-20b"
+    key: "${TPU_VERSION:-tpu6e}_record_openai_gpt-oss-20b_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-20b_Benchmark"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "openai/gpt-oss-20b"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_openai_gpt-oss-20b_Benchmark
