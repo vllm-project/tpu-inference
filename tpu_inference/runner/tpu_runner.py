@@ -1579,6 +1579,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         positions = metadata["positions"]
         if self.uses_mrope:
             positions = positions.reshape(3, -1)
+        else:
+            positions = positions.ravel()
         query_start_loc = metadata["query_start_loc"]
         seq_lens = metadata["seq_lens"]
         logits_indices = metadata["logits_indices"]
@@ -1842,6 +1844,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         positions = metadata["positions"]
         if self.uses_mrope:
             positions = positions.reshape(3, -1)
+        else:
+            positions = positions.ravel()
         query_start_loc = metadata["query_start_loc"]
         seq_lens = metadata["seq_lens"]
         logits_indices = metadata["logits_indices"]
