@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+import functools
 import time
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import dataclass
 from functools import wraps
-from typing import Any, Callable, List, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -409,3 +411,91 @@ def time_function(func):
         return result
 
     return wrapper
+
+
+@dataclass(frozen=True)
+class DeviceBufferMetadata:
+    """Metadata for the layout of a DeviceBuffer."""
+    keys: Tuple[str, ...]
+    sizes: Tuple[int, ...]
+
+
+class DeviceBuffer:
+    """
+    A utility to pack 1D numpy arrays into a monolithic buffer.
+    Supports appending data or getting views, then tagging the accumulated
+    data with a key. The internal buffer grows dynamically as needed.
+    """
+
+    def __init__(self, initial_capacity: int = 1024):
+        self.buffer = np.zeros(initial_capacity, dtype=np.int32)
+        self._offset = 0
+        self._last_offset = 0
+        self._keys: List[str] = []
+        self._sizes: List[int] = []
+
+    def _ensure_capacity(self, size: int):
+        """Ensure the internal buffer has enough space for 'size' more elements."""
+        if self._offset + size > self.buffer.size:
+            new_capacity = max(self.buffer.size * 2,
+                               self._offset + size + 1024)
+            new_buffer = np.zeros(new_capacity, dtype=np.int32)
+            new_buffer[:self._offset] = self.buffer[:self._offset]
+            self.buffer = new_buffer
+
+    def append(self, array: np.ndarray, key: Optional[str] = None):
+        """Append data to the buffer and advance offset."""
+        size = array.size
+        self._ensure_capacity(size)
+        self.buffer[self._offset:self._offset + size] = array.ravel()
+        self._offset += size
+        if key:
+            self.set_key(key)
+
+    def get_view(self,
+                 shape: Union[int, Tuple[int, ...]],
+                 key: Optional[str] = None) -> np.ndarray:
+        """Reserve space in the buffer and return a reshaped view for direct writing."""
+        if isinstance(shape, (int, np.integer)):
+            size = int(shape)
+            shape = (size, )
+        else:
+            size = int(np.prod(shape))
+
+        self._ensure_capacity(size)
+        view = self.buffer[self._offset:self._offset + size].reshape(shape)
+        self._offset += size
+        if key:
+            self.set_key(key)
+        return view
+
+    def set_key(self, key: str):
+        """Tag all data accumulated since the last set_key() call."""
+        size = self._offset - self._last_offset
+        self._keys.append(key)
+        self._sizes.append(size)
+        self._last_offset = self._offset
+
+    def build(self) -> Tuple[np.ndarray, DeviceBufferMetadata]:
+        """Return the active portion of the buffer and its layout metadata."""
+        return self.buffer[:self._offset], DeviceBufferMetadata(
+            keys=tuple(self._keys), sizes=tuple(self._sizes))
+
+    def reset(self):
+        """Reset offsets and metadata for reuse. Keeps the allocated buffer."""
+        self._offset = 0
+        self._last_offset = 0
+        self._keys = []
+        self._sizes = []
+
+    @staticmethod
+    @functools.partial(jax.jit, static_argnums=(1, ))
+    def unpack_arrays(blob: jax.Array,
+                      metadata: DeviceBufferMetadata) -> Dict[str, jax.Array]:
+        """
+        Unpack a 1D blob into a dictionary of arrays based on provided metadata.
+        Uses JIT and jnp.split to minimize dispatch overhead.
+        """
+        indices = tuple(np.cumsum(metadata.sizes)[:-1])
+        parts = jnp.split(blob, indices)
+        return {key: parts[i] for i, key in enumerate(metadata.keys)}
