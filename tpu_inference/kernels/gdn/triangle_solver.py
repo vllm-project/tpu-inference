@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import enum
 import functools
 
 import jax
@@ -194,3 +195,21 @@ def decompose_triangular_matrix_inverse_pallas(A,
     )(A_reshaped)
 
     return x.reshape(A.shape)
+
+
+class TriangleSolverImpl(str, enum.Enum):
+    GAUSSIAN = "gaussian"
+    NEWTON_SCHULZ = "newton_schulz"
+
+    def __call__(self, A):
+        if self == TriangleSolverImpl.GAUSSIAN:
+            return decompose_triangular_matrix_inverse_pallas(A,
+                                                              n_block_size=min(
+                                                                  32,
+                                                                  A.shape[-1]))
+        elif self == TriangleSolverImpl.NEWTON_SCHULZ:
+            return newton_schulz_inverse_pallas(A)
+        else:
+            print(f"Unknown solver: {self.value} Using default solver."
+                  f" {TriangleSolverImpl.NEWTON_SCHULZ.value}")
+            return newton_schulz_inverse_pallas(A)

@@ -13,27 +13,11 @@
 # limitations under the License.
 """Ragged gated delta rule packed JAX implementation."""
 
-import enum
-
 import jax
 import jax.numpy as jnp
 from jax import lax
 
 import tpu_inference.kernels.gdn.triangle_solver as triangle_solver
-
-
-class TriangleSolverImpl(str, enum.Enum):
-    GAUSSIAN = "gaussian"
-    NEWTON_SCHULZ = "newton_schulz"
-
-    def __call__(self, A):
-        if self == TriangleSolverImpl.GAUSSIAN:
-            return triangle_solver.decompose_triangular_matrix_inverse_pallas(
-                A, n_block_size=min(32, A.shape[-1]))
-        elif self == TriangleSolverImpl.NEWTON_SCHULZ:
-            return triangle_solver.newton_schulz_inverse_pallas(A)
-        else:
-            raise ValueError(f"Unknown solver: {self}")
 
 
 def l2norm(x: jnp.ndarray, dim: int = -1, eps: float = 1e-6) -> jnp.ndarray:
@@ -215,13 +199,13 @@ def ragged_gated_delta_rule_mixed_prefill(
     recurrent_state: jnp.ndarray,
     state_indices: jnp.ndarray,
     distribution: jnp.ndarray,
-    chunk_size: int = 64,
+    chunk_size: int = 128,
     use_qk_norm_in_gdn: bool = False,
     compute_dtype: jnp.dtype = jnp.bfloat16,
     precision: jax.lax.Precision = jax.lax.Precision.HIGHEST,
     preferred_element_type: jnp.dtype = jnp.float32,
-    triangle_solver_impl: TriangleSolverImpl = TriangleSolverImpl.
-    NEWTON_SCHULZ,
+    triangle_solver_impl: triangle_solver.TriangleSolverImpl = triangle_solver.
+    TriangleSolverImpl.GAUSSIAN,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Applies chunked gated delta rule for mixed prefill case.
 
@@ -618,7 +602,7 @@ def ragged_gated_delta_rule(
     n_v: int,
     d_k: int,
     d_v: int,
-    chunk_size: int = 64,
+    chunk_size: int = 128,
     use_qk_norm_in_gdn: bool = True,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Applies the gated delta rule over ragged seq lengths
