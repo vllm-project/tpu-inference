@@ -13,9 +13,12 @@
 # limitations under the License.
 """Ragged convolution Jax implementation."""
 
+import jax
 import jax.numpy as jnp
 
 
+@jax.jit(static_argnames=("kernel_size", ), donate_argnames=("conv_state", ))
+@jax.named_scope("ragged_conv1d_jax")
 def ragged_conv1d(
     x,
     conv_state,
@@ -23,8 +26,9 @@ def ragged_conv1d(
     conv_bias,
     query_start_loc,
     state_indices,
-    kernel_size,
     distribution,
+    *,
+    kernel_size,
 ):
     """Applies 1D convolution over ragged sequences and updates state.
 

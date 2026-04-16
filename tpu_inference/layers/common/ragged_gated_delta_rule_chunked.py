@@ -23,14 +23,14 @@ import tpu_inference.kernels.gdn.triangle_solver as triangle_solver
 def l2norm(x: jnp.ndarray, dim: int = -1, eps: float = 1e-6) -> jnp.ndarray:
     """Normalizes x along the specified dimension using L2 norm.
 
-    Args:
-      x: Input array.
-      dim: Dimension along which to normalize.
-      eps: Epsilon value to avoid division by zero.
+  Args:
+    x: Input array.
+    dim: Dimension along which to normalize.
+    eps: Epsilon value to avoid division by zero.
 
-    Returns:
-      Normalized array.
-    """
+  Returns:
+    Normalized array.
+  """
     inv_norm = jax.lax.rsqrt((x * x).sum(axis=dim, keepdims=True) +
                              jnp.array(eps, dtype=x.dtype))
     return x * inv_norm
@@ -572,6 +572,18 @@ def ragged_gated_delta_rule_decode_only(
     return updated_recurrent_state.astype(recurrent_state.dtype), outputs
 
 
+@jax.jit(
+    donate_argnames=('recurrent_state', ),
+    static_argnames=(
+        'n_kq',
+        'n_v',
+        'd_k',
+        'd_v',
+        'chunk_size',
+        'use_qk_norm_in_gdn',
+    ),
+)
+@jax.named_scope("ragged_gated_delta_rule_chunked")
 def ragged_gated_delta_rule(
     mixed_qkv: jnp.ndarray,
     b: jnp.ndarray,
