@@ -31,10 +31,11 @@ set -ex
 
 
 OPTIONS=""
-LONGOPTS=model:,tp:,req_tput_limit:,output_token_tput_limit:,total_token_tput_limit:,input_len:,output_len:,use_moe_ep_kernel:,limit_mm_per_prompt:,hf_overrides:,block_size:,num_prompts:,num-prompts:,gpu_memory_utilization:,gpu-memory-utilization:
+LONGOPTS=model:,tp:,req_tput_limit:,output_token_tput_limit:,total_token_tput_limit:,input_len:,output_len:,use_moe_ep_kernel:,limit_mm_per_prompt:,hf_overrides:,block_size:,num_prompts:,num-prompts:,gpu_memory_utilization:,gpu-memory-utilization:,timeout:
 
 num_prompts=320
 gpu_memory_utilization=0.95
+timeout_mins=40
 
 # Parse arguments
 if ! PARSED=$(getopt --options="$OPTIONS" --longoptions=$LONGOPTS --name "$0" -- "$@"); then
@@ -94,6 +95,10 @@ while true; do
       ;;
     --gpu_memory_utilization|--gpu-memory-utilization)
       gpu_memory_utilization=$2
+      shift 2
+      ;;
+    --timeout)
+      timeout_mins=$2
       shift 2
       ;;
     --)
@@ -156,13 +161,13 @@ trap cleanup EXIT
 
 # Need to put the nc command in a condition.
 # If we assign it to a variable, the nc command is supposed to fail at first because it takes some time for the server to be ready. But the "set -e" will cause the script to exit immediately so the while loop will not run.
-TIMEOUT_SECONDS=$((40 * 60))  # 40 minutes
+TIMEOUT_SECONDS=$((timeout_mins * 60))
 wait_start_time=$(date +%s)
 while ! nc -zv $DEFAULT_HOST $DEFAULT_PORT; do
   current_time=$(date +%s)
   elapsed=$((current_time - wait_start_time))
   if [ "$elapsed" -ge "$TIMEOUT_SECONDS" ]; then
-    echo "Timeout: Server did not start within 40 minutes."
+    echo "Timeout: Server did not start within ${timeout_mins} minutes."
     exit 1
   fi
   echo "Waiting for the server to start... (${elapsed}s elapsed)"
