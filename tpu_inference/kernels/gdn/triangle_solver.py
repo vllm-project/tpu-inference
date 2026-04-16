@@ -201,6 +201,7 @@ class TriangleSolverImpl(str, enum.Enum):
     GAUSSIAN = "gaussian"
     NEWTON_SCHULZ = "newton_schulz"
 
+    #TODO: Choose based on Chunk size and vmem constraints. Newton-schulz OOMs for chunk size 128, use Gaussian elimination based solver instead.
     def __call__(self, A):
         if self == TriangleSolverImpl.GAUSSIAN:
             return decompose_triangular_matrix_inverse_pallas(A,

@@ -199,13 +199,14 @@ def ragged_gated_delta_rule_mixed_prefill(
     recurrent_state: jnp.ndarray,
     state_indices: jnp.ndarray,
     distribution: jnp.ndarray,
-    chunk_size: int = 128,
+    chunk_size: int = 64,
     use_qk_norm_in_gdn: bool = False,
     compute_dtype: jnp.dtype = jnp.bfloat16,
     precision: jax.lax.Precision = jax.lax.Precision.HIGHEST,
     preferred_element_type: jnp.dtype = jnp.float32,
+    # chunk size 128 will hit VMEM oom, use Gaussian elimination based solver instead.
     triangle_solver_impl: triangle_solver.TriangleSolverImpl = triangle_solver.
-    TriangleSolverImpl.GAUSSIAN,
+    TriangleSolverImpl.NEWTON_SCHULZ,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Applies chunked gated delta rule for mixed prefill case.
 
@@ -602,7 +603,7 @@ def ragged_gated_delta_rule(
     n_v: int,
     d_k: int,
     d_v: int,
-    chunk_size: int = 128,
+    chunk_size: int = 64,
     use_qk_norm_in_gdn: bool = True,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Applies the gated delta rule over ragged seq lengths
