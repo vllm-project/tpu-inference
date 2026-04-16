@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import io
+import json
 import logging
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, mock_open, patch
 
 import jax
@@ -12,8 +14,8 @@ from jax._src.interpreters import pxla
 from jax._src.pallas.utils import next_power_of_2
 
 from tpu_inference.runner.utils import (
-    PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR, ForbidCompile, InferencePhase,
-    LatencyTracker, PhasedBasedProfiler,
+    PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR, ContinuousBatchStatsLogger,
+    ForbidCompile, InferencePhase, LatencyTracker, PhasedBasedProfiler,
     determine_phase_from_batch_composition_stats, get_batch_composition_stats,
     get_padded_num_reqs_with_upper_limit, get_padded_token_len,
     get_req_paddings, get_token_paddings)
@@ -335,6 +337,111 @@ def test_determine_phase_from_batch_composition_stats(prefill_tokens,
 
 
 @pytest.fixture
+def continuous_logger_fixture(tmp_path):
+    """Fixture to mock dependencies for ContinuousBatchStatsLogger."""
+    target_module = "tpu_inference.runner.utils"
+    with patch(f"{target_module}.datetime") as mock_datetime, \
+         patch(f"{target_module}.atexit") as mock_atexit, \
+         patch(f"{target_module}.subprocess.run") as mock_subprocess_run, \
+         patch(f"{target_module}.tempfile.gettempdir", return_value=str(tmp_path)):
+
+        mock_now = MagicMock()
+        mock_now.strftime.return_value = "2025_01_01_12_00_00"
+        mock_datetime.datetime.now.return_value = mock_now
+
+        yield {
+            "mock_datetime": mock_datetime,
+            "mock_atexit": mock_atexit,
+            "mock_subprocess_run": mock_subprocess_run,
+            "tmp_path": tmp_path,
+        }
+
+
+def test_continuous_logger_initialization_local_path(continuous_logger_fixture):
+    """Test logger initialization with a local directory."""
+    tmp_path = continuous_logger_fixture["tmp_path"]
+    profile_dir = tmp_path / "profiles"
+    logger = ContinuousBatchStatsLogger(profile_dir=str(profile_dir))
+
+    expected_filename = "all_batches_stats_2025_01_01_12_00_00.jsonl"
+    expected_path = profile_dir / expected_filename
+
+    assert logger.profile_dir == str(profile_dir)
+    assert logger.local_temp_file == str(expected_path)
+    assert logger.target_file == str(expected_path)
+    assert profile_dir.exists()
+    assert expected_path.exists()
+    assert expected_path.read_text() == ""
+
+    continuous_logger_fixture["mock_atexit"].register.assert_called_once_with(
+        logger.close)
+
+
+def test_continuous_logger_initialization_gcs_path(continuous_logger_fixture):
+    """Test logger initialization with a GCS directory."""
+    tmp_path = continuous_logger_fixture["tmp_path"]
+    profile_dir = "gs://my-bucket/profiles"
+    logger = ContinuousBatchStatsLogger(profile_dir=profile_dir)
+
+    expected_filename = "all_batches_stats_2025_01_01_12_00_00.jsonl"
+    expected_local_path = tmp_path / expected_filename
+    expected_target_path = f"gs://my-bucket/profiles/{expected_filename}"
+
+    assert logger.profile_dir == profile_dir
+    assert logger.local_temp_file == str(expected_local_path)
+    assert logger.target_file == expected_target_path
+    assert expected_local_path.exists()
+    assert expected_local_path.read_text() == ""
+
+    continuous_logger_fixture["mock_atexit"].register.assert_called_once_with(
+        logger.close)
+
+
+def test_continuous_logger_log_single_entry(continuous_logger_fixture):
+    """Test logging a single statistics dictionary."""
+    tmp_path = continuous_logger_fixture["tmp_path"]
+    profile_dir = tmp_path / "logs"
+    logger = ContinuousBatchStatsLogger(profile_dir=str(profile_dir))
+
+    stats = {"batch_no": 1, "tokens": 100}
+    logger.log(stats)
+
+    expected_json = '{"batch_no": 1, "tokens": 100}\n'
+    local_file_path = Path(logger.local_temp_file)
+    assert local_file_path.read_text() == expected_json
+
+
+def test_continuous_logger_auto_flush(continuous_logger_fixture):
+    """Test that flush is called automatically after flush_interval."""
+    profile_dir = "gs://my-bucket/logs"
+    flush_interval = 3
+    logger = ContinuousBatchStatsLogger(profile_dir=profile_dir,
+                                        flush_interval=flush_interval)
+    mock_subprocess_run = continuous_logger_fixture["mock_subprocess_run"]
+
+    for i in range(flush_interval - 1):
+        logger.log({"step": i})
+    mock_subprocess_run.assert_not_called()
+
+    logger.log({"step": flush_interval - 1})
+    mock_subprocess_run.assert_called_once()
+
+
+def test_continuous_logger_close_flushes_and_cleans_up_gcs(continuous_logger_fixture):
+    """Test that close() flushes and removes the local temp file for GCS."""
+    profile_dir = "gs://my-bucket/logs"
+    logger = ContinuousBatchStatsLogger(profile_dir=profile_dir)
+    mock_subprocess_run = continuous_logger_fixture["mock_subprocess_run"]
+    logger.log({"step": 1})
+    local_file_path = Path(logger.local_temp_file)
+
+    with patch("os.remove") as mock_os_remove:
+        logger.close()
+        mock_subprocess_run.assert_called_once()
+        mock_os_remove.assert_called_once_with(str(local_file_path))
+
+
+@pytest.fixture
 def profiler_fixture(tmp_path):
     """Fixture to set up a PhasedBasedProfiler with mocked dependencies."""
     target_module = "tpu_inference.runner.utils"
@@ -359,6 +466,37 @@ def profiler_fixture(tmp_path):
             "mock_file": mock_file,
             "mock_determine_phase": mock_determine_phase,
         }
+
+
+def test_phased_profiler_initializes_continuous_logger(tmp_path):
+    """Tests that PhasedBasedProfiler initializes ContinuousBatchStatsLogger."""
+    with patch("tpu_inference.runner.utils.envs.ENABLE_CONTINUOUS_BATCH_LOGGER", True), \
+         patch("tpu_inference.runner.utils.ContinuousBatchStatsLogger") as mock_logger_cls:
+        # Test with worker_rank = 0
+        PhasedBasedProfiler(profile_dir=str(tmp_path),
+                            worker_rank=0,
+                            flush_interval=50)
+        mock_logger_cls.assert_called_once_with(str(tmp_path), 50)
+
+        # Test with worker_rank != 0
+        mock_logger_cls.reset_mock()
+        PhasedBasedProfiler(profile_dir=str(tmp_path), worker_rank=1)
+        mock_logger_cls.assert_not_called()
+
+    with patch("tpu_inference.runner.utils.envs.ENABLE_CONTINUOUS_BATCH_LOGGER", False), \
+         patch("tpu_inference.runner.utils.ContinuousBatchStatsLogger") as mock_logger_cls:
+        # Test with continuous logging disabled
+        PhasedBasedProfiler(profile_dir=str(tmp_path), worker_rank=0)
+        mock_logger_cls.assert_not_called()
+
+
+def test_phased_profiler_step_calls_continuous_logger(profiler_fixture):
+    """Tests that profiler.step() calls continuous_logger.log()."""
+    profiler = profiler_fixture["profiler"]
+    profiler.continuous_logger = MagicMock()
+    stats = {"batch_no": 1, "tokens": 100}
+    profiler.step(stats)
+    profiler.continuous_logger.log.assert_called_once_with(stats)
 
 
 def test_phased_profiler_full_cycle(profiler_fixture):

@@ -7,8 +7,11 @@ import datetime
 import functools
 import json
 import os
+import subprocess
+import tempfile
 import time
 from enum import Enum
+import atexit
 from typing import Any
 
 import jax
@@ -282,6 +285,70 @@ def determine_phase_from_batch_composition_stats(
     return InferencePhase.AMBIGUOUS
 
 
+class ContinuousBatchStatsLogger:
+    """
+    Logs batch composition stats continuously for all steps to a file and
+    periodically flushes them to GCS if required.
+    """
+
+    def __init__(self, profile_dir: str, flush_interval: int = 100):
+        self.profile_dir = profile_dir
+        self.flush_interval = flush_interval
+        self.step_count = 0
+
+        now = datetime.datetime.now()
+        date_string = now.strftime("%Y_%m_%d_%H_%M_%S")
+        filename = f"all_batches_stats_{date_string}.jsonl"
+        self.local_temp_file, self.target_file = \
+            self._get_local_and_target_paths(self.profile_dir, filename)
+
+        self._f_local = open(self.local_temp_file, "w")
+        self._f_tmp = open("/tmp/all_batches_stats.jsonl", "w")
+
+        logger.info(f"Initialized ContinuousBatchLogger with output path: {self.target_file}")
+        atexit.register(self.close)
+
+    def _get_local_and_target_paths(self, base_dir: str, filename: str) -> tuple[str, str]:
+        """Helper to resolve local temp path vs final target path (e.g. for GCS)."""
+        target = os.path.join(base_dir, filename)
+        if base_dir.startswith("gs://"):
+            return os.path.join(tempfile.gettempdir(), filename), target
+        os.makedirs(base_dir, exist_ok=True)
+        return target, target
+
+    def _sync_to_gcs(self, local_file: str, target_file: str) -> None:
+        """Helper to sync local file to GCS."""
+        if target_file.startswith("gs://") and os.path.exists(local_file):
+            subprocess.Popen(["gcloud", "storage", "cp", local_file, target_file],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def log(self, batch_composition_stats: dict) -> None:
+        stats_json = json.dumps(batch_composition_stats) + "\n"
+        self._f_local.write(stats_json)
+        self._f_tmp.write(stats_json)
+
+        self.step_count += 1
+        if self.step_count % self.flush_interval == 0:
+            self.flush()
+
+    def flush(self) -> None:
+        self._f_local.flush()
+        self._f_tmp.flush()
+        if self.target_file.startswith("gs://") and os.path.exists(self.local_temp_file):
+            logger.info(f"Syncing continuous batch stats to {self.target_file} (Step {self.step_count})...")
+            self._sync_to_gcs(self.local_temp_file, self.target_file)
+
+    def close(self) -> None:
+        self.flush()
+        self._f_local.close()
+        self._f_tmp.close()
+        if self.profile_dir.startswith("gs://") and os.path.exists(self.local_temp_file):
+            try:
+                os.remove(self.local_temp_file)
+            except OSError:
+                pass
+
+
 class PhasedBasedProfiler:
     """
     Implements a phased-based profiler, which will profile three phases:
@@ -294,6 +361,7 @@ class PhasedBasedProfiler:
 
     Args:
         profile_dir: The directory to save the profiles to.
+        worker_rank: The rank of the current worker process.
 
     Attributes:
         profiling_n_steps_left: The number of steps left to profile for the current phase.
@@ -305,7 +373,7 @@ class PhasedBasedProfiler:
         current_phase: The current phase.
     """
 
-    def __init__(self, profile_dir: str):
+    def __init__(self, profile_dir: str, worker_rank: int = 0, flush_interval: int = 100):
         self.profiling_n_steps_left: int = 0
         self.profile_dir_with_phase_suffix: str = None
         self.num_steps_to_profile_for: int = int(
@@ -328,6 +396,12 @@ class PhasedBasedProfiler:
         self.default_profiling_options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
 
         self.current_phase: str = ""
+
+        self.worker_rank = worker_rank
+        self.continuous_logger = None
+
+        if self.worker_rank == 0 and envs.ENABLE_CONTINUOUS_BATCH_LOGGER:
+            self.continuous_logger = ContinuousBatchStatsLogger(self.profile_dir, flush_interval)
 
         logger.info(
             "Phased-based profiler enabled. Traces will be saved to: %s",
@@ -442,6 +516,9 @@ class PhasedBasedProfiler:
                     padded_total_num_scheduled_tokens: The padded total number of tokens scheduled for the batch.
                     num_reqs: The number of requests in the batch.
         """
+        if self.continuous_logger is not None:
+            self.continuous_logger.log(batch_composition_stats)
+
         have_seen_all_phases = all(self.inference_phase_seen.values())
         # We want to start profiling only after the first trial request
         is_past_initial_request = batch_composition_stats[
