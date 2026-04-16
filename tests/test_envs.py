@@ -321,7 +321,7 @@ def test_cache_preserves_values_across_env_changes(
     assert envs.JAX_PLATFORMS == "cpu"
 
 
-def test_continuous_batch_logger_validation(monkeypatch: pytest.MonkeyPatch):
+def test_aggregated_stats_logger_validation(monkeypatch: pytest.MonkeyPatch):
     """Test that ENABLE_AGGREGATED_STATS_LOGGER requires PHASED_PROFILING_DIR"""
     monkeypatch.setenv("ENABLE_AGGREGATED_STATS_LOGGER", "1")
     monkeypatch.delenv("PHASED_PROFILING_DIR", raising=False)
