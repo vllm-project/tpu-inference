@@ -59,6 +59,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         self.runner.input_batch.block_table = [mock_block_table]
 
         # Initialize CPU arrays that the method modifies
+        self.runner.positions_cpu = np.zeros(64, dtype=np.int32)
         self.runner.mrope_positions_cpu = np.zeros((3, 64), dtype=np.int64)
         self.runner.arange_cpu = np.arange(64, dtype=np.int64)
         self.runner.uses_mrope = False
@@ -1301,6 +1302,7 @@ class TestSamplingMetadataPassthrough:
         mock_block_table.max_num_blocks_per_req = 8
         mock_block_table.get_cpu_tensor.return_value = np.arange(32).reshape(
             4, 8)
+        runner.positions_cpu = np.zeros(64, dtype=np.int32)
         runner.input_batch.block_table = [mock_block_table]
         runner.arange_cpu = np.arange(64, dtype=np.int64)
 

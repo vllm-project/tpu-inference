@@ -491,10 +491,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             is_spec_decode=bool(self.vllm_config.speculative_config),
         )
 
+        self.positions_cpu = np.zeros(self.max_num_tokens, dtype=np.int32)
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
         # Keep in int64 to avoid overflow with long context
-        self.positions_cpu = np.zeros(self.max_num_tokens, dtype=np.int32)
         self.arange_cpu = np.arange(self.max_num_tokens, dtype=np.int64)
         min_num_reqs = max(MIN_NUM_SEQS, next_power_of_2(self.dp_size))
         self.num_reqs_paddings = runner_utils.get_req_paddings(
