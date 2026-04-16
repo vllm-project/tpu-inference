@@ -491,7 +491,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             is_spec_decode=bool(self.vllm_config.speculative_config),
         )
 
-        self.positions_cpu = np.zeros(self.max_num_tokens, dtype=np.int32)
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
         # Keep in int64 to avoid overflow with long context
@@ -1349,6 +1348,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             (max_num_reqs_per_dp_rank + 1, ), key="query_start_loc")
         seq_lens_view = self.device_buffer.get_view(
             (max_num_reqs_per_dp_rank, ), key="seq_lens")
+
+        if self.uses_mrope:
+            positions_view = self.device_buffer.get_view(
+                (3, padded_num_scheduled_tokens_per_dp_rank), key="positions")
+        else:
+            positions_view = self.device_buffer.get_view(
+                (padded_num_scheduled_tokens_per_dp_rank, ), key="positions")
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
 
@@ -1380,10 +1386,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             total_num_scheduled_tokens = num_scheduled_tokens_per_dp_rank[
                 dp_rank]
             input_ids_cpu = input_ids_view[dp_rank]
-            token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
-            positions_cpu = self.positions_cpu[
-                token_offset:token_offset +
-                padded_num_scheduled_tokens_per_dp_rank]
             # Get request indices.
             # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
             # For each scheduled token, what are the corresponding req index.
@@ -1394,13 +1396,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # For each scheduled token, what is its position in corresponding req.
             arange = np.concatenate(
                 [self.arange_cpu[:n] for n in num_scheduled_tokens_per_req])
-            # Get positions.
-            positions_np = positions_cpu[:total_num_scheduled_tokens]
+
+            # Get positions (1D).
+            if self.uses_mrope:
+                positions_np = positions_view[dp_rank,
+                                              0, :total_num_scheduled_tokens]
+            else:
+                positions_np = positions_view[
+                    dp_rank, :total_num_scheduled_tokens]
+
             np.add(
                 self.input_batch.num_computed_tokens_cpu[req_indices],
                 arange,
                 out=positions_np,
             )
+
+            if not self.uses_mrope:
+                positions_view[dp_rank, total_num_scheduled_tokens:] = 0
             # Get token indices.
             # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
             # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
@@ -1462,7 +1474,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             self.phase_based_profiler.step(batch_composition_stats)
 
-        positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
         mrope_positions = self.mrope_positions_cpu[:, :
                                                    padded_total_num_scheduled_tokens]
         _request_distribution = []
@@ -1493,27 +1504,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices_view.ravel(
             )[:] = spec_decode_metadata.final_logits_indices.ravel()
 
-        # Put to device
-        sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
-            self.mesh,
+        # Add sampling metadata to buffer
+        TPUSupportedSamplingMetadata.add_to_device_buffer(
+            self.device_buffer,
             self.input_batch,
-            padded_num_reqs,
-            sharding=data_parallel_attn_sharding,
+            padded_num_reqs_per_dp_rank,
+            dp_size,
         )
 
+        # Add positions to buffer
         if self.uses_mrope:
-            # M-RoPE positions are of the shape (3, max_num_tokens).
-            # https://github.com/vllm-project/tpu-inference/blob/efc9608acd925bb3b64db6fda509514f799ab7be/tpu_inference/runner/tpu_runner.py#L555
-            # Shard the positions accordingly.
-            mrope_sharding = NamedSharding(
-                self.mesh, PartitionSpec(None, ShardingAxisName.ATTN_DATA))
-            positions = device_array(self.mesh,
-                                     mrope_positions,
-                                     sharding=mrope_sharding)
-        else:
-            positions = device_array(self.mesh,
-                                     positions,
-                                     sharding=data_parallel_attn_sharding)
+            # Reshape and transpose to match (dp_size, 3, tokens_per_dp)
+            positions_view[:] = mrope_positions.reshape(
+                3, dp_size,
+                padded_num_scheduled_tokens_per_dp_rank).transpose(1, 0, 2)
 
         # Collect block tables host arrays loops zone presence zones legality
         def build_block_table_host(kv_cache_gid: int) -> None:
@@ -1560,6 +1564,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         query_start_loc = metadata["query_start_loc"].ravel()
         seq_lens = metadata["seq_lens"].ravel()
         logits_indices = metadata["logits_indices"].ravel()
+
+        # Unpack positions
+        positions = metadata["positions"]
+        if self.uses_mrope:
+            # Transpose back to (3, dp_size, tokens_per_dp) and reshape to (3, total_tokens)
+            positions = positions.reshape(self.dp_size, 3,
+                                          -1).transpose(1, 0,
+                                                        2).reshape(3, -1)
+        else:
+            positions = positions.ravel()
+
+        # Unpack sampling metadata
+        sampling_metadata = TPUSupportedSamplingMetadata.from_unpacked_blob(
+            self.mesh,
+            metadata,
+            self.input_batch,
+            padded_num_reqs,
+        )
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
@@ -1689,6 +1711,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         seq_lens_view = self.device_buffer.get_view((self.max_num_reqs, ),
                                                     key="seq_lens")
 
+        if self.uses_mrope:
+            positions_view = self.device_buffer.get_view(
+                (3, padded_total_num_scheduled_tokens), key="positions")
+        else:
+            positions_view = self.device_buffer.get_view(
+                (padded_total_num_scheduled_tokens, ), key="positions")
+
         # Get the number of scheduled tokens for each request.
         num_scheduled_tokens_per_req = []
         max_num_scheduled_tokens_all_reqs = 0
@@ -1723,11 +1752,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         arange = np.concatenate(
             [self.arange_cpu[:n] for n in num_scheduled_tokens_per_req])
 
-        # Get positions.
-        positions_np = self.positions_cpu[:total_num_scheduled_tokens]
+        # Get positions (1D).
+        if self.uses_mrope:
+            positions_np = positions_view[0, 0, :total_num_scheduled_tokens]
+        else:
+            positions_np = positions_view[0, :total_num_scheduled_tokens]
+
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
                arange,
                out=positions_np)
+
+        if not self.uses_mrope:
+            positions_view[0, total_num_scheduled_tokens:] = 0
 
         # Multi-modal support
         # Calculate M-RoPE positions.
@@ -1758,7 +1794,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             num_scheduled_tokens_per_req)
         seq_lens_view[0, num_reqs:] = 0
 
-        positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
         mrope_positions = self.mrope_positions_cpu[:, :
                                                    padded_total_num_scheduled_tokens]
         use_spec_decode = len(
@@ -1775,27 +1810,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices_view.ravel(
             )[:] = spec_decode_metadata.final_logits_indices.ravel()
 
-        # Put to device
-        sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
-            self.mesh,
+        # Add sampling metadata to buffer
+        TPUSupportedSamplingMetadata.add_to_device_buffer(
+            self.device_buffer,
             self.input_batch,
             padded_num_reqs,
-            sharding=data_parallel_attn_sharding,
+            dp_size=1,
         )
 
+        # Add positions to buffer
         if self.uses_mrope:
-            # M-RoPE positions are of the shape (3, max_num_tokens).
-            # https://github.com/vllm-project/tpu-inference/blob/efc9608acd925bb3b64db6fda509514f799ab7be/tpu_inference/runner/tpu_runner.py#L555
-            # Shard the positions accordingly.
-            mrope_sharding = NamedSharding(
-                self.mesh, PartitionSpec(None, ShardingAxisName.ATTN_DATA))
-            positions = device_array(self.mesh,
-                                     mrope_positions,
-                                     sharding=mrope_sharding)
-        else:
-            positions = device_array(self.mesh,
-                                     positions,
-                                     sharding=data_parallel_attn_sharding)
+            positions_view[:] = mrope_positions.reshape(
+                1, 3, padded_total_num_scheduled_tokens)
 
         request_distribution = np.array(self.input_batch.request_distribution)
 
@@ -1831,6 +1857,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         query_start_loc = metadata["query_start_loc"].ravel()
         seq_lens = metadata["seq_lens"].ravel()
         logits_indices = metadata["logits_indices"].ravel()
+
+        # Unpack positions
+        positions = metadata["positions"]
+        if self.uses_mrope:
+            positions = positions.reshape(1, 3,
+                                          -1).transpose(1, 0,
+                                                        2).reshape(3, -1)
+        else:
+            positions = positions.ravel()
+
+        # Unpack sampling metadata
+        sampling_metadata = TPUSupportedSamplingMetadata.from_unpacked_blob(
+            self.mesh,
+            metadata,
+            self.input_batch,
+            padded_num_reqs,
+        )
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(

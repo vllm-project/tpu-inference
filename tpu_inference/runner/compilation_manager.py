@@ -582,12 +582,15 @@ class CompilationManager:
 
                     # Use a dummy tensor with a unique shape for each logprobs config.
                     # This avoids persistent cache collisions.
-                    dummy_shape = (1 if logprobs else 2, )
+                    dummy_len = 1 if logprobs else 2
+                    dummy_shape = (self.runner.dp_size * dummy_len, )
                     _cache_collision_dummy = jnp.zeros(dummy_shape,
                                                        dtype=jnp.int32)
                     _cache_collision_dummy = jax.device_put(
                         _cache_collision_dummy,
-                        NamedSharding(self.runner.mesh, PartitionSpec(None)))
+                        NamedSharding(
+                            self.runner.mesh,
+                            PartitionSpec(ShardingAxisName.ATTN_DATA)))
 
                     sampling_metadata = TPUSupportedSamplingMetadata(
                         temperature=temperature,
@@ -690,12 +693,15 @@ class CompilationManager:
                     # Use a dummy tensor with a unique shape for each logprobs config.
                     # Currently logprobs=False for rejection_sampler.
                     logprobs_dummy = False
-                    dummy_shape = (1 if logprobs_dummy else 2, )
+                    dummy_len = 1 if logprobs_dummy else 2
+                    dummy_shape = (self.runner.dp_size * dummy_len, )
                     _cache_collision_dummy = jnp.zeros(dummy_shape,
                                                        dtype=jnp.int32)
                     _cache_collision_dummy = jax.device_put(
                         _cache_collision_dummy,
-                        NamedSharding(self.runner.mesh, PartitionSpec(None)))
+                        NamedSharding(
+                            self.runner.mesh,
+                            PartitionSpec(ShardingAxisName.ATTN_DATA)))
 
                     if do_sampling:
                         compilation_name = "random_rejection_sampler"
