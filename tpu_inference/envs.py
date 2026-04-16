@@ -92,7 +92,9 @@ def env_with_choices(
     return _get_validated_env
 
 
-def env_bool(env_name: str, default: bool = False) -> Callable[[], bool]:
+def env_bool(env_name: str,
+             default: bool = False,
+             requires: list[str] | None = None) -> Callable[[], bool]:
     """
     Accepts both numeric strings ("0", "1") and boolean strings
     ("true", "false", "True", "False").
@@ -100,22 +102,32 @@ def env_bool(env_name: str, default: bool = False) -> Callable[[], bool]:
     Args:
         env_name: Name of the environment variable
         default: Default boolean value if not set
+        requires: List of environment variables that must be set if this is True.
     """
 
     def _get_bool_env() -> bool:
         value = os.getenv(env_name)
         if value is None or value == "":
-            return default
-
-        value_lower = value.lower()
-        if value_lower in ("true", "1"):
-            return True
-        elif value_lower in ("false", "0"):
-            return False
+            parsed_value = default
         else:
-            raise ValueError(
-                f"Invalid boolean value '{value}' for {env_name}. "
-                f"Valid options: '0', '1', 'true', 'false', 'True', 'False'.")
+            value_lower = value.lower()
+            if value_lower in ("true", "1"):
+                parsed_value = True
+            elif value_lower in ("false", "0"):
+                parsed_value = False
+            else:
+                raise ValueError(
+                    f"Invalid boolean value '{value}' for {env_name}. "
+                    f"Valid options: '0', '1', 'true', 'false', 'True', 'False'."
+                )
+
+        if parsed_value and requires:
+            for req in requires:
+                if not os.getenv(req):
+                    raise ValueError(
+                        f"{env_name} can only be set if {req} is set.")
+
+        return parsed_value
 
     return _get_bool_env
 
@@ -253,6 +265,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
                      ]),
     "MOE_ALL_GATHER_ACTIVATION_DTYPE":
     lambda: os.getenv("MOE_ALL_GATHER_ACTIVATION_DTYPE", ""),
+    "ENABLE_AGGREGATED_STATS_LOGGER":
+    env_bool("ENABLE_AGGREGATED_STATS_LOGGER",
+             default=False,
+             requires=["PHASED_PROFILING_DIR"]),
 }
 
 
