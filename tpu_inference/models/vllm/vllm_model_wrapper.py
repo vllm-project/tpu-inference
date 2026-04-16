@@ -32,7 +32,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
 from torchax.ops.ops_registry import (register_torch_dispatch_op,
-                                         register_torch_function_op)
+                                      register_torch_function_op)
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA

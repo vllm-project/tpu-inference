@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Ragged gated delta rule JAX implementation."""
+"""Ragged gated delta rule Ref implementation mainly for unit test."""
 
 from typing import Optional, Tuple
 
@@ -102,6 +102,8 @@ def ragged_gated_delta_rule(
     dt_bias,
     query_start_loc,
     state_indices,
+    distribution,
+    *,
     n_kq,
     n_v,
     d_k,
@@ -114,7 +116,9 @@ def ragged_gated_delta_rule(
         d_v)`.
       b: B tensor of shape `(num_tokens, n_v)`.
       a: A tensor of shape `(num_tokens, n_v)`.
-      recurrent_state: Recurrent state of shape `(max_reqs, n_v, d_k, d_v)`.
+      recurrent_state: Recurrent state of shape `(num_blocks, n_v, d_k, d_v)`.
+        `num_blocks` is always equal or larger than `max_seqs + 1`. The first
+        block is a null_block and only used for padded / invalid tokens.
       A_log: Log of A parameter of shape `(n_v,)`.
       dt_bias: Delta T bias of shape `(n_v,)`.
       query_start_loc: Tensor of shape `(num_seqs + 1,)` containing the start
@@ -122,6 +126,8 @@ def ragged_gated_delta_rule(
         valid tokens.
       state_indices: Tensor of shape `(max_reqs,)` mapping request index to state
         index.
+      distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end,
+        mixed_end)`.
       n_kq: Number of key/query heads.
       n_v: Number of value heads.
       d_k: Dimension of key.
@@ -129,7 +135,8 @@ def ragged_gated_delta_rule(
 
     Returns:
       A tuple containing:
-      - updated_recurrent_state: The updated recurrent state of shape `(max_reqs,
+      - updated_recurrent_state: The updated recurrent state of shape
+      `(num_blocks,
         n_v, d_k, d_v)`.
       - output: The output tensor of shape `(num_tokens, n_v * d_v)`.
     """
@@ -141,10 +148,16 @@ def ragged_gated_delta_rule(
     max_reqs = state_indices.shape[0]
     token_idx = jnp.arange(num_tokens)
 
-    req_indices = (
-        jnp.sum(token_idx[:, None] >= query_start_loc[None, :], axis=1) - 1)
+    num_valid_seqs = distribution[2]
+    valid_loc_mask = jnp.arange(query_start_loc.shape[0]) <= num_valid_seqs
+    last_valid_loc = query_start_loc[num_valid_seqs]
+    effective_query_start_loc = jnp.where(valid_loc_mask, query_start_loc,
+                                          last_valid_loc)
+
+    req_indices = (jnp.sum(
+        token_idx[:, None] >= effective_query_start_loc[None, :], axis=1) - 1)
     req_indices = jnp.clip(req_indices, 0, max_reqs - 1)
-    valid_mask = token_idx < query_start_loc[-1]
+    valid_mask = token_idx < last_valid_loc
 
     def scan_fn(carry, xs):
         recurrent_state_all = carry
@@ -207,7 +220,8 @@ def ragged_gated_delta_rule(
 
         recurrent_state_all = jnp.where(
             is_valid_token,
-            recurrent_state_all.at[state_index].set(new_recurrent_state[0]),
+            recurrent_state_all.at[state_index].set(
+                new_recurrent_state[0].astype(recurrent_state_all.dtype)),
             recurrent_state_all,
         )
 
