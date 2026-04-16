@@ -475,6 +475,14 @@ class VllmModelWrapper:
         ) -> jax.Array:
             with torchax.default_env():
                 if mm_embeds is not None:
+
+                    # Some fix for remove padding??
+                    # Sometimes is_multimodal is None but mm_embeds is not None
+                    # during MMMU benchmarking, but still don't known why.
+                    if is_multimodal is not None:
+                        num_expected = int(is_multimodal.sum())
+                        mm_embeds = mm_embeds[:num_expected]
+
                     if isinstance(mm_embeds, list):
                         torch_mm_embeds = [torch_view(x) for x in mm_embeds]
                     else:
