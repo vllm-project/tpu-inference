@@ -13,8 +13,6 @@
 # limitations under the License.
 
 import copy
-import functools
-import inspect
 import time
 from collections.abc import Sequence
 from contextlib import nullcontext
@@ -60,6 +58,8 @@ from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.vllm.experimental.model_patcher import patch_mm_model
+from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
+    maybe_apply_qwen3_vl_patches
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_inference.runner.lora_utils import replace_lora_metadata
@@ -129,35 +129,6 @@ class VllmModelWrapper:
             self.vllm_config, self.mesh)
         self.model_config = vllm_config.speculative_config.draft_model_config if is_draft_model else vllm_config.model_config
         self._apply_pp_patch()
-        self._patch_vllm_ops()
-
-    def _patch_vllm_ops(self):
-        # Caution: there is no public api for restore the ops.
-        # It need to patched again if the ops are jitted and mesh is change.
-        # The overwritten ops should not be called after the end of model wrapper.
-
-        # Import the registered ops at first and then we can overwrite them.
-        import torchax.ops.jtorch  # noqa: F401
-
-        # Patch sdpa from torch ops to flash attention to prevent OOM
-        register_torch_function_op(
-            torch.nn.functional.scaled_dot_product_attention,
-            functools.partial(patch_ops.scaled_dot_product_attention.
-                              scaled_dot_product_attention,
-                              mesh=self.mesh),
-            is_jax_function=True,
-            needs_env=False,
-        )
-
-        register_torch_dispatch_op(
-            torch.ops.vllm.torch_sdpa_wrapper,
-            functools.partial(patch_ops.scaled_dot_product_attention.vllm_vit_sdpa, mesh=self.mesh),
-            is_jax_function=True,
-            needs_env=False,
-        )
-
-        patch_ops.gdn_attention.apply_gated_delta_net_torch_ops_patch(
-            mesh=self.mesh)
 
     def _apply_pp_patch(self):
         # patch `get_pp_group` in vLLM to jax's get_pp_group.
@@ -173,7 +144,6 @@ class VllmModelWrapper:
             if module_name.startswith("vllm.model_executor.models"):
                 if hasattr(module, "get_pp_group"):
                     setattr(module, "get_pp_group", jax_get_pp_group)
-
 
     def load_weights(self):
         loading_start = time.time()
@@ -243,13 +213,11 @@ class VllmModelWrapper:
             [0]) if not vllm_envs.VLLM_TPU_USING_PATHWAYS else nullcontext()
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
-        with load_context, jax_context:
-            with set_current_vllm_config(vllm_config_for_load):
-                vllm_model = vllm_get_model(vllm_config=vllm_config_for_load)
-                if hasattr(vllm_model, "config") and hasattr(vllm_model.config, "architectures"):
-                    if "Qwen3VLForConditionalGeneration" in vllm_model.config.architectures:
-                        from tpu_inference.models.vllm.patches.qwen3_vl import apply_qwen3_vl_patches
-                        apply_qwen3_vl_patches(vllm_model)
+
+        with load_context, jax_context, set_current_vllm_config(
+                self.vllm_config):
+            vllm_model = vllm_get_model(vllm_config=vllm_config_for_load,
+                                        model_config=self.model_config)
 
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:
@@ -288,6 +256,9 @@ class VllmModelWrapper:
                 register_mm_module_custom_pytree_classes=envs.
                 REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES,
             )
+
+        # NOTE: Apply Qwen3-VL model specific patches
+        maybe_apply_qwen3_vl_patches(self.model.vllm_model)
 
         loading_end = time.time()
         total_loading_time = loading_end - loading_start
