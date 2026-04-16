@@ -34,9 +34,9 @@
     </tr>
     <tr>
       <td>KV cache host offloading</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>LoRA_Torch</td>
@@ -46,9 +46,9 @@
     </tr>
     <tr>
       <td>multi-host</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>Multimodal Inputs</td>
@@ -70,9 +70,9 @@
     </tr>
     <tr>
       <td>runai_model_streamer_loader</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>sampling_params</td>
@@ -88,9 +88,9 @@
     </tr>
     <tr>
       <td>Single-Host-P-D-disaggregation</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>Speculative Decoding: Eagle3</td>
@@ -106,9 +106,9 @@
     </tr>
     <tr>
       <td>structured_decoding</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
   </tbody>
 </table>

@@ -86,7 +86,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 > - 🧪 **Experimental:** Works, but unoptimized or pending community validation.
 > - 📝 **Planned:** Not yet implemented, but on the official roadmap.
 > - ⛔️ **Unplanned:** There is no benefit to adding this.
-> - ❓ **Untested:** The functionality exists but has not been recently or thoroughly verified.
+> - ❔ **Untested:** The functionality exists but has not been recently or thoroughly verified.
 >
 > <details>
 > <summary> <b>📐 <i>View Matrix Aggregation Rules (v6e/v7x & C+P)</i></b> </summary>
@@ -94,12 +94,12 @@ Below is the live status of our supported models, features, and kernels. Click o
 > - **🛠️ Correctness + Performance (C + P)**
 >   - ❌ **Failing**: If either check fails.
 >   - ✅ **Passing**: If **BOTH** checks pass successfully.
->   - ❓ **Untested**: If any check is untested (and neither fails).
+>   - ❔ **Untested**: If any check is untested (and neither fails).
 >
 > - **🌐 Hardware Rollups (v6e + v7x)**
 >   - ❌ **Failing**: If the feature fails on **either** v6e or v7x.
 >   - ✅ **Passing**: If the feature passes on **BOTH** v6e and v7x.
->   - ❓ **Untested**: If either generation is untested (and neither fails).
+>   - ❔ **Untested**: If either generation is untested (and neither fails).
 > </details>
 
 </details>
@@ -123,30 +123,30 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: release_model_support -- >
 | Model | Type | Unit&nbsp;Test | Correctness&nbsp;Test | Performance&nbsp;Test |
 | --- | --- | --- | --- | --- |
-| [deepseek-ai/DeepSeek-OCR](https://huggingface.co/deepseek-ai/DeepSeek-OCR) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [moonshotai/Kimi-K2.5](https://huggingface.co/moonshotai/Kimi-K2.5) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [deepseek-ai/DeepSeek-OCR](https://huggingface.co/deepseek-ai/DeepSeek-OCR) | Multimodal | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [moonshotai/Kimi-K2.5](https://huggingface.co/moonshotai/Kimi-K2.5) | Multimodal | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
 | [Qwen/Qwen2.5-VL-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) | Multimodal | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="❌ Failing">❌</span> |
-| [Qwen/Qwen3-Omni-30B-A3B-Instruct](https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [Qwen/Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [Qwen/Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [deepseek-ai/DeepSeek-Math-V2](https://huggingface.co/deepseek-ai/DeepSeek-Math-V2) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [deepseek-ai/DeepSeek-R1](https://huggingface.co/deepseek-ai/DeepSeek-R1) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [deepseek-ai/DeepSeek-V3.1](https://huggingface.co/deepseek-ai/DeepSeek-V3.1) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [deepseek-ai/DeepSeek-V3.2](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [deepseek-ai/DeepSeek-V3.2-Speciale](https://huggingface.co/deepseek-ai/DeepSeek-V3.2-Speciale) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [Qwen/Qwen3-Omni-30B-A3B-Instruct](https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct) | Multimodal | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [Qwen/Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct) | Multimodal | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [Qwen/Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B) | Multimodal | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [deepseek-ai/DeepSeek-Math-V2](https://huggingface.co/deepseek-ai/DeepSeek-Math-V2) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [deepseek-ai/DeepSeek-R1](https://huggingface.co/deepseek-ai/DeepSeek-R1) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [deepseek-ai/DeepSeek-V3.1](https://huggingface.co/deepseek-ai/DeepSeek-V3.1) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [deepseek-ai/DeepSeek-V3.2](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [deepseek-ai/DeepSeek-V3.2-Speciale](https://huggingface.co/deepseek-ai/DeepSeek-V3.2-Speciale) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
 | [google/gemma-3-27b-it](https://huggingface.co/google/gemma-3-27b-it) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
 | [meta-llama/Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
 | [meta-llama/Llama-3.3-70B-Instruct](https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
-| [MiniMaxAI/MiniMax-M2.5](https://huggingface.co/MiniMaxAI/MiniMax-M2.5) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [moonshotai/Kimi-K2-Thinking](https://huggingface.co/moonshotai/Kimi-K2-Thinking) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [openai/gpt-oss-120b](https://huggingface.co/openai/gpt-oss-120b) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [openai/gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [MiniMaxAI/MiniMax-M2.5](https://huggingface.co/MiniMaxAI/MiniMax-M2.5) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [moonshotai/Kimi-K2-Thinking](https://huggingface.co/moonshotai/Kimi-K2-Thinking) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [openai/gpt-oss-120b](https://huggingface.co/openai/gpt-oss-120b) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [openai/gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
 | [Qwen/Qwen3-30B-A3B](https://huggingface.co/Qwen/Qwen3-30B-A3B) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
 | [Qwen/Qwen3-32B](https://huggingface.co/Qwen/Qwen3-32B) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
-| [Qwen/Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B) | Text | <span title="✅ Passing">✅</span> | <span title="❌ Failing">❌</span> | <span title="❓ Untested">❓</span> |
+| [Qwen/Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B) | Text | <span title="✅ Passing">✅</span> | <span title="❌ Failing">❌</span> | <span title="❔ Untested">❔</span> |
 | [Qwen/Qwen3-Coder-480B-A35B-Instruct](https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
-| [Qwen/Qwen3_5-397B-A17B](https://huggingface.co/Qwen/Qwen3_5-397B-A17B) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [zai-org/GLM-5](https://huggingface.co/zai-org/GLM-5) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [Qwen/Qwen3_5-397B-A17B](https://huggingface.co/Qwen/Qwen3_5-397B-A17B) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [zai-org/GLM-5](https://huggingface.co/zai-org/GLM-5) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
 
 <!-- END: release_model_support -- >
 
@@ -191,14 +191,14 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td>hybrid kv cache</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>KV cache host offloading</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>LoRA_Torch</td>
@@ -208,9 +208,9 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>multi-host</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>Multimodal Inputs</td>
@@ -232,15 +232,15 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>runai_model_streamer_loader</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>sampling_params</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>Single Program Multi Data</td>
@@ -250,9 +250,9 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>Single-Host-P-D-disaggregation</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>Speculative Decoding: Eagle3</td>
@@ -268,9 +268,9 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>structured_decoding</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
   </tbody>
 </table>
@@ -299,24 +299,24 @@ Below is the live status of our supported models, features, and kernels. Click o
   <tbody>
     <tr>
       <td>CP</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>DP</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>EP</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>PP</td>
@@ -327,17 +327,17 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>SP&nbsp;(<a href="https://github.com/vllm-project/tpu-inference/issues/1749">vote&nbsp;to&nbsp;prioritize</a>)</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>TP</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
   </tbody>
 </table>
@@ -365,35 +365,35 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>mxfp4</td>
       <td>v7</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>FP8 W8A8</td>
       <td>compressed-tensor</td>
       <td>v7</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>FP8 W8A16</td>
       <td>compressed-tensor</td>
       <td>v7</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>INT4 W4A16</td>
       <td>awq</td>
       <td>v5, v6</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>INT8 W8A8</td>
       <td>compressed-tensor</td>
       <td>v5, v6</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
   </tbody>
 </table>
@@ -428,63 +428,63 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td rowspan="2"><b>Moe</b></td>
       <td>Fused&nbsp;MoE</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>gmm</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
   </tbody>
   <tbody>
     <tr>
       <td rowspan="1"><b>Dense</b></td>
       <td>All&#8209;gather&nbsp;matmul</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
   </tbody>
   <tbody>
     <tr>
       <td rowspan="3"><b>Attention</b></td>
       <td>Generic&nbsp;Ragged&nbsp;Paged<br>Attention&nbsp;V3*</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>MLA</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>Ragged&nbsp;Paged<br>Attention&nbsp;V3&nbsp;Head_Dim<br>64*</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
   </tbody>
 </table>
@@ -525,22 +525,22 @@ Below is the live status of our supported models, features, and kernels. Click o
 | [Qwen/Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
 | [Qwen/Qwen3-Coder-480B-A35B-Instruct](https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
 | [Qwen/Qwen3.5-397B-A17B](https://huggingface.co/Qwen/Qwen3.5-397B-A17B) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="❌ Failing">❌</span> |
-| [Qwen/Qwen2.5-VL-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) | Multimodal | <span title="✅ Passing">✅</span> | <span title="❌ Failing">❌</span> | <span title="❓ Untested">❓</span> |
-| [deepseek-ai/DeepSeek-OCR](https://huggingface.co/deepseek-ai/DeepSeek-OCR) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [moonshotai/Kimi-K2.5](https://huggingface.co/moonshotai/Kimi-K2.5) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [Qwen/Qwen3-Omni-30B-A3B-Instruct](https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [Qwen/Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [Qwen/Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [deepseek-ai/DeepSeek-Math-V2](https://huggingface.co/deepseek-ai/DeepSeek-Math-V2) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [deepseek-ai/DeepSeek-R1](https://huggingface.co/deepseek-ai/DeepSeek-R1) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [deepseek-ai/DeepSeek-V3.1](https://huggingface.co/deepseek-ai/DeepSeek-V3.1) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [deepseek-ai/DeepSeek-V3.2](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [deepseek-ai/DeepSeek-V3.2-Speciale](https://huggingface.co/deepseek-ai/DeepSeek-V3.2-Speciale) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [MiniMaxAI/MiniMax-M2.5](https://huggingface.co/MiniMaxAI/MiniMax-M2.5) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [moonshotai/Kimi-K2-Thinking](https://huggingface.co/moonshotai/Kimi-K2-Thinking) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [openai/gpt-oss-120b](https://huggingface.co/openai/gpt-oss-120b) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [openai/gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [zai-org/GLM-5](https://huggingface.co/zai-org/GLM-5) | Text | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [Qwen/Qwen2.5-VL-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) | Multimodal | <span title="✅ Passing">✅</span> | <span title="❌ Failing">❌</span> | <span title="❔ Untested">❔</span> |
+| [deepseek-ai/DeepSeek-OCR](https://huggingface.co/deepseek-ai/DeepSeek-OCR) | Multimodal | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [moonshotai/Kimi-K2.5](https://huggingface.co/moonshotai/Kimi-K2.5) | Multimodal | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [Qwen/Qwen3-Omni-30B-A3B-Instruct](https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct) | Multimodal | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [Qwen/Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct) | Multimodal | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [Qwen/Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B) | Multimodal | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [deepseek-ai/DeepSeek-Math-V2](https://huggingface.co/deepseek-ai/DeepSeek-Math-V2) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [deepseek-ai/DeepSeek-R1](https://huggingface.co/deepseek-ai/DeepSeek-R1) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [deepseek-ai/DeepSeek-V3.1](https://huggingface.co/deepseek-ai/DeepSeek-V3.1) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [deepseek-ai/DeepSeek-V3.2](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [deepseek-ai/DeepSeek-V3.2-Speciale](https://huggingface.co/deepseek-ai/DeepSeek-V3.2-Speciale) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [MiniMaxAI/MiniMax-M2.5](https://huggingface.co/MiniMaxAI/MiniMax-M2.5) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [moonshotai/Kimi-K2-Thinking](https://huggingface.co/moonshotai/Kimi-K2-Thinking) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [openai/gpt-oss-120b](https://huggingface.co/openai/gpt-oss-120b) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [openai/gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
+| [zai-org/GLM-5](https://huggingface.co/zai-org/GLM-5) | Text | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> | <span title="❔ Untested">❔</span> |
 
 <!-- END: nightly_model_support -->
 
@@ -626,45 +626,45 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>hybrid kv cache</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>KV cache host offloading</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>multi-host</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>runai_model_streamer_loader</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>sampling_params</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>Single-Host-P-D-disaggregation</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>structured_decoding</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
   </tbody>
 </table>
@@ -701,37 +701,37 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td>DP</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>EP</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>TP</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>CP</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>SP&nbsp;(<a href="https://github.com/vllm-project/tpu-inference/issues/1749">vote&nbsp;to&nbsp;prioritize</a>)</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
   </tbody>
 </table>
@@ -759,35 +759,35 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>mxfp4</td>
       <td>v7</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>FP8 W8A16</td>
       <td>compressed-tensor</td>
       <td>v7</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>FP8 W8A8</td>
       <td>compressed-tensor</td>
       <td>v7</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>INT4 W4A16</td>
       <td>awq</td>
       <td>v5, v6</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>INT8 W8A8</td>
       <td>compressed-tensor</td>
       <td>v5, v6</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
   </tbody>
 </table>
@@ -822,63 +822,63 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td rowspan="2"><b>Moe</b></td>
       <td>Fused&nbsp;MoE</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>gmm</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
   </tbody>
   <tbody>
     <tr>
       <td rowspan="1"><b>Dense</b></td>
       <td>All&#8209;gather&nbsp;matmul</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
   </tbody>
   <tbody>
     <tr>
       <td rowspan="3"><b>Attention</b></td>
       <td>Generic&nbsp;Ragged&nbsp;Paged<br>Attention&nbsp;V3*</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>MLA</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
     <tr>
       <td>Ragged&nbsp;Paged<br>Attention&nbsp;V3&nbsp;Head_Dim<br>64*</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
+      <td><span title="❔&nbsp;Untested">❔</span></td>
     </tr>
   </tbody>
 </table>
