@@ -59,6 +59,7 @@ steps:
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu7x"
+      USE_MOE_EP_KERNEL: "0"
     agents:
       queue: tpu_v7x_8_queue
     commands:
