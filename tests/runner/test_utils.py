@@ -449,3 +449,79 @@ def test_phased_profiler_handles_all_phases(profiler_fixture):
     mock_determine_phase.return_value = InferencePhase.PREFILL_HEAVY
     profiler.step(stats)
     assert mock_start.call_count == len(phases_to_profile)
+
+
+def test_phased_profiler_skips_decode_steps_before_profiling(profiler_fixture):
+    """Tests that the profiler skips N decode-heavy steps before profiling."""
+    profiler = profiler_fixture["profiler"]
+    mock_start = profiler_fixture["mock_start"]
+    mock_stop = profiler_fixture["mock_stop"]
+    mock_determine_phase = profiler_fixture["mock_determine_phase"]
+
+    num_steps_to_skip = 3
+    profiler.num_decode_steps_to_skip = num_steps_to_skip
+
+    stats = {"num_reqs": 2, "total_num_scheduled_tokens": 100}
+    mock_determine_phase.return_value = InferencePhase.DECODE_HEAVY
+
+    # Each of these steps should be skipped (no profiling started)
+    for i in range(num_steps_to_skip):
+        profiler.step(stats)
+        assert profiler.decode_steps_skipped == i + 1
+        mock_start.assert_not_called()
+        assert not profiler.inference_phase_seen[InferencePhase.DECODE_HEAVY]
+
+    # The next step should actually start profiling
+    profiler.step(stats)
+    mock_start.assert_called_once()
+    assert profiler.inference_phase_seen[InferencePhase.DECODE_HEAVY]
+    assert profiler.current_phase == "decode_heavy"
+    assert profiler.profiling_n_steps_left == PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
+
+    # Complete the profiling cycle
+    for _ in range(PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR):
+        profiler.step(stats)
+    mock_stop.assert_called_once()
+    assert profiler.current_phase == ""
+
+
+def test_phased_profiler_skip_only_affects_decode_heavy(profiler_fixture):
+    """Tests that the skip logic only applies to the DECODE_HEAVY phase."""
+    profiler = profiler_fixture["profiler"]
+    mock_start = profiler_fixture["mock_start"]
+    mock_stop = profiler_fixture["mock_stop"]
+    mock_determine_phase = profiler_fixture["mock_determine_phase"]
+
+    profiler.num_decode_steps_to_skip = 5  # Large skip count
+
+    stats = {"num_reqs": 2, "total_num_scheduled_tokens": 100}
+
+    # PREFILL_HEAVY should start profiling immediately (no skipping)
+    mock_determine_phase.return_value = InferencePhase.PREFILL_HEAVY
+    profiler.step(stats)
+    mock_start.assert_called_once()
+    assert profiler.inference_phase_seen[InferencePhase.PREFILL_HEAVY]
+    assert profiler.decode_steps_skipped == 0  # Not incremented
+
+    # Complete the PREFILL_HEAVY profiling cycle
+    for _ in range(PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR):
+        profiler.step(stats)
+    mock_stop.assert_called_once()
+
+    # BALANCED should also start immediately (no skipping)
+    mock_determine_phase.return_value = InferencePhase.BALANCED
+    profiler.step(stats)
+    assert mock_start.call_count == 2
+    assert profiler.inference_phase_seen[InferencePhase.BALANCED]
+    assert profiler.decode_steps_skipped == 0  # Still not incremented
+
+    # Complete the BALANCED profiling cycle
+    for _ in range(PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR):
+        profiler.step(stats)
+    assert mock_stop.call_count == 2
+
+    # DECODE_HEAVY should be skipped
+    mock_determine_phase.return_value = InferencePhase.DECODE_HEAVY
+    profiler.step(stats)
+    assert mock_start.call_count == 2  # Not started yet
+    assert profiler.decode_steps_skipped == 1

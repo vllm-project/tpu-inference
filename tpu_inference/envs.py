@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     SC_KERNEL_COL_CHUNK_SIZE: int = 1024
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
+    RAGGED_GATED_DELTA_RULE_IMPL: str = "ragged_gated_delta_rule_chunked"
 
 
 def env_with_choices(
@@ -243,6 +244,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_str_list("JITTED_MM_MODULE_KEYS"),
     "REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES":
     env_str_list("REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES"),
+    "RAGGED_GATED_DELTA_RULE_IMPL":
+    env_with_choices(
+        "RAGGED_GATED_DELTA_RULE_IMPL", "ragged_gated_delta_rule_chunked",
+        ["ragged_gated_delta_rule_ref", "ragged_gated_delta_rule_chunked"]),
 }
 
 

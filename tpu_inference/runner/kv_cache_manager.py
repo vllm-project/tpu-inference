@@ -11,11 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import dataclasses
 from typing import TYPE_CHECKING, List
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import t2j_dtype
@@ -24,7 +24,6 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mla import MLAAttention
-from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, MambaSpec,
@@ -119,7 +118,8 @@ class KVCacheManager:
 
         num_kv_heads = common_utils.get_padded_num_heads(
             first_attn_module.num_kv_heads,
-            self.runner.mesh.shape[ShardingAxisName.ATTN_HEAD])
+            common_utils.get_mesh_shape_product(self.runner.mesh,
+                                                ShardingAxisName.ATTN_HEAD))
         head_size = common_utils.get_padded_head_dim(
             first_attn_module.head_size)
         page_size_bytes = get_attention_page_size_bytes(
@@ -327,11 +327,6 @@ class KVCacheManager:
             )
             self.runner.input_batch = new_input_batch
             self.runner.persistent_batch_manager.input_batch = new_input_batch
-            self.runner.block_tables_cpu = [
-                np.zeros((self.runner.max_num_reqs,
-                          cdiv(self.runner.max_model_len, block_size)),
-                         dtype=np.int32) for block_size in block_sizes
-            ]
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         self.maybe_reinitialize_input_batch(kv_cache_config)
@@ -386,28 +381,44 @@ class KVCacheManager:
                     break
 
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
-            for j, layer_name in enumerate(kv_cache_tensor.shared_by):
-                layer_spec = layer_name_to_spec[layer_name]
-
-                page_size_bytes = layer_spec.page_size_bytes
+            if duplicate_shared_layers:
+                total_group_page_size = 0
+                for name in kv_cache_tensor.shared_by:
+                    spec = layer_name_to_spec[name]
+                    # MambaSpec has a padded page size to unify it with full
+                    # attention layers. If duplicating, use unpadded size for
+                    # num_blocks calculation to make it consistent with actual
+                    # allocation and avoid underutilization of HBM.
+                    if isinstance(spec, MambaSpec):
+                        total_group_page_size += dataclasses.replace(
+                            spec, page_size_padded=None).page_size_bytes
+                    else:
+                        total_group_page_size += spec.page_size_bytes
+                num_blocks = kv_cache_tensor.size // total_group_page_size
+            else:
+                # If sharing KV cache, compute `num_blocks` using the page size
+                # of the first layer.
+                page_size_bytes = layer_name_to_spec[
+                    kv_cache_tensor.shared_by[0]].page_size_bytes
                 assert kv_cache_tensor.size % page_size_bytes == 0
                 num_blocks = kv_cache_tensor.size // page_size_bytes
-                if duplicate_shared_layers:
-                    num_blocks //= num_shared_layers
-                sharding_config = self.runner.vllm_config.sharding_config
-                if self.use_mla and not self.runner.vllm_config.additional_config.get(
-                        "sharding", {}).get("sharding_strategy", {}).get(
-                            "enable_dp_attention", False):
-                    # MLA KV cache is sharded with MLP_TENSOR = (attn_dp, attn_dp_expert, model, expert)
-                    divisor = (sharding_config.attn_dp_size *
-                               sharding_config.attn_dp_expert_size *
-                               sharding_config.tp_size *
-                               sharding_config.expert_size)
-                else:
-                    divisor = sharding_config.total_dp_size
-                # num_blocks must be a multiple of the sharding divisor
-                num_blocks = (num_blocks // divisor) * divisor
 
+            if self.use_mla and not self.runner.vllm_config.additional_config.get(
+                    "sharding", {}).get("sharding_strategy", {}).get(
+                        "enable_dp_attention", False):
+                # MLA KV cache is sharded over MLP_TENSOR
+                divisor = common_utils.get_mesh_shape_product(
+                    self.runner.mesh, ShardingAxisName.MLP_TENSOR)
+            else:
+                # Default KV cache is sharded over ATTN_DATA
+                divisor = common_utils.get_mesh_shape_product(
+                    self.runner.mesh, ShardingAxisName.ATTN_DATA)
+
+            # num_blocks must be a multiple of the sharding divisor
+            num_blocks = (num_blocks // divisor) * divisor
+
+            for j, layer_name in enumerate(kv_cache_tensor.shared_by):
+                layer_spec = layer_name_to_spec[layer_name]
                 if isinstance(layer_spec, MambaSpec):
                     mamba_states = []
                     for state_index, (shape, dtype) in enumerate(
@@ -416,11 +427,12 @@ class KVCacheManager:
                         cache_shape = (num_blocks, *shape)
                         if state_index == 0:
                             # conv_state: [num_blocks, conv_kernel_size, intermediate_size]
-                            spec = PartitionSpec(None, None,
+                            spec = PartitionSpec(ShardingAxisName.ATTN_DATA,
+                                                 None,
                                                  ShardingAxisName.ATTN_HEAD)
                         elif state_index == 1:
                             # ssm_state: [num_blocks, num_heads, head_dim, state_size]
-                            spec = PartitionSpec(None,
+                            spec = PartitionSpec(ShardingAxisName.ATTN_DATA,
                                                  ShardingAxisName.ATTN_HEAD,
                                                  None, None)
                         else:
