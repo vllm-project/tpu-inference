@@ -24,6 +24,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mla import MLAAttention
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, MambaSpec,
@@ -328,6 +329,107 @@ class KVCacheManager:
             self.runner.input_batch = new_input_batch
             self.runner.persistent_batch_manager.input_batch = new_input_batch
 
+    def _get_sharding_divisor(self) -> int:
+        """Calculates the divisor for sharding KV cache blocks.
+
+        The total number of KV cache blocks must be a multiple of this value
+        to ensure even distribution across devices. The divisor depends on the
+        sharding strategy.
+
+        - For MLA (MatMul-Less Attention) without data-parallel attention, the
+          cache is sharded along the MLP tensor axis.
+        - Otherwise, the default is to shard along the attention data axis.
+
+        Returns:
+            The integer divisor for KV cache block sharding.
+        """
+        sharding_config = self.runner.vllm_config.additional_config.get(
+            "sharding", {})
+        sharding_strategy = sharding_config.get("sharding_strategy", {})
+        enable_dp_attention = sharding_strategy.get("enable_dp_attention",
+                                                    False)
+
+        if self.use_mla and not enable_dp_attention:
+            # MLA KV cache is sharded over MLP_TENSOR.
+            return common_utils.get_mesh_shape_product(
+                self.runner.mesh, ShardingAxisName.MLP_TENSOR)
+
+        # Default KV cache is sharded over ATTN_DATA.
+        return common_utils.get_mesh_shape_product(self.runner.mesh,
+                                                   ShardingAxisName.ATTN_DATA)
+
+    def _calculate_num_blocks(self, kv_cache_tensor, layer_name_to_spec,
+                              duplicate_shared_layers,
+                              sharding_divisor) -> tuple[int, int]:
+        """Calculates the number of blocks for attention and Mamba layers.
+
+        This function determines how to partition the memory of a given
+        `kv_cache_tensor` into blocks for different types of layers.
+
+        Args:
+            kv_cache_tensor: The tensor representing the available memory for
+                this group of layers.
+            layer_name_to_spec: A dictionary mapping layer names to their
+                `KVCacheSpec`.
+            duplicate_shared_layers: A boolean indicating if layers that share
+                a cache spec should get their own physical cache tensor.
+            sharding_divisor: The divisor used to ensure the number of blocks
+                is compatible with device sharding.
+
+        Returns:
+            A tuple of (attn_num_blocks, mamba_num_blocks).
+            - attn_num_blocks: The number of blocks allocated for standard
+              attention layers.
+            - mamba_num_blocks: The number of blocks allocated for Mamba layers.
+              If no Mamba layers are present, this will be equal to
+              attn_num_blocks.
+        """
+        if duplicate_shared_layers:
+            total_mamba_page_size = 0
+            total_attn_page_size = 0
+            for name in kv_cache_tensor.shared_by:
+                spec = layer_name_to_spec[name]
+                # MambaSpec has a padded page size to unify it with full
+                # attention layers. If duplicating, use unpadded size for
+                # num_blocks calculation to make it consistent with actual
+                # allocation and avoid underutilization of HBM.
+                if isinstance(spec, MambaSpec):
+                    total_mamba_page_size += dataclasses.replace(
+                        spec, page_size_padded=None).page_size_bytes
+                else:
+                    total_attn_page_size += spec.page_size_bytes
+
+            uniform_num_blocks = kv_cache_tensor.size // (
+                total_mamba_page_size + total_attn_page_size)
+            uniform_num_blocks = (uniform_num_blocks //
+                                  sharding_divisor) * sharding_divisor
+            if (self.runner.max_num_reqs > uniform_num_blocks
+                    or total_attn_page_size == 0
+                    or total_mamba_page_size == 0):
+                return uniform_num_blocks, uniform_num_blocks
+
+            # Linear layers only use one state cache per sequence. So we can
+            # set the number of blocks as maximum number of concurrent
+            # requests.
+            mamba_num_blocks = cdiv(self.runner.max_num_reqs,
+                                    sharding_divisor) * sharding_divisor
+            mamba_memory = mamba_num_blocks * total_mamba_page_size
+            remaining_memory = max(0, kv_cache_tensor.size - mamba_memory)
+
+            attn_num_blocks = remaining_memory // total_attn_page_size
+            attn_num_blocks = (attn_num_blocks //
+                               sharding_divisor) * sharding_divisor
+            return attn_num_blocks, mamba_num_blocks
+        else:
+            # If sharing KV cache, compute `num_blocks` using the page size
+            # of the first layer.
+            page_size_bytes = layer_name_to_spec[
+                kv_cache_tensor.shared_by[0]].page_size_bytes
+            assert kv_cache_tensor.size % page_size_bytes == 0
+            num_blocks = kv_cache_tensor.size // page_size_bytes
+            num_blocks = (num_blocks // sharding_divisor) * sharding_divisor
+            return num_blocks, num_blocks
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         self.maybe_reinitialize_input_batch(kv_cache_config)
 
@@ -381,50 +483,19 @@ class KVCacheManager:
                     break
 
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
-            if duplicate_shared_layers:
-                total_group_page_size = 0
-                for name in kv_cache_tensor.shared_by:
-                    spec = layer_name_to_spec[name]
-                    # MambaSpec has a padded page size to unify it with full
-                    # attention layers. If duplicating, use unpadded size for
-                    # num_blocks calculation to make it consistent with actual
-                    # allocation and avoid underutilization of HBM.
-                    if isinstance(spec, MambaSpec):
-                        total_group_page_size += dataclasses.replace(
-                            spec, page_size_padded=None).page_size_bytes
-                    else:
-                        total_group_page_size += spec.page_size_bytes
-                num_blocks = kv_cache_tensor.size // total_group_page_size
-            else:
-                # If sharing KV cache, compute `num_blocks` using the page size
-                # of the first layer.
-                page_size_bytes = layer_name_to_spec[
-                    kv_cache_tensor.shared_by[0]].page_size_bytes
-                assert kv_cache_tensor.size % page_size_bytes == 0
-                num_blocks = kv_cache_tensor.size // page_size_bytes
-
-            if self.use_mla and not self.runner.vllm_config.additional_config.get(
-                    "sharding", {}).get("sharding_strategy", {}).get(
-                        "enable_dp_attention", False):
-                # MLA KV cache is sharded over MLP_TENSOR
-                divisor = common_utils.get_mesh_shape_product(
-                    self.runner.mesh, ShardingAxisName.MLP_TENSOR)
-            else:
-                # Default KV cache is sharded over ATTN_DATA
-                divisor = common_utils.get_mesh_shape_product(
-                    self.runner.mesh, ShardingAxisName.ATTN_DATA)
-
-            # num_blocks must be a multiple of the sharding divisor
-            num_blocks = (num_blocks // divisor) * divisor
-
+            divisor = self._get_sharding_divisor()
+            attn_num_blocks, mamba_num_blocks = self._calculate_num_blocks(
+                kv_cache_tensor, layer_name_to_spec, duplicate_shared_layers,
+                divisor)
             for j, layer_name in enumerate(kv_cache_tensor.shared_by):
                 layer_spec = layer_name_to_spec[layer_name]
                 if isinstance(layer_spec, MambaSpec):
+                    layer_num_blocks = mamba_num_blocks
                     mamba_states = []
                     for state_index, (shape, dtype) in enumerate(
                             zip(layer_spec.shapes, layer_spec.dtypes)):
                         jax_dtype = t2j_dtype(dtype)
-                        cache_shape = (num_blocks, *shape)
+                        cache_shape = (layer_num_blocks, *shape)
                         if state_index == 0:
                             # conv_state: [num_blocks, conv_kernel_size, intermediate_size]
                             spec = PartitionSpec(ShardingAxisName.ATTN_DATA,
@@ -463,6 +534,7 @@ class KVCacheManager:
 
                     kv_caches.append(tuple(mamba_states))
                 else:
+                    layer_num_blocks = attn_num_blocks
                     # We should only init a new kv cache for the first layer in shared_by
                     # if duplicate_shared_layers is False.  Otherwise, if duplicate_shared_layers
                     # is True, we should init a new kv cache for each layer in shared_by
@@ -474,7 +546,7 @@ class KVCacheManager:
                         else:
                             head_size = layer_spec.head_size
                         kv_cache = create_kv_caches(
-                            num_blocks=num_blocks,
+                            num_blocks=layer_num_blocks,
                             block_size=layer_spec.block_size,
                             num_kv_heads=layer_spec.num_kv_heads,
                             head_size=head_size,
@@ -496,7 +568,7 @@ class KVCacheManager:
                 # if duplicate_shared_layers is False.  Otherwise, if duplicate_shared_layers
                 # is True, we should add the blocks for each layer in shared_by.
                 if j == 0 or duplicate_shared_layers:
-                    num_blocks_list.append(num_blocks)
+                    num_blocks_list.append(layer_num_blocks)
                 layer_idx = (i * num_shared_layers
                              ) + j if duplicate_shared_layers else i
                 self.runner.layer_name_to_kvcache_index[layer_name] = layer_idx
