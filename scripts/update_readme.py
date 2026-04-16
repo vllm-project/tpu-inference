@@ -820,8 +820,12 @@ def update_readme():
                 new_table += "\n\n> **Note:**\n> - *This table only tests checkpoint loading compatibility.*"
 
             os.makedirs("docs/includes", exist_ok=True)
-            snippet_path = os.path.join("docs", "includes",
-                                        f"{type_key}_{section_key}.md")
+            if type_key == "release":
+                snippet_path = os.path.join("docs", "includes",
+                                            f"{section_key}.md")
+            else:
+                snippet_path = os.path.join("docs", "includes",
+                                            f"{type_key}_{section_key}.md")
             with open(snippet_path, "w", encoding="utf-8") as f:
                 f.write(new_table.strip() + "\n")
 

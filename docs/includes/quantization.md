@@ -17,14 +17,14 @@
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
-      <td>FP8 W8A8</td>
+      <td>FP8 W8A16</td>
       <td>compressed-tensor</td>
       <td>v7</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
-      <td>FP8 W8A16</td>
+      <td>FP8 W8A8</td>
       <td>compressed-tensor</td>
       <td>v7</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
