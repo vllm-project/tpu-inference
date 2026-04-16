@@ -296,6 +296,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self._pre_async_results: AsyncPreResults | None = None
         self._substitute_placeholder_token_fn = _substitute_placeholder_token
         self.execute_model_state: ExecuteModelState | None = None
+        self.batch_counter = 0
 
         self.kv_caches: list[jax.Array] = []
         self.layer_name_to_kvcache_index: dict[str, int] = {}
@@ -1467,8 +1468,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Please see runner_utils.PhasedBasedProfiler for details
         if self.phase_based_profiler:
+            self.batch_counter += 1
             batch_composition_stats = runner_utils.get_batch_composition_stats(
-                self.input_batch, total_num_scheduled_tokens, num_reqs,
+                self.batch_counter, self.input_batch,
+                total_num_scheduled_tokens, num_reqs,
                 padded_total_num_scheduled_tokens, scheduler_output)
 
             self.phase_based_profiler.step(batch_composition_stats)
@@ -1662,8 +1665,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Please see runner_utils.PhasedBasedProfiler for details
         if self.phase_based_profiler:
+            self.batch_counter += 1
             batch_composition_stats = runner_utils.get_batch_composition_stats(
-                self.input_batch, total_num_scheduled_tokens, num_reqs,
+                self.batch_counter, self.input_batch,
+                total_num_scheduled_tokens, num_reqs,
                 padded_total_num_scheduled_tokens, scheduler_output)
 
             self.phase_based_profiler.step(batch_composition_stats)
