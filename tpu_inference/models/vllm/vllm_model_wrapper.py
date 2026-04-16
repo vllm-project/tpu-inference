@@ -56,6 +56,8 @@ from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.vllm.experimental.model_patcher import patch_mm_model
+from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
+    maybe_apply_qwen3_vl_patches
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_inference.runner.lora_utils import replace_lora_metadata
@@ -214,6 +216,7 @@ class VllmModelWrapper:
                 self.vllm_config):
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load,
                                         model_config=self.model_config)
+
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:
             # Replace layers in the model with LoRA layers.
@@ -251,6 +254,9 @@ class VllmModelWrapper:
                 register_mm_module_custom_pytree_classes=envs.
                 REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES,
             )
+
+        # NOTE: Apply Qwen3-VL model specific patches
+        maybe_apply_qwen3_vl_patches(self.model.vllm_model)
 
         loading_end = time.time()
         total_loading_time = loading_end - loading_start
