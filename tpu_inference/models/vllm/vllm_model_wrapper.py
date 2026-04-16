@@ -13,8 +13,6 @@
 # limitations under the License.
 
 import copy
-import functools
-import inspect
 import time
 from collections.abc import Sequence
 from contextlib import nullcontext
@@ -31,8 +29,6 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
-from torchax.ops.ops_registry import (register_torch_dispatch_op,
-                                      register_torch_function_op)
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.lora.layers import BaseLayerWithLoRA
@@ -52,7 +48,6 @@ from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm import ops as patch_ops
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     shard_model_to_tpu
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
@@ -130,35 +125,6 @@ class VllmModelWrapper:
             self.vllm_config, self.mesh)
         self.model_config = vllm_config.speculative_config.draft_model_config if is_draft_model else vllm_config.model_config
         self._apply_pp_patch()
-        self._patch_vllm_ops()
-
-    def _patch_vllm_ops(self):
-        # Caution: there is no public api for restore the ops.
-        # It need to patched again if the ops are jitted and mesh is change.
-        # The overwritten ops should not be called after the end of model wrapper.
-
-        # Import the registered ops at first and then we can overwrite them.
-        import torchax.ops.jtorch  # noqa: F401
-
-        # Patch sdpa from torch ops to flash attention to prevent OOM
-        register_torch_function_op(
-            torch.nn.functional.scaled_dot_product_attention,
-            functools.partial(patch_ops.scaled_dot_product_attention.
-                              scaled_dot_product_attention,
-                              mesh=self.mesh),
-            is_jax_function=True,
-            needs_env=False,
-        )
-
-        register_torch_dispatch_op(
-            torch.ops.vllm.torch_sdpa_wrapper,
-            functools.partial(patch_ops.scaled_dot_product_attention.vllm_vit_sdpa, mesh=self.mesh),
-            is_jax_function=True,
-            needs_env=False,
-        )
-
-        patch_ops.gdn_attention.apply_gated_delta_net_torch_ops_patch(
-            mesh=self.mesh)
 
     def _apply_pp_patch(self):
         # patch `get_pp_group` in vLLM to jax's get_pp_group.
@@ -174,7 +140,6 @@ class VllmModelWrapper:
             if module_name.startswith("vllm.model_executor.models"):
                 if hasattr(module, "get_pp_group"):
                     setattr(module, "get_pp_group", jax_get_pp_group)
-
 
     def load_weights(self):
         loading_start = time.time()
