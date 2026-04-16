@@ -177,6 +177,60 @@ def dequantize_tensor_from_mxfp4_packed(
     )
 
 
+def dequantize_nvfp4(
+    weight: jax.Array,
+    weight_scale: jax.Array,
+    weight_global_scale: float | jax.Array,
+    group_size: int = 16,
+    out_dtype: jnp.dtype = jnp.bfloat16,
+) -> jax.Array:
+    """Dequantize nvfp4 weights.
+
+    Args:
+        weight: Packed uint8 weights [N, K/2].
+        weight_scale: per-block scales [N, K/group_size] in fp8_e4m3fn.
+        weight_global_scale: per-tensor global scale.
+        group_size: block size for weight_scale.
+        out_dtype: Output dtype.
+
+    Returns:
+        Dequantized weights [N, K] in out_dtype.
+    """
+    # 1. Unpack nibbles
+    # weight is [N, K/2] uint8
+    n, packed_k = weight.shape
+    k = packed_k * 2
+
+    low = weight & 0x0F
+    high = (weight & 0xF0) >> 4
+
+    # Interleave low and high nibbles
+    combined = jnp.stack([low, high], axis=-1).reshape(n, k)
+
+    # 2. Convert to float using lookup table
+    # signs = (combined & 0x08).astype(bool)
+    # abs_vals = (combined & 0x07).astype(jnp.int32)
+    # nvfp4_lut = jnp.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=jnp.float32)
+    # values = nvfp4_lut[abs_vals] * jnp.where(signs, -1.0, 1.0)
+
+    # Optimized version using bitwise ops
+    # sign bit is 8 (2^3). 1 - 2 * (sign_bit >> 3) gives 1 if sign=0, -1 if sign=1
+    values = jnp.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
+                       dtype=jnp.float32)[combined & 0x07]
+    values = values * (1.0 - 2.0 * ((combined & 0x08) >> 3))
+
+    # 3. Apply scales
+    # weight_scale is [N, K/group_size]
+    # We need to broadcast it to [N, K]
+    weight_scale = weight_scale.astype(jnp.float32)
+    weight_scale = jnp.repeat(weight_scale, group_size, axis=-1)
+
+    # weight_global_scale is usually a scalar or [N, 1]
+    dequantized = values * weight_scale * weight_global_scale
+
+    return dequantized.astype(out_dtype)
+
+
 def quantize_tensor(
     dtype: jnp.dtype,
     tensor: jax.Array,
