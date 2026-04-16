@@ -65,6 +65,7 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
             weight_group_shape = GroupShape(*self.weight_block_size)
             self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
 
+            # TODO: replace QuantKey() calls with create_fp8_quant_key once LKG is updated to a more recent vLLM commit
             weight_quant_key = QuantKey(
                 FP8_DTYPE,
                 ScaleDesc(torch.float32, True, weight_group_shape),
