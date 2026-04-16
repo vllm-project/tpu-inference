@@ -1337,8 +1337,13 @@ class TestSamplingMetadataPassthrough:
 
         TPUModelRunner._prepare_inputs_dp(runner, scheduler_output)
 
-        # Verify from_inp  utfrom_input_batch was called exactly once
+        # Verify from_input_batch was called exactly once with the ATTN_DATA sharding
         mock_sampling_metadata.from_input_batch.assert_called_once()
+        sharding_arg = mock_sampling_metadata.from_input_batch.call_args.kwargs.get(
+            'sharding')
+        assert sharding_arg is mock_named_sharding.return_value, (
+            "from_input_batch should receive the data_parallel_attn_sharding instance"
+        )
 
         # Verify NamedSharding was called with ATTN_DATA PartitionSpec.
         call_partition_specs = [

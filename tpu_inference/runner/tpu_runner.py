@@ -622,7 +622,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         num_kv_groups = len(kv_cache_config.kv_cache_groups)
         sampling_params_size = 3 * self.max_num_reqs
         input_ids_size = self.max_num_tokens
-        # Positions can be 3D for M-RoPE models (e.g. Qwen2-VL)
         query_start_loc_size = self.max_num_reqs + self.dp_size
         seq_lens_size = self.max_num_reqs
         logits_indices_size = self.max_num_reqs
@@ -1390,13 +1389,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # For each scheduled token, what are the corresponding req index.
             req_indices = np.repeat(req_indices_dp[dp_rank],
                                     num_scheduled_tokens_per_req)
-
             # Get batched arange.
             # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
             # For each scheduled token, what is its position in corresponding req.
             arange = np.concatenate(
                 [self.arange_cpu[:n] for n in num_scheduled_tokens_per_req])
-
             # Get positions.
             positions_np = positions_cpu[:total_num_scheduled_tokens]
             np.add(
@@ -1404,7 +1401,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 arange,
                 out=positions_np,
             )
-
             # Get token indices.
             # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
             # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
