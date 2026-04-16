@@ -13,7 +13,8 @@
 # limitations under the License.
 
 from itertools import islice
-from typing import Any, Callable, Iterable, List, NamedTuple, Optional, Tuple
+from typing import (Any, Callable, Iterable, List, Literal, NamedTuple,
+                    Optional, Tuple, TypedDict)
 
 import jax
 import jax.numpy as jnp
@@ -46,7 +47,31 @@ DEFAULT_ROPE_BASE_FREQUENCY = 10000
 DEFAULT_ROPE_SCALE_FACTOR = 1.0
 init_fn = nnx.initializers.normal(stddev=0.02)
 
-# --- From gemma4_vision_attention.py ---
+
+class Gemma4ImagePixelInputs(TypedDict):
+    """
+    Pre-patchified image inputs from the Gemma4 image processor.
+
+    Dimensions:
+        - bn: Batch size * number of images
+        - np: Number of patches (max_patches = max_soft_tokens * pooling_kernel_size²)
+        - pp: Patch pixels (patch_size² * 3)
+
+    The HF Gemma4ImageProcessor outputs pixel_values as
+    (batch, max_patches, patch_pixels) — already patchified with
+    zero-padding for patches beyond the real image content.
+    pixel_position_ids provides (x, y) coordinates per patch,
+    with (-1, -1) for padding patches.
+    """
+    type: Literal["pixel_values"]
+    pixel_values: jax.Array
+    """
+    Shape: `(bn, np, pp)`
+    """
+    pixel_position_ids: jax.Array
+    """
+    Shape: `(bn, np, 2)`
+    """
 
 
 def apply_multidimensional_rope(
@@ -262,7 +287,7 @@ class Gemma4VisionFlashAttention(JaxModule):
         return final_output
 
 
-class VisionEntry(JaxModule):
+class Gemma4VisionPatchEmbedder(JaxModule):
     """
     Handles converting input [B, H, W, C] to patches [B, L, D],
     adding factorized positional embeddings.
@@ -293,15 +318,15 @@ class VisionEntry(JaxModule):
             jax.random.normal(rngs.params(), (10240, 2, config.hidden_size),
                               dtype=dtype))
 
-    def _factorized_posemb(self, positions_xy: jax.Array) -> jax.Array:
+    def _factorized_posemb(self, pixel_position_ids: jax.Array) -> jax.Array:
         posemb = self.position_embedding_table.value
-        one_hot = jax.nn.one_hot(positions_xy,
+        one_hot = jax.nn.one_hot(pixel_position_ids,
                                  posemb.shape[0],
                                  dtype=posemb.dtype)
 
         nan = jnp.logical_not(one_hot.any(axis=-1, keepdims=True))
-        nan = jnp.logical_and(nan, positions_xy[..., None]
-                              != POSITIONS_PAD_VALUE)
+        nan = jnp.logical_and(
+            nan, pixel_position_ids[..., None] != POSITIONS_PAD_VALUE)
         pos_oh = jnp.where(nan, jnp.nan, one_hot)
 
         pe_seq = jnp.einsum('blis,sid->ibld', pos_oh,
@@ -311,21 +336,21 @@ class VisionEntry(JaxModule):
     def __call__(
         self,
         patches: jax.Array,
-        positions_xy: Optional[jax.Array] = None,
+        pixel_position_ids: Optional[jax.Array] = None,
     ) -> jax.Array:
         if patches.ndim != 3:
             raise ValueError(
                 f"Expected patches to be 3D or images to be 4D, but got shape {patches.shape} with ndim {patches.ndim}"
             )
-        assert positions_xy is not None
+        assert pixel_position_ids is not None
 
         jax.debug.print(
-            "[VISION TRACE] VisionEntry patches shape: {s}, mean: {m}",
+            "[VISION TRACE] Gemma4VisionPatchEmbedder patches shape: {s}, mean: {m}",
             s=patches.shape,
             m=patches.mean())
         patches = 2.0 * (patches - 0.5)
         x = self.input_proj(patches)
-        pos_embed = self._factorized_posemb(positions_xy).astype(x.dtype)
+        pos_embed = self._factorized_posemb(pixel_position_ids).astype(x.dtype)
 
         return x + pos_embed
 
@@ -428,7 +453,7 @@ class Gemma4VisionEncoderLayer(JaxModule):
         return outputs
 
 
-class VisionExit(JaxModule):
+class Gemma4VisionPooler(JaxModule):
     """
     Vision exit layer with dynamic spatial pooling.
     Gemma 4 strictly uses a 3x3 pooling kernel rather than a hardcoded output length.
@@ -442,7 +467,7 @@ class VisionExit(JaxModule):
     def _avg_pool_by_positions(
         self,
         x: jax.Array,
-        positions_xy: jax.Array,
+        pixel_position_ids: jax.Array,
     ) -> Tuple[jax.Array, jax.Array]:
         # Gemma 4 uses a strict pooling kernel (default 3x3)
         k = getattr(self.config, 'pooling_kernel_size', 3)
@@ -451,8 +476,8 @@ class VisionExit(JaxModule):
         length = x.shape[1] // (k**2)
 
         # Positions are [X, Y], so index 0 is X (Width) and index 1 is Y (Height)
-        max_x = positions_xy[..., 0].max(axis=-1, keepdims=True) + 1
-        kernel_idxs = jnp.floor_divide(positions_xy, k)
+        max_x = pixel_position_ids[..., 0].max(axis=-1, keepdims=True) + 1
+        kernel_idxs = jnp.floor_divide(pixel_position_ids, k)
 
         # Row-major flat index calculation: (Y_pool * Width_pool) + X_pool
         pooled_width = max_x // k
@@ -469,10 +494,10 @@ class VisionExit(JaxModule):
     def _maybe_downsample(
         self,
         x: jax.Array,
-        positions_xy: Optional[jax.Array],
+        pixel_position_ids: Optional[jax.Array],
     ) -> Tuple[jax.Array, jax.Array]:
-        if positions_xy is not None:
-            return self._avg_pool_by_positions(x, positions_xy)
+        if pixel_position_ids is not None:
+            return self._avg_pool_by_positions(x, pixel_position_ids)
 
         # Fallback if no positions are provided (e.g., dummy testing)
         k = getattr(self.config, 'pooling_kernel_size', 3)
@@ -492,15 +517,15 @@ class VisionExit(JaxModule):
     def __call__(
         self,
         x: jax.Array,
-        positions_xy: Optional[jax.Array] = None,
+        pixel_position_ids: Optional[jax.Array] = None,
         output_length_overrides: Optional[Tuple[int, ...]] = None,
     ) -> Tuple[Tuple[jax.Array, jax.Array], ...]:
 
         x = x.astype(self.param_dtype)
 
-        pooled_x, mask = self._maybe_downsample(x, positions_xy)
+        pooled_x, mask = self._maybe_downsample(x, pixel_position_ids)
         jax.debug.print(
-            "[VISION TRACE] VisionExit pooled_x shape: {s}, valid tokens: {v}",
+            "[VISION TRACE] Gemma4VisionPooler pooled_x shape: {s}, valid tokens: {v}",
             s=pooled_x.shape,
             v=jnp.sum(mask))
         pooled_x = pooled_x * jnp.sqrt(self.d_model)
@@ -527,7 +552,8 @@ class Gemma4VisionModel(JaxModule):
         self.mesh = mesh
 
         # 1. Vision Entry (Positional Embeddings)
-        self.patch_embedder = VisionEntry(config, dtype, rng, quant_config)
+        self.patch_embedder = Gemma4VisionPatchEmbedder(
+            config, dtype, rng, quant_config)
 
         # 2. Transformer Blocks
         # We use make_layers instead of nn.scan to natively support tpu-inference Pipeline Parallelism
@@ -537,7 +563,7 @@ class Gemma4VisionModel(JaxModule):
                 config, dtype, rng, self.mesh, quant_config))
 
         # 3. Vision Exit (Spatial Pooling)
-        self.vision_exit = VisionExit(config, dtype)
+        self.pooler = Gemma4VisionPooler(config, dtype)
 
         # Gemma 4 standardization parameters for Vision Model outputs
         self.std_bias = nnx.Param(
@@ -549,22 +575,23 @@ class Gemma4VisionModel(JaxModule):
         self,
         pixel_values: jax.Array,
         input_mask: Optional[jax.Array] = None,
-        positions_xy: Optional[jax.Array] = None,
+        pixel_position_ids: Optional[jax.Array] = None,
     ):
         """
         Forward pass for the complete Vision Encoder.
         """
-        # This now receives the newly generated positions_xy instead of None
-        hidden_states = self.patch_embedder(pixel_values, positions_xy)
+        # This now receives the newly generated pixel_position_ids instead of None
+        hidden_states = self.patch_embedder(pixel_values, pixel_position_ids)
 
         # 3. Forward through Transformer Layers
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states = layer(hidden_states, positions_xy, input_mask)
+            hidden_states = layer(hidden_states, pixel_position_ids,
+                                  input_mask)
         # Apply standardization
         hidden_states = hidden_states * self.std_scale.value + self.std_bias.value
 
         # 4. Forward through Exit (Pooling)
-        outputs = self.vision_exit(hidden_states, positions_xy)
+        outputs = self.pooler(hidden_states, pixel_position_ids)
 
         return outputs
 
@@ -682,10 +709,6 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             name = name.replace("model.embed_vision.", "embed_vision.")
             name = name.replace("model.vision_tower.encoder.", "vision_tower.")
             name = name.replace("model.vision_tower.", "vision_tower.")
-            name = name.replace("model.multi_modal_projector.linear.",
-                                "embed_vision.embedding_projection.")
-            name = name.replace("model.multi_modal_projector.",
-                                "embed_vision.")
 
             if "vision_tower.layers." in name:
                 name = name.replace(".linear.weight", ".weight")
@@ -769,12 +792,13 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
     @jax.jit
     def get_single_image_embedding(self, pixel_values: jax.Array,
-                                   positions_xy: jax.Array) -> jax.Array:
-        input_mask = positions_xy[..., 0] != -1
+                                   pixel_position_ids: jax.Array) -> jax.Array:
+        input_mask = pixel_position_ids[..., 0] != -1
 
-        vision_outputs = self.vision_tower(pixel_values,
-                                           input_mask=input_mask,
-                                           positions_xy=positions_xy)
+        vision_outputs = self.vision_tower(
+            pixel_values,
+            input_mask=input_mask,
+            pixel_position_ids=pixel_position_ids)
 
         projected_vision_features = vision_outputs[0][0]
         pooler_mask = vision_outputs[0][1]
@@ -796,42 +820,42 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
     def _parse_and_validate_image_input(self,
                                         **kwargs: object) -> Optional[dict]:
-        pixel_values = kwargs.get("pixel_values")
-        positions_xy = kwargs.get("pixel_position_ids")
+        pixel_values = kwargs.pop("pixel_values", None)
+        pixel_position_ids = kwargs.pop("pixel_position_ids", None)
+        image_embeds = kwargs.pop("image_embeds", None)
+        assert image_embeds is None, "Gemma4 does not support image_embeds."
         if pixel_values is None:
             return None
+        if isinstance(pixel_values, torch.Tensor):
+            pixel_values = pixel_values.contiguous().view(
+                torch.int16).numpy().view(jnp.bfloat16)
+            pixel_values = jnp.asarray(pixel_values)
+        if isinstance(pixel_position_ids, torch.Tensor):
+            pixel_position_ids = pixel_position_ids.to(
+                torch.int32).contiguous().numpy()
+            pixel_position_ids = jnp.asarray(pixel_position_ids)
 
-        def to_numpy(tensor):
-            if isinstance(tensor, torch.Tensor):
-                if tensor.dtype == torch.bfloat16:
-                    return tensor.to(torch.float32).numpy().astype(
-                        jnp.bfloat16)
-                return tensor.numpy()
-            return tensor
-
-        return {
-            "pixel_values": to_numpy(pixel_values),
-            "positions_xy": to_numpy(positions_xy)
-        }
+        return Gemma4ImagePixelInputs(type="pixel_values",
+                                      pixel_values=pixel_values,
+                                      pixel_position_ids=pixel_position_ids)
 
     def _process_image_input(self, image_input: dict) -> list[jax.Array]:
-        pv_jax = jnp.asarray(image_input["pixel_values"])
-        pos_jax = jnp.asarray(image_input["positions_xy"], dtype=jnp.int32)
+        pixel_values = image_input["pixel_values"]
+        pixel_position_ids = image_input["pixel_position_ids"]
 
-        if pv_jax.ndim == 2:
-            pv_jax = jnp.expand_dims(pv_jax, axis=0)
-        if pos_jax.ndim == 2:
-            pos_jax = jnp.expand_dims(pos_jax, axis=0)
+        if pixel_values.ndim == 2:
+            pixel_values = jnp.expand_dims(pixel_values, axis=0)
+        if pixel_position_ids.ndim == 2:
+            pixel_position_ids = jnp.expand_dims(pixel_position_ids, axis=0)
 
-        image_embeds = []
-        batch_size = pv_jax.shape[0]
-
+        per_image_features = []
+        batch_size = pixel_values.shape[0]
         for i in range(batch_size):
-            single_pv = pv_jax[i:i + 1, ...]
-            single_pos = pos_jax[i:i + 1, ...]
-            emb = self.get_single_image_embedding(single_pv, single_pos)
-            image_embeds.append(emb[0])
-        return image_embeds
+            pv = pixel_values[i:i + 1, ...]
+            pp = pixel_position_ids[i:i + 1, ...]
+            vt_output = self.get_single_image_embedding(pv, pp)
+            per_image_features.append(vt_output[0])
+        return per_image_features
 
     def embed_multimodal(self, **kwargs) -> List[jax.Array]:
         jax.debug.print(
@@ -875,16 +899,16 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                 dtype=jax_dtype,
             )
 
-            # Positions shape logic mirrors _patchify from VisionEntry
             p = self.vision_tower.patch_embedder.patch_size
             h_p, w_p = h_input // p, w_input // p
-            dummy_positions_xy = jnp.ones((1, h_p * w_p, 2), dtype=jnp.int32)
+            dummy_pixel_position_ids = jnp.ones((1, h_p * w_p, 2),
+                                                dtype=jnp.int32)
 
             # Trigger JIT
             run_compilation_fn("vision_encoder",
                                self.get_single_image_embedding,
                                dummy_pixel_values,
-                               dummy_positions_xy,
+                               dummy_pixel_position_ids,
                                image_shape=input_hw)
 
     def __call__(
