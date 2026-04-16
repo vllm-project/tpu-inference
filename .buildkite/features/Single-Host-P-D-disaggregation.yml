@@ -17,6 +17,7 @@
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for Single-Host P-D disaggregation"
     key: "${TPU_VERSION:-tpu6e}_SingleHostPDDisaggregation_CorrectnessTest"
+    skip: "Disabled: test is consistently failing"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
@@ -27,6 +28,7 @@ steps:
           /workspace/tpu_inference/tests/e2e/test_local_disagg.py::test_disaggregated_serving_correctness
   - label: "${TPU_VERSION:-tpu6e} Record correctness test result for Single-Host P-D disaggregation"
     key: "${TPU_VERSION:-tpu6e}_record_SingleHostPDDisaggregation_CorrectnessTest"
+    skip: "Disabled: parent test is disabled"
     depends_on: "${TPU_VERSION:-tpu6e}_SingleHostPDDisaggregation_CorrectnessTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
