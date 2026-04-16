@@ -166,11 +166,11 @@ class ExecuteModelState:
     padded_num_reqs: Optional[int] = None
 
 
-@jax.jit(donate_argnums=(0, 1, 2))
-def _substitute_placeholder_token(
-        input_ids: jax.Array, token_in_tpu_cur_input_indices: jax.Array,
-        token_in_tpu_pre_next_tokens_indices: jax.Array,
-        next_tokens: jax.Array, placeholder_num: int):
+@jax.jit(donate_argnums=(0, 1))
+def _substitute_placeholder_token(input_ids: jax.Array,
+                                  combined_indices: jax.Array,
+                                  next_tokens: jax.Array,
+                                  placeholder_num: int):
     """Substitute placeholder tokens from TPU for async scheduler
 
     Padding for parallelisation of the substitute_placeholder_token_fn
@@ -182,13 +182,16 @@ def _substitute_placeholder_token(
 
     Args:
         input_ids: possible input_ids size
-        token_in_tpu_cur_input_indices: replace holder idx in input_ids. Length the same to input_ids.
-        token_in_tpu_pre_next_tokens_indices: value idx in next_tokens. Length the same to input_ids.
+        combined_indices: concatenated [cur_input_indices, pre_next_tokens_indices]
         next_tokens: next tokens on the TPU from previous step.
-        placeholder_num: number of placeholders. placeholder_num <= len(token_in_tpu_cur_input_indices)
+        placeholder_num: number of placeholders. placeholder_num <= len(input_ids)
     Return:
         input_ids after replace placeholder tokens
     """
+    num_tokens = input_ids.shape[0]
+    token_in_tpu_cur_input_indices = combined_indices[:num_tokens]
+    token_in_tpu_pre_next_tokens_indices = combined_indices[num_tokens:]
+
     assert input_ids.shape == token_in_tpu_cur_input_indices.shape == token_in_tpu_pre_next_tokens_indices.shape, \
         f"Shape mismatch: input_ids and index arrays must have identical shapes due to precompilation assumptions. " \
         f"Got: {input_ids.shape=}, {token_in_tpu_cur_input_indices.shape=}, {token_in_tpu_pre_next_tokens_indices.shape=}"
@@ -1285,15 +1288,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             mode='constant',
             constant_values=-1).astype(np.int32)
 
-        (padded_token_in_tpu_cur_input_indices,
-         padded_token_in_tpu_pre_next_tokens_indices) = device_array(
-             self.mesh, (padded_token_in_tpu_cur_input_indices,
-                         padded_token_in_tpu_pre_next_tokens_indices))
+        combined_indices = np.concatenate([
+            padded_token_in_tpu_cur_input_indices,
+            padded_token_in_tpu_pre_next_tokens_indices
+        ])
+
+        combined_indices = jax.device_put(
+            combined_indices, NamedSharding(self.mesh, PartitionSpec()))
 
         with self.maybe_forbid_compile:
             input_ids = self._substitute_placeholder_token_fn(
-                input_ids, padded_token_in_tpu_cur_input_indices,
-                padded_token_in_tpu_pre_next_tokens_indices,
+                input_ids, combined_indices,
                 self._pre_async_results.next_tokens,
                 jnp.asarray(len(token_in_tpu_cur_input_indices),
                             dtype=jnp.int32))

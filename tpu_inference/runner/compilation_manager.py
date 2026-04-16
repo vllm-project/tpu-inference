@@ -291,14 +291,16 @@ class CompilationManager:
                 padded_token_in_tpu_cur_input_indices = np.zeros(
                     (num_tokens, ), dtype=np.int32)
                 padded_token_in_tpu_pre_next_tokens_indices = np.zeros(
-                    (num_tokens, ), dtype=jnp.int32)
-                (padded_token_in_tpu_cur_input_indices,
-                 padded_token_in_tpu_pre_next_tokens_indices) = device_array(
-                     self.runner.mesh,
-                     (padded_token_in_tpu_cur_input_indices,
-                      padded_token_in_tpu_pre_next_tokens_indices),
-                     sharding=NamedSharding(self.runner.mesh,
-                                            PartitionSpec(None)))
+                    (num_tokens, ), dtype=np.int32)
+
+                combined_indices = np.concatenate([
+                    padded_token_in_tpu_cur_input_indices,
+                    padded_token_in_tpu_pre_next_tokens_indices
+                ])
+
+                combined_indices = jax.device_put(
+                    combined_indices,
+                    NamedSharding(self.runner.mesh, PartitionSpec()))
 
                 input_ids = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32, dp_sharding)
@@ -312,8 +314,7 @@ class CompilationManager:
                     "_substitute_placeholder_token_fn",
                     self.runner._substitute_placeholder_token_fn,
                     input_ids,
-                    padded_token_in_tpu_cur_input_indices,
-                    padded_token_in_tpu_pre_next_tokens_indices,
+                    combined_indices,
                     next_tokens,
                     placeholder_num,
                     num_tokens=num_tokens,

@@ -944,10 +944,10 @@ class TestTPUJaxRunnerDPInputsLightweight:
         # Should return input_ids unchanged
         np.testing.assert_array_equal(result, input_ids)
 
-    @patch('tpu_inference.runner.tpu_runner.device_array',
-           side_effect=lambda mesh, tensors, **kwargs: tensors)
+    @patch('tpu_inference.runner.tpu_runner.NamedSharding')
+    @patch('jax.device_put', side_effect=lambda x, *args, **kwargs: x)
     def test_apply_async_token_substitution_with_padding(
-            self, mock_device_array):
+            self, mock_device_put, mock_named_sharding):
         """Test _apply_async_token_substitution with padding."""
 
         # Bind the actual method
@@ -981,12 +981,11 @@ class TestTPUJaxRunnerDPInputsLightweight:
         # Verify input_ids
         np.testing.assert_array_equal(call_args[0], input_ids)
 
-        # Verify padded indices length matches input_ids length
-        assert len(call_args[1]) == len(input_ids)
-        assert len(call_args[2]) == len(input_ids)
+        # Verify combined_indices length matches 2 * input_ids length
+        assert len(call_args[1]) == 2 * len(input_ids)
 
-        # Verify placeholder_num
-        assert call_args[4] == 2  # Number of actual substitutions
+        # Verify placeholder_num (now at index 3)
+        assert call_args[3] == 2  # Number of actual substitutions
 
     def test_prepare_inputs_routing_to_dp(self):
         """Test _prepare_inputs routes to _prepare_inputs_dp when dp_size > 1."""
@@ -1349,8 +1348,7 @@ class TestSamplingMetadataPassthrough:
         for call in call_args_list:
             args, kwargs = call
             sharding_arg = kwargs.get('sharding')
-            if sharding_arg is None and len(args) > 1:
-                sharding_arg = args[1]
+            sharding_arg = args[1]
             if sharding_arg is mock_named_sharding.return_value:
                 found_call = True
                 break
