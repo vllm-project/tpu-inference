@@ -1341,23 +1341,20 @@ class TestSamplingMetadataPassthrough:
 
         TPUModelRunner._prepare_inputs_dp(runner, scheduler_output)
 
-        # Verify device_array was called with data_parallel_attn_sharding
-        mock_device_array.assert_called()
-        # Find the call that passes metadata_blob
-        call_args_list = mock_device_array.call_args_list
+        # Verify jax.device_put was called with data_parallel_attn_sharding
+        mock_device_put.assert_called()
+        # Find the call that passes data_parallel_attn_sharding
+        call_args_list = mock_device_put.call_args_list
         found_call = False
         for call in call_args_list:
             args, kwargs = call
-            if len(args) > 1 and isinstance(args[1], tuple) and len(
-                    args[1]) == 2:
-                # Check if it is (request_distribution, metadata_blob)
+            sharding_arg = kwargs.get('sharding')
+            if sharding_arg is None and len(args) > 1:
+                sharding_arg = args[1]
+            if sharding_arg is mock_named_sharding.return_value:
                 found_call = True
-                sharding_arg = kwargs.get('sharding')
-                assert sharding_arg is mock_named_sharding.return_value, (
-                    "device_array should receive the data_parallel_attn_sharding instance"
-                )
                 break
-        assert found_call, "Should find a call to device_array with metadata_blob"
+        assert found_call, "Should find a call to jax.device_put with data_parallel_attn_sharding"
 
         # Verify NamedSharding was called with ATTN_DATA PartitionSpec.
         call_partition_specs = [
