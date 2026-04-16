@@ -320,8 +320,11 @@ class CompilationManager:
             input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32,
                                                   dp_sharding)
             if self.runner.uses_mrope:
-                positions = self._create_dummy_tensor((3, num_tokens),
-                                                      jnp.int32, dp_sharding)
+                mrope_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+                positions = self._create_dummy_tensor(
+                    (3, num_tokens), jnp.int32, mrope_sharding)
             else:
                 positions = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32, dp_sharding)
@@ -365,9 +368,12 @@ class CompilationManager:
             inputs_embeds = self._create_dummy_tensor(
                 (num_tokens, hidden_size), dtype, sharding=sharding)
             if self.runner.uses_mrope:
+                mrope_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(None, ShardingAxisName.ATTN_DATA))
                 positions = self._create_dummy_tensor((3, num_tokens),
                                                       jnp.int32,
-                                                      sharding=sharding)
+                                                      sharding=mrope_sharding)
             else:
                 positions = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32,

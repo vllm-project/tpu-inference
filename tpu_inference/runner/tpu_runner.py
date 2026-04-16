@@ -1793,6 +1793,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             sharding=data_parallel_attn_sharding,
         )
 
+        if self.uses_mrope:
+            # M-RoPE positions are of the shape (3, max_num_tokens).
+            # https://github.com/vllm-project/tpu-inference/blob/efc9608acd925bb3b64db6fda509514f799ab7be/tpu_inference/runner/tpu_runner.py#L555
+            # Shard the positions accordingly.
+            mrope_sharding = NamedSharding(
+                self.mesh, PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+            positions = device_array(self.mesh,
+                                     mrope_positions,
+                                     sharding=mrope_sharding)
+        else:
+            positions = device_array(self.mesh,
+                                     positions,
+                                     sharding=data_parallel_attn_sharding)
+
         request_distribution = np.array(self.input_batch.request_distribution)
 
         def build_block_table_host(kv_cache_gid: int) -> None:
@@ -1817,10 +1831,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         metadata_blob, metadata_layout = self.device_buffer.build()
 
-        if self.uses_mrope:
-            positions = mrope_positions
-        (request_distribution, dev_arrays_payload, positions) = device_array(
-            self.mesh, (request_distribution, metadata_blob, positions),
+        (request_distribution, dev_arrays_payload) = device_array(
+            self.mesh, (request_distribution, metadata_blob),
             sharding=data_parallel_attn_sharding)
 
         metadata = common_utils.DeviceBuffer.unpack_arrays(
