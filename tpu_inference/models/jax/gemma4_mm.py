@@ -265,14 +265,11 @@ class Gemma4VisionFlashAttention(JaxModule):
             p=jnp.sum(segment_ids_val == 2))
         segment_ids = SegmentIds(q=segment_ids_val, kv=segment_ids_val)
 
-        import math
-
         # 6. Execute TPU Flash Attention Kernel
         outputs_BNTH = sharded_flash_attention(
             mesh=self.mesh,
             causal=False,  # Vision is non-causal
-            sm_scale=1.0 / math.sqrt(self.head_dim))(q_BNTH, k_BKTH, v_BKTH,
-                                                     segment_ids)
+            sm_scale=1.0)(q_BNTH, k_BKTH, v_BKTH, segment_ids)
 
         # 7. Transpose back: (B, N, T, H) -> (B, T, N, H)
         outputs_BTNH = jnp.transpose(outputs_BNTH, (0, 2, 1, 3))
@@ -566,10 +563,12 @@ class Gemma4VisionModel(JaxModule):
         self.pooler = Gemma4VisionPooler(config, dtype)
 
         # Gemma 4 standardization parameters for Vision Model outputs
-        self.std_bias = nnx.Param(
-            jnp.zeros((config.hidden_size, ), dtype=dtype))
-        self.std_scale = nnx.Param(
-            jnp.ones((config.hidden_size, ), dtype=dtype))
+        self.standardize = getattr(config, "standardize", False)
+        if self.standardize:
+            self.std_bias = nnx.Param(
+                jnp.zeros((config.hidden_size, ), dtype=dtype))
+            self.std_scale = nnx.Param(
+                jnp.ones((config.hidden_size, ), dtype=dtype))
 
     def __call__(
         self,
@@ -587,11 +586,14 @@ class Gemma4VisionModel(JaxModule):
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states = layer(hidden_states, pixel_position_ids,
                                   input_mask)
-        # Apply standardization
-        hidden_states = hidden_states * self.std_scale.value + self.std_bias.value
 
         # 4. Forward through Exit (Pooling)
         outputs = self.pooler(hidden_states, pixel_position_ids)
+
+        if self.standardize:
+            pooled_x, mask = outputs[0]
+            pooled_x = (pooled_x - self.std_bias.value) * self.std_scale.value
+            outputs = ((pooled_x, mask), )
 
         return outputs
 
