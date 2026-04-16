@@ -15,11 +15,14 @@
 
 import jax
 import jax.numpy as jnp
+import torch
+from torchax.ops.jtorch import register_function
 
 from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
 
 
+@register_function(torch.nn.functional.scaled_dot_product_attention)
 def scaled_dot_product_attention(
     query,
     key,
@@ -29,14 +32,14 @@ def scaled_dot_product_attention(
     is_causal=False,
     scale=None,
     enable_gqa=False,
-    *,
-    mesh: jax.sharding.Mesh,
 ):
     """The same args as torch.nn.functional.scaled_dot_product_attention to use flash attention."""
     if dropout_p != 0.0:
         raise NotImplementedError("patched_sdpa does not support dropout_p")
     if enable_gqa is not False:
         raise NotImplementedError("patched_sdpa does not support enable_gqa")
+
+    mesh = jax.sharding.get_abstract_mesh()
 
     # Q, K, V shapes: (batch, num_heads, seq_len, head_dim)
     batch = query.shape[0]
@@ -84,6 +87,8 @@ def scaled_dot_product_attention(
 
     return out
 
+
+@register_function(torch.ops.vllm.torch_sdpa_wrapper)
 def vllm_vit_sdpa(
     query,
     key,
@@ -91,8 +96,6 @@ def vllm_vit_sdpa(
     scale=None,
     cu_seqlens=None,
     enable_gqa=False,
-    *,
-    mesh,
 ):
     """Custom JAX implementation of ViT SDPA as an alternative of [upstream vLLM SDPA](https://github.com/vllm-project/vllm/blob/bcc2306cefa4179c548d3e638e7a22a88d281733/vllm/v1/attention/ops/vit_attn_wrappers.py#L211-L239) implementation."""
 
@@ -102,6 +105,8 @@ def vllm_vit_sdpa(
     query = jnp.swapaxes(query, 1, 2)
     key = jnp.swapaxes(key, 1, 2)
     value = jnp.swapaxes(value, 1, 2)
+
+    mesh = jax.sharding.get_abstract_mesh()
 
     batch = query.shape[0]
     q_seq_len = query.shape[2]

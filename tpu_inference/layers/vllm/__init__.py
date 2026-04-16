@@ -13,6 +13,7 @@
 # limitations under the License.
 from tpu_inference.layers.vllm import backends as backends
 from tpu_inference.layers.vllm import custom_ops as custom_ops
+from tpu_inference.layers.vllm import ops as ops
 from tpu_inference.layers.vllm import quantization as quantization
 
 
