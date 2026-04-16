@@ -572,6 +572,7 @@ def ragged_gated_delta_rule_decode_only(
     return updated_recurrent_state.astype(recurrent_state.dtype), outputs
 
 
+# Donate conv_state to avoid "copy" op by XLA
 @jax.jit(
     donate_argnames=('recurrent_state', ),
     static_argnames=(

@@ -17,7 +17,8 @@ import jax
 import jax.numpy as jnp
 
 
-@jax.jit(static_argnames=("kernel_size", ), donate_argnames=("conv_state", ))
+# Donate conv_state to avoid "copy" op by XLA
+@jax.jit(donate_argnames=("conv_state", ), static_argnames=("kernel_size", ))
 @jax.named_scope("ragged_conv1d_jax")
 def ragged_conv1d(
     x,
