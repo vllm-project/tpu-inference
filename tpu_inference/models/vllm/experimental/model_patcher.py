@@ -73,6 +73,43 @@ def patch_mm_model(
         "JIT compilation for multi-modal (MM) modules is an experimental feature."
     )
 
+    # Monkey patch vLLM's _merge_multimodal_embeddings to support JAX/torchax
+    # broadcasting limitations with boolean masks.
+    try:
+        import vllm.model_executor.models.utils as vllm_utils
+        
+        # Save the original to avoid recursion if patched multiple times
+        if not hasattr(vllm_utils, "_original_merge_multimodal_embeddings"):
+            vllm_utils._original_merge_multimodal_embeddings = vllm_utils._merge_multimodal_embeddings
+
+            def _jax_compatible_merge_multimodal_embeddings(inputs_embeds, multimodal_embeddings, is_multimodal):
+                if len(multimodal_embeddings) == 0:
+                    return inputs_embeds
+                
+                mm_embeds_flat = vllm_utils._flatten_embeddings(multimodal_embeddings)
+                input_dtype = inputs_embeds.dtype
+                mm_embeds_flat = mm_embeds_flat.to(dtype=input_dtype)
+
+                # JAX boolean array indexing does not broadcast automatically.
+                # We convert the boolean mask to integer indices which JAX handles natively.
+                import jax.numpy as jnp
+                if isinstance(is_multimodal, torchax.torch.Tensor):
+                    mask = is_multimodal.jax_device_array
+                    if mask.dtype == jnp.bool_:
+                        # Convert to int indices
+                        idx = jnp.where(mask)[0]
+                        new_embeds = inputs_embeds.jax_device_array.at[idx].set(mm_embeds_flat.jax_device_array)
+                        return torchax.torch.Tensor.from_jax(new_embeds)
+                
+                # Fallback to standard PyTorch implementation
+                inputs_embeds[is_multimodal] = mm_embeds_flat
+                return inputs_embeds
+            
+            vllm_utils._merge_multimodal_embeddings = _jax_compatible_merge_multimodal_embeddings
+            logger.info("Patched vLLM's _merge_multimodal_embeddings for JAX compatibility.")
+    except Exception as e:
+        logger.warning(f"Failed to patch vLLM's _merge_multimodal_embeddings: {e}")
+
     # Flatten custom pytree to jax for jit
     # eg. transformers.modeling_outputs.BaseModelOutputWithPast
     def _flatten_model_output(obj):
