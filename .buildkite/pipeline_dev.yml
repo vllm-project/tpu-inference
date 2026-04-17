@@ -66,7 +66,7 @@ steps:
         # Customize --model, --max-model-len, --max-tokens as needed.
         .buildkite/scripts/run_in_docker.sh bash -c '
           export DYNAMIC_YAML="generated_gmm_tests.yml" && 
-          python3 tools/kernel/tuner/v1/gmm_cases_generator.py --output-path="$$DYNAMIC_YAML"'
+          python3 tools/kernel/tuner/v1/generate_cases_and_yml.py --output-path="$$DYNAMIC_YAML"'
       - |
         # Upload the generated YAML as a Buildkite artifact for the next step to consume.
         # buildkite-agent artifact upload "$$DYNAMIC_YAML"
