@@ -92,7 +92,7 @@ class VllmMxfp4Config(Mxfp4Config, VllmQuantConfig):
         return None
 
 
-class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
+class VllmMxfp4MoEMethod(GptOssMxfp4MoEMethod):
 
     def __init__(
         self,
