@@ -67,4 +67,4 @@ steps:
         .buildkite/scripts/run_in_docker.sh bash -c '
           export DYNAMIC_YAML="generated_gmm_tests.yml" && 
           python3 tools/kernel/tuner/v1/gmm_cases_generator.py --output-path="$$DYNAMIC_YAML"'
-      artifact_paths: "$$DYNAMIC_YAML"
+    artifact_paths: "$$DYNAMIC_YAML"
