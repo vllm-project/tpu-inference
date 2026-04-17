@@ -52,6 +52,7 @@ def main(args: dict):
         use_chat_template = True
 
     # Create an LLM
+    args["enable_return_routed_experts"] = True
     llm = LLM(**args)
 
     # Create a sampling params object
@@ -133,6 +134,12 @@ def main(args: dict):
         prompt = output.prompt
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
+
+        # Print experts if available
+        if hasattr(output.outputs[0], "routed_experts"
+                   ) and output.outputs[0].routed_experts is not None:
+            print(f"Routed experts: {output.outputs[0].routed_experts}")
+
         print("-" * 50)
 
 

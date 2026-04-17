@@ -318,7 +318,7 @@ def get_flax_model(
         out_shardings=(
             kv_cache_sharding,
             hidden_states_sharding,
-            hidden_states_sharding,  # aux hidden states
+            None,  # all_experts
         ),
         donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
         static_argnums=(
