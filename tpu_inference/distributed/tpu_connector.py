@@ -662,7 +662,8 @@ class TPUConnectorWorker:
             f"Worker {self.node_id} --> Doing D2H kv transfer for req_id={req_id}"
         )
         buffer_idx, dest_buffer = self.host_kv_pool.get_buffer()
-        logger.debug(f"Worker {self.node_id} -->get the buffer id {buffer_idx}")
+        logger.debug(
+            f"Worker {self.node_id} -->get the buffer id {buffer_idx}")
         updated_dest_buffer = []
 
         start_time = time.perf_counter()
@@ -748,7 +749,8 @@ class TPUConnectorWorker:
                 logger.info(
                     f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | "
                     f"uuid={req_meta.uuid} | prepare time={prepare_time_ms:.2f}ms | "
-                    f"pull time={pull_time_ms:.2f}ms | size={kv_size_mb:.2f}MB")
+                    f"pull time={pull_time_ms:.2f}ms | size={kv_size_mb:.2f}MB"
+                )
             else:
                 logger.warning(
                     f"Worker {self.node_id} --> kv transfer | failed to pull req_id={req_id} with in {pull_time_ms:.2f}ms | "
@@ -819,7 +821,9 @@ class TPUConnectorWorker:
             buffer, expires, buffer_index = self.reqs_wait_pull[req_id]
             if now > expires:
                 if expires > 0:
-                    logger.warning(f"Worker {self.node_id} --> req_id={req_id} KV transfer timeout. Force recycle the memory buffer.")
+                    logger.warning(
+                        f"Worker {self.node_id} --> req_id={req_id} KV transfer timeout. Force recycle the memory buffer."
+                    )
                 if buffer_index != -1 and self.host_kv_pool is not None:
                     self.host_kv_pool.return_buffer(buffer_index, buffer)
                 del self.reqs_wait_pull[req_id]
