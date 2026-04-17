@@ -239,7 +239,7 @@ class Gemma4MoE(JaxMoE):
 
     def load_weights(self, weights: Iterable):
         """Load weights for Gemma4 MoE layer.
-        
+
         Unlike other MoE, Gemma4 didn't provide per-expert weights, but already fuse projection weight in the checkpoint.
         """
         loaded = set()
@@ -314,12 +314,8 @@ class Gemma4Attention(JaxModule):
                 "rope_theta", getattr(config, "rope_theta", 10000.0))
             self.rope_scaling = rope_parameters.get(
                 "rope_scaling", getattr(config, "rope_scaling", None))
-            if not self.is_sliding:  # GLOBAL layer
-                self.rope_proportion = rope_parameters.get(
-                    "global_partial_rotary_factor", 0.25)
-            else:  # LOCAL layer
-                self.rope_proportion = rope_parameters.get(
-                    "partial_rotary_factor", 1.0)
+            self.rope_proportion = rope_parameters.get("partial_rotary_factor",
+                                                       1.0)
         else:
             # Transformers v4 rope config.
             # Fallback for config backward compatibility
@@ -467,10 +463,18 @@ class Gemma4Attention(JaxModule):
         if not self.is_kv_shared_layer:
             # Non-shared: apply K norm + RoPE, V norm
             k = self.k_norm(k)
-            q = apply_rope(q, md.input_positions, self.head_dim_original,
-                           self.rope_theta, self.rope_scaling)
-            k = apply_rope(k, md.input_positions, self.head_dim_original,
-                           self.rope_theta, self.rope_scaling)
+            q = apply_rope(q,
+                           md.input_positions,
+                           self.head_dim_original,
+                           self.rope_theta,
+                           self.rope_scaling,
+                           rope_proportion=self.rope_proportion)
+            k = apply_rope(k,
+                           md.input_positions,
+                           self.head_dim_original,
+                           self.rope_theta,
+                           self.rope_scaling,
+                           rope_proportion=self.rope_proportion)
 
             v = self.v_norm(v)
         else:
