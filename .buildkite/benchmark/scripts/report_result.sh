@@ -42,9 +42,10 @@ RESULT_FILE="${ARTIFACT_FOLDER}/${RECORD_ID}.result"
 
 # Upload logs to GCS if bucket is provided
 if [[ -n "${GCS_BUCKET:-}" ]]; then
-  # Temp write to dev bucket
+  # TODO: When switching to Production after validation is complete, 
+  # please change to use `$GCS_BUCKET` as the log storage bucket. 
+  # For now, it is hardcoded to use the `vllm-bm-bk-storage` bucket.
   # REMOTE_LOG_ROOT="gs://$GCS_BUCKET/job_logs/$RECORD_ID/"
-  # TODO: use $GCS_BUCKET instead the temp one
   REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
 fi
 

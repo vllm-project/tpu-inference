@@ -40,6 +40,10 @@ The `run_bm.sh` script is designed to be environment-aware. When running locally
 "GCP_DATABASE_ID": "vllm-bm-bk-runs"
 ```
 
+***There are two more modifications that need to be made here:***
+1. [`REMOTE_LOG_ROOT`](scripts/report_result.sh#L49) needs to be changed to use `$GSC_BUCKET` as the bucket for storing logs.
+2. The migration file [`vllm_bm_20260410.ddl`](sql/vllm_bm_20260410.ddl) needs to be executed in `vllm-bm-runs` (Production Spanner DB).
+
 ## 3. Configuration Guide (JSON Cases)
 
 The feature is driven by JSON configuration files. A case file can define a single benchmark or multiple benchmarks using the `benchmark_cases` array.
