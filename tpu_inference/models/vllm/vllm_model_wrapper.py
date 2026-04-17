@@ -453,6 +453,8 @@ class VllmModelWrapper:
                         torch_mm_embeds = [torch_view(x) for x in mm_embeds]
                     else:
                         torch_mm_embeds = torch_view(mm_embeds)
+                    if is_multimodal is not None:
+                        torch_mm_embeds = torch_mm_embeds[is_multimodal]
                     call_args = (torch_view(input_ids), torch_mm_embeds)
                 else:
                     call_args = (torch_view(input_ids), )
