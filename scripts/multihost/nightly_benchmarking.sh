@@ -75,6 +75,7 @@ export USE_UNFUSED_MEGABLOCKS_ENV=""
 export HF_CONFIG=""
 export USE_VLLM_LKG="true"
 export FORCE_MOE_RANDOM_ROUTING_ENV=""
+export FORCE_MOE_RANDOM_ROUTING=""
 export API_SERVER_COUNT=""
 export LOAD_FORMAT=""
 
@@ -111,7 +112,7 @@ while [[ $# -gt 0 ]]; do
     --model-impl-type) export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=$2"; shift 2 ;;
     --use-unfused-megablocks) export USE_UNFUSED_MEGABLOCKS_ENV="USE_UNFUSED_MEGABLOCKS=$2"; shift 2 ;;
     --hf-config) export HF_CONFIG="$2"; shift 2 ;;
-    --force-moe-random-routing) export FORCE_MOE_RANDOM_ROUTING_ENV="FORCE_MOE_RANDOM_ROUTING=$2"; shift 2 ;;
+    --force-moe-random-routing) export FORCE_MOE_RANDOM_ROUTING_ENV="FORCE_MOE_RANDOM_ROUTING=$2"; export FORCE_MOE_RANDOM_ROUTING="$2"; shift 2 ;;
     --api-server-count) API_SERVER_COUNT="$2"; shift 2 ;;
     --load-format) export LOAD_FORMAT="$2"; shift 2 ;;
     *) echo "Unknown parameter passed: $1"; exit 1 ;;
