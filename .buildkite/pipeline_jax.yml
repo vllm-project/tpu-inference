@@ -267,19 +267,18 @@ steps:
         env:
           USE_PREBUILT_IMAGE: "1"
           NEW_MODEL_DESIGN: "1"
-          USE_V6E8_QUEUE: "False"
-          SKIP_ACCURACY_TESTS: "True"
+          SKIP_ACCURACY_TESTS: "False"
           VLLM_MLA_DISABLE: "0"
           MOE_REQUANTIZE_BLOCK_SIZE: "512"
           MOE_REQUANTIZE_WEIGHT_DTYPE: "fp4"
           MODEL_IMPL_TYPE: "vllm"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
-          queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
+          queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
         commands:
           - |
             if [[ "$TPU_VERSION" == "tpu7x" ]]; then
-              .buildkite/scripts/run_in_docker.sh bash -c 'python /workspace/tpu_inference/benchmarks/benchmark_serving.py     --backend vllm     --model  deepseek-ai/DeepSeek-R1    --dataset-name mmlu    --dataset-path /tpu_vm/data/mmlu/data/test     --num-prompts 14042 --run_eval"'
+              .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mmlu.sh -m  "gs://tpu-commons-ci/deepseek/r1" -n 14042
             else
               echo "Skipping: Step requires TPU v7x."
               exit 0
