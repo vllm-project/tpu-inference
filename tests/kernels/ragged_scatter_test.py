@@ -41,6 +41,12 @@ class ScatterTest(jtu.JaxTestCase):
                 [7168],
                 [jnp.bfloat16],
             ),
+            itertools.product(
+                [4096],
+                [(13, 500)],
+                [2048],
+                [jnp.bfloat16],
+            ),
         )
     ]
 
