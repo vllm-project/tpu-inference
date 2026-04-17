@@ -421,7 +421,7 @@ class VllmModelWrapper:
                     for k, v in kwargs.items()
                 }
 
-                # image_grid_thw as `jax.tree.map` cannot be used to move Python list
+                # Need special handling for image_grid_thw as `jax.tree.map` cannot be used to move Python list
                 if image_grid_thw is not None:
                     call_kwargs["image_grid_thw"] = torch.tensor(
                         image_grid_thw, dtype=torch.long).to(device="jax")
