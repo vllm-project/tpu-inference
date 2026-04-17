@@ -444,7 +444,7 @@ class TPUConnectorWorker:
         # based on topology_order_id
         self.node_id = 0
 
-        # req_id: (kv, expiration_time)
+        # req_id: (kv, expiration_time, buffer_index)
         self.reqs_wait_pull: dict[ReqId, list[list[jax.Array], float,
                                               int]] = {}
         # req_id: thread_future
@@ -568,7 +568,11 @@ class TPUConnectorWorker:
                 )
                 if req_id in self.reqs_wait_pull:
                     # Set the expiration time of this request to -1, mark to be done
+                    buffer, _, buffer_index = self.reqs_wait_pull[req_id]
+                    if buffer_index != -1 and self.host_kv_pool is not None:
+                        self.host_kv_pool.return_buffer(buffer_index, buffer)
                     self.reqs_wait_pull[req_id][1] = -1
+                    self.reqs_wait_pull[req_id][2] = -1
                     self.kv_pull_uuid_to_req_id_map.pop(uuid)
                 else:
                     logger.warning(
@@ -658,6 +662,7 @@ class TPUConnectorWorker:
             f"Worker {self.node_id} --> Doing D2H kv transfer for req_id={req_id}"
         )
         buffer_idx, dest_buffer = self.host_kv_pool.get_buffer()
+        logger.debug(f"Worker {self.node_id} -->get the buffer id {buffer_idx}")
         updated_dest_buffer = []
 
         start_time = time.perf_counter()
@@ -728,6 +733,7 @@ class TPUConnectorWorker:
         kv = conn.pull(req_meta.uuid, kv_spec)
         kv_size_mb = sum(k.nbytes for k in kv) / (1024 * 1024)
         end_time_0, end_time_1 = time.perf_counter(), None
+        prepare_time_ms = (end_time_0 - start_time) * 1000
         if dist_utils.get_enable_block_kv_transfer():
             while True:
                 end_time_1 = time.perf_counter()
@@ -737,14 +743,22 @@ class TPUConnectorWorker:
                 ):
                     break
                 time.sleep(0.001)
-
-        prepare_time_ms = (end_time_0 - start_time) * 1000
-        pull_time_ms = (end_time_1 -
-                        end_time_0) * 1000 if end_time_1 is not None else 0.0
-        logger.info(
-            f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | "
-            f"uuid={req_meta.uuid} | prepare time={prepare_time_ms:.2f}ms | "
-            f"pull time={pull_time_ms:.2f}ms | size={kv_size_mb:.2f}MB")
+            pull_time_ms = (end_time_1 - end_time_0) * 1000
+            if all(chunk.is_ready() for chunk in kv):
+                logger.info(
+                    f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | "
+                    f"uuid={req_meta.uuid} | prepare time={prepare_time_ms:.2f}ms | "
+                    f"pull time={pull_time_ms:.2f}ms | size={kv_size_mb:.2f}MB")
+            else:
+                logger.warning(
+                    f"Worker {self.node_id} --> kv transfer | failed to pull req_id={req_id} with in {pull_time_ms:.2f}ms | "
+                    f"uuid={req_meta.uuid} | prepare time={prepare_time_ms:.2f}ms | "
+                    f"size={kv_size_mb:.2f}MB")
+        else:
+            logger.info(
+                f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | "
+                f"uuid={req_meta.uuid} | prepare time={prepare_time_ms:.2f}ms | "
+                f"size={kv_size_mb:.2f}MB")
         return kv, indices, req_meta.local_block_ids
 
     def _get_kv_spec(self, num_blocks: int) -> list[jax.ShapeDtypeStruct]:
@@ -804,6 +818,8 @@ class TPUConnectorWorker:
         for req_id in list(self.reqs_wait_pull):
             buffer, expires, buffer_index = self.reqs_wait_pull[req_id]
             if now > expires:
+                if expires > 0:
+                    logger.warning(f"Worker {self.node_id} --> req_id={req_id} KV transfer timeout. Force recycle the memory buffer.")
                 if buffer_index != -1 and self.host_kv_pool is not None:
                     self.host_kv_pool.return_buffer(buffer_index, buffer)
                 del self.reqs_wait_pull[req_id]

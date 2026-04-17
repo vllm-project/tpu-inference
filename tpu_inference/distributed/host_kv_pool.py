@@ -98,7 +98,7 @@ class HostKVPool:
         """
         Returns the buffer to the pool so other requests can use it.
         """
-        # logger.info(f"Returning buffer to HostKVPool (idx={idx})")
+        logger.info(f"Returning buffer to HostKVPool (idx={idx})")
 
         if updated_buffer is not None:
             # Overwrite the donated Python references with the new valid ones
