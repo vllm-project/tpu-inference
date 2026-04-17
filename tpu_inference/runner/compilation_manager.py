@@ -128,7 +128,7 @@ class CompilationManager:
         for num_tokens in self.runner.num_tokens_paddings:
             hidden_size = self.runner.vllm_config.model_config.get_hidden_size()
             hf_conf = self.runner.vllm_config.model_config.hf_config
-                
+
             # Identify multimodal embedding size
             mm_hidden_size = hidden_size
             try:
@@ -154,7 +154,7 @@ class CompilationManager:
                 PartitionSpec(ShardingAxisName.ATTN_DATA, None))
             input_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
-            
+
             dummy_multimodal_embeddings = self._create_dummy_tensor(
                 (1, num_tokens, mm_hidden_size),
                 self.runner.vllm_config.model_config.dtype,
@@ -383,11 +383,7 @@ class CompilationManager:
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
-        if hidden_size == 0 and hasattr(self.runner.model_config.hf_config, "text_config"):
-            hidden_size = getattr(self.runner.model_config.hf_config.text_config, "hidden_size", 0)
-        if hidden_size == 0 and hasattr(self.runner.model_config.hf_config, "hidden_size"):
-            hidden_size = self.runner.model_config.hf_config.hidden_size
-        
+
         dtype = self.runner.model_config.dtype
         for num_tokens in self.runner.num_tokens_paddings:
             sharding = NamedSharding(
