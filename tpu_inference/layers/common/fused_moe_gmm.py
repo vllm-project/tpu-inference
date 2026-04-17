@@ -21,12 +21,9 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.envs as envs
-# from tpu_inference.kernels.gather import gather_reduce as gather_reduce_sc
-# from tpu_inference.kernels.gather.ragged_gather import ragged_gather
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.kernels.sparse_core import gather_reduce as gather_reduce_sc
 from tpu_inference.kernels.sparse_core.ragged_gather import ragged_gather
-from tpu_inference.kernels.sparse_core.ragged_scatter import ragged_scatter
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
@@ -171,35 +168,6 @@ def moe_gmm_local(
     else:
         mask = jnp.full((batch_size, ), True).reshape(-1, topk, 1)
 
-    # # =====================================================================
-    # # 🚨 E2E GARBAGE SIMULATION 🚨
-    # # Inject NaNs, Infs, and huge values into the untouched rows
-    # # =====================================================================
-    # if local_group_size < group_sizes.size:
-    #     # 1. Get a boolean mask of valid rows in the sorted buffer
-    #     valid_sorted_rows = valid_rows_mask(
-    #         batch_size,
-    #         group_sizes,
-    #         group_offset,
-    #         group_offset + local_group_size,
-    #     )
-
-    #     # 2. Create a tensor of pure garbage
-    #     _k = jax.random.PRNGKey(999)
-    #     _rand = jax.random.uniform(_k, gmm2_res.shape, dtype=gmm2_res.dtype)
-    #     garbage = jnp.where(_rand < 0.33, jnp.nan,
-    #               jnp.where(_rand > 0.66, jnp.inf, 1e4))
-
-    #     # 3. Overwrite the un-routed rows with the garbage
-    #     gmm2_res = jnp.where(valid_sorted_rows[:, None], gmm2_res, garbage)
-
-    #     # 4. Shuffle the mask back to sequence order for the unrouting step
-    #     # (This replaces your original mask calculation)
-    #     mask = valid_sorted_rows[topk_argsort_revert_indices].reshape(-1, topk, 1)
-    # else:
-    #     mask = jnp.full((batch_size, ), True).reshape(-1, topk, 1)
-    # # =====================================================================
-
     reduction_axis = (ShardingAxisName.MLP_TENSOR
                       if parallelism == "tp" else ShardingAxisName.EXPERT)
 
@@ -291,25 +259,9 @@ def moe_gmm_local(
             start_tok = start // topk
             end_tok = end // topk
 
-            if local_group_size < group_sizes.size:
-                group_offsets = jnp.cumulative_sum(group_sizes,
-                                                   include_initial=True)
-                experts_start = group_offset[0]
-                experts_end = group_offset[0] + local_group_size
-                shard_output_start = group_offsets[experts_start]
-                shard_output_end = group_offsets[experts_end]
-                token_hidden = ragged_scatter(gmm2_res,
-                                              topk_argsort_revert_indices,
-                                              shard_output_start,
-                                              shard_output_end)
-            else:
-                token_hidden = gmm2_res[topk_argsort_revert_indices]
-
-            # First run local reduction on topk experts owned by the rank for all tokens
-            token_topk_hidden = token_hidden.reshape(
-                (-1, topk, gmm2_res.shape[-1]))
-            token_topk_hidden = token_topk_hidden * jnp.expand_dims(
-                topk_weights, axis=-1)
+            cur_indices = topk_argsort_revert_indices[start:end]
+            cur_topk_weights = topk_weights[start_tok:end_tok]
+            cur_mask = mask[start_tok:end_tok]
 
             cur_sorted = gmm2_res[cur_indices].reshape(
                 (-1, topk, gmm2_res.shape[-1]))
