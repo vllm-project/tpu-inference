@@ -116,8 +116,8 @@ def run_jax_gdn_attention_local(
         conv_bias,
         query_start_loc,
         state_indices,
-        kernel_size,
         distribution,
+        kernel_size=kernel_size,
     )
 
     out_mixed_qkv = jax.nn.silu(out_mixed_qkv)

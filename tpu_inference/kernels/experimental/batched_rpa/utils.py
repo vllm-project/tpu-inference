@@ -11,14 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Utility functions for Ragged Paged Attention."""
 
 import jax
 import jax.experimental.pallas as pl
 import jax.experimental.pallas.tpu as pltpu
 import jax.numpy as jnp
-
-from tpu_inference.kernels.experimental.batched_rpa import \
-    schedule as schedule_lib
 
 
 def align_to(a, b):
@@ -30,24 +28,25 @@ def broadcast_minor(src, shape):
     """Broadcasts 'src' to 'shape' in the minor dimension."""
     if src.shape == shape:
         return src
+    num_lanes = pltpu.get_tpu_info().num_lanes
     assert src.shape[:-1] == shape[:-1]
-    assert src.shape[-1] % 128 == 0
+    assert src.shape[-1] % num_lanes == 0
     target_minor = align_to(shape[-1], src.shape[-1])
     # no-op concatenation.
-    return jnp.concatenate([src for _ in range(target_minor // src.shape[-1])],
-                           axis=-1)[..., :shape[-1]]
+    broadcasted = jnp.concat([src] * (target_minor // src.shape[-1]), axis=-1)
+    return broadcasted[..., :shape[-1]]
 
 
-def get_dtype_bitwidth(dtype):
-    """Returns the bitwidth of a JAX dtype."""
-    return jax._src.dtypes.itemsize_bits(dtype)
+def get_dtype_packing(dtype):
+    return 32 // jax.dtypes.itemsize_bits(dtype)
 
 
 def strided_load(ref, start_row, num_rows, step, *, dtype=None):
     """Loads data from HBM with strided access, handling 128-lane alignment."""
     _, row_width = ref.shape
-    num_sub_lanes = row_width // 128
-    ref_flat = ref.reshape(-1, 128)
+    num_lanes = pltpu.get_tpu_info().num_lanes
+    num_sub_lanes = row_width // num_lanes
+    ref_flat = ref.reshape(-1, num_lanes)
 
     # scale indices to match flattened arraw.
     v_start = start_row * num_sub_lanes
@@ -66,33 +65,36 @@ def strided_load(ref, start_row, num_rows, step, *, dtype=None):
 
 def strided_store(ref, start, sz, step, val):
     """Stores data to HBM with strided access, handling 128-lane alignment."""
-    assert schedule_lib.get_dtype_packing(ref.dtype) == 1
+    assert get_dtype_packing(ref.dtype) == 1
     assert ref.dtype == val.dtype
     assert ref.shape == val.shape
-    assert len(ref.shape) == 2
-    r, l = ref.shape  # noqa
-    assert l % 128 == 0
-    folds = l // 128
-    ref = ref.reshape(r * folds, 128)
+    assert ref.ndim == 2
+    rows, cols = ref.shape
+    num_lanes = pltpu.get_tpu_info().num_lanes
+    assert cols % num_lanes == 0
+    folds = cols // num_lanes
+    ref = ref.reshape(rows * folds, num_lanes)
     start *= folds
     sz *= folds
     step *= folds
     assert sz % step == 0
     for i in range(folds):
-        ref[pl.ds(start + i, sz // step, step)] = val[:, i * 128:(i + 1) * 128]
+        val_slice = val[:, i * num_lanes:(i + 1) * num_lanes]
+        ref[pl.ds(start + i, sz // step, step)] = val_slice
 
 
-# If we want to convert 32-bits into 32//N number of N-bits value, naive
-# approach would be to perform 32//N number of 32-bits to N-bits conversion.
-# However, we can reduce number of instructions by utilizing binary tree.
-# 0: [32]
-# 1: [16, 16]
-# ...
-# log2(32//N): [N, N, ... N]
 def convert_to_target_bitwidth(val, target_bitwidth: int, kv_dtype: jnp.dtype):
     """Converts a value to a target bitwidth."""
+    # If we want to convert 32-bits into 32//N number of N-bits value, naive
+    # approach would be to perform 32//N number of 32-bits to N-bits conversion.
+    # However, we can reduce number of instructions by utilizing binary tree.
+    # 0: [32]
+    # 1: [16, 16]
+    # ...
+    # log2(32//N): [N, N, ... N]
+
     curr_dtype = val.dtype
-    curr_bitwidth = get_dtype_bitwidth(curr_dtype)
+    curr_bitwidth = jax.dtypes.itemsize_bits(curr_dtype)
     assert target_bitwidth != curr_bitwidth, "No conversion is needed."
 
     # We split val into two vals (left and right) where each have half of the
@@ -121,3 +123,13 @@ def convert_to_target_bitwidth(val, target_bitwidth: int, kv_dtype: jnp.dtype):
                                                target_bitwidth=target_bitwidth,
                                                kv_dtype=kv_dtype)
         return left_out + right_out
+
+
+def has_bank_conflicts(stride: int, distance=24, num_banks=32) -> bool:
+    banks = set()
+    for i in range(distance):
+        bank = (i * stride) % num_banks
+        if bank in banks:
+            return True
+        banks.add(bank)
+    return False

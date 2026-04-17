@@ -12,33 +12,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import jax
 import jax.numpy as jnp
 from jax import lax
+from jax.experimental.pallas import tpu as pltpu
 
-from tpu_inference.kernels.experimental.batched_rpa import \
-    schedule as rpa_schedule
-from tpu_inference.kernels.experimental.batched_rpa import utils
+from tpu_inference.kernels.experimental.batched_rpa import configs, utils
 
 
 def flash_attention(
-    q,  # [B, KV, TQ, H]
-    k,  # [B, KV, S, H]
-    v,  # [B, KV, S, H]
-    o_prev,  # [B, KV, TQ, H]
-    m_prev,  # [B, KV, TQ, 128]
-    l_prev,  # [B, KV, TQ, 128]
+    q: jax.Array,  # [B, KV, TQ, H]
+    k: jax.Array,  # [B, KV, S, H]
+    v: jax.Array,  # [B, KV, S, H]
+    o_prev: jax.Array,  # [B, KV, TQ, H]
+    m_prev: jax.Array,  # [B, KV, TQ, 128]
+    l_prev: jax.Array,  # [B, KV, TQ, 128]
     *,
-    processed_q_len,  # [B]
-    processed_kv_len,  # [B]
-    effective_kv_len,  # [B]
-    config: rpa_schedule.RPAConfig,
+    processed_q_len: list[jax.Array],  # [B]
+    processed_kv_len: list[jax.Array],  # [B]
+    effective_kv_len: list[jax.Array],  # [B]
+    cfgs: configs.RPAConfig,
 ):
     """Flash attention kernel."""
     b, k_heads, tq, h = q.shape
     s = k.shape[2]
 
-    if config.q_scale is not None:
-        q = q / config.q_scale
+    if cfgs.serve.scale_q is not None:
+        q = q / cfgs.serve.scale_q
         if jnp.issubdtype(k.dtype, jnp.floating):
             dtype_info = jnp.finfo(k.dtype)
             minval = float(dtype_info.min)
@@ -47,48 +47,48 @@ def flash_attention(
         q = q.astype(k.dtype)
 
     qk = lax.dot_general(
-        q.reshape((b * k_heads, tq, h)),
-        k.reshape((b * k_heads, s, h)),
+        pltpu.einshape("bkth->(bk)th", q, True),
+        pltpu.einshape("bksh->(bk)sh", k, True),
         dimension_numbers=(([2], [2]), ([0], [0])),
         preferred_element_type=jnp.float32,
-    )
-    qk = qk.reshape((b, k_heads, tq, s)).astype(config.out_dtype)
+    ).astype(cfgs.serve.dtype_out)
+    qk = pltpu.einshape("(bk)ts->bkts", qk, True, b=b)
 
-    qk *= config.sm_scale
-    if config.k_scale is not None:
-        qk *= config.k_scale
-    if config.q_scale is not None:
-        qk *= config.q_scale
+    qk *= cfgs.model.sm_scale
+    if cfgs.serve.scale_k is not None:
+        qk *= cfgs.serve.scale_k
+    if cfgs.serve.scale_q is not None:
+        qk *= cfgs.serve.scale_q
 
-    if config.soft_cap is not None:
-        qk = config.soft_cap * jnp.tanh(qk / config.soft_cap)
+    if cfgs.model.soft_cap is not None:
+        qk = cfgs.model.soft_cap * jnp.tanh(qk / cfgs.model.soft_cap)
 
     qk_masked = []
     v_masked = []
 
-    int_ty = config.int_ty
+    int_ty = cfgs.serve.int_ty
 
-    for b_idx in range(config.batch_size):
+    for b_idx in range(cfgs.block.batch_size):
         kv_idx_b = (lax.broadcasted_iota(int_ty, (k_heads, tq, s), 2) +
                     processed_kv_len[b_idx])
         q_idx_b = (lax.broadcasted_iota(jnp.int32, (k_heads, tq, s), 1) //
-                   config.num_q_heads_per_kv_head
+                   cfgs.model.num_q_heads_per_kv_head
                    ).astype(int_ty) + processed_q_len[b_idx]
 
         eff_kv_len_b = effective_kv_len[b_idx]
         mask_b = q_idx_b < eff_kv_len_b
         mask_b = jnp.logical_and(mask_b, q_idx_b >= kv_idx_b)
 
-        if config.sliding_window is not None:
-            mask_b = jnp.logical_and(
-                mask_b, q_idx_b < kv_idx_b + config.sliding_window)
+        if (sliding_window := cfgs.model.sliding_window) is not None:
+            mask_b = jnp.logical_and(mask_b, q_idx_b
+                                     < kv_idx_b + sliding_window)
 
-        if not config.mask_v:
+        if not cfgs.mask_v:
             mask_b = jnp.logical_and(mask_b, kv_idx_b < eff_kv_len_b)
 
-        qk_masked.append(jnp.where(mask_b, qk[b_idx], config.mask_value))
+        qk_masked.append(jnp.where(mask_b, qk[b_idx], cfgs.model.mask_value))
 
-        if config.mask_v:
+        if cfgs.mask_v:
             kv_idx_v = (lax.broadcasted_iota(int_ty, (k_heads, s, h), 1) +
                         processed_kv_len[b_idx])
             v_mask_b = kv_idx_v < eff_kv_len_b
@@ -104,17 +104,17 @@ def flash_attention(
     p = jnp.exp(qk - utils.broadcast_minor(m_next, qk.shape))
 
     pv = lax.dot_general(
-        p.reshape((b * k_heads, tq, s)),
-        v.reshape((b * k_heads, s, h)),
+        pltpu.einshape("bkts->(bk)ts", p, True),
+        pltpu.einshape("bksh->(bk)sh", v, True),
         dimension_numbers=(([2], [1]), ([0], [0])),
         preferred_element_type=jnp.float32,
-    )
-    pv = pv.reshape((b, k_heads, tq, h)).astype(config.out_dtype)
+    ).astype(cfgs.serve.dtype_out)
+    pv = pltpu.einshape("(bk)th->bkth", pv, True, b=b)
 
-    if config.v_scale is not None:
-        pv *= config.v_scale
+    if cfgs.serve.scale_v is not None:
+        pv *= cfgs.serve.scale_v
 
-    p_rowsum = jnp.sum(p, axis=-1, keepdims=True, dtype=config.out_dtype)
+    p_rowsum = jnp.sum(p, axis=-1, keepdims=True, dtype=cfgs.serve.dtype_out)
     alpha = jnp.exp(m_prev - m_next)
     l_next = alpha * l_prev + p_rowsum
 
