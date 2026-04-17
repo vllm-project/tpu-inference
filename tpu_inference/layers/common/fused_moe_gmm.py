@@ -25,8 +25,12 @@ from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.kernels.sparse_core import gather_reduce as gather_reduce_sc
 from tpu_inference.kernels.sparse_core.ragged_gather import ragged_gather
 from tpu_inference.kernels.sparse_core.ragged_scatter import ragged_scatter
+from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
+
+logger = init_logger(__name__)
 
 
 def all_gather_topk_indices_and_weights(
@@ -367,6 +371,28 @@ def expert_parallel_gmm(
     )
 
 
+def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
+                          dtype: jnp.dtype) -> jax.Array:
+    hidden_states_q, scale = quantize_tensor(
+        jnp.float8_e4m3fn,
+        hidden_states,
+        axis=-1,
+    )
+    # quantize_tensor squeezes the scale if axis is int. We need to expand it back.
+    scale = jnp.expand_dims(scale, -1)
+
+    # Dequantize if needed
+    return jax.shard_map(
+        lambda x, s: (x.astype(jnp.float32) * s).astype(dtype),
+        mesh=mesh,
+        in_specs=(
+            P(ShardingAxisName.MLP_DATA, None),
+            P(ShardingAxisName.MLP_DATA, None),
+        ),
+        out_specs=P(ShardingAxisName.MLP_DATA, None),
+    )(hidden_states_q, scale)
+
+
 @jax.jit(static_argnames=(
     "topk",
     "renormalize",
@@ -376,6 +402,7 @@ def expert_parallel_gmm(
     "scoring_fn",
     "sc_kernel_threshold",
     "sc_kernel_col_chunk_size",
+    "all_gather_fp8",
 ))
 def fused_moe_func(
     hidden_states: jax.Array,
@@ -394,6 +421,7 @@ def fused_moe_func(
     scoring_fn: str,
     sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
+    all_gather_fp8: bool = False,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -428,8 +456,8 @@ def fused_moe_func(
 
     topk_weights = apply_scoring_fn(scoring_fn, gating_output)
     if envs.FORCE_MOE_RANDOM_ROUTING:
-        print(
-            "[WARNING] Forcing random routing should be used for performance testing purpose only."
+        logger.warning(
+            "Forcing random routing should be used for performance testing purpose only."
         )
         # Forcing random routing is useful to get rid of the effect
         # of routing imbalance during performance debugging.
@@ -489,6 +517,9 @@ def fused_moe_func(
 
     x_out_spec = (P(ShardingAxisName.EXPERT_DATA)
                   if use_ep else P(ShardingAxisName.MLP_DATA))
+    if all_gather_fp8:
+        hidden_states = _apply_all_gather_fp8(hidden_states, mesh, dtype)
+
     x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
         _process_tokens_locally,
         mesh=mesh,
