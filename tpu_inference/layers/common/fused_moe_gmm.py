@@ -21,8 +21,8 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.envs as envs
-from tpu_inference.kernels.gather import gather_reduce as gather_reduce_sc
-from tpu_inference.kernels.gather.ragged_gather import ragged_gather
+# from tpu_inference.kernels.gather import gather_reduce as gather_reduce_sc
+# from tpu_inference.kernels.gather.ragged_gather import ragged_gather
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.kernels.sparse_core import gather_reduce as gather_reduce_sc
 from tpu_inference.kernels.sparse_core.ragged_gather import ragged_gather
@@ -291,7 +291,6 @@ def moe_gmm_local(
             start_tok = start // topk
             end_tok = end // topk
 
-
             if local_group_size < group_sizes.size:
                 group_offsets = jnp.cumulative_sum(group_sizes,
                                                    include_initial=True)
@@ -301,15 +300,16 @@ def moe_gmm_local(
                 shard_output_end = group_offsets[experts_end]
                 token_hidden = ragged_scatter(gmm2_res,
                                               topk_argsort_revert_indices,
-                                              shard_output_start, shard_output_end)
+                                              shard_output_start,
+                                              shard_output_end)
             else:
                 token_hidden = gmm2_res[topk_argsort_revert_indices]
 
             # First run local reduction on topk experts owned by the rank for all tokens
             token_topk_hidden = token_hidden.reshape(
                 (-1, topk, gmm2_res.shape[-1]))
-            token_topk_hidden = token_topk_hidden * jnp.expand_dims(topk_weights,
-                                                                axis=-1)
+            token_topk_hidden = token_topk_hidden * jnp.expand_dims(
+                topk_weights, axis=-1)
 
             cur_sorted = gmm2_res[cur_indices].reshape(
                 (-1, topk, gmm2_res.shape[-1]))
@@ -529,8 +529,8 @@ def fused_moe_func(
     scoring_fn: str,
     sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
-    all_gather_fp8: bool = False,
     sc_psum_num_chunks: int,
+    all_gather_fp8: bool = False,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
