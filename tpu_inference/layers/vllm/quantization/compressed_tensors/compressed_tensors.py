@@ -96,6 +96,7 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, VllmQuantConfig):
         linear_config = self.get_linear_config(layer)
 
         if self._is_fp8_w4a8(weight_quant, input_quant):
+            # TODO(dmolitor): Handle unpacked weights or propagate a guard here based on the quantization config format.
             return VllmCompressedTensorsW4A8Fp8(
                 weight_quant=weight_quant,
                 is_static_input_scheme=input_quant and not input_quant.dynamic,

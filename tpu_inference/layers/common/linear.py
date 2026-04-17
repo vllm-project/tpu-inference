@@ -53,6 +53,7 @@ def sharded_quantized_matmul(x: jax.Array,
         w_s: Weight quantization scale. [n_output_features] for xla quantized matmul, [n_blocks, 1, n_output_features] for quantized matmul kernel
         weight_sharding: PartitionSpec or NamedSharding for the weight tensor.
         mesh: (Optional) Mesh to shard on. If None, mesh from current context is used, similar to jax.shard_map().
+        x_q_dtype: (Optional) Quantized dtype for the activation. If None, inferred from w_q dtype (int -> int8, float -> float8).
 
     Returns:
         Output of the quantized matmul.

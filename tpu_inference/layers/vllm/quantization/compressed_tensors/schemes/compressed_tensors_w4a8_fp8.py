@@ -155,8 +155,6 @@ class VllmCompressedTensorsW4A8Fp8(CompressedTensorsW4A8Fp8):
         layer.register_parameter("weight_shape", weight_shape)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-
-        # TODO(dmolitor): Handle the case where weights are stored unpacked.
         unpacked_weights = unpack_quantized_values_into_int32(
             layer.weight_packed, self.wtype, packed_dim=1)
         uint_weight = t2j(unpacked_weights, use_dlpack=False)
