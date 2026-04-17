@@ -26,7 +26,10 @@ from tpu_inference.kernels.gather.ragged_gather import ragged_gather
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
+
+logger = init_logger(__name__)
 
 
 def all_gather_topk_indices_and_weights(
@@ -439,8 +442,8 @@ def fused_moe_func(
 
     topk_weights = apply_scoring_fn(scoring_fn, gating_output)
     if envs.FORCE_MOE_RANDOM_ROUTING:
-        print(
-            "[WARNING] Forcing random routing should be used for performance testing purpose only."
+        logger.warning(
+            "Forcing random routing should be used for performance testing purpose only."
         )
         # Forcing random routing is useful to get rid of the effect
         # of routing imbalance during performance debugging.
