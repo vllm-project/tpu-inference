@@ -236,3 +236,13 @@ def maybe_apply_qwen3_vl_patches(vllm_model):
                                                  "architectures"):
         if "Qwen3VLForConditionalGeneration" in vllm_model.config.architectures:
             apply_qwen3_vl_patches(vllm_model)
+
+def maybe_wrap_mm_embed_to_list(vllm_model, mm_embeds):
+    """Wraps mm_embeds into a list for Qwen3-VL model as it requires the mm_embeds to be a list. 
+
+    Wrapping the combined tensor in a list is functionally equivalent to passing a list of
+    separate tensors because `_merge_multimodal_embeddings` (https://github.com/vllm-project/vllm/blob/978a4462bbc529ff204647543526e4caa08ed974/vllm/model_executor/models/utils.py#L474) flattens the list of tensors anyway.
+    """
+    if type(vllm_model).__name__ == "Qwen3VLForConditionalGeneration" and not isinstance(mm_embeds, list):
+        return [mm_embeds]
+    return mm_embeds
