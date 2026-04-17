@@ -158,18 +158,18 @@ def reference_tgmm(
 class GmmTest(jtu.JaxTestCase):
 
   @parameterized.product(
-      # batch_size=[128],
-      # in_size=[512, 1024],
-      # out_size=[512, 1024],
-      # num_groups=[16, 32],
-      # has_bias=[True, False],
-      # group_offset=[0, 2, 3],
       batch_size=[128],
-      in_size=[512],
-      out_size=[1024],
-      num_groups=[16],
-      has_bias=[False],
-      group_offset=[1],
+      in_size=[512, 1024],
+      out_size=[512, 1024],
+      num_groups=[16, 32],
+      has_bias=[True, False],
+      group_offset=[0, 2, 3],
+      # batch_size=[128],
+      # in_size=[512],
+      # out_size=[1024],
+      # num_groups=[16],
+      # has_bias=[False],
+      # group_offset=[1],
   )
   def test_gmm_basic(
       self, batch_size, in_size, out_size, num_groups, has_bias, group_offset

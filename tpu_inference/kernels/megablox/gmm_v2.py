@@ -203,6 +203,10 @@ class GmmConfigs:
 TileFn = Callable[
     [Dimensions, InputConfigs, InputConfigs, int, str | None], TileSizes
 ]
+TileTgmmFn = Callable[
+    [Dimensions, InputConfigs, InputConfigs, int, jnp.dtype, jnp.dtype],
+    TileSizes,
+]
 
 
 class IndexMaps:
@@ -1347,7 +1351,7 @@ def make_tgmm_configs(
     group_sizes: jax.Array,
     num_actual_groups: int,
     *,
-    tile_info: TileSizes | TileFn,
+    tile_info: TileSizes | TileTgmmFn,
     vmem_limit_bytes: int | None,
     out_dtype: jnp.dtype,
     acc_dtype: jnp.dtype | None,
@@ -1375,7 +1379,6 @@ def make_tgmm_configs(
   
   rhs_cfgs = InputConfigs(
       quant_dtype=None,
-      # xw32q: when we need to use this quant_block_size?
       quant_block_size=-1,
       dtype=rhs.dtype,
   )
@@ -1565,18 +1568,17 @@ def tgmm_kernel_main(
   scratches = [acc_ref, metadata_ref]
   pipeline_fn(lhs_in, rhs_in, out_ref, scratches=scratches)
 
-# TODO(xw32): Add back jax.jit.
-# @functools.partial(
-#     jax.jit,
-#     static_argnames=[
-#         "num_actual_groups",
-#         "tile_info",
-#         "vmem_limit_bytes",
-#         "precision",
-#         "preferred_element_type",
-#         "acc_dtype",
-#     ],
-# )
+@functools.partial(
+    jax.jit,
+    static_argnames=[
+        "num_actual_groups",
+        "tile_info",
+        "vmem_limit_bytes",
+        "precision",
+        "preferred_element_type",
+        "acc_dtype",
+    ],
+)
 def _tgmm_v2_impl(
     lhs: jax.Array,  # [size_m, size_k]
     rhs: jax.Array,  # [size_m, size_n]
@@ -1584,7 +1586,7 @@ def _tgmm_v2_impl(
     num_actual_groups: int,
     group_offset: jax.Array | None = None,
     *,
-    tile_info: TileSizes | TileFn = calculate_tgmm_tiling,
+    tile_info: TileSizes | TileTgmmFn = calculate_tgmm_tiling,
     vmem_limit_bytes: int | None = None,
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
     preferred_element_type: jnp.dtype | None = None,
@@ -1619,15 +1621,10 @@ def _tgmm_v2_impl(
   )
   dims = cfgs.dims
   tiles = cfgs.tiles
-  jax.debug.print("xw32 line1508 dims={}", dims)
-  jax.debug.print("xw32 line1509 tiles={}", tiles)
-  jax.debug.print("xw32 line1510 cfgs={}", cfgs)
-  # cfgs=GmmConfigs(tiles=TileSizes(tile_m=128, tile_k=512, tile_n=512), dims=Dimensions(size_m=128, size_k=512, size_n=512, size_group=16, size_lhs_group=16, size_lhs_sublane=16), lhs_cfgs=InputConfigs(quant_dtype=None, quant_block_size=-1, dtype=dtype(bfloat16), has_bias=False, has_scale=False, packing=1, num_quant_blocks=1), rhs_cfgs=InputConfigs(quant_dtype=None, quant_block_size=-1, dtype=dtype(bfloat16), has_bias=False, has_scale=False, packing=1, num_quant_blocks=1), out_dtype=dtype(bfloat16), acc_dtype=dtype(bfloat16), zero_init=False)
 
   # 4. Form pl.pallas_call calling tgmm_kernel_main
   num_lanes = pltpu.get_tpu_info().num_lanes
   aligned_n = align_to(dims.size_n, num_lanes)
-  # xw32q: do I need to align size_k to sublane boundary? If not, why not?
   out_init = jax.ShapeDtypeStruct((num_actual_groups, dims.size_k, aligned_n), cfgs.out_dtype)
   max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
   scratch_shapes = [
@@ -1636,7 +1633,6 @@ def _tgmm_v2_impl(
       # metadata_ref
       MetadataRef(
           gm_id_to_group_id=pltpu.SMEM((max_num_gm,), jnp.int32),
-          # xw32q: why +1?
           gm_id_to_m_offset=pltpu.SMEM((max_num_gm + 1,), jnp.int32),
       ),
   ]
@@ -1718,7 +1714,6 @@ def _gmm_v2_fwd(
     rhs_scale: jax.Array | None = None,  # [size_group, num_blocks, 1, out_size]
     rhs_bias: jax.Array | None = None,  # [size_group, 1, out_size]
     group_offset: jax.Array | None = None,  # int32[1]
-    *,
     tile_info: TileSizes | TileFn = calculate_tiling,
     vmem_limit_bytes: int | None = None,
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
@@ -1758,6 +1753,15 @@ def _gmm_v2_fwd(
 
 
 def _gmm_v2_bwd(
+    # non-diff argnames (passed as positional args before residuals and grad)
+    tile_info: TileSizes | TileFn,
+    vmem_limit_bytes: int | None,
+    precision: jax.lax.Precision,
+    preferred_element_type: jnp.dtype | None,
+    acc_dtype: jnp.dtype | None,
+    maybe_quantize_lhs: bool,
+    zero_initialize: bool,
+    fuse_act: str | None,
     # residual
     residuals: tuple[
         jnp.ndarray,  # lhs
@@ -1770,18 +1774,6 @@ def _gmm_v2_bwd(
     ],
     # cotangent
     grad: jnp.ndarray,
-    *,
-    # non-diff argnames
-    # NB: if you use nondiff_argnums in jax.custom_vjp, the arguments below
-    # should be args instead of kwargs.
-    tile_info: TileSizes | TileFn = calculate_tiling,
-    vmem_limit_bytes: int | None = None,
-    precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
-    preferred_element_type: jnp.dtype | None = None,
-    acc_dtype: jnp.dtype | None = None,
-    maybe_quantize_lhs: bool = True,
-    zero_initialize: bool = True,
-    fuse_act: str | None = None,
 ):
   """Backward pass for GMM kernel."""
   (
