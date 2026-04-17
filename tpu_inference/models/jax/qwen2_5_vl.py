@@ -1120,7 +1120,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         is_last_rank: bool = True,
         *args,
     ) -> tuple[list[jax.Array], jax.Array | JaxIntermediateTensors,
-               List[jax.Array]]:
+               List[jax.Array], list]:
         # The logic of choosing between input_ids and inputs_embeds is
         # handled inside self.model.__call__
         if not is_first_rank:
@@ -1137,7 +1137,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         if not is_last_rank:
             x = JaxIntermediateTensors(tensors={"hidden_states": x})
 
-        return kv_caches, x, []
+        return kv_caches, x, [], []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if hasattr(self, 'lm_head'):

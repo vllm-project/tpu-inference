@@ -118,6 +118,8 @@ class Qwen3MoeSparseMoeBlock(JaxModule):
             num_expert_parallelism=num_expert_parallelism,
             moe_backend=moe_backend,
             quant_config=quant_config,
+            enable_return_routed_experts=vllm_config.model_config.
+            enable_return_routed_experts,
             prefix=prefix + ".experts")
 
     def __call__(self, x: jax.Array) -> tuple[jax.Array, Optional[jax.Array]]:
@@ -353,7 +355,7 @@ class Qwen3MoeForCausalLM(JaxModule, LoadableWithIterator):
         is_last_rank: bool = True,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
-               List[Optional[jax.Array]]]:
+               List[jax.Array], List[Optional[jax.Array]]]:
         if not is_first_rank:
             assert intermediate_tensors is not None
             inputs_embeds = intermediate_tensors["hidden_states"]
@@ -363,9 +365,10 @@ class Qwen3MoeForCausalLM(JaxModule, LoadableWithIterator):
             attention_metadata,
             inputs_embeds,
         )
+
         if not is_last_rank:
             x = JaxIntermediateTensors(tensors={"hidden_states": x}, )
-        return kv_caches, x, all_experts
+        return kv_caches, x, [], all_experts
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if hasattr(self, 'lm_head'):

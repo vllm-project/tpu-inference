@@ -232,9 +232,15 @@ class Gemma4MoE(JaxMoE):
             Output array of shape (sequence_length, d_model) after passing through MoE.
         """
         if self.quant_method is not None:
-            return self.quant_method.apply_jax(self,
-                                               x_TD,
-                                               router_logits=router_logits)
+            output_TD = self.quant_method.apply_jax(
+                self, x_TD, router_logits=router_logits)
+            if self.enable_return_routed_experts:
+                _, selected_experts_TX = jax.lax.top_k(
+                    router_logits, self.num_experts_per_tok)
+            else:
+                selected_experts_TX = None
+
+            return output_TD, selected_experts_TX
         raise ValueError("Expected quant_method to be set!")
 
     def load_weights(self, weights: Iterable):
@@ -597,6 +603,8 @@ class Gemma4DecoderLayer(JaxModule):
                                      mesh=mesh,
                                      rngs=rng,
                                      quant_config=quant_config,
+                                     enable_return_routed_experts=config.
+                                     enable_return_routed_experts,
                                      prefix=prefix + ".experts")
             self.post_feedforward_layernorm_1 = JaxRmsNorm(
                 text_config.hidden_size,
@@ -634,7 +642,7 @@ class Gemma4DecoderLayer(JaxModule):
         kv_cache: jax.Array,
         x: jax.Array,
         attention_metadata: AttentionMetadata,
-    ) -> Tuple[jax.Array, jax.Array]:
+    ) -> Tuple[jax.Array, jax.Array, Optional[jax.Array]]:
         residual = x
         hidden_states = self.input_layernorm(x)
         kv_cache, attn_output = self.self_attn(
@@ -646,6 +654,7 @@ class Gemma4DecoderLayer(JaxModule):
         hidden_states = residual + attn_output
         residual = hidden_states
 
+        experts = None
         if self.enable_moe_block:
             # Dense MLP branch
             hidden_states_1 = self.pre_feedforward_layernorm(hidden_states)
@@ -657,7 +666,10 @@ class Gemma4DecoderLayer(JaxModule):
             # norm + scale internally); experts see separately normed input
             router_logits = self.router(hidden_states)
             hidden_states_2 = self.pre_feedforward_layernorm_2(hidden_states)
-            hidden_states_2 = self.experts(hidden_states_2, router_logits)
+
+            hidden_states_2, experts = self.experts(hidden_states_2,
+                                                    router_logits)
+
             hidden_states_2 = self.post_feedforward_layernorm_2(
                 hidden_states_2)
 
@@ -673,7 +685,7 @@ class Gemma4DecoderLayer(JaxModule):
 
         outputs = outputs * self.layer_scalar.value
 
-        return kv_cache, outputs
+        return kv_cache, outputs, experts
 
 
 class Gemma4Model(JaxModule):
@@ -744,7 +756,7 @@ class Gemma4Model(JaxModule):
         attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
         layer_name_to_kv_cache: Optional[dict] = None,
-    ) -> Tuple[List[jax.Array], jax.Array]:
+    ) -> Tuple[List[jax.Array], jax.Array, list]:
 
         if inputs_embeds is not None:
             x = inputs_embeds
@@ -753,6 +765,7 @@ class Gemma4Model(JaxModule):
             # Gemma4: Apply embedding scaling
             x = x * self.embedding_scale
 
+        all_experts = []
         for i, layer in enumerate(
                 islice(self.layers, self.start_layer, self.end_layer)):
             layer_name = f"layer.{i + self.start_layer}"
@@ -767,14 +780,17 @@ class Gemma4Model(JaxModule):
                 cache_idx = i + self.start_layer
 
             kv_cache = kv_caches[cache_idx]
-            kv_cache, x = layer(
+            kv_cache, x, experts = layer(
                 kv_cache,
                 x,
                 layer_attn_metadata,
             )
             kv_caches[cache_idx] = kv_cache
+            if experts is not None:
+                all_experts.append(experts)
+
         x = self.norm(x)
-        return kv_caches, x
+        return kv_caches, x, all_experts
 
 
 class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
@@ -842,7 +858,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
         is_last_rank: bool = True,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
-               List[jax.Array]]:
+               List[jax.Array], list]:
 
         if not is_first_rank:
             assert intermediate_tensors is not None
@@ -850,7 +866,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
 
         layer_name_to_kv_cache = dict(
             _layer_name_to_kv_cache) if _layer_name_to_kv_cache else None
-        kv_caches, x = self.model(
+        kv_caches, x, all_experts = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
@@ -861,7 +877,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
         if not is_last_rank:
             x = JaxIntermediateTensors(tensors={"hidden_states": x}, )
 
-        return kv_caches, x, []
+        return kv_caches, x, [], all_experts
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if hasattr(self, 'lm_head'):

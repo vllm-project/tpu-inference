@@ -652,37 +652,34 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             get_kv_transfer_group().register_runner(self)
 
         # Initialize routed experts capturer to create shared memory buffer
-        from vllm.model_executor.layers.fused_moe.routed_experts_capturer import \
-            RoutedExpertsCapturer
-        from vllm.platforms import current_platform
+        if self.vllm_config.model_config.enable_return_routed_experts:
+            from vllm.model_executor.layers.fused_moe.routed_experts_capturer import \
+                RoutedExpertsCapturer
+            from vllm.platforms import current_platform
+            try:
+                self.experts_capturer = RoutedExpertsCapturer.create()
+            except RuntimeError:
+                self.experts_capturer = RoutedExpertsCapturer.get_instance()
 
-        try:
-            self.experts_capturer = RoutedExpertsCapturer.create()
-        except RuntimeError:
-            self.experts_capturer = RoutedExpertsCapturer.get_instance()
+            num_groups = len(kv_cache_config.kv_cache_groups)
+            min_block_size = min([
+                group.kv_cache_spec.block_size
+                for group in kv_cache_config.kv_cache_groups
+            ])
+            max_num_kv_tokens = (kv_cache_config.num_blocks //
+                                 num_groups) * min_block_size
 
-        num_groups = len(kv_cache_config.kv_cache_groups)
-        min_block_size = min([
-            group.kv_cache_spec.block_size
-            for group in kv_cache_config.kv_cache_groups
-        ])
-        max_num_kv_tokens = (kv_cache_config.num_blocks //
-                             num_groups) * min_block_size
+            # # Monkey-patch current_platform.device_type to 'cpu' to avoid PyTorch error with 'tpu'
+            original_device_type = current_platform.device_type
+            current_platform.device_type = "cpu"
 
-        # Monkey-patch current_platform.device_type to 'cpu' to avoid PyTorch error with 'tpu'
-        original_device_type = current_platform.device_type
-        current_platform.device_type = "cpu"
-
-        try:
-            self.experts_capturer.init_buffer(
-                max_num_batched_tokens=self.max_num_tokens,
-                max_num_kv_tokens=max_num_kv_tokens,
-                vllm_config=self.vllm_config)
-        finally:
-            current_platform.device_type = original_device_type
-
-        logger.info(
-            "Initialized RoutedExpertsCapturer and shared memory buffer.")
+            try:
+                self.experts_capturer.init_buffer(
+                    max_num_batched_tokens=self.max_num_tokens,
+                    max_num_kv_tokens=max_num_kv_tokens,
+                    vllm_config=self.vllm_config)
+            finally:
+                current_platform.device_type = original_device_type
 
     def delete_kv_cache(self) -> None:
         self.kv_cache_manager.delete_kv_cache()
@@ -939,8 +936,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
-                (self.kv_caches, hidden_states,
-                 aux_hidden_states) = self.model_fn(
+                (self.kv_caches, hidden_states, aux_hidden_states,
+                 all_experts) = self.model_fn(
                      self.state,
                      self.kv_caches,
                      input_ids,
@@ -954,71 +951,36 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      self.is_last_rank,
                  )
 
-                # For MoE models, aux_hidden_states contains the experts
-                all_experts = aux_hidden_states if getattr(
-                    self.model_config.hf_config, "num_experts",
-                    0) > 0 else None
-
                 # Extract captured experts from all layers
                 try:
-                    logger.error(
-                        f"MOEMOE TPUModelRunner | all_experts: {all_experts}")
                     if all_experts:
                         num_reqs = self.input_batch.num_reqs
-                        num_scheduled_tokens_per_req = [
-                            scheduler_output.num_scheduled_tokens[req_id]
-                            for req_id in self.input_batch.req_ids[:num_reqs]
-                        ]
-                        num_scheduled_tokens_per_req = np.array(
-                            num_scheduled_tokens_per_req, dtype=np.int32)
-                        offsets = np.cumsum(
-                            np.insert(num_scheduled_tokens_per_req, 0, 0))
+
+                        # 1. Compute global slot mapping for the entire batch of tokens
+                        all_slot_mappings = []
+                        for i, req_id in enumerate(
+                                self.input_batch.req_ids[:num_reqs]):
+                            num_tokens = scheduler_output.num_scheduled_tokens[
+                                req_id]
+                            slot_mapping = self._get_slot_mapping(
+                                req_id, num_tokens)
+                            all_slot_mappings.append(slot_mapping)
+                        global_slot_mapping = np.concatenate(all_slot_mappings)
+
+                        # 2. Write to shared memory in one shot per layer
+                        from vllm.model_executor.layers.fused_moe.routed_experts_capturer import \
+                            _file_lock
 
                         for layer_idx, experts in enumerate(all_experts):
                             if experts is not None:
                                 experts_cpu = np.asarray(
                                     jax.device_get(experts))
 
-                                for i, req_id in enumerate(
-                                        self.input_batch.req_ids[:num_reqs]):
-                                    num_tokens = num_scheduled_tokens_per_req[
-                                        i]
-                                    start_token_idx = offsets[i]
-                                    end_token_idx = offsets[i + 1]
-
-                                    req_experts = experts_cpu[
-                                        start_token_idx:end_token_idx]
-
-                                    slot_mapping = self._get_slot_mapping(
-                                        req_id, num_tokens)
-
-                                    if hasattr(
-                                            self, "experts_capturer"
-                                    ) and self.experts_capturer is not None and self.experts_capturer._host_buffer_view is not None:
-                                        from vllm.model_executor.layers.fused_moe.routed_experts_capturer import \
-                                            _file_lock
-                                        with _file_lock(self.experts_capturer.
-                                                        _lock_file):
-                                            self.experts_capturer._host_buffer_view[
-                                                slot_mapping,
-                                                layer_idx, :] = req_experts
-
-                        logger.error(
-                            f"MOEMOE TPUModelRunner | Successfully extracted and stored experts for {num_reqs} requests."
-                        )
-                        if num_reqs > 0:
-                            req_id = self.input_batch.req_ids[0]
-                            num_tokens = num_scheduled_tokens_per_req[0]
-                            # We need to offset by num_computed_tokens to get the current step's slots.
-                            # _get_slot_mapping already does that!
-                            slot_mapping = self._get_slot_mapping(
-                                req_id, num_tokens)
-                            if len(slot_mapping) > 0:
-                                sample_experts = self.experts_capturer._host_buffer_view[
-                                    slot_mapping[0], 0, :]
-                                logger.error(
-                                    f"MOEMOE TPUModelRunner | Sample experts (req 0, token 0, layer 0): {sample_experts}"
-                                )
+                                with _file_lock(
+                                        self.experts_capturer._lock_file):
+                                    self.experts_capturer._host_buffer_view[
+                                        global_slot_mapping,
+                                        layer_idx, :] = experts_cpu
                 except Exception as e:
                     logger.warning(f"Failed to extract captured experts: {e}")
 

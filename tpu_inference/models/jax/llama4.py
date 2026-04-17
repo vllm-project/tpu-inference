@@ -538,6 +538,8 @@ class Llama4ForCausalLM(nnx.Module):
                 edf_sharding=('model', None, None),
                 efd_sharding=('model', None, None),
                 quant_config=vllm_config.quant_config,
+                enable_return_routed_experts=vllm_config.model_config.
+                enable_return_routed_experts,
                 random_init=force_random_weights) if is_moe_layer else None
 
             dense_ffw = DenseFFW(dtype=dtype,
@@ -696,7 +698,8 @@ class Llama4ForCausalLM(nnx.Module):
         _lora_metadata: Any = None,
         intermediate_tensors: Optional[JaxIntermediateTensors] = None,
         *args,
-    ) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array]]:
+    ) -> Tuple[List[KVCacheType], jax.Array | JaxIntermediateTensors,
+               List[jax.Array], list]:
         is_prefill = False
         if self.is_first_rank:
             x_TD = self.embedder.encode(input_ids)
@@ -704,20 +707,23 @@ class Llama4ForCausalLM(nnx.Module):
             assert intermediate_tensors is not None
             x_TD = intermediate_tensors["hidden_states"]
 
+        all_experts = []
         for (i, block) in enumerate(
                 islice(self.layers, self.start_layer, self.end_layer)):
             kv_cache = kv_caches[i]
-            new_kv_cache, x_TD = block(x_TD, is_prefill, kv_cache,
-                                       attention_metadata)
+            new_kv_cache, x_TD, experts = block(x_TD, is_prefill, kv_cache,
+                                                attention_metadata)
             jax.block_until_ready(x_TD)
             kv_caches[i] = new_kv_cache
+            if experts is not None:
+                all_experts.append(experts)
 
         if not self.is_last_rank:
             return kv_caches, JaxIntermediateTensors({"hidden_states":
-                                                      x_TD}), []
+                                                      x_TD}), [], all_experts
 
         final_activation_TD = self.final_norm(x_TD)
-        return kv_caches, final_activation_TD, []
+        return kv_caches, final_activation_TD, [], all_experts
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         logits_TV = jnp.dot(hidden_states,

@@ -156,6 +156,7 @@ class JaxMoE(JaxModule):
     random_init: bool = False
     moe_backend: MoEBackend = MoEBackend.DENSE_MAT
     scoring_func: str = "softmax"
+    enable_return_routed_experts: bool = False
 
     # --- Sparse MoE Specific Attributes ---
     num_experts_per_tok: int = 1  # Required for Sparse, optional/derived for Dense
@@ -187,11 +188,15 @@ class JaxMoE(JaxModule):
             x_TD = self.quant_method.apply_jax(self,
                                                x_TD,
                                                router_logits=router_logits)
-            if self.moe_backend in MoEBackend.fused_moe_backends():
-                _, selected_experts_TX = jax.lax.top_k(
-                    router_logits, self.num_experts_per_tok)
+            if self.enable_return_routed_experts:
+                if self.moe_backend in MoEBackend.fused_moe_backends():
+                    _, selected_experts_TX = jax.lax.top_k(
+                        router_logits, self.num_experts_per_tok)
+                else:
+                    _, selected_experts_TX = router_logits
             else:
-                _, selected_experts_TX = router_logits
+                selected_experts_TX = None
+
             return x_TD, selected_experts_TX
 
         raise ValueError("Expected quant_method to be set!")

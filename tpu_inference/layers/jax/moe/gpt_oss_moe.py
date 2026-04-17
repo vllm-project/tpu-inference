@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from dataclasses import InitVar, dataclass
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
@@ -132,8 +133,9 @@ class GptOssMoE(nnx.Module):
     ed_sharding: Sharding
 
     random_init: bool = False
+    enable_return_routed_experts: bool = False
 
-    def __call__(self, x_TD: Float) -> Float:
+    def __call__(self, x_TD: Float) -> tuple[Float, Optional[jax.Array]]:
         """Performs the forward pass for the GPT-OSS MoE layer."""
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = lax.with_sharding_constraint(x_TD, self.activation_ffw_td)
@@ -169,7 +171,8 @@ class GptOssMoE(nnx.Module):
         # Weighted sum of expert outputs
         output_TD = self.combine_experts(down_proj_TED, weights_TX, indices_TX)
 
-        return output_TD
+        experts = indices_TX if self.enable_return_routed_experts else None
+        return output_TD, experts
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Initializes all weights and biases for the MoE block."""

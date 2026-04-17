@@ -594,7 +594,8 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
         *args,
-    ) -> Tuple[List[KVCacheType], jax.Array]:
+    ) -> Tuple[List[KVCacheType], jax.Array | JaxIntermediateTensors,
+               List[jax.Array], list]:
         is_prefill = False
 
         if self.is_first_rank:
@@ -620,10 +621,10 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             kv_caches[i] = new_kv_cache
 
         if not self.is_last_rank:
-            return kv_caches, JaxIntermediateTensors({"hidden_states": x_TD}), []
+            return kv_caches, JaxIntermediateTensors({"hidden_states": x_TD}), [], []
 
         final_activation_TD = self.final_norm(x_TD)
-        return kv_caches, final_activation_TD, []
+        return kv_caches, final_activation_TD, [], []
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         logits_TV = jnp.dot(hidden_states,

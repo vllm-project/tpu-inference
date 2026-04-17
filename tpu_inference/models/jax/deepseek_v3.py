@@ -816,9 +816,16 @@ class SharedFusedMoe(JaxMoE):
 
     routed_scaling_factor: float = 1.0
 
-    def __call__(self, x_TD: jax.Array) -> jax.Array:
+    def __call__(self,
+                 x_TD: jax.Array) -> tuple[jax.Array, Optional[jax.Array]]:
         # Compute Routed Experts
-        final_hidden_states = super().__call__(x_TD)
+        custom_output = super().__call__(x_TD)
+        if isinstance(custom_output, tuple):
+            final_hidden_states, experts = custom_output
+        else:
+            final_hidden_states = custom_output
+            experts = None
+
         final_hidden_states *= self.routed_scaling_factor
 
         # (Maybe) Compute Shared Experts
@@ -826,7 +833,7 @@ class SharedFusedMoe(JaxMoE):
             shared_output = self.shared_experts(x_TD)
             final_hidden_states += shared_output
 
-        return final_hidden_states
+        return final_hidden_states, experts
 
 
 class DeepseekV2Moe(JaxModule):
@@ -844,7 +851,8 @@ class DeepseekV2Moe(JaxModule):
                  quant_config,
                  scoring_func,
                  rng,
-                 prefix: str = ""):
+                 prefix: str = "",
+                 enable_return_routed_experts: bool = False):
 
         self.gate = DeepSeekV3Router(
             hidden_size=hidden_size,
@@ -918,6 +926,7 @@ class DeepseekV2Moe(JaxModule):
             router=self.gate,
             shared_experts=self.shared_experts,
             scoring_func=scoring_func,
+            enable_return_routed_experts=enable_return_routed_experts,
             routed_scaling_factor=routed_scaling_factor)
 
     def __call__(self, x_TD: jax.Array):
@@ -946,7 +955,7 @@ class DeepseekV3DecoderLayer(JaxModule):
     def __call__(
         self, x_TD: jax.Array, *, kv_cache: List[jax.Array],
         attention_metadata: AttentionMetadata
-    ) -> Tuple[List[jax.Array], jax.Array]:
+    ) -> Tuple[List[jax.Array], jax.Array, Optional[jax.Array]]:
 
         # Run Self-Attention
         residual = x_TD
@@ -958,12 +967,18 @@ class DeepseekV3DecoderLayer(JaxModule):
         # Run MLP/MoE
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        mlp_output = self.mlp(hidden_states)
+
+        custom_output = self.mlp(hidden_states)
+        if isinstance(custom_output, tuple):
+            mlp_output, experts = custom_output
+        else:
+            mlp_output = custom_output
+            experts = None
 
         # Residual
         hidden_states = residual + mlp_output
 
-        return new_cache, hidden_states
+        return new_cache, hidden_states, experts
 
 
 class DeepSeekV3Router(JaxEinsum):
@@ -1283,6 +1298,8 @@ class DeepSeekV3(JaxModule):
                     quant_config=quant_config,
                     scoring_func=scoring_func,
                     rng=rng,
+                    enable_return_routed_experts=self.vllm_config.model_config.
+                    enable_return_routed_experts,
                     prefix=f"{prefix}.layers.{layer_index}.mlp")
 
             return DeepseekV3DecoderLayer(
@@ -1325,23 +1342,27 @@ class DeepSeekV3(JaxModule):
         input_ids: Optional[jax.Array],
         attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
-    ) -> Tuple[List[jax.Array], jax.Array]:
+    ) -> Tuple[List[jax.Array], jax.Array, list]:
         if inputs_embeds is not None:
             x = inputs_embeds
         else:
             x = self.embed_tokens(input_ids)
 
+        all_experts = []
         for i, layer in enumerate(
                 islice(self.layers, self.start_layer, self.end_layer)):
             kv_cache = kv_caches[i]
-            kv_cache, x = layer(
+            kv_cache, x, experts = layer(
                 x,
                 kv_cache=kv_cache,
                 attention_metadata=attention_metadata,
             )
             kv_caches[i] = kv_cache
+            if experts is not None:
+                all_experts.append(experts)
+
         x = self.norm(x)
-        return kv_caches, x
+        return kv_caches, x, all_experts
 
 
 class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
@@ -1405,22 +1426,25 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
         is_last_rank: bool = True,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
-               List[jax.Array]]:
+               List[jax.Array], list]:
         if not is_first_rank:
             assert intermediate_tensors is not None
             inputs_embeds = intermediate_tensors["hidden_states"]
 
-        kv_caches, x = self.model(
+        kv_caches, x, all_experts = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
             inputs_embeds,
         )
 
+        if not self.vllm_config.model_config.enable_return_routed_experts:
+            all_experts = []
+
         if not is_last_rank:
             x = JaxIntermediateTensors(tensors={"hidden_states": x}, )
 
-        return kv_caches, x, []
+        return kv_caches, x, [], all_experts
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         return self.lm_head(hidden_states)
