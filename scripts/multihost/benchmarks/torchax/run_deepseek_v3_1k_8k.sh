@@ -7,7 +7,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 NIGHTLY_SCRIPT="${SCRIPT_DIR}/../../nightly_benchmarking.sh"
 
 # Adjust model-path, max-seqs, and code-hash below when officially serving DeepSeek.
-MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8 bash "${NIGHTLY_SCRIPT}" \
+bash "${NIGHTLY_SCRIPT}" \
   --model-path "/mnt/disks/checkpoint/hub/models--deepseek-ai--DeepSeek-R1/snapshots/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/" \
   --model-name "DeepSeek-R1" \
   --tokenizer "deepseek-ai/DeepSeek-R1" \
@@ -32,4 +32,5 @@ MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8 bash "${NIGHTLY_SCRIPT}" \
   --moe-requantize-block-size "512" \
   --moe-requantize-weight-dtype "fp4" \
   --api-server-count 3 \
+  --moe-all-gather-activation-dtype "fp8" \
   --run-accuracy "mmlu"
