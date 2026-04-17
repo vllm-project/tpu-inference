@@ -171,6 +171,35 @@ def moe_gmm_local(
     else:
         mask = jnp.full((batch_size, ), True).reshape(-1, topk, 1)
 
+    # # =====================================================================
+    # # 🚨 E2E GARBAGE SIMULATION 🚨
+    # # Inject NaNs, Infs, and huge values into the untouched rows
+    # # =====================================================================
+    # if local_group_size < group_sizes.size:
+    #     # 1. Get a boolean mask of valid rows in the sorted buffer
+    #     valid_sorted_rows = valid_rows_mask(
+    #         batch_size,
+    #         group_sizes,
+    #         group_offset,
+    #         group_offset + local_group_size,
+    #     )
+
+    #     # 2. Create a tensor of pure garbage
+    #     _k = jax.random.PRNGKey(999)
+    #     _rand = jax.random.uniform(_k, gmm2_res.shape, dtype=gmm2_res.dtype)
+    #     garbage = jnp.where(_rand < 0.33, jnp.nan,
+    #               jnp.where(_rand > 0.66, jnp.inf, 1e4))
+
+    #     # 3. Overwrite the un-routed rows with the garbage
+    #     gmm2_res = jnp.where(valid_sorted_rows[:, None], gmm2_res, garbage)
+
+    #     # 4. Shuffle the mask back to sequence order for the unrouting step
+    #     # (This replaces your original mask calculation)
+    #     mask = valid_sorted_rows[topk_argsort_revert_indices].reshape(-1, topk, 1)
+    # else:
+    #     mask = jnp.full((batch_size, ), True).reshape(-1, topk, 1)
+    # # =====================================================================
+
     reduction_axis = (ShardingAxisName.MLP_TENSOR
                       if parallelism == "tp" else ShardingAxisName.EXPERT)
 
@@ -181,6 +210,9 @@ def moe_gmm_local(
         if local_group_size < group_sizes.size:
             mask = mask.reshape(-1, topk)
             topk_weights = jnp.where(mask, topk_weights, 0)
+            topk_wgt_zero_nan = True
+        else:
+            topk_wgt_zero_nan = False
 
         inds = topk_argsort_revert_indices
         topk_weights = topk_weights.flatten().reshape(-1, 128)
@@ -201,6 +233,7 @@ def moe_gmm_local(
             reduce_group_size=topk,
             topk_weights=topk_weights_reshaped[0],
             col_chunk_size=sc_kernel_col_chunk_size,
+            topk_wgt_zero_nan=topk_wgt_zero_nan,
         )
 
         chunk_out_reduced = None
@@ -223,6 +256,7 @@ def moe_gmm_local(
                 reduce_group_size=topk,
                 topk_weights=weights_chunk,
                 col_chunk_size=sc_kernel_col_chunk_size,
+                topk_wgt_zero_nan=topk_wgt_zero_nan,
             )
 
             # psum on the previous chunk output

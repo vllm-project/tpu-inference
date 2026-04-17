@@ -32,14 +32,23 @@ def test():
 
     batch_size = 1024
     topk = 8
-    local_num_experts = 20
+    local_num_experts = 4
     hidden_size = 6144
     intermediate_size = 128
 
     key = jax.random.PRNGKey(0)
-    k1, k2, k3, k4, k5 = jax.random.split(key, 5)
+    k1, k2, k3, k4, k5, k_nan = jax.random.split(key, 6)
 
-    # 1. Changed inputs and weights to random normal
+    # 1. Fix group sizes so the sum exactly matches (batch_size * topk)
+    global_num_experts = local_num_experts * 2
+    tokens_per_expert = (batch_size * topk) // global_num_experts
+
+    group_sizes = jnp.full((global_num_experts, ),
+                           tokens_per_expert,
+                           dtype=jnp.int32)
+    group_offset = jnp.array([0], dtype=jnp.int32)
+
+    # 2. Generate clean inputs and weights
     x = jax.random.normal(k1, (batch_size * topk, hidden_size),
                           dtype=jnp.bfloat16)
     w1 = jax.random.normal(
@@ -48,61 +57,87 @@ def test():
     w2 = jax.random.normal(k3,
                            (local_num_experts, intermediate_size, hidden_size),
                            dtype=jnp.bfloat16)
-
-    group_sizes = jnp.full((local_num_experts, ),
-                           batch_size * topk // local_num_experts,
-                           dtype=jnp.int32)
-    group_offset = jnp.array([0], dtype=jnp.int32)
     topk_argsort_revert_indices = jax.random.permutation(
         k4, jnp.arange(batch_size * topk, dtype=jnp.int32))
-
     topk_weights = jax.random.normal(k5, (batch_size, topk),
                                      dtype=jnp.bfloat16)
 
-    # Grouped arguments for clean lowering/execution
-    args = (x, w1, w2, group_sizes, group_offset, topk_argsort_revert_indices,
-            topk_weights)
+    # 3. INJECT FAULTY VALUES (Poison the out-of-bounds tokens)
+    # Tokens from index 0 to `local_token_count` belong to this shard.
+    # Tokens after this index belong to experts on other shards.
+    local_token_count = local_num_experts * tokens_per_expert
+
+    # Set all tokens for remote experts to NaN.
+    # This guarantees `gmm2_res` will have NaNs in the masked-out rows.
+    x_wnan = x.at[local_token_count:].set(jnp.nan)
+    print('cleme')
+    print(jnp.isnan(x_wnan).sum())
+
+    # 4. Grouped arguments
+    args = (x_wnan, w1, w2, group_sizes, group_offset,
+            topk_argsort_revert_indices, topk_weights)
+    args_wnan = (x_wnan, w1, w2, group_sizes, group_offset,
+                 topk_argsort_revert_indices, topk_weights)
 
     # 2. Refactored to return the function rather than executing it immediately
     def get_gmm_fn(sc_thresh):
-        return jax.shard_map(lambda x_l, w1_l, w2_l, gs_l, go_l, tari_l, tw_l:
-                             moe_gmm_local(x=x_l,
-                                           w1=w1_l,
-                                           w1_scale=None,
-                                           w1_bias=None,
-                                           w2=w2_l,
-                                           w2_scale=None,
-                                           w2_bias=None,
-                                           group_sizes=gs_l,
-                                           group_offset=go_l,
-                                           topk_argsort_revert_indices=tari_l,
-                                           topk_weights=tw_l,
-                                           activation='silu',
-                                           topk=topk,
-                                           parallelism='ep',
-                                           sc_kernel_threshold=sc_thresh,
-                                           sc_kernel_col_chunk_size=3072,
-                                           sc_psum_num_chunks=4),
-                             mesh=mesh,
-                             in_specs=(P(), P(), P(), P(), P(), P(), P()),
-                             out_specs=P(),
-                             check_vma=False)
+        return jax.shard_map(
+            lambda x_l, w1_l, w2_l, gs_l, go_l, tari_l, tw_l: moe_gmm_local(
+                x=x_l,
+                w1=w1_l,
+                w1_scale=None,
+                w1_bias=None,
+                w2=w2_l,
+                w2_scale=None,
+                w2_bias=None,
+                group_sizes=gs_l,
+                group_offset=go_l,
+                topk_argsort_revert_indices=tari_l,
+                topk_weights=tw_l,
+                activation='silu',
+                topk=topk,
+                parallelism='ep',
+                sc_kernel_threshold=sc_thresh,
+                sc_kernel_col_chunk_size=3072,
+                sc_psum_num_chunks=4,
+            ),
+            mesh=mesh,
+            in_specs=(P(), P(), P(), P(), P(), P(), P()),
+            out_specs=P(),
+            check_vma=False)
 
     print('=== Lowering and Compiling ===')
     base_fn = jax.jit(get_gmm_fn(1000000))
     base_compiled = base_fn.lower(*args).compile()
 
     sc_fn = jax.jit(get_gmm_fn(0))
-    sc_compiled = sc_fn.lower(*args).compile()
+    sc_compiled = sc_fn.lower(*args_wnan).compile()
 
     print('=== Warming up ===')
     out_base = base_compiled(*args)
     out_base.block_until_ready()
-    out_sc = sc_compiled(*args)
+    out_sc = sc_compiled(*args_wnan)
     out_sc.block_until_ready()
 
     # Fixed `dprint` to `print`
     print('\n=== Difference Analysis ===')
+
+    # Check if the unrouting op successfully swallowed the NaNs
+    nan_count_base = jnp.isnan(out_base).sum()
+    nan_count_sc = jnp.isnan(out_sc).sum()
+
+    print(f"NaNs in Base output:       {int(nan_count_base)}")
+    print(f"NaNs in SC output:         {int(nan_count_sc)}")
+
+    if nan_count_sc > 0:
+        print(
+            "\n❌ FAILURE: NaN leakage detected! The unrouting op is not safely masking 0.0 * NaN."
+        )
+    else:
+        print(
+            "\n✅ SUCCESS: No NaNs detected. The unrouting op successfully masked out faulty values."
+        )
+
     # 1. Absolute Differences
     abs_diff = jnp.abs(out_sc - out_base)
     max_abs_diff = jnp.max(abs_diff)

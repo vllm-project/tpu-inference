@@ -84,7 +84,7 @@ def sc_gather_reduce(
     loop_parallel_access_1: bool = True,
     loop_parallel_access_2: bool = False,
     loop_parallel_access_3: bool = False,
-    topk_wgt_zero_nan: bool = False,
+    topk_wgt_zero_nan: bool = True,
 ) -> jax.Array:
     """Performs a gather-reduce operation on SparseCore.
 
@@ -547,49 +547,50 @@ def sc_gather_reduce(
                     ]
 
                 def round_to_bf16(val_f32):
-                    val_i32 = arith.bitcast(_I32[vreg_size], val_f32)
-                    vec_16 = vector.broadcast(_I32[vreg_size],
-                                              const_lut(16, i32))
-                    vec_1 = vector.broadcast(_I32[vreg_size],
-                                             const_lut(1, i32))
-                    vec_7fff = vector.broadcast(_I32[vreg_size],
-                                                const_lut(0x7FFF, i32))
-                    vec_ffff0000 = vector.broadcast(_I32[vreg_size],
-                                                    const_lut(-65536, i32))
+                    return val_f32
+                    # val_i32 = arith.bitcast(_I32[vreg_size], val_f32)
+                    # vec_16 = vector.broadcast(_I32[vreg_size],
+                    #                           const_lut(16, i32))
+                    # vec_1 = vector.broadcast(_I32[vreg_size],
+                    #                          const_lut(1, i32))
+                    # vec_7fff = vector.broadcast(_I32[vreg_size],
+                    #                             const_lut(0x7FFF, i32))
+                    # vec_ffff0000 = vector.broadcast(_I32[vreg_size],
+                    #                                 const_lut(-65536, i32))
 
-                    shifted = arith.shrui(val_i32, vec_16)
-                    lsb = arith.andi(shifted, vec_1)
-                    add_val = arith.addi(vec_7fff, lsb)
-                    val_i32 = arith.addi(val_i32, add_val)
-                    val_i32 = arith.andi(val_i32, vec_ffff0000)
+                    # shifted = arith.shrui(val_i32, vec_16)
+                    # lsb = arith.andi(shifted, vec_1)
+                    # add_val = arith.addi(vec_7fff, lsb)
+                    # val_i32 = arith.addi(val_i32, add_val)
+                    # val_i32 = arith.andi(val_i32, vec_ffff0000)
 
-                    # Preserve NaNness if necessary
-                    vec_7f800000 = vector.broadcast(_I32[vreg_size],
-                                                    const_lut(0x7F800000, i32))
-                    vec_007fffff = vector.broadcast(_I32[vreg_size],
-                                                    const_lut(0x007FFFFF, i32))
-                    vec_0 = vector.broadcast(_I32[vreg_size],
-                                             const_lut(0, i32))
-                    vec_ff800000 = vector.broadcast(
-                        _I32[vreg_size], const_lut(-8388608,
-                                                   i32))  # 0xFF800000
-                    vec_00400000 = vector.broadcast(_I32[vreg_size],
-                                                    const_lut(0x00400000, i32))
+                    # # Preserve NaNness if necessary
+                    # vec_7f800000 = vector.broadcast(_I32[vreg_size],
+                    #                                 const_lut(0x7F800000, i32))
+                    # vec_007fffff = vector.broadcast(_I32[vreg_size],
+                    #                                 const_lut(0x007FFFFF, i32))
+                    # vec_0 = vector.broadcast(_I32[vreg_size],
+                    #                          const_lut(0, i32))
+                    # vec_ff800000 = vector.broadcast(
+                    #     _I32[vreg_size], const_lut(-8388608,
+                    #                                i32))  # 0xFF800000
+                    # vec_00400000 = vector.broadcast(_I32[vreg_size],
+                    #                                 const_lut(0x00400000, i32))
 
-                    u_orig = arith.bitcast(_I32[vreg_size], val_f32)
-                    u_and_7f80 = arith.andi(u_orig, vec_7f800000)
-                    is_nan_or_inf = arith.cmpi(arith.CmpIPredicate.eq,
-                                               u_and_7f80, vec_7f800000)
-                    u_and_007f = arith.andi(u_orig, vec_007fffff)
-                    mantissa_nz = arith.cmpi(arith.CmpIPredicate.ne,
-                                             u_and_007f, vec_0)
-                    is_nan = arith.andi(is_nan_or_inf, mantissa_nz)
+                    # u_orig = arith.bitcast(_I32[vreg_size], val_f32)
+                    # u_and_7f80 = arith.andi(u_orig, vec_7f800000)
+                    # is_nan_or_inf = arith.cmpi(arith.CmpIPredicate.eq,
+                    #                            u_and_7f80, vec_7f800000)
+                    # u_and_007f = arith.andi(u_orig, vec_007fffff)
+                    # mantissa_nz = arith.cmpi(arith.CmpIPredicate.ne,
+                    #                          u_and_007f, vec_0)
+                    # is_nan = arith.andi(is_nan_or_inf, mantissa_nz)
 
-                    nan_val = arith.ori(arith.andi(val_i32, vec_ff800000),
-                                        vec_00400000)
-                    final_v = arith.select(is_nan, nan_val, val_i32)
+                    # nan_val = arith.ori(arith.andi(val_i32, vec_ff800000),
+                    #                     vec_00400000)
+                    # final_v = arith.select(is_nan, nan_val, val_i32)
 
-                    return arith.bitcast(_F32[vreg_size], final_v)
+                    # return arith.bitcast(_F32[vreg_size], final_v)
 
                 # reinterpret cast to correct shape to read from it
                 if not is_bf16:
