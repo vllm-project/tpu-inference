@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import random
 from typing import TYPE_CHECKING, Optional, Tuple, Union
 
 import jax.numpy as jnp
+import numpy
 import torch
 import vllm.envs as vllm_envs
 from vllm.platforms.interface import Platform, PlatformEnum
@@ -369,3 +371,8 @@ class TpuPlatform(Platform):
         on the TPU device(s).
         """
         return torch.device("cpu")
+
+    @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        random.seed(seed)
+        numpy.random.seed(seed)

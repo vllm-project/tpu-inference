@@ -16,7 +16,7 @@ from typing import Tuple
 import jax.numpy as jnp
 import torch
 from jax.sharding import Mesh
-from torchax.interop import jax_view
+from torchax.interop import jax_view, torch_view
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.v1.attention.backend import (AttentionBackend, AttentionLayer,
@@ -32,10 +32,6 @@ from tpu_inference.layers.common.quantization import (
 
 @register_backend(AttentionBackendEnum.FLASH_ATTN_MLA)
 class PallasMLAttentionBackend(AttentionBackend):
-
-    @property
-    def accept_output_buffer(self) -> bool:
-        return True
 
     @staticmethod
     def get_name() -> str:
@@ -112,10 +108,15 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
         """
         pass
 
-    def forward(self, q: torch.Tensor, kv_c_normed: torch.Tensor,
-                k_pe: torch.Tensor, kv_cache: jnp.ndarray,
-                attn_metadata: AttentionMetadata, mesh: Mesh,
+    def forward(self,
+                q: torch.Tensor,
+                kv_c_normed: torch.Tensor,
+                k_pe: torch.Tensor,
+                kv_cache: jnp.ndarray,
+                attn_metadata: AttentionMetadata,
+                mesh: Mesh,
                 layer: MLAAttention,
+                output: torch.Tensor | None = None,
                 **kwargs) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """
         Runs the fundamental MLA forward pass.
@@ -132,9 +133,10 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             attn_metadata: AttentionMetadata
             mesh: Mesh
             layer: MLAAttention instance
+            output: torch.Tensor
 
         Returns:
-            Tuple[jnp.ndarray, jnp.ndarray]: (outputs, new_kv_cache)
+            Tuple[jnp.ndarray, jnp.ndarray]: (new_kv_cache, outputs)
         """
 
         q = jax_view(q)
@@ -201,4 +203,7 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
                    jax_view(layer.W_UV_scale)).astype(input_dtype)
         outputs = outputs.reshape(-1, self.num_heads * self.v_head_dim)
 
-        return outputs, new_kv_cache
+        out_torch = torch_view(outputs)
+        if output is not None:
+            output.copy_(out_torch)
+        return out_torch, new_kv_cache
