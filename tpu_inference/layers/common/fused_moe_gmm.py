@@ -191,7 +191,7 @@ def moe_gmm_local(
                                group_offset,
                                preferred_element_type=x.dtype)
 
-        if parallelism == "ep":
+        if local_group_size < group_sizes.size:
             group_offsets = jnp.cumulative_sum(group_sizes,
                                                include_initial=True)
             experts_start = group_offset[0]
