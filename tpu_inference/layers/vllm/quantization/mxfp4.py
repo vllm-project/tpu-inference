@@ -31,7 +31,8 @@ from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
-from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
+from vllm.model_executor.layers.quantization.mxfp4 import (GptOssMxfp4Config,
+                                                           Mxfp4Config)
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
@@ -39,7 +40,7 @@ from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_moe_weights, quantize_moe_weights,
     shard_moe_weights)
-from tpu_inference.layers.common.quant_methods import MXFP4
+from tpu_inference.layers.common.quant_methods import GPT_OSS_MXFP4, MXFP4
 from tpu_inference.layers.common.quantization import \
     dequantize_tensor_from_mxfp4_packed
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -68,6 +69,37 @@ class VllmMxfp4Config(Mxfp4Config, VllmQuantConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
 
+        if isinstance(layer, LinearBase):
+            linear_config = self.get_linear_config(layer)
+            if self.ignored_layers and is_layer_skipped(
+                    prefix=prefix,
+                    ignored_layers=self.ignored_layers,
+                    fused_mapping=self.packed_modules_mapping,
+            ):
+                return VllmUnquantizedLinearMethod(linear_config)
+            logger.warning_once(
+                "MXFP4 linear layer is not implemented - falling back to "
+                "UnquantizedLinearMethod.")
+            return VllmUnquantizedLinearMethod(linear_config)
+        elif isinstance(layer, FusedMoE):
+            moe_config = self.get_moe_config(layer)
+            return VllmMxfp4MoEMethod(moe_config, self.mesh)
+        elif isinstance(layer, Attention):
+            logger.warning_once("MXFP4 attention layer is not implemented. "
+                                "Skipping quantization for this layer.")
+        return None
+
+
+@register_quantization_config(GPT_OSS_MXFP4)
+class VllmGptOssMxfp4Config(GptOssMxfp4Config, VllmQuantConfig):
+
+    @classmethod
+    def get_name(cls):
+        return GPT_OSS_MXFP4
+
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["QuantizeMethodBase"]:
+        # Reuse the same logic as VllmMxfp4Config
         if isinstance(layer, LinearBase):
             linear_config = self.get_linear_config(layer)
             if self.ignored_layers and is_layer_skipped(
