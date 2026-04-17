@@ -212,7 +212,9 @@ class Qwen2_5_VisionAttention(nnx.Module):
         self.hidden_size = vision_config.hidden_size
         self.num_heads = vision_config.num_heads
         self.num_kv_heads = self.num_heads
-        self.rope_theta = config.rope_theta
+        rope_parameters = getattr(config, "rope_parameters", {})
+        self.rope_theta = rope_parameters.get(
+            "rope_theta", getattr(config, "rope_theta", 1000000.0))
         self.rope_scaling = getattr(config, "rope_scaling", None)
         self.head_dim_original = self.hidden_size // self.num_heads
 

@@ -582,3 +582,31 @@ def test_unaligned_block_quantization(model, input_size, output_size):
     initialize_layer_weights(linear_layer)
     ref_output, layer_output = return_ref_and_layer_output(linear_layer)
     torch.testing.assert_close(ref_output, layer_output)
+
+
+
+def test_fp8_init():
+    """Verify that vLLM patches are working for __init__ post vLLM PR: https://github.com/vllm-project/vllm/pull/32929."""
+    mesh = test_utils.get_spmd_mesh(1)
+    engine_args = EngineArgs(model=MODELS[0])
+    vllm_config = engine_args.create_engine_config()
+    vllm_config.model_config.dtype = torch.bfloat16
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+
+    # VllmQuantLinearConfig requires a layer to initialize.
+    with set_current_vllm_config(vllm_config):
+        dummy_layer = RowParallelLinear(
+            input_size=128,
+            output_size=128,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=quant_config,
+        )
+    linear_config = VllmQuantLinearConfig(vllm_config, mesh, dummy_layer)
+
+    with set_current_vllm_config(vllm_config):
+        method = VllmFp8LinearMethod(quant_config, linear_config)
+
+    assert not hasattr(method, 'fp8_linear'), \
+        "fp8_linear should not be set during __init__ (set in create_weights)"
+    assert method.use_marlin is True, "use_marlin is set to True (previous status quo)"

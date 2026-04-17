@@ -77,11 +77,15 @@ class GptOss(nnx.Module):
         rms_norm_eps: float = self.hf_config.rms_norm_eps
         swiglu_limit: float = self.hf_config.swiglu_limit
 
-        rope_theta: float = self.hf_config.rope_theta
-        rope_scaling_factor: float = self.hf_config.rope_scaling["factor"]
-        rope_ntk_alpha: float = self.hf_config.rope_scaling["beta_slow"]
-        rope_ntk_beta: float = self.hf_config.rope_scaling["beta_fast"]
-        initial_context_length: int = self.hf_config.rope_scaling[
+        rope_parameters = getattr(self.hf_config, "rope_parameters", {})
+        rope_theta: float = rope_parameters.get(
+            "rope_theta", getattr(self.hf_config, "rope_theta", 10000.0))
+        rope_scaling = getattr(self.hf_config, "rope_scaling",
+                               None) or rope_parameters
+        rope_scaling_factor: float = rope_scaling["factor"]
+        rope_ntk_alpha: float = rope_scaling["beta_slow"]
+        rope_ntk_beta: float = rope_scaling["beta_fast"]
+        initial_context_length: int = rope_scaling[
             "original_max_position_embeddings"]
 
         dtype: jnp.dtype = jnp.bfloat16

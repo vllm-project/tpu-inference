@@ -112,7 +112,9 @@ class Qwen2Attention(JaxModule):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
-        self.rope_theta = config.rope_theta
+        rope_parameters = getattr(config, "rope_parameters", {})
+        self.rope_theta = rope_parameters.get(
+            "rope_theta", getattr(config, "rope_theta", 1000000.0))
         self.rope_scaling = getattr(config, "rope_scaling", None)
 
         self.head_dim_original = getattr(config, "head_dim",
