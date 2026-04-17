@@ -147,7 +147,7 @@ class VllmMLAAttention(MLAAttention):
         if outputs is not output and output is not None:
             output.copy_(outputs)
 
-        return outputs
+        return torch_view(outputs)
 
 
 @MultiHeadLatentAttentionWrapper.register_oot
