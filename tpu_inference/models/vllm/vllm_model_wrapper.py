@@ -407,22 +407,11 @@ class VllmModelWrapper:
             # Pop it so it doesn't go through the 'move' loop if we want to handle it specially
             image_grid_thw = kwargs.pop("image_grid_thw", None)
 
-            def move(v: Any) -> Any:
-                import numpy as np
-                if isinstance(v, np.ndarray):
-                    if str(v.dtype) == "bfloat16":
-                        v = torch.from_numpy(v.view(np.int16)).view(torch.bfloat16)
-                    else:
-                        v = torch.from_numpy(v)
-                elif not isinstance(v, torch.Tensor) and type(v) not in (int, float, bool, str, list, tuple, dict):
-                    try:
-                        v = torch_view(v)
-                    except Exception:
-                        pass
-                
-                if isinstance(v, torch.Tensor):
-                    return v.to(device="jax")
-                return v
+            def move(v: torch.Tensor) -> torch.Tensor:
+                if not isinstance(v, torch.Tensor):
+                    logger.warning(f"Expect torch.Tensor, got {type(v)}")
+                    return v
+                return v.to(device="jax")
 
             with torchax.default_env():
                 # Ensure all tensors are moved into accelerator so the
