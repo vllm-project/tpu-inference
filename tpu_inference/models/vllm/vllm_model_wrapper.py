@@ -28,6 +28,7 @@ import vllm.envs as vllm_envs
 from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
+from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import maybe_wrap_mm_embed_to_list
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
@@ -404,7 +405,7 @@ class VllmModelWrapper:
             params_and_buffers: Any,
             **kwargs,
         ) -> Any:
-            # Pop it so it doesn't go through the 'move' loop as we want to handle it specially
+            # Pop it so it doesn't go through the 'move' loop if we want to handle it specially
             image_grid_thw = kwargs.pop("image_grid_thw", None)
 
             def move(v: torch.Tensor) -> torch.Tensor:
@@ -421,7 +422,7 @@ class VllmModelWrapper:
                     for k, v in kwargs.items()
                 }
                 
-                # image_grid_thw is passed as a Python list and cannot be converted via `move` method as it uses `jax.tree.map(move, v)` which will not work for a list.
+                # Always pass it if it was present, assuming the model supports it or ignores it via **kwargs
                 if image_grid_thw is not None:
                     call_kwargs["image_grid_thw"] = torch.tensor(
                         image_grid_thw, dtype=torch.long).to(device="jax")
@@ -454,6 +455,9 @@ class VllmModelWrapper:
             is_multimodal: jax.Array | None = None,
         ) -> jax.Array:
             with torchax.default_env():
+                
+                # Truncate mm_embeds to match the number of expected multimodal tokens.
+                # This handles cases where mm_embeds may contain trailing padding.
                 if mm_embeds is not None and is_multimodal is not None:
                     if not isinstance(mm_embeds, list):
                         num_expected = int(is_multimodal.sum())
@@ -466,8 +470,8 @@ class VllmModelWrapper:
                     else:
                         torch_mm_embeds = torch_view(mm_embeds)
                     
-                    if type(self.model.vllm_model).__name__ == "Qwen3VLForConditionalGeneration" and not isinstance(torch_mm_embeds, list):
-                        torch_mm_embeds = [torch_mm_embeds]
+                    # Qwen3-VL expects a list of tensors for multimodal embeddings.
+                    torch_mm_embeds = maybe_wrap_mm_embed_to_list(self.model.vllm_model, torch_mm_embeds)
                                 
                     call_args = (torch_view(input_ids), torch_mm_embeds)
                 else:
