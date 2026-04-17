@@ -33,4 +33,5 @@ bash "${NIGHTLY_SCRIPT}" \
   --moe-requantize-weight-dtype "fp4" \
   --model-impl-type "flax_nnx" \
   --use-unfused-megablocks "0" \
-  --hf-config "deepseek-ai/DeepSeek-R1"
+  --hf-config "deepseek-ai/DeepSeek-R1" \
+  --moe-all-gather-activation-dtype "fp8"
