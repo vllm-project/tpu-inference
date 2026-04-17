@@ -359,6 +359,7 @@ def expert_parallel_gmm(
 
 def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
                           dtype: jnp.dtype) -> jax.Array:
+    logger.info("Apply FP8 all-gather on input of MOE")
     hidden_states_q, scale = quantize_tensor(
         jnp.float8_e4m3fn,
         hidden_states,
