@@ -34,6 +34,13 @@ The python script takes the following arguments:
 - **--type**: [OPTIONAL] Specify the model type. Defaults to a `tpu-optimized` model.
   - `tpu-optimized`: A model with specific optimizations for TPU. Includes unit tests, accuracy tests, and performance benchmark tests.
   - `vllm-native`: A model using the upstream vLLM definition. Includes unit tests and accuracy tests. These models will not go through performance benchmarks on our pipeline.
+- **--host-scale**: [OPTIONAL] Specify the host scale for running tests. Options: "single" or "multi". (default: "single")
+  - `single`: Runs tests on a single TPU host.
+    - For **v6e**: uses `tpu_v6e_queue` (v6e-1).
+    - For **v7x**: uses `tpu_v7x_2_queue` (v7x-2).
+  - `multi`: Runs tests on multiple TPU hosts.
+    - For **v6e**: uses `tpu_v6e_8_queue` (v6e-8 slice).
+    - For **v7x**: uses `tpu_v7x_8_queue` (v7x-8 slice).
 
 ```bash
 # For a TPU-optimized model (default type, includes performance benchmarks)
@@ -41,6 +48,9 @@ python .buildkite/pipeline_generation/add_model_to_ci.py --model-name <MODEL_NAM
 
 # For a vLLM-native model (no performance benchmarks)
 python .buildkite/pipeline_generation/add_model_to_ci.py --model-name <MODEL_NAME> --category <CATEGORY> --type vllm-native
+
+# For a multi-host model test
+python .buildkite/pipeline_generation/add_model_to_ci.py --model-name <MODEL_NAME> --host-scale multi
 ```
 
 In the generated yml file, there are three TODOs that will need your input:
