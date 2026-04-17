@@ -16,7 +16,6 @@ from typing import Dict
 
 import jax
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
-from vllm.utils.func_utils import supports_kw
 
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
