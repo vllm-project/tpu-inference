@@ -40,12 +40,12 @@ steps:
   # -----------------------------------------------------------------
   # Build Step (required by all demo steps below)
   # -----------------------------------------------------------------
-  - label: ":docker: Build and Push Base Image (tpu7x)"
-    key: tpu7x_build_docker
+  - label: ":docker: Build and Push Base Image (tpu6e)"
+    key: tpu6e_build_docker
     agents:
-      queue: cpu_64_core
+      queue: tpu_v6e_queue
     env:
-      TPU_VERSION: "tpu7x"
+      TPU_VERSION: "tpu6e"
     commands:
       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
@@ -53,12 +53,12 @@ steps:
   # -----------------------------------------------------------------
   - label: ":docker: Generate Kernel Tuning Cases and YML"
     key: generate_tuning_cases_and_yml
-    depends_on: tpu7x_build_docker
+    depends_on: tpu6e_build_docker
     env:
       USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu7x"
+      TPU_VERSION: "tpu6e"
     agents:
-      queue: cpu_64_core
+      queue: tpu_v6e_queue
     commands:
       - |
         # Run offline inference with a small model.
@@ -67,4 +67,7 @@ steps:
         .buildkite/scripts/run_in_docker.sh bash -c '
           export DYNAMIC_YAML="generated_gmm_tests.yml" && 
           python3 tools/kernel/tuner/v1/gmm_cases_generator.py --output-path="$$DYNAMIC_YAML"'
+      - |
+        # Upload the generated YAML as a Buildkite artifact for the next step to consume.
+        # buildkite-agent artifact upload "$$DYNAMIC_YAML"
     artifact_paths: "$$DYNAMIC_YAML"
