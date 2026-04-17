@@ -383,7 +383,6 @@ class CompilationManager:
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
-
         dtype = self.runner.model_config.dtype
         for num_tokens in self.runner.num_tokens_paddings:
             sharding = NamedSharding(

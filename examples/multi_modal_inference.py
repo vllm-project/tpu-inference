@@ -264,8 +264,6 @@ def main(args):
 
     # NOTE: Currently, only Qwen2.5-VL and Qwen3-VL is supported. If later we want to support a model with new chat template, we may need to change this
     model_key = args.model
-
-        
     req_data = get_model_runner(model_key)(questions, modality, args)
 
     # Disable other modalities to save memory
