@@ -404,7 +404,7 @@ class VllmModelWrapper:
             params_and_buffers: Any,
             **kwargs,
         ) -> Any:
-            # Pop it so it doesn't go through the 'move' loop if we want to handle it specially
+            # Pop it so it doesn't go through the 'move' loop as we want to handle it specially
             image_grid_thw = kwargs.pop("image_grid_thw", None)
 
             def move(v: torch.Tensor) -> torch.Tensor:
@@ -421,7 +421,7 @@ class VllmModelWrapper:
                     for k, v in kwargs.items()
                 }
                 
-                # Always pass it if it was present, assuming the model supports it or ignores it via **kwargs
+                # image_grid_thw is passed as a Python list and cannot be converted via `move` method as it uses `jax.tree.map(move, v)` which will not work for a list.
                 if image_grid_thw is not None:
                     call_kwargs["image_grid_thw"] = torch.tensor(
                         image_grid_thw, dtype=torch.long).to(device="jax")
