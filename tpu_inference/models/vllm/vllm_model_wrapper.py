@@ -404,8 +404,6 @@ class VllmModelWrapper:
             params_and_buffers: Any,
             **kwargs,
         ) -> Any:
-            # Pop it so it doesn't go through the 'move' loop as we want to handle it specially
-            image_grid_thw = kwargs.pop("image_grid_thw", None)
 
             def move(v: torch.Tensor) -> torch.Tensor:
                 if not isinstance(v, torch.Tensor):
@@ -420,12 +418,6 @@ class VllmModelWrapper:
                     k: jax.tree.map(move, v)
                     for k, v in kwargs.items()
                 }
-                
-                # image_grid_thw is passed as a Python list and cannot be converted via `move` method as it uses `jax.tree.map(move, v)` which will not work for a list.
-                if image_grid_thw is not None:
-                    call_kwargs["image_grid_thw"] = torch.tensor(
-                        image_grid_thw, dtype=torch.long).to(device="jax")
-
                 output_from_torch = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
@@ -454,21 +446,11 @@ class VllmModelWrapper:
             is_multimodal: jax.Array | None = None,
         ) -> jax.Array:
             with torchax.default_env():
-                if mm_embeds is not None and is_multimodal is not None:
-                    if not isinstance(mm_embeds, list):
-                        num_expected = int(is_multimodal.sum())
-                        if mm_embeds.shape[0] > num_expected:
-                            mm_embeds = mm_embeds[:num_expected]
-
                 if mm_embeds is not None:
                     if isinstance(mm_embeds, list):
                         torch_mm_embeds = [torch_view(x) for x in mm_embeds]
                     else:
                         torch_mm_embeds = torch_view(mm_embeds)
-                    
-                    if type(self.model.vllm_model).__name__ == "Qwen3VLForConditionalGeneration" and not isinstance(torch_mm_embeds, list):
-                        torch_mm_embeds = [torch_mm_embeds]
-                                
                     call_args = (torch_view(input_ids), torch_mm_embeds)
                 else:
                     call_args = (torch_view(input_ids), )
