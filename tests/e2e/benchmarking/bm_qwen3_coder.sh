@@ -120,12 +120,7 @@ if [ -z "$model" ] || [ -z "$tp" ] || [ -z "$req_tput_limit" ] || [ -z "$output_
   exit 1
 fi
 
-if [ ! -e ./bench_serving ]; then
-  echo "git clone bench_serving"
-  git clone https://github.com/kimbochen/bench_serving.git
-else
-  echo "bench_serving exists. Skip git cloning the repo."
-fi
+
 
 DEFAULT_HOST=127.0.0.1
 DEFAULT_PORT=8000
@@ -136,7 +131,7 @@ start_time=$(date +%s)
 export USE_MOE_EP_KERNEL=${use_moe_ep_kernel}
 export MODEL_IMPL_TYPE=vllm
 
-echo "bench_serving commit: $(git -C bench_serving rev-parse HEAD)"
+
 
 EXTRA_VLLM_ARGS=()
 if [ -n "$limit_mm_per_prompt" ]; then EXTRA_VLLM_ARGS+=("--limit-mm-per-prompt" "$limit_mm_per_prompt"); fi
@@ -206,7 +201,7 @@ check_metrics() {
 echo "----------------------------------------------------------------"
 echo "Running benchmark with input_len=$input_len and output_len=$output_len num_prompts=$num_prompts"
 echo "----------------------------------------------------------------"
-benchmark_output=$(python3 bench_serving/benchmark_serving.py \
+benchmark_output=$(python3 scripts/bench_serving/benchmark_serving.py \
   --model="$model" \
   --backend=vllm \
   --host="$DEFAULT_HOST" \
