@@ -40,6 +40,8 @@ from tests.layers.common import utils as test_utils
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
+from tpu_inference.layers.vllm.quantization.configs import \
+    VllmQuantLinearConfig
 from tpu_inference.layers.vllm.quantization.fp8 import (VllmFp8Config,
                                                         VllmFp8LinearMethod,
                                                         VllmFp8MoEMethod)
@@ -582,7 +584,6 @@ def test_unaligned_block_quantization(model, input_size, output_size):
     initialize_layer_weights(linear_layer)
     ref_output, layer_output = return_ref_and_layer_output(linear_layer)
     torch.testing.assert_close(ref_output, layer_output)
-
 
 
 def test_fp8_init():
