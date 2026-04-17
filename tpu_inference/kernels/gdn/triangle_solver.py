@@ -54,7 +54,7 @@ def newton_schulz_inverse_ref(A, n=None):
     S = 2 * eye - A
     k = 1
     while k < n:
-        precision = jax.lax.Precision.HIGHEST if k >= n / 2 else None
+        precision = jax.lax.Precision.HIGHEST
         k *= 2
         I_plus_error = 2 * eye - jnp.matmul(A, S, precision=precision)
         S = jnp.matmul(S, I_plus_error, precision=precision)
@@ -201,16 +201,19 @@ class TriangleSolverImpl(str, enum.Enum):
     GAUSSIAN = "gaussian"
     NEWTON_SCHULZ = "newton_schulz"
 
-    #TODO: Choose based on Chunk size and vmem constraints. Newton-schulz OOMs for chunk size 128, use Gaussian elimination based solver instead.
+    #TODO: Choose based on Chunk size and vmem constraints. Newton-schulz is unsatable, it needs S to be nilpotent to converge and also with small values to avoid NaNs
     def __call__(self, A):
         if self == TriangleSolverImpl.GAUSSIAN:
             return decompose_triangular_matrix_inverse_pallas(A,
                                                               n_block_size=min(
-                                                                  32,
+                                                                  64,
                                                                   A.shape[-1]))
         elif self == TriangleSolverImpl.NEWTON_SCHULZ:
             return newton_schulz_inverse_pallas(A)
         else:
             print(f"Unknown solver: {self.value} Using default solver."
-                  f" {TriangleSolverImpl.NEWTON_SCHULZ.value}")
-            return newton_schulz_inverse_pallas(A)
+                  f" {TriangleSolverImpl.GAUSSIAN.value}")
+            return decompose_triangular_matrix_inverse_pallas(A,
+                                                              n_block_size=min(
+                                                                  64,
+                                                                  A.shape[-1]))

@@ -204,9 +204,8 @@ def ragged_gated_delta_rule_mixed_prefill(
     compute_dtype: jnp.dtype = jnp.bfloat16,
     precision: jax.lax.Precision = jax.lax.Precision.HIGHEST,
     preferred_element_type: jnp.dtype = jnp.float32,
-    # chunk size 128 will hit VMEM oom, use Gaussian elimination based solver instead.
     triangle_solver_impl: triangle_solver.TriangleSolverImpl = triangle_solver.
-    TriangleSolverImpl.NEWTON_SCHULZ,
+    TriangleSolverImpl.GAUSSIAN,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Applies chunked gated delta rule for mixed prefill case.
 
