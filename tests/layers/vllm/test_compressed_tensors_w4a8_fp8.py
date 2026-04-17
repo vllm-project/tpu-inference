@@ -62,7 +62,7 @@ def ref_w4a8_fp8_dynamic(x: torch.Tensor, w_float: torch.Tensor,
 
     x_q, x_s = test_utils.ref_quantize_fp8(x, dtype=torch.float8_e4m3fn)
 
-    out = torch.einsum('bd,fd->bf', x_q.to(torch.float32), w_float)
+    out = torch.einsum('bd,fd->bf', x_q.to(torch.bfloat16), w_float)
     out = out * x_s
 
     if b is not None:
