@@ -957,17 +957,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                         num_reqs = self.input_batch.num_reqs
 
                         # 1. Compute global slot mapping for the entire batch of tokens
-                        all_slot_mappings = []
-                        for i, req_id in enumerate(
-                                self.input_batch.req_ids[:num_reqs]):
-                            num_tokens = scheduler_output.num_scheduled_tokens[
-                                req_id]
-                            slot_mapping = self._get_slot_mapping(
-                                req_id, num_tokens)
-                            all_slot_mappings.append(slot_mapping)
-                        global_slot_mapping = np.concatenate(all_slot_mappings)
+                        num_scheduled_tokens_per_req = [
+                            scheduler_output.num_scheduled_tokens[req_id]
+                            for req_id in self.input_batch.req_ids[:num_reqs]
+                        ]
+                        num_scheduled_tokens_per_req = np.array(
+                            num_scheduled_tokens_per_req, dtype=np.int32)
+                        offsets = np.cumsum(
+                            np.insert(num_scheduled_tokens_per_req, 0, 0))
 
-                        # 2. Write to shared memory in one shot per layer
                         from vllm.model_executor.layers.fused_moe.routed_experts_capturer import \
                             _file_lock
 
@@ -976,11 +974,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                 experts_cpu = np.asarray(
                                     jax.device_get(experts))
 
-                                with _file_lock(
-                                        self.experts_capturer._lock_file):
-                                    self.experts_capturer._host_buffer_view[
-                                        global_slot_mapping,
-                                        layer_idx, :] = experts_cpu
+                                for i, req_id in enumerate(
+                                        self.input_batch.req_ids[:num_reqs]):
+                                    num_tokens = num_scheduled_tokens_per_req[
+                                        i]
+                                    start_token_idx = offsets[i]
+                                    end_token_idx = offsets[i + 1]
+
+                                    req_experts = experts_cpu[
+                                        start_token_idx:end_token_idx]
+
+                                    slot_mapping = self._get_slot_mapping(
+                                        req_id, num_tokens)
+
+                                    with _file_lock(
+                                            self.experts_capturer._lock_file):
+                                        self.experts_capturer._host_buffer_view[
+                                            slot_mapping,
+                                            layer_idx, :] = req_experts
                 except Exception as e:
                     logger.warning(f"Failed to extract captured experts: {e}")
 
