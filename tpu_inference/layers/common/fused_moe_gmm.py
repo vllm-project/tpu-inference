@@ -21,9 +21,10 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.envs as envs
-from tpu_inference.kernels.gather import gather_reduce as gather_reduce_sc
-from tpu_inference.kernels.gather.ragged_gather import ragged_gather
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
+from tpu_inference.kernels.sparse_core import gather_reduce as gather_reduce_sc
+from tpu_inference.kernels.sparse_core.ragged_gather import ragged_gather
+from tpu_inference.kernels.sparse_core.ragged_scatter import ragged_scatter
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
 
@@ -190,8 +191,21 @@ def moe_gmm_local(
                                group_offset,
                                preferred_element_type=x.dtype)
 
+        if parallelism == "ep":
+            group_offsets = jnp.cumulative_sum(group_sizes,
+                                               include_initial=True)
+            experts_start = group_offset[0]
+            experts_end = group_offset[0] + local_group_size
+            shard_output_start = group_offsets[experts_start]
+            shard_output_end = group_offsets[experts_end]
+            token_hidden = ragged_scatter(gmm2_res,
+                                          topk_argsort_revert_indices,
+                                          shard_output_start, shard_output_end)
+        else:
+            token_hidden = gmm2_res[topk_argsort_revert_indices]
+
         # First run local reduction on topk experts owned by the rank for all tokens
-        token_topk_hidden = gmm2_res[topk_argsort_revert_indices].reshape(
+        token_topk_hidden = token_hidden.reshape(
             (-1, topk, gmm2_res.shape[-1]))
         token_topk_hidden = token_topk_hidden * jnp.expand_dims(topk_weights,
                                                                 axis=-1)
