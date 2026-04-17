@@ -189,6 +189,96 @@ class TestTPUJaxRunner:
         self.runner.kv_cache_config = mock_kv_cache_config
         self.runner.use_hybrid_kvcache = True
 
+    @patch(
+        'vllm.model_executor.layers.fused_moe.routed_experts_capturer.RoutedExpertsCapturer'
+    )
+    def test_execute_model_moe_experts(self, mock_capturer_class):
+        """Test that _execute_model correctly stores experts in the shared buffer."""
+        # 1. ===== Setup =====
+        mock_capturer = MagicMock()
+        mock_capturer_class.get_instance.return_value = mock_capturer
+        self.runner.experts_capturer = mock_capturer
+
+        max_tokens = 10
+        num_layers = 2
+        top_k = 1
+        dummy_buffer = np.zeros((max_tokens, num_layers, top_k),
+                                dtype=np.int32)
+        mock_capturer._host_buffer_view = dummy_buffer
+        mock_capturer._lock_file = "dummy.lock"
+
+        dummy_experts_layer0 = jnp.array([[72], [73]], dtype=jnp.int32)
+        dummy_experts_layer1 = jnp.array([[82], [83]], dtype=jnp.int32)
+
+        self.runner.model_fn = MagicMock()
+        self.runner.model_fn.return_value = (
+            MagicMock(),  # kv_caches
+            MagicMock(),  # hidden_states
+            MagicMock(),  # aux_hidden_states
+            [dummy_experts_layer0, dummy_experts_layer1]  # all_experts
+        )
+
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.num_reqs = 1
+        self.runner.input_batch.req_ids = ['req1']
+        self.runner.input_batch.num_computed_tokens_cpu = np.array([0])
+        self.runner.input_batch.token_ids_cpu = np.zeros((8, 64),
+                                                         dtype=np.int32)
+        self.runner.input_batch.max_num_logprobs = 0
+        self.runner.input_batch.request_distribution = []
+        self.runner.get_mrope_input_positions_fn = None
+        self.runner.state = MagicMock()
+
+        mock_kv_cache_config = MagicMock()
+        mock_kv_cache_config.kv_cache_groups = [MagicMock()]
+        self.runner.kv_cache_config = mock_kv_cache_config
+
+        self.runner._prepare_inputs_non_dp = MagicMock(return_value=(
+            jnp.zeros((2, ), dtype=jnp.int32),  # input_ids
+            jnp.zeros((2, ), dtype=jnp.int32),  # positions
+            {},  # attention_metadata
+            MagicMock(),  # sampling_metadata
+            jnp.zeros((2, ), dtype=jnp.int32),  # logits_indices
+            None,  # spec_decode_metadata
+            None,  # logits_indices_selector
+            1,  # padded_num_reqs
+        ))
+
+        self.runner._select_from_array_fn = MagicMock(
+            side_effect=lambda x, *args, **kwargs: x)
+        self.runner.compute_logits_fn = MagicMock(
+            return_value=jnp.zeros((2, 1000), dtype=jnp.float32))
+        self.runner.pooler_fn = MagicMock()
+        self.runner.combine_hidden_states_fn = MagicMock()
+        self.runner.lora_manager = None
+        self.runner.model = None
+
+        scheduler_output = MagicMock()
+        scheduler_output.total_num_scheduled_tokens = 2
+        scheduler_output.num_scheduled_tokens = {'req1': 2}
+
+        dummy_slots = np.array([2, 5], dtype=np.int32)
+        self.runner._get_slot_mapping = MagicMock(return_value=dummy_slots)
+
+        # 2. ===== Act =====
+        with patch(
+                'vllm.model_executor.layers.fused_moe.routed_experts_capturer._file_lock',
+                return_value=MagicMock()):
+            self.runner._execute_model(scheduler_output)
+
+        # 3. ===== Assert =====
+        # The buffer dimensions are (Token_Slot, Layer, Expert_Rank)
+        # We mocked _get_slot_mapping to return [2, 5] for the 2 tokens in the batch.
+
+        # Token at slot 2, Layer 0, Top-1 expert is 72
+        assert dummy_buffer[2, 0, 0] == 72
+        # Token at slot 5, Layer 0, Top-1 expert is 73
+        assert dummy_buffer[5, 0, 0] == 73
+        # Token at slot 2, Layer 1, Top-1 expert is 82
+        assert dummy_buffer[2, 1, 0] == 82
+        # Token at slot 5, Layer 1, Top-1 expert is 83
+        assert dummy_buffer[5, 1, 0] == 83
+
 
 class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
 
