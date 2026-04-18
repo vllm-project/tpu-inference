@@ -33,7 +33,7 @@ steps:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu7x"
     agents:
-      queue: tpu_v7x_8_queue
+      queue: tpu_v7x_2_queue
     matrix:
       - "1"
       - "2"
