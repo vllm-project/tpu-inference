@@ -12,9 +12,8 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
-# Configure logging to show info-level messages
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 logger = logging.getLogger(__name__)
@@ -225,6 +224,20 @@ async def _handle_completions(api: str, request: Request):
         kv_transfer_params = response_json.get('kv_transfer_params', {})
         if kv_transfer_params:
             req_data["kv_transfer_params"] = kv_transfer_params
+            rb = kv_transfer_params.get("remote_block_ids", [])
+            per_group = ([len(g) for g in rb]
+                         if rb and isinstance(rb[0], list) else len(rb))
+            logger.info(
+                f"wyzhangd PROXY recv-from-P | req={request_id} | "
+                f"uuid={kv_transfer_params.get('uuid')} | "
+                f"per_group_blocks={per_group} | "
+                f"remote_block_ids={rb} | "
+                f"kv_addr={kv_transfer_params.get('remote_host')}:"
+                f"{kv_transfer_params.get('remote_port')}")
+        else:
+            logger.info(
+                f"wyzhangd PROXY recv-from-P | req={request_id} | "
+                f"NO kv_transfer_params (prefill returned no transfer)")
 
         # Get the next decode client in round-robin fashion
         decode_client_info = get_next_client(request.app, 'decode')
@@ -234,6 +247,12 @@ async def _handle_completions(api: str, request: Request):
             f"and decode client {decode_client_info['id']}")
         logger.info(f"[{request_id}] Sending decode request to "
                     f"client {decode_client_info['id']}")
+        ktp = req_data.get("kv_transfer_params") or {}
+        logger.info(
+            f"wyzhangd PROXY send-to-D | req={request_id} | "
+            f"uuid={ktp.get('uuid')} | "
+            f"remote_block_ids={ktp.get('remote_block_ids')} | "
+            f"decode_client={decode_client_info['id']}")
         logger.debug(f"[{request_id}] Decode request body: {req_data}")
 
         # Stream response from decode service

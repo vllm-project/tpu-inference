@@ -102,19 +102,26 @@ ReqId = str
 
 logger = init_logger(__name__)
 
+# Per-kv-cache-group block IDs. Used by HMA connector
+BlockIdsPerGroup = list[list[int]]
+
 
 @dataclass
 class SendMeta:
     uuid: int
-    local_block_ids: list[int]
+    # `list[int]` used for non-HMA connector
+    # `BlockIdsPerGroup` used for HMA connector
+    local_block_ids: list[int] | BlockIdsPerGroup
     expiration_time: float
 
 
 @dataclass
 class LoadMeta:
     uuid: int
-    local_block_ids: list[int]
-    remote_block_ids: list[int]
+    # `list[int]`         used for non-HMA connector.
+    # `BlockIdsPerGroup`  used for HMA connector.
+    local_block_ids: list[int] | BlockIdsPerGroup | None
+    remote_block_ids: list[int] | BlockIdsPerGroup | None
     remote_host: str | list[str]
     remote_port: int | list[int]
 
