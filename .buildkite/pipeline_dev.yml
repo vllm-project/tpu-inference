@@ -66,8 +66,8 @@ steps:
         # --tensor-parallel-size 2: tp=1 is currently unsupported on tpu7x.
         # Customize --model, --max-model-len, --max-tokens as needed.
         .buildkite/scripts/run_in_docker.sh bash -c "
-          python3 tools/kernel/tuner/v1/generate_cases_and_yml.py --output-path=generated_tuning_cases.yml"
+          python3 tools/kernel/tuner/v1/generate_cases_and_yml.py --output-path=/workspace/tpu_inference/generated_tuning_cases.yml"
       - |
         # Upload the generated YAML as a Buildkite artifact for the next step to consume.
-        buildkite-agent artifact upload "generated_tuning_cases.yml"
-    artifact_paths: "generated_tuning_cases.yml"
+        buildkite-agent artifact upload "/workspace/tpu_inference/generated_tuning_cases.yml"
+    artifact_paths: "/workspace/tpu_inference/generated_tuning_cases.yml"
