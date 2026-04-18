@@ -57,6 +57,8 @@ steps:
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu6e"
+      # Define it here so it's available to ALL commands below
+      DYNAMIC_YAML: "generated_gmm_tests.yml"
     agents:
       queue: tpu_v6e_queue
     commands:
@@ -65,7 +67,6 @@ steps:
         # --tensor-parallel-size 2: tp=1 is currently unsupported on tpu7x.
         # Customize --model, --max-model-len, --max-tokens as needed.
         .buildkite/scripts/run_in_docker.sh bash -c '
-          export DYNAMIC_YAML="./generated_gmm_tests.yml" && 
           python3 tools/kernel/tuner/v1/generate_cases_and_yml.py --output-path="$$DYNAMIC_YAML"'
       - |
         # Upload the generated YAML as a Buildkite artifact for the next step to consume.
