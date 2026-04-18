@@ -139,6 +139,8 @@ class CompilationManager:
                 sharding=sharding)
             dummy_input_ids = self._create_dummy_tensor(
                 (num_tokens, ), jnp.int32, sharding=input_sharding)
+            dummy_is_multimodal = self._create_dummy_tensor(
+                (num_tokens, ), jnp.int32, sharding=input_sharding)
 
             self._run_compilation(
                 "input_embeddings_merger",
@@ -146,6 +148,7 @@ class CompilationManager:
                 self.runner.state,
                 dummy_input_ids,
                 dummy_multimodal_embeddings,
+                dummy_is_multimodal,
                 num_tokens=num_tokens,
             )
 
@@ -154,6 +157,7 @@ class CompilationManager:
                 self.runner.embed_input_ids_fn,
                 self.runner.state,
                 dummy_input_ids,
+                None,
                 None,
                 num_tokens=num_tokens,
             )
