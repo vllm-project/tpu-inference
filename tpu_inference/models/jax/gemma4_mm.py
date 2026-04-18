@@ -43,8 +43,6 @@ from tpu_inference.models.jax.utils.weight_utils import (LoadableWithIterator,
 logger = init_logger(__name__)
 
 POSITIONS_PAD_VALUE = -1
-DEFAULT_ROPE_BASE_FREQUENCY = 10000
-DEFAULT_ROPE_SCALE_FACTOR = 1.0
 init_fn = nnx.initializers.normal(stddev=0.02)
 
 
@@ -85,9 +83,6 @@ def apply_multidimensional_rope(
 
     b, seq_len, num_heads, head_dim = inputs.shape
 
-    # tpu-inference apply_rope expects inputs as (seq_len, num_heads, head_dim)
-    # and positions as (seq_len,).
-    # We must flatten the batch (B) and sequence (L) dimensions into a single sequence.
     inputs_flat = inputs.reshape((b * seq_len, num_heads, head_dim))
     positions_flat = positions.reshape((b * seq_len, positions.shape[-1]))
 
@@ -108,10 +103,9 @@ def apply_multidimensional_rope(
     y_parts = [
         apply_rope(
             inputs=x_parts[k],
-            positions=positions_flat[
-                ..., k],  # Shape becomes (B * L,) matching expected (seq_len,)
+            positions=positions_flat[..., k],
             head_dim=x_parts[k].shape[-1],
-            rope_theta=base_frequency,  # Explicitly mapping to rope_theta
+            rope_theta=base_frequency,
             rope_scaling=rope_scaling,
         ) for k in range(ndim)
     ]
@@ -121,7 +115,6 @@ def apply_multidimensional_rope(
 
     out_flat = jnp.concatenate(y_parts, axis=-1)
 
-    # Reshape back to the original 4D Vision shape
     return out_flat.reshape((b, seq_len, num_heads, head_dim))
 
 
@@ -134,7 +127,6 @@ class SegmentIds(NamedTuple):
 class Gemma4VisionFlashAttention(JaxModule):
     """
     Gemma 4 Vision Attention using TPU sharded_flash_attention.
-    Fixes the output mean shift by introducing the required Value RMSNorm.
     """
 
     def __init__(self,
@@ -178,7 +170,6 @@ class Gemma4VisionFlashAttention(JaxModule):
                                 rngs=rng,
                                 quant_config=quant_config)
 
-        # Gemma 4 uses RMSNorm for Q, K, and V
         self.q_norm = JaxRmsNorm(self.head_dim,
                                  param_dtype=dtype,
                                  rngs=rng,
@@ -187,8 +178,6 @@ class Gemma4VisionFlashAttention(JaxModule):
                                  param_dtype=dtype,
                                  rngs=rng,
                                  quant_config=quant_config)
-
-        # MEAN SHIFT FIX: Added v_norm. Note `use_scale=False` to match gemma4.py text tower logic.
         self.v_norm = JaxRmsNorm(self.head_dim,
                                  param_dtype=dtype,
                                  use_scale=False,
@@ -203,29 +192,23 @@ class Gemma4VisionFlashAttention(JaxModule):
         B, T, _ = x.shape
         orig_T = T
 
-        # Pad sequence length to multiple of 128
         pad_len = (128 - (T % 128)) % 128
         if pad_len > 0:
             x = jnp.pad(x, ((0, 0), (0, pad_len), (0, 0)))
             segment_pos = jnp.pad(segment_pos, ((0, 0), (0, pad_len), (0, 0)))
 
-            # Pad the input mask as well if it exists
             if input_mask is not None:
-                # We pad with False (0) since this is invalid space
                 input_mask = jnp.pad(input_mask, ((0, 0), (0, pad_len)))
             T = T + pad_len
 
-        # 1. Project Q, K, V
         query_proj = self.q_proj(x)
         key_proj = self.k_proj(x)
         value_proj = self.v_proj(x)
 
-        # 2. Apply RMSNorms
         query_proj = self.q_norm(query_proj)
         key_proj = self.k_norm(key_proj)
         value_proj = self.v_norm(value_proj)
 
-        # 3. Apply Gemma Multidimensional RoPE
         query_proj = apply_multidimensional_rope(
             query_proj,
             segment_pos,
@@ -237,17 +220,12 @@ class Gemma4VisionFlashAttention(JaxModule):
             base_frequency=self.rope_base_frequency,
             rope_scaling=self.rope_scaling)
 
-        # 4. Transpose for Flash Attention: (B, T, N, H) -> (B, N, T, H)
+        # Transpose for Flash Attention: (B, T, N, H) -> (B, N, T, H)
         q_BNTH = jnp.transpose(query_proj, (0, 2, 1, 3))
         k_BKTH = jnp.transpose(key_proj, (0, 2, 1, 3))
         v_BKTH = jnp.transpose(value_proj, (0, 2, 1, 3))
 
-        # 5. Create valid Segment IDs (Vision is full attention, no causal masking)
-        # Use segment 1 for valid tokens and segment 2 for padding tokens so they don't attend to each other.
-
         if input_mask is not None:
-            # input_mask is True for valid pixels, False for padding
-            # Map valid to 1, padding to 2
             segment_ids_val = jnp.where(input_mask, 1, 2).astype(jnp.int32)
         else:
             valid_ids = jnp.ones((B, orig_T), dtype=jnp.int32)
@@ -257,27 +235,19 @@ class Gemma4VisionFlashAttention(JaxModule):
             else:
                 segment_ids_val = valid_ids
 
-        jax.debug.print(
-            "[VISION TRACE] Gemma4VisionFlashAttention x shape: {s}, padded T: {t}, valid tokens (1): {v}, padding tokens (2): {p}",
-            s=x.shape,
-            t=T,
-            v=jnp.sum(segment_ids_val == 1),
-            p=jnp.sum(segment_ids_val == 2))
         segment_ids = SegmentIds(q=segment_ids_val, kv=segment_ids_val)
 
-        # 6. Execute TPU Flash Attention Kernel
-        outputs_BNTH = sharded_flash_attention(
-            mesh=self.mesh,
-            causal=False,  # Vision is non-causal
-            sm_scale=1.0)(q_BNTH, k_BKTH, v_BKTH, segment_ids)
+        outputs_BNTH = sharded_flash_attention(mesh=self.mesh,
+                                               causal=False,
+                                               sm_scale=1.0)(q_BNTH, k_BKTH,
+                                                             v_BKTH,
+                                                             segment_ids)
 
-        # 7. Transpose back: (B, N, T, H) -> (B, T, N, H)
+        # Transpose back: (B, N, T, H) -> (B, T, N, H)
         outputs_BTNH = jnp.transpose(outputs_BNTH, (0, 2, 1, 3))
 
-        # 8. Final Output Projection
         final_output = self.o_proj(outputs_BTNH)
 
-        # Remove padding if it was added
         if pad_len > 0:
             final_output = final_output[:, :orig_T, :]
 
@@ -295,11 +265,7 @@ class Gemma4VisionPatchEmbedder(JaxModule):
         self.dtype = dtype
 
         self.patch_size = config.patch_size
-        print(
-            f"[JAX DEBUG] config.patch_size={getattr(config, 'patch_size', 14)}, config={config}"
-        )
 
-        # Linear projection
         self.input_proj = JaxEinsum(
             "...d,dh->...h",
             (3 * self.patch_size**2, config.hidden_size),
@@ -333,7 +299,7 @@ class Gemma4VisionPatchEmbedder(JaxModule):
     def __call__(
         self,
         patches: jax.Array,
-        pixel_position_ids: Optional[jax.Array] = None,
+        pixel_position_ids: jax.Array,
     ) -> jax.Array:
         if patches.ndim != 3:
             raise ValueError(
@@ -341,10 +307,6 @@ class Gemma4VisionPatchEmbedder(JaxModule):
             )
         assert pixel_position_ids is not None
 
-        jax.debug.print(
-            "[VISION TRACE] Gemma4VisionPatchEmbedder patches shape: {s}, mean: {m}",
-            s=patches.shape,
-            m=patches.mean())
         patches = 2.0 * (patches - 0.5)
         x = self.input_proj(patches)
         pos_embed = self._factorized_posemb(pixel_position_ids).astype(x.dtype)
@@ -399,7 +361,7 @@ class Gemma4VisionMLP(JaxModule):
 
 
 class Gemma4VisionEncoderLayer(JaxModule):
-    # Added `mesh` to init so we can pass it to Flash Attention
+
     def __init__(self,
                  config: PretrainedConfig,
                  dtype: jnp.dtype,
@@ -453,7 +415,6 @@ class Gemma4VisionEncoderLayer(JaxModule):
 class Gemma4VisionPooler(JaxModule):
     """
     Vision exit layer with dynamic spatial pooling.
-    Gemma 4 strictly uses a 3x3 pooling kernel rather than a hardcoded output length.
     """
 
     def __init__(self, config: PretrainedConfig, dtype: jnp.dtype):
@@ -461,80 +422,36 @@ class Gemma4VisionPooler(JaxModule):
         self.d_model = config.hidden_size
         self.param_dtype = dtype
 
-    def _avg_pool_by_positions(
+    def __call__(
         self,
         x: jax.Array,
         pixel_position_ids: jax.Array,
-    ) -> Tuple[jax.Array, jax.Array]:
-        # Gemma 4 uses a strict pooling kernel (default 3x3)
-        k = getattr(self.config, 'pooling_kernel_size', 3)
+    ) -> Tuple[Tuple[jax.Array, jax.Array], ...]:
 
-        # Dynamically calculate the true target length based on input patches
+        x = x.astype(self.param_dtype)
+        k = getattr(self.config, 'pooling_kernel_size', 3)
         length = x.shape[1] // (k**2)
 
-        # Positions are [X, Y], so index 0 is X (Width) and index 1 is Y (Height)
         max_x = pixel_position_ids[..., 0].max(axis=-1, keepdims=True) + 1
         kernel_idxs = jnp.floor_divide(pixel_position_ids, k)
 
-        # Row-major flat index calculation: (Y_pool * Width_pool) + X_pool
         pooled_width = max_x // k
         flat_kernel_idx = kernel_idxs[..., 1] * pooled_width + kernel_idxs[...,
                                                                            0]
 
         weights = jax.nn.one_hot(flat_kernel_idx, length, dtype=x.dtype) / (k**
                                                                             2)
-        output = jnp.einsum('bLl,bLd->bld', weights, x)
-
+        pooled_x = jnp.einsum('bLl,bLd->bld', weights, x)
         mask = jnp.logical_not((weights == 0).all(axis=1))
-        return output, mask
 
-    def _maybe_downsample(
-        self,
-        x: jax.Array,
-        pixel_position_ids: Optional[jax.Array],
-    ) -> Tuple[jax.Array, jax.Array]:
-        if pixel_position_ids is not None:
-            return self._avg_pool_by_positions(x, pixel_position_ids)
-
-        # Fallback if no positions are provided (e.g., dummy testing)
-        k = getattr(self.config, 'pooling_kernel_size', 3)
-        length = x.shape[1] // (k**2)
-        cur_width = int(x.shape[1]**0.5)
-        output_width = cur_width // k
-
-        x_2d = x.reshape((x.shape[0], cur_width, cur_width, x.shape[-1]))
-        x_2d = x_2d.reshape(x.shape[0], output_width, k, output_width, k,
-                            x.shape[-1])
-        x_pooled = x_2d.mean(axis=(2, 4))
-
-        x_pooled = x_pooled.reshape(x.shape[0], length, x.shape[-1])
-        mask = jnp.ones(x_pooled.shape[:-1], dtype=jnp.bool_)
-        return x_pooled, mask
-
-    def __call__(
-        self,
-        x: jax.Array,
-        pixel_position_ids: Optional[jax.Array] = None,
-        output_length_overrides: Optional[Tuple[int, ...]] = None,
-    ) -> Tuple[Tuple[jax.Array, jax.Array], ...]:
-
-        x = x.astype(self.param_dtype)
-
-        pooled_x, mask = self._maybe_downsample(x, pixel_position_ids)
-        jax.debug.print(
-            "[VISION TRACE] Gemma4VisionPooler pooled_x shape: {s}, valid tokens: {v}",
-            s=pooled_x.shape,
-            v=jnp.sum(mask))
         pooled_x = pooled_x * jnp.sqrt(self.d_model)
 
-        # Return as a tuple of tuples to match the expected API
         return ((pooled_x, mask), )
 
 
 class Gemma4VisionModel(JaxModule):
     """
     Top-level wrapper for the Gemma 4 Vision Encoder.
-    Translates VisionTransformer from _transformer.py.
     """
 
     def __init__(self,
@@ -548,21 +465,16 @@ class Gemma4VisionModel(JaxModule):
         self.dtype = dtype
         self.mesh = mesh
 
-        # 1. Vision Entry (Positional Embeddings)
         self.patch_embedder = Gemma4VisionPatchEmbedder(
             config, dtype, rng, quant_config)
 
-        # 2. Transformer Blocks
-        # We use make_layers instead of nn.scan to natively support tpu-inference Pipeline Parallelism
         num_layers = getattr(config, "num_hidden_layers", 32)
         self.start_layer, self.end_layer, self.layers = make_layers(
             num_layers, lambda *_: Gemma4VisionEncoderLayer(
                 config, dtype, rng, self.mesh, quant_config))
 
-        # 3. Vision Exit (Spatial Pooling)
         self.pooler = Gemma4VisionPooler(config, dtype)
 
-        # Gemma 4 standardization parameters for Vision Model outputs
         self.standardize = getattr(config, "standardize", False)
         if self.standardize:
             self.std_bias = nnx.Param(
@@ -573,21 +485,15 @@ class Gemma4VisionModel(JaxModule):
     def __call__(
         self,
         pixel_values: jax.Array,
+        pixel_position_ids: jax.Array,
         input_mask: Optional[jax.Array] = None,
-        pixel_position_ids: Optional[jax.Array] = None,
     ):
-        """
-        Forward pass for the complete Vision Encoder.
-        """
-        # This now receives the newly generated pixel_position_ids instead of None
         hidden_states = self.patch_embedder(pixel_values, pixel_position_ids)
 
-        # 3. Forward through Transformer Layers
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states = layer(hidden_states, pixel_position_ids,
                                   input_mask)
 
-        # 4. Forward through Exit (Pooling)
         outputs = self.pooler(hidden_states, pixel_position_ids)
 
         if self.standardize:
@@ -596,9 +502,6 @@ class Gemma4VisionModel(JaxModule):
             outputs = ((pooled_x, mask), )
 
         return outputs
-
-
-# --- From gemma4.py ---
 
 
 class Gemma4MultimodalEmbedder(JaxModule):
@@ -660,7 +563,6 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         )
         model_config = vllm_config.model_config
 
-        # Initialize Vision Tower (Make sure to pass mesh if Flash Attention needs it)
         vision_config = model_config.hf_config.vision_config
         self.image_token_id = getattr(model_config.hf_config, "image_token_id",
                                       258880)
@@ -680,7 +582,6 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             quant_config=vllm_config.quant_config,
             prefix="embed_vision")
 
-        # Gemma 4: soft-capping in the final logits.
         self.final_logit_softcapping = getattr(
             model_config.hf_config.text_config, "final_logit_softcapping",
             None)
@@ -723,7 +624,6 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             return name
 
         def process_tensor(mapped_name, tensor):
-            # 1. Shape and Math Fixes
             if "position_embedding_table" in mapped_name:
                 # PyTorch (2, 10240, hidden) -> JAX (10240, 2, hidden)
                 return tensor.transpose(0, 1)
@@ -773,19 +673,14 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                         input_ids: jax.Array,
                         multimodal_embeddings: Optional[jax.Array] = None,
                         **kwargs) -> jax.Array:
-        # 1. Standard Token Embedding
         inputs_embeds = self.model.embed_tokens(input_ids)
         target_dtype = inputs_embeds.dtype
 
-        # 2. Gemma 4 specific scaling
         inputs_embeds = (inputs_embeds *
                          self.model.embedding_scale).astype(target_dtype)
 
-        # 3. Merge Vision Tokens
         if multimodal_embeddings is not None and multimodal_embeddings.shape[
                 0] > 0:
-            # We need to ensure the merge utility knows these are VISION tokens
-            # and potentially apply the projector if it hasn't been applied yet.
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 [self.image_token_id])
@@ -808,7 +703,6 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         projected_vision_features = self.embed_vision(
             projected_vision_features)
 
-        # Pack valid tokens to the front
         seq_len = pooler_mask.shape[1]
         indices = jnp.arange(seq_len)
         sort_key = jnp.where(pooler_mask, indices, seq_len + indices)
@@ -860,58 +754,11 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         return per_image_features
 
     def embed_multimodal(self, **kwargs) -> List[jax.Array]:
-        jax.debug.print(
-            "\n[BACKEND DEBUG] embed_multimodal called! pixel_values present: {p}",
-            p=1 if "pixel_values" in kwargs
-            and kwargs["pixel_values"] is not None else 0)
-
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
 
         return self._process_image_input(image_input)
-
-    def precompile_vision_encoder(
-        self,
-        run_compilation_fn: Callable,
-    ) -> None:
-
-        image_shapes = []
-        # Attempt to extract warm-up configurations specifically tailored for vision
-        if hasattr(self.vllm_config,
-                   'additional_config') and self.vllm_config.additional_config:
-            warmup_config = self.vllm_config.additional_config.get(
-                "vision_warmup_config", {})
-            if warmup_config:
-                image_shapes = warmup_config.get("image_shapes", [])
-
-        # Run compilation for all requested visual resolutions
-        for input_hw in image_shapes:
-            if not isinstance(input_hw, list) or len(input_hw) != 2:
-                logger.warning(f"Skipping invalid shape {input_hw}.")
-                continue
-            h_input, w_input = input_hw
-
-            from tpu_inference import utils
-            dtype_str = str(self.vllm_config.model_config.dtype).split('.')[-1]
-            jax_dtype = utils.get_jax_dtype_from_str_dtype(dtype_str)
-
-            dummy_pixel_values = jnp.ones(
-                (1, h_input, w_input, 3),
-                dtype=jax_dtype,
-            )
-
-            p = self.vision_tower.patch_embedder.patch_size
-            h_p, w_p = h_input // p, w_input // p
-            dummy_pixel_position_ids = jnp.ones((1, h_p * w_p, 2),
-                                                dtype=jnp.int32)
-
-            # Trigger JIT
-            run_compilation_fn("vision_encoder",
-                               self.get_single_image_embedding,
-                               dummy_pixel_values,
-                               dummy_pixel_position_ids,
-                               image_shape=input_hw)
 
     def __call__(
         self,
@@ -962,9 +809,47 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         else:
             logits = self.model.embed_tokens.decode(hidden_states)
 
-        # Gemma4: Use Logit Soft-capping
         if self.final_logit_softcapping is not None:
             logits = jnp.tanh(
                 logits /
                 self.final_logit_softcapping) * self.final_logit_softcapping
         return logits
+
+    def precompile_vision_encoder(
+        self,
+        run_compilation_fn: Callable,
+    ) -> None:
+
+        image_shapes = []
+        if hasattr(self.vllm_config,
+                   'additional_config') and self.vllm_config.additional_config:
+            warmup_config = self.vllm_config.additional_config.get(
+                "vision_warmup_config", {})
+            if warmup_config:
+                image_shapes = warmup_config.get("image_shapes", [])
+
+        for input_hw in image_shapes:
+            if not isinstance(input_hw, list) or len(input_hw) != 2:
+                logger.warning(f"Skipping invalid shape {input_hw}.")
+                continue
+            h_input, w_input = input_hw
+
+            from tpu_inference import utils
+            dtype_str = str(self.vllm_config.model_config.dtype).split('.')[-1]
+            jax_dtype = utils.get_jax_dtype_from_str_dtype(dtype_str)
+
+            dummy_pixel_values = jnp.ones(
+                (1, h_input, w_input, 3),
+                dtype=jax_dtype,
+            )
+
+            p = self.vision_tower.patch_embedder.patch_size
+            h_p, w_p = h_input // p, w_input // p
+            dummy_pixel_position_ids = jnp.ones((1, h_p * w_p, 2),
+                                                dtype=jnp.int32)
+
+            run_compilation_fn("vision_encoder",
+                               self.get_single_image_embedding,
+                               dummy_pixel_values,
+                               dummy_pixel_position_ids,
+                               image_shape=input_hw)
