@@ -76,11 +76,15 @@ class CompilationManager:
             return inner_val != outer_val
         return inner_val > outer_val
 
-    def _run_compilation(self, name: str, fn: Callable, *args,
+    def _run_compilation(self,
+                         name: str,
+                         fn: Callable,
+                         *args,
+                         call_kwargs=dict(),
                          **kwargs) -> None:
         logger.info(f"Precompile {name} --> {kwargs}")
         start = time.perf_counter()
-        result = fn(*args)
+        result = fn(*args, **call_kwargs)
         jax.tree.map(lambda r: r.block_until_ready(), result)
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
@@ -148,7 +152,7 @@ class CompilationManager:
                 self.runner.state,
                 dummy_input_ids,
                 dummy_multimodal_embeddings,
-                dummy_is_multimodal,
+                call_kwargs={"is_multimodal": dummy_is_multimodal},
                 num_tokens=num_tokens,
             )
 
@@ -158,7 +162,7 @@ class CompilationManager:
                 self.runner.state,
                 dummy_input_ids,
                 None,
-                None,
+                call_kwargs={"is_multimodal": None},
                 num_tokens=num_tokens,
             )
 

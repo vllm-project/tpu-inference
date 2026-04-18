@@ -444,6 +444,7 @@ class VllmModelWrapper:
             params_and_buffers: Any,
             input_ids: jax.Array,
             mm_embeds: list[jax.Array] | jax.Array | None = None,
+            *,
             is_multimodal: jax.Array | None = None,
         ) -> jax.Array:
             with torchax.default_env():
