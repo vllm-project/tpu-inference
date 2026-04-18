@@ -67,8 +67,8 @@ steps:
         # --tensor-parallel-size 2: tp=1 is currently unsupported on tpu7x.
         # Customize --model, --max-model-len, --max-tokens as needed.
         .buildkite/scripts/run_in_docker.sh bash -c "
-          python3 tools/kernel/tuner/v1/generate_cases_and_yml.py --output-path=$$DYNAMIC_YAML"
+          python3 tools/kernel/tuner/v1/generate_cases_and_yml.py --output-path=${DYNAMIC_YAML}"
       - |
         # Upload the generated YAML as a Buildkite artifact for the next step to consume.
-        buildkite-agent artifact upload "$$DYNAMIC_YAML"
-    artifact_paths: "$$DYNAMIC_YAML"
+        buildkite-agent artifact upload "${DYNAMIC_YAML}"
+    artifact_paths: "${DYNAMIC_YAML}"
