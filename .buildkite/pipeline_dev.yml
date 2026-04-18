@@ -70,4 +70,4 @@ steps:
       - |
         # Upload the generated YAML as a Buildkite artifact for the next step to consume.
         # buildkite-agent artifact upload "$$DYNAMIC_YAML"
-    artifact_paths: "$$DYNAMIC_YAML"
+    artifact_paths: "generated_gmm_tests.yml"

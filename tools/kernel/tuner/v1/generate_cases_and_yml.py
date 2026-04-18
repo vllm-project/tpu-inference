@@ -35,7 +35,7 @@ def generate_cases(output_path):
         pipeline["steps"].append(step)
 
     # 4. Write to the specified output path
-    print(f"Writing generated pipeline to {output_path=}, {os.path.dirname(output_path)=}...")
+    print(f"Writing generated pipeline to {output_path=}, {os.path.dirname(output_path)=}, {os.path.abspath(output_path)=}...")
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w") as f:
         yaml.dump(pipeline, f, default_flow_style=False, sort_keys=False)
