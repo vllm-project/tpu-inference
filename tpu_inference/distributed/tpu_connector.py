@@ -457,7 +457,8 @@ class TPUConnectorWorker:
         self.reqs_wait_pull: dict[ReqId, list[list[jax.Array], float,
                                               int]] = {}
         # req_id: (pull_thread_future, kv, block_ids)
-        self.reqs_pulling: dict[ReqId, list[Future, list[jax.Array], list[int]]] = {}
+        self.reqs_pulling: dict[ReqId, list[Future, list[jax.Array],
+                                            list[int]]] = {}
 
         # req_id: (kv, indices)
         self.reqs_ready_to_insert: dict[ReqId, tuple[list[jax.Array],
@@ -624,8 +625,11 @@ class TPUConnectorWorker:
                 # TODO(xiang): pad block_ids to avoid recompilation
                 conn = self._maybe_build_kv_connection(req_meta)
                 if req_id not in self.reqs_pulling:
-                    self.reqs_pulling[req_id] = [self.pull_executor.submit(
-                        self._pull_kv, req_id, conn, req_meta), None, req_meta.local_block_ids]
+                    self.reqs_pulling[req_id] = [
+                        self.pull_executor.submit(self._pull_kv, req_id, conn,
+                                                  req_meta), None,
+                        req_meta.local_block_ids
+                    ]
                 else:
                     # Update the local block ids as the pre-allocated blocks may get preempted
                     self.reqs_pulling[req_id][2] = req_meta.local_block_ids
