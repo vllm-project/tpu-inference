@@ -780,7 +780,8 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
                 vllm_config=vllm_config,
                 rngs=self.rng,
                 mesh=mesh,
-                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                norm_eps=getattr(config, "rms_norm_eps",
+                                 config.text_config.rms_norm_eps),
             )
         else:
             self.visual = PPMissingLayer()
@@ -790,7 +791,9 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         if not model_config.hf_config.tie_word_embeddings:
             if self.is_last_rank:
                 vocab_size = model_config.get_vocab_size()
-                hidden_size = model_config.hf_config.hidden_size
+                hidden_size = getattr(
+                    model_config.hf_config, 'hidden_size',
+                    model_config.hf_config.text_config.hidden_size)
                 self.lm_head = JaxEinsum(
                     einsum_str="TD,DV->TV",
                     kernel_shape=(hidden_size, vocab_size),

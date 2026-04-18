@@ -301,10 +301,12 @@ class Qwen2Model(JaxModule):
                  prefix: str = "model") -> None:
         model_config = vllm_config.model_config
         hf_config = model_config.hf_config
+        # Since transformers v5, Qwen2_5_VLConfig nests language attrs under text_config
+        lang_config = getattr(hf_config, 'text_config', hf_config)
         vocab_size = model_config.get_vocab_size()
         dtype = model_config.dtype
-        rms_norm_eps = hf_config.rms_norm_eps
-        hidden_size = hf_config.hidden_size
+        rms_norm_eps = lang_config.rms_norm_eps
+        hidden_size = lang_config.hidden_size
 
         self.is_first_rank = get_pp_group().is_first_rank
         self.is_last_rank = get_pp_group().is_last_rank
@@ -324,9 +326,9 @@ class Qwen2Model(JaxModule):
             self.embed_tokens = PPMissingLayer()
 
         self.start_layer, self.end_layer, self.layers = make_layers(
-            hf_config.num_hidden_layers,
+            lang_config.num_hidden_layers,
             lambda layer_index: Qwen2DecoderLayer(
-                config=hf_config,
+                config=lang_config,
                 dtype=dtype,
                 rng=rng,
                 mesh=mesh,
@@ -392,7 +394,9 @@ class Qwen2ForCausalLM(JaxModule, LoadableWithIterator):
         model_config = vllm_config.model_config
         if not model_config.hf_config.tie_word_embeddings:
             vocab_size = model_config.get_vocab_size()
-            hidden_size = model_config.hf_config.hidden_size
+            hidden_size = getattr(
+                model_config.hf_config, 'hidden_size',
+                model_config.hf_config.text_config.hidden_size)
             self.lm_head = JaxEinsum(
                 einsum_str="TD,DV->TV",
                 kernel_shape=(hidden_size, vocab_size),
