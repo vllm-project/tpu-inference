@@ -70,5 +70,5 @@ steps:
       - |
         # Upload the generated YAML as a Buildkite artifact for the next step to consume.
         buildkite-agent artifact upload "/mnt/disks/persist/generated_tuning_cases.yml"
-        buildkite-agent pipeline upload "/mnt/disks/persist/generated_tuning_cases.yml"
+        # buildkite-agent pipeline upload "/mnt/disks/persist/generated_tuning_cases.yml"
     artifact_paths: "/mnt/disks/persist/generated_tuning_cases.yml"
