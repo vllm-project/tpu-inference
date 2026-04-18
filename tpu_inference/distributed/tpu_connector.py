@@ -119,20 +119,6 @@ class LoadMeta:
     remote_port: int | list[int]
 
 
-@dataclass
-class _kv_transfer_params:
-    """
-    P prepares this in request_finished() and responds to proxy server.
-    D recieves this from proxy server and uses this to create LoadMeta.
-    """
-    uuid: int
-    remote_block_ids: list[int]
-    # A single IP for single-host, or a list of IPs for mult-host.
-    remote_host: str | list[str]
-    # A single port for single-host, or a list of ports for mult-host.
-    remote_port: int | list[int]
-
-
 # The metadata used for communicating between scheduler and worker connectors.
 @dataclass
 class TPUConnectorMetadata(KVConnectorMetadata):
