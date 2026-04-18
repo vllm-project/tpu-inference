@@ -14,7 +14,7 @@ bash "${NIGHTLY_SCRIPT}" \
   --input-len 1024 \
   --output-len 8192 \
   --tp-size 16 \
-  --max-seqs 128 \
+  --max-seqs 160 \
   --max-model-len 9216 \
   --max-batched-tokens 512 \
   --num-prompts 2048 \
@@ -23,7 +23,7 @@ bash "${NIGHTLY_SCRIPT}" \
   --device "tpu7x-16" \
   --created-by "bm-scheduler" \
   --new-model-design "1" \
-  --gpu-memory-utilization "0.92" \
+  --gpu-memory-utilization "0.95" \
   --enable-expert-parallel \
   --additional-config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true}}}' \
   --disable-shared-experts-stream "0" \
@@ -31,5 +31,7 @@ bash "${NIGHTLY_SCRIPT}" \
   --vllm-mla-disable "0" \
   --moe-requantize-block-size "512" \
   --moe-requantize-weight-dtype "fp4" \
+  --moe-all-gather-activation-dtype "fp8" \
+  --api-server-count 3 \
   --force-moe-random-routing "1" \
   --run-accuracy "mmlu"

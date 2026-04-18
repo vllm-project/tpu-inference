@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import copy
-import functools
 import time
 from collections.abc import Sequence
 from contextlib import nullcontext
@@ -30,9 +29,9 @@ from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
-from torchax.ops.ops_registry import register_torch_function_op
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
+from vllm.ir import enable_torch_wrap
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.layers.pooler import Pooler
@@ -50,7 +49,6 @@ from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm import ops as patch_ops
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     shard_model_to_tpu
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
@@ -59,6 +57,8 @@ from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.vllm.experimental.model_patcher import patch_mm_model
+from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
+    maybe_apply_qwen3_vl_patches
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_inference.runner.lora_utils import replace_lora_metadata
@@ -128,25 +128,6 @@ class VllmModelWrapper:
             self.vllm_config, self.mesh)
         self.model_config = vllm_config.speculative_config.draft_model_config if is_draft_model else vllm_config.model_config
         self._apply_pp_patch()
-        self._patch_vllm_ops()
-
-    def _patch_vllm_ops(self):
-        # Caution: there is no public api for restore the ops.
-        # It need to patched again if the ops are jitted and mesh is change.
-        # The overwritten ops should not be called after the end of model wrapper.
-
-        # Import the registered ops at first and then we can overwrite them.
-        import torchax.ops.jtorch  # noqa: F401
-
-        # Patch sdpa from torch ops to flash attention to prevent OOM
-        register_torch_function_op(
-            torch.nn.functional.scaled_dot_product_attention,
-            functools.partial(patch_ops.scaled_dot_product_attention.
-                              scaled_dot_product_attention,
-                              mesh=self.mesh),
-            is_jax_function=True,
-            needs_env=False,
-        )
 
     def _apply_pp_patch(self):
         # patch `get_pp_group` in vLLM to jax's get_pp_group.
@@ -236,6 +217,7 @@ class VllmModelWrapper:
                 self.vllm_config):
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load,
                                         model_config=self.model_config)
+
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:
             # Replace layers in the model with LoRA layers.
@@ -274,8 +256,13 @@ class VllmModelWrapper:
                 REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES,
             )
 
+        # NOTE: Apply Qwen3-VL model specific patches
+        maybe_apply_qwen3_vl_patches(self.model.vllm_model)
+
         loading_end = time.time()
         total_loading_time = loading_end - loading_start
+        # Warning: Please DO NOT remove the below logging line.
+        # If you are making changes, inform/reach out to https://github.com/sethiay.
         logger.info(
             f"Total time to load model weights from storage to TPU: {total_loading_time:.2f} seconds."
         )
@@ -421,18 +408,20 @@ class VllmModelWrapper:
             **kwargs,
         ) -> Any:
 
-            def move(v):
-                if isinstance(v, np.ndarray):
-                    if v.dtype.name == 'bfloat16':
-                        v = torch.from_numpy(
-                            v.view(np.uint16)).view(torch.bfloat16)
-                    else:
-                        v = torch.from_numpy(np.ascontiguousarray(v))
-                if not isinstance(v, torch.Tensor):
-                    return v
-                return v.to(device="jax")
+            with torchax.default_env(), enable_torch_wrap(False):
 
-            with torchax.default_env():
+                def move(v):
+                    if isinstance(v, np.ndarray):
+                        if v.dtype.name == 'bfloat16':
+                            v = torch.from_numpy(
+                                v.view(np.uint16)).view(torch.bfloat16)
+                        else:
+                            v = torch.from_numpy(np.ascontiguousarray(v))
+                    if not isinstance(v, torch.Tensor):
+                        logger.warning(f"Expect torch.Tensor, got {type(v)}")
+                        return v
+                    return v.to(device="jax")
+
                 # Ensure all tensors are moved into accelerator so the
                 # computation with weights can work properly.
                 # Convert grid_thw tuples to tensors expected by vllm models.
@@ -477,6 +466,8 @@ class VllmModelWrapper:
                         torch_mm_embeds = [torch_view(x) for x in mm_embeds]
                     else:
                         torch_mm_embeds = torch_view(mm_embeds)
+                    assert is_multimodal is not None
+                    torch_mm_embeds = torch_mm_embeds[is_multimodal]
                     call_args = (torch_view(input_ids), torch_mm_embeds)
                 else:
                     call_args = (torch_view(input_ids), )

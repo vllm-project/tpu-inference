@@ -31,6 +31,7 @@ from tpu_inference.layers.common.utils import \
     reorder_concatenated_tensor_for_sharding
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
+from tpu_inference.utils import get_mesh_shape_product
 
 
 def gdn_attention_core_tpu(
@@ -83,7 +84,7 @@ def gdn_attention_core_tpu(
     # Use reorder_concatenated_tensor_for_sharding to reorder into correct layout
     key_dim = n_kq * d_k
     value_dim = n_v * d_v
-    tp_size = mesh.shape[ShardingAxisName.ATTN_HEAD]
+    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
     j_mixed_qkv = reorder_concatenated_tensor_for_sharding(
         j_mixed_qkv, [key_dim, key_dim, value_dim], tp_size, -1)
     j_conv_weight = reorder_concatenated_tensor_for_sharding(

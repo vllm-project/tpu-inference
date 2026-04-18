@@ -31,6 +31,7 @@ from tpu_inference.layers.common.ragged_gated_delta_rule_chunked import \
 from tpu_inference.layers.common.ragged_gated_delta_rule_ref import \
     ragged_gated_delta_rule as ragged_gated_delta_rule_ref
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.utils import get_mesh_shape_product
 
 
 class RaggedConv1dImpl(enum.Enum):
@@ -76,9 +77,11 @@ def run_jax_gdn_attention_local(
         mixed_qkv: Combined QKV tensor of shape `(num_tokens, dim)`.
         b: B tensor of shape `(num_tokens, n_v)`.
         a: A tensor of shape `(num_tokens, n_v)`.
-        conv_state: Combined convolutional state of shape `(max_reqs, kernel_size
-          - 1, dim)`.
-        recurrent_state: Recurrent state of shape `(max_reqs, n_v, d_k, d_v)`.
+        conv_state: Combined convolutional state of shape `(num_blocks,
+          kernel_size - 1, dim)`. `num_blocks` is always equal or larger than
+          `max_seqs + 1`. The first block is a null_block and only used for
+          padded / invalid tokens.
+        recurrent_state: Recurrent state of shape `(num_blocks, n_v, d_k, d_v)`.
         conv_weight: Combined convolutional weight of shape `(dim, 1,
           kernel_size)`.
         conv_bias: Optional combined convolutional bias of shape `(dim,)`.
@@ -88,7 +91,8 @@ def run_jax_gdn_attention_local(
           each sequence.
         state_indices: Tensor of shape `(max_reqs,)` mapping request index to
           state index.
-        distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end, mixed_end)`.
+        distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end,
+          mixed_end)`.
         n_kq: Number of key/query heads.
         n_v: Number of value heads.
         d_k: Dimension of key.
@@ -102,10 +106,6 @@ def run_jax_gdn_attention_local(
         - The output tensor of shape `(num_tokens, n_v * d_v)`.
     """
 
-    # Ensure query_start_loc is monotonically increasing. This is required to
-    # handle cases where query_start_loc might be padded with trailing zeros.
-    query_start_loc = jnp.maximum.accumulate(query_start_loc)
-
     # TODO: Switch conv implementaion based on config once we have more than 1 impl
     conv_impl = ragged_conv1d_jax
 
@@ -116,7 +116,8 @@ def run_jax_gdn_attention_local(
         conv_bias,
         query_start_loc,
         state_indices,
-        kernel_size,
+        distribution,
+        kernel_size=kernel_size,
     )
 
     out_mixed_qkv = jax.nn.silu(out_mixed_qkv)
@@ -181,9 +182,11 @@ def run_jax_gdn_attention(
         j_mixed_qkv: Input tensor of shape `(num_tokens, dim)`.
         j_b: Input tensor of shape `(num_tokens, n_v)`.
         j_a: Input tensor of shape `(num_tokens, n_v)`.
-        conv_state: Convolutional state tensor of shape `(max_reqs, kernel_size -
-          1, dim)`.
-        recurrent_state: Recurrent state tensor of shape `(max_reqs, n_v, d_k,
+        conv_state: Convolutional state tensor of shape `(num_blocks, kernel_size
+          - 1, dim)`. `num_blocks` is always equal or larger than `max_seqs +
+          1`. The first block is a null_block and only used for padded / invalid
+          tokens.
+        recurrent_state: Recurrent state tensor of shape `(num_blocks, n_v, d_k,
           d_v)`.
         j_conv_weight: Convolutional weight tensor of shape `(dim, 1,
           kernel_size)`.
@@ -194,7 +197,8 @@ def run_jax_gdn_attention(
           state index.
         query_start_loc: Tensor of shape `(num_seqs + 1,)` with start locations of
           each sequence.
-        distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end, mixed_end)`.
+        distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end,
+          mixed_end)`.
         n_kq: Number of key/query heads.
         n_v: Number of value heads.
         d_k: Dimension of key.
@@ -206,36 +210,40 @@ def run_jax_gdn_attention(
     Returns:
         A tuple containing:
         - A tuple of (new_conv_state, new_recurrent_state).
-          - new_conv_state: `(max_reqs, kernel_size - 1, dim)`
-          - new_recurrent_state: `(max_reqs, n_v, d_k, d_v)`
+          - new_conv_state: `(num_blocks, kernel_size - 1, dim)`
+          - new_recurrent_state: `(num_blocks, n_v, d_k, d_v)`
         - The output tensor of shape `(num_tokens, n_v * d_v)`.
     """
     in_specs = (
-        P(None, ShardingAxisName.ATTN_HEAD),  # j_mixed_qkv
-        P(None, ShardingAxisName.ATTN_HEAD),  # j_b
-        P(None, ShardingAxisName.ATTN_HEAD),  # j_a
-        P(None, None, ShardingAxisName.ATTN_HEAD),  # conv_state
-        P(None, ShardingAxisName.ATTN_HEAD, None, None),  # recurrent_state
+        P(ShardingAxisName.ATTN_DATA,
+          ShardingAxisName.ATTN_HEAD),  # j_mixed_qkv
+        P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # j_b
+        P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # j_a
+        P(ShardingAxisName.ATTN_DATA, None,
+          ShardingAxisName.ATTN_HEAD),  # conv_state
+        P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None,
+          None),  # recurrent_state
         P(ShardingAxisName.ATTN_HEAD, None, None),  # j_conv_weight
         P(ShardingAxisName.ATTN_HEAD)
         if j_conv_bias is not None else None,  # j_conv_bias
         P(ShardingAxisName.ATTN_HEAD),  # j_A_log
         P(ShardingAxisName.ATTN_HEAD),  # j_dt_bias
-        P(),  # query_start_loc
-        P(),  # state_indices
-        P(),  # distribution
+        P(ShardingAxisName.ATTN_DATA),  # query_start_loc
+        P(ShardingAxisName.ATTN_DATA),  # state_indices
+        P(ShardingAxisName.ATTN_DATA),  # distribution
     )
 
     out_specs = (
         (
-            P(None, None, ShardingAxisName.ATTN_HEAD),  # new_conv_state
-            P(None, ShardingAxisName.ATTN_HEAD, None,
+            P(ShardingAxisName.ATTN_DATA, None,
+              ShardingAxisName.ATTN_HEAD),  # new_conv_state
+            P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None,
               None),  # new_recurrent_state
         ),
-        P(None, ShardingAxisName.ATTN_HEAD),  # output
+        P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # output
     )
 
-    tp_size = mesh.shape[ShardingAxisName.ATTN_HEAD]
+    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
 
     p_run_jax_gdn_attention_local = functools.partial(
         run_jax_gdn_attention_local,

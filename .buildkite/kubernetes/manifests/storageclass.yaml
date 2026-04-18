@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-QUEUE_TO_TENSOR_PARALLEL_SIZE_MAP = {
-    "tpu_v6e_queue": 1,
-    "tpu_v6e_8_queue": 8,
-    "tpu_v7x_2_queue": 2,
-    "tpu_v7x_8_queue": 8,
-}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: hyperdisk-balanced
+provisioner: pd.csi.storage.gke.io # The name of the provisioner (CSI driver)
+parameters:
+  type: hyperdisk-balanced # Specifies a balanced disk type on GCP
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer 
