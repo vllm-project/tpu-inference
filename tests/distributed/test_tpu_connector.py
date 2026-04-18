@@ -424,7 +424,7 @@ class TestTPUConnectorWorker(unittest.TestCase):
         worker._maybe_build_kv_connection.assert_called_once_with(load_meta)
         self.all_mocks[
             "ThreadPoolExecutor"].return_value.submit.assert_called_once_with(
-                worker._pull_kv, "req1", "conn", load_meta, mock_indices)
+                worker._pull_kv, "req1", "conn", load_meta)
 
     def test_process_send_load_for_consumer_notifying(self):
         """Tests process_send_load for a consumer that needs to notify."""
@@ -446,7 +446,7 @@ class TestTPUConnectorWorker(unittest.TestCase):
         worker.sharding = MagicMock()
         worker.sharding.spec = "mock_spec"
         worker.mesh = "mock_mesh"
-        worker.reqs_ready_to_insert = {"req1": ("kv_data", "indices", [1])}
+        worker.reqs_pulling = {"req1": [None, "kv_data", [1]]}
         self.all_mocks['insert_kv_chunks'].return_value = "new_kv_caches"
 
         worker.process_send_load(meta)
@@ -454,7 +454,7 @@ class TestTPUConnectorWorker(unittest.TestCase):
         self.all_mocks['insert_kv_chunks'].assert_called_once_with(
             original_kv_caches, "kv_data", [1], "mock_mesh", "mock_spec")
         self.assertEqual(worker.runner.kv_caches, "new_kv_caches")
-        self.assertNotIn("req1", worker.reqs_ready_to_insert)
+        self.assertNotIn("req1", worker.reqs_pulling)
         worker._maybe_build_notif_socket.assert_called_once_with(load_meta)
         worker._notify_pull_done.assert_called_once_with(
             "socket", "req1", uuid)
@@ -468,15 +468,14 @@ class TestTPUConnectorWorker(unittest.TestCase):
         mock_future = MagicMock()
         mock_future.done.return_value = True
         mock_future.result.return_value = ('kv_data', 'indices', [1])
-        worker.reqs_pulling = {'req1': mock_future}
+        worker.reqs_pulling = {'req1': [mock_future, None, [1]]}
 
         done_sending, done_recving = worker.get_finished()
 
         self.assertEqual(done_sending, set())
         self.assertEqual(done_recving, {'req1'})
-        self.assertNotIn('req1', worker.reqs_pulling)
-        self.assertIn('req1', worker.reqs_ready_to_insert)
-        self.assertEqual(worker.reqs_ready_to_insert['req1'],
+        self.assertIn('req1', worker.reqs_pulling)
+        self.assertEqual(worker.reqs_pulling['req1'][1],
                          ('kv_data', 'indices', [1]))
         self.all_mocks['insert_kv_chunks'].assert_not_called()
 
