@@ -9,19 +9,25 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
-from jax.sharding import Mesh
+from jax.sharding import Mesh, PartitionSpec as P
 from vllm.config import VllmConfig
 
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
-from tpu_inference.layers.jax.linear import JaxEinsum
+from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.embed import JaxEmbed
+from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
+from tpu_inference.layers.jax.moe.moe import JaxMoE
+from tpu_inference.layers.jax.moe.utils import (
+    get_expert_parallelism,
+    select_moe_backend,
+)
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
-from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.qwen3_moe import (
     Qwen3MoeDecoderLayer,
     Qwen3MoeModel,
-    Qwen3MoeSparseMoeBlock,
 )
 from tpu_inference.models.jax.qwen2 import Qwen2MLP as Qwen3MoeDenseMLP
 from tpu_inference.models.jax.qwen3_vl import (
@@ -48,6 +54,107 @@ from tpu_inference.models.jax.utils.weight_utils import (
 init_fn = nnx.initializers.uniform()
 
 logger = init_logger(__name__)
+
+
+def _resolve_tp_axis_name(mesh: Mesh) -> Optional[str]:
+    """Return the first mesh axis name suitable for sharding MoE tensor dims.
+
+    Prefers the standard 'model' axis; falls back to None (replicated) if the
+    mesh does not expose any TP-sized axis. Kept local to the VL-MoE file so
+    the text-only Qwen3-MoE path in qwen3_moe.py stays byte-identical to
+    upstream.
+    """
+    for candidate in ("model", ):
+        size = mesh.shape.get(candidate)
+        if size and size > 1:
+            return candidate
+    return None
+
+
+class Qwen3VLMoeSparseMoeBlock(JaxModule):
+    """VL-MoE override that shards routed-expert weights along the model axis.
+
+    The upstream Qwen3MoeSparseMoeBlock hardcodes
+    edf_sharding=efd_sharding=P(None,) for the routed experts. That
+    replicates the full expert stack on every device, which fits for the
+    small MoE configs exercised upstream but OOMs for Qwen3-VL-MoE 30B on
+    v6e-16 (~2 GB per layer × ~48 layers replicated = far above per-device
+    HBM). We keep everything else — router, moe_backend selection, the
+    no-expert-parallelism contract — identical to the upstream block.
+    """
+
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 rng: nnx.Rngs,
+                 mesh: Mesh,
+                 prefix: str = ""):
+        config = vllm_config.model_config.hf_text_config
+        dtype = vllm_config.model_config.dtype
+        quant_config = vllm_config.quant_config
+
+        # Keep upstream's EP contract: no expert axis, TP-only backend.
+        expert_axis_name = None
+        num_expert_parallelism = get_expert_parallelism(
+            expert_axis_name, mesh)
+        use_ep = num_expert_parallelism > 1
+        moe_backend = select_moe_backend(use_ep)
+
+        tp_axis = _resolve_tp_axis_name(mesh)
+        if tp_axis is None:
+            edf_sharding = P(None, )
+            efd_sharding = P(None, )
+            activation_ffw_ted = P(ShardingAxisName.MLP_DATA, None, None)
+        else:
+            edf_sharding = P(None, None, tp_axis)
+            efd_sharding = P(None, tp_axis, None)
+            activation_ffw_ted = P(ShardingAxisName.MLP_DATA, None, tp_axis)
+        activation_ffw_td = P(ShardingAxisName.MLP_DATA, None)
+
+        self.gate = JaxLinear(
+            config.hidden_size,
+            config.num_experts,
+            dtype=dtype,
+            param_dtype=dtype,
+            rngs=rng,
+            use_bias=False,
+            quant_config=quant_config,
+            prefix=prefix + ".gate",
+        )
+        self.gate.num_experts_per_tok = config.num_experts_per_tok
+
+        shared_expert_intermediate_size = getattr(
+            config, "shared_expert_intermediate_size", 0)
+        if shared_expert_intermediate_size > 0:
+            raise NotImplementedError(
+                "Shared expert is not implemented yet. Found "
+                f"{shared_expert_intermediate_size=} in config.")
+        self.shared_expert = None
+
+        self.experts = JaxMoE(
+            dtype=dtype,
+            num_local_experts=config.num_experts,
+            hidden_size=config.hidden_size,
+            intermediate_size_moe=config.moe_intermediate_size,
+            hidden_act=config.hidden_act,
+            rngs=rng,
+            router=self.gate,
+            mesh=mesh,
+            activation_ffw_td=activation_ffw_td,
+            activation_ffw_ted=activation_ffw_ted,
+            edf_sharding=edf_sharding,
+            efd_sharding=efd_sharding,
+            apply_expert_weight_before_computation=False,
+            expert_axis_name=expert_axis_name,
+            num_expert_parallelism=num_expert_parallelism,
+            moe_backend=moe_backend,
+            quant_config=quant_config,
+            prefix=prefix + ".experts")
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        out = self.experts(x)
+        if self.shared_expert is not None:
+            out += self.shared_expert(x)
+        return out
 
 _MOE_EXPERT_WEIGHT_REGEX = r".*\.mlp\.experts(?:\.\d+\.)?.*"
 _MOE_ROUTER_WEIGHT_REGEX = r".*layers\.(\d+)\.mlp\.gate\.weight$"
@@ -117,7 +224,7 @@ class Qwen3VLMoeDecoderLayer(Qwen3MoeDecoderLayer):
             and (layer_idx + 1) % decoder_sparse_step == 0
         )
         if use_moe:
-            self.mlp = Qwen3MoeSparseMoeBlock(
+            self.mlp = Qwen3VLMoeSparseMoeBlock(
                 vllm_config=vllm_config,
                 rng=rng,
                 mesh=mesh,
