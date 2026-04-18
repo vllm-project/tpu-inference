@@ -49,8 +49,6 @@ _MODEL_REGISTRY = {}
 _VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset({
     "GptOssForCausalLM",
     "Qwen3MoeForCausalLM",
-    # Gemma4 model is lacking vision support in "flax_nnx" implementation.
-    "Gemma4ForConditionalGeneration",
 })
 
 # List of architectures that don't have pipeline parallelism support in jax yet.
