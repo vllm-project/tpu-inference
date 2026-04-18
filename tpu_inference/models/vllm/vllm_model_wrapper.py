@@ -260,6 +260,8 @@ class VllmModelWrapper:
 
         loading_end = time.time()
         total_loading_time = loading_end - loading_start
+        # Warning: Please DO NOT remove the below logging line.
+        # If you are making changes, inform/reach out to https://github.com/sethiay.
         logger.info(
             f"Total time to load model weights from storage to TPU: {total_loading_time:.2f} seconds."
         )
