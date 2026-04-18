@@ -204,6 +204,7 @@ class TestTPUConnectorScheduler(unittest.TestCase):
             "remote_port": 54321
         }
         mock_blocks = MagicMock()
+        mock_blocks.get_block_ids.return_value = [[1, 2]]
         num_external_tokens = 0
 
         self.scheduler.update_state_after_alloc(mock_request, mock_blocks,
@@ -212,7 +213,7 @@ class TestTPUConnectorScheduler(unittest.TestCase):
         self.assertIn("req1", self.scheduler.reqs_to_load)
         load_meta = self.scheduler.reqs_to_load["req1"]
         self.assertEqual(load_meta.uuid, 123)
-        self.assertIsNone(load_meta.local_block_ids)
+        self.assertEqual(load_meta.local_block_ids, [1, 2])
         self.assertIsNone(load_meta.remote_block_ids)
 
     def test_build_connector_meta(self):
@@ -428,6 +429,7 @@ class TestTPUConnectorWorker(unittest.TestCase):
 
     def test_process_send_load_for_consumer_notifying(self):
         """Tests process_send_load for a consumer that needs to notify."""
+        self.all_mocks["time"].perf_counter.side_effect = [0.0, 1.0]
         self.vllm_config.kv_transfer_config.is_kv_producer = False
         worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
         worker._maybe_build_notif_socket = MagicMock(return_value="socket")
