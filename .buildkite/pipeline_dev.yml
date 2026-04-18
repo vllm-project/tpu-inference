@@ -69,6 +69,6 @@ steps:
           python3 tools/kernel/tuner/v1/generate_cases_and_yml.py --output-path=/tmp/hf_home/generated_tuning_cases.yml"
       - |
         # Upload the generated YAML as a Buildkite artifact for the next step to consume.
-        buildkite-agent artifact upload "/mnt/disks/persist/generated_tuning_cases.yml"
-        # buildkite-agent pipeline upload "/mnt/disks/persist/generated_tuning_cases.yml"
-    artifact_paths: "/mnt/disks/persist/generated_tuning_cases.yml"
+        buildkite-agent artifact upload "/mnt/disks/persist/models/generated_tuning_cases.yml"
+        # buildkite-agent pipeline upload "/mnt/disks/persist/models/generated_tuning_cases.yml"
+    artifact_paths: "/mnt/disks/persist/models/generated_tuning_cases.yml"
