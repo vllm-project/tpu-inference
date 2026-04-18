@@ -23,8 +23,13 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
-from vllm.model_executor.models.gemma4_mm import \
-    Gemma4ForConditionalGeneration as PtGemma4MM
+
+try:
+    from vllm.model_executor.models.gemma4_mm import \
+        Gemma4ForConditionalGeneration as PtGemma4MM
+except ImportError:
+    # TODO(#2308): Remove try-except once we have transformers>=5.5.0
+    PtGemma4MM = None
 
 from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
