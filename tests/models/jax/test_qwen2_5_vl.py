@@ -25,11 +25,16 @@ from jax.sharding import Mesh
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import \
     Qwen2_5_VLConfig
 from vllm.config import (CacheConfig, DeviceConfig, MultiModalConfig,
-                         ParallelConfig, SchedulerConfig)
+                         ParallelConfig, SchedulerConfig,
+                         set_current_vllm_config)
+from vllm.model_executor.model_loader import get_model_loader
 
 from tpu_inference.distributed.jax_parallel_state import \
     init_pp_distributed_environment
+from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
+    get_kv_cache_shape
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer
+from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 # Import the module itself to allow patching
@@ -134,9 +139,9 @@ def rng() -> PRNGKey:
     return jax.random.PRNGKey(42)
 
 
-@pytest.fixture
-def mock_vllm_config() -> MockVllmConfig:
-    return MockVllmConfig()
+# @pytest.fixture
+# def mock_vllm_config() -> MockVllmConfig:
+#     return MockVllmConfig()
 
 
 @pytest.fixture
@@ -616,32 +621,83 @@ class TestQwen2_5_VLForConditionalGeneration:
         np.testing.assert_array_equal(logits, mock_logits)
         model.compute_logits.assert_called_once_with(hidden_states)
 
-    @patch("tpu_inference.models.jax.utils.weight_utils.load_hf_weights")
-    def test_load_weights(self, mock_load_weights: MagicMock,
-                          model: Qwen2_5_VLForConditionalGeneration,
-                          mock_vllm_config: MockVllmConfig, rng: PRNGKey,
-                          mesh: Mesh):
-        model.load_weights(rng)
-        mock_load_weights.assert_called_once()
-        kwargs = mock_load_weights.call_args.kwargs
-        assert kwargs['vllm_config'] == mock_vllm_config
-        assert kwargs['model'] is model
-        assert kwargs['mesh'] is mesh
-        assert isinstance(model.rng, nnx.Rngs)
-        assert model.rng is model.rng
+    @pytest.mark.parametrize("model_name", ["Qwen/Qwen2.5-VL-3B-Instruct"])
+    @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
+                                                       (3, 4)])
+    @pytest.mark.parametrize("load_format",
+                             ["skip_layers_model_loader_for_test"])
+    def test_model_loading(self, model_name, pp_rank, pp_world_size,
+                           load_format, rng, mesh, mock_vllm_config,
+                           assert_weight_loading_memory_bounded):
+        """Tests loading weights from HF model"""
+        kv_cache_type = "auto"
+        mock_vllm_config = mock_vllm_config(model_name, kv_cache_type)
+        # No need to load full model.
+        mock_vllm_config.model_config.hf_config.num_hidden_layers = 4
+        mock_vllm_config.load_config.load_format = load_format
+        mock_vllm_config.load_config.num_layers_to_load_for_test = 4
+        mock_vllm_config.parallel_config = None
 
-    @patch("tpu_inference.models.jax.utils.weight_utils.load_hf_weights")
-    def test_load_weights_tied(self, mock_load_weights: MagicMock,
-                               rng: PRNGKey, mesh: Mesh):
-        mock_vllm_config_tied = MockVllmConfig(tie_word_embeddings=True)
-        with patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2_5_VisionTransformer', autospec=True), \
-             patch('tpu_inference.models.jax.qwen2_5_vl.Qwen2Model', autospec=True), jax.set_mesh(mesh):
-            model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config_tied,
-                                                       rng, mesh)
-            model.load_weights(rng)
-            mock_load_weights.assert_called_once()
-            kwargs = mock_load_weights.call_args.kwargs
-            assert "lm_head" not in kwargs['metadata_map'].name_map
+        init_pp_distributed_environment(
+            ip="",
+            rank=pp_rank,
+            world_size=pp_world_size,
+            device=jax.devices()[0],
+            need_pp=False,
+        )
+        mock_vllm_config.quant_config = get_tpu_quantization_config(
+            mock_vllm_config)
+
+        model_dim = mock_vllm_config.model_config.hf_config.hidden_size
+        model_config = mock_vllm_config.model_config
+        kv_dtype = jnp.bfloat16
+        num_key_value_heads = model_config.hf_config.num_key_value_heads
+        qk_head_dim = model_config.hf_config.head_dim
+        # Create random input for comparison
+        seq_len = 1
+        input = [[0.01 * i for i in range(model_dim)] for _ in range(seq_len)]
+
+        with jax.set_mesh(mesh):
+            model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng,
+                                                       mesh)
+
+            # load weights from HF model, monitoring device memory
+            loader = get_model_loader(mock_vllm_config.load_config)
+            # Monitor device memory during weight loading to catch
+            # regressions.
+            with assert_weight_loading_memory_bounded(
+                    model,
+                    description=f"load_weights({model_name})",
+                    threshold_multiplier=0.3,
+            ), set_current_vllm_config(mock_vllm_config):
+                loader.load_weights(model, model_config)
+
+        layer_idx = model.model.start_layer
+        jax_layer_0 = model.model.layers[layer_idx]
+
+        input_tensor_jax = jnp.array(input, dtype=jnp.bfloat16)
+
+        # Forward pass only the 1st layer for comparison
+
+        block_size = 16
+        num_blocks = 8
+        cache_shape = get_kv_cache_shape(num_blocks, block_size,
+                                         num_key_value_heads, qk_head_dim,
+                                         kv_dtype)
+
+        with jax.set_mesh(mesh):
+            jax_output, _ = jax_layer_0(
+                kv_cache=jnp.zeros(cache_shape, dtype=kv_dtype),
+                x=input_tensor_jax,
+                attention_metadata=AttentionMetadata(
+                    input_positions=jnp.array(seq_len),
+                    block_tables=jnp.array(list(range(1))),
+                    seq_lens=jnp.array([seq_len]),
+                    query_start_loc=jnp.array([0, seq_len]),
+                    request_distribution=jnp.array([0, 0, 1]),
+                ),
+            )
+        assert jax_output is not None
 
 
 class TestQwen2_5_VLPipelineParallel:
