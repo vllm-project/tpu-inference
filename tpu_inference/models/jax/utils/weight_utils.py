@@ -509,6 +509,7 @@ def load_hf_weights(
     keep_original_dtype_keys_regex: Optional[list[str]] = None,
     pp_missing_layers: list[str] | None = None,
     keep_hf_weight_suffix_when_match: list[str] = [],
+    weights_iterator: Optional[Iterable] = None,
 ):
     """Load weights into a JAX model from either an iterator or files.
 
@@ -524,14 +525,20 @@ def load_hf_weights(
         shardings = nnx.get_named_sharding(params, mesh)
     except TypeError:
         shardings = params
-    weights_iterator = None
-    if hasattr(vllm_config.model_config, "runai_model_weights_iterator"):
+    if weights_iterator is None and hasattr(vllm_config.model_config,
+                                            "runai_model_weights_iterator"):
         weights_iterator = vllm_config.model_config.runai_model_weights_iterator
     env = torchax.default_env()
     # The weights_iterator is used in RunAI model streamer integration.
     if weights_iterator is not None:
         for hf_key, hf_weight in weights_iterator:
             if filter_regex and not re.match(filter_regex, hf_key):
+                continue
+
+            # Skip PP-missing weights before converting torch→JAX to avoid
+            # a transient device-memory spike from unnecessary tensor copies.
+            if pp_missing_layers and _is_pp_missing_layer(
+                    hf_key, pp_missing_layers):
                 continue
 
             # Since the weights_iterator yields Pytorch tensors (torch.Tensor),
@@ -705,7 +712,8 @@ class StandardWeightLoader(BaseWeightLoader):
     def load_weights(self,
                      model: nnx.Module,
                      mappings: dict | MetadataMap,
-                     keep_hf_weight_suffix_when_match: list[str] = []):
+                     keep_hf_weight_suffix_when_match: list[str] = [],
+                     weights_iterator: Optional[Iterable] = None):
         """
         Calls the generic load_hf_weights utility, passing the correct
         weights iterator.
@@ -733,7 +741,8 @@ class StandardWeightLoader(BaseWeightLoader):
             metadata_map=metadata_map,
             mesh=self.mesh,
             pp_missing_layers=getattr(model, 'pp_missing_layers', []),
-            keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match)
+            keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match,
+            weights_iterator=weights_iterator)
 
 
 def jax_array_from_reshaped_torch(

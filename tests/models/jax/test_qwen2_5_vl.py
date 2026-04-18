@@ -139,9 +139,9 @@ def rng() -> PRNGKey:
     return jax.random.PRNGKey(42)
 
 
-# @pytest.fixture
-# def mock_vllm_config() -> MockVllmConfig:
-#     return MockVllmConfig()
+@pytest.fixture
+def mock_vllm_config() -> MockVllmConfig:
+    return MockVllmConfig()
 
 
 @pytest.fixture
@@ -627,13 +627,13 @@ class TestQwen2_5_VLForConditionalGeneration:
     @pytest.mark.parametrize("load_format",
                              ["skip_layers_model_loader_for_test"])
     def test_model_loading(self, model_name, pp_rank, pp_world_size,
-                           load_format, rng, mesh, mock_vllm_config,
+                           load_format, rng, mock_vllm_config_factory,
                            assert_weight_loading_memory_bounded):
         """Tests loading weights from HF model"""
         kv_cache_type = "auto"
-        mock_vllm_config = mock_vllm_config(model_name, kv_cache_type)
+        mock_vllm_config = mock_vllm_config_factory(model_name, kv_cache_type)
         # No need to load full model.
-        mock_vllm_config.model_config.hf_config.num_hidden_layers = 4
+        mock_vllm_config.model_config.hf_config.text_config.num_hidden_layers = 4
         mock_vllm_config.load_config.load_format = load_format
         mock_vllm_config.load_config.num_layers_to_load_for_test = 4
         mock_vllm_config.parallel_config = None
@@ -648,18 +648,26 @@ class TestQwen2_5_VLForConditionalGeneration:
         mock_vllm_config.quant_config = get_tpu_quantization_config(
             mock_vllm_config)
 
-        model_dim = mock_vllm_config.model_config.hf_config.hidden_size
+        model_dim = mock_vllm_config.model_config.hf_config.text_config.hidden_size
         model_config = mock_vllm_config.model_config
         kv_dtype = jnp.bfloat16
-        num_key_value_heads = model_config.hf_config.num_key_value_heads
-        qk_head_dim = model_config.hf_config.head_dim
+        num_key_value_heads = model_config.hf_config.text_config.num_key_value_heads
+        tc = model_config.hf_config.text_config
+        qk_head_dim = getattr(tc, "head_dim",
+                              tc.hidden_size // tc.num_attention_heads)
         # Create random input for comparison
         seq_len = 1
         input = [[0.01 * i for i in range(model_dim)] for _ in range(seq_len)]
 
-        with jax.set_mesh(mesh):
+        # Use a single-device mesh so shard_map is compatible with seq_len=1.
+        # request_distribution has 3 elements and cannot be divided across
+        # multiple data-parallel devices.
+        test_mesh = Mesh(np.array(jax.local_devices()[:1]).reshape((1, 1, 1)),
+                         axis_names=('data', 'attn_dp', 'model'))
+
+        with jax.set_mesh(test_mesh):
             model = Qwen2_5_VLForConditionalGeneration(mock_vllm_config, rng,
-                                                       mesh)
+                                                       test_mesh)
 
             # load weights from HF model, monitoring device memory
             loader = get_model_loader(mock_vllm_config.load_config)
@@ -685,7 +693,7 @@ class TestQwen2_5_VLForConditionalGeneration:
                                          num_key_value_heads, qk_head_dim,
                                          kv_dtype)
 
-        with jax.set_mesh(mesh):
+        with jax.set_mesh(test_mesh):
             jax_output, _ = jax_layer_0(
                 kv_cache=jnp.zeros(cache_shape, dtype=kv_dtype),
                 x=input_tensor_jax,
