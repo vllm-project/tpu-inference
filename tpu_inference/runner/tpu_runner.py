@@ -546,8 +546,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # able to avoid the overhead of multiple device_put operations.
         # Initialize to a constant size, and resize later after kv cache size is
         # known.
-        self.device_buffer = common_utils.DeviceBuffer((self.dp_size, ),
-                                                       initial_capacity=1024)
+        self.device_buffer_leading_shape = (
+            self.dp_size, ) if self.dp_size > 1 else ()
+        self.device_buffer = common_utils.DeviceBuffer(
+            self.device_buffer_leading_shape, initial_capacity=1024)
 
     def load_model(self):
         with set_current_vllm_config(self.vllm_config):
@@ -640,7 +642,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                             query_start_loc_size + seq_lens_size +
                             logits_indices_size + block_tables_size)
         self.device_buffer = common_utils.DeviceBuffer(
-            (self.dp_size, ), initial_capacity=initial_capacity)
+            self.device_buffer_leading_shape,
+            initial_capacity=initial_capacity)
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_runner(self)
@@ -1756,16 +1759,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Get positions (1D).
         if self.uses_mrope:
-            positions_np = positions_view[0, 0, :total_num_scheduled_tokens]
-        else:
             positions_np = positions_view[0, :total_num_scheduled_tokens]
+        else:
+            positions_np = positions_view[:total_num_scheduled_tokens]
 
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
                arange,
                out=positions_np)
 
         if not self.uses_mrope:
-            positions_view[0, total_num_scheduled_tokens:] = 0
+            positions_view[total_num_scheduled_tokens:] = 0
 
         # Multi-modal support
         # Calculate M-RoPE positions.
@@ -1782,19 +1785,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         np.take(self.input_batch.token_ids_cpu.ravel(),
                 token_indices,
-                out=input_ids_view[0, :total_num_scheduled_tokens])
-        input_ids_view[0, total_num_scheduled_tokens:] = 0
+                out=input_ids_view[:total_num_scheduled_tokens])
+        input_ids_view[total_num_scheduled_tokens:] = 0
 
         # Prepare the attention metadata.
-        query_start_loc_view[0, 0] = 0
+        query_start_loc_view[0] = 0
         np.cumsum(num_scheduled_tokens_per_req,
-                  out=query_start_loc_view[0, 1:num_reqs + 1])
-        query_start_loc_view[0, num_reqs + 1:] = 1
+                  out=query_start_loc_view[1:num_reqs + 1])
+        query_start_loc_view[num_reqs + 1:] = 1
 
-        seq_lens_view[0, :num_reqs] = (
+        seq_lens_view[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens_per_req)
-        seq_lens_view[0, num_reqs:] = 0
+        seq_lens_view[num_reqs:] = 0
 
         mrope_positions = self.mrope_positions_cpu[:, :
                                                    padded_total_num_scheduled_tokens]
@@ -1823,11 +1826,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Add positions to buffer
         if self.uses_mrope:
             positions_view[:] = mrope_positions.reshape(
-                1, 3, padded_total_num_scheduled_tokens)
+                3, padded_total_num_scheduled_tokens)
 
         req_dist_view = self.device_buffer.get_view((3, ),
                                                     key="request_distribution")
-        req_dist_view[0] = self.input_batch.request_distribution
+        req_dist_view[:] = self.input_batch.request_distribution
 
         def build_block_table_host(kv_cache_gid: int) -> None:
             block_table_obj = self.input_batch.block_table[kv_cache_gid]
@@ -1836,8 +1839,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 key=f"block_tables_gid_{kv_cache_gid}")
 
             cpu_tensor = block_table_obj.get_cpu_tensor()
-            np.copyto(block_tables_view[0, :num_reqs], cpu_tensor[:num_reqs])
-            block_tables_view[0, num_reqs:].fill(0)
+            np.copyto(block_tables_view[:num_reqs], cpu_tensor[:num_reqs])
+            block_tables_view[num_reqs:].fill(0)
 
         if len(self.kv_cache_config.kv_cache_groups) <= 1:
             # Pooling model will not using kv cache
@@ -1856,18 +1859,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         metadata = common_utils.DeviceBuffer.unpack_arrays(
             dev_arrays_payload, metadata_layout)
-        input_ids = metadata["input_ids"].ravel()
-        query_start_loc = metadata["query_start_loc"].ravel()
-        seq_lens = metadata["seq_lens"].ravel()
-        request_distribution = metadata["request_distribution"].ravel()
-        logits_indices = metadata["logits_indices"].ravel()
+        input_ids = metadata["input_ids"]
+        query_start_loc = metadata["query_start_loc"]
+        seq_lens = metadata["seq_lens"]
+        request_distribution = metadata["request_distribution"]
+        logits_indices = metadata["logits_indices"]
 
         # Unpack positions
         positions = metadata["positions"]
         if self.uses_mrope:
-            positions = positions.reshape(1, 3,
-                                          -1).transpose(1, 0,
-                                                        2).reshape(3, -1)
+            positions = positions.reshape(3, -1)
         else:
             positions = positions.ravel()
 
@@ -1887,9 +1888,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution)
             # This is for making these cpu buffers hidden during tracing
-            attention_metadata_gid.query_start_loc_cpu = query_start_loc_view.ravel(
-            )
-            attention_metadata_gid.seq_lens_cpu = seq_lens_view.ravel()
+            attention_metadata_gid.query_start_loc_cpu = query_start_loc_view
+            attention_metadata_gid.seq_lens_cpu = seq_lens_view
             return attention_metadata_gid
 
         attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]
