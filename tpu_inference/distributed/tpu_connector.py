@@ -283,6 +283,11 @@ class TPUConnectorScheduler():
         if self.is_producer or not request.kv_transfer_params:
             return 0, False
 
+        # Only trigger 1 KV transfer per request.
+        if request.kv_transfer_params.get("do_remote_prefill", True) is False:
+            # logger.debug(f"TPUConnector Scheduler skip kv transfer for request {request.request_id} as it already pulled before.")
+            return 0, False
+
         assert num_computed_tokens % self.block_size == 0
         # This rounding logic must be consistent with calculating
         # remote_block_ids in P's request_finished()
@@ -345,6 +350,10 @@ class TPUConnectorScheduler():
                 remote_host=params["remote_host"],
                 remote_port=params["remote_port"],
             )
+
+        # Only trigger 1 KV transfer per request.
+        params["do_remote_prefill"] = False
+
         logger.info(
             f"TPUConnector Scheduler update_state_after_alloc -->  reqs_to_load={self.reqs_to_load}"
         )
@@ -447,8 +456,9 @@ class TPUConnectorWorker:
         # req_id: (kv, expiration_time, buffer_index)
         self.reqs_wait_pull: dict[ReqId, list[list[jax.Array], float,
                                               int]] = {}
-        # req_id: thread_future
-        self.reqs_pulling: dict[ReqId, Future] = {}
+        # req_id: (pull_thread_future, kv, block_ids)
+        self.reqs_pulling: dict[ReqId, list[Future, list[jax.Array], list[int]]] = {}
+
         # req_id: (kv, indices)
         self.reqs_ready_to_insert: dict[ReqId, tuple[list[jax.Array],
                                                      jax.Array]] = {}
@@ -612,25 +622,25 @@ class TPUConnectorWorker:
                 # We execute device_array here so JAX sees the exact same sequence
                 # of local_block_ids across all TPU nodes simultaneously.
                 # TODO(xiang): pad block_ids to avoid recompilation
-                indices = device_array(self.mesh,
-                                       np.array(req_meta.local_block_ids))
                 conn = self._maybe_build_kv_connection(req_meta)
-
-                self.reqs_pulling[req_id] = self.pull_executor.submit(
-                    self._pull_kv, req_id, conn, req_meta, indices)
+                if req_id not in self.reqs_pulling:
+                    self.reqs_pulling[req_id] = [self.pull_executor.submit(
+                        self._pull_kv, req_id, conn, req_meta), None, req_meta.local_block_ids]
+                else:
+                    # Update the local block ids as the pre-allocated blocks may get preempted
+                    self.reqs_pulling[req_id][2] = req_meta.local_block_ids
             else:
-                if req_id in self.reqs_ready_to_insert:
-                    kv, indices, block_numbers = self.reqs_ready_to_insert.pop(
-                        req_id)
+                if req_id in self.reqs_pulling:
+                    assert self.reqs_pulling[req_id][1] is not None
+                    _, kv, block_numbers = self.reqs_pulling.pop(req_id)
                     if len(block_numbers) > 0:
                         self.runner.kv_caches = insert_kv_chunks(
                             self.runner.kv_caches, kv, block_numbers,
                             self.mesh, self.sharding.spec)
-
-                # The request has finished pulling the KV from remote, or it has full local
-                # prefix cache, need to notify P to let it free blocks.
-                socket = self._maybe_build_notif_socket(req_meta)
-                self._notify_pull_done(socket, req_id, req_meta.uuid)
+                    # The request has finished pulling the KV from remote, or it has full local
+                    # prefix cache, need to notify P to let it free blocks.
+                    socket = self._maybe_build_notif_socket(req_meta)
+                    self._notify_pull_done(socket, req_id, req_meta.uuid)
 
     def _prepare_kv_and_wait(self, req_id: str, req_meta: SendMeta):
         local_block_ids = req_meta.local_block_ids
@@ -716,8 +726,7 @@ class TPUConnectorWorker:
             )
         return conn
 
-    def _pull_kv(self, req_id: str, conn: Any, req_meta: LoadMeta,
-                 indices: jax.Array):
+    def _pull_kv(self, req_id: str, conn: Any, req_meta: LoadMeta):
         # The local allocated blocks which don't hit prefix caching.
         local_block_ids = req_meta.local_block_ids
         # The remote computed blocks which need to pull from P.
@@ -761,7 +770,7 @@ class TPUConnectorWorker:
                 f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | "
                 f"uuid={req_meta.uuid} | prepare time={prepare_time_ms:.2f}ms | "
                 f"size={kv_size_mb:.2f}MB")
-        return kv, indices, req_meta.local_block_ids
+        return kv
 
     def _get_kv_spec(self, num_blocks: int) -> list[jax.ShapeDtypeStruct]:
         assert num_blocks <= self.shape[0]
@@ -806,13 +815,12 @@ class TPUConnectorWorker:
         # Mark a req as done recieving after its pulling thread returns.
         # This req can then be scheduled for decoding in the next scheduler step.
         for req_id in list(self.reqs_pulling.keys()):
-            future = self.reqs_pulling[req_id]
-            if future.done():
-                kv, indices, block_numbers = future.result()
-                self.reqs_ready_to_insert[req_id] = (kv, indices,
-                                                     block_numbers)
-                del self.reqs_pulling[req_id]
-                done_recving.add(req_id)
+            if self.reqs_pulling[req_id][1] is None:
+                future = self.reqs_pulling[req_id][0]
+                if future.done():
+                    kv = future.result()
+                    self.reqs_pulling[req_id][1] = kv
+                    done_recving.add(req_id)
 
         # Mark a req as done seding when it's expired.
         # This req can then be released blocks in the current scheduler step.
