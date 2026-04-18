@@ -345,7 +345,7 @@ class TPUConnectorScheduler():
             # In both cases we need to send notification to let P free memory.
             self.reqs_to_load[request.request_id] = LoadMeta(
                 uuid=params["uuid"],
-                local_block_ids=None,
+                local_block_ids=blocks.get_block_ids()[0],
                 remote_block_ids=None,
                 remote_host=params["remote_host"],
                 remote_port=params["remote_port"],
@@ -638,13 +638,22 @@ class TPUConnectorWorker:
                     assert self.reqs_pulling[req_id][1] is not None
                     _, kv, block_numbers = self.reqs_pulling.pop(req_id)
                     if len(block_numbers) > 0:
+                        start_time = time.perf_counter()
                         self.runner.kv_caches = insert_kv_chunks(
                             self.runner.kv_caches, kv, block_numbers,
                             self.mesh, self.sharding.spec)
+                        end_time = time.perf_counter()
+                        logger.info(
+                            f"TPUConnector Worker {self.node_id} --> req_id={req_id}, takes {(end_time - start_time)*1000:.2f}ms for insert_kv_chunks"
+                        )
                     # The request has finished pulling the KV from remote, or it has full local
                     # prefix cache, need to notify P to let it free blocks.
                     socket = self._maybe_build_notif_socket(req_meta)
                     self._notify_pull_done(socket, req_id, req_meta.uuid)
+                else:
+                    logger.info(
+                        f"TPUConnector Worker {self.node_id} --> req_id={req_id}, skip insert_kv_chunks."
+                    )
 
     def _prepare_kv_and_wait(self, req_id: str, req_meta: SendMeta):
         local_block_ids = req_meta.local_block_ids
@@ -797,6 +806,7 @@ class TPUConnectorWorker:
                                    path=sock_path,
                                    socket_type=zmq.DEALER,
                                    bind=False)
+            self.notif_sockets[sock_path] = sock
             logger.info(
                 f"Worker {self.node_id} --> notify make_zmq_socket | sock_path={sock_path}"
             )
