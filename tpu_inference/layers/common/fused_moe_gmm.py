@@ -171,95 +171,53 @@ def moe_gmm_local(
     reduction_axis = (ShardingAxisName.MLP_TENSOR
                       if parallelism == "tp" else ShardingAxisName.EXPERT)
 
-    chunk_size = gmm2_res.shape[0] // sc_psum_num_chunks
-    if gather_reduce_sc.is_supported_by_sc_gather_reduce(
-            gmm1_res.shape[0], sc_kernel_threshold):
+    use_sc = gather_reduce_sc.is_supported_by_sc_gather_reduce(
+        gmm1_res.shape[0], sc_kernel_threshold)
+
+    # 1. Setup chunk sizes and pre-process kernel weights
+    if use_sc:
+        sc_kernel_col_chunk_size = gather_reduce_sc.get_valid_col_chunk_size(
+            gmm2_res.shape[1], sc_kernel_col_chunk_size)
+        chunk_size = gmm2_res.shape[0] // sc_psum_num_chunks
 
         if local_group_size < group_sizes.size:
-            mask = mask.reshape(-1, topk)
-            topk_weights = jnp.where(mask, topk_weights, 0)
+            mask_flat = mask.reshape(-1, topk)
+            topk_weights_sc = jnp.where(mask_flat, topk_weights, 0)
             topk_wgt_zero_nan = True
         else:
+            topk_weights_sc = topk_weights
             topk_wgt_zero_nan = False
 
-        inds = topk_argsort_revert_indices
-        topk_weights = topk_weights.flatten().reshape(-1, 128)
+        # Flattened so we can slice it easily in the loop
+        topk_weights_flat = topk_weights_sc.flatten()
+    else:
+        chunk_size = 16384
 
-        inds_reshaped = inds.reshape(sc_psum_num_chunks, chunk_size)
-        topk_weights_reshaped = topk_weights.reshape(sc_psum_num_chunks,
-                                                     chunk_size // 128, 128)
+    out_list = []
 
-        # Pre-allocate output buffer to save memory and avoids list accumulation
-        # The shape is (inds.shape[0] // 8, hidden_size)
-        token_hidden = jnp.zeros((inds.shape[0] // 8, gmm2_res.shape[-1]),
-                                 dtype=jnp.bfloat16)
+    # 2. Unified loop relying on XLA unrolling
+    for start in range(0, batch_size, chunk_size):
+        end = min(batch_size, start + chunk_size)
+        start_tok = start // topk
+        end_tok = end // topk
 
-        # Prologue: Execute the first kernel chunk
-        chunk_out_prev = gather_reduce_sc.sc_gather_reduce(
-            op=gmm2_res,
-            idx=inds_reshaped[0],
-            reduce_group_size=topk,
-            topk_weights=topk_weights_reshaped[0],
-            col_chunk_size=sc_kernel_col_chunk_size,
-            topk_wgt_zero_nan=topk_wgt_zero_nan,
-        )
+        cur_indices = topk_argsort_revert_indices[start:end]
 
-        chunk_out_reduced = None
+        if use_sc:
+            # --- Custom SC Kernel Branch ---
+            # Slice flattened weights and reshape to expected (-1, 128)
+            cur_weights = topk_weights_flat[start:end].reshape(-1, 128)
 
-        for i in range(1, sc_psum_num_chunks):
-            weights_chunk = topk_weights_reshaped[i]
-
-            # Optimization barrier to ensure SC_i and TC_{i-1} start in parallel
-            if i == 1:
-                idx_chunk_barriered, chunk_out_prev_barriered = jax.lax.optimization_barrier(
-                    (inds_reshaped[i], chunk_out_prev))
-            else:
-                idx_chunk_barriered, chunk_out_prev_barriered, _ = jax.lax.optimization_barrier(
-                    (inds_reshaped[i], chunk_out_prev, chunk_out_reduced))
-
-            # Start SC kernel using the barriered index
-            chunk_out = gather_reduce_sc.sc_gather_reduce(
+            cur_reduced = gather_reduce_sc.sc_gather_reduce(
                 op=gmm2_res,
-                idx=idx_chunk_barriered,
+                idx=cur_indices,
                 reduce_group_size=topk,
-                topk_weights=weights_chunk,
+                topk_weights=cur_weights,
                 col_chunk_size=sc_kernel_col_chunk_size,
                 topk_wgt_zero_nan=topk_wgt_zero_nan,
             )
-
-            # psum on the previous chunk output
-            chunk_out_reduced = jax.lax.psum(chunk_out_prev_barriered,
-                                             axis_name=reduction_axis)
-
-            # In-place update of the pre-allocated buffer
-            token_hidden = jax.lax.dynamic_update_slice(
-                token_hidden, chunk_out_reduced,
-                ((i - 1) * (chunk_size // 8), 0))
-
-            chunk_out_prev = chunk_out
-
-        # Epilogue: Perform psum on the last kernel output
-        if sc_psum_num_chunks > 1:
-            chunk_out_prev_barriered, _ = jax.lax.optimization_barrier(
-                (chunk_out_prev, chunk_out_reduced))
         else:
-            chunk_out_prev_barriered = jax.lax.optimization_barrier(
-                (chunk_out_prev, ))[0]
-
-        chunk_out_reduced_final = jax.lax.psum(chunk_out_prev_barriered,
-                                               axis_name=reduction_axis)
-        token_hidden = jax.lax.dynamic_update_slice(
-            token_hidden, chunk_out_reduced_final,
-            ((sc_psum_num_chunks - 1) * (chunk_size // 8), 0))
-    else:
-        chunk_size = 16384
-        out_list = []
-        for start in range(0, batch_size, chunk_size):
-            end = min(batch_size, start + chunk_size)
-            start_tok = start // topk
-            end_tok = end // topk
-
-            cur_indices = topk_argsort_revert_indices[start:end]
+            # --- Fallback JAX Math Branch ---
             cur_topk_weights = topk_weights[start_tok:end_tok]
             cur_mask = mask[start_tok:end_tok]
 
@@ -271,11 +229,11 @@ def moe_gmm_local(
             cur_masked = jnp.where(cur_mask, cur_weighted, 0.0)
             cur_reduced = cur_masked.sum(axis=-2)
 
-            reduction_axis = (ShardingAxisName.MLP_TENSOR if parallelism
-                              == "tp" else ShardingAxisName.EXPERT)
-            out = jax.lax.psum(cur_reduced, axis_name=reduction_axis)
-            out_list.append(out)
-        token_hidden = jnp.concat(out_list, axis=0)
+        # --- Shared Reduction and Append ---
+        out = jax.lax.psum(cur_reduced, axis_name=reduction_axis)
+        out_list.append(out)
+
+    token_hidden = jnp.concat(out_list, axis=0)
 
     return token_hidden
 

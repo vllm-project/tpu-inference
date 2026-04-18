@@ -32,6 +32,10 @@ from jax.interpreters import mlir
 from jaxlib.mlir import ir
 from jaxlib.mlir.dialects import arith, func, memref, scf, vector
 
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 class VectorTypeHelper:
     """Helper to create VectorType with a specific element type."""
@@ -54,7 +58,32 @@ def is_supported_by_sc_gather_reduce(x_shape: int,
                                      sc_kernel_threshold: int) -> bool:
     if x_shape > sc_kernel_threshold and pltpu.get_tpu_info().generation == 7:
         return True
+
+    logger.warning(
+        'Plattform does not support SparseCore, gather reduce not performed on SparseCore.'
+    )
     return False
+
+
+def get_valid_col_chunk_size(total_cols: int,
+                             requested_chunk_size: int) -> int:
+    """Ensures the chunk size perfectly divides the total columns.
+    
+    If it doesn't, returns the largest valid divisor smaller than the requested size.
+    """
+    if total_cols % requested_chunk_size == 0:
+        return requested_chunk_size
+
+    # Iterate backwards from the requested size to find the nearest valid divisor
+    for divisor in range(requested_chunk_size - 1, 0, -1):
+        if total_cols % divisor == 0:
+            logger.warning(
+                f"sc_kernel_col_chunk_size ({requested_chunk_size}) does not evenly "
+                f"divide the hidden size ({total_cols}). Automatically adjusting to "
+                f"the nearest valid divisor: {divisor}.")
+            return divisor
+
+    return 1  # Fallback (1 perfectly divides everything)
 
 
 @jax.jit(static_argnames=[
