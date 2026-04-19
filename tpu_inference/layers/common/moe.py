@@ -123,13 +123,18 @@ def moe_apply(
                     **extra_backend_kwargs,
                 )[:, :actual_hidden_size]
             case MoEBackend.GMM_EP | MoEBackend.GMM_TP:
-                # Check if activation_dtype was passed via kwargs or as an environment variable
+                # e_score_correction_bias (for topk_method="noaux_tc" models
+                # like GLM-5.1 / DeepSeek-V3) may be supplied via
+                # extra_backend_kwargs as a pre-converted JAX array.
+                _bias_jax = (extra_backend_kwargs or {}).get(
+                    "e_score_correction_bias")
+                # Upstream FP8 activation path (#2152): read activation_dtype
+                # from kwargs or env, set all_gather_fp8 accordingly.
                 activation_dtype = extra_backend_kwargs.get(
                     "activation_dtype", envs.MOE_ALL_GATHER_ACTIVATION_DTYPE)
                 all_gather_fp8 = (bool(activation_dtype)
                                   and to_jax_dtype(activation_dtype)
                                   == jnp.float8_e4m3fn)
-
                 output = fused_moe_func(
                     hidden_states=x,
                     w1=weights.w13_weight,
@@ -145,6 +150,7 @@ def moe_apply(
                     use_ep=layer.use_ep,
                     activation=activation,
                     scoring_fn=layer.scoring_func,
+                    e_score_correction_bias=_bias_jax,
                     all_gather_fp8=all_gather_fp8,
                 )
             case MoEBackend.DENSE_MAT:
