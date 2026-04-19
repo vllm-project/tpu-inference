@@ -52,7 +52,7 @@ class TuningStatus(Enum):
     UNKNOWN_ERROR = 'UNKNOWN_ERROR'
 
 
-class CaseBase:
+class TuningCase:
 
     def __init__(self, tuning_key: TuningKey, tunable_params: TunableParams):
         self.tuning_key = tuning_key
@@ -80,7 +80,7 @@ class KernelTunerBase:
     The kernel tuner runner will be executed in a distributed manner, where each worker will claim a bucket of cases to process, run the kernel with the corresponding tuning key and tunable params, measure the latency, and save the results back to the storage manager. The Buildkite pipeline will be generated to orchestrate the distributed execution of the kernel tuner runner.
 
     Subclass should implement the following methods:
-    - generate_cases: Generate the tuning cases for the given case_set_id and desc, and return a list of CaseBase objects representing the tuning cases.
+    - generate_cases: Generate the tuning cases for the given case_set_id and desc, and return a list of TuningCase objects representing the tuning cases.
     - generate_inputs: Generate the kernel inputs for the given tuning key with caching, and return a dictionary of kernel inputs.
     - run: Execute the kernel with the given tuning key and tunable params for a certain number of iterations, measure the latency, and return the tuning status, average latency, and total latency.
 
@@ -125,19 +125,19 @@ class KernelTunerBase:
                 f"Initialized new CaseSet with ID: {case_set_id} and description: {desc}"
             )
 
-    def generate_cases(self) -> list[CaseBase]:
+    def generate_cases(self) -> list[TuningCase]:
         """Generate the cases for the given case_set_id. This will be called when the caseset_id is new or the caseset_id is not specified.
-        This should not raise any exception, all exceptions should be caught and handled internally. The generated cases will be persisted in local file or database using storage_management module, where each case is represented as a CaseBase object and stored as a string. The case_id is the index of the case in the generated case list.
+        This should not raise any exception, all exceptions should be caught and handled internally. The generated cases will be persisted in local file or database using storage_management module, where each case is represented as a TuningCase object and stored as a string. The case_id is the index of the case in the generated case list.
 
         Args:
             case_set_id: Identifies a set of tuning cases. If specified when running the tuning
                 pipeline, the caseset will only be regenerated when the caseset_id changes.
             desc: A description for this case set, which will be persisted in local file or database using storage_management module."""
         raise NotImplementedError(
-            "Specific kernel should implement this to generate the cases for the given case_set_id and desc, and return a list of CaseBase objects representing the tuning cases."
+            "Specific kernel should implement this to generate the cases for the given case_set_id and desc, and return a list of TuningCase objects representing the tuning cases."
         )
 
-    def generate_tuning_jobs(self,
+    def _generate_tuning_jobs(self,
                              case_set_id: str,
                              bucket_size: int = 100) -> list[tuple[int, int]]:
         """Partitions the full case set into fixed-size work buckets.
@@ -159,9 +159,9 @@ class KernelTunerBase:
         total_cases = len(cases)
         for case_id, case_str in enumerate(map(str, cases)):
             self.storage_manager.add_tuner_case(case_set_id, case_id, case_str)
-        self.db_manager.flush()
+        self.storage_manager.flush()
         duration_sec = int(time.perf_counter() - start_time)
-        self.db_manager.finish_case_set(
+        self.storage_manager.finish_case_set(
             case_set_id,
             total_cases,
             0,  # invalid case count, doesn't matter here
@@ -192,7 +192,7 @@ class KernelTunerBase:
         except Exception as e:
             logger.error(f"Error initializing case set {case_set_id}: {e}")
             raise e
-        buckets = self.generate_tuning_jobs(case_set_id)
+        buckets = self._generate_tuning_jobs(case_set_id)
         # The Buildkite pipeline YAML will be generated in the format of:
         # steps:
         #   - label: "Measure latency for cases [begin_case_id, end_case_id)"
@@ -309,7 +309,7 @@ class KernelTunerBase:
             config = all_configs.get(cid)
             if not config: continue
             _, _, case_key_value = config
-            tuning_key, tunable_params = CaseBase.from_string(
+            tuning_key, tunable_params = TuningCase.from_string(
                 case_key_value, self.tuning_key_class,
                 self.tunable_params_class)
 
