@@ -190,8 +190,8 @@ def process_w13_for_gmm(tensor,
     padded_w1 = _pad_tensor(w1)
     padded_w3 = _pad_tensor(w3)
 
-    logger.info(f"{name}_w1 shape after padding: {padded_w1.shape}")
-    logger.info(f"{name}_w3 shape after padding: {padded_w3.shape}")
+    logger.debug(f"{name}_w1 shape after padding: {padded_w1.shape}")
+    logger.debug(f"{name}_w3 shape after padding: {padded_w3.shape}")
 
     # 3. Concatenate and Reorder for avoiding TP sharding comms
     w13_concat = jnp.concatenate([padded_w1, padded_w3], axis=concat_dim)
@@ -210,6 +210,7 @@ def process_moe_weights(
     moe_backend: MoEBackend,
     w13_reorder_size: int | None = None,
     w13_interleave: bool = False,
+    compact_scale_fields: tuple[str, ...] = (),
 ) -> FusedMoEWeights:
     """Process fused moe weights to a layout that moe backend expects.
 
@@ -223,6 +224,11 @@ def process_moe_weights(
         w13_interleave: used when loaded w13_weight is stored in interleaved
             pattern where even index element is w1 and odd index element is w3.
             we uninterleave so that first half is w1 and second half is w3.
+        compact_scale_fields: field names (e.g. "w2_weight_scale") whose
+            scale should stay 3D (E, K_blocks, N_blocks) rather than being
+            expand_dims'd to 4D. Used by the direct FP8 path to feed the
+            kernel's per-block scalar lookup (scale_n_block_size mode),
+            saving the 128× host-side memory blow-up.
 
     Returns:
         MoE weights that are processed for specified backend.
@@ -257,18 +263,30 @@ def process_moe_weights(
     w13_weight = jnp.swapaxes(w13_weight, 1, 2)
     w2_weight = jnp.swapaxes(w2_weight, 1, 2)
 
-    # Workaround for JAX error "must have valid byte strides"
-    w13_weight = with_layout_constraint(w13_weight, Layout((0, 1, 2)))
-    w2_weight = with_layout_constraint(w2_weight, Layout((0, 1, 2)))
+    # Workaround for JAX error "must have valid byte strides". Keep it for the
+    # fused-MoE path, but skip it for GMM_EP because that path already ends up
+    # with EP-only sharding and this extra layout constraint can trigger a huge
+    # TP all-gather during lowering.
+    if moe_backend != MoEBackend.GMM_EP:
+        w13_weight = with_layout_constraint(w13_weight, Layout((0, 1, 2)))
+        w2_weight = with_layout_constraint(w2_weight, Layout((0, 1, 2)))
 
+    # Scale layout: swap (N_blocks↔K_blocks) so kernel's b_id iterates over
+    # K_blocks (contracting dim). By default expand_dims(axis=2) to get 4D
+    # (E, K_blocks, 1, N_full) expected by legacy per-element-N kernel path.
+    # Fields in `compact_scale_fields` keep the 3D (E, K_blocks, N_blocks)
+    # layout — kernel's gmm_v2 auto-enables scale_n_block_size mode and does
+    # per-block scalar lookup. See process_fp8_moe_weights_direct.
     if w13_weight_scale is not None:
         w13_weight_scale = w13_weight_scale.astype(jnp.float32)
         w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
-        w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
+        if "w13_weight_scale" not in compact_scale_fields:
+            w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
     if w2_weight_scale is not None:
         w2_weight_scale = w2_weight_scale.astype(jnp.float32)
         w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
-        w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
+        if "w2_weight_scale" not in compact_scale_fields:
+            w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
     if w13_bias is not None:
         w13_bias = w13_bias.astype(jnp.float32)
         w13_bias = jnp.expand_dims(w13_bias, 1)
@@ -416,9 +434,13 @@ def shard_moe_weights(
     weights: FusedMoEWeights,
     moe_backend: MoEBackend,
     mesh: Mesh,
+    num_experts_global: int | None = None,
 ) -> FusedMoEWeights:
+    # Only set by GMM_TP when we expand w2_weight_scale via jnp.repeat, so
+    # the main loop can override axis-1 of its global_shape.
+    _w2_ws_global_axis1 = None
     match moe_backend:
-        case MoEBackend.FUSED_MOE | MoEBackend.GMM_EP:
+        case MoEBackend.FUSED_MOE:
             ep_sharding = NamedSharding(mesh, P(ShardingAxisName.EXPERT))
             weight_shardings = FusedMoEWeights(
                 w13_weight=ep_sharding,
@@ -428,15 +450,59 @@ def shard_moe_weights(
                 w2_weight_scale=ep_sharding,
                 w2_bias=ep_sharding,
             )
+        case MoEBackend.GMM_EP:
+            # For the 8EP4TP NEW_MODEL_DESIGN bring-up, shard MoE weights on
+            # the full EXPERT axis tuple so the 32-way mesh placement matches
+            # the intended 8-way EP x 4-way TP layout.
+            gmm_ep_sharding = NamedSharding(mesh, P(ShardingAxisName.EXPERT))
+            weight_shardings = FusedMoEWeights(
+                w13_weight=gmm_ep_sharding,
+                w13_weight_scale=gmm_ep_sharding,
+                w13_bias=gmm_ep_sharding,
+                w2_weight=gmm_ep_sharding,
+                w2_weight_scale=gmm_ep_sharding,
+                w2_bias=gmm_ep_sharding,
+            )
         case MoEBackend.GMM_TP:
-            # When using per-channel, in_dim // block_size == 1. This means we
-            # are unable to shard w2_weight_scale along 1st dim. Therefore, we
-            # fully replicate it instead.
-            if (weights.w2_weight_scale is not None
-                    and weights.w2_weight_scale.shape[1] == 1):
-                w2_weight_scale_p_spec = P()
-            else:
+            # w2_weight_scale must align with w2_weight's TP sharding along
+            # the intermediate (contracting) axis. For GLM-5.1 the raw scale
+            # has only 16 K-blocks while TP=32, so we repeat axis-1 up to 32
+            # *after* the compact-scale optimization, then shard it. Each
+            # pair of adjacent chips thus owns the same (small) block — the
+            # kernel reads scale[b_id=0, n_block_idx] as a scalar and applies
+            # it to that chip's 64 local intermediate elements (half of a
+            # 128-element global block; correct per block-quantization
+            # semantics, since all elements in a block share one scale).
+            _mlp_tensor_size = get_mesh_shape_product(
+                mesh, list(ShardingAxisName.MLP_TENSOR))
+            _w2_ws = weights.w2_weight_scale
+            if _w2_ws is None:
                 w2_weight_scale_p_spec = P(None, ShardingAxisName.MLP_TENSOR)
+            else:
+                _process_count = jax.process_count()
+                _local_axis1 = _w2_ws.shape[1]
+                _global_axis1 = _local_axis1 * _process_count
+                if _global_axis1 % _mlp_tensor_size == 0:
+                    w2_weight_scale_p_spec = P(
+                        None, ShardingAxisName.MLP_TENSOR)
+                elif _mlp_tensor_size % _global_axis1 == 0:
+                    _rf = _mlp_tensor_size // _global_axis1
+                    _w2_ws_global_axis1 = _global_axis1 * _rf
+                    weights.w2_weight_scale = jnp.repeat(_w2_ws, _rf, axis=1)
+                    _w2_ws = None  # free pre-repeat buffer
+                    w2_weight_scale_p_spec = P(
+                        None, ShardingAxisName.MLP_TENSOR)
+                else:
+                    w2_weight_scale_p_spec = P()
+                logger.debug(
+                    "[shard_moe_weights GMM_TP] w2_weight_scale ndim=%d "
+                    "shape=%s global_axis1=%d mlp=%d → %s",
+                    weights.w2_weight_scale.ndim,
+                    weights.w2_weight_scale.shape,
+                    _w2_ws_global_axis1 or _global_axis1,
+                    _mlp_tensor_size,
+                    "shard axis-1" if w2_weight_scale_p_spec != P()
+                    else "replicate")
             weight_shardings = FusedMoEWeights(
                 w13_weight=NamedSharding(
                     mesh,
@@ -473,7 +539,7 @@ def shard_moe_weights(
                 w2_weight_scale=Layout((0, 1, 2, 3)),
                 w2_bias=Layout((0, 1, 2)),
             )
-        case MoEBackend.GMM_TP | MoEBackend.GMM_EP:
+        case MoEBackend.GMM_TP:
             weight_layouts = FusedMoEWeights(
                 w13_weight=Layout((0, 1, 2)),
                 w13_weight_scale=Layout((0, 1, 2, 3)),
@@ -482,53 +548,117 @@ def shard_moe_weights(
                 w2_weight_scale=Layout((0, 1, 2, 3)),
                 w2_bias=Layout((0, 1, 2)),
             )
+        case MoEBackend.GMM_EP:
+            # Skip Layout constraints for GMM_EP to avoid the ~1.5GB XLA
+            # compilation/transposition temp buffer that jax.device_put(Format(...))
+            # requires. With large models (e.g., GLM-5.1-FP8 744B) that fill nearly
+            # all HBM with weights, this temp buffer causes RESOURCE_EXHAUSTED.
+            # Weights are stored in natural C-order; the GMM kernel still produces
+            # correct results, just without the Fortran-order cache optimization.
+            weight_layouts = FusedMoEWeights(
+                w13_weight=None,
+                w13_weight_scale=None,
+                w13_bias=None,
+                w2_weight=None,
+                w2_weight_scale=None,
+                w2_bias=None,
+            )
 
     for field in fields(FusedMoEWeights):
         key = field.name
         if (weight := getattr(weights, key, None)) is not None:
             layout = getattr(weight_layouts, key)
+            # Compact 3D scale (kernel 2D block mode) — static layout tuples
+            # above are 4D; drop the constraint so JAX picks a compatible
+            # layout for ndim=3. Covers the direct-FP8 path for w2 (and in
+            # the future w13) where scale is kept as (E, K_blocks, N_blocks).
+            if key in ("w13_weight_scale", "w2_weight_scale") and \
+                    weight.ndim == 3:
+                layout = None
             sharding = getattr(weight_shardings, key)
-            weight = general_device_put(weight, sharding, layout=layout)
+            # make_array_from_process_local_data wants global shape. axis-0
+            # is always experts (provided explicitly via num_experts_global);
+            # axis-1 needs override only when shard_moe_weights already did
+            # a host-side repeat that blew up the local axis to
+            # `_w2_ws_global_axis1` per host × process_count globally.
+            g_shape = None
+            if num_experts_global is not None:
+                g_shape = (num_experts_global,) + weight.shape[1:]
+            if (moe_backend == MoEBackend.GMM_TP
+                    and key == "w2_weight_scale"
+                    and _w2_ws_global_axis1 is not None
+                    and g_shape is not None):
+                g_shape = (g_shape[0], _w2_ws_global_axis1) + g_shape[2:]
+            logger.debug(
+                "[shard_moe_weights] field=%s weight.shape=%s g_shape=%s",
+                key, getattr(weight, "shape", "?"), g_shape)
+            weight = general_device_put(
+                weight, sharding, layout=layout, global_shape=g_shape)
             setattr(weights, key, weight)
+    # Force host→device DMAs to complete before returning so the CPU source
+    # buffers (t2j'd FP8 tensors, repeated scales, etc) are no longer pinned
+    # by async transfers. Without this, JAX holds the CPU buffers for each
+    # leaf until the DMA completes across all processes — host RAM accumulates
+    # across the 75 MoE layers and trips the Ray 95% OOM kill threshold.
+    jax.block_until_ready(weights)
     return weights
 
 
-@jax.jit(static_argnames=(
-    "moe_backend",
-    "mesh",
-    "activation",
-    "weight_block_size",
-))
-def process_fp8_moe_weights(
+def _slice_fused_moe_weights(
+    weights: FusedMoEWeights,
+    expert_slice: slice,
+) -> FusedMoEWeights:
+    sliced_weights = {}
+    for field in fields(FusedMoEWeights):
+        value = getattr(weights, field.name)
+        sliced_weights[field.name] = None if value is None else value[
+            expert_slice]
+    return FusedMoEWeights(**sliced_weights)
+
+
+def _concat_fused_moe_weight_chunks(
+    chunks: list[FusedMoEWeights],
+) -> FusedMoEWeights:
+    if not chunks:
+        raise ValueError("Expected at least one MoE weight chunk")
+
+    concatenated_weights = {}
+    for field in fields(FusedMoEWeights):
+        value = getattr(chunks[0], field.name)
+        if value is None:
+            concatenated_weights[field.name] = None
+            continue
+
+        concatenated_weights[field.name] = jnp.concatenate(
+            [getattr(chunk, field.name) for chunk in chunks], axis=0)
+
+    return FusedMoEWeights(**concatenated_weights)
+
+
+@partial(
+    jax.jit,
+    static_argnames=(
+        "moe_backend",
+        "mesh",
+        "activation",
+        "desired_quant_dtype",
+        "requant_block_size",
+        "weight_block_size",
+    ),
+)
+def _process_fp8_moe_weight_chunk(
     weights: FusedMoEWeights,
     moe_backend: MoEBackend,
     mesh: Mesh,
     activation: str,
+    desired_quant_dtype: jnp.dtype,
+    requant_block_size: int | None,
     weight_block_size: tuple[int, ...] | None = None,
 ) -> FusedMoEWeights:
     w13_weight = weights.w13_weight
     w13_weight_scale = weights.w13_weight_scale
     w2_weight = weights.w2_weight
     w2_weight_scale = weights.w2_weight_scale
-    if desired_quant_dtype_from_env := envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
-        desired_quant_dtype = to_jax_dtype(desired_quant_dtype_from_env)
-    else:
-        desired_quant_dtype = w13_weight.dtype
-        if w13_weight.dtype != w2_weight.dtype:
-            raise ValueError(
-                f"Expected w13_weight and w2_weight to have the same dtype, but got {w13_weight.dtype} and {w2_weight.dtype}"
-            )
-    requant_block_size = None
-    if requant_block_size_from_env := envs.MOE_REQUANTIZE_BLOCK_SIZE:
-        requant_block_size = (int(requant_block_size_from_env)
-                              if requant_block_size_from_env else None)
-
-    moe_logging_str = (
-        f"[MoE requantization]: re-quantizing MoE weights to {desired_quant_dtype}"
-    )
-    if requant_block_size is not None:
-        moe_logging_str += f" with block size {requant_block_size}"
-    logger.info(moe_logging_str)
 
     # Dequantize fp8 2d block quantized weights into fp32.
     w13_weight = dequantize_tensor(w13_weight,
@@ -557,6 +687,174 @@ def process_fp8_moe_weights(
     )
     return process_moe_weights(
         weights,
+        moe_backend=moe_backend,
+        w13_reorder_size=w13_reorder_size,
+        w13_interleave=w13_interleave,
+    )
+
+
+def process_fp8_moe_weights(
+    weights: FusedMoEWeights,
+    moe_backend: MoEBackend,
+    mesh: Mesh,
+    activation: str,
+    weight_block_size: tuple[int, ...] | None = None,
+) -> FusedMoEWeights:
+    if desired_quant_dtype_from_env := envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
+        desired_quant_dtype = to_jax_dtype(desired_quant_dtype_from_env)
+    else:
+        desired_quant_dtype = weights.w13_weight.dtype
+        if weights.w13_weight.dtype != weights.w2_weight.dtype:
+            raise ValueError(
+                "Expected w13_weight and w2_weight to have the same dtype, "
+                f"but got {weights.w13_weight.dtype} and {weights.w2_weight.dtype}"
+            )
+
+    requant_block_size = None
+    if requant_block_size_from_env := envs.MOE_REQUANTIZE_BLOCK_SIZE:
+        requant_block_size = (int(requant_block_size_from_env)
+                              if requant_block_size_from_env else None)
+
+    expert_chunk_size = envs.MOE_REQUANTIZE_EXPERT_CHUNK_SIZE
+    if (expert_chunk_size is not None and expert_chunk_size <= 0):
+        expert_chunk_size = None
+
+    moe_logging_str = (
+        f"[MoE requantization]: re-quantizing MoE weights to {desired_quant_dtype}"
+    )
+    if requant_block_size is not None:
+        moe_logging_str += f" with block size {requant_block_size}"
+    if expert_chunk_size is not None:
+        moe_logging_str += f" using expert chunk size {expert_chunk_size}"
+    logger.info(moe_logging_str)
+
+    num_experts = weights.w13_weight.shape[0]
+    if expert_chunk_size is None or expert_chunk_size >= num_experts:
+        return _process_fp8_moe_weight_chunk(
+            weights,
+            moe_backend=moe_backend,
+            mesh=mesh,
+            activation=activation,
+            desired_quant_dtype=desired_quant_dtype,
+            requant_block_size=requant_block_size,
+            weight_block_size=weight_block_size,
+        )
+
+    processed_chunks = []
+    for expert_start in range(0, num_experts, expert_chunk_size):
+        expert_end = min(expert_start + expert_chunk_size, num_experts)
+        chunk = _slice_fused_moe_weights(weights, slice(expert_start,
+                                                        expert_end))
+        processed_chunks.append(
+            _process_fp8_moe_weight_chunk(
+                chunk,
+                moe_backend=moe_backend,
+                mesh=mesh,
+                activation=activation,
+                desired_quant_dtype=desired_quant_dtype,
+                requant_block_size=requant_block_size,
+                weight_block_size=weight_block_size,
+            ))
+
+    return _concat_fused_moe_weight_chunks(processed_chunks)
+
+
+def expand_2d_block_scale(
+    scale: jax.Array,
+    block_size_n: int,
+) -> jax.Array:
+    """Expand 2D block scale's N-block dimension to full N resolution.
+
+    Checkpoint 2D block scale: (E, N_blocks, K_blocks)
+    After expansion: (E, N_full, K_blocks) where N_full = N_blocks * block_size_n
+
+    process_moe_weights will then do swapaxes(1,2) + expand_dims(2)
+    to get the kernel-expected shape (E, K_blocks, 1, N_full).
+
+    Args:
+        scale: 2D block scale with shape (E, N_blocks, K_blocks).
+        block_size_n: The block size along the N dimension (typically 128).
+
+    Returns:
+        Expanded scale with shape (E, N_full, K_blocks).
+    """
+    return jnp.repeat(scale, block_size_n, axis=1)
+
+
+def process_fp8_moe_weights_direct(
+    weights: FusedMoEWeights,
+    moe_backend: MoEBackend,
+    mesh: Mesh,
+    activation: str,
+    weight_block_size: tuple[int, ...],
+) -> FusedMoEWeights:
+    """Skip dequant/requant — directly do shape transforms on FP8 weights.
+
+    This is mathematically equivalent to process_fp8_moe_weights but
+    avoids the FP32 intermediate representation and JIT compilation,
+    resulting in ~30x faster startup for large MoE models.
+
+    The key insight: checkpoint uses 2D block-quantized scale
+    (E, N_blocks, K_blocks), while the GMM kernel expects
+    (E, K_blocks, 1, N_full). We can expand the scale using jnp.repeat
+    instead of full dequant→requant cycle.
+
+    Args:
+        weights: FP8 MoE weights with 2D block-quantized scales.
+        moe_backend: The MoE backend to use.
+        mesh: The JAX mesh for sharding.
+        activation: Activation function name.
+        weight_block_size: The 2D block size (block_n, block_k).
+
+    Returns:
+        Processed FP8 MoE weights with expanded scales.
+    """
+    block_size_n = weight_block_size[0]  # 128
+
+    # w13: keep the legacy expansion. GMM_TP's `process_w13_for_gmm` does
+    # split+reorder on axis-3 which requires the expanded (E, N_full, K_blocks)
+    # layout.
+    w13_scale = expand_2d_block_scale(weights.w13_weight_scale, block_size_n)
+    # w2 compact optimization only for GMM_TP: keep (E, N_blocks, K_blocks).
+    # process_moe_weights swaps to (E, K_blocks, N_blocks) 3D and skips
+    # expand_dims. gmm_v2.make_gmm_configs detects 3D scale and enables
+    # scale_n_block_size mode so the kernel does per-block scalar lookup
+    # instead of per-element N expansion. Other backends (FUSED_MOE, GMM_EP)
+    # keep the legacy expand path — they have their own downstream pad/pack
+    # logic that assumes 4D.
+    #
+    # Rationale: host-side expand on w2 created a 128× memory blow-up on
+    # the N dim (e.g. 48 → 6144 for GLM-5.1), pushed CPU mem past Ray's
+    # 95% OOM threshold on 744B MoE models, and forced a second host-side
+    # `jnp.repeat` to realign axis 1 with TP=32. Keeping w2 scale compact
+    # eliminates both hacks at the cost of a kernel-side scalar load per
+    # block (already supported, just unused).
+    # Compact 3D w2 scale was an earlier optimization for GMM_TP TP=32, but
+    # it breaks downstream paths (PP per-stage TP=4 triggers Mosaic tile error
+    # on N_blocks=48 unaligned to 128; tensor_parallel_gmm's in_specs wrote 4D
+    # spec).  Keep legacy 4D expanded layout everywhere for stability.
+    w2_scale = expand_2d_block_scale(weights.w2_weight_scale, block_size_n)
+
+    w13_interleave = activation == "swigluoai"
+    w13_reorder_size = get_mesh_shape_product(mesh, ShardingAxisName.MLP_TENSOR)
+
+    logger.debug(
+        "[MoE direct FP8]: w13 expanded scale shape=%s, w2 expanded scale "
+        "shape=%s (block_size_n=%d)",
+        None if w13_scale is None else tuple(w13_scale.shape),
+        None if w2_scale is None else tuple(w2_scale.shape),
+        block_size_n,
+    )
+
+    return process_moe_weights(
+        FusedMoEWeights(
+            w13_weight=weights.w13_weight,     # FP8 unchanged
+            w13_weight_scale=w13_scale,         # expanded 4D
+            w13_bias=None,
+            w2_weight=weights.w2_weight,        # FP8 unchanged
+            w2_weight_scale=w2_scale,           # expanded 4D
+            w2_bias=None,
+        ),
         moe_backend=moe_backend,
         w13_reorder_size=w13_reorder_size,
         w13_interleave=w13_interleave,
