@@ -19,14 +19,16 @@ import jax
 from jax import numpy as jnp
 from jax.sharding import Mesh
 
+import tpu_inference.envs as envs
 from tpu_inference.layers.common.linear import sharded_quantized_matmul
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights)
 from tpu_inference.layers.common.quantization import (dequantize_tensor,
                                                       quantize_tensor)
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
-from tpu_inference.layers.common.utils import \
-    slice_sharded_tensor_for_concatenation
+from tpu_inference.layers.common.utils import (
+    reorder_concatenated_tensor_for_sharding,
+    slice_sharded_tensor_for_concatenation)
 
 
 class Fp8LinearMethod:
@@ -94,6 +96,44 @@ def process_blockwise_fp8_linear_weights(
     fuse_matmuls,
     n_shards,
 ) -> LinearWeights:
+    if envs.DISABLE_WEIGHT_REQUANTIZATION:
+        original_block_size = weight_block_size[0]
+        output_sizes_blocks = [s // original_block_size for s in output_sizes]
+
+        if weight_scale.ndim == 2 and weight_scale.shape[1] == sum(
+                output_sizes_blocks):
+            weight_scale = jnp.transpose(weight_scale)
+
+        linear_weights = process_linear_weights(
+            LinearWeights(
+                weight=weight,
+                weight_scale=None,
+                zero_point=None,
+                bias=bias,
+            ),
+            fused=fuse_matmuls,
+            output_sizes=output_sizes,
+            reorder_size=n_shards,
+        )
+
+        if fuse_matmuls:
+            weight_scale_processed = reorder_concatenated_tensor_for_sharding(
+                weight_scale, output_sizes_blocks, n_shards, dim=0)
+        else:
+            weight_scale_processed = []
+            start = 0
+            for size in output_sizes_blocks:
+                end = start + size
+                tensor_split = jax.lax.slice_in_dim(weight_scale,
+                                                    start,
+                                                    end,
+                                                    axis=0)
+                weight_scale_processed.append(tensor_split)
+                start = end
+
+        linear_weights.weight_scale = weight_scale_processed
+        return linear_weights
+
     weights = []
     weight_scales = []
     original_block_size = weight_block_size[0]

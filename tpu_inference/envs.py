@@ -251,6 +251,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         ["ragged_gated_delta_rule_ref", "ragged_gated_delta_rule_chunked"]),
     "MOE_ALL_GATHER_ACTIVATION_DTYPE":
     lambda: os.getenv("MOE_ALL_GATHER_ACTIVATION_DTYPE", ""),
+    "DISABLE_WEIGHT_REQUANTIZATION":
+    env_bool("DISABLE_WEIGHT_REQUANTIZATION", default=False),
 }
 
 

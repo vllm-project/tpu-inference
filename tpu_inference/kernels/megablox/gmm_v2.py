@@ -367,30 +367,54 @@ def inner_kernel(
             # Unquantized matmul path.
             mxu_size = pltpu.get_tpu_info().mxu_column_size
             rhs_qbs = cfgs.rhs_cfgs.quant_block_size
-            for start_n in range(0, rhs_tile_n, mxu_size):
-                end_n = min(rhs_tile_n, start_n + mxu_size)
-                col_size = end_n - start_n
 
-                acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size),
-                                  dtype=acc_ref.dtype)
-                for b_id in range(cfgs.num_quant_blocks_per_tile_k):
-                    k_start = b_id * rhs_qbs
-                    k_end = k_start + rhs_qbs
+            # Dequantize inside VMEM to avoid small contracting dimension in jnp.matmul.
+            if cfgs.rhs_cfgs.has_scale and rhs_qbs < mxu_size:
+                tiled_rhs_scale = tiled_rhs_ref.get_scale().astype(
+                    acc_ref.dtype)
+                # tiled_rhs: [tile_k, tile_n]
+                # tiled_rhs_scale: [num_blocks, 1, tile_n]
+                num_blocks = cfgs.num_quant_blocks_per_tile_k
+                tiled_rhs_dequant = tiled_rhs.astype(acc_ref.dtype).reshape(
+                    num_blocks, rhs_qbs, rhs_tile_n)
+                tiled_rhs_dequant = tiled_rhs_dequant * tiled_rhs_scale
+                tiled_rhs = tiled_rhs_dequant.reshape(cfgs.tiles.tile_k,
+                                                      rhs_tile_n)
 
-                    block_acc = jnp.matmul(
-                        tiled_lhs[:, k_start:k_end],
-                        tiled_rhs[k_start:k_end, start_n:end_n],
+                for start_n in range(0, rhs_tile_n, mxu_size):
+                    end_n = min(rhs_tile_n, start_n + mxu_size)
+                    col_size = end_n - start_n
+                    acc_n = jnp.matmul(
+                        tiled_lhs,
+                        tiled_rhs[:, start_n:end_n],
                         preferred_element_type=jnp.float32,
                     ).astype(acc_ref.dtype)
+                    acc_list.append(acc_n)
+            else:
+                for start_n in range(0, rhs_tile_n, mxu_size):
+                    end_n = min(rhs_tile_n, start_n + mxu_size)
+                    col_size = end_n - start_n
 
-                    if cfgs.rhs_cfgs.has_scale:
-                        tiled_rhs_scale = tiled_rhs_ref.get_scale()
-                        block_acc *= tiled_rhs_scale[b_id, :,
-                                                     start_n:end_n].astype(
-                                                         acc_ref.dtype)
+                    acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size),
+                                      dtype=acc_ref.dtype)
+                    for b_id in range(cfgs.num_quant_blocks_per_tile_k):
+                        k_start = b_id * rhs_qbs
+                        k_end = k_start + rhs_qbs
 
-                    acc_n += block_acc
-                acc_list.append(acc_n)
+                        block_acc = jnp.matmul(
+                            tiled_lhs[:, k_start:k_end],
+                            tiled_rhs[k_start:k_end, start_n:end_n],
+                            preferred_element_type=jnp.float32,
+                        ).astype(acc_ref.dtype)
+
+                        if cfgs.rhs_cfgs.has_scale:
+                            tiled_rhs_scale = tiled_rhs_ref.get_scale()
+                            block_acc *= tiled_rhs_scale[b_id, :,
+                                                         start_n:end_n].astype(
+                                                             acc_ref.dtype)
+
+                        acc_n += block_acc
+                    acc_list.append(acc_n)
         else:
             # Quantized matmul path.
             lhs_q_dtype = cfgs.lhs_cfgs.quant_dtype
@@ -410,6 +434,19 @@ def inner_kernel(
             # inner loop which can be used to pipeline subsequent VPU or VST ops with
             # MXU ops for the next [tile_m, mxu_size].
             mxu_size = pltpu.get_tpu_info().mxu_column_size
+
+            # Dequantize inside VMEM to avoid small contracting dimension in jnp.matmul.
+            rhs_qbs = cfgs.rhs_cfgs.quant_block_size
+            if cfgs.rhs_cfgs.has_scale and rhs_qbs < mxu_size:
+                tiled_rhs_scale = tiled_rhs_ref.get_scale().astype(
+                    acc_ref.dtype)
+                num_blocks = cfgs.num_quant_blocks_per_tile_k
+                tiled_rhs_dequant = tiled_rhs.astype(acc_ref.dtype).reshape(
+                    num_blocks, rhs_qbs, rhs_tile_n)
+                tiled_rhs_dequant = tiled_rhs_dequant * tiled_rhs_scale
+                tiled_rhs = tiled_rhs_dequant.reshape(cfgs.tiles.tile_k,
+                                                      rhs_tile_n)
+
             for start_n in range(0, rhs_tile_n, mxu_size):
                 end_n = min(rhs_tile_n, start_n + mxu_size)
                 col_size = end_n - start_n
@@ -441,14 +478,14 @@ def inner_kernel(
 
                     block_acc = jnp.matmul(
                         block_lhs_q,
-                        block_rhs,
+                        block_rhs.astype(preferred_element_type),
                         preferred_element_type=preferred_element_type,
                     ).astype(acc_ref.dtype)
 
                     block_acc *= block_scale.astype(acc_ref.dtype)
 
-                    # Apply rhs subchannel scale per quant block.
-                    if cfgs.rhs_cfgs.has_scale:
+                    # Apply rhs subchannel scale per quant block if it was not dequantized earlier.
+                    if cfgs.rhs_cfgs.has_scale and not (rhs_qbs < mxu_size):
                         b_id = start_k // cfgs.rhs_cfgs.quant_block_size
                         rhs_scale_slice = tiled_rhs_ref.get_scale()
                         block_acc *= rhs_scale_slice[b_id, :,
@@ -938,7 +975,7 @@ def validate_inputs(
     if rhs_scale is not None:
         num_quant_blocks = rhs_scale.shape[1]
         assert rhs_scale.shape == (size_group, num_quant_blocks, 1, size_n)
-        assert size_k % num_quant_blocks == 0
+        assert size_k % num_quant_blocks == 0, f"{size_k=}, {num_quant_blocks=}"
 
     assert group_offset.shape == (1, )
 
