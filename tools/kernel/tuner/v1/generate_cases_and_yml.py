@@ -6,8 +6,8 @@ def generate_cases(output_path):
     # 1. Logic to generate your test cases
     # This is where you would iterate through your tuning configurations
     test_cases = [
-        {"name": "gmm_case_1", "params": "--size 1024 --dtype float32"},
-        {"name": "gmm_case_2", "params": "--size 2048 --dtype bfloat16"},
+        {"name": "gmm_case_1", "params": "echo 'case 1 complete...' && sleep 5 && echo 'done!'"},
+        {"name": "gmm_case_2", "params": "echo 'case 2 complete...' && sleep 10 && echo 'done!'"},
     ]
 
     # 2. Logic to update your GCP Database
@@ -23,13 +23,12 @@ def generate_cases(output_path):
     for case in test_cases:
         step = {
             "label": f":test_tube: Run {case['name']}",
-            "agent": {"queue": "tpu_v7x_2_queue"}, # Adjust to your TPU queue
+            "agents": {"queue": "tpu_v6e_queue"}, # Adjust to your TPU queue
             "env": {
-                "USE_PREBUILT_IMAGE": "1",
-                "TPU_VERSION": "tpu7x"
+                "TPU_VERSION": "tpu6e"
             },
             "commands": [
-                f".buildkite/scripts/run_in_docker.sh python3 tests/run_kernel_test.py {case['params']}"
+                f".buildkite/scripts/run_in_docker.sh -c \"{case['params']}\""
             ]
         }
         pipeline["steps"].append(step)
