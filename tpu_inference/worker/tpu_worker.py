@@ -258,20 +258,9 @@ class TPUWorker(WorkerBase):
                                                        total_devices]
                 else:
                     # In a multi-host distributed env, say: Ray, local_device count may smaller
-                    # than the total devices. When the requested device count fits inside
-                    # a single host, use the local addressable devices so that per-worker
-                    # HBM accounting and allocation reflect the actual chips used on that
-                    # host (for example, TP=4 on a v6e-16 pod with 4 chips per VM). When
-                    # the requested device count exceeds the local host, fall back to the
-                    # global device list to build a cross-host mesh.
-                    if (multihost_backend == "ray"
-                            and jax.local_device_count()
-                            >= sharding_config.total_devices):
-                        self.devices = jax.local_devices()[:sharding_config.
-                                                           total_devices]
-                    else:
-                        self.devices = jax.devices()[:sharding_config.
-                                                     total_devices]
+                    # than the total devices, we just choose the smaller set here.
+                    self.devices = jax.devices()[:sharding_config.
+                                                 total_devices]
 
         # Initialize the vLLM distribution layer as a single chip environment,
         # we'll swap the model's parallel modules with TPU SPMD equivalents.

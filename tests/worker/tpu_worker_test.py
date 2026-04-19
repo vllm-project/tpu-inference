@@ -257,39 +257,6 @@ class TestTPUWorker:
                                                 expected_is_first_rank,
                                                 expected_is_last_rank)
 
-    @patch('tpu_inference.worker.tpu_worker.TPUModelRunner')
-    @patch('tpu_inference.worker.tpu_worker.utils')
-    @patch('tpu_inference.worker.tpu_worker.jax')
-    @patch('tpu_inference.worker.tpu_worker.ensure_kv_transfer_initialized')
-    @patch.dict('os.environ', {"TPU_MULTIHOST_BACKEND": "ray"})
-    def test_init_device_ray_uses_local_devices_when_tp_fits_one_host(
-            self, mock_ensure_kv_transfer_initialized, mock_jax, mock_utils,
-            mock_runner_cls, mock_vllm_config):
-        """TP=4 on Ray should use the worker's local addressable devices."""
-        mock_vllm_config.sharding_config.total_devices = 4
-
-        local_devices = [MagicMock(coords=(0, i, 0)) for i in range(4)]
-        global_devices = local_devices + [MagicMock(coords=(1, i, 0))
-                                          for i in range(2)]
-        mock_jax.local_device_count.return_value = 4
-        mock_jax.local_devices.return_value = local_devices
-        mock_jax.devices.return_value = global_devices
-
-        worker = TPUWorker(vllm_config=mock_vllm_config,
-                           local_rank=0,
-                           rank=0,
-                           distributed_init_method="test_method",
-                           devices=[])
-
-        worker.init_device()
-
-        assert worker.devices == local_devices
-        mock_runner_cls.assert_called_once_with(mock_vllm_config,
-                                                local_devices,
-                                                0,
-                                                True,
-                                                True)
-
     @patch('tpu_inference.worker.tpu_worker.utils')
     def test_determine_available_memory(self, mock_utils, mock_vllm_config):
         """Tests the available HBM memory calculation."""
