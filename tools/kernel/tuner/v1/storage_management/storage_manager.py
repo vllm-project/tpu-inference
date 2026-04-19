@@ -37,6 +37,14 @@ class StorageManager:
         """
         raise NotImplementedError("Subclasses must implement init_case_set")
 
+    def case_set_id_exists(self, case_set_id) -> bool:
+        """Checks whether the given case_set_id already exists in the CaseSet table."""
+        raise NotImplementedError("Subclasses must implement case_set_id_exists")
+
+    def get_case_set_desc(self, case_set_id) -> str:
+        """Gets the description for the given case_set_id from the CaseSet table."""
+        raise NotImplementedError("Subclasses must implement get_case_set_desc")
+
     def finish_case_set(self, case_set_id, valid, invalid, duration):
         """Marks a CaseSet as completed and records summary statistics.
 

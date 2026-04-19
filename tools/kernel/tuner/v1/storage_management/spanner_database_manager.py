@@ -37,6 +37,32 @@ class SpannerStorageManager(StorageManager):
             )
         self.database.run_in_transaction(_do_insert)
 
+    def case_set_id_exists(self, case_set_id) -> bool:
+        """Checks whether the given case_set_id already exists in the CaseSet table."""
+        if self.dry_run: return False
+        def _do_query(tx):
+            result = tx.execute_sql(
+                "SELECT COUNT(*) FROM CaseSet WHERE ID = @id",
+                params={'id': case_set_id},
+                param_types={'id': spanner.param_types.STRING}
+            )
+            row = list(result)[0]
+            return row[0] > 0
+        return self.database.run_in_transaction(_do_query)
+
+    def get_case_set_desc(self, case_set_id) -> str:
+        """Gets the description for the given case_set_id from the CaseSet table."""
+        if self.dry_run: return None
+        def _do_query(tx):
+            result = tx.execute_sql(
+                "SELECT Description FROM CaseSet WHERE ID = @id",
+                params={'id': case_set_id},
+                param_types={'id': spanner.param_types.STRING}
+            )
+            row = list(result)[0]
+            return row[0]
+        return self.database.run_in_transaction(_do_query)
+
     def finish_case_set(self, case_set_id, valid, invalid, duration):
         """Updates tracking columns upon completion."""
         if self.dry_run: return
