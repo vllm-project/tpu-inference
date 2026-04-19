@@ -1509,6 +1509,18 @@ def get_default_block_sizes(
                           num_kv_heads_x2)
 
     match tpu_version:
+        case 4:
+            # TPU v4 has much smaller VMEM (~16MB) than v5/v6 (~32MB+)
+            if case == RpaCase.DECODE:
+                bq_sz = 1
+                bkv_sz = min(512, min_bkv_sz_to_peak, max_kv)
+                bq_csz = 1
+                bkv_csz = min(512, min_bkv_sz_to_peak, max_kv)
+            else:
+                bq_sz = min(512 // num_q_heads_per_kv_head, max_q // 2)
+                bkv_sz = min(512, max_kv)
+                bq_csz = min(256 // num_q_heads_per_kv_head, max_q)
+                bkv_csz = min(256, align_to(max_kv // 2, page_size))
         case 5 | 6:
             if case == RpaCase.DECODE:
                 bq_sz = 1

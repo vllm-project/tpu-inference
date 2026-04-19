@@ -31,10 +31,22 @@ from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
-from vllm.model_executor.layers.quantization.mxfp4 import \
-    GptOssMxfp4Config as Mxfp4Config
-from vllm.model_executor.layers.quantization.mxfp4 import \
-    GptOssMxfp4MoEMethod as Mxfp4MoEMethod
+# Upstream vllm renamed GptOssMxfp4Config → Mxfp4Config (and MoEMethod
+# similarly). Support both name variants so this file imports against
+# either pin of vllm. Assert at least one set is present so we fail fast
+# on a truly unexpected build.
+try:
+    from vllm.model_executor.layers.quantization.mxfp4 import \
+        GptOssMxfp4Config as Mxfp4Config
+    from vllm.model_executor.layers.quantization.mxfp4 import \
+        GptOssMxfp4MoEMethod as Mxfp4MoEMethod
+except ImportError:
+    from vllm.model_executor.layers.quantization.mxfp4 import \
+        Mxfp4Config
+    from vllm.model_executor.layers.quantization.mxfp4 import \
+        Mxfp4MoEMethod
+assert Mxfp4Config is not None and Mxfp4MoEMethod is not None, (
+    "Neither GptOssMxfp4Config nor Mxfp4Config is available in vllm")
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 

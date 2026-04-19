@@ -55,11 +55,20 @@ _VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset({
     "Qwen3MoeForCausalLM",
     "KimiK25ForConditionalGeneration",
     "Qwen3_5MoeForConditionalGeneration",
+    # GLM-5.1-FP8 (`GlmMoeDsa`) uses Dynamic Sparse Attention which does
+    # not yet have a flax_nnx implementation; route it through the vLLM
+    # path until a JAX-native DSA lands.
+    "GlmMoeDsaForCausalLM",
 })
 
 # List of architectures that don't have pipeline parallelism support in jax yet.
-_PP_DISABLED_MODELS: frozenset[str] = frozenset(
-    {"DeepseekV3ForCausalLM", "Eagle3LlamaForCausalLM", "GptOssForCausalLM"})
+_PP_DISABLED_MODELS: frozenset[str] = frozenset({
+    "DeepseekV3ForCausalLM",
+    "Eagle3LlamaForCausalLM",
+    "GptOssForCausalLM",
+    "GlmMoeDsaForCausalLM",
+    "Glm4MoeLiteForCausalLM",
+})
 
 
 class UnsupportedArchitectureError(ValueError):
