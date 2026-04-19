@@ -77,13 +77,28 @@ def vllm_moe_apply(layer: FusedMoE, weights: FusedMoEWeights,
     assert isinstance(quant_method_instance, FusedMoEMethodBase)
     assert isinstance(weights, FusedMoEWeights)
 
-    return torch_view(
-        moe_apply(
-            layer=layer,
-            x=jax_view(x),
-            gating_output=jax_view(router_logits),
-            weights=weights,
-            moe_backend=quant_method_instance.moe_backend,
-            mesh=quant_method_instance.mesh,
-            extra_backend_kwargs=quant_method_instance.extra_backend_kwargs,
-        ))
+    x_jax = jax_view(x)
+    gating_jax = jax_view(router_logits)
+
+    # For models with topk_method="noaux_tc" (GLM-5.1 / DeepSeek-V3), vLLM
+    # stores e_score_correction_bias on the FusedMoE layer. Convert once
+    # (outside JIT) and pass to the MoE kernel via extra_backend_kwargs so
+    # top-k selection uses (scores + bias) while weights stay un-biased.
+    extra_kwargs = dict(quant_method_instance.extra_backend_kwargs or {})
+    _bias = getattr(layer, "e_score_correction_bias", None)
+    if _bias is not None and "e_score_correction_bias" not in extra_kwargs:
+        from torchax.ops.mappings import t2j
+        extra_kwargs["e_score_correction_bias"] = t2j(
+            _bias.detach(), use_dlpack=False)
+
+    output_jax = moe_apply(
+        layer=layer,
+        x=x_jax,
+        gating_output=gating_jax,
+        weights=weights,
+        moe_backend=quant_method_instance.moe_backend,
+        mesh=quant_method_instance.mesh,
+        extra_backend_kwargs=extra_kwargs,
+    )
+
+    return torch_view(output_jax)

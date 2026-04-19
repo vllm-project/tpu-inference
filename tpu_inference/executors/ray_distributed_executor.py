@@ -61,7 +61,11 @@ class AsyncResultFuture(Future):
             ret_refs.append(
                 worker.execute_method.remote("get_execute_model_output",
                                              result_id))
-        return ray.get(ret_refs[0], timeout=timeout)
+        outputs = ray.get(ret_refs, timeout=timeout)
+        for output in outputs:
+            if output is not None:
+                return output
+        return None
 
 
 class RayDistributedExecutor(RayDistributedExecutorV1):
@@ -85,6 +89,10 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
     def supports_async_scheduling(cls) -> bool:
         """
         Whether the executor supports async scheduling.
+        PP mode uses JAX transfer for intermediate tensors which is
+        incompatible with Ray compiled DAG channels, so we disable
+        async scheduling for PP. The class method cannot access instance
+        config, so PP disables it at runtime in _init_executor.
         """
         return True
 
@@ -93,8 +101,13 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
 
         os.environ["VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE"] = "shm"
 
-        # Currently, this requires USE_RAY_SPMD_WORKER=True.
-        self.use_ray_compiled_dag = True
+        pp_size = self.vllm_config.parallel_config.pipeline_parallel_size
+        # PP mode uses JAX transfer server for intermediate tensors,
+        # which is incompatible with Ray compiled DAG channels.
+        # Fall back to basic collective_rpc for PP.
+        self.use_ray_compiled_dag = (pp_size <= 1)
+        if pp_size > 1:
+            self.vllm_config.scheduler_config.async_scheduling = False
         # If it is true, then we do not distinguish between the
         # "driver worker" vs other workers. Also, the rank 0 worker will
         # be executed in a remote Ray worker. Currently this requires
@@ -370,6 +383,10 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
 
         # Copy existing env vars to each worker's args
         for i, args in enumerate(all_args_to_update_environment_variables):
+            # Preserve the globally ordered Ray worker index so the model
+            # loader can derive a stable EP shard rank even when PP=1 forces
+            # the runtime worker rank back to 0.
+            args["TPU_EP_RANK"] = str(i)
             for name in env_vars_to_copy:
                 if name in os.environ:
                     args[name] = os.environ[name]
@@ -501,6 +518,20 @@ class RayWorkerWrapper(RayWorkerWrapperV1):
         self._execute_model_outputs = dict()  # type: ignore
         self.result_id = int(0)
 
+    def initialize_from_config(self, kv_cache_configs: list) -> None:
+        """Override to use JAX process_index (self.worker.rank) instead of
+        Ray rpc_rank (self.global_rank) for selecting the per-worker KV cache
+        config.  In multi-host Ray mode, Ray worker scheduling order doesn't
+        match JAX process_index order, and the model layers are partitioned
+        based on the latter."""
+        from vllm.config import set_current_vllm_config
+        assert self.worker is not None
+        rank = self.worker.rank
+        kv_cache_config = kv_cache_configs[rank]
+        assert self.vllm_config is not None
+        with set_current_vllm_config(self.vllm_config):
+            self.worker.initialize_from_config(kv_cache_config)
+
     def _is_intermediate_tensors(self, output) -> bool:
         return isinstance(output, JaxIntermediateTensors)
 
@@ -520,7 +551,8 @@ class RayWorkerWrapper(RayWorkerWrapperV1):
             int,  # result_id for async scheduling
     ]:
         assert self.vllm_config is not None
-        if not self.vllm_config.scheduler_config.async_scheduling:
+        if (not self.vllm_config.scheduler_config.async_scheduling
+                or self.vllm_config.parallel_config.pipeline_parallel_size > 1):
             return super().execute_model_ray(execute_model_input)
 
         # This method is used by Ray Compiled Graph to execute the model,
@@ -544,11 +576,17 @@ class RayWorkerWrapper(RayWorkerWrapperV1):
         return self.result_id
 
     # Method to get the actual output for async scheduling.
-    def get_execute_model_output(self, result_id) -> ModelRunnerOutput:
+    def get_execute_model_output(self, result_id) -> ModelRunnerOutput | None:
         assert (self.vllm_config
                 and self.vllm_config.scheduler_config.async_scheduling)
         output = self._execute_model_outputs.pop(result_id, None)
         assert output is not None, f"No output found for result_id {result_id}"
         if isinstance(output, AsyncTPUModelRunnerOutput):
+            next_tokens = output._next_tokens
+            if hasattr(next_tokens, "addressable_shards") and not next_tokens.addressable_shards:
+                logger.info(
+                    "Skipping async output materialization on worker without addressable shards."
+                )
+                return None
             return output.get_output()
         return output
