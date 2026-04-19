@@ -1,43 +1,68 @@
-from dataclasses import dataclass, fields, asdict
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import json
-import time
-from datetime import datetime
 import logging
-from absl import flags
+import time
+from dataclasses import asdict, dataclass
+from datetime import datetime
 from enum import Enum
+
+import yaml
+from absl import flags
+from google.cloud import spanner
 
 from tools.kernel.tuner.v1.common.storage_manager import StorageManager
 from tools.kernel.tuner.v1.common.utils import get_host_ip
-from google.cloud import spanner
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-_DEBUG = flags.DEFINE_bool('debug', False, 'If true, prints results after each case iteration.')
+_DEBUG = flags.DEFINE_bool(
+    'debug', False, 'If true, prints results after each case iteration.')
 _WORKER_ID = flags.DEFINE_string('worker_id', get_host_ip(), 'The worker id')
+
 
 @dataclass
 class TuningKey:
     # Specify the key for tuning case
     pass
 
+
 @dataclass
 class TunableParams:
     # Specify the tiles for tuning case
     pass
+
 
 class TuningStatus(Enum):
     SUCCESS = 'SUCCESS'
     FAILED_OOM = 'FAILED_OOM'
     UNKNOWN_ERROR = 'UNKNOWN_ERROR'
 
+
 class CaseBase:
+
     def __init__(self, tuning_key: TuningKey, tunable_params: TunableParams):
         self.tuning_key = tuning_key
         self.tunable_params = tunable_params
 
     def __str__(self):
-        return json.dumps({'tuning_key': asdict(self.tuning_key), 'tunable_params': asdict(self.tunable_params)})
+        return json.dumps({
+            'tuning_key': asdict(self.tuning_key),
+            'tunable_params': asdict(self.tunable_params)
+        })
 
     @classmethod
     def from_string(self, string, tuning_key_class, tunable_params_class):
@@ -46,15 +71,30 @@ class CaseBase:
         self.tunable_params = tunable_params_class(**data['tunable_params'])
         return self.tuning_key, self.tunable_params
 
+
 class KernelTunerBase:
-    def __init__(self, tuning_key_class, tunable_params_class, storage_manager: StorageManager):
+    """
+    Base class for kernel tuner runner. The kernel tuner runner is responsible for generating the tuning cases, partitioning the cases into buckets, generating the Buildkite pipeline, and measuring the latency of the cases. The specific kernel tuner runner should inherit from this base class and implement the generate_cases, generate_inputs, and run methods.
+    Subclass should also define the TuningKey and TunableParams dataclasses according to the kernel's tuning space.
+    The tuning cases, tuning results, and other metadata will be persisted in local file or database using storage_management module, which is abstracted by the StorageManager class. The specific implementation of StorageManager can be LocalDbManager for local JSON-file-backed storage or SpannerDbManager for Google Spanner-backed storage.
+    The kernel tuner runner will be executed in a distributed manner, where each worker will claim a bucket of cases to process, run the kernel with the corresponding tuning key and tunable params, measure the latency, and save the results back to the storage manager. The Buildkite pipeline will be generated to orchestrate the distributed execution of the kernel tuner runner.
+
+    Subclass should implement the following methods:
+    - generate_cases: Generate the tuning cases for the given case_set_id and desc, and return a list of CaseBase objects representing the tuning cases.
+    - generate_inputs: Generate the kernel inputs for the given tuning key with caching, and return a dictionary of kernel inputs.
+    - run: Execute the kernel with the given tuning key and tunable params for a certain number of iterations, measure the latency, and return the tuning status, average latency, and total latency.
+
+    """
+
+    def __init__(self, tuning_key_class, tunable_params_class,
+                 storage_manager: StorageManager):
         self.tuning_key_class = tuning_key_class
         self.tunable_params_class = tunable_params_class
         self.storage_manager = storage_manager
         self._KERNEL_INPUTS_CACHE = {}
         self._TUNING_KEY = None
 
-    def init_case_set(self, case_set_id: str, desc: str):
+    def _init_case_set(self, case_set_id: str, desc: str):
         """Initialize the case set with the given case_set_id and description. This will be called when the caseset_id is new or the caseset_id is not specified.
 
         Args:
@@ -70,37 +110,71 @@ class KernelTunerBase:
         if self.storage_manager.case_set_id_exists(case_set_id):
             existing_desc = self.storage_manager.get_case_set_desc(case_set_id)
             if existing_desc != desc:
-                raise ValueError(f"CaseSetId {case_set_id} already exists with a different description. Existing desc: {existing_desc}, new desc: {desc}. Please use a different CaseSetId or update the description to match the existing one.")
+                raise ValueError(
+                    f"CaseSetId {case_set_id} already exists with a different description. Existing desc: {existing_desc}, new desc: {desc}. Please use a different CaseSetId or update the description to match the existing one."
+                )
             else:
-                logger.info(f"CaseSetId {case_set_id} already exists with the same description. Proceeding with the existing case set.")
+                logger.info(
+                    f"CaseSetId {case_set_id} already exists with the same description. Proceeding with the existing case set."
+                )
         else:
-            self.storage_manager.init_case_set(case_set_id, scan_space=0, desc=desc)
-            logger.info(f"Initialized new CaseSet with ID: {case_set_id} and description: {desc}")
-    
+            self.storage_manager.init_case_set(case_set_id,
+                                               scan_space=0,
+                                               desc=desc)
+            logger.info(
+                f"Initialized new CaseSet with ID: {case_set_id} and description: {desc}"
+            )
+
     def generate_cases(self) -> list[CaseBase]:
         """Generate the cases for the given case_set_id. This will be called when the caseset_id is new or the caseset_id is not specified.
+        This should not raise any exception, all exceptions should be caught and handled internally. The generated cases will be persisted in local file or database using storage_management module, where each case is represented as a CaseBase object and stored as a string. The case_id is the index of the case in the generated case list.
 
         Args:
             case_set_id: Identifies a set of tuning cases. If specified when running the tuning
                 pipeline, the caseset will only be regenerated when the caseset_id changes.
             desc: A description for this case set, which will be persisted in local file or database using storage_management module."""
-        raise NotImplementedError("Specific kernel should implement this to generate the cases for the given case_set_id and desc, and return a list of CaseBase objects representing the tuning cases.")
-    
-    def generate_tuning_jobs(self, bucket_size: int = 100) -> list[tuple[int, int]]:
-        """Generate the tuning jobs for the given cases. Each tuning job is represented as a tuple of (begin_case_id, end_case_id), where the tuning job will process the cases with case_id in [begin_case_id, end_case_id).
+        raise NotImplementedError(
+            "Specific kernel should implement this to generate the cases for the given case_set_id and desc, and return a list of CaseBase objects representing the tuning cases."
+        )
+
+    def generate_tuning_jobs(self,
+                             case_set_id: str,
+                             bucket_size: int = 100) -> list[tuple[int, int]]:
+        """Partitions the full case set into fixed-size work buckets.
+
+        Calls `generate_cases` to determine the total number of cases, then
+        splits them into contiguous ranges of at most `bucket_size` cases each.
+        Buckets are intended to be dispatched and executed in parallel; result
+        ordering is not guaranteed. Each bucket is identified by a half-open
+        interval [begin_case_id, end_case_id).
 
         Args:
-            cases: A list of CaseBase objects representing the tuning cases.
-            bucket_size: The number of cases to be processed in each tuning job.
+            bucket_size: Maximum number of cases per bucket. Defaults to 100.
 
         Returns:
-            A list of tuples, where each tuple is (begin_case_id, end_case_id) representing a tuning job.
+            A list of [begin_case_id, end_case_id] pairs covering all cases.
         """
-        total_cases = len(self.generate_cases())
-        buckets = [[i, min(i + bucket_size, total_cases)] for i in range(0, total_cases, bucket_size)]
+        start_time = time.perf_counter()
+        cases = self.generate_cases()
+        total_cases = len(cases)
+        for case_id, case_str in enumerate(map(str, cases)):
+            self.storage_manager.add_tuner_case(case_set_id, case_id, case_str)
+        self.db_manager.flush()
+        duration_sec = int(time.perf_counter() - start_time)
+        self.db_manager.finish_case_set(
+            case_set_id,
+            total_cases,
+            0,  # invalid case count, doesn't matter here
+            duration_sec)
+        logger.info(
+            f"\nComplete Generate Tuning Cases for {case_set_id}, Valid Cases: {total_cases} | Duration: {duration_sec}s"
+        )
+        buckets = [[i, min(i + bucket_size, total_cases)]
+                   for i in range(0, total_cases, bucket_size)]
         return buckets
-    
-    def generate_buildkite_pipeline(self, case_set_id: str, run_id: str, desc: str) -> str:
+
+    def generate_buildkite_pipeline(self, case_set_id: str, run_id: str,
+                                    desc: str) -> str:
         """Generate the Buildkite pipeline for the given tuning jobs. Each tuning job will be represented as a Buildkite step that calls the measure_latency function with the corresponding case_id range.
 
         Args:
@@ -114,11 +188,26 @@ class KernelTunerBase:
             A string representing the Buildkite pipeline configuration in YAML format.
         """
         try:
-            self.init_case_set(case_set_id, desc=desc)
+            self._init_case_set(case_set_id, desc=desc)
         except Exception as e:
             logger.error(f"Error initializing case set {case_set_id}: {e}")
             raise e
-        raise NotImplementedError("Specific kernel should implement this to generate the Buildkite pipeline for the given case_set_id and run_id, and return a string representing the Buildkite pipeline configuration in YAML format.")
+        buckets = self.generate_tuning_jobs(case_set_id)
+        # The Buildkite pipeline YAML will be generated in the format of:
+        # steps:
+        #   - label: "Measure latency for cases [begin_case_id, end_case_id)"
+        #     command: "python -m tools.kernel.tuner.v1.kernel_tuner_runner --worker_id=WORKER_ID --case_set_id=CASE_SET_ID --run_id=RUN_ID --begin_case_id=BEGIN_CASE_ID --end_case_id=END_CASE_ID"
+        pipeline_steps = []
+        for begin_case_id, end_case_id in buckets:
+            step = {
+                'label':
+                f"Measure latency for cases [{begin_case_id}, {end_case_id})",
+                'command':
+                f"python -m tools.kernel.tuner.v1.kernel_tuner_runner --worker_id={_WORKER_ID.value} --case_set_id={case_set_id} --run_id={run_id} --begin_case_id={begin_case_id} --end_case_id={end_case_id}"
+            }
+            pipeline_steps.append(step)
+        pipeline = {'steps': pipeline_steps}
+        return yaml.dump(pipeline)
 
     def generate_inputs(self, tuning_key: TuningKey) -> dict:
         """Generates the kernel inputs for the given tuning key with caching.
@@ -131,9 +220,12 @@ class KernelTunerBase:
         """
         if self._TUNING_KEY and tuning_key == self._TUNING_KEY:
             return self._KERNEL_INPUTS_CACHE
-        raise NotImplementedError("Specific kernel should implement this to generate the inputs to kernel based on the tuning key with caching.")
-        
-    def run(self, tuning_key: TuningKey, tunable_params: TunableParams, iters: int) -> list[TuningStatus, int, int]:
+        raise NotImplementedError(
+            "Specific kernel should implement this to generate the inputs to kernel based on the tuning key with caching."
+        )
+
+    def run(self, tuning_key: TuningKey, tunable_params: TunableParams,
+            iters: int) -> list[TuningStatus, int, int]:
         """Executes the kernel and measures its latency.
 
         Fetches inputs via `generate_inputs`, runs the kernel with the supplied
@@ -182,7 +274,9 @@ class KernelTunerBase:
                 - total_latency_ns: Cumulative latency across all iterations in
                   nanoseconds, or 0 on failure.
         """
-        raise NotImplementedError("Specific kernel should implement this to call the kernl with the inputs from generate_inputs")
+        raise NotImplementedError(
+            "Specific kernel should implement this to call the kernl with the inputs from generate_inputs"
+        )
 
     def measure_latency(self, caseset_id, run_id, begin_case_id, end_case_id):
         """Measure the latency of cases in the caseset with case_id in [begin_case_id, end_case_id). The latency of each case will be persisted in local file or database using storage_management module.
@@ -197,11 +291,16 @@ class KernelTunerBase:
             end_case_id: End of the case_id range (exclusive) within the caseset to measure.
         """
         bucket_id = f"{caseset_id}_{run_id}_{begin_case_id}_{end_case_id}"
-        logger.info(f"[{_WORKER_ID.value}] Claimed CaseSetId: {caseset_id}, RunId: {run_id}, Bucket {bucket_id} ({begin_case_id}-{end_case_id}) for processing.")
-        self.storage_manager.mark_bucket_in_progress(caseset_id, run_id, bucket_id)
+        logger.info(
+            f"[{_WORKER_ID.value}] Claimed CaseSetId: {caseset_id}, RunId: {run_id}, Bucket {bucket_id} ({begin_case_id}-{end_case_id}) for processing."
+        )
+        self.storage_manager.mark_bucket_in_progress(caseset_id, run_id,
+                                                     bucket_id)
 
-        processed_ids = self.storage_manager.get_already_processed_ids(caseset_id, run_id, begin_case_id, end_case_id)
-        all_configs = self.storage_manager.get_bucket_configs(caseset_id, begin_case_id, end_case_id)
+        processed_ids = self.storage_manager.get_already_processed_ids(
+            caseset_id, run_id, begin_case_id, end_case_id)
+        all_configs = self.storage_manager.get_bucket_configs(
+            caseset_id, begin_case_id, end_case_id)
 
         bucket_start_perf = time.perf_counter()
         results_buffer = []
@@ -210,39 +309,57 @@ class KernelTunerBase:
             config = all_configs.get(cid)
             if not config: continue
             _, _, case_key_value = config
-            tuning_key, tunable_params = CaseBase.from_string(case_key_value, self.tuning_key_class, self.tunable_params_class)
+            tuning_key, tunable_params = CaseBase.from_string(
+                case_key_value, self.tuning_key_class,
+                self.tunable_params_class)
 
             begin_case_id_time = time.perf_counter_ns()
             # status can be SUCCESS, FAILED_OOM, UNKNOWN_ERROR.
             status, warmup, _ = self.run(tuning_key, tunable_params, iters=1)
             if status != 'SUCCESS':
-                results_buffer.append((caseset_id, run_id, cid, status, _WORKER_ID.value, 0, 0, spanner.COMMIT_TIMESTAMP))
-                logger.warning(f"Case {cid} failed during warmup with status: {status}. Skipping to next case.")
+                results_buffer.append(
+                    (caseset_id, run_id, cid, status, _WORKER_ID.value, 0, 0,
+                     spanner.COMMIT_TIMESTAMP))
+                logger.warning(
+                    f"Case {cid} failed during warmup with status: {status}. Skipping to next case."
+                )
                 continue
             warmup_us = warmup // 1000
 
-            status, average_latency, _ = self.run(tuning_key, tunable_params, iters=10)
+            status, average_latency, _ = self.run(tuning_key,
+                                                  tunable_params,
+                                                  iters=10)
             end_time = time.perf_counter_ns()
             total_time = end_time - begin_case_id_time
             if status != 'SUCCESS':
-                results_buffer.append((caseset_id, run_id, cid, status, _WORKER_ID.value, warmup_us, 0, spanner.COMMIT_TIMESTAMP))
-                logger.warning(f"Case {cid} failed during main run with status: {status}. Total time spent: {total_time/1e9:.2f}s.")
+                results_buffer.append(
+                    (caseset_id, run_id, cid, status, _WORKER_ID.value,
+                     warmup_us, 0, spanner.COMMIT_TIMESTAMP))
+                logger.warning(
+                    f"Case {cid} failed during main run with status: {status}. Total time spent: {total_time/1e9:.2f}s."
+                )
                 continue
-            
+
             average_latency_us = average_latency // 1000
             total_time_us = total_time // 1000
             results_buffer.append(
-                (caseset_id, run_id, cid, status, _WORKER_ID.value, average_latency_us, warmup_us, total_time_us, spanner.COMMIT_TIMESTAMP)
-            )
+                (caseset_id, run_id, cid, status, _WORKER_ID.value,
+                 average_latency_us, warmup_us, total_time_us,
+                 spanner.COMMIT_TIMESTAMP))
 
             if _DEBUG.value:
-                logger.info(f"Case {cid} completed with AvgLat={average_latency_us}us, Warmup={warmup_us}us, Total={total_time_us}us")
+                logger.info(
+                    f"Case {cid} completed with AvgLat={average_latency_us}us, Warmup={warmup_us}us, Total={total_time_us}us"
+                )
 
             if len(results_buffer) >= 10:
                 self.storage_manager.save_results_batch(results_buffer)
                 results_buffer = []
 
         self.storage_manager.save_results_batch(results_buffer)
-        
-        bucket_total_time_us = int((time.perf_counter() - bucket_start_perf) * 1_000_000)
-        self.storage_manager.mark_bucket_completed(caseset_id, run_id, bucket_id, bucket_total_time_us)
+
+        bucket_total_time_us = int(
+            (time.perf_counter() - bucket_start_perf) * 1_000_000)
+        self.storage_manager.mark_bucket_completed(caseset_id, run_id,
+                                                   bucket_id,
+                                                   bucket_total_time_us)

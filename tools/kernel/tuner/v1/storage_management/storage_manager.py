@@ -1,3 +1,16 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Base class for kernel tuner storage backends.
 
 This module defines the StorageManager abstract base class, which provides the
@@ -21,7 +34,7 @@ class StorageManager:
       - Local JSON file: a lightweight backend for offline or development use.
     """
 
-    def __init__(self, instance_id = 'vllm-bm-inst', database_id = 'tune-gmm'):
+    def __init__(self, instance_id='vllm-bm-inst', database_id='tune-gmm'):
         raise NotImplementedError("Subclasses must implement __init__")
 
     def init_case_set(self, case_set_id, scan_space, desc):
@@ -39,11 +52,13 @@ class StorageManager:
 
     def case_set_id_exists(self, case_set_id) -> bool:
         """Checks whether the given case_set_id already exists in the CaseSet table."""
-        raise NotImplementedError("Subclasses must implement case_set_id_exists")
+        raise NotImplementedError(
+            "Subclasses must implement case_set_id_exists")
 
     def get_case_set_desc(self, case_set_id) -> str:
         """Gets the description for the given case_set_id from the CaseSet table."""
-        raise NotImplementedError("Subclasses must implement get_case_set_desc")
+        raise NotImplementedError(
+            "Subclasses must implement get_case_set_desc")
 
     def finish_case_set(self, case_set_id, valid, invalid, duration):
         """Marks a CaseSet as completed and records summary statistics.
@@ -70,7 +85,8 @@ class StorageManager:
                 'bm_infra_hash': git hash of the bm-infra repo.
                 'kernel_runer': name of the KernelTunerRunner class used.
         """
-        raise NotImplementedError("Subclasses must implement get_case_set_metadata")
+        raise NotImplementedError(
+            "Subclasses must implement get_case_set_metadata")
 
     def flush(self):
         """Flushes any buffered tuning cases to the backend storage.
@@ -104,7 +120,8 @@ class StorageManager:
             r_id: Run ID the bucket belongs to.
             b_id: Bucket ID to claim.
         """
-        raise NotImplementedError("Subclasses must implement mark_bucket_in_progress")
+        raise NotImplementedError(
+            "Subclasses must implement mark_bucket_in_progress")
 
     def mark_bucket_completed(self, cs_id, r_id, b_id, tt_us):
         """Marks a work bucket as COMPLETED and records its total processing time.
@@ -115,7 +132,8 @@ class StorageManager:
             b_id: Bucket ID to mark as completed.
             tt_us: Total processing time for the bucket in microseconds.
         """
-        raise NotImplementedError("Subclasses must implement mark_bucket_completed")
+        raise NotImplementedError(
+            "Subclasses must implement mark_bucket_completed")
 
     def get_already_processed_ids(self, cs_id, r_id, start, end):
         """Returns case IDs that have already been processed within a range.
@@ -132,7 +150,8 @@ class StorageManager:
         Returns:
             A set of integer case IDs that have already been processed.
         """
-        raise NotImplementedError("Subclasses must implement get_already_processed_ids")
+        raise NotImplementedError(
+            "Subclasses must implement get_already_processed_ids")
 
     def save_results_batch(self, results):
         """Persists a batch of tuning results to the backend.
@@ -144,7 +163,8 @@ class StorageManager:
                 CaseResults (ID, RunId, CaseId, ProcessedStatus, WorkerID,
                 Latency, WarmupTime, TotalTime, ProcessedAt).
         """
-        raise NotImplementedError("Subclasses must implement save_results_batch")
+        raise NotImplementedError(
+            "Subclasses must implement save_results_batch")
 
     def get_bucket_configs(self, cs_id, start, end):
         """Retrieves the tuning case configurations for a range of case IDs.
@@ -160,7 +180,5 @@ class StorageManager:
             A dict mapping case_id (int) to the corresponding storage row for
             that case.
         """
-        raise NotImplementedError("Subclasses must implement get_bucket_configs")
-
-
-
+        raise NotImplementedError(
+            "Subclasses must implement get_bucket_configs")
