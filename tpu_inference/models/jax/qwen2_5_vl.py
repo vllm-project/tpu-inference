@@ -27,6 +27,7 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
 from vllm.config import VllmConfig
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.transformers_utils.config import set_default_rope_theta
 
 from tpu_inference import utils as utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
@@ -212,7 +213,8 @@ class Qwen2_5_VisionAttention(nnx.Module):
         self.hidden_size = vision_config.hidden_size
         self.num_heads = vision_config.num_heads
         self.num_kv_heads = self.num_heads
-        self.rope_theta = config.rope_theta
+        set_default_rope_theta(config, default_theta=1000000)
+        self.rope_theta = config.rope_parameters["rope_theta"]
         self.rope_scaling = getattr(config, "rope_scaling", None)
         self.head_dim_original = self.hidden_size // self.num_heads
 
@@ -326,12 +328,12 @@ class Qwen2_5_VisionAttention(nnx.Module):
 
 class Qwen2_5_VisionBlock(nnx.Module):
 
-    def __init__(self, config: Qwen2_5_VLConfig, dtype: jnp.dtype,
-                 rngs: nnx.Rngs, mesh: Mesh):
+    def __init__(self, config: Qwen2_5_VLConfig, norm_eps: float,
+                 dtype: jnp.dtype, rngs: nnx.Rngs, mesh: Mesh):
         vision_config = config.vision_config
         dim = vision_config.hidden_size
         norm_layer = partial(nnx.RMSNorm,
-                             epsilon=config.rms_norm_eps,
+                             epsilon=norm_eps,
                              param_dtype=dtype,
                              scale_init=nnx.with_partitioning(
                                  init_fn, (None, )))
@@ -496,6 +498,7 @@ class Qwen2_5_VisionTransformer(nnx.Module):
         self.blocks = nnx.List([
             Qwen2_5_VisionBlock(
                 config=hf_config,
+                norm_eps=norm_eps,
                 dtype=dtype,
                 rngs=rngs,
                 mesh=mesh,
@@ -777,7 +780,8 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
                 vllm_config=vllm_config,
                 rngs=self.rng,
                 mesh=mesh,
-                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                norm_eps=getattr(config, "rms_norm_eps",
+                                 config.text_config.rms_norm_eps),
             )
         else:
             self.visual = PPMissingLayer()
@@ -787,7 +791,9 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         if not model_config.hf_config.tie_word_embeddings:
             if self.is_last_rank:
                 vocab_size = model_config.get_vocab_size()
-                hidden_size = model_config.hf_config.hidden_size
+                hidden_size = getattr(
+                    model_config.hf_config, 'hidden_size',
+                    model_config.hf_config.text_config.hidden_size)
                 self.lm_head = JaxEinsum(
                     einsum_str="TD,DV->TV",
                     kernel_shape=(hidden_size, vocab_size),
