@@ -142,38 +142,89 @@ def quantized_matmul_kernel(
         def accum(is_first_step, is_last_step):
             accumulators = [None] * steps_n
 
-            for i in range(steps_k):
-                k_start, k_end = i * block_size, (i + 1) * block_size
-                lhs_sub = lhs_ref[:, k_start:k_end].astype(jnp.float32)
-                lhs_q, lhs_scale = util.quantize_block(lhs_sub, 1, x_q_dtype)
-                lhs_scale = lhs_scale.astype(acc_dtype)
+            if block_size < MXU_SIZE:
+                # Dequantize RHS in VMEM once per tile to avoid small contracting dim matmuls.
+                rhs_q = rhs_ref[...]
+                rhs_q = rhs_q.reshape(out_block_size, steps_k, block_size)
+                scales = w_scales_ref[...]  # [steps_k, 1, out_block_size]
+                scales = jnp.transpose(
+                    scales, (2, 0, 1))  # [out_block_size, steps_k, 1]
+                rhs_dequant = rhs_q.astype(acc_dtype) * scales.astype(
+                    acc_dtype)
+                rhs_dequant = rhs_dequant.reshape(out_block_size,
+                                                  in_block_size)
 
-                rhs_q_full = rhs_ref[:, k_start:k_end]
-                rhs_scale_full = w_scales_ref[i, :, :].astype(acc_dtype)
+                # Use original unquantized LHS if no activation quantization.
+                if not quantize_activation:
+                    lhs = lhs_ref[...].astype(acc_dtype)
+                    for j in range(steps_n):
+                        n_start, n_end = j * compute_tile_n, (
+                            j + 1) * compute_tile_n
+                        accumulators[j] = jax.lax.dot_general(
+                            lhs,
+                            rhs_dequant[n_start:n_end, :],
+                            (((1, ), (1, )), ((), ())),
+                            preferred_element_type=jnp.float32,
+                        ).astype(acc_dtype)
+                else:
+                    # If quantizing activation, we still do it in steps_k but use dequantized RHS.
+                    for i in range(steps_k):
+                        k_start, k_end = i * block_size, (i + 1) * block_size
+                        lhs_sub = lhs_ref[:, k_start:k_end].astype(jnp.float32)
+                        lhs_q, lhs_scale = util.quantize_block(
+                            lhs_sub, 1, x_q_dtype)
+                        lhs_scale = lhs_scale.astype(acc_dtype)
 
-                for j in range(steps_n):
-                    n_start, n_end = j * compute_tile_n, (j +
-                                                          1) * compute_tile_n
+                        for j in range(steps_n):
+                            n_start, n_end = j * compute_tile_n, (
+                                j + 1) * compute_tile_n
+                            rhs_slice = rhs_dequant[n_start:n_end,
+                                                    k_start:k_end]
+                            dot_res = jax.lax.dot_general(
+                                lhs_q,
+                                rhs_slice,
+                                (((1, ), (1, )), ((), ())),
+                                preferred_element_type=jnp.float32,
+                            )
+                            res = dot_res.astype(acc_dtype) * lhs_scale
+                            if i == 0:
+                                accumulators[j] = res
+                            else:
+                                accumulators[j] += res
+            else:
+                for i in range(steps_k):
+                    k_start, k_end = i * block_size, (i + 1) * block_size
+                    lhs_sub = lhs_ref[:, k_start:k_end].astype(jnp.float32)
+                    lhs_q, lhs_scale = util.quantize_block(
+                        lhs_sub, 1, x_q_dtype)
+                    lhs_scale = lhs_scale.astype(acc_dtype)
 
-                    rhs_q_slice = rhs_q_full[n_start:n_end, :]
-                    rhs_scale_slice = rhs_scale_full[:, n_start:n_end]
-                    if jnp.issubdtype(x_q_dtype, jnp.integer):
-                        preferred_element_type = jnp.int32
-                    else:
-                        preferred_element_type = jnp.float32
-                    dot_res = jax.lax.dot_general(
-                        lhs_q,
-                        rhs_q_slice,
-                        (((1, ), (1, )), ((), ())),
-                        preferred_element_type=preferred_element_type,
-                    )
-                    res = dot_res.astype(acc_dtype)
-                    res = res * lhs_scale
-                    res = res * rhs_scale_slice
-                    if i == 0:
-                        accumulators[j] = res
-                    else:
-                        accumulators[j] += res
+                    rhs_q_full = rhs_ref[:, k_start:k_end]
+                    rhs_scale_full = w_scales_ref[i, :, :].astype(acc_dtype)
+
+                    for j in range(steps_n):
+                        n_start, n_end = j * compute_tile_n, (
+                            j + 1) * compute_tile_n
+
+                        rhs_q_slice = rhs_q_full[n_start:n_end, :]
+                        rhs_scale_slice = rhs_scale_full[:, n_start:n_end]
+                        if jnp.issubdtype(x_q_dtype, jnp.integer):
+                            preferred_element_type = jnp.int32
+                        else:
+                            preferred_element_type = jnp.float32
+                        dot_res = jax.lax.dot_general(
+                            lhs_q,
+                            rhs_q_slice,
+                            (((1, ), (1, )), ((), ())),
+                            preferred_element_type=preferred_element_type,
+                        )
+                        res = dot_res.astype(acc_dtype)
+                        res = res * lhs_scale
+                        res = res * rhs_scale_slice
+                        if i == 0:
+                            accumulators[j] = res
+                        else:
+                            accumulators[j] += res
 
             acc_block = jnp.concatenate(accumulators, axis=1)
 
@@ -186,6 +237,59 @@ def quantized_matmul_kernel(
                 acc_scratch[...] = acc_block
 
         unfold_args((is_first_step, is_last_step), (), accum)
+
+    kernel = pl.pallas_call(
+        kernel,
+        grid_spec=pltpu.PrefetchScalarGridSpec(
+            num_scalar_prefetch=0,
+            in_specs=[
+                pl.BlockSpec(
+                    (batch_block_size, in_block_size),
+                    lambda b, o, i: (b, i),
+                    memory_space=pltpu.VMEM,
+                ),  # x
+                pl.BlockSpec(
+                    (out_block_size, in_block_size),
+                    lambda b, o, i: (o, i),
+                    memory_space=pltpu.VMEM,
+                ),  # w_q
+                pl.BlockSpec(
+                    (steps_k, 1, out_block_size),
+                    lambda _, o, i: (i, 0, o),
+                    memory_space=pltpu.VMEM,
+                ),
+            ],  # w_scale
+            out_specs=pl.BlockSpec((batch_block_size, out_block_size),
+                                   lambda b, o, i: (b, o)),
+            scratch_shapes=[
+                pltpu.VMEM((batch_block_size, out_block_size), jnp.bfloat16)
+            ],
+            grid=(n_batch, n_out, n_in),
+        ),
+        out_shape=jax.ShapeDtypeStruct((padded_n_batch, padded_n_out),
+                                       x.dtype),
+        compiler_params=pltpu.CompilerParams(
+            dimension_semantics=("parallel", "parallel", "arbitrary"),
+            vmem_limit_bytes=vmem_limit_bytes,
+        ),
+    )
+
+    util.validate_inputs(
+        x=x,
+        w_q=w_q,
+        w_scale=w_scale,
+        x_abs_max=None,
+        batch_block_size=batch_block_size,
+        out_block_size=out_block_size,
+        in_block_size=in_block_size,
+    )
+
+    # The named_scope is used for autotune.
+    kernel_name = get_kernel_name(tuned_value)
+    with jax.named_scope(kernel_name):
+        out = kernel(x, w_q, w_scale)
+
+    return out[:orig_n_batch, :orig_n_out]
 
     kernel = pl.pallas_call(
         kernel,
