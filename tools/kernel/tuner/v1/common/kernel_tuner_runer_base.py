@@ -100,11 +100,10 @@ class KernelTunerBase:
         buckets = [[i, min(i + bucket_size, total_cases)] for i in range(0, total_cases, bucket_size)]
         return buckets
     
-    def generate_buildkite_pipeline(self, tuning_jobs: list[tuple[int, int]], case_set_id: str, run_id: str):
+    def generate_buildkite_pipeline(self, case_set_id: str, run_id: str, desc: str) -> str:
         """Generate the Buildkite pipeline for the given tuning jobs. Each tuning job will be represented as a Buildkite step that calls the measure_latency function with the corresponding case_id range.
 
         Args:
-            tuning_jobs: A list of tuples, where each tuple is (begin_case_id, end_case_id) representing a tuning job.
             case_set_id: Identifies a set of tuning cases. If specified when running the tuning
                 pipeline, the caseset will only be regenerated when the caseset_id changes.
             run_id: Identifies a run of the tuning pipeline. Can be used to distinguish different
@@ -114,7 +113,12 @@ class KernelTunerBase:
         Returns:
             A string representing the Buildkite pipeline configuration in YAML format.
         """
-        raise NotImplementedError("Specific kernel should implement this to generate the Buildkite pipeline for the given tuning_jobs, case_set_id and run_id, and return a string representing the Buildkite pipeline configuration in YAML format.")
+        try:
+            self.init_case_set(case_set_id, desc=desc)
+        except Exception as e:
+            logger.error(f"Error initializing case set {case_set_id}: {e}")
+            raise e
+        raise NotImplementedError("Specific kernel should implement this to generate the Buildkite pipeline for the given case_set_id and run_id, and return a string representing the Buildkite pipeline configuration in YAML format.")
 
     def generate_inputs(self, tuning_key: TuningKey) -> dict:
         """Generates the kernel inputs for the given tuning key with caching.
@@ -129,7 +133,6 @@ class KernelTunerBase:
             return self._KERNEL_INPUTS_CACHE
         raise NotImplementedError("Specific kernel should implement this to generate the inputs to kernel based on the tuning key with caching.")
         
-
     def run(self, tuning_key: TuningKey, tunable_params: TunableParams, iters: int) -> list[TuningStatus, int, int]:
         """Executes the kernel and measures its latency.
 
@@ -137,6 +140,32 @@ class KernelTunerBase:
         tunable parameters for `iters` iterations, and returns timing results.
         All exceptions must be caught internally; nothing should propagate to
         the caller.
+
+        A common implementation pattern is:
+        ```
+            try:
+                inputs_cache = self.generate_inputs(tuning_key)
+            except Exception as e:
+                logger.error(f"Error generating inputs for tuning key {tuning_key}: {e}")
+                return TuningStatus.UNKNOWN_ERROR, 0, 0
+            kernel_param_0 = inputs_cache['kernel_param_0']
+            kernel_param_1 = inputs_cache['kernel_param_1']
+            ...
+            try:
+                # Run the kernel with the tunable parameters and measure latency 
+                start_time_ns = time.perf_counter_ns()
+                for _ in range(iters):
+                    # Call the kernel with kernel_param_0, kernel_param_1, ... and tunable_params
+                end_time_ns = time.perf_counter_ns()
+                average_latency_ns = (end_time_ns - start_time_ns) // iters
+                return TuningStatus.SUCCESS, average_latency_ns, end_time_ns - start_time_ns
+            except OOMError as e:
+                logger.warning(f"OOM error when running kernel for tuning key {tuning_key} with tunable params {tunable_params}: {e}")
+                return TuningStatus.FAILED_OOM, 0, 0
+            except Exception as e:
+                logger.error(f"Unknown error when running kernel for tuning key {tuning_key} with tunable params {tunable_params}: {e}")
+                return TuningStatus.UNKNOWN_ERROR, 0, 0
+        ```
 
         Args:
             tuning_key: Identifies the kernel shape / problem size.
