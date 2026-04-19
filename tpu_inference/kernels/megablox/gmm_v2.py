@@ -23,6 +23,10 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+# TPU v4 has no FP8 matmul support (Mosaic E2001). We detect FP8 and dequantize
+# to BF16 inside the Pallas kernel VMEM.
+_FP8_DTYPES = (jnp.float8_e4m3fn, jnp.float8_e5m2)
+
 # Util.
 
 
@@ -173,6 +177,9 @@ class InputConfigs:
     dtype: jnp.dtype
     has_bias: bool = False
     has_scale: bool = False
+    scale_n_block_size: int | None = None  # 2D block scale N-block size
+    # None = current behavior (full N resolution)
+    # 128  = 2D block scale, N dimension blocked by 128
 
     @property
     def should_bitcast(self) -> bool:
@@ -194,6 +201,13 @@ class GmmConfigs:
     @property
     def num_quant_blocks_per_tile_k(self) -> int:
         return pl.cdiv(self.tiles.tile_k, self.rhs_cfgs.quant_block_size)
+
+    @property
+    def n_blocks_per_tile_n(self) -> int | None:
+        """Number of N-blocks per tile_n (for 2D block scale)."""
+        if self.rhs_cfgs.scale_n_block_size is None:
+            return None  # full N resolution, current behavior
+        return self.tiles.tile_n // self.rhs_cfgs.scale_n_block_size
 
     @property
     def out_size_n(self) -> int:
@@ -244,6 +258,17 @@ class IndexMaps:
         b_tile_id = b_row // self.cfgs.num_quant_blocks_per_tile_k
         return (group_id, b_tile_id, 0, n_id)
 
+    def rhs_scale_index_map_2d(self, n_id: jax.Array, gm_id: jax.Array,
+                                k_id: jax.Array):
+        """Index map for 2D block scale (E, K_blocks, N_blocks)."""
+        group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
+        k_row = k_id * self.cfgs.tiles.tile_k
+        b_row = k_row // self.cfgs.rhs_cfgs.quant_block_size
+        b_tile_id = b_row // self.cfgs.num_quant_blocks_per_tile_k
+        # n_id now maps to N_blocks dimension (not full N)
+        return (group_id, b_tile_id, n_id)
+        # 3D index: (expert, K_block_tile, N_block_tile)
+
     def out_index_map(self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array):
         is_last_gm = gm_id == (pl.num_programs(1) - 1)
         m_start = self.metadata_ref.gm_id_to_m_offset[gm_id]
@@ -289,10 +314,18 @@ def generate_block_specs(
             index_map.rhs_bias_index_map,
         )
     if cfgs.rhs_cfgs.has_scale:
-        rhs_scale_block_spec = pl.BlockSpec(
-            (None, cfgs.num_quant_blocks_per_tile_k, 1, cfgs.tiles.tile_n),
-            index_map.rhs_scale_index_map,
-        )
+        if cfgs.rhs_cfgs.scale_n_block_size is not None:
+            # 2D block scale: compact (E, K_blocks, N_blocks)
+            rhs_scale_block_spec = pl.BlockSpec(
+                (None, cfgs.num_quant_blocks_per_tile_k, cfgs.n_blocks_per_tile_n),
+                index_map.rhs_scale_index_map_2d,
+            )
+        else:
+            # Current: full N resolution (E, K_blocks, 1, N)
+            rhs_scale_block_spec = pl.BlockSpec(
+                (None, cfgs.num_quant_blocks_per_tile_k, 1, cfgs.tiles.tile_n),
+                index_map.rhs_scale_index_map,
+            )
 
     rhs_block_spec = WeightsRef(
         weight=rhs_weight_spec,
@@ -377,17 +410,46 @@ def inner_kernel(
                     k_start = b_id * rhs_qbs
                     k_end = k_start + rhs_qbs
 
-                    block_acc = jnp.matmul(
-                        tiled_lhs[:, k_start:k_end],
-                        tiled_rhs[k_start:k_end, start_n:end_n],
-                        preferred_element_type=jnp.float32,
-                    ).astype(acc_ref.dtype)
+                    rhs_block = tiled_rhs[k_start:k_end, start_n:end_n]
 
-                    if cfgs.rhs_cfgs.has_scale:
+                    # TPU v4: no FP8 matmul (Mosaic E2001). Dequantize FP8 tile
+                    # in Pallas VMEM to float32 for numerical accuracy.
+                    if cfgs.rhs_cfgs.dtype in _FP8_DTYPES and cfgs.rhs_cfgs.has_scale:
                         tiled_rhs_scale = tiled_rhs_ref.get_scale()
-                        block_acc *= tiled_rhs_scale[b_id, :,
-                                                     start_n:end_n].astype(
-                                                         acc_ref.dtype)
+                        if cfgs.rhs_cfgs.scale_n_block_size is not None:
+                            # 2D block scale: tiled_rhs_scale is (K_blocks_per_tile, N_blocks_per_tile)
+                            n_block_size = cfgs.rhs_cfgs.scale_n_block_size
+                            n_block_idx = start_n // n_block_size
+                            scale = tiled_rhs_scale[b_id, n_block_idx]  # scalar
+                            rhs_block = (rhs_block.astype(jnp.float32) * scale)
+                        else:
+                            # Current: full N resolution
+                            scale = tiled_rhs_scale[b_id, :, start_n:end_n]
+                            rhs_block = (rhs_block.astype(jnp.float32)
+                                         * scale)
+                        # Scale is baked in; cast back to lhs dtype for MXU.
+                        rhs_block = rhs_block.astype(tiled_lhs.dtype)
+                        block_acc = jnp.matmul(
+                            tiled_lhs[:, k_start:k_end],
+                            rhs_block,
+                            preferred_element_type=jnp.float32,
+                        ).astype(acc_ref.dtype)
+                    else:
+                        block_acc = jnp.matmul(
+                            tiled_lhs[:, k_start:k_end],
+                            rhs_block,
+                            preferred_element_type=jnp.float32,
+                        ).astype(acc_ref.dtype)
+
+                        if cfgs.rhs_cfgs.has_scale:
+                            tiled_rhs_scale = tiled_rhs_ref.get_scale()
+                            if cfgs.rhs_cfgs.scale_n_block_size is not None:
+                                n_block_idx = start_n // cfgs.rhs_cfgs.scale_n_block_size
+                                block_acc *= tiled_rhs_scale[b_id, n_block_idx].astype(acc_ref.dtype)
+                            else:
+                                block_acc *= tiled_rhs_scale[b_id, :,
+                                                             start_n:end_n].astype(
+                                                                 acc_ref.dtype)
 
                     acc_n += block_acc
                 acc_list.append(acc_n)
@@ -859,6 +921,14 @@ def calculate_tiling(
     rhs_vmem_target = vmem_limit_bytes // num_rhs_buffers
     base_rhs_size_bytes = dims.size_k * dims.size_n * rhs_bits // 8
 
+    # TPU v4: FP8→F32 dequant in VMEM keeps the original FP8 tile, the F32
+    # intermediate, and the BF16 result coexisting.  Budget conservatively:
+    #   per element = FP8 (1 B) + F32 (4 B) = 5 B
+    if rhs_cfgs.dtype in _FP8_DTYPES and rhs_cfgs.has_scale:
+        fp8_bytes = rhs_bits // 8  # 1
+        dequant_bytes = 4  # F32 intermediate
+        base_rhs_size_bytes = base_rhs_size_bytes * (fp8_bytes + dequant_bytes) // fp8_bytes
+
     # To avoid stalling MXU, we add some buffer room where tile_n cannot go
     # smaller than 2x of mxu_column_size.
     tile_n_limit = pltpu.get_tpu_info().mxu_column_size * 2
@@ -907,6 +977,14 @@ def calculate_tiling(
             tile_k = align_to(dims.size_k,
                               num_k_tiles * num_lanes) // num_k_tiles
 
+    # 2D block scale: ensure tile_n is a multiple of scale_n_block_size
+    if rhs_cfgs.scale_n_block_size is not None:
+        nbs = rhs_cfgs.scale_n_block_size
+        if tile_n % nbs != 0:
+            tile_n = (tile_n // nbs) * nbs
+            if tile_n == 0:
+                tile_n = nbs
+
     if tile_n == 0 or tile_k == 0:
         raise ValueError(
             f"Could not find valid tile sizes for {dims=} and {rhs_vmem_target=}."
@@ -936,9 +1014,17 @@ def validate_inputs(
     if rhs_bias is not None:
         assert rhs_bias.shape == (size_group, 1, size_n)
     if rhs_scale is not None:
-        num_quant_blocks = rhs_scale.shape[1]
-        assert rhs_scale.shape == (size_group, num_quant_blocks, 1, size_n)
-        assert size_k % num_quant_blocks == 0
+        if rhs_scale.ndim == 3:
+            # 2D block scale: (E, K_blocks, N_blocks)
+            num_quant_blocks = rhs_scale.shape[1]
+            num_n_blocks = rhs_scale.shape[2]
+            assert size_k % num_quant_blocks == 0
+            assert size_n % num_n_blocks == 0
+        else:
+            # Current: (E, K_blocks, 1, N)
+            num_quant_blocks = rhs_scale.shape[1]
+            assert rhs_scale.shape == (size_group, num_quant_blocks, 1, size_n)
+            assert size_k % num_quant_blocks == 0
 
     assert group_offset.shape == (1, )
 
@@ -1031,10 +1117,19 @@ def make_gmm_configs(
         rhs_quant_dtype = rhs.dtype
         num_blocks = rhs_scale.shape[1]
         block_size = dims.size_k // num_blocks
+        # 2D block scale: shape (E, K_blocks, N_blocks). Auto-enable kernel's
+        # 2D mode so it does scalar per-block lookup instead of per-element N
+        # expansion. Avoids the 128x host-side memory blow-up from
+        # `expand_2d_block_scale` under large TP sharding.
+        if rhs_scale.ndim == 3:
+            scale_n_block_size = dims.size_n // rhs_scale.shape[-1]
+        else:
+            scale_n_block_size = None
     else:
         has_scale = False
         rhs_quant_dtype = None
         block_size = dims.size_k
+        scale_n_block_size = None
 
     rhs_cfgs = InputConfigs(
         quant_dtype=rhs_quant_dtype,
@@ -1042,6 +1137,7 @@ def make_gmm_configs(
         dtype=rhs.dtype,
         has_bias=rhs_bias is not None,
         has_scale=has_scale,
+        scale_n_block_size=scale_n_block_size,
     )
 
     lhs_q_dtype = None
