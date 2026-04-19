@@ -328,27 +328,17 @@ class JaxMoE(JaxModule):
                 target_dtype = param.value.dtype
                 # Reclaim the HBM held by the init-time placeholder before
                 # allocating the real weight. `_unsafe_bypass_check=True`
-                # skips the shape-match guard so we can swap in a scalar
-                # stub. If a future flax release drops that kwarg, fall back
-                # to direct assignment — it just means we keep peak HBM for
-                # one extra layer during loading.
+                # skips the shape-match guard so we can swap in a scalar stub.
                 with cpu_mesh_context(), jax.default_device(jax.devices("cpu")[0]):
-                    try:
-                        param.set_raw_value(jnp.zeros((1,),
-                                                      dtype=target_dtype),
-                                            _unsafe_bypass_check=True)
-                    except TypeError:
-                        pass
+                    param.set_raw_value(jnp.zeros((1,), dtype=target_dtype),
+                                        _unsafe_bypass_check=True)
                 gc.collect()
                 try:
                     loaded_value = shard_put(weights,
                                              param.sharding,
                                              mesh=self.mesh)
-                    try:
-                        param.set_raw_value(loaded_value,
-                                            _unsafe_bypass_check=True)
-                    except TypeError:
-                        param.value = loaded_value
+                    param.set_raw_value(loaded_value,
+                                        _unsafe_bypass_check=True)
                     loaded_names.add(param_name)
                 except Exception as e:
                     raise RuntimeError(

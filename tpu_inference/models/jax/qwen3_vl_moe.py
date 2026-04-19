@@ -474,18 +474,6 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         if getattr(experts, "quant_method", None) is None:
             self._clear_loaded_expert_buffers(experts, loaded_names)
 
-    def _to_model_dtype(self,
-                        torch_weight,
-                        *,
-                        permute_dims: Optional[tuple[int, ...]] = None):
-        with jax.default_device(jax.devices("cpu")[0]):
-            cpu_weight = np.asarray(
-                jax.device_get(ensure_cpu_jax_array(torch_weight)))
-            if permute_dims is not None:
-                cpu_weight = np.transpose(cpu_weight, permute_dims)
-            return jnp.asarray(cpu_weight,
-                               dtype=self.vllm_config.model_config.dtype)
-
     def _skip_non_expert_weight(self, hf_key: str) -> bool:
         layer_match = re.match(r".*layers\.(\d+)\.(.*)", hf_key)
         if layer_match is None:
@@ -730,9 +718,15 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 "Could not resolve MoE router param for "
                 f"language_model.layers.{layer_idx}.mlp.gate.weight")
 
+        with jax.default_device(jax.devices("cpu")[0]):
+            cpu_weight = np.transpose(
+                np.asarray(jax.device_get(ensure_cpu_jax_array(hf_weight))),
+                (1, 0))
+            gate_weight = jnp.asarray(
+                cpu_weight, dtype=self.vllm_config.model_config.dtype)
         assign_and_shard_param(
             gate_param,
-            self._to_model_dtype(hf_weight, permute_dims=(1, 0)),
+            gate_weight,
             param_name=f"language_model.layers.{layer_idx}.mlp.gate.weight",
             mesh=self.mesh,
         )

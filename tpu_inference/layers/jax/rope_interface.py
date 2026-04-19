@@ -19,13 +19,6 @@ import jax
 import jax.numpy as jnp
 
 
-def rotate_half(x: jax.Array) -> jax.Array:
-    """Rotate the last dimension using split-half ordering."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2:]
-    return jnp.concatenate([-x2, x1], axis=-1)
-
-
 def apply_interleaved_mrope(
     freqs: jax.Array,
     mrope_section: Sequence[int],
