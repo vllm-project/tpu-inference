@@ -116,15 +116,44 @@ class KernelTunerBase:
         """
         raise NotImplementedError("Specific kernel should implement this to generate the Buildkite pipeline for the given tuning_jobs, case_set_id and run_id, and return a string representing the Buildkite pipeline configuration in YAML format.")
 
-    def setup_inputs(self, tuning_key: TuningKey):
-        # This function is used to setup the inputs to kernel based on the tuning key. The setup process can be time consuming, so the inputs will be cached based on the tuning key. If the inputs for the given tuning key are already cached, it will return the cached inputs. Otherwise, it will re-generate the inputs, cache the inputs and return the inputs.
-        raise NotImplementedError("Specific kernel should implement this to initialize the inputs to kernel based on the tuning key")
+    def generate_inputs(self, tuning_key: TuningKey) -> dict:
+        """Generates the kernel inputs for the given tuning key with caching.
+
+        Args:
+            tuning_key: Identifies the kernel shape / problem size for which
+                inputs should be prepared.
+        Returns:
+            The kernel inputs corresponding to the given tuning key as a dictionary.
+        """
+        if self._TUNING_KEY and tuning_key == self._TUNING_KEY:
+            return self._KERNEL_INPUTS_CACHE
+        raise NotImplementedError("Specific kernel should implement this to generate the inputs to kernel based on the tuning key with caching.")
+        
 
     def run(self, tuning_key: TuningKey, tunable_params: TunableParams, iters: int) -> list[TuningStatus, int, int]:
-        # return status, average_latency and total latency in nanosecond. status can be SUCCESS, FAILED_OOM, UNKNOWN_ERROR.
-        # the implementation of this function should call the kernel with the inputs from setup_inputs and the tunable_params, and measure the latency of the kernel execution. If the kernel execution is successful, return SUCCESS and the average latency and total latency. If the kernel execution fails due to OOM, return FAILED_OOM and 0 for latencies. If the kernel execution fails due to other reasons, return UNKNOWN_ERROR and 0 for latencies.
-        # exception should be caught and handled within this function, and should not be raised to the upper level.
-        raise NotImplementedError("Specific kernel should implement this to call the kernl with the inputs from setup_inputs")
+        """Executes the kernel and measures its latency.
+
+        Fetches inputs via `generate_inputs`, runs the kernel with the supplied
+        tunable parameters for `iters` iterations, and returns timing results.
+        All exceptions must be caught internally; nothing should propagate to
+        the caller.
+
+        Args:
+            tuning_key: Identifies the kernel shape / problem size.
+            tunable_params: Tile sizes and other parameters to evaluate.
+            iters: Number of iterations to run for latency measurement.
+
+        Returns:
+            A three-element list of (status, average_latency_ns, total_latency_ns):
+                - status: TuningStatus.SUCCESS on success,
+                  TuningStatus.FAILED_OOM on out-of-memory, or
+                  TuningStatus.UNKNOWN_ERROR for any other failure.
+                - average_latency_ns: Mean per-iteration latency in nanoseconds,
+                  or 0 on failure.
+                - total_latency_ns: Cumulative latency across all iterations in
+                  nanoseconds, or 0 on failure.
+        """
+        raise NotImplementedError("Specific kernel should implement this to call the kernl with the inputs from generate_inputs")
 
     def measure_latency(self, caseset_id, run_id, begin_case_id, end_case_id):
         """Measure the latency of cases in the caseset with case_id in [begin_case_id, end_case_id). The latency of each case will be persisted in local file or database using storage_management module.
