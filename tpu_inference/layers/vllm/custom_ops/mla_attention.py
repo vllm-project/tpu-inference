@@ -75,6 +75,13 @@ class VllmMLAAttention(MLAAttention):
         # instance (VllmFp8Config.get_quant_method constructs a fresh
         # VllmFp8LinearMethod), so patching the instance only affects this
         # kv_b_proj.
+        # vLLM's Fp8Config.get_quant_method constructs a fresh
+        # Fp8LinearMethod(self) per LinearBase via Linear.__init__, so `_qm`
+        # below is this kv_b_proj's exclusive instance and the method patch
+        # only no-ops PWAL for this MLA layer. This relies on upstream NOT
+        # caching/reusing quant_method instances across layers; if that
+        # contract ever changes the patch would silently disable kv_b_proj
+        # absorb everywhere.
         import types as _types
         _qm = getattr(self.kv_b_proj, "quant_method", None)
         if _qm is not None and hasattr(_qm, "process_weights_after_loading"):

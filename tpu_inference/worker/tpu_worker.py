@@ -304,6 +304,19 @@ class TPUWorker(WorkerBase):
         if pp_size > 1:
             from vllm.distributed.parallel_state import get_pp_group
             pp_group = get_pp_group()
+            if pp_group.world_size != 1:
+                # The patch below overwrites whatever PP state is already
+                # there. vLLM initialises the group with world_size=1 on
+                # a fresh process, so seeing a non-1 here means init_device
+                # ran a second time (or somebody else patched it). Warn
+                # before we clobber the previous values — idempotent in the
+                # same-values case, but harmful if the second run picks a
+                # different rank.
+                logger.warning(
+                    "PP group already patched (world_size=%d, rank=%d) "
+                    "before this init_device call; re-patching with "
+                    "rank_in_group=%d world_size=%d.",
+                    pp_group.world_size, pp_group.rank, self.rank, pp_size)
             pp_group.rank_in_group = self.rank
             pp_group.world_size = pp_size
             pp_group.rank = self.rank
@@ -375,6 +388,16 @@ class TPUWorker(WorkerBase):
             if d.process_index == jax.process_index()
         ]
         if not local_devs:
+            logger.warning(
+                "determine_available_memory: filter by process_index=%d "
+                "returned 0 local devices from %d entries in self.devices. "
+                "This suggests a misconfiguration (e.g. device_indexes "
+                "pointing only at remote chips). Falling back to "
+                "jax.local_devices() so HBM sizing still works, but the "
+                "fallback covers all local chips — num_chips below will "
+                "reflect the process footprint, not the worker's intended "
+                "device subset.",
+                jax.process_index(), len(self.devices))
             local_devs = jax.local_devices()
         hbm_usage = utils.hbm_usage_bytes(local_devs)
         # In multi-host Ray/PJRT mode, jax.live_arrays() distributes model
