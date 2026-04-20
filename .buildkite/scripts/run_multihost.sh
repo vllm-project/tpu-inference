@@ -98,7 +98,7 @@ if [ ! -f ~/.ssh/id_rsa ]; then
     ssh-keygen -t rsa -b 4096 -N "" -f ~/.ssh/id_rsa -q
 fi
 
-SSH_OPTS=(-vvv -o StrictHostKeyChecking=no -o BatchMode=yes -o UserKnownHostsFile=/dev/null -i ~/.ssh/id_rsa)
+SSH_OPTS=(-o StrictHostKeyChecking=no -o BatchMode=yes -o UserKnownHostsFile=/dev/null -o IPQoS=none -i ~/.ssh/id_rsa)
 
 # Cleanup function that runs on exit to tear down the Ray cluster
 cleanup() {
@@ -232,21 +232,22 @@ for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
     # shellcheck disable=SC2002
     cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | base64 | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "base64 -d > ~/tpu-inference/scripts/multihost/run_cluster.sh"
     
-    REMOTE_CMD="bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_INTERNAL_IP}' --worker '${HOST_HF_HOME}' \
-      -e HF_TOKEN='${HF_TOKEN:-}' \
-      -e TPU_MULTIHOST_BACKEND=ray \
-      -e JAX_PLATFORMS='' \
-      -e TPU_BACKEND_TYPE=jax \
-      -e MODEL_IMPL_TYPE=vllm \
-      -e VLLM_DISABLE_SHARED_EXPERTS_STREAM='${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}' \
-      -e NEW_MODEL_DESIGN='${NEW_MODEL_DESIGN:-0}' \
-      -e MOE_REQUANTIZE_BLOCK_SIZE='${MOE_REQUANTIZE_BLOCK_SIZE:-}' \
-      -e MOE_REQUANTIZE_WEIGHT_DTYPE='${MOE_REQUANTIZE_WEIGHT_DTYPE:-}' \
-      -e MOE_ALL_GATHER_ACTIVATION_DTYPE='${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}' \
-      -e FORCE_MOE_RANDOM_ROUTING='${FORCE_MOE_RANDOM_ROUTING:-}'"
-
+    # shellcheck disable=SC2087
     # shellcheck disable=SC2029
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "$REMOTE_CMD" &
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" << EOF &
+bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_INTERNAL_IP}' --worker '${HOST_HF_HOME}' \
+  -e HF_TOKEN='${HF_TOKEN:-}' \
+  -e TPU_MULTIHOST_BACKEND=ray \
+  -e JAX_PLATFORMS='' \
+  -e TPU_BACKEND_TYPE=jax \
+  -e MODEL_IMPL_TYPE=vllm \
+  -e VLLM_DISABLE_SHARED_EXPERTS_STREAM='${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}' \
+  -e NEW_MODEL_DESIGN='${NEW_MODEL_DESIGN:-0}' \
+  -e MOE_REQUANTIZE_BLOCK_SIZE='${MOE_REQUANTIZE_BLOCK_SIZE:-}' \
+  -e MOE_REQUANTIZE_WEIGHT_DTYPE='${MOE_REQUANTIZE_WEIGHT_DTYPE:-}' \
+  -e MOE_ALL_GATHER_ACTIVATION_DTYPE='${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}' \
+  -e FORCE_MOE_RANDOM_ROUTING='${FORCE_MOE_RANDOM_ROUTING:-}'
+EOF
 done
 
 
