@@ -108,8 +108,12 @@ class VllmMLAAttention(MLAAttention):
             for key in kv_b_proj_params.keys():
                 delattr(self.kv_b_proj, key)
 
-    def forward(self, q: torch.Tensor, kv_c_normed: torch.Tensor,
-                k_pe: torch.Tensor, **kwargs) -> torch.Tensor:
+    def forward(self,
+                q: torch.Tensor,
+                kv_c_normed: torch.Tensor,
+                k_pe: torch.Tensor,
+                output: torch.Tensor | None = None,
+                **kwargs) -> torch.Tensor:
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe,
                                                 self.layer_name)
@@ -127,12 +131,21 @@ class VllmMLAAttention(MLAAttention):
         attn_metadata, _, _, _ = get_attention_context(self.layer_name)
 
         # Run the fundamental MLA forward pass from the impl
-        outputs, new_kv_cache = self.impl.forward(q, kv_c_normed, k_pe,
-                                                  kv_cache, attn_metadata,
-                                                  mesh, self, **kwargs)
+        outputs, new_kv_cache = self.impl.forward(q,
+                                                  kv_c_normed,
+                                                  k_pe,
+                                                  kv_cache,
+                                                  attn_metadata,
+                                                  mesh,
+                                                  self,
+                                                  output=output,
+                                                  **kwargs)
 
         # Update KV cache
         vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
+
+        if outputs is not output and output is not None:
+            output.copy_(outputs)
 
         return torch_view(outputs)
 

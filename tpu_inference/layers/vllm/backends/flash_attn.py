@@ -159,8 +159,9 @@ class PallasAttentionBackendImpl(AttentionImpl):
         attn_metadata: AttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if output_scale is not None:
+        if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported for "
                 "PallasAttentionBackendImpl")
@@ -211,7 +212,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
         )
         vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
 
-        return torch_view(outputs)
+        out_torch = torch_view(outputs)
+        if output is not None:
+            output.copy_(out_torch)
+        return out_torch
 
 
 @jax.jit(

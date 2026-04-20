@@ -196,7 +196,6 @@ class TestSpeculativeDecodingManager:
         # Mock runner attributes needed by the function
         self.runner.arange_cpu = np.arange(1024, dtype=np.int64)
         # Make input_ids_cpu a sequence of numbers for easy verification
-        self.runner.input_ids_cpu = np.arange(1024, dtype=np.int32) * 10
         self.runner.num_tokens_paddings = [16, 32, 64, 128, 256, 512, 1024]
 
         # Mock the device_array function to just return the numpy arrays
@@ -251,6 +250,7 @@ class TestSpeculativeDecodingManager:
         num_draft_tokens_np = np.array(num_draft_tokens, dtype=np.int32)
         cu_num_scheduled_tokens_np = np.array(cu_num_scheduled_tokens,
                                               dtype=np.int32)
+        input_ids = np.arange(1024, dtype=np.int32) * 10
 
         # Act
         with patch(
@@ -259,7 +259,8 @@ class TestSpeculativeDecodingManager:
             metadata = self.runner.speculative_decoding_manager.get_spec_decode_metadata(
                 num_draft_tokens_np,
                 cu_num_scheduled_tokens_np,
-                padded_num_reqs=padded_num_reqs)
+                padded_num_reqs=padded_num_reqs,
+                input_ids=input_ids)
 
         # Assert basic properties
         assert isinstance(metadata, SpecDecodeMetadata)

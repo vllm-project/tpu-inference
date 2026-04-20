@@ -76,11 +76,15 @@ class CompilationManager:
             return inner_val != outer_val
         return inner_val > outer_val
 
-    def _run_compilation(self, name: str, fn: Callable, *args,
+    def _run_compilation(self,
+                         name: str,
+                         fn: Callable,
+                         *args,
+                         call_kwargs=dict(),
                          **kwargs) -> None:
         logger.info(f"Precompile {name} --> {kwargs}")
         start = time.perf_counter()
-        result = fn(*args)
+        result = fn(*args, **call_kwargs)
         jax.tree.map(lambda r: r.block_until_ready(), result)
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
@@ -139,6 +143,8 @@ class CompilationManager:
                 sharding=sharding)
             dummy_input_ids = self._create_dummy_tensor(
                 (num_tokens, ), jnp.int32, sharding=input_sharding)
+            dummy_is_multimodal = self._create_dummy_tensor(
+                (num_tokens, ), jnp.int32, sharding=input_sharding)
 
             self._run_compilation(
                 "input_embeddings_merger",
@@ -146,6 +152,7 @@ class CompilationManager:
                 self.runner.state,
                 dummy_input_ids,
                 dummy_multimodal_embeddings,
+                call_kwargs={"is_multimodal": dummy_is_multimodal},
                 num_tokens=num_tokens,
             )
 
@@ -155,6 +162,7 @@ class CompilationManager:
                 self.runner.state,
                 dummy_input_ids,
                 None,
+                call_kwargs={"is_multimodal": None},
                 num_tokens=num_tokens,
             )
 
@@ -191,8 +199,10 @@ class CompilationManager:
                                             sharding=dp_sharding)
 
         def build_block_table(kv_cache_gid: int) -> jax.Array:
-            block_tables = self.runner.block_tables_cpu[
-                kv_cache_gid][:self.runner.max_num_reqs]
+            block_table_obj = self.runner.input_batch.block_table[kv_cache_gid]
+            shape = (self.runner.max_num_reqs,
+                     block_table_obj.max_num_blocks_per_req)
+            block_tables = np.zeros(shape, dtype=np.int32)
             block_tables = block_tables.reshape(-1)
             block_tables = device_array(self.runner.mesh,
                                         block_tables,
@@ -318,8 +328,11 @@ class CompilationManager:
             input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32,
                                                   dp_sharding)
             if self.runner.uses_mrope:
-                positions = self._create_dummy_tensor((3, num_tokens),
-                                                      jnp.int32, dp_sharding)
+                mrope_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+                positions = self._create_dummy_tensor(
+                    (3, num_tokens), jnp.int32, mrope_sharding)
             else:
                 positions = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32, dp_sharding)
@@ -363,9 +376,12 @@ class CompilationManager:
             inputs_embeds = self._create_dummy_tensor(
                 (num_tokens, hidden_size), dtype, sharding=sharding)
             if self.runner.uses_mrope:
+                mrope_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(None, ShardingAxisName.ATTN_DATA))
                 positions = self._create_dummy_tensor((3, num_tokens),
                                                       jnp.int32,
-                                                      sharding=sharding)
+                                                      sharding=mrope_sharding)
             else:
                 positions = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32,

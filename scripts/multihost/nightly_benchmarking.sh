@@ -64,6 +64,8 @@ export MOE_REQUANTIZE_BLOCK_SIZE=""
 export MOE_REQUANTIZE_WEIGHT_DTYPE=""
 export MOE_REQUANTIZE_BLOCK_SIZE_ENV=""
 export MOE_REQUANTIZE_WEIGHT_DTYPE_ENV=""
+export MOE_ALL_GATHER_ACTIVATION_DTYPE=""
+export MOE_ALL_GATHER_ACTIVATION_DTYPE_ENV=""
 export PHASED_PROFILING_DIR=""
 export PHASED_PROFILING_DIR_ENV=""
 export SKIP_DB_UPLOAD="false"
@@ -73,6 +75,7 @@ export USE_UNFUSED_MEGABLOCKS_ENV=""
 export HF_CONFIG=""
 export USE_VLLM_LKG="true"
 export FORCE_MOE_RANDOM_ROUTING_ENV=""
+export FORCE_MOE_RANDOM_ROUTING=""
 export API_SERVER_COUNT=""
 export LOAD_FORMAT=""
 
@@ -102,13 +105,14 @@ while [[ $# -gt 0 ]]; do
     --vllm-mla-disable) VLLM_MLA_DISABLE_ENV="VLLM_MLA_DISABLE=${2}"; shift 2 ;;
     --moe-requantize-block-size) export MOE_REQUANTIZE_BLOCK_SIZE="$2"; MOE_REQUANTIZE_BLOCK_SIZE_ENV="MOE_REQUANTIZE_BLOCK_SIZE=$2"; shift 2 ;;
     --moe-requantize-weight-dtype) export MOE_REQUANTIZE_WEIGHT_DTYPE="$2"; MOE_REQUANTIZE_WEIGHT_DTYPE_ENV="MOE_REQUANTIZE_WEIGHT_DTYPE=$2"; shift 2 ;;
+    --moe-all-gather-activation-dtype) export MOE_ALL_GATHER_ACTIVATION_DTYPE="$2"; MOE_ALL_GATHER_ACTIVATION_DTYPE_ENV="MOE_ALL_GATHER_ACTIVATION_DTYPE=$2"; shift 2 ;;
     --phased-profiling-dir) export PHASED_PROFILING_DIR="$2"; PHASED_PROFILING_DIR_ENV="PHASED_PROFILING_DIR=$2"; shift 2 ;;
     --skip-db-upload) export SKIP_DB_UPLOAD="true"; shift 1 ;;
     --run-accuracy) export RUN_ACCURACY="$2"; shift 2 ;;
     --model-impl-type) export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=$2"; shift 2 ;;
     --use-unfused-megablocks) export USE_UNFUSED_MEGABLOCKS_ENV="USE_UNFUSED_MEGABLOCKS=$2"; shift 2 ;;
     --hf-config) export HF_CONFIG="$2"; shift 2 ;;
-    --force-moe-random-routing) export FORCE_MOE_RANDOM_ROUTING_ENV="FORCE_MOE_RANDOM_ROUTING=$2"; shift 2 ;;
+    --force-moe-random-routing) export FORCE_MOE_RANDOM_ROUTING="$2"; FORCE_MOE_RANDOM_ROUTING_ENV="FORCE_MOE_RANDOM_ROUTING=$2"; shift 2 ;;
     --api-server-count) API_SERVER_COUNT="$2"; shift 2 ;;
     --load-format) export LOAD_FORMAT="$2"; shift 2 ;;
     *) echo "Unknown parameter passed: $1"; exit 1 ;;
@@ -147,6 +151,7 @@ NEW_MODEL_DESIGN=${NEW_MODEL_DESIGN} \
 ${VLLM_MLA_DISABLE_ENV} \
 ${MOE_REQUANTIZE_BLOCK_SIZE_ENV} \
 ${MOE_REQUANTIZE_WEIGHT_DTYPE_ENV} \
+${MOE_ALL_GATHER_ACTIVATION_DTYPE_ENV} \
 ${PHASED_PROFILING_DIR_ENV} \
 ${USE_UNFUSED_MEGABLOCKS_ENV} \
 VLLM_ENGINE_READY_TIMEOUT_S=10800 \
