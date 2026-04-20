@@ -20,8 +20,9 @@ import jax.numpy as jnp
 from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 
-from tpu_inference.kernels.megablox.gmm_v2 import (TileSizes, apply_act_fn,
-                                                   gmm_v2, _tgmm_v2_impl)
+from tpu_inference.kernels.megablox.gmm_v2 import (TileSizes, apply_act_fn)
+from tpu_inference.kernels.megablox.ops_v2 import gmm_v2
+from tpu_inference.kernels.megablox.tgmm_v2 import _tgmm_v2_impl
 
 jax.config.parse_flags_with_absl()
 
