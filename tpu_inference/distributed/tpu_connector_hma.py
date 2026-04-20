@@ -41,8 +41,6 @@ from tpu_inference.logger import init_logger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 from tpu_inference.utils import device_array
 
-ReqId = str
-
 logger = init_logger(__name__)
 
 
@@ -132,7 +130,7 @@ class TPUConnectorHMAScheduler(TPUConnectorScheduler):
             )
         load_meta = self.reqs_to_load[request.request_id]
         logger.info(
-            f"TPUConnectorHMAScheduler D --> load queued | "
+            f"TPUConnectorHMAScheduler Decode --> load queued | "
             f"req_id={request.request_id} | uuid={load_meta.uuid} | "
             f"remote_host={load_meta.remote_host} | "
             f"remote_port={load_meta.remote_port} | "
@@ -176,7 +174,7 @@ class TPUConnectorHMAScheduler(TPUConnectorScheduler):
                                       remote_host=self.kv_ip,
                                       remote_port=self.kv_port)
             logger.info(
-                f"TPUConnectorHMAScheduler P --> send queued | "
+                f"TPUConnectorHMAScheduler Prefill --> send queued | "
                 f"req_id={request.request_id} | uuid={uuid} | "
                 f"num_prompt_tokens={len(request.prompt_token_ids)} | "
                 f"num_computed_tokens={request.num_computed_tokens} | "
@@ -201,10 +199,9 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
         self.node_id = runner.topology_order_id
         self.runner = runner
         self.mesh = runner.mesh
+        role = 'Prefill' if self.is_producer else 'Decode'
         self.stats = TransferStats(
-            node_id=self.node_id,
-            log_prefix=f"TPUConnectorHMA "
-            f"{'P' if self.is_producer else 'D'}")
+            log_prefix=f"TPUConnectorHMA Worker {self.node_id} {role}")
 
         self.num_groups = len(runner.kv_cache_config.kv_cache_groups)
         # Mapping of kv cache group id to whether it is mamba or full attn
@@ -243,13 +240,13 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
             for s in self.kv_array_shardings
         ]
 
-        # Build mapping from flat kv cache index to group id
-        group_annot = [
+        # Build mapping from flat kv cache array index to group id
+        kv_array_to_group_id = [
             jax.tree_util.tree_map(lambda _, gid=layer_to_group_id[layer]: gid,
                                    cache)
             for layer, cache in enumerate(kv_caches)
         ]
-        self.kv_array_to_group_id, _ = jax.tree_util.tree_flatten(group_annot)
+        self.kv_array_to_group_id, _ = jax.tree_util.tree_flatten(kv_array_to_group_id)
 
         # Attention layers should share the same sharding spec.
         # Pick the first as attention sharding spec.
@@ -283,8 +280,7 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
                 per_array_host_sharding=self.kv_array_host_shardings,
             )
             
-        self._maybe_start_p2p_server()    
-        role = 'P' if self.is_producer else 'D'
+        self._maybe_start_p2p_server()
         logger.info(
             f"TPUConnectorHMA Worker {self.node_id} {role} --> init | "
             f"ip={self.host_ip} | multi_host={self.multi_host} | "
@@ -294,6 +290,7 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
             f"group_is_mamba={self.group_is_mamba} | "
             f"layer_to_group_id={self.layer_to_group_id} | "
             f"num_kv_arrays={self.num_kv_arrays} | "
+            f"kv_array_to_group_id={self.kv_array_to_group_id} | "
             f"host_kv_pool_enabled={self.host_kv_pool is not None}")
 
     def _compute_max_blocks_per_group(self) -> list[int]:
@@ -305,22 +302,22 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
                 for is_mamba in self.group_is_mamba]
 
     def process_send_load(self, metadata: TPUConnectorMetadata):
-        # P
+        # Prefill side: schedule sends.
         reqs = metadata.reqs_to_send
         if reqs:
             assert self.is_producer
             logger.info(
-                f"TPUConnectorHMA Worker {self.node_id} P --> step send | "
+                f"TPUConnectorHMA Worker {self.node_id} Prefill --> schedule send | "
                 f"num_reqs={len(reqs)}")
         for req_id, req_meta in reqs.items():
             self._prepare_kv_and_wait(req_id, req_meta)
 
-        # D
+        # Decode side: schedule loads (pull or insert).
         reqs = metadata.reqs_to_load
         if reqs:
             assert not self.is_producer
             logger.info(
-                f"TPUConnectorHMA Worker {self.node_id} D --> step load | "
+                f"TPUConnectorHMA Worker {self.node_id} Decode --> schedule load | "
                 f"num_reqs={len(reqs)}")
         for req_id, req_meta in reqs.items():
             if req_meta.remote_block_ids is not None:
@@ -354,7 +351,7 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
                             self.mesh,
                             self.attn_sharding_spec,
                         )
-                # Notify P so it can free the buffer.
+                # Notify Prefill so it can free the buffer.
                 socket = self._maybe_build_notif_socket(req_meta)
                 self._notify_pull_done(socket, req_id, req_meta.uuid)
 
@@ -425,7 +422,7 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
 
         total_bytes = sum(b.nbytes for b in updated_dest_buffer)
         logger.info(
-            f"TPUConnectorHMA Worker {self.node_id} P --> send d2h done | "
+            f"TPUConnectorHMA Worker {self.node_id} Prefill --> d2h send done | "
             f"req_id={req_id} | uuid={req_meta.uuid} | "
             f"slice_ms={(end_slice_time-start_time)*1000:.2f} | "
             f"copy_ms={(end_copy_time-end_slice_time)*1000:.2f} | "
@@ -474,7 +471,7 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
             ready_flags = [bool(chunk.is_ready()) for chunk in kv]
             pending_idx = [i for i, r in enumerate(ready_flags) if not r]
             logger.error(
-                f"TPUConnectorHMA Worker {self.node_id} D --> pull timeout | "
+                f"TPUConnectorHMA Worker {self.node_id} Decode --> pull timeout | "
                 f"req_id={req_id} | uuid={req_meta.uuid} | "
                 f"timeout_s={timeout_s} | bytes={total_bytes} | "
                 f"ready={sum(ready_flags)}/{len(ready_flags)} | "
@@ -482,7 +479,7 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
                 f"{'...' if len(pending_idx) > 20 else ''}")
         else:
             logger.info(
-                f"TPUConnectorHMA Worker {self.node_id} D --> pull done | "
+                f"TPUConnectorHMA Worker {self.node_id} Decode --> pull done | "
                 f"req_id={req_id} | uuid={req_meta.uuid} | "
                 f"prepare_ms={prepare_time_ms:.2f} | "
                 f"pull_ms={pull_time_ms:.2f} | bytes={total_bytes}")

@@ -25,18 +25,16 @@ class TransferStats:
     """Cumulative stats for kv transfer."""
 
     def __init__(self,
-                 node_id: int,
                  log_prefix: str | None = None,
                  log_interval: int = 32):
         """Initialization
 
         Args:
-            node_id: TPU connector worker id.
-            log_prefix: Prefix to prepend to logs.
-            log_interval: Number of stats increment calls between periodic 
+            log_prefix: Prefix to prepend to logs. Caller should bake in
+                any identifying context (e.g. worker id, role).
+            log_interval: Number of stats increment calls between periodic
                 summary logging.
         """
-        self.node_id = node_id
         self.log_prefix = log_prefix
         self.log_interval = log_interval
         self.num_sends = 0
@@ -46,12 +44,12 @@ class TransferStats:
 
     def _log_prefix(self) -> str:
         if self.log_prefix is None:
-            return f"{self.node_id} stats --> "
-        return f"{self.log_prefix} {self.node_id} stats --> "
+            return "--> stats |"
+        return f"{self.log_prefix} --> stats |"
 
     def increment_send(self, num_bytes: int):
         """Record a kv cache transfer send.
-        
+
         Args:
             num_bytes: Number of bytes sent.
         """
@@ -60,19 +58,19 @@ class TransferStats:
         if self.num_sends % self.log_interval == 0:
             logger.info(
                 f"{self._log_prefix()} "
-                f"cumulative sends={self.num_sends} "
-                f"cumulative MB={_bytes_to_mb(self.bytes_sent):.2f}")
+                f"cumulative_sends={self.num_sends} | "
+                f"cumulative_mb={_bytes_to_mb(self.bytes_sent):.2f}")
 
     def increment_pull(self, num_bytes: int):
         """Record a kv cache transfer pull
 
         Args:
-            num_bytes: Number of bytes sent.        
+            num_bytes: Number of bytes sent.
         """
         self.num_pulls += 1
         self.bytes_pulled += num_bytes
         if self.num_pulls % self.log_interval == 0:
             logger.info(
                 f"{self._log_prefix()} "
-                f"cumulative pulls={self.num_pulls} "
-                f"cumulative MB={_bytes_to_mb(self.bytes_pulled):.2f}")
+                f"cumulative_pulls={self.num_pulls} | "
+                f"cumulative_mb={_bytes_to_mb(self.bytes_pulled):.2f}")
