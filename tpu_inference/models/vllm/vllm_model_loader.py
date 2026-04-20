@@ -77,6 +77,13 @@ def _compute_mesh_aware_local_expert_ids(
             sharding.tp_size,
         )
 
+        # NOTE: the loader uses the process-global device list here, while the
+        # runner (tpu_runner._create_single_slice_mesh) uses self.devices
+        # which can be a subset (device_indexes or total_devices sub-slicing).
+        # For the PR's target config (v4-64, single slice, no sub-slicing)
+        # jax.devices() equals self.devices; once we add sub-slicing scenarios
+        # the loader must also consume the worker's device set or expert ids
+        # will misalign silently.
         devices = jax.devices()
         # Mirror tpu_runner.py: when FORCE_LOGICAL_RESHAPE=1, bypass the
         # physical-optimal mesh and use naive row-major reshape so the loader
@@ -89,7 +96,17 @@ def _compute_mesh_aware_local_expert_ids(
             try:
                 device_mesh = mesh_utils.create_device_mesh(
                     mesh_shape, devices, allow_split_physical_axes=True)
-            except (AssertionError, ValueError, RuntimeError):
+            except Exception as _mesh_exc:  # noqa: BLE001
+                # Widen the catch: if create_device_mesh grows a new
+                # failure mode across jaxlib versions (e.g., a TypeError
+                # on signature drift) we still want to fall back rather
+                # than bubble out of the filter and lose all EP slicing.
+                # Log the actual reason so the row-major fallback isn't
+                # a silent degrade.
+                logger.warning(
+                    "mesh_utils.create_device_mesh(shape=%s) failed (%s); "
+                    "falling back to row-major reshape.", mesh_shape,
+                    _mesh_exc)
                 device_mesh = np.array(devices).reshape(mesh_shape)
 
         local_proc = jax.process_index()
