@@ -173,7 +173,7 @@ def moe_gmm_local(
                       if parallelism == "tp" else ShardingAxisName.EXPERT)
 
     use_sc = gather_reduce_sc.is_supported_by_sc_gather_reduce(
-        gmm1_res.shape[0], sc_kernel_threshold)
+        gmm1_res.shape[0], sc_kernel_threshold, topk)
     if use_sc:
         sc_kernel_col_chunk_size = gather_reduce_sc.get_valid_col_chunk_size(
             gmm2_res.shape[1], sc_kernel_col_chunk_size)
