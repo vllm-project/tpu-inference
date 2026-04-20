@@ -204,13 +204,13 @@ def tgmm_inner_kernel(
     lhs_iota = lax.broadcasted_iota(jnp.int32, tiled_lhs_ref.shape, 0)
     lhs_mask = jnp.logical_and(m_start_local <= lhs_iota, lhs_iota < m_end_local)
     lhs_masked = jnp.where(lhs_mask, tiled_lhs_ref[...], 0)
-    rhs_iota = lax.broadcasted_iota(jnp.int32, tiled_rhs_ref.shape, 0)
-    rhs_mask = jnp.logical_and(m_start_local <= rhs_iota, rhs_iota < m_end_local)
-    rhs_masked = jnp.where(rhs_mask, tiled_rhs_ref[...], 0)
+    # masking both lhs and rhs shouldn't be necessary. as long as there isn't
+    # NaNs, we can just mask out one of either argument and get the same
+    # numeric result.
 
     acc = acc_ref[...] + jax.lax.dot_general(
         lhs_masked,
-        rhs_masked,
+        tiled_rhs_ref[...],
         (((0,), (0,)), ((), ())),
         preferred_element_type=jnp.float32,
     )

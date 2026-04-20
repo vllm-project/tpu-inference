@@ -222,16 +222,16 @@ class GmmTest(jtu.JaxTestCase):
     self.assertArraysAllClose(grad_rhs, expected_grad_rhs)
 
   @parameterized.product(
-      # batch_size=[128, 512],
-      # in_size=[512, 1024],
-      # out_size=[512, 1024],
-      # num_groups=[5, 16, 32],
-      # group_offset=[0, 2, 3],
-      batch_size=[512],
-      in_size=[1024],
-      out_size=[512],
-      num_groups=[5],
-      group_offset=[1],
+      batch_size=[128, 512],
+      in_size=[512, 1024],
+      out_size=[512, 1024],
+      num_groups=[5, 16, 32],
+      group_offset=[0, 2, 3],
+      # batch_size=[512],
+      # in_size=[1024],
+      # out_size=[512],
+      # num_groups=[5],
+      # group_offset=[1],
   )
   def test_tgmm(self, batch_size, in_size, out_size, num_groups, group_offset):
     num_local_groups = num_groups - group_offset
