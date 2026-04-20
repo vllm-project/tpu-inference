@@ -51,7 +51,7 @@ steps:
 
   # -----------------------------------------------------------------
   # -----------------------------------------------------------------
-  - label: ":docker: Generate Kernel Tuning Cases and YML"
+  - label: ":docker: Tuning Cases Generation and Pipeline Upload"
     key: generate_tuning_cases_and_yml
     depends_on: tpu6e_build_docker
     env:
@@ -61,21 +61,13 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-        # If CASE_SET_ID was not provided via the Buildkite UI, generate one from the current time and reset RUN_ID to 0.
-        if [ -z "$$CASE_SET_ID" ]; then
-          CASE_SET_ID="$$(date +%Y%m%d%H%M)"
-          RUN_ID="0"
-        else
-          RUN_ID="$${RUN_ID:-0}"
-        fi
-        CASE_SET_ID="$$CASE_SET_ID" RUN_ID="$$RUN_ID" \
         .buildkite/scripts/run_in_docker.sh bash -c "
           python -m tools.kernel.tuner.v1.kernel_tuner_runner \
-          --kernel_tuner_name=test_kernel_tuner \
-          --case_set_desc='testing the infra' \
+          --kernel_tuner_name=\${KERNEL_TUNING_KERNEL_NAME} \
+          --case_set_desc=\${KERNEL_TUNING_CASE_SET_DESC} \
           --generate_buildkite_pipeline=True \
-          --case_set_id=\${CASE_SET_ID} \
-          --run_id=\${RUN_ID} \"
+          --case_set_id=\${KERNEL_TUNING_CASE_SET_ID} \
+          --run_id=\${KERNEL_TUNING_RUN_ID} \"
           # python3 tools/kernel/tuner/v1/generate_cases_and_yml.py --output-path=/tmp/hf_home/generated_tuning_cases.yml"
       - |
         # Upload the generated YAML as a Buildkite artifact for the next step to consume.

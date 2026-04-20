@@ -241,6 +241,8 @@ class KernelTunerBase:
             }
             pipeline["steps"].append(step)
 
+        pipeline['steps'] = [{'group': 'Kernel Sweeping Group', 'steps': pipeline['steps']}]
+
         output_path = "/tmp/hf_home/generated_tuning_cases.yml"
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w") as f:
