@@ -43,6 +43,8 @@ class InferencePhase(Enum):
     DECODE_HEAVY = 1
     BALANCED = 2
     AMBIGUOUS = 3
+    PREFILL_ONLY = 4
+    DECODE_ONLY = 5
 
 
 def get_padded_num_reqs_with_upper_limit(x: int, upper_limit: int) -> int:
@@ -260,15 +262,19 @@ def determine_phase_from_batch_composition_stats(
     total_num_scheduled_tokens = batch_composition_stats[
         "total_num_scheduled_tokens"]
     prefill_ratio_for_batch = num_prefill_tokens / total_num_scheduled_tokens
+    if prefill_ratio_for_batch == 1.0:
+        return InferencePhase.PREFILL_ONLY
+    if prefill_ratio_for_batch == 0.0:
+        return InferencePhase.DECODE_ONLY
     if prefill_ratio_for_batch >= PREFILL_HEAVY_RATIO_THRESHOLD:
         return InferencePhase.PREFILL_HEAVY
-    elif prefill_ratio_for_batch <= DECODE_HEAVY_RATIO_THRESHOLD:
+    if prefill_ratio_for_batch <= DECODE_HEAVY_RATIO_THRESHOLD:
         return InferencePhase.DECODE_HEAVY
-    elif prefill_ratio_for_batch >= BALANCED_RATIO_THRESHOLD[
+    if prefill_ratio_for_batch >= BALANCED_RATIO_THRESHOLD[
             0] and prefill_ratio_for_batch <= BALANCED_RATIO_THRESHOLD[1]:
         return InferencePhase.BALANCED
-    else:
-        return InferencePhase.AMBIGUOUS
+
+    return InferencePhase.AMBIGUOUS
 
 
 class PhasedBasedProfiler:
@@ -307,7 +313,9 @@ class PhasedBasedProfiler:
         self.profile_dir: str = profile_dir
         # NOTE: we purposely don't have AMBIGUOUS here
         self.inference_phase_seen: dict = {
+            InferencePhase.PREFILL_ONLY: False,
             InferencePhase.PREFILL_HEAVY: False,
+            InferencePhase.DECODE_ONLY: False,
             InferencePhase.DECODE_HEAVY: False,
             InferencePhase.BALANCED: False
         }
