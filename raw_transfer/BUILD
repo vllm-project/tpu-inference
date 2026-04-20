@@ -1,0 +1,40 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+cc_binary(
+    name = "raw_transfer.so",
+    srcs = ["raw_transfer.cc"],
+    copts = [
+        "-Ithird_party/conda_python_include",
+        "-Ithird_party/conda_nanobind_include",
+        "-Ithird_party/py/jax",
+        "-Ithird_party/conda_numpy_include",
+        "-fPIC",
+    ],
+    features = [
+        "-check_includes",
+        "-parse_headers",
+    ],
+    linkshared = True,
+    deps = [
+        "//xla/pjrt:abstract_tracked_device_buffer",
+        "//xla/pjrt:pjrt_client",
+        "//xla/pjrt:pjrt_layout",
+        "//xla/pjrt:raw_buffer",
+        "//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
+        "//xla/pjrt/c_api_client:pjrt_c_api_client",
+        "//xla/python/ifrt",
+        "//xla/python/pjrt_ifrt",
+        "//third_party:external_headers",
+        "//xla/pjrt:exceptions",
+        "//xla/python:nb_numpy",
+        "//xla/tsl/python/lib/core:numpy",
+        "//third_party/py/jax/jaxlib:py_client",
+        "//third_party/py/jax/jaxlib:traceback",
+        "//third_party/py/jax/jaxlib:nb_class_ptr",
+        "//third_party/py/jax/jaxlib:py_user_context",
+        "//xla/tsl/platform:logging",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/types:optional",
+        "@llvm-project//llvm:Support",
+    ],
+)

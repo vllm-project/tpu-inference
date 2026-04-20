@@ -1,0 +1,134 @@
+# Guide: Setting up Bazel and XLA on Cloud TPU VM
+
+This guide describes the steps to set up the development environment on a remote Cloud TPU VM, specifically for building C++ extensions like `raw_transfer` that depend on XLA and JAX.
+
+## 1. Prerequisites: Python Environment
+
+It is recommended to use a Conda environment to manage Python dependencies.
+
+```bash
+# Create a new conda environment
+conda create -y -n tpu_env python=3.12
+conda activate tpu_env
+
+# Install basic dependencies and build tools
+pip install numpy scipy nanobind
+```
+
+### External Headers Configuration (Crucial for Bazel)
+Since we are building inside the XLA tree but using dependencies from the Conda environment (like Python headers, NumPy, and Nanobind), we need to make these headers visible to Bazel.
+
+In `xla/third_party/BUILD.bazel`, we created a rule to glob these headers after symlinking them:
+
+```python
+cc_library(
+    name = "external_headers",
+    hdrs = glob([
+        "conda_python_include/**/*.h",
+        "conda_nanobind_include/**/*.h",
+        "conda_numpy_include/**/*.h",
+    ]),
+    visibility = ["//visibility:public"],
+)
+```
+You will need to create these symlinks in `xla/third_party/` pointing to your Conda environment's include directories:
+- `conda_python_include` -> `$CONDA_PREFIX/include/python3.12`
+- `conda_nanobind_include` -> `$CONDA_PREFIX/lib/python3.12/site-packages/nanobind/include`
+- `conda_numpy_include` -> `$CONDA_PREFIX/lib/python3.12/site-packages/numpy/_core/include` (or equivalent path)
+
+## 2. Install Bazel (via Bazelisk)
+
+To avoid ABI mismatches, you must build C++ extensions directly on the TPU VM. Bazelisk is the recommended way to install and manage Bazel.
+
+```bash
+# Download Bazelisk binary (x86_64)
+sudo wget -O /usr/local/bin/bazel https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
+
+# Make it executable
+sudo chmod +x /usr/local/bin/bazel
+
+# Verify installation (this will download the appropriate Bazel version)
+bazel --version
+```
+
+## 3. XLA and JAX Environment Setup
+
+To build extensions that integrate with JAX and XLA (like `raw_transfer`), you need to set up a specific directory structure with symlinks to allow Bazel to find all dependencies.
+
+### Step 3.1: Clone Repositories
+
+Clone both XLA and JAX repositories into a common directory on the TPU VM.
+
+```bash
+# Example directory
+mkdir -p /mnt/disks/jcgu/code/ullm/
+cd /mnt/disks/jcgu/code/ullm/
+
+git clone https://github.com/openxla/xla.git
+git clone https://github.com/google/jax.git
+```
+
+### Step 3.2: Configure Symlinks
+
+XLA's build system expects JAX to be available in specific locations. Create the following symlinks:
+
+```bash
+cd xla
+
+# Symlink jaxlib from JAX repo into XLA's third_party
+mkdir -p third_party/py/jax
+ln -s /mnt/disks/jcgu/code/ullm/jax/jaxlib third_party/py/jax/jaxlib
+
+# Symlink jax root for visibility resolution
+ln -s ../jax jax
+```
+
+### Step 3.3: Copy Extension Source Files
+
+You need to place your custom extension source files inside the XLA tree to simplify dependency resolution.
+
+Create a directory for your extension under `xla/python/` and copy your files there:
+
+```bash
+mkdir -p xla/python/raw_transfer
+```
+
+Files to copy to `xla/python/raw_transfer/`:
+- `raw_transfer.cc`
+- `BUILD`
+- `raw_transfer.pyi`
+
+### File Descriptions
+
+Here is a brief description of the files in `raw_transfer`:
+
+*   **`raw_transfer.cc`**: The main C++ source file. It implements the high-performance data transfer logic using PJRT APIs and defines the Python bindings using `nanobind` to make the functionality accessible from JAX.
+*   **`BUILD`**: The Bazel build file. It defines the build target for `raw_transfer.so`, listing the source files and dependencies on XLA and external headers.
+*   **`raw_transfer.pyi`**: Python type stub file. It provides type hints for the functions and classes exposed by the C++ extension, enabling better IDE support and static type checking in Python scripts that use the library.
+
+## 4. Building and Resolving Known Issues
+
+When building `raw_transfer` or similar extensions inside this environment, you may encounter several issues that require manual patching of the open-source JAX/XLA files.
+
+### Issue 4.1: Missing Proto Headers
+If you encounter errors about missing `.pb.h` files (e.g., `py_host_callback.pb.h`), you may need to stub out the usage of these protos if they are not strictly needed for your extension.
+- **Fix**: In `jaxlib/py_host_callback.cc`, remove the proto include and stub out methods like `Serialize()` to return an error.
+
+### Issue 4.2: Visibility Restrictions
+Bazel may complain that targets in `//xla/...` cannot see targets in `//third_party/py/jax/...`.
+- **Fix**: In `third_party/py/jax/jaxlib/jax.bzl`, modify the `jax_visibility` function to return `["//visibility:public"]`.
+
+### Issue 4.3: Undeclared Inclusions (Include Paths)
+You may see errors like `undeclared inclusion(s) in rule ...` because files include headers as `"jaxlib/foo.h"` but they are in the same directory.
+- **Fix**: Perform a mass replacement in `third_party/py/jax/jaxlib/` to change `#include "jaxlib/` to `#include "`.
+
+## 5. Build Command
+
+Once the environment is set up and patched, you can build your extension:
+
+```bash
+cd xla
+bazel build --repo_env=HERMETIC_PYTHON_VERSION=3.12 //xla/python/raw_transfer:raw_transfer.so
+```
+
+The built shared object will be available in `bazel-bin/`.

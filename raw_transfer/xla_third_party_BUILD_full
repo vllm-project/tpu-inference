@@ -1,0 +1,11 @@
+licenses(["notice"])  # Apache 2.0
+
+cc_library(
+    name = "external_headers",
+    hdrs = glob([
+        "conda_python_include/**/*.h",
+        "conda_nanobind_include/**/*.h",
+        "conda_numpy_include/**/*.h",
+    ]),
+    visibility = ["//visibility:public"],
+)
