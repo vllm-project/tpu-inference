@@ -699,7 +699,7 @@ class Llama4ForCausalLM(nnx.Module):
         intermediate_tensors: Optional[JaxIntermediateTensors] = None,
         *args,
     ) -> Tuple[List[KVCacheType], jax.Array | JaxIntermediateTensors,
-               List[jax.Array], list]:
+               List[jax.Array], dict]:
         is_prefill = False
         if self.is_first_rank:
             x_TD = self.embedder.encode(input_ids)
@@ -720,10 +720,13 @@ class Llama4ForCausalLM(nnx.Module):
 
         if not self.is_last_rank:
             return kv_caches, JaxIntermediateTensors({"hidden_states":
-                                                      x_TD}), [], all_experts
+                                                      x_TD}), [], {
+                                                          "expert_ids":
+                                                          all_experts
+                                                      }
 
         final_activation_TD = self.final_norm(x_TD)
-        return kv_caches, final_activation_TD, [], all_experts
+        return kv_caches, final_activation_TD, [], {"expert_ids": all_experts}
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         logits_TV = jnp.dot(hidden_states,

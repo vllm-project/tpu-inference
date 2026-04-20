@@ -525,7 +525,7 @@ class GptOss(nnx.Module):
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         *args,
-    ) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array], list]:
+    ) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array], dict]:
         is_prefill = False
         x = self.embedder.encode(input_ids)
 
@@ -543,7 +543,7 @@ class GptOss(nnx.Module):
 
         final_activation = self.final_norm(x)
 
-        return kv_caches, final_activation, [], all_experts
+        return kv_caches, final_activation, [], {"expert_ids": all_experts}
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         return self.lm_head.decode(hidden_states)

@@ -382,15 +382,15 @@ class LlamaForCausalLM(nnx.Module):
         _is_first_rank: bool | None = None,
         _is_last_rank: bool | None = None,
         *args,
-    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array], list] | Tuple[
-            List[jax.Array], JaxIntermediateTensors, List[jax.Array], list]:
+    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array], dict] | Tuple[
+            List[jax.Array], JaxIntermediateTensors, List[jax.Array], dict]:
         outputs = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
             intermediate_tensors,
         )
-        return outputs[0], outputs[1], outputs[2], []
+        return outputs[0], outputs[1], outputs[2], {}
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if self.vllm_config.model_config.hf_config.tie_word_embeddings:

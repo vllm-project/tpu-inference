@@ -858,7 +858,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
         is_last_rank: bool = True,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
-               List[jax.Array], list]:
+               List[jax.Array], dict]:
 
         if not is_first_rank:
             assert intermediate_tensors is not None
@@ -877,7 +877,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
         if not is_last_rank:
             x = JaxIntermediateTensors(tensors={"hidden_states": x}, )
 
-        return kv_caches, x, [], all_experts
+        return kv_caches, x, [], {"expert_ids": all_experts}
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if hasattr(self, 'lm_head'):

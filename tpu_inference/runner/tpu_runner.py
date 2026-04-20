@@ -949,14 +949,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     self.is_first_rank,
                     self.is_last_rank,
                 )
-                if len(outputs) == 3:
-                    self.kv_caches, hidden_states, aux_hidden_states = outputs
-                    all_experts = []
-                elif len(outputs) == 4:
-                    self.kv_caches, hidden_states, aux_hidden_states, all_experts = outputs
-                else:
+                if len(outputs) != 4:
                     raise ValueError(
-                        f"Unexpected model_fn return length: {len(outputs)}")
+                        f"Expected exactly 4 return values from model_fn, got {len(outputs)}"
+                    )
+                self.kv_caches, hidden_states, aux_hidden_states, metadata = outputs
+                all_experts = metadata.get("expert_ids", []) if isinstance(
+                    metadata, dict) else metadata
 
                 # Extract captured experts from all layers
                 try:

@@ -245,13 +245,11 @@ class CompilationManager:
                                            lora_metadata, intermediate_tensors,
                                            is_first_rank, is_last_rank)
 
-            if len(outputs) == 3:
-                kv_caches, hidden_states, _ = outputs
-            elif len(outputs) == 4:
-                kv_caches, hidden_states, _, _ = outputs
-            else:
+            if len(outputs) != 4:
                 raise ValueError(
-                    f"Unexpected model_fn return length: {len(outputs)}")
+                    f"Expected exactly 4 return values from model_fn, got {len(outputs)}"
+                )
+            kv_caches, hidden_states, _, _ = outputs
             self.runner.kv_caches = kv_caches
             return hidden_states
 
@@ -887,7 +885,7 @@ class CompilationManager:
                 attention_metadata,
                 layer_name_to_kvcache_index,
             ):
-                kv_caches, hidden_states, _ = self.runner.drafter.model_fn(
+                kv_caches, hidden_states, _, _ = self.runner.drafter.model_fn(
                     state, kv_caches, input_ids, draft_hidden_states,
                     attention_metadata, layer_name_to_kvcache_index)
                 self.runner.kv_caches = kv_caches
