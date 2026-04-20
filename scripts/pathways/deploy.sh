@@ -88,7 +88,7 @@ else
   TOTAL_DP_SIZE="${DATA_PARALLEL_SIZE}"
 fi
 
-NUM_PROMPTS=$(( TOTAL_DP_SIZE * 256 ))
+NUM_PROMPTS=$(( TOTAL_DP_SIZE * 128 ))
 
 # Build experiment suffix for naming artifacts/jobs
 if [[ "${ENABLE_ATTN_DP}" == "true" ]]; then
