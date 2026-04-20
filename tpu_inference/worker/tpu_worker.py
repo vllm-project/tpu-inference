@@ -362,12 +362,20 @@ class TPUWorker(WorkerBase):
         fragmentation_reserve_fraction = float(
             os.environ.get("TPU_HBM_FRAGMENTATION_RESERVE_FRACTION",
                            "0.05"))
-        # Use local devices for accurate HBM profiling.  self.devices
-        # contains all global devices (e.g. 32) in multihost mode, but
-        # device.memory_stats() only returns accurate values for devices
-        # local to this JAX process.  Using remote devices yields stale/
-        # zero readings and wildly inflated available-memory estimates.
-        local_devs = jax.local_devices()
+        # Use only the worker's configured devices that are addressable
+        # by this JAX process. `self.devices` can include remote devices
+        # in multi-host mode (populated from `jax.devices()[:N]`) or a
+        # sub-slice of local chips (when `device_indexes` is set);
+        # `memory_stats()` is only reliable for devices local to this
+        # process. Filtering on `process_index` covers both cases and
+        # also sizes `num_chips` below to the worker's actual footprint.
+        # Fall back to `jax.local_devices()` defensively.
+        local_devs = [
+            d for d in self.devices
+            if d.process_index == jax.process_index()
+        ]
+        if not local_devs:
+            local_devs = jax.local_devices()
         hbm_usage = utils.hbm_usage_bytes(local_devs)
         # In multi-host Ray/PJRT mode, jax.live_arrays() distributes model
         # weights evenly across TP chips so summing gives total logical data

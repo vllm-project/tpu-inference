@@ -210,7 +210,6 @@ def process_moe_weights(
     moe_backend: MoEBackend,
     w13_reorder_size: int | None = None,
     w13_interleave: bool = False,
-    compact_scale_fields: tuple[str, ...] = (),
 ) -> FusedMoEWeights:
     """Process fused moe weights to a layout that moe backend expects.
 
@@ -224,11 +223,6 @@ def process_moe_weights(
         w13_interleave: used when loaded w13_weight is stored in interleaved
             pattern where even index element is w1 and odd index element is w3.
             we uninterleave so that first half is w1 and second half is w3.
-        compact_scale_fields: field names (e.g. "w2_weight_scale") whose
-            scale should stay 3D (E, K_blocks, N_blocks) rather than being
-            expand_dims'd to 4D. Used by the direct FP8 path to feed the
-            kernel's per-block scalar lookup (scale_n_block_size mode),
-            saving the 128× host-side memory blow-up.
 
     Returns:
         MoE weights that are processed for specified backend.
@@ -272,21 +266,20 @@ def process_moe_weights(
         w2_weight = with_layout_constraint(w2_weight, Layout((0, 1, 2)))
 
     # Scale layout: swap (N_blocks↔K_blocks) so kernel's b_id iterates over
-    # K_blocks (contracting dim). By default expand_dims(axis=2) to get 4D
-    # (E, K_blocks, 1, N_full) expected by legacy per-element-N kernel path.
-    # Fields in `compact_scale_fields` keep the 3D (E, K_blocks, N_blocks)
-    # layout — kernel's gmm_v2 auto-enables scale_n_block_size mode and does
-    # per-block scalar lookup. See process_fp8_moe_weights_direct.
+    # K_blocks (contracting dim), then expand_dims(axis=2) to get 4D
+    # (E, K_blocks, 1, N_full) expected by the legacy per-element-N kernel
+    # path. A compact 3D variant was tried for GMM_EP (see comment in
+    # process_fp8_moe_weights_direct) but Mosaic's DMA slicer rejected
+    # N_blocks not divisible by the tile size, so all backends now use
+    # the expanded layout.
     if w13_weight_scale is not None:
         w13_weight_scale = w13_weight_scale.astype(jnp.float32)
         w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
-        if "w13_weight_scale" not in compact_scale_fields:
-            w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
+        w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
     if w2_weight_scale is not None:
         w2_weight_scale = w2_weight_scale.astype(jnp.float32)
         w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
-        if "w2_weight_scale" not in compact_scale_fields:
-            w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
+        w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
     if w13_bias is not None:
         w13_bias = w13_bias.astype(jnp.float32)
         w13_bias = jnp.expand_dims(w13_bias, 1)
