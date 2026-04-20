@@ -69,8 +69,20 @@ class Eagle3Proposer:
 
     def load_model(self, target_model: Any) -> None:
         """Loads the draft model."""
-        self.model_fn, self.compute_logits_fn, self.pooler_fn, self.combine_hidden_states_fn, _, self.state, _, self.model = get_model(
-            self.vllm_config, self.rng_key, self.mesh, is_draft_model=True)
+        model = get_model(
+            self.vllm_config,
+            self.rng_key,
+            self.mesh,
+            is_draft_model=True,
+        )
+
+        self.model_fn = model.model_fn
+        self.compute_logits_fn = model.compute_logits_fn
+        self.pooler_fn = model.pooler_fn
+        self.combine_hidden_states_fn = model.combine_hidden_states_fn
+        self.state = model.state
+        self.model = model.model
+
         draft_model_impl = envs.DRAFT_MODEL_IMPL_TYPE
         target_model_impl = envs.MODEL_IMPL_TYPE
         if draft_model_impl == 'auto':

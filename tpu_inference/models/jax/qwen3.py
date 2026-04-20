@@ -20,6 +20,7 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import Qwen3Config
 from vllm.config import VllmConfig
+from vllm.transformers_utils.config import set_default_rope_theta
 
 from tpu_inference import envs, utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
@@ -56,10 +57,11 @@ class Qwen3Attention(JaxModule):
                  kv_cache_dtype: str,
                  quant_config: VllmQuantConfig,
                  prefix: str = ""):
+        set_default_rope_theta(config, default_theta=1000000)
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
-        self.rope_theta = config.rope_theta
+        self.rope_theta = config.rope_parameters["rope_theta"]
         self.rope_scaling = getattr(config, "rope_scaling", None)
         self.rms_norm_eps = config.rms_norm_eps
 

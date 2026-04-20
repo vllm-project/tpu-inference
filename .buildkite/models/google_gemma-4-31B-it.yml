@@ -20,14 +20,16 @@ steps:
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true
-    # Gemma4 is added in transformers 5.5.0, however vLLM doesn't support transformers 5.5.0 in stable release yet.
-    # Specifically Qwen2-VL will break (b/494248502) if we upgrade to transformers 5.5.0 globally, so here we install
-    # transformers 5.5.0 before running the test.
-    # TODO(https://github.com/vllm-project/vllm/issues/38902): Remove pip install from command once vLLM supports transformers 5.5.0 in stable release.
+    # use 'pip install "transformers>=5.5.0" --dry-run' to check if transformers 5.5.0 is satisfied.
+    # if the output contains "Would install transformers-", it means transformers 5.5.0 is not satisfied, and we should skip the test.
     commands:
       - |
+        if pip install "transformers>=5.5.0" --dry-run | grep -q "Would install transformers-"; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_google_gemma-4-31B-it_UnitTest" "transformers version too low"
+          exit 0
+        fi
         .buildkite/scripts/run_in_docker.sh \
-          bash -c 'pip install transformers==5.5.0 && JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python /workspace/tpu_inference/examples/offline_inference.py --model google/gemma-4-31B-it --tensor-parallel-size 8 --max-num-batched-tokens 4096 --max-model-len 4096'
+          bash -c 'JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python /workspace/tpu_inference/examples/offline_inference.py --model google/gemma-4-31B-it --tensor-parallel-size 8 --max-num-batched-tokens 4096 --max-model-len 4096'
 
   - label: "${TPU_VERSION:-tpu6e} Record unit test result for google/gemma-4-31B-it"
     key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-31B-it_UnitTest"
@@ -55,7 +57,7 @@ steps:
       MINIMUM_ACCURACY_THRESHOLD: 0.56
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh 'pip install transformers==5.5.0 && bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh'
+        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
 
   - label: "${TPU_VERSION:-tpu6e} Record integration test result for google/gemma-4-31B-it"
     key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-31B-it_Accuracy"
@@ -83,7 +85,7 @@ steps:
       MINIMUM_THROUGHPUT_THRESHOLD: 2
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh bash -c 'pip install transformers==5.5.0 && JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh'
+        .buildkite/scripts/run_in_docker.sh bash -c 'JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh'
 
   - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for google/gemma-4-31B-it"
     key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-31B-it_Benchmark"

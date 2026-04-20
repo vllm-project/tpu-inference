@@ -212,7 +212,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
         )
         vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
 
-        return torch_view(outputs)
+        out_torch = torch_view(outputs)
+        if output is not None:
+            output.copy_(out_torch)
+        return out_torch
 
 
 @jax.jit(
