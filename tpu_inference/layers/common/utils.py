@@ -127,11 +127,18 @@ def general_device_put(tensor: jax.Array,
     # here so `make_array_from_process_local_data` sees the right global
     # shape without every caller having to plumb it.  No-op when the
     # registry is empty (env flag off) or the tensor has no torch data_ptr
-    # (already converted to a JAX array upstream).
+    # (already converted to a JAX array upstream). If the import itself
+    # fails (e.g., a code bug in tp_selective_loader), warn once so the
+    # symptom isn't a silent OOM on the replicated fallback path.
     try:
         from tpu_inference.models.vllm.tp_selective_loader import \
             lookup_tp_full_shape
-    except Exception:  # noqa: BLE001
+    except ImportError as _exc:
+        logger.warning(
+            "TP-selective registry disabled: import failed (%s). Weights "
+            "pre-sliced by the streaming loader will fall through to the "
+            "replicated code path, which can cause host OOM on large FP8 "
+            "MoE models.", _exc)
         lookup_tp_full_shape = lambda _t: None  # type: ignore
 
     def _put(t):

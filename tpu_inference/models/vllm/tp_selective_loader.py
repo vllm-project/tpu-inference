@@ -135,8 +135,13 @@ def _find_gcs_mount(file_path: str) -> Optional[tuple[str, str]]:
                     best_bucket = src
             if best_mp:
                 return best_bucket, best_mp
-    except Exception:  # noqa: BLE001
-        pass
+    except OSError as _exc:
+        # /proc/mounts missing or unreadable — not fatal, just means
+        # the gcsfuse fast path can't be detected for this file. Log
+        # so the silent fallback to regular safetensors isn't a mystery
+        # when someone is debugging load speed.
+        logger.debug("_find_gcs_mount: /proc/mounts read failed (%s); "
+                     "gcsfuse fast path disabled for %s", _exc, file_path)
     return None
 
 
@@ -406,7 +411,20 @@ _TP_FULL_SHAPES: dict[int, tuple[int, ...]] = {}
 
 
 def register_tp_full_shape(tensor: torch.Tensor, full_shape: tuple[int, ...]) -> None:
-    _TP_FULL_SHAPES[tensor.data_ptr()] = tuple(full_shape)
+    dp = tensor.data_ptr()
+    new_shape = tuple(full_shape)
+    prior = _TP_FULL_SHAPES.get(dp)
+    if prior is not None and prior != new_shape:
+        # Overwriting a live entry with a different shape means either the
+        # same data_ptr got reused for an unrelated tensor, or _resize_param
+        # ran twice on the same param. Either way the downstream lookup is
+        # now ambiguous — warn instead of silently replacing.
+        logger.warning(
+            "register_tp_full_shape: overwriting existing entry for "
+            "data_ptr=%d (old=%s, new=%s). This may indicate tensor reuse "
+            "or duplicate resize; the second registration wins.",
+            dp, prior, new_shape)
+    _TP_FULL_SHAPES[dp] = new_shape
 
 
 def lookup_tp_full_shape(t) -> tuple[int, ...] | None:
@@ -418,7 +436,9 @@ def lookup_tp_full_shape(t) -> tuple[int, ...] | None:
     # shape for a coincident pointer.
     try:
         dp = t.data_ptr() if hasattr(t, "data_ptr") else None
-    except Exception:  # noqa: BLE001
+    except (AttributeError, RuntimeError):
+        # AttributeError: exotic tensor types without data_ptr().
+        # RuntimeError: torch tensors whose storage was freed.
         return None
     if dp is None:
         return None
