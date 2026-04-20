@@ -519,11 +519,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             cache_dtype = self.dtype
         kv_cache_dtype = to_jax_dtype(cache_dtype)
         kv_packing = common_utils.get_dtype_packing(kv_cache_dtype)
-        # Env override so callers who know their workload starts at a larger
-        # padding bucket (e.g. an EP test that only exercises 32+ tokens) can
-        # skip compiling the unused 16/32-token buckets. Default 16 matches
-        # upstream behaviour; users who never set this pay nothing.
-        min_bucket_env = int(os.environ.get("TPU_MIN_TOKEN_BUCKET", "16"))
+        # Default min bucket 512: token-axis on multi-host EP meshes (e.g.
+        # v4-64 TP=4 EP=8 shards the num_tokens axis 32-way across
+        # attn_dp*attn_dp_expert*model*expert). Buckets below that product
+        # fail shard_map divisibility (16 < 32) or force >50% padding at
+        # runtime (32 with 4-17 real prompt tokens → garbage output).
+        # TPU_MIN_TOKEN_BUCKET can lower this for single-host or non-EP
+        # configs whose token axis is not sharded that wide.
+        min_bucket_env = int(os.environ.get("TPU_MIN_TOKEN_BUCKET", "512"))
         self.num_tokens_paddings = runner_utils.get_token_paddings(
             min_token_size=max(min_bucket_env,
                                next_power_of_2(self.dp_size * kv_packing)),
