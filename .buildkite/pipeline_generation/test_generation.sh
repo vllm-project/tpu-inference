@@ -24,8 +24,11 @@ OUTPUT_DIR="${PROJECT_ROOT}/models"
 TEST_FILE_PATTERN="test_org_test-model-*.yml"
 
 # Use trap to ensure cleanup happens on exit, regardless of success or failure
+# shellcheck disable=SC2317
 cleanup() {
     echo "--- :wastebasket: Cleaning up generated test files"
+    # Ensure wildcard expansion by keeping it outside of double quotes
+    # shellcheck disable=SC2086
     rm -f "${OUTPUT_DIR}"/${TEST_FILE_PATTERN}
     echo "✨ Cleanup complete!"
 }
@@ -69,9 +72,14 @@ if [ ${#FAILED_CASES[@]} -ne 0 ]; then
 fi
 
 echo "--- :white_check_mark: Successfully generated all combinations"
+# shellcheck disable=SC2086
 ls -lh "${OUTPUT_DIR}"/${TEST_FILE_PATTERN}
 
 echo "--- :mag: Validating generated YAML files syntax"
+
+# Use OUTPUT_DIR and strip the repo root prefix to get relative paths starting with .buildkite/
+# (required by validate_all_pipelines.sh grep rules)
+# shellcheck disable=SC2012,SC2086
 GENERATED_FILES=$(ls .buildkite/models/${TEST_FILE_PATTERN} 2>/dev/null || true)
 
 if [ -z "$GENERATED_FILES" ]; then
