@@ -93,7 +93,7 @@ run_disagg_benchmark() {
     local num_prompts=$5
     local filename="${input_len}_${output_len}.json"
 
-    for CONCURRENCY in 1 4 16 32 64 128 256
+    for CONCURRENCY in 16 32 64 128 256
     do
         echo "-------------------------------------------------------"
         echo "Starting Benchmark: Concurrency=$CONCURRENCY, Input=$input_len, Output=$output_len"
