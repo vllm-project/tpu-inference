@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import queue
 import time
 from typing import List, Tuple
@@ -22,6 +23,22 @@ import jax.numpy as jnp
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+@functools.lru_cache(maxsize=None)
+def _cached_zeros_fn(cache_shape: Tuple[int, ...], cache_dtype: jnp.dtype,
+                     cache_sharding: jax.sharding.NamedSharding):
+    """Cached `jax.jit(zeros)` keyed on (shape, dtype, sharding).
+
+    Allocations in `HostKVPool.__init__` re-use the same few (shape, dtype,
+    sharding) triples thousands of times. Caching the compiled zero-fill
+    avoids re-tracing / re-compiling the same HLO per call.
+    """
+
+    def _allocate():
+        return jnp.zeros(shape=cache_shape, dtype=cache_dtype)
+
+    return jax.jit(_allocate, out_shardings=cache_sharding)
 
 
 class HostKVPool:
@@ -68,12 +85,8 @@ class HostKVPool:
 
     def _create_single_layer_kv_cache_zeros(self, cache_shape, cache_dtype,
                                             cache_sharding):
-
-        def _allocate():
-            return jnp.zeros(shape=cache_shape, dtype=cache_dtype)
-
-        sharded_allocate = jax.jit(_allocate, out_shardings=cache_sharding)
-        return sharded_allocate()
+        return _cached_zeros_fn(tuple(cache_shape), cache_dtype,
+                                cache_sharding)()
 
     def get_buffer(self,
                    block: bool = True,

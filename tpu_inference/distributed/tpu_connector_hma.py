@@ -31,9 +31,12 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 import tpu_inference.distributed.utils as dist_utils
+from tpu_inference.distributed.host_kv_pool_hma import HostKVPoolHMA
+from tpu_inference.distributed.kv_transfer import copy_to_host
 from tpu_inference.distributed.tpu_connector import (
     LoadMeta, SendMeta, TPUConnector, TPUConnectorMetadata,
     TPUConnectorScheduler, TPUConnectorWorker, get_uuid, insert_kv_chunks)
+from tpu_inference.distributed.transfer_stats import TransferStats
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 from tpu_inference.utils import device_array
@@ -50,7 +53,6 @@ class TPUConnectorHMA(TPUConnector, SupportsHMA):
                  vllm_config: VllmConfig,
                  role: KVConnectorRole,
                  kv_cache_config: "KVCacheConfig | None" = None):
-        assert vllm_config.kv_transfer_config is not None
         self._connector_metadata = None
 
         if role == KVConnectorRole.SCHEDULER:
@@ -75,9 +77,9 @@ class TPUConnectorHMA(TPUConnector, SupportsHMA):
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         raise AssertionError(
-            "TPUConnectorHMA.request_finished was called, but this "
-            "connector is SupportsHMA. vLLM should dispatch to "
-            "`request_finished_all_groups`.")
+            "Unexpected call to TPUConnectorHMA.request_finished. "
+            "TPUConnectorHMA implements SupportsHMA and only expects "
+            "`request_finished_all_groups` to be invoked.")
 
 
 class TPUConnectorHMAScheduler(TPUConnectorScheduler):
@@ -128,38 +130,20 @@ class TPUConnectorHMAScheduler(TPUConnectorScheduler):
                 remote_host=params["remote_host"],
                 remote_port=params["remote_port"],
             )
-        logger.info(f"TPUConnectorHMAScheduler update_state_after_alloc --> "
-                    f"reqs_to_load={self.reqs_to_load}")
+        load_meta = self.reqs_to_load[request.request_id]
+        logger.info(
+            f"TPUConnectorHMAScheduler D --> load queued | "
+            f"req_id={request.request_id} | uuid={load_meta.uuid} | "
+            f"remote_host={load_meta.remote_host} | "
+            f"remote_port={load_meta.remote_port} | "
+            f"pending_loads={len(self.reqs_to_load)}")
 
-    def request_finished(
-        self,
-        request: "Request",
-        block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
-        raise AssertionError(
-            "TPUConnectorHMAScheduler.request_finished was called, but "
-            "this scheduler only handles SupportsHMA requests via "
-            "`request_finished_all_groups`.")
 
     def request_finished_all_groups(
         self,
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
-        """
-        Called when a request has finished, before its blocks are freed.
-        No-op for D workers.
-
-        Args:
-            request (Request): the request object.
-            block_ids: The block IDs allocated for this request and need to be freed.
-        Returns:
-            True if the request is being saved/sent asynchronously and blocks
-            should not be freed until the request_id is returned from
-            get_finished().
-            Optional KVTransferParams to be included in the request outputs
-            returned by the engine.
-        """
         if not self.is_producer:
             return False, None
 
@@ -175,7 +159,7 @@ class TPUConnectorHMAScheduler(TPUConnectorScheduler):
         # locally, they would be fed through the Mamba recurrence a
         # second time on D.
         computed_per_group: list[list[int]] = [
-            list(group_ids) for group_ids in block_ids
+            list(block_ids_one_group) for block_ids_one_group in block_ids
         ]
         delay_free_blocks = any(len(g) > 0 for g in computed_per_group)
 
@@ -191,15 +175,25 @@ class TPUConnectorHMAScheduler(TPUConnectorScheduler):
                                       remote_block_ids=computed_per_group,
                                       remote_host=self.kv_ip,
                                       remote_port=self.kv_port)
-            logger.info(f"TPUConnectorHMAScheduler ----> generated "
-                        f"num_prompt_tokens={len(request.prompt_token_ids)} | "
-                        f"num_computed_tokens={request.num_computed_tokens} | "
-                        f"reqs_to_send={self.reqs_to_send} | "
-                        f"kv_transfer_params={kv_transfer_params}")
+            logger.info(
+                f"TPUConnectorHMAScheduler P --> send queued | "
+                f"req_id={request.request_id} | uuid={uuid} | "
+                f"num_prompt_tokens={len(request.prompt_token_ids)} | "
+                f"num_computed_tokens={request.num_computed_tokens} | "
+                f"pending_sends={len(self.reqs_to_send)}")
         else:
             kv_transfer_params = {}
         return delay_free_blocks, kv_transfer_params
 
+    def request_finished(
+        self,
+        request: "Request",
+        block_ids: list[int],
+    ) -> tuple[bool, Optional[dict[str, Any]]]:
+        raise AssertionError(
+            "Unexpected call to TPUConnectorHMAScheduler.request_finished. "
+            "This scheduler only expects `request_finished_all_groups` "
+            "to be dispatched for SupportsHMA connectors.")    
 
 class TPUConnectorHMAWorker(TPUConnectorWorker):
 
@@ -207,16 +201,19 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
         self.node_id = runner.topology_order_id
         self.runner = runner
         self.mesh = runner.mesh
+        self.stats = TransferStats(
+            node_id=self.node_id,
+            log_prefix=f"TPUConnectorHMA "
+            f"{'P' if self.is_producer else 'D'}")
 
-        # KV transfer sanity counters. P bumps on send queued; D bumps on
-        # pull completed. A cumulative line is logged every N events.
-        self.stats_num_sends = 0
-        self.stats_bytes_sent = 0
-        self.stats_num_pulls = 0
-        self.stats_bytes_pulled = 0
-        self.stats_log_interval = 32
-        self.num_kv_groups = len(runner.kv_cache_config.kv_cache_groups)
+        self.num_groups = len(runner.kv_cache_config.kv_cache_groups)
+        # Mapping of kv cache group id to whether it is mamba or full attn
+        self.group_is_mamba: list[bool] = [
+            isinstance(g.kv_cache_spec, MambaSpec)
+            for g in runner.kv_cache_config.kv_cache_groups
+        ]
 
+        # Build layer id to kv cache group id mapping
         kv_caches = runner.kv_caches
         layer_to_group_id: list[int] = [0] * len(kv_caches)
         for group_id, group in enumerate(
@@ -226,41 +223,19 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
                     f"Layer '{layer_name}' is listed in kv_cache_group "
                     f"{group_id} but has no entry in "
                     f"runner.layer_name_to_kvcache_index.")
-                layer = runner.layer_name_to_kvcache_index[layer_name]
-                layer_to_group_id[layer] = group_id
-        # kv cache group id for each layer
+                layer_id = runner.layer_name_to_kvcache_index[layer_name]
+                layer_to_group_id[layer_id] = group_id
         self.layer_to_group_id = layer_to_group_id
 
-        # Whether a kv cache group is a Mamba one.
-        self.group_is_mamba: list[bool] = [
-            isinstance(g.kv_cache_spec, MambaSpec)
-            for g in runner.kv_cache_config.kv_cache_groups
-        ]
 
-        kv_array_to_group_id: list[int] = []
-        layer_to_kv_array_range: list[tuple[int, int]] = []
-        for layer, cache in enumerate(kv_caches):
-            start = len(kv_array_to_group_id)
-            group_id = self.layer_to_group_id[layer]
-            if isinstance(cache, tuple):
-                for _ in cache:
-                    kv_array_to_group_id.append(group_id)
-            else:
-                kv_array_to_group_id.append(group_id)
-            layer_to_kv_array_range.append((start, len(kv_array_to_group_id)))
-        # Index of flattened kv cache jax array -> kv cache group id
-        self.kv_array_to_group_id: list[int] = kv_array_to_group_id
-        # layer -> [start_idx, end_idx) range in the flattened kv cache
-        self.layer_to_kv_array_range: list[tuple[
-            int, int]] = layer_to_kv_array_range
-        self.num_kv_arrays: int = len(kv_array_to_group_id)
-
-        flat_kv_caches = _flatten_kv_caches(kv_caches)
-        self.kv_array_shapes: list[list[int]] = [
-            list(a.shape) for a in flat_kv_caches
-        ]
-        self.kv_array_dtypes: list = [a.dtype for a in flat_kv_caches]
-        self.kv_array_shardings: list = [a.sharding for a in flat_kv_caches]
+        # Flatten kv cache, since Mamba layer kv cache is a tuple
+        # of (ssm, conv)
+        leaves, treedef = jax.tree_util.tree_flatten(kv_caches)
+        self.kv_cache_treedef = treedef
+        self.num_kv_arrays: int = len(leaves)
+        self.kv_array_shapes: list[list[int]] = [list(a.shape) for a in leaves]
+        self.kv_array_dtypes: list = [a.dtype for a in leaves]
+        self.kv_array_shardings: list = [a.sharding for a in leaves]
         self.kv_array_host_shardings: list = [
             jax.sharding.NamedSharding(s.mesh,
                                        s.spec,
@@ -268,32 +243,75 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
             for s in self.kv_array_shardings
         ]
 
-        # Attention layers share a uniform sharding spec; pick the first
-        # attention kv_array's spec for the legacy attention insert path.
-        self.attn_sharding_spec = next(
-            (self.kv_array_shardings[layer_to_kv_array_range[layer][0]].spec
-             for layer in range(len(kv_caches))
-             if not self.group_is_mamba[layer_to_group_id[layer]]), None)
+        # Build mapping from flat kv cache index to group id
+        group_annot = [
+            jax.tree_util.tree_map(lambda _, gid=layer_to_group_id[layer]: gid,
+                                   cache)
+            for layer, cache in enumerate(kv_caches)
+        ]
+        self.kv_array_to_group_id, _ = jax.tree_util.tree_flatten(group_annot)
 
-        logger.info(f"TPUConnectorHMA Worker --> register_runner | "
-                    f"node_id={self.node_id} | ip={self.host_ip} | "
-                    f"num_kv_groups={self.num_kv_groups} | "
-                    f"num_kv_arrays={self.num_kv_arrays} | "
-                    f"kv_transfer_port={self.kv_transfer_port}")
-        self._maybe_start_p2p_server()
+        # Attention layers should share the same sharding spec.
+        # Pick the first as attention sharding spec.
+        attn_specs = [
+            self.kv_array_shardings[i].spec
+            for i in range(self.num_kv_arrays)
+            if not self.group_is_mamba[self.kv_array_to_group_id[i]]
+        ]
+        assert all(s == attn_specs[0] for s in attn_specs), (
+            f"Expected uniform sharding spec across attention kv arrays, "
+            f"got {attn_specs}")
+        self.attn_sharding_spec = attn_specs[0] if attn_specs else None
 
-        # TODO(wyzhang): support D2H host-pool for HMA. Currently not
-        # supported (see the if-branch in `_prepare_kv_and_wait` — a
-        # D2H-enabled send path raises there).
-        self.host_kv_pool = None
+        # Build D2H host pool.
+        self.host_kv_pool: Optional[HostKVPoolHMA] = None
+        if (self.is_producer and dist_utils.get_enable_d2h_transfer()
+                and not self.multi_host):
+            max_blocks_per_group = self._compute_max_blocks_per_group()
+            kv_array_inner_shapes = [
+                tuple(s[1:]) for s in self.kv_array_shapes
+            ]
+            kv_array_max_blocks = [
+                max_blocks_per_group[self.kv_array_to_group_id[i]]
+                for i in range(self.num_kv_arrays)
+            ]
+            self.host_kv_pool = HostKVPoolHMA(
+                pool_size=dist_utils.get_max_host_kv_buffer_size(),
+                per_array_max_blocks=kv_array_max_blocks,
+                per_array_inner_shape=kv_array_inner_shapes,
+                per_array_dtype=self.kv_array_dtypes,
+                per_array_host_sharding=self.kv_array_host_shardings,
+            )
+            
+        self._maybe_start_p2p_server()    
+        role = 'P' if self.is_producer else 'D'
+        logger.info(
+            f"TPUConnectorHMA Worker {self.node_id} {role} --> init | "
+            f"ip={self.host_ip} | multi_host={self.multi_host} | "
+            f"kv_transfer_port={self.kv_transfer_port} | "
+            f"num_layers={len(kv_caches)} | "
+            f"num_kv_groups={self.num_groups} | "
+            f"group_is_mamba={self.group_is_mamba} | "
+            f"layer_to_group_id={self.layer_to_group_id} | "
+            f"num_kv_arrays={self.num_kv_arrays} | "
+            f"host_kv_pool_enabled={self.host_kv_pool is not None}")
+
+    def _compute_max_blocks_per_group(self) -> list[int]:
+        """Compute max num of blocks per request per kv cache group."""
+        block_size = self.vllm_config.cache_config.block_size
+        max_model_len = self.vllm_config.model_config.max_model_len
+        attn_max_blocks = max_model_len // block_size
+        return [(1 if is_mamba else attn_max_blocks)
+                for is_mamba in self.group_is_mamba]
 
     def process_send_load(self, metadata: TPUConnectorMetadata):
         # P
         reqs = metadata.reqs_to_send
         if reqs:
             assert self.is_producer
-            logger.info(f"TPUConnectorHMA Worker {self.node_id} --> "
-                        f"reqs_to_send={reqs}")
+            logger.info(
+                f"TPUConnectorHMA Worker {self.node_id} P --> step send | "
+                f"num_reqs={len(reqs)}")
         for req_id, req_meta in reqs.items():
             self._prepare_kv_and_wait(req_id, req_meta)
 
@@ -301,8 +319,9 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
         reqs = metadata.reqs_to_load
         if reqs:
             assert not self.is_producer
-            logger.info(f"TPUConnectorHMA Worker {self.node_id} --> "
-                        f"reqs_to_load={reqs}")
+            logger.info(
+                f"TPUConnectorHMA Worker {self.node_id} D --> step load | "
+                f"num_reqs={len(reqs)}")
         for req_id, req_meta in reqs.items():
             if req_meta.remote_block_ids is not None:
                 # Pull
@@ -330,8 +349,8 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
                             kv,
                             block_ids_per_group,
                             self.layer_to_group_id,
-                            self.layer_to_kv_array_range,
-                            self.num_kv_groups,
+                            self.kv_cache_treedef,
+                            self.num_groups,
                             self.mesh,
                             self.attn_sharding_spec,
                         )
@@ -340,26 +359,20 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
                 self._notify_pull_done(socket, req_id, req_meta.uuid)
 
     def _prepare_kv_and_wait(self, req_id: str, req_meta: SendMeta):
-        local_block_ids = req_meta.local_block_ids  # list[list[int]]
+        local_block_ids = req_meta.local_block_ids
+        assert isinstance(local_block_ids, list) and all(
+            isinstance(g, list) for g in local_block_ids), (
+                f"Expected list[list[int]] (per-kv-cache-group) for "
+                f"local_block_ids in HMA; got {local_block_ids!r}")
+
         kv = _select_from_kv_caches_per_group(
             self.runner.kv_caches,
             local_block_ids,
             self.layer_to_group_id,
         )
         if dist_utils.get_enable_d2h_transfer() and not self.multi_host:
-            # TODO(wyzhang): Generalize HostKVPool to per-flat-array shapes
-            # so HMA can use D2H and relieve HBM pressure on P under high
-            # concurrency. HostKVPool currently assumes uniform per-layer
-            # shape (one `cache_inner_shape` + `num_layers` + `dtype`),
-            # which doesn't hold for hybrid models — Mamba layers carry a
-            # tuple of state arrays (SSM + conv) with different shapes, and
-            # block semantics differ per group (1 state-block vs. many
-            # token-blocks).
-            raise AssertionError(
-                "D2H host-pool transfer is not yet supported by "
-                "TPUConnectorHMA. Set TPU_ENABLE_D2H_TRANSFER=false in the "
-                "env (it defaults to true) to use the device-resident path. "
-                "See TODO(wyzhang) in tpu_connector_hma.py.")
+            self.kv_d2h_executor.submit(self._async_d2h_and_transfer, req_id,
+                                        req_meta, kv, local_block_ids)
         else:
             buffer_idx = -1
             # NOTE(xiang): We need to manually store the kv because:
@@ -373,57 +386,107 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
             ]
             self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
             self.kv_transfer_server.await_pull(req_meta.uuid, kv)
-            self.stats_num_sends += 1
-            self.stats_bytes_sent += sum(k.nbytes for k in kv)
-            if self.stats_num_sends % self.stats_log_interval == 0:
-                logger.info(
-                    f"TPUConnectorHMA Worker {self.node_id} --> stats | "
-                    f"cumulative sends={self.stats_num_sends} "
-                    f"bytes={self.stats_bytes_sent}")
+            self.stats.increment_send(sum(k.nbytes for k in kv))
+
+    def _async_d2h_and_transfer(self, req_id: str, req_meta: SendMeta,
+                                kv_src: list[jax.Array],
+                                local_block_ids: list[list[int]]):
+        buffer_idx, dest_buffer = self.host_kv_pool.get_buffer()
+
+        start_time = time.perf_counter()
+        sliced_dest_buffer = []
+        for idx, array in enumerate(dest_buffer):
+            group_id = self.kv_array_to_group_id[idx]
+            num_blocks = len(local_block_ids[group_id])
+            sliced_dest_buffer.append(jax.lax.slice_in_dim(array, 0, num_blocks))
+        end_slice_time = time.perf_counter()
+
+        updated_dest_buffer = []
+        for idx, (src, dest) in enumerate(zip(kv_src, sliced_dest_buffer)):
+            updated_dest = copy_to_host(
+                src=src,
+                dest=dest,
+                mesh=self.mesh,
+                sharding_spec=self.kv_array_shardings[idx].spec)
+            updated_dest_buffer.append(updated_dest)
+
+        while True:
+            end_copy_time = time.perf_counter()
+            if all(chunk.is_ready() for chunk in updated_dest_buffer) or \
+                    end_copy_time - end_slice_time > dist_utils.get_p2p_wait_pull_timeout():
+                break
+            time.sleep(0.001)
+
+        self.reqs_wait_pull[req_id] = [
+            dest_buffer, req_meta.expiration_time, buffer_idx
+        ]
+        self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
+        self.kv_transfer_server.await_pull(req_meta.uuid, updated_dest_buffer)
+
+        total_bytes = sum(b.nbytes for b in updated_dest_buffer)
+        logger.info(
+            f"TPUConnectorHMA Worker {self.node_id} P --> send d2h done | "
+            f"req_id={req_id} | uuid={req_meta.uuid} | "
+            f"slice_ms={(end_slice_time-start_time)*1000:.2f} | "
+            f"copy_ms={(end_copy_time-end_slice_time)*1000:.2f} | "
+            f"bytes={total_bytes}")
+        self.stats.increment_send(total_bytes)
 
     def _pull_kv(self, req_id: str, conn: Any, req_meta: LoadMeta,
                  indices_per_group: list[jax.Array]):
-        local_block_ids = req_meta.local_block_ids  # list[list[int]]
-        remote_block_ids = req_meta.remote_block_ids  # list[list[int]]
-        assert len(local_block_ids) == len(remote_block_ids)
-        for g, (lids, rids) in enumerate(zip(local_block_ids,
-                                             remote_block_ids)):
-            assert len(lids) == len(rids), (
-                f"Group {g}: local blocks {len(lids)} != "
-                f"remote blocks {len(rids)}")
+        local_block_ids = req_meta.local_block_ids
+        remote_block_ids = req_meta.remote_block_ids
+        for name, block_ids in (("local_block_ids", local_block_ids),
+                                ("remote_block_ids", remote_block_ids)):
+            assert isinstance(block_ids, list) and all(
+                isinstance(g, list) for g in block_ids), (
+                    f"Expected list[list[int]] (per-kv-cache-group) for "
+                    f"{name} in HMA; got {block_ids}")
+        assert len(local_block_ids) == len(remote_block_ids) and all(
+            len(l) == len(r)
+            for l, r in zip(local_block_ids, remote_block_ids)), (
+                f"local/remote block-ids shape mismatch: "
+                f"local={local_block_ids}, remote={remote_block_ids}")
 
         num_blocks_per_group = [len(ids) for ids in remote_block_ids]
         kv_spec = self._get_kv_spec_hybrid(num_blocks_per_group)
-        logger.info(f"Worker {self.node_id} --> kv transfer | start pull "
-                    f"req_id={req_id} | uuid={req_meta.uuid}")
         start_time = time.perf_counter()
         kv = conn.pull(req_meta.uuid, kv_spec)
         kv_size_mb = sum(k.nbytes for k in kv) / (1024 * 1024)
-        end_time_0, end_time_1 = time.perf_counter(), None
+        end_prep_time, end_pull_time = time.perf_counter(), None
+        timed_out = False
         if dist_utils.get_enable_block_kv_transfer():
+            timeout_s = dist_utils.get_p2p_wait_pull_timeout()
             while True:
-                end_time_1 = time.perf_counter()
-                if all(chunk.is_ready() for chunk in kv) or \
-                        end_time_1 - end_time_0 > \
-                        dist_utils.get_p2p_wait_pull_timeout():
+                end_pull_time = time.perf_counter()
+                if all(chunk.is_ready() for chunk in kv):
+                    break
+                if end_pull_time - end_prep_time > timeout_s:
+                    timed_out = True
                     break
                 time.sleep(0.001)
 
-        prepare_time_ms = (end_time_0 - start_time) * 1000
-        pull_time_ms = ((end_time_1 - end_time_0) *
-                        1000 if end_time_1 is not None else 0.0)
-        logger.info(
-            f"Worker {self.node_id} --> kv transfer | done pull "
-            f"req_id={req_id} | uuid={req_meta.uuid} | "
-            f"prepare time={prepare_time_ms:.2f}ms | "
-            f"pull time={pull_time_ms:.2f}ms | size={kv_size_mb:.2f}MB")
-        self.stats_num_pulls += 1
-        self.stats_bytes_pulled += sum(k.nbytes for k in kv)
-        if self.stats_num_pulls % self.stats_log_interval == 0:
+        prepare_time_ms = (end_prep_time - start_time) * 1000
+        pull_time_ms = ((end_pull_time - end_prep_time) *
+                        1000 if end_pull_time is not None else 0.0)
+        total_bytes = sum(k.nbytes for k in kv)
+        if timed_out:
+            ready_flags = [bool(chunk.is_ready()) for chunk in kv]
+            pending_idx = [i for i, r in enumerate(ready_flags) if not r]
+            logger.error(
+                f"TPUConnectorHMA Worker {self.node_id} D --> pull timeout | "
+                f"req_id={req_id} | uuid={req_meta.uuid} | "
+                f"timeout_s={timeout_s} | bytes={total_bytes} | "
+                f"ready={sum(ready_flags)}/{len(ready_flags)} | "
+                f"pending_idx={pending_idx[:20]}"
+                f"{'...' if len(pending_idx) > 20 else ''}")
+        else:
             logger.info(
-                f"TPUConnectorHMA Worker {self.node_id} --> stats | "
-                f"cumulative pulls={self.stats_num_pulls} "
-                f"bytes={self.stats_bytes_pulled}")
+                f"TPUConnectorHMA Worker {self.node_id} D --> pull done | "
+                f"req_id={req_id} | uuid={req_meta.uuid} | "
+                f"prepare_ms={prepare_time_ms:.2f} | "
+                f"pull_ms={pull_time_ms:.2f} | bytes={total_bytes}")
+        self.stats.increment_pull(total_bytes)
         return kv, indices_per_group, local_block_ids
 
     def _get_kv_spec_hybrid(
@@ -445,27 +508,15 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
                                      sharding=self.kv_array_shardings[idx]))
         return specs
 
-
-def _flatten_kv_caches(kv_caches: list) -> list[jax.Array]:
-    """Flatten kv caches by expanding tuple into individual arrays"""
-    flat_kv_caches: list[jax.Array] = []
-    for cache in kv_caches:
-        if isinstance(cache, tuple):
-            flat_kv_caches.extend(cache)
-        else:
-            flat_kv_caches.append(cache)
-    return flat_kv_caches
-
-
 def _select_from_kv_caches_per_group(
     kv_caches: list,
     block_ids_per_group: list[list[int]],
     layer_to_group_id: list[int],
 ) -> list[jax.Array]:
-    """Read blocks specified by the per-kv-cache-group ids.
+    """Read blocks specified by `block_ids_per_group`.
 
-    Returns a flat list of arrays to be transfered. Mamba tuples (i.e. 
-    Mamba block containing two arrays) will be expanded.
+    Returns a flat list of arrays to be transfered. Mamaba 
+    layer kv cache is a tuple of arrays and will be flattened.
     """
     indices_per_group = [
         jnp.asarray(ids, dtype=jnp.int32) for ids in block_ids_per_group
@@ -498,12 +549,19 @@ def _insert_kv_chunks_per_group(
     kv_slices: list[jax.Array],
     block_ids_per_group: list[list[int]],
     layer_to_group_id: list[int],
-    layer_to_kv_array_range: list[tuple[int, int]],
+    kv_treedef,
     num_groups: int,
     mesh: jax.sharding.Mesh,
     sharding_spec,
 ) -> list:
-    """Write received KV slices back into kv_caches for each group."""
+    """Write received KV slices back into kv_caches for each group.
+
+    `kv_slices` is a flat list of arrays (the pull result). It is
+    reassembled via `kv_treedef` into the same pytree shape as
+    `kv_caches` so per-layer access is single array (attention) or
+    tuple (Mamba) — no manual flat-range bookkeeping.
+    """
+    sliced_tree = jax.tree_util.tree_unflatten(kv_treedef, kv_slices)
     updated: list = list(kv_caches)
 
     for group_id in range(num_groups):
@@ -512,25 +570,18 @@ def _insert_kv_chunks_per_group(
                            f"{block_ids_per_group}")
 
         mamba_layer_indices: list[int] = []
-        mamba_kv_slice_ranges: list[tuple[int, int]] = []
         attn_layer_indices: list[int] = []
-        attn_kv_slice_indices: list[int] = []
-
         for layer, cache in enumerate(kv_caches):
             if layer_to_group_id[layer] != group_id:
                 continue
-            start, end = layer_to_kv_array_range[layer]
             if isinstance(cache, tuple):
                 mamba_layer_indices.append(layer)
-                mamba_kv_slice_ranges.append((start, end))
             else:
                 attn_layer_indices.append(layer)
-                attn_kv_slice_indices.append(start)
 
-        for layer, (start, end) in zip(mamba_layer_indices,
-                                       mamba_kv_slice_ranges):
+        for layer in mamba_layer_indices:
             new_states = []
-            for state, kv_slice in zip(kv_caches[layer], kv_slices[start:end]):
+            for state, kv_slice in zip(kv_caches[layer], sliced_tree[layer]):
                 new_states.append(
                     _mamba_scatter_set(
                         state,
@@ -541,7 +592,7 @@ def _insert_kv_chunks_per_group(
 
         if attn_layer_indices:
             attn_kv_caches = [kv_caches[i] for i in attn_layer_indices]
-            attn_kv_slices = [kv_slices[s] for s in attn_kv_slice_indices]
+            attn_kv_slices = [sliced_tree[i] for i in attn_layer_indices]
             updated_attn = insert_kv_chunks(attn_kv_caches, attn_kv_slices,
                                             block_ids, mesh, sharding_spec)
             for layer, new_arr in zip(attn_layer_indices, updated_attn):
