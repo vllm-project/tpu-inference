@@ -57,20 +57,24 @@ steps:
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu6e"
-      # Define it here so it's available to ALL commands below
     agents:
       queue: tpu_v6e_queue
     commands:
       - |
-        # Run offline inference with a small model.
-        # --tensor-parallel-size 2: tp=1 is currently unsupported on tpu7x.
-        # Customize --model, --max-model-len, --max-tokens as needed.
+        # If CASE_SET_ID was not provided via the Buildkite UI, generate one from the current time and reset RUN_ID to 0.
+        if [ -z "${CASE_SET_ID}" ]; then
+          CASE_SET_ID="$(date +%Y%m%d%H%M)"
+          RUN_ID="0"
+        else
+          RUN_ID="${RUN_ID:-0}"
+        fi
         .buildkite/scripts/run_in_docker.sh bash -c "
           python -m tools.kernel.tuner.v1.kernel_tuner_runner \
           --kernel_tuner_name=test_kernel_tuner \
           --case_set_desc='testing the infra' \
           --generate_buildkite_pipeline=True \
-          --case_set_id=016 --run_id=4"
+          --case_set_id=${CASE_SET_ID} \
+          --run_id=${RUN_ID:-0} \"
           # python3 tools/kernel/tuner/v1/generate_cases_and_yml.py --output-path=/tmp/hf_home/generated_tuning_cases.yml"
       - |
         # Upload the generated YAML as a Buildkite artifact for the next step to consume.
