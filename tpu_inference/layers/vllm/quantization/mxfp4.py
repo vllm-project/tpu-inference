@@ -33,21 +33,26 @@ from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
 # Upstream vllm renamed GptOssMxfp4Config → Mxfp4Config (and MoEMethod
 # similarly). Support both name variants so this file imports against
-# either pin of vllm. Assert at least one set is present so we fail fast
-# on a truly unexpected build.
+# either pin of vllm. If neither is available, raise a single clear
+# ImportError that chains the underlying cause (rather than leaking the
+# second try's raw ImportError, which points only at the "current" name).
 try:
     from vllm.model_executor.layers.quantization.mxfp4 import \
         GptOssMxfp4Config as Mxfp4Config
     from vllm.model_executor.layers.quantization.mxfp4 import \
         GptOssMxfp4MoEMethod as Mxfp4MoEMethod
 except ImportError:
-    from vllm.model_executor.layers.quantization.mxfp4 import \
-        Mxfp4Config
-    from vllm.model_executor.layers.quantization.mxfp4 import \
-        Mxfp4MoEMethod
-if Mxfp4Config is None or Mxfp4MoEMethod is None:
-    raise ImportError(
-        "Neither GptOssMxfp4Config nor Mxfp4Config is available in vllm")
+    try:
+        from vllm.model_executor.layers.quantization.mxfp4 import \
+            Mxfp4Config
+        from vllm.model_executor.layers.quantization.mxfp4 import \
+            Mxfp4MoEMethod
+    except ImportError as exc:
+        raise ImportError(
+            "Neither legacy GptOssMxfp4Config/GptOssMxfp4MoEMethod nor "
+            "current Mxfp4Config/Mxfp4MoEMethod is importable from "
+            "vllm.model_executor.layers.quantization.mxfp4"
+        ) from exc
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 

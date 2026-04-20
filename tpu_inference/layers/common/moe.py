@@ -126,7 +126,7 @@ def moe_apply(
                 # e_score_correction_bias (for topk_method="noaux_tc" models
                 # like GLM-5.1 / DeepSeek-V3) may be supplied via
                 # extra_backend_kwargs as a pre-converted JAX array.
-                _bias_jax = (extra_backend_kwargs or {}).get(
+                _bias_jax = extra_backend_kwargs.get(
                     "e_score_correction_bias")
                 # Upstream FP8 activation path (#2152): read activation_dtype
                 # from kwargs or env, set all_gather_fp8 accordingly.

@@ -383,10 +383,12 @@ def _get_stacked_mapping(model: torch.nn.Module) -> list[tuple]:
     ]
 
 
-# Registry: maps id(param.data) -> full (pre-slice) shape tuple.
+# Registry: maps tensor.data_ptr() -> full (pre-slice) shape tuple.
 # Consumed by the monkey-patched general_device_put to pass global_shape into
 # jax.make_array_from_process_local_data so JAX reconstructs the full tensor
-# across hosts from each host's local slice.
+# across hosts from each host's local slice. Keying by data_ptr (not id()) is
+# intentional: param.data can be reassigned during load, and both register and
+# lookup see the new tensor's memory address consistently.
 _TP_FULL_SHAPES: dict[int, tuple[int, ...]] = {}
 
 
