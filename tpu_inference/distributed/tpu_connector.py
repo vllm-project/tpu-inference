@@ -106,15 +106,19 @@ logger = init_logger(__name__)
 @dataclass
 class SendMeta:
     uuid: int
-    local_block_ids: list[int]
+    # `list[int]`       used for non-HMA connector
+    # `list[list[int]]` used for HMA connector (per-kv-cache-group)
+    local_block_ids: list[int] | list[list[int]]
     expiration_time: float
 
 
 @dataclass
 class LoadMeta:
     uuid: int
-    local_block_ids: list[int]
-    remote_block_ids: list[int]
+    # `list[int]`       used for non-HMA connector.
+    # `list[list[int]]` used for HMA connector (per-kv-cache-group).
+    local_block_ids: list[int] | list[list[int]] | None
+    remote_block_ids: list[int] | list[list[int]] | None
     remote_host: str | list[str]
     remote_port: int | list[int]
 
