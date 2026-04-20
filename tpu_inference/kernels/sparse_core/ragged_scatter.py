@@ -390,10 +390,11 @@ def ragged_scatter(x: jax.Array, indices: jax.Array, start: jax.Array,
     dtype = x.dtype
     dtype_bits = jax.dtypes.itemsize_bits(dtype)
     packing = 32 // dtype_bits
+    dtype_bytes = dtype_bits // 8
 
     # Heuristic threshold on whether to fallback to xla gather.
-    if jnp.size(
-            x) * packing * 2 < pltpu.get_tpu_info().vmem_capacity_bytes * 0.6:
+    if jnp.size(x) * dtype_bytes * 2 < pltpu.get_tpu_info(
+    ).vmem_capacity_bytes * 0.6:
         # For small {input + output}, it's likely that both can be put in TC VMEM,
         # so it's likely faster to run TC-based gather on it than going through SC,
         # without data movement to/from HBM.
