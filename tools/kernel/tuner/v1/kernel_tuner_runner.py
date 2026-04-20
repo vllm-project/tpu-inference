@@ -91,7 +91,9 @@ def main(argv):
         # If case_set_id is not provided, generate one using the current timestamp but in the format of YYYYMMDDHHMMSS to ensure it is sortable and easily readable.
         case_set_id = datetime.now().strftime("%Y%m%d%H%M%S")
         run_id = 0
-    logger.info(f'Using case_set_id: {case_set_id}, run_id: {run_id}, case_set_desc: {case_set_desc} for this tuning run.')
+    logger.info(
+        f'Using case_set_id: {case_set_id}, run_id: {run_id}, case_set_desc: {case_set_desc} for this tuning run.'
+    )
 
     # Initialize storage manager
     if _RUN_LOCALLY.value:

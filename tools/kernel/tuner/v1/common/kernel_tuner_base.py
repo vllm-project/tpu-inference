@@ -230,7 +230,7 @@ class KernelTunerBase:
                 "label":
                 f"cs_id={case_set_id} rid={run_id} Bucket([{case_id_start}, {case_id_end}))",
                 "agents": {
-                    "queue": "tpu_v6e_queue"
+                    "queue": "tpu_v6e_8_queue"
                 },  # Adjust to your TPU queue
                 "env": {
                     "TPU_VERSION": "tpu6e"
@@ -241,7 +241,10 @@ class KernelTunerBase:
             }
             pipeline["steps"].append(step)
 
-        pipeline['steps'] = [{'group': 'Kernel Sweeping Group', 'steps': pipeline['steps']}]
+        pipeline['steps'] = [{
+            'group': 'Kernel Sweeping Group',
+            'steps': pipeline['steps']
+        }]
 
         output_path = "/tmp/hf_home/generated_tuning_cases.yml"
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -320,7 +323,8 @@ class KernelTunerBase:
             "Specific kernel should implement this to call the kernl with the inputs from generate_inputs"
         )
 
-    def measure_latency(self, caseset_id: str, run_id: int, begin_case_id: int, end_case_id: int):
+    def measure_latency(self, caseset_id: str, run_id: int, begin_case_id: int,
+                        end_case_id: int):
         """Measure the latency of cases in the caseset with case_id in [begin_case_id, end_case_id). The latency of each case will be persisted in local file or database using storage_management module.
 
         Args:

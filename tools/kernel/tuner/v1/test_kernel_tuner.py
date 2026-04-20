@@ -44,6 +44,7 @@ class TunableParams:
 
 
 class TestKernelTuner(KernelTunerBase):
+    # This is a reference implementation of a KernelTuner for testing purposes. It defines a simple tuning key and tunable parameters, and simulates running a kernel by sleeping for a random short duration. The latency returned is not based on any real computation, but rather is just a placeholder to demonstrate the tuning pipeline.
 
     def __init__(self, storage_manager):
         super().__init__(tuning_key_class=TuningKey,
