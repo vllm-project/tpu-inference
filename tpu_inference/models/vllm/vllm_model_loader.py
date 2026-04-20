@@ -265,6 +265,22 @@ class IncrementalModelLoader(DefaultModelLoader):
                     len(ordered), num_experts, sample_chunks,
                 )
             else:
+                # Linear fallback is only safe when the physical mesh matches
+                # row-major iteration (single-host, or multi-host where the
+                # PJRT-returned device order is process-major). On real v4-64
+                # pods the physical mesh scatters each process's devices
+                # across non-contiguous EP slots (e.g. proc N → [2N,2N+1,
+                # 2N+16,2N+17]); a linear fallback there would silently assign
+                # the wrong expert ids to each host. Fail loudly in that case
+                # rather than feeding wrong weights to the kernel.
+                if jax.process_count() > 1:
+                    raise RuntimeError(
+                        f"_compute_mesh_aware_local_expert_ids returned None "
+                        f"on multi-host run (process_count="
+                        f"{jax.process_count()}, ep_size={ep_size}). Linear "
+                        f"fallback would silently misalign expert ids. Check "
+                        f"earlier loader logs for the mesh-construction "
+                        f"exception that triggered the fallback.")
                 ep_rank = int(os.environ.get("TPU_EP_RANK",
                                              str(jax.process_index())))
                 self.local_expert_ids = compute_local_expert_ids(
