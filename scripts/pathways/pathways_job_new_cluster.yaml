@@ -92,6 +92,7 @@ spec:
                     --max-num-seqs 256 \
                     --max-num-batched-tokens 4096 \
                     --load-format dummy \
+                    --enable-expert-parallel \
                     __ADDITIONAL_CONFIG__
                   ) & PID=$!
                   
@@ -129,7 +130,7 @@ spec:
             # ── Pathways Resource Manager (sidecar initContainer) ──
             initContainers:
             - name: pathways-rm
-              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server@sha256:3ffb32b12f6b8cbf4f12cf08ecc9fcfda720b171f4ec9d4131c95f5eeb84d2ae
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_server@sha256:bea35fb014edf250718ce32820777ceb943dfdcf08a593b3fb762ad9ea433fdc
               imagePullPolicy: Always
               args:
               - --server_port=29001
@@ -164,7 +165,7 @@ spec:
               restartPolicy: Always
             # ── Pathways Proxy Server (sidecar initContainer, port 29000) ──
             - name: pathways-proxy
-              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_proxy_server@sha256:86fedb263c8221bb878c2d301cb45e7c93f54f62872c5c79b055a267da780f42
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_proxy_server@sha256:e5ad4ef0ec907ba2378394f59c4ba074a82231112c03d7f80d7c4a38b19c043c
               imagePullPolicy: Always
               args:
               - --server_port=29000
@@ -240,7 +241,7 @@ spec:
             dnsPolicy: ClusterFirstWithHostNet
             containers:
             - name: pathways-worker
-              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server@sha256:3ffb32b12f6b8cbf4f12cf08ecc9fcfda720b171f4ec9d4131c95f5eeb84d2ae
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_server@sha256:bea35fb014edf250718ce32820777ceb943dfdcf08a593b3fb762ad9ea433fdc
               imagePullPolicy: Always
               restartPolicy: OnFailure
               args:
