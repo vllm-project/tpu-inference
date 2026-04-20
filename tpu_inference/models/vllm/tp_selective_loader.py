@@ -231,6 +231,19 @@ def is_enabled() -> bool:
 # to skip that narrow.
 # ---------------------------------------------------------------------------
 def _apply_vllm_patches() -> None:
+    """Install class-level monkey patches on vLLM Parameter / FusedMoE types.
+
+    The patches are idempotent (guarded by _PATCHES_APPLIED) but are never
+    reversed; once a process has loaded a model through this loader, the
+    patched methods stay in place for the lifetime of the process. That is
+    safe for production serve (one model per process) but would be unsafe
+    for a test harness that reloads different models under different
+    load_format settings in the same process. All patched methods gate
+    their per-rank narrowing on `is_sharded_weight`, so a second load with
+    the streaming loader disabled still gets the normal full narrow
+    behaviour; the failure mode is only triggered if some other code path
+    sets `is_sharded_weight=True` on a parameter outside of this loader.
+    """
     global _PATCHES_APPLIED
     if _PATCHES_APPLIED:
         return
