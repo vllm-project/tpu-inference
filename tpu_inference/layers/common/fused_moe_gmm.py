@@ -24,6 +24,7 @@ import tpu_inference.envs as envs
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.kernels.sparse_core import gather_reduce as gather_reduce_sc
 from tpu_inference.kernels.sparse_core.ragged_gather import ragged_gather
+from tpu_inference.kernels.sparse_core.ragged_scatter import ragged_scatter
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
@@ -173,12 +174,10 @@ def moe_gmm_local(
 
     use_sc = gather_reduce_sc.is_supported_by_sc_gather_reduce(
         gmm1_res.shape[0], sc_kernel_threshold)
-
-    # 1. Setup chunk sizes and pre-process kernel weights
     if use_sc:
         sc_kernel_col_chunk_size = gather_reduce_sc.get_valid_col_chunk_size(
             gmm2_res.shape[1], sc_kernel_col_chunk_size)
-        chunk_size = gmm2_res.shape[0] // sc_psum_num_chunks
+        chunk_size = batch_size // sc_psum_num_chunks
 
         if local_group_size < group_sizes.size:
             mask_flat = mask.reshape(-1, topk)
@@ -188,14 +187,26 @@ def moe_gmm_local(
             topk_weights_sc = topk_weights
             topk_wgt_zero_nan = False
 
-        # Flattened so we can slice it easily in the loop
         topk_weights_flat = topk_weights_sc.flatten()
     else:
         chunk_size = 16384
 
-    out_list = []
+        if local_group_size < group_sizes.size:
+            group_offsets = jnp.cumulative_sum(group_sizes,
+                                               include_initial=True)
+            experts_start = group_offset[0]
+            experts_end = group_offset[0] + local_group_size
+            shard_output_start = group_offsets[experts_start]
+            shard_output_end = group_offsets[experts_end]
 
-    # 2. Unified loop relying on XLA unrolling
+            token_hidden_full = ragged_scatter(gmm2_res,
+                                               topk_argsort_revert_indices,
+                                               shard_output_start,
+                                               shard_output_end)
+        else:
+            token_hidden_full = gmm2_res[topk_argsort_revert_indices]
+
+    out_list = []
     for start in range(0, batch_size, chunk_size):
         end = min(batch_size, start + chunk_size)
         start_tok = start // topk
@@ -204,10 +215,7 @@ def moe_gmm_local(
         cur_indices = topk_argsort_revert_indices[start:end]
 
         if use_sc:
-            # --- Custom SC Kernel Branch ---
-            # Slice flattened weights and reshape to expected (-1, 128)
             cur_weights = topk_weights_flat[start:end].reshape(-1, 128)
-
             cur_reduced = gather_reduce_sc.sc_gather_reduce(
                 op=gmm2_res,
                 idx=cur_indices,
@@ -217,11 +225,10 @@ def moe_gmm_local(
                 topk_wgt_zero_nan=topk_wgt_zero_nan,
             )
         else:
-            # --- Fallback JAX Math Branch ---
             cur_topk_weights = topk_weights[start_tok:end_tok]
             cur_mask = mask[start_tok:end_tok]
 
-            cur_sorted = gmm2_res[cur_indices].reshape(
+            cur_sorted = token_hidden_full[start:end].reshape(
                 (-1, topk, gmm2_res.shape[-1]))
 
             cur_topk_weights = jnp.expand_dims(cur_topk_weights, axis=-1)
@@ -229,13 +236,10 @@ def moe_gmm_local(
             cur_masked = jnp.where(cur_mask, cur_weighted, 0.0)
             cur_reduced = cur_masked.sum(axis=-2)
 
-        # --- Shared Reduction and Append ---
         out = jax.lax.psum(cur_reduced, axis_name=reduction_axis)
         out_list.append(out)
 
-    token_hidden = jnp.concat(out_list, axis=0)
-
-    return token_hidden
+    return jnp.concat(out_list, axis=0)
 
 
 def tensor_parallel_gmm(
