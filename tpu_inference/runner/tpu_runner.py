@@ -107,7 +107,7 @@ def _log_mesh_ep_positions(device_mesh, mesh_shape, origin):
                 continue
             ep_flat = flat_idx % ep_total
             local_slots.append((dev.id, ep_flat))
-        logger.info(
+        logger.debug(
             "[EP_DIAG origin=%s proc=%d] local_devices (dev_id, ep_flat_slot): %s",
             origin, local_proc, local_slots)
     except Exception as exc:  # noqa: BLE001

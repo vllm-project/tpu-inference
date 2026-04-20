@@ -38,16 +38,6 @@ logger = init_logger(__name__)
 _LAYER_RE = stdlib_re.compile(r'model\.layers\.(\d+)\.')
 
 
-def _count_groups(sorted_ids: list[int]) -> int:
-    if not sorted_ids:
-        return 0
-    groups = 1
-    for i in range(1, len(sorted_ids)):
-        if sorted_ids[i] != sorted_ids[i - 1] + 1:
-            groups += 1
-    return groups
-
-
 def _compute_mesh_aware_local_expert_ids(
     num_experts: int,
 ) -> list[int] | None:
