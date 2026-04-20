@@ -71,8 +71,7 @@ steps:
           --case_set_desc=\${KERNEL_TUNING_CASE_SET_DESC} \
           --generate_buildkite_pipeline=True \
           --case_set_id=\${KERNEL_TUNING_CASE_SET_ID} \
-          --run_id=\${KERNEL_TUNING_RUN_ID} \"
-          # python3 tools/kernel/tuner/v1/generate_cases_and_yml.py --output-path=/tmp/hf_home/generated_tuning_cases.yml"
+          --run_id=\${KERNEL_TUNING_RUN_ID} "
       - |
         # Upload the generated YAML as a Buildkite artifact for the next step to consume.
         buildkite-agent artifact upload "/mnt/disks/persist/models/generated_tuning_cases.yml"
