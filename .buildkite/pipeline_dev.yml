@@ -62,13 +62,13 @@ steps:
     commands:
       - |
         # If CASE_SET_ID was not provided via the Buildkite UI, generate one from the current time and reset RUN_ID to 0.
-        if [ -z "${CASE_SET_ID}" ]; then
-          CASE_SET_ID="$(date +%Y%m%d%H%M)"
+        if [ -z "$$CASE_SET_ID" ]; then
+          CASE_SET_ID="$$(date +%Y%m%d%H%M)"
           RUN_ID="0"
         else
-          RUN_ID="${RUN_ID:-0}"
+          RUN_ID="$${RUN_ID:-0}"
         fi
-        CASE_SET_ID="${CASE_SET_ID}" RUN_ID="${RUN_ID}" \
+        CASE_SET_ID="$$CASE_SET_ID" RUN_ID="$$RUN_ID" \
         .buildkite/scripts/run_in_docker.sh bash -c "
           python -m tools.kernel.tuner.v1.kernel_tuner_runner \
           --kernel_tuner_name=test_kernel_tuner \
