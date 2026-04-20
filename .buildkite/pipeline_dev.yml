@@ -66,6 +66,13 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash -c "
+          pip install --upgrade google-cloud-spanner && \
+          pip install --upgrade google-api-core && \
+          pip install --upgrade google-auth && \
+          echo \${KERNEL_TUNING_KERNEL_NAME} && \
+          echo \${KERNEL_TUNING_CASE_SET_DESC} && \
+          echo \${KERNEL_TUNING_CASE_SET_ID} && \
+          echo \${KERNEL_TUNING_RUN_ID} && \
           python -m tools.kernel.tuner.v1.kernel_tuner_runner \
           --kernel_tuner_name=\${KERNEL_TUNING_KERNEL_NAME} \
           --case_set_desc=\${KERNEL_TUNING_CASE_SET_DESC} \
