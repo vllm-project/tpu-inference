@@ -273,8 +273,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self._init_random()
         self._init_mesh()
-        self.data_parallel_attn_sharding = NamedSharding(
-            self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
+
         self._init_phased_profiling()
         self._init_mm()
         self._init_inputs()
@@ -1323,6 +1322,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         assert num_reqs > 0
 
         dp_size = self.dp_size
+        data_parallel_attn_sharding = NamedSharding(
+            self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
 
         (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
          scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
@@ -1563,7 +1564,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         metadata_blob, metadata_layout = self.device_buffer.build()
 
         dev_arrays_payload = jax.device_put(metadata_blob,
-                                            self.data_parallel_attn_sharding)
+                                            data_parallel_attn_sharding)
 
         metadata = common_utils.DeviceBuffer.unpack_arrays(
             dev_arrays_payload, metadata_layout)
@@ -1671,6 +1672,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
+
+        data_parallel_attn_sharding = NamedSharding(
+            self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
 
         # Do the padding and copy the tensors to the TPU.
         padded_total_num_scheduled_tokens = runner_utils.get_padded_token_len(
@@ -1855,7 +1859,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         metadata_blob, metadata_layout = self.device_buffer.build()
 
         dev_arrays_payload = jax.device_put(metadata_blob,
-                                            self.data_parallel_attn_sharding)
+                                            data_parallel_attn_sharding)
 
         metadata = common_utils.DeviceBuffer.unpack_arrays(
             dev_arrays_payload, metadata_layout)

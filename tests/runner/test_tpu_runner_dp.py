@@ -1317,7 +1317,6 @@ class TestSamplingMetadataPassthrough:
         mock_kv_cache_config = MagicMock()
         mock_kv_cache_config.kv_cache_groups = [MagicMock()]
         runner.kv_cache_config = mock_kv_cache_config
-        runner.data_parallel_attn_sharding = mock_named_sharding.return_value
         runner._prepare_dp_input_metadata = TPUModelRunner._prepare_dp_input_metadata.__get__(
             runner)
         runner._prepare_async_token_substitution_indices_dp = TPUModelRunner._prepare_async_token_substitution_indices_dp.__get__(
