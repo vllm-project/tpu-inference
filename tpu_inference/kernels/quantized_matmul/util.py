@@ -80,11 +80,13 @@ def xla_quantized_matmul(
     Reference (pure JAX) implementation of the quantized matmul kernel below.
 
     Args:
-        x:  Activation.
+        x: Activation.
         w_q: Weight quantized array. [n_output_features, n_input_features]
-        w_s: Weight quantization scale. [n_output_features] or [n_output_features, 1]
-        mesh: Mesh to shard on.
-        weight_sharding: PartitionSpec for the weight tensor.
+        w_scale: Weight quantization scale. [n_output_features] or
+            [n_output_features, 1].
+        quantize_activation: If True (default), quantize the activation
+            to the activation dtype before the matmul; if False, compute
+            the matmul in the activation's dtype directly.
 
     Returns:
         Output of the quantized matmul.
