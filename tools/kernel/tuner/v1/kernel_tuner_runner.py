@@ -36,8 +36,8 @@ _KERNEL_TUNER_NAME = flags.DEFINE_string('kernel_tuner_name',
                                          'Name of the kernel tuner to run.')
 _CASE_SET_ID = flags.DEFINE_string('case_set_id', None,
                                    'The case set ID to use for this run.')
-_RUN_ID = flags.DEFINE_string(
-    'run_id', None,
+_RUN_ID = flags.DEFINE_integer(
+    'run_id', 0,
     'The run ID to use for this run. If not specified, a timestamp-based ID will be generated.'
 )
 _CASE_SET_DESC = flags.DEFINE_string('case_set_desc', '',
@@ -102,21 +102,25 @@ def main(argv):
                                                      desc=case_set_desc)
         for bucket in buckets:
             begin_case_id, end_case_id = bucket
-            logger.info(f'Bucket: [{begin_case_id}, {end_case_id})')
             kernel_tuner.measure_latency(case_set_id, run_id, begin_case_id,
                                          end_case_id)
     else:
         logger.info(
-            'Running in cloud mode. Generating Buildkite pipeline YAML and printing to stdout.'
+            'Running in cloud mode. Generating Buildkite pipeline YAML or running tuning jobs directly.'
         )
-        generate_pipeline_yaml = _GENERATE_BUILDKITE_PIPELINE.value
-        if generate_pipeline_yaml:
-            pipeline_yaml = kernel_tuner.generate_buildkite_pipeline_yaml(
-                case_set_id, desc=case_set_desc)
-            print(pipeline_yaml)
+        if _GENERATE_BUILDKITE_PIPELINE.value:
+            logger.info(
+                'Generating Buildkite pipeline YAML. No tuning jobs will be run.'
+            )
+            pipeline_yaml = kernel_tuner.generate_buildkite_pipeline(
+                case_set_id=case_set_id, run_id=run_id, desc=case_set_desc)
+            logger.info(pipeline_yaml)
         else:
             begin_case_id = _BEGIN_CASE_ID.value
             end_case_id = _END_CASE_ID.value
+            logger.debug(
+                'Running tuning jobs directly. Skipping Buildkite pipeline generation. Bucket [%d, %d)',
+                begin_case_id, end_case_id)
             kernel_tuner.measure_latency(case_set_id,
                                          run_id=run_id,
                                          begin_case_id=begin_case_id,

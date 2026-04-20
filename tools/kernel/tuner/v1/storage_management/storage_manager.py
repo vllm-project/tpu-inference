@@ -182,3 +182,15 @@ class StorageManager:
         """
         raise NotImplementedError(
             "Subclasses must implement get_bucket_configs")
+
+    def get_total_cases_in_case_set(self, case_set_id):
+        """Returns the total number of cases in the given case set.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+
+        Returns:
+            The total number of cases in the case set.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement get_total_cases_in_case_set")

@@ -15,6 +15,7 @@
 import dataclasses
 import itertools
 import logging
+import random
 import time
 
 from tools.kernel.tuner.v1.common.kernel_tuner_base import (KernelTunerBase,
@@ -27,12 +28,7 @@ logging.basicConfig(level=logging.INFO)
 
 def mock_kernel(key1, key2, param1, param2):
     # A mock kernel function that takes some time to execute and returns a latency based on the input parameters.
-    time.sleep(0.1)  # Simulate some computation time
-    latency_ns = (key1 + key2) * (param1 + param2) * 0.1 * 1e9
-    logger.info(
-        f"Mock kernel executed with key1={key1}, key2={key2}, param1={param1}, param2={param2}, {latency_ns=}"
-    )
-    return latency_ns
+    time.sleep(random.random() / 5)  # Simulate some computation time
 
 
 @dataclasses.dataclass
@@ -50,11 +46,12 @@ class TunableParams:
 class TestKernelTuner(KernelTunerBase):
 
     def __init__(self, storage_manager):
-        super().__init__(
-            tuning_key_class=TuningKey,
-            tunable_params_class=TunableParams,
-            storage_manager=storage_manager,
-            job_bucket_size=2)  # Use a small bucket size for testing
+        super().__init__(tuning_key_class=TuningKey,
+                         tunable_params_class=TunableParams,
+                         storage_manager=storage_manager,
+                         job_bucket_size=2,
+                         kernel_tuner_name="test_kernel_tuner"
+                         )  # Use a small bucket size for testing
 
     def generate_cases(self) -> list[TuningCase]:
         # Generate some mock tuning cases based on the case_set_id and desc.
@@ -86,6 +83,13 @@ class TestKernelTuner(KernelTunerBase):
             tunable_params: TunableParams,
             iters: int = 1) -> tuple[TuningStatus, float, float]:
         # Run the mock kernel with the given tuning key and tunable params, and return the latency.
-        latency = mock_kernel(tuning_key.key1, tuning_key.key2,
-                              tunable_params.param1, tunable_params.param2)
-        return TuningStatus.SUCCESS, latency, latency  # status, average latency, total latency
+        logger.debug(
+            f"Running mock kernel with tuning_key={tuning_key}, tunable_params={tunable_params}, iters={iters}"
+        )
+        start_ns = time.perf_counter_ns()
+        for i in range(iters):
+            mock_kernel(tuning_key.key1, tuning_key.key2,
+                        tunable_params.param1, tunable_params.param2)
+        end_ns = time.perf_counter_ns()
+        latency_ns = (end_ns - start_ns)
+        return TuningStatus.SUCCESS, latency_ns / iters, latency_ns  # status, average latency, total latency

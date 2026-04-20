@@ -16,6 +16,11 @@ import os
 import socket
 import time
 
+from absl import flags
+from google.cloud import spanner
+
+FLAGS = flags.FLAGS
+
 
 def get_host_ip():
     is_docker = os.path.exists('/.dockerenv')
@@ -31,4 +36,6 @@ def get_host_ip():
 
 
 def get_timestamp_sec():
-    return int(time.time())
+    return int(
+        time.time()
+    ) if FLAGS.run_locally else spanner.COMMIT_TIMESTAMP  # Use microsecond precision for non-local runs to avoid collisions

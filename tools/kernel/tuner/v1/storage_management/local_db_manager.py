@@ -50,8 +50,7 @@ class LocalDbManager(StorageManager):
         self.db_path = db_path
         if not self.dry_run:
             os.makedirs(self.db_path, exist_ok=True)
-            logger.info(
-                f'[LocalDbManager] Database initialized at {self.db_path}')
+            logger.info(f'Database initialized at {self.db_path}')
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -88,7 +87,7 @@ class LocalDbManager(StorageManager):
         table = self._read_table('CaseSet')
         table.append(row)
         self._write_table('CaseSet', table)
-        logger.info(f'[LocalDbManager] init_case_set: {row}')
+        logger.info(f'Initialized case set: {row}')
 
     def case_set_id_exists(self, case_set_id) -> bool:
         if self.dry_run:
@@ -123,7 +122,7 @@ class LocalDbManager(StorageManager):
                 break
         self._write_table('CaseSet', table)
         logger.info(
-            f'[LocalDbManager] finish_case_set: ID={case_set_id}, valid={valid}, invalid={invalid}, duration={duration}s'
+            f'Finished case set: ID={case_set_id}, valid={valid}, invalid={invalid}, duration={duration}s'
         )
 
     def get_case_set_metadata(self, case_set_id):
@@ -151,8 +150,7 @@ class LocalDbManager(StorageManager):
             })
         self._write_table('KernelTuningCases', table)
         logger.info(
-            f'[LocalDbManager] flush: wrote {len(self.buffer)} cases to KernelTuningCases'
-        )
+            f'Flushed: wrote {len(self.buffer)} cases to KernelTuningCases')
         self.buffer = []
 
     def add_tuner_case(self, caseset_id: str, case_id: int, case: str):
@@ -193,7 +191,7 @@ class LocalDbManager(StorageManager):
             })
         self._write_table('WorkBuckets', table)
         logger.info(
-            f'[LocalDbManager] mark_bucket_in_progress: cs_id={cs_id}, r_id={r_id}, b_id={b_id}, worker={self.worker_id}'
+            f'Marked bucket as in progress: cs_id={cs_id}, r_id={r_id}, b_id={b_id}, worker={self.worker_id}'
         )
 
     def mark_bucket_completed(self, cs_id, r_id, b_id, tt_us):
@@ -209,7 +207,7 @@ class LocalDbManager(StorageManager):
                 break
         self._write_table('WorkBuckets', table)
         logger.info(
-            f'[LocalDbManager] mark_bucket_completed: cs_id={cs_id}, r_id={r_id}, b_id={b_id}, tt_us={tt_us}'
+            f'Marked bucket as completed: cs_id={cs_id}, r_id={r_id}, b_id={b_id}, tt_us={tt_us}'
         )
 
     def get_already_processed_ids(self, cs_id, r_id, start, end):
@@ -240,9 +238,7 @@ class LocalDbManager(StorageManager):
                 index[key] = len(table)
                 table.append(row)
         self._write_table('CaseResults', table)
-        logger.info(
-            f'[LocalDbManager] save_results_batch: saved {len(results)} results to CaseResults'
-        )
+        logger.info(f'Saved {len(results)} results to CaseResults')
 
     def get_bucket_configs(self, cs_id, start, end):
         table = self._read_table('KernelTuningCases')
@@ -256,11 +252,24 @@ class LocalDbManager(StorageManager):
         # Ensure any remaining buffered cases are flushed to disk on destruction.
         self.flush()
         logger.info(
-            f'[LocalDbManager] Database at {self.db_path} finalized with {self.current_case_id} cases, {self.invalid_count} invalid cases.'
+            f'Database at {self.db_path} finalized with {self.current_case_id} cases, {self.invalid_count} invalid cases.'
         )
         # Log the full path of all the files under the self.db_path for debugging and visibility
         for root, dirs, files in os.walk(self.db_path):
             for file in files:
-                logger.info(
-                    f'[LocalDbManager] Final DB file: {os.path.join(root, file)}'
-                )
+                logger.info(f'Final DB file: {os.path.join(root, file)}')
+
+    def get_total_cases_in_case_set(self, case_set_id):
+        """Returns the total number of cases in the given case set.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+
+        Returns:
+            The total number of cases in the case set.
+        """
+        table = self._read_table('CaseSet')
+        for row in table:
+            if row['ID'] == case_set_id:
+                return row.get('Valid', 0)
+        return 0

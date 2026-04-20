@@ -213,3 +213,17 @@ class SpannerStorageManager(StorageManager):
                                                'e': end
                                            })
             }
+
+    def get_total_cases_in_case_set(self, case_set_id):
+        """Returns the total number of cases in the given case set.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+
+        Returns:
+            The total number of cases in the case set.
+        """
+        query = "SELECT VALID FROM CaseSet WHERE ID = @id"
+        with self.database.snapshot() as snp:
+            result = list(snp.execute_sql(query, params={'id': case_set_id}))
+            return result[0][0] if result else 0
