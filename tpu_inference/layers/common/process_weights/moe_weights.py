@@ -470,17 +470,12 @@ def shard_moe_weights(
                 mesh, list(ShardingAxisName.MLP_TENSOR))
             _w2_ws = weights.w2_weight_scale
 
-            # NOTE: `_local_axis1 * _process_count` below assumes the
-            # intermediate axis of w2_weight_scale is already sharded
-            # 1/process_count per host — true for multi-host TP runs under
-            # `--load-format tpu_streaming_loader` (TP-selective loader
-            # sets coarse_tp = process_count). For multi-host TP runs
-            # *without* TP-selective the scale arrives full on every
-            # host and this multiplication inflates `_global_axis1` by
-            # a factor of process_count, making the subsequent repeat /
-            # replicate decision wrong. The PR's target (GLM-5.1-FP8,
-            # GMM_EP) never executes this branch; small-model multi-host
-            # TP paths that do should enable tpu_streaming_loader.
+            # `_global_axis1` reconstruction depends on whether the
+            # intermediate axis arrived pre-sliced per-host (TP-selective
+            # loader, 1/process_count slice) or full on every host
+            # (default loader path).  We detect which regime we're in and
+            # scale accordingly, so downstream shard/repeat/replicate
+            # logic sees the true global size in both cases.
 
             # Pad the PartitionSpec to the scale tensor's ndim: after
             # process_moe_weights the scale is 4D (E, K_blocks, 1, N_full);
@@ -495,8 +490,12 @@ def shard_moe_weights(
                 w2_weight_scale_p_spec = P(None, ShardingAxisName.MLP_TENSOR)
             else:
                 _process_count = jax.process_count()
+                from tpu_inference.models.vllm import \
+                    tp_selective_loader as _tpsl
+                _is_pre_sliced = (_process_count > 1 and _tpsl.is_enabled())
                 _local_axis1 = _w2_ws.shape[1]
-                _global_axis1 = _local_axis1 * _process_count
+                _global_axis1 = (_local_axis1 * _process_count
+                                 if _is_pre_sliced else _local_axis1)
                 if _global_axis1 % _mlp_tensor_size == 0:
                     w2_weight_scale_p_spec = _pad_spec(
                         None, ShardingAxisName.MLP_TENSOR)

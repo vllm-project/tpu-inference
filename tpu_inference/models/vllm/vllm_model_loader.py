@@ -404,6 +404,32 @@ class IncrementalModelLoader(DefaultModelLoader):
                 "[TP-selective] DIAG: pp=%d ep_total=%d proc_cnt=%d tp_global=%d",
                 pp_size, ep_total, process_count, tp_global)
             if pp_size != 1 or ep_total != 1 or process_count <= 1:
+                # EP<process_count means multiple hosts share one EP slot and
+                # cross-host TP happens inside the slot.  EP filter slices
+                # MoE experts per slot but not the TP-parallel non-MoE
+                # weights (attention / embed / lm_head), so each co-located
+                # host loads the full TP=N tensor → CPU OOM.  Composing
+                # TP-selective with the EP filter (slice non-MoE by
+                # hosts-per-slot, leave MoE to EP) is the proper fix but
+                # requires plan changes plus an EP<process_count test
+                # config which this PR's hardware does not exercise.
+                # PP<process_count does not reach this branch: the PP
+                # worker setup (tpu_worker.py) hard-requires one host per
+                # stage (rank_in_group=self.rank, ranks=range(pp_size)),
+                # so PP<process_count fails earlier.
+                if (ep_total > 1 and ep_total < process_count
+                        and tp_global > 1):
+                    raise NotImplementedError(
+                        "TP-selective loader composition with EP<"
+                        "process_count is not implemented. Config: EP=%d "
+                        "TP=%d on %d hosts → each EP slot spans %d hosts "
+                        "and TP-parallel non-MoE weights would be loaded "
+                        "full on every host (%d× per-host RAM "
+                        "overcommit). Supported configs on this PR: "
+                        "EP=process_count (e.g., EP=8 TP=4 on 8 hosts) "
+                        "or pure-TP multi-host (PP=1, EP=1)." % (
+                            ep_total, tp_global, process_count,
+                            process_count // ep_total, tp_global))
                 logger.info(
                     "[TP-selective] no-op (pp=%d ep_total=%d proc_cnt=%d "
                     "tp_global=%d) — PP/EP filters already slice per-host",
