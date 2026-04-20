@@ -1494,7 +1494,6 @@ def get_default_block_sizes(
 
     Note the default block sizes are not necessarily optimal.
     """
-    # DEBUG: Allow hardcoding block sizes via environment variables.
     # Set e.g. RPA_D_BLOCK_SIZES="1,4096,1,256" to override decode block sizes.
     # Set e.g. RPA_P_BLOCK_SIZES="32,4096,32,256" to override prefill block sizes.
     # Set e.g. RPA_M_BLOCK_SIZES="32,4096,32,256" to override mixed block sizes.
