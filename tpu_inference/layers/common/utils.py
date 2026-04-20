@@ -163,13 +163,30 @@ def general_device_put(tensor: jax.Array,
         # by the TP-selective registry lookup above), each host holds only
         # its local shard.  Use make_array_from_process_local_data to
         # construct the correct global distributed array, then apply the
-        # caller's Layout on top (the array is already distributed, so this
-        # transforms only the local shard without triggering allgather).
+        # caller's Layout on top. We *expect* device_put(Format(...)) on an
+        # already-distributed array to be a shard-local relayout, but JAX
+        # does not contract this explicitly. Assert afterwards that the
+        # result is still distributed — if a collective fired the array
+        # would become fully addressable on this process, defeating the
+        # whole point of avoiding host-side allgather.
         if effective_global is not None:
             arr = jax.make_array_from_process_local_data(
                 sharding, t, effective_global)
             if layout is not None:
-                return jax.device_put(arr, Format(layout, sharding))
+                arr_fmt = jax.device_put(arr, Format(layout, sharding))
+                if (isinstance(arr_fmt, jax.Array)
+                        and arr_fmt.is_fully_addressable
+                        and not arr.is_fully_addressable):
+                    raise RuntimeError(
+                        "general_device_put: device_put(Format(layout, "
+                        "sharding)) on a distributed array was expected to "
+                        "be a shard-local relayout but materialised the "
+                        "array on this process (is_fully_addressable "
+                        "flipped False -> True). A collective likely fired. "
+                        "This risks host-side OOM on large MoE runs; "
+                        "investigate the jaxlib / PJRT version before "
+                        "relying on the Layout hint.")
+                return arr_fmt
             return arr
 
         # Replicated/TP-sharded weights (no global_shape): all hosts have
