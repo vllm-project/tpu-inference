@@ -106,9 +106,9 @@ def _log_mesh_ep_positions(device_mesh, mesh_shape, origin):
             if dev.process_index != local_proc:
                 continue
             ep_flat = flat_idx % ep_total
-            local_slots.append((dev.id, ep_flat, ep_flat * 8))
+            local_slots.append((dev.id, ep_flat))
         logger.info(
-            "[EP_DIAG origin=%s proc=%d] local_devices (dev_id, ep_flat_slot, expert_range_start): %s",
+            "[EP_DIAG origin=%s proc=%d] local_devices (dev_id, ep_flat_slot): %s",
             origin, local_proc, local_slots)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[EP_DIAG] failed to log mesh positions: %s", exc)

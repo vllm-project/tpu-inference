@@ -339,16 +339,20 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
 
         if (weight_block_size is not None
                 and envs.MOE_SKIP_REQUANTIZATION):
-            # Fast path: skip dequant/requant, direct FP8 shape transform
+            # Fast path: skip dequant/requant, direct FP8 shape transform.
+            # Same `cpu_mesh_context()` as the legacy branch so the
+            # expand_dims / reshape ops stay on the CPU mesh and don't
+            # allocate temporaries on the TPU HBM during load.
             logger.info_once(
                 "[MoE] Skipping requantization — direct FP8 path")
-            weights = process_fp8_moe_weights_direct(
-                input_weights,
-                moe_backend=self.moe_backend,
-                mesh=self.mesh,
-                activation=layer.activation.value,
-                weight_block_size=weight_block_size,
-            )
+            with cpu_mesh_context():
+                weights = process_fp8_moe_weights_direct(
+                    input_weights,
+                    moe_backend=self.moe_backend,
+                    mesh=self.mesh,
+                    activation=layer.activation.value,
+                    weight_block_size=weight_block_size,
+                )
         else:
             with cpu_mesh_context():
                 weights = process_fp8_moe_weights(

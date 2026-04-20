@@ -469,6 +469,16 @@ def shard_moe_weights(
             _mlp_tensor_size = get_mesh_shape_product(
                 mesh, list(ShardingAxisName.MLP_TENSOR))
             _w2_ws = weights.w2_weight_scale
+
+            # Pad the PartitionSpec to the scale tensor's ndim: after
+            # process_moe_weights the scale is 4D (E, K_blocks, 1, N_full);
+            # an older compact path could leave it 3D. Relying on JAX's
+            # "trailing dims unconstrained" fallback is ambiguous, so
+            # explicitly mark the unsharded trailing axes.
+            def _pad_spec(*head):
+                target_ndim = _w2_ws.ndim if _w2_ws is not None else 2
+                return P(*head, *((None, ) * (target_ndim - len(head))))
+
             if _w2_ws is None:
                 w2_weight_scale_p_spec = P(None, ShardingAxisName.MLP_TENSOR)
             else:
@@ -476,7 +486,7 @@ def shard_moe_weights(
                 _local_axis1 = _w2_ws.shape[1]
                 _global_axis1 = _local_axis1 * _process_count
                 if _global_axis1 % _mlp_tensor_size == 0:
-                    w2_weight_scale_p_spec = P(
+                    w2_weight_scale_p_spec = _pad_spec(
                         None, ShardingAxisName.MLP_TENSOR)
                 elif _mlp_tensor_size % _global_axis1 == 0:
                     _rf = _mlp_tensor_size // _global_axis1
@@ -484,7 +494,8 @@ def shard_moe_weights(
                     weights.w2_weight_scale = jnp.repeat(_w2_ws, _rf, axis=1)
                     _w2_ws = None  # free pre-repeat buffer
                     w2_weight_scale_p_spec = P(
-                        None, ShardingAxisName.MLP_TENSOR)
+                        None, ShardingAxisName.MLP_TENSOR,
+                        *((None, ) * (weights.w2_weight_scale.ndim - 2)))
                 else:
                     w2_weight_scale_p_spec = P()
                 logger.debug(
