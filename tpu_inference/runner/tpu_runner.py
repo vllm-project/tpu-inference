@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import functools
-import json
 import logging
 import random
 from contextlib import nullcontext
@@ -323,39 +322,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         logger.info(f"Init mesh | mesh={self.mesh}")
 
-    def _maybe_log_new_model_design_hint(self, exc: Exception) -> None:
-        sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
-        requires_extended_mesh = (
-            sharding_strategy.attn_dp_size > 1
-            or sharding_strategy.attn_dp_expert_size > 1
-            or sharding_strategy.expert_size > 1
-        )
-        if envs.NEW_MODEL_DESIGN or not requires_extended_mesh:
-            return
-
-        requested_strategy = self.vllm_config.additional_config.get(
-            "sharding", {}).get("sharding_strategy", {})
-        serve_hint = (
-            f"NEW_MODEL_DESIGN=1 vllm serve "
-            f"\"{getattr(self.model_config, 'model', '<model>')}\" "
-            f"--tensor-parallel-size {self.parallel_config.tensor_parallel_size} "
-            f"--additional-config '{json.dumps({'sharding': {'sharding_strategy': requested_strategy}})}'"
-        )
-        logger.error(
-            "Model load failed while NEW_MODEL_DESIGN is disabled, but the "
-            "requested sharding strategy needs expert/extended mesh axes "
-            "(dp=%s attn_dp=%s attn_dp_expert=%s expert=%s tp=%s). "
-            "Retry with NEW_MODEL_DESIGN=1. Example:\n%s\nOriginal error: %s: %s",
-            sharding_strategy.model_dp_size,
-            sharding_strategy.attn_dp_size,
-            sharding_strategy.attn_dp_expert_size,
-            sharding_strategy.expert_size,
-            sharding_strategy.tp_size,
-            serve_hint,
-            type(exc).__name__,
-            exc,
-        )
-
     def _create_new_model_mesh(self) -> jax.sharding.Mesh:
         num_slices = envs.NUM_SLICES
 
@@ -582,16 +548,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.device_buffer = common_utils.DeviceBuffer(initial_capacity=1024)
 
     def load_model(self):
-        try:
-            with set_current_vllm_config(self.vllm_config):
-                model = get_model(
-                    self.vllm_config,
-                    self.rng_key,
-                    self.mesh,
-                )
-        except Exception as exc:
-            self._maybe_log_new_model_design_hint(exc)
-            raise
+        with set_current_vllm_config(self.vllm_config):
+            model = get_model(
+                self.vllm_config,
+                self.rng_key,
+                self.mesh,
+            )
 
         self.model_fn = model.model_fn
         self.compute_logits_fn = model.compute_logits_fn
