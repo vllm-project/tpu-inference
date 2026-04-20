@@ -470,6 +470,18 @@ def shard_moe_weights(
                 mesh, list(ShardingAxisName.MLP_TENSOR))
             _w2_ws = weights.w2_weight_scale
 
+            # NOTE: `_local_axis1 * _process_count` below assumes the
+            # intermediate axis of w2_weight_scale is already sharded
+            # 1/process_count per host — true for multi-host TP runs under
+            # `--load-format tpu_streaming_loader` (TP-selective loader
+            # sets coarse_tp = process_count). For multi-host TP runs
+            # *without* TP-selective the scale arrives full on every
+            # host and this multiplication inflates `_global_axis1` by
+            # a factor of process_count, making the subsequent repeat /
+            # replicate decision wrong. The PR's target (GLM-5.1-FP8,
+            # GMM_EP) never executes this branch; small-model multi-host
+            # TP paths that do should enable tpu_streaming_loader.
+
             # Pad the PartitionSpec to the scale tensor's ndim: after
             # process_moe_weights the scale is 4D (E, K_blocks, 1, N_full);
             # an older compact path could leave it 3D. Relying on JAX's
