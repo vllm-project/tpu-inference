@@ -1,0 +1,290 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+    xpk.google.com/workload: wenxindongtest
+  name: wenxindongtest
+  namespace: default
+spec:
+  coordinator:
+    replicatedJob: pathways-head
+  failurePolicy:
+    restartStrategy: Recreate
+  network:
+    enableDNSHostnames: true
+    publishNotReadyAddresses: true
+  replicatedJobs:
+  - name: pathways-head
+    replicas: 1
+    template:
+      metadata:
+        annotations:
+          alpha.jobset.sigs.k8s.io/exclusive-topology: kubernetes.io/hostname
+      spec:
+        backoffLimit: 0
+        completionMode: Indexed
+        completions: 1
+        parallelism: 1
+        template:
+          metadata:
+            annotations:
+              alpha.jobset.sigs.k8s.io/exclusive-topology: kubernetes.io/hostname
+          spec:
+            containers:
+            - command:
+              - bash
+              - -c
+              - |
+                echo XPK Start: $(date);
+                _sigterm() (kill -SIGTERM $! 2>/dev/null;);
+                trap _sigterm SIGTERM;
+
+                (
+                  # # Patch local tpu-inference changes from GCS
+                  # echo "Installing tpu-inference patch from GCS..."
+                  # TOKEN=$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+                  # curl -s -H "Authorization: Bearer ${TOKEN}" \
+                  #   -o /tmp/tpu-inference.tar.gz \
+                  #   "https://storage.googleapis.com/wenxindong-multipod-dev/patches/tpu-inference.tar.gz"
+                  # mkdir -p /tmp/tpu-inference && tar xzf /tmp/tpu-inference.tar.gz -C /tmp/tpu-inference
+                  # # Overwrite the pre-installed /workspace/tpu_inference in-place
+                  # # (editable installs there take precedence over site-packages)
+                  # if [ -d /workspace/tpu_inference ]; then
+                  #   cp -a /tmp/tpu-inference/. /workspace/tpu_inference/
+                  # fi
+                  # pip install --no-deps /tmp/tpu-inference
+                  # echo "tpu-inference patch installed."
+                
+                  # Environment variables
+                  export VLLM_ENABLE_V1_MULTIPROCESSING=0
+                  export HF_TOKEN=${HF_TOKEN}
+                  export PHASED_PROFILING_DIR=gs://wenxindong-cloud-tpu-inference-test/profiling/vllm_qwen3_235b_a22b_instruct_2507/mar30/30b/dp8/2
+                  export VLLM_ENGINE_READY_TIMEOUT_S=7200
+                  export MODEL_IMPL_TYPE=vllm
+                  export NEW_MODEL_DESIGN=1
+                  # export SKIP_JAX_PRECOMPILE=1
+
+                  # pip install jax==0.9.1 jaxlib==0.9.1
+
+                  # Launch vllm serve via Pathways
+                  JAX_PLATFORMS=proxy,cpu \
+                  JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 \
+                  vllm serve Qwen/Qwen3-30B-A3B \
+                    --tensor-parallel-size 2 \
+                    --data-parallel-size 8 \
+                    --api-server-count 1 \
+                    --max-model-len 8704 \
+                    --gpu-memory-utilization 0.95 \
+                    --no-enable-prefix-caching \
+                    --max-num-seqs 128 \
+                    --max-num-batched-tokens 4096 \
+                    --enable-expert-parallel \
+                    --load-format dummy
+                ) & PID=$!;
+                while kill -0 $PID 2>/dev/null;
+                    do sleep 5;
+                done;
+                wait $PID;
+                EXIT_CODE=$?;
+
+                echo XPK End: $(date);
+                echo EXIT_CODE=$EXIT_CODE;
+
+
+                exit $EXIT_CODE
+              env:
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: JAX_PLATFORMS
+                value: proxy
+              - name: XCLOUD_ENVIRONMENT
+                value: GCP
+              - name: JAX_BACKEND_TARGET
+                value: grpc://$(PATHWAYS_HEAD):29000
+              image: vllm/vllm-tpu:nightly
+              imagePullPolicy: Always
+              name: jax-tpu
+              resources:
+                limits:
+                  cpu: "24"
+                  memory: 100G
+              securityContext:
+                privileged: true
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+            dnsPolicy: ClusterFirstWithHostNet
+            hostNetwork: true
+            initContainers:
+            - args:
+              - --server_port=29001
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
+              - --node_type=resource_manager
+              - --instance_count=1
+              - --instance_type=tpu7x:2x2x2
+              env:
+              - name: REPLICATED_JOB_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+              - name: HOST_ADDRESS
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: TPU_SKIP_MDS_QUERY
+                value: "true"
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_server@sha256:bea35fb014edf250718ce32820777ceb943dfdcf08a593b3fb762ad9ea433fdc
+              imagePullPolicy: Always
+              name: pathways-rm
+              ports:
+              - containerPort: 29001
+                protocol: TCP
+              - containerPort: 29002
+                protocol: TCP
+              resources:
+                limits:
+                  cpu: "8"
+                  memory: 32G
+              restartPolicy: Always
+            - args:
+              - --server_port=29000
+              - --resource_manager_address=$(PATHWAYS_HEAD):29001
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
+              - --sidecar_name=external
+              env:
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_proxy_server@sha256:e5ad4ef0ec907ba2378394f59c4ba074a82231112c03d7f80d7c4a38b19c043c
+              imagePullPolicy: Always
+              name: pathways-proxy
+              ports:
+              - containerPort: 29000
+                protocol: TCP
+              resources:
+                limits:
+                  cpu: "16"
+                  memory: 100G
+              restartPolicy: Always
+            nodeSelector:
+              cloud.google.com/gke-nodepool: cpu-np
+            restartPolicy: Never
+            volumes:
+            - hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+              name: shared-tmp
+  - name: worker
+    replicas: 1
+    template:
+      metadata: {}
+      spec:
+        backoffLimit: 8
+        completionMode: Indexed
+        completions: 2
+        parallelism: 2
+        template:
+          metadata:
+            annotations:
+              alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+          spec:
+            containers:
+            - args:
+              - --server_port=29005
+              - --resource_manager_address=$(PATHWAYS_HEAD):29001
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
+              env:
+              - name: TPU_MIN_LOG_LEVEL
+                value: "0"
+              - name: TF_CPP_MIN_LOG_LEVEL
+                value: "0"
+              - name: XCLOUD_ENVIRONMENT
+                value: GCP
+              - name: MEGASCALE_GRPC_ENABLE_XOR_TRACER
+                value: "false"
+              - name: MEGASCALE_NUM_SLICES
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/replicatedjob-replicas']
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+              - name: REPLICATED_JOB_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+              - name: MEGASCALE_SLICE_ID
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/job-index']
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: MEGASCALE_COORDINATOR_ADDRESS
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_server@sha256:bea35fb014edf250718ce32820777ceb943dfdcf08a593b3fb762ad9ea433fdc
+              imagePullPolicy: Always
+              name: pathways-worker
+              ports:
+              - containerPort: 29005
+                protocol: TCP
+              - containerPort: 29006
+                protocol: TCP
+              - containerPort: 8471
+                protocol: TCP
+              - containerPort: 8080
+                protocol: TCP
+              resources:
+                limits:
+                  google.com/tpu: "4"
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+            dnsPolicy: ClusterFirstWithHostNet
+            hostNetwork: true
+            initContainers:
+            - env:
+              - name: GRPC_SERVER_ADDRESS
+                value: '''0.0.0.0:50051'''
+              image: us-east5-docker.pkg.dev/cloud-tpu-inference-test/wenxindong/colocated_python:latest
+              imagePullPolicy: Always
+              name: colocated-python-sidecar
+              ports:
+              - containerPort: 50051
+                protocol: TCP
+              resources: {}
+              restartPolicy: Always
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: tpu7x
+              cloud.google.com/gke-tpu-topology: 2x2x2
+              cloud.google.com/placement-policy-name: tpu7x-16-2x2x2-placement-policy
+            priorityClassName: very-high
+            restartPolicy: OnFailure
+            terminationGracePeriodSeconds: 30
+            volumes:
+            - hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+              name: shared-tmp
+  startupPolicy:
+    startupPolicyOrder: InOrder
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+    - pathways-head
+  suspend: false
