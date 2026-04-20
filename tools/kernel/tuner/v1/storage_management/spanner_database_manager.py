@@ -15,8 +15,9 @@
 from google.api_core import retry
 from google.cloud import spanner
 
-from tools.kernel.tuner.v1.common.storage_manager import StorageManager
 from tools.kernel.tuner.v1.common.utils import get_host_ip
+from tools.kernel.tuner.v1.storage_management.storage_manager import \
+    StorageManager
 
 BATCH_SIZE = 1000
 

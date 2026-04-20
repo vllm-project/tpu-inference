@@ -13,12 +13,15 @@
 # limitations under the License.
 
 import json
+import logging
 import os
 from datetime import datetime
 
-from tools.kernel.tuner.v1.common.storage_manager import StorageManager
 from tools.kernel.tuner.v1.common.utils import get_host_ip
+from tools.kernel.tuner.v1.storage_management.storage_manager import \
+    StorageManager
 
+logger = logging.getLogger(__name__)
 BATCH_SIZE = 1000
 
 
@@ -27,7 +30,7 @@ class LocalDbManager(StorageManager):
 
     Models the database as a folder (default: /tmp/kernel_tuner_run_YYYY_MM_DD)
     where each Spanner table is persisted as a JSON file. All writes are also
-    printed to the console for visibility.
+    logged for visibility.
     """
 
     def __init__(self,
@@ -42,12 +45,13 @@ class LocalDbManager(StorageManager):
         self.worker_id = worker_id or get_host_ip()
         self.dry_run = dry_run
         if db_path is None:
-            date_str = datetime.now().strftime('%Y_%m_%d')
+            date_str = datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
             db_path = f'/tmp/kernel_tuner_run_{date_str}'
         self.db_path = db_path
         if not self.dry_run:
             os.makedirs(self.db_path, exist_ok=True)
-            print(f'[LocalDbManager] Database initialized at {self.db_path}')
+            logger.info(
+                f'[LocalDbManager] Database initialized at {self.db_path}')
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -84,7 +88,7 @@ class LocalDbManager(StorageManager):
         table = self._read_table('CaseSet')
         table.append(row)
         self._write_table('CaseSet', table)
-        print(f'[LocalDbManager] init_case_set: {row}')
+        logger.info(f'[LocalDbManager] init_case_set: {row}')
 
     def case_set_id_exists(self, case_set_id) -> bool:
         if self.dry_run:
@@ -118,7 +122,7 @@ class LocalDbManager(StorageManager):
                 })
                 break
         self._write_table('CaseSet', table)
-        print(
+        logger.info(
             f'[LocalDbManager] finish_case_set: ID={case_set_id}, valid={valid}, invalid={invalid}, duration={duration}s'
         )
 
@@ -146,7 +150,7 @@ class LocalDbManager(StorageManager):
                 'CaseKeyValue': case_kv
             })
         self._write_table('KernelTuningCases', table)
-        print(
+        logger.info(
             f'[LocalDbManager] flush: wrote {len(self.buffer)} cases to KernelTuningCases'
         )
         self.buffer = []
@@ -188,7 +192,7 @@ class LocalDbManager(StorageManager):
                 'UpdatedAt': datetime.now().isoformat()
             })
         self._write_table('WorkBuckets', table)
-        print(
+        logger.info(
             f'[LocalDbManager] mark_bucket_in_progress: cs_id={cs_id}, r_id={r_id}, b_id={b_id}, worker={self.worker_id}'
         )
 
@@ -204,7 +208,7 @@ class LocalDbManager(StorageManager):
                 })
                 break
         self._write_table('WorkBuckets', table)
-        print(
+        logger.info(
             f'[LocalDbManager] mark_bucket_completed: cs_id={cs_id}, r_id={r_id}, b_id={b_id}, tt_us={tt_us}'
         )
 
@@ -236,7 +240,7 @@ class LocalDbManager(StorageManager):
                 index[key] = len(table)
                 table.append(row)
         self._write_table('CaseResults', table)
-        print(
+        logger.info(
             f'[LocalDbManager] save_results_batch: saved {len(results)} results to CaseResults'
         )
 
@@ -247,3 +251,16 @@ class LocalDbManager(StorageManager):
             for row in table
             if row['ID'] == cs_id and start <= row['CaseId'] <= end
         }
+
+    def __del__(self):
+        # Ensure any remaining buffered cases are flushed to disk on destruction.
+        self.flush()
+        logger.info(
+            f'[LocalDbManager] Database at {self.db_path} finalized with {self.current_case_id} cases, {self.invalid_count} invalid cases.'
+        )
+        # Log the full path of all the files under the self.db_path for debugging and visibility
+        for root, dirs, files in os.walk(self.db_path):
+            for file in files:
+                logger.info(
+                    f'[LocalDbManager] Final DB file: {os.path.join(root, file)}'
+                )

@@ -23,15 +23,13 @@ import yaml
 from absl import flags
 from google.cloud import spanner
 
-from tools.kernel.tuner.v1.common.storage_manager import StorageManager
-from tools.kernel.tuner.v1.common.utils import get_host_ip
+from tools.kernel.tuner.v1.storage_management.storage_manager import StorageManager
+from tools.kernel.tuner.v1.common.utils import get_timestamp_sec
+
+FLAGS = flags.FLAGS
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-_DEBUG = flags.DEFINE_bool(
-    'debug', False, 'If true, prints results after each case iteration.')
-_WORKER_ID = flags.DEFINE_string('worker_id', get_host_ip(), 'The worker id')
 
 
 @dataclass
@@ -84,15 +82,21 @@ class KernelTunerBase:
     - generate_inputs: Generate the kernel inputs for the given tuning key with caching, and return a dictionary of kernel inputs.
     - run: Execute the kernel with the given tuning key and tunable params for a certain number of iterations, measure the latency, and return the tuning status, average latency, and total latency.
 
+    Subclass must call super().__init__(tuning_key_class=tuning_key_class, tunable_params_class=tunable_params_class, storage_manager=storage_manager) in the __init__ method to initialize the base class with the tuning key class, tunable params class, and storage manager.
+
     """
 
-    def __init__(self, tuning_key_class, tunable_params_class,
-                 storage_manager: StorageManager):
+    def __init__(self, *, tuning_key_class = None, tunable_params_class = None,
+                 storage_manager: StorageManager = None, job_bucket_size: int = 100):
+        assert tuning_key_class is not None, "tuning_key_class must be specified"
+        assert tunable_params_class is not None, "tunable_params_class must be specified"
+        assert storage_manager is not None, "storage_manager must be specified"
         self.tuning_key_class = tuning_key_class
         self.tunable_params_class = tunable_params_class
         self.storage_manager = storage_manager
         self._KERNEL_INPUTS_CACHE = {}
         self._TUNING_KEY = None
+        self.job_bucket_size = job_bucket_size
 
     def _init_case_set(self, case_set_id: str, desc: str):
         """Initialize the case set with the given case_set_id and description. This will be called when the caseset_id is new or the caseset_id is not specified.
@@ -139,21 +143,29 @@ class KernelTunerBase:
 
     def _generate_tuning_jobs(self,
                              case_set_id: str,
-                             bucket_size: int = 100) -> list[tuple[int, int]]:
+                             desc: str,
+                             ) -> list[tuple[int, int]]:
         """Partitions the full case set into fixed-size work buckets.
 
         Calls `generate_cases` to determine the total number of cases, then
-        splits them into contiguous ranges of at most `bucket_size` cases each.
+        splits them into contiguous ranges of at most `self.job_bucket_size` cases each.
         Buckets are intended to be dispatched and executed in parallel; result
         ordering is not guaranteed. Each bucket is identified by a half-open
         interval [begin_case_id, end_case_id).
 
         Args:
-            bucket_size: Maximum number of cases per bucket. Defaults to 100.
+            case_set_id: Identifies a set of tuning cases. If specified when running the tuning
+                pipeline, the caseset will only be regenerated when the caseset_id changes.
+            desc: A description for this case set, which will be persisted in local file or database using storage_management module.
 
         Returns:
             A list of [begin_case_id, end_case_id] pairs covering all cases.
         """
+        try:
+            self._init_case_set(case_set_id, desc=desc)
+        except Exception as e:
+            logger.error(f"Error initializing case set {case_set_id}: {e}")
+            raise e
         start_time = time.perf_counter()
         cases = self.generate_cases()
         total_cases = len(cases)
@@ -169,8 +181,8 @@ class KernelTunerBase:
         logger.info(
             f"\nComplete Generate Tuning Cases for {case_set_id}, Valid Cases: {total_cases} | Duration: {duration_sec}s"
         )
-        buckets = [[i, min(i + bucket_size, total_cases)]
-                   for i in range(0, total_cases, bucket_size)]
+        buckets = [[i, min(i + self.job_bucket_size, total_cases)]
+                   for i in range(0, total_cases, self.job_bucket_size)]
         return buckets
 
     def generate_buildkite_pipeline(self, case_set_id: str, run_id: str,
@@ -187,12 +199,7 @@ class KernelTunerBase:
         Returns:
             A string representing the Buildkite pipeline configuration in YAML format.
         """
-        try:
-            self._init_case_set(case_set_id, desc=desc)
-        except Exception as e:
-            logger.error(f"Error initializing case set {case_set_id}: {e}")
-            raise e
-        buckets = self._generate_tuning_jobs(case_set_id)
+        buckets = self._generate_tuning_jobs(case_set_id, desc=desc)
         # The Buildkite pipeline YAML will be generated in the format of:
         # steps:
         #   - label: "Measure latency for cases [begin_case_id, end_case_id)"
@@ -203,7 +210,7 @@ class KernelTunerBase:
                 'label':
                 f"Measure latency for cases [{begin_case_id}, {end_case_id})",
                 'command':
-                f"python -m tools.kernel.tuner.v1.kernel_tuner_runner --worker_id={_WORKER_ID.value} --case_set_id={case_set_id} --run_id={run_id} --begin_case_id={begin_case_id} --end_case_id={end_case_id}"
+                f"python -m tools.kernel.tuner.v1.kernel_tuner_runner --worker_id={FLAGS.worker_id} --case_set_id={case_set_id} --run_id={run_id} --begin_case_id={begin_case_id} --end_case_id={end_case_id}"
             }
             pipeline_steps.append(step)
         pipeline = {'steps': pipeline_steps}
@@ -292,7 +299,7 @@ class KernelTunerBase:
         """
         bucket_id = f"{caseset_id}_{run_id}_{begin_case_id}_{end_case_id}"
         logger.info(
-            f"[{_WORKER_ID.value}] Claimed CaseSetId: {caseset_id}, RunId: {run_id}, Bucket {bucket_id} ({begin_case_id}-{end_case_id}) for processing."
+            f"[{FLAGS.worker_id}] Claimed CaseSetId: {caseset_id}, RunId: {run_id}, Bucket {bucket_id} ({begin_case_id}-{end_case_id}) for processing."
         )
         self.storage_manager.mark_bucket_in_progress(caseset_id, run_id,
                                                      bucket_id)
@@ -315,39 +322,39 @@ class KernelTunerBase:
 
             begin_case_id_time = time.perf_counter_ns()
             # status can be SUCCESS, FAILED_OOM, UNKNOWN_ERROR.
-            status, warmup, _ = self.run(tuning_key, tunable_params, iters=1)
-            if status != 'SUCCESS':
+            status, warmup_ns, _ = self.run(tuning_key, tunable_params, iters=1)
+            if status != TuningStatus.SUCCESS:
                 results_buffer.append(
-                    (caseset_id, run_id, cid, status, _WORKER_ID.value, 0, 0,
-                     spanner.COMMIT_TIMESTAMP))
+                    (caseset_id, run_id, cid, status.value, FLAGS.worker_id, 0, 0,
+                     get_timestamp_sec()))
                 logger.warning(
                     f"Case {cid} failed during warmup with status: {status}. Skipping to next case."
                 )
                 continue
-            warmup_us = warmup // 1000
+            warmup_us = warmup_ns // 1000
 
-            status, average_latency, _ = self.run(tuning_key,
+            status, average_latency_ns, _ = self.run(tuning_key,
                                                   tunable_params,
                                                   iters=10)
             end_time = time.perf_counter_ns()
             total_time = end_time - begin_case_id_time
-            if status != 'SUCCESS':
+            if status != TuningStatus.SUCCESS:
                 results_buffer.append(
-                    (caseset_id, run_id, cid, status, _WORKER_ID.value,
-                     warmup_us, 0, spanner.COMMIT_TIMESTAMP))
+                    (caseset_id, run_id, cid, status.value, FLAGS.worker_id,
+                     warmup_us, 0, get_timestamp_sec()))
                 logger.warning(
                     f"Case {cid} failed during main run with status: {status}. Total time spent: {total_time/1e9:.2f}s."
                 )
                 continue
 
-            average_latency_us = average_latency // 1000
+            average_latency_us = average_latency_ns // 1000
             total_time_us = total_time // 1000
             results_buffer.append(
-                (caseset_id, run_id, cid, status, _WORKER_ID.value,
+                (caseset_id, run_id, cid, status.value, FLAGS.worker_id,
                  average_latency_us, warmup_us, total_time_us,
-                 spanner.COMMIT_TIMESTAMP))
+                 get_timestamp_sec()))
 
-            if _DEBUG.value:
+            if FLAGS.debug:
                 logger.info(
                     f"Case {cid} completed with AvgLat={average_latency_us}us, Warmup={warmup_us}us, Total={total_time_us}us"
                 )
