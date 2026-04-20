@@ -262,3 +262,33 @@ def sharded_quantized_batched_matmul(x: jax.Array,
         out_specs=out_sharding,
         check_vma=False,
     )(x, w_q, w_s)
+
+
+def dense_gmm_matmul(x, weight, scale, *, group_size):
+    """Run GMM V2 kernel for a dense (single-group) quantized matmul.
+
+    Treats the dense linear as a single-group GMM, allowing the kernel
+    to handle int8 weights with subchannel scale application.
+
+    Args:
+        x: Input activations, shape (batch, K_local).
+        weight: Int8 weight (zero-point subtracted), shape (K_local, N_local).
+        scale: Per-group scales, shape (num_groups_local, N_local).
+        group_size: Number of input channels per quantization group.
+    """
+    from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
+
+    batch = x.shape[0]
+    rhs = weight[jnp.newaxis, :, :]  # (1, K_local, N_local)
+    rhs_scale = scale[jnp.newaxis, :,
+                      jnp.newaxis, :]  # (1, G_local, 1, N_local)
+    group_sizes = jnp.array([batch], dtype=jnp.int32)
+
+    return gmm_v2(
+        lhs=x,
+        rhs=rhs,
+        rhs_scale=rhs_scale,
+        group_sizes=group_sizes,
+        zero_initialize=False,
+        maybe_quantize_lhs=False,
+    )
