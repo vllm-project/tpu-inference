@@ -789,41 +789,88 @@ class KVCacheManager:
             block_ids: The physical block numbers allocated for this request on
                 this runner. This is a list of lists, for each KV cache group.
         """
-        # Assume one KV cache group for now, which is consistent with current setup.
-        if len(block_ids) > 1:
-            raise NotImplementedError(
-                "Inserting KV cache for models with multiple KV cache groups "
-                "is not supported yet.")
-        block_numbers = block_ids[0]
-        if block_numbers == list(
-                range(block_numbers[0],
-                      block_numbers[0] + len(block_numbers))):
-            # For continuous blocks we use slice instead of scatter.
-            start_block = block_numbers[0]
-            with runner_utils.LatencyTracker(
-                    f"JittedInsertContinuousKVCache-b{len(block_numbers)}"):
-                logger.debug(f"inserting to continuous blocks {block_numbers}")
-                self.runner.kv_caches = KVCacheManager._jitted_insert_continuous_kv_cache_from_slice(
-                    self.runner.block_size,
-                    len(block_numbers),
-                    self.runner.kv_caches,
-                    kv_cache_slices,
-                    0,
-                    start_block,
-                )
-                jax.block_until_ready(self.runner.kv_caches)
+        kv_cache_config = getattr(self.runner, 'kv_cache_config', None)
+        
+        if len(block_ids) > 1 and (kv_cache_config is None or not kv_cache_config.kv_cache_groups):
+             raise ValueError("Multiple block groups provided but no kv_cache_groups config found.")
+
+        if kv_cache_config is not None and kv_cache_config.kv_cache_groups:
+            slice_start_idx = 0
+            for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
+                block_numbers = block_ids[group_idx]
+                num_layers_in_group = len(group.layer_names)
+                
+                # Split slices for this group
+                group_slices = kv_cache_slices[slice_start_idx : slice_start_idx + num_layers_in_group]
+                slice_start_idx += num_layers_in_group
+                
+                if not block_numbers:
+                    continue
+                    
+                # Find indices of layers in self.runner.kv_caches that belong to this group
+                # We assume they are ordered by group.
+                group_cache_start_idx = sum(len(g.layer_names) for g in kv_cache_config.kv_cache_groups[:group_idx])
+                
+                # Extract the subset of runner.kv_caches for this group
+                group_kv_caches = self.runner.kv_caches[group_cache_start_idx : group_cache_start_idx + num_layers_in_group]
+                
+                if block_numbers == list(range(block_numbers[0], block_numbers[0] + len(block_numbers))):
+                    start_block = block_numbers[0]
+                    with runner_utils.LatencyTracker(f"JittedInsertContinuousKVCache-g{group_idx}-b{len(block_numbers)}"):
+                        logger.debug(f"inserting to continuous blocks {block_numbers} for group {group_idx}")
+                        updated_group_caches = KVCacheManager._jitted_insert_continuous_kv_cache_from_slice(
+                            self.runner.block_size,
+                            len(block_numbers),
+                            group_kv_caches,
+                            group_slices,
+                            0,
+                            start_block,
+                        )
+                else:
+                    with runner_utils.LatencyTracker(f"JittedInsertKVCache-g{group_idx}-b{len(block_numbers)}"):
+                        logger.debug(f"inserting to non continuous blocks {block_numbers} for group {group_idx}")
+                        updated_group_caches = KVCacheManager._jitted_insert_kv_cache(
+                            self.runner.block_size,
+                            group_kv_caches,
+                            group_slices,
+                            block_numbers,
+                        )
+                
+                # Update self.runner.kv_caches in place
+                for i, updated_cache in enumerate(updated_group_caches):
+                    self.runner.kv_caches[group_cache_start_idx + i] = updated_cache
+                    
+            jax.block_until_ready(self.runner.kv_caches)
         else:
-            with runner_utils.LatencyTracker(
-                    f"JittedInsertKVCache-b{len(block_numbers)}"):
-                logger.debug(
-                    f"inserting to non continuous blocks {block_numbers}")
-                self.runner.kv_caches = KVCacheManager._jitted_insert_kv_cache(
-                    self.runner.block_size,
-                    self.runner.kv_caches,
-                    kv_cache_slices,
-                    block_numbers,
-                )
-                jax.block_until_ready(self.runner.kv_caches)
+            # Fallback for single group if no config (backward compatibility)
+            block_numbers = block_ids[0]
+            if block_numbers == list(
+                    range(block_numbers[0],
+                          block_numbers[0] + len(block_numbers))):
+                start_block = block_numbers[0]
+                with runner_utils.LatencyTracker(
+                        f"JittedInsertContinuousKVCache-b{len(block_numbers)}"):
+                    logger.debug(f"inserting to continuous blocks {block_numbers}")
+                    self.runner.kv_caches = KVCacheManager._jitted_insert_continuous_kv_cache_from_slice(
+                        self.runner.block_size,
+                        len(block_numbers),
+                        self.runner.kv_caches,
+                        kv_cache_slices,
+                        0,
+                        start_block,
+                    )
+            else:
+                with runner_utils.LatencyTracker(
+                        f"JittedInsertKVCache-b{len(block_numbers)}"):
+                    logger.debug(
+                        f"inserting to non continuous blocks {block_numbers}")
+                    self.runner.kv_caches = KVCacheManager._jitted_insert_kv_cache(
+                        self.runner.block_size,
+                        self.runner.kv_caches,
+                        kv_cache_slices,
+                        block_numbers,
+                    )
+            jax.block_until_ready(self.runner.kv_caches)
 
         logger.debug(
             f"Updated kv cache entries cnt={len(self.runner.kv_caches)}")

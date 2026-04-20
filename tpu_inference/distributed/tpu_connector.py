@@ -64,6 +64,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
+from tpu_inference.runner import utils as runner_utils
 from uuid import uuid4
 
 import jax
@@ -73,8 +74,9 @@ import zmq
 from jax.experimental.transfer import start_transfer_server
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole, SupportsHMA)
 from vllm.utils.math_utils import round_down
 from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -82,6 +84,7 @@ from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 import tpu_inference.distributed.utils as dist_utils
@@ -106,15 +109,15 @@ logger = init_logger(__name__)
 @dataclass
 class SendMeta:
     uuid: int
-    local_block_ids: list[int]
+    local_block_ids: BlockIds
     expiration_time: float
 
 
 @dataclass
 class LoadMeta:
     uuid: int
-    local_block_ids: list[int]
-    remote_block_ids: list[int]
+    local_block_ids: BlockIds
+    remote_block_ids: BlockIds
     remote_host: str | list[str]
     remote_port: int | list[int]
 
@@ -126,7 +129,7 @@ class _kv_transfer_params:
     D recieves this from proxy server and uses this to create LoadMeta.
     """
     uuid: int
-    remote_block_ids: list[int]
+    remote_block_ids: BlockIds
     # A single IP for single-host, or a list of IPs for mult-host.
     remote_host: str | list[str]
     # A single port for single-host, or a list of ports for mult-host.
@@ -140,19 +143,19 @@ class TPUConnectorMetadata(KVConnectorMetadata):
     reqs_to_load: dict[ReqId, LoadMeta] = field(default_factory=dict)
 
 
-class TPUConnector(KVConnectorBase_V1):
+class TPUConnector(KVConnectorBase_V1, SupportsHMA):
 
-    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
+    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: "KVCacheConfig"):
         assert vllm_config.kv_transfer_config is not None
         self._connector_metadata = None
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = \
-                TPUConnectorScheduler(vllm_config)
+                TPUConnectorScheduler(vllm_config, kv_cache_config)
             self.connector_worker = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
-            self.connector_worker = TPUConnectorWorker(vllm_config)
+            self.connector_worker = TPUConnectorWorker(vllm_config, kv_cache_config)
 
     ############################################################
     # Scheduler Side Methods
@@ -183,6 +186,14 @@ class TPUConnector(KVConnectorBase_V1):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.request_finished(request, block_ids)
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
@@ -236,8 +247,9 @@ class TPUConnector(KVConnectorBase_V1):
 
 class TPUConnectorScheduler():
 
-    def __init__(self, vllm_config: "VllmConfig"):
+    def __init__(self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"):
         self.vllm_config = vllm_config
+        self.kv_cache_config = kv_cache_config
         self.config = vllm_config.kv_transfer_config
         self.is_producer = self.config.is_kv_producer
 
@@ -253,8 +265,19 @@ class TPUConnectorScheduler():
 
         self.kv_ip = dist_utils.get_kv_ips()
         self.kv_port = dist_utils.get_kv_ports()
+        
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+        self._is_hma_required = (
+            not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+            and kv_cache_config is not None
+            and any(
+                not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                for g in kv_cache_config.kv_cache_groups
+            )
+        )
+        
         logger.info(
-            f"TPUConnectorScheduler --> kv_ip={self.kv_ip} | kv_port={self.kv_port}"
+            f"TPUConnectorScheduler --> kv_ip={self.kv_ip} | kv_port={self.kv_port} | HMA={self._is_hma_required}"
         )
 
     def get_num_new_matched_tokens(
@@ -314,7 +337,7 @@ class TPUConnectorScheduler():
         params = request.kv_transfer_params
         if num_external_tokens > 0:
             # We need to load KV-cache from remote (partial prefix cache hit).
-            local_block_ids = blocks.get_block_ids()[0]
+            local_block_ids = blocks.get_block_ids()
 
             # NOTE(xiang): D needs to pull the whole prefill blocks from the remote
             # regardless how much ratio the prefix cache hits.
@@ -376,7 +399,7 @@ class TPUConnectorScheduler():
     def request_finished(
         self,
         request: "Request",
-        block_ids: list[int],
+        block_ids: BlockIds,
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Called when a request has finished, before its blocks are freed.
@@ -404,10 +427,34 @@ class TPUConnectorScheduler():
         # This indication means for the last partially filled block, we won't bother transfering
         # KV-cache, will just let D run prefill locally.
         all_full = request.num_computed_tokens % self.block_size == 0
-        computed_block_ids = block_ids if all_full else block_ids[:-1]
+        logger.info(f"TPUConnector Scheduler ----> request_finished | req_id={request.request_id} | all_full={all_full} | raw block_ids={block_ids}")
+        
+        if all_full:
+            computed_block_ids = block_ids
+        else:
+            # Drop the last block of each group if not all full, EXCEPT for linear attention states
+            # computed_block_ids should be a tuple of lists
+            if isinstance(block_ids, list) and len(block_ids) > 0 and isinstance(block_ids[0], int):
+                # Fallback for old flat list if it somehow happens
+                computed_block_ids = block_ids[:-1]
+            else:
+                from vllm.v1.kv_cache_interface import FullAttentionSpec
+                computed_block_ids_list = []
+                for group_idx, group in enumerate(block_ids):
+                    g_spec = self.kv_cache_config.kv_cache_groups[group_idx].kv_cache_spec
+                    if isinstance(g_spec, FullAttentionSpec):
+                        computed_block_ids_list.append(group[:-1] if len(group) > 0 else group)
+                    else:
+                        computed_block_ids_list.append(group) # Do not drop for linear attention (Mamba)
+                computed_block_ids = tuple(computed_block_ids_list)
+        logger.info(f"TPUConnector Scheduler ----> request_finished | req_id={request.request_id} | computed_block_ids={computed_block_ids}")
 
         # If prompt < block_size, no transfer so free blocks immediately.
-        delay_free_blocks = len(computed_block_ids) > 0
+        if isinstance(computed_block_ids, tuple):
+            delay_free_blocks = any(len(group) > 0 for group in computed_block_ids)
+        else:
+            delay_free_blocks = len(computed_block_ids) > 0
+            
         if delay_free_blocks:
             uuid = get_uuid()
             expiration_time = time.perf_counter(
@@ -431,7 +478,7 @@ class TPUConnectorScheduler():
 
 class TPUConnectorWorker:
 
-    def __init__(self, vllm_config: VllmConfig):
+    def __init__(self, vllm_config: VllmConfig, kv_cache_config: "KVCacheConfig"):
         self.vllm_config = vllm_config
         self.config = vllm_config.kv_transfer_config
         self.is_producer = self.config.is_kv_producer
@@ -443,6 +490,17 @@ class TPUConnectorWorker:
         # when the topology is initialized, runner will update it
         # based on topology_order_id
         self.node_id = 0
+
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+        self._is_hma_required = (
+            not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+            and kv_cache_config is not None
+            and any(
+                not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                for g in kv_cache_config.kv_cache_groups
+            )
+        )
+        self.kv_cache_config = kv_cache_config
 
         # req_id: (kv, expiration_time)
         self.reqs_wait_pull: dict[ReqId, list[list[jax.Array], float,
@@ -503,10 +561,18 @@ class TPUConnectorWorker:
         # Get the spec of the kv_caches
         kv_caches = runner.kv_caches
         kv_layer = kv_caches[0]
+        
+        if isinstance(kv_layer, tuple):
+            representative_layer = kv_layer[0]
+            self.shape = list(representative_layer.shape)
+            self.dtype = representative_layer.dtype
+            self.sharding = representative_layer.sharding
+        else:
+            self.shape = list(kv_layer.shape)
+            self.dtype = kv_layer.dtype
+            self.sharding = kv_layer.sharding
+
         self.num_layers = len(kv_caches)
-        self.shape = list(kv_layer.shape)
-        self.dtype = kv_layer.dtype
-        self.sharding = kv_layer.sharding
         self.host_sharding = jax.sharding.NamedSharding(
             self.sharding.mesh,
             self.sharding.spec,
@@ -522,11 +588,14 @@ class TPUConnectorWorker:
         ) and not self.multi_host:
             block_size = self.vllm_config.cache_config.block_size
             max_blocks = self.vllm_config.model_config.max_model_len // block_size
+            
+            inner_shape = representative_layer.shape[1:] if isinstance(kv_layer, tuple) else kv_layer.shape[1:]
+            
             self.host_kv_pool = HostKVPool(
                 pool_size=dist_utils.get_max_host_kv_buffer_size(),
                 num_layers=self.num_layers,
                 max_blocks_per_req=max_blocks,
-                cache_inner_shape=kv_layer.shape[1:],
+                cache_inner_shape=inner_shape,
                 dtype=self.dtype,
                 host_sharding=self.host_sharding)
 
@@ -605,34 +674,110 @@ class TPUConnectorWorker:
                 # The request requires to pull KV from P, build the connection and pull
                 # the data asyncly.
 
-                # We execute device_array here so JAX sees the exact same sequence
-                # of local_block_ids across all TPU nodes simultaneously.
-                # TODO(xiang): pad block_ids to avoid recompilation
-                indices = device_array(self.mesh,
-                                       np.array(req_meta.local_block_ids))
+                # Pass a dummy array since indices is not used in process_send_load or _pull_kv
+                indices = device_array(self.mesh, np.array([0], dtype=np.int32))
                 conn = self._maybe_build_kv_connection(req_meta)
 
                 self.reqs_pulling[req_id] = self.pull_executor.submit(
                     self._pull_kv, req_id, conn, req_meta, indices)
-            else:
-                if req_id in self.reqs_ready_to_insert:
-                    kv, indices, block_numbers = self.reqs_ready_to_insert.pop(
-                        req_id)
-                    if len(block_numbers) > 0:
-                        self.runner.kv_caches = insert_kv_chunks(
-                            self.runner.kv_caches, kv, block_numbers,
-                            self.mesh, self.sharding.spec)
+            elif req_id in self.reqs_ready_to_insert:
+                    kv, indices, block_numbers_list = self.reqs_ready_to_insert[
+                        req_id]
 
-                # The request has finished pulling the KV from remote, or it has full local
-                # prefix cache, need to notify P to let it free blocks.
-                socket = self._maybe_build_notif_socket(req_meta)
-                self._notify_pull_done(socket, req_id, req_meta.uuid)
+                    with runner_utils.LatencyTracker(
+                            f"insert_request_kv_cache-{req_id}"):
+                        
+                        slice_start_idx = 0
+                        for group_idx, group in enumerate(self.kv_cache_config.kv_cache_groups):
+                            num_layers_in_group = len(group.layer_names)
+                            
+                            group_cache_start_idx = sum(len(g.layer_names) for g in self.kv_cache_config.kv_cache_groups[:group_idx])
+                            group_kv_caches = self.runner.kv_caches[group_cache_start_idx : group_cache_start_idx + num_layers_in_group]
+                            
+                            # Calculate number of states in group to slice properly
+                            num_states_in_group = sum(len(c) if isinstance(c, tuple) else 1 for c in group_kv_caches)
+                            group_slices = kv[slice_start_idx : slice_start_idx + num_states_in_group]
+                            slice_start_idx += num_states_in_group
+                            
+                            # Fallback for old flat list if it somehow happens
+                            if isinstance(block_numbers_list, list) and len(block_numbers_list) > 0 and isinstance(block_numbers_list[0], int):
+                                block_numbers = block_numbers_list
+                            else:
+                                block_numbers = block_numbers_list[group_idx]
+                            
+                            if not block_numbers:
+                                continue
+                                
+                            # Flatten group_kv_caches for insert_kv_chunks
+                            flattened_group_kv_caches = []
+                            for cache in group_kv_caches:
+                                if isinstance(cache, tuple):
+                                    flattened_group_kv_caches.extend(cache)
+                                else:
+                                    flattened_group_kv_caches.append(cache)
+                                    
+                            spec = group_kv_caches[0][0].sharding.spec if isinstance(group_kv_caches[0], tuple) else group_kv_caches[0].sharding.spec
+                            
+                            logger.debug(f"inserting chunks to blocks {block_numbers} for group {group_idx}")
+                            updated_flattened_caches = insert_kv_chunks(
+                                flattened_group_kv_caches, group_slices, block_numbers,
+                                self.runner.mesh, spec)
+                                
+                            # Unflatten updated_flattened_caches back into structure
+                            updated_group_caches = []
+                            cache_idx = 0
+                            for cache in group_kv_caches:
+                                if isinstance(cache, tuple):
+                                    num_states = len(cache)
+                                    updated_group_caches.append(tuple(updated_flattened_caches[cache_idx : cache_idx + num_states]))
+                                    cache_idx += num_states
+                                else:
+                                    updated_group_caches.append(updated_flattened_caches[cache_idx])
+                                    cache_idx += 1
+                                    
+                            for i, updated_cache in enumerate(updated_group_caches):
+                                self.runner.kv_caches[group_cache_start_idx + i] = updated_cache
+
+                        del self.reqs_ready_to_insert[req_id]
+
+                    # The request has finished pulling the KV from remote, or it has full local
+                    # prefix cache, need to notify P to let it free blocks.
+                    socket = self._maybe_build_notif_socket(req_meta)
+                    self._notify_pull_done(socket, req_id, req_meta.uuid)
 
     def _prepare_kv_and_wait(self, req_id: str, req_meta: SendMeta):
         local_block_ids = req_meta.local_block_ids
-        # TODO(xiang): pad block_ids to avoid recompilation
-        indices = device_array(self.mesh, np.array(local_block_ids))
-        kv = select_from_kv_caches(self.runner.kv_caches, indices)
+        
+        if self.kv_cache_config is None and self.runner is not None:
+            self.kv_cache_config = getattr(self.runner, "kv_cache_config", None)
+            
+        # Flatten kv_caches to handle tuples (Mamba)
+        flattened_caches = []
+        for cache in self.runner.kv_caches:
+            if isinstance(cache, tuple):
+                flattened_caches.extend(list(cache))
+            else:
+                flattened_caches.append(cache)
+                
+        # Create flat list of indices matching flattened_caches
+        indices = []
+        cache_idx = 0
+        for group_idx, group in enumerate(self.kv_cache_config.kv_cache_groups):
+            g_ids = local_block_ids[group_idx]
+            g_ids_arr = device_array(self.mesh, np.array(g_ids, dtype=np.int32))
+            
+            # Replicate indices for each state in the group
+            for _ in range(len(group.layer_names)):
+                cache = self.runner.kv_caches[cache_idx]
+                cache_idx += 1
+                if isinstance(cache, tuple):
+                    indices.extend([g_ids_arr] * len(cache))
+                else:
+                    indices.append(g_ids_arr)
+                    
+        logger.info(f"TPUConnector Worker ----> _prepare_kv_and_wait | req_id={req_id} | num_flattened_caches={len(flattened_caches)} | num_indices={len(indices)}")
+                    
+        kv = select_from_kv_caches(flattened_caches, indices)
         if dist_utils.get_enable_d2h_transfer() and not self.multi_host:
             self.kv_d2h_executor.submit(self._async_d2h_and_transfer, req_id,
                                         req_meta, kv, len(local_block_ids))
@@ -720,7 +865,7 @@ class TPUConnectorWorker:
         # if partial prefix cache hit now.
         assert len(local_block_ids) == len(remote_block_ids)
 
-        kv_spec = self._get_kv_spec(len(remote_block_ids))
+        kv_spec = self._get_kv_spec(remote_block_ids)
         logger.info(
             f"Worker {self.node_id} --> kv transfer | start pull req_id={req_id} | uuid={req_meta.uuid}"
         )
@@ -747,13 +892,32 @@ class TPUConnectorWorker:
             f"pull time={pull_time_ms:.2f}ms | size={kv_size_mb:.2f}MB")
         return kv, indices, req_meta.local_block_ids
 
-    def _get_kv_spec(self, num_blocks: int) -> list[jax.ShapeDtypeStruct]:
-        assert num_blocks <= self.shape[0]
-        shape = copy.copy(self.shape)
-        shape[0] = num_blocks
-        return [
-            jax.ShapeDtypeStruct(shape, self.dtype, sharding=self.sharding)
-        ] * self.num_layers
+    def _get_kv_spec(self, remote_block_ids: BlockIds) -> list[jax.ShapeDtypeStruct]:
+        if self.kv_cache_config is None and self.runner is not None:
+            self.kv_cache_config = getattr(self.runner, "kv_cache_config", None)
+            
+        specs = []
+        idx = 0
+        for group_idx, group in enumerate(self.kv_cache_config.kv_cache_groups):
+            # Fallback for old flat list if it somehow happens
+            if isinstance(remote_block_ids, list) and len(remote_block_ids) > 0 and isinstance(remote_block_ids[0], int):
+                num_blocks = len(remote_block_ids)
+            else:
+                num_blocks = len(remote_block_ids[group_idx])
+                
+            for _ in group.layer_names:
+                cache = self.runner.kv_caches[idx]
+                if isinstance(cache, tuple):
+                    for state in cache:
+                        shape = list(state.shape)
+                        shape[0] = num_blocks
+                        specs.append(jax.ShapeDtypeStruct(shape, state.dtype, sharding=state.sharding))
+                else:
+                    shape = list(cache.shape)
+                    shape[0] = num_blocks
+                    specs.append(jax.ShapeDtypeStruct(shape, cache.dtype, sharding=cache.sharding))
+                idx += 1
+        return specs
 
     def _maybe_build_notif_socket(self, req_meta: LoadMeta) -> zmq.Socket:
         remote_host = req_meta.remote_host
@@ -829,55 +993,18 @@ def get_uuid() -> int:
 @jax.jit
 def select_from_kv_caches(kv_caches: list[jax.Array],
                           indices: list[jax.Array]) -> list[jax.Array]:
-    selected = [cache.at[indices].get() for cache in kv_caches]
+    selected = [cache.at[ind].get() for cache, ind in zip(kv_caches, indices)]
     return selected
 
 
 def insert_kv_chunks(kv_caches: list[jax.Array], kv_slices: list[jax.Array],
                      block_numbers: list[int], mesh: jax.sharding.Mesh,
                      spec) -> list[jax.Array]:
-    src_offsets = []
-    dest_offsets = []
-    chunk_sizes = []
-
-    start_idx = 0
-    for i in range(1, len(block_numbers) + 1):
-        if i == len(block_numbers) or block_numbers[i] != block_numbers[i -
-                                                                        1] + 1:
-            start_block = block_numbers[start_idx]
-            chunk_size = i - start_idx
-
-            src_offsets.append(start_idx)
-            dest_offsets.append(start_block)
-            chunk_sizes.append(chunk_size)
-
-            start_idx = i
-
-    num_chunks = len(src_offsets)
-    total_len = len(block_numbers)
-
-    # Pad to total_len to avoid recompilation
-    while len(src_offsets) < total_len:
-        src_offsets.append(0)
-        dest_offsets.append(0)
-        chunk_sizes.append(0)
-
-    src_offsets_arr = jnp.array(src_offsets, dtype=jnp.int32)
-    dest_offsets_arr = jnp.array(dest_offsets, dtype=jnp.int32)
-    chunk_sizes_arr = jnp.array(chunk_sizes, dtype=jnp.int32)
-    num_chunks_arr = jnp.array([num_chunks], dtype=jnp.int32)
-
-    replicated_spec = jax.sharding.PartitionSpec()
-
-    return multi_layer_copy(
-        src_array=kv_slices,
-        dest_array=kv_caches,
-        src_offsets=src_offsets_arr,
-        dest_offsets=dest_offsets_arr,
-        chunk_sizes=chunk_sizes_arr,
-        num_chunks=num_chunks_arr,
-        mesh=mesh,
-        src_sharding_spec=spec,
-        dest_sharding_spec=spec,
-        replicated_sharding_spec=replicated_spec,
-    )
+    block_numbers_arr = jnp.array(block_numbers, dtype=jnp.int32)
+    updated_caches = list(kv_caches)
+    
+    for i, (cache, slice_) in enumerate(zip(kv_caches, kv_slices)):
+        # Standard JAX updates do not require copies and ignore tiling
+        updated_caches[i] = cache.at[block_numbers_arr].set(slice_)
+        
+    return updated_caches

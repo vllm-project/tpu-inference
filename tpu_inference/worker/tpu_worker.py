@@ -285,8 +285,6 @@ class TPUWorker(WorkerBase):
             self.devices[0],
             need_pp=self.parallel_config.pipeline_parallel_size > 1)
 
-        ensure_kv_transfer_initialized(self.vllm_config)
-
         is_first_rank = True
         is_last_rank = True
         self.topology_order_id = self.rank
@@ -450,6 +448,7 @@ class TPUWorker(WorkerBase):
         kv_cache_config: KVCacheConfig,
     ) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         # Precompile functions with large vocab_size tensors before allocating KV cache to avoid OOM
         if not (envs.SKIP_JAX_PRECOMPILE or
                 (hasattr(self.model_runner.model_config, "enforce_eager")
