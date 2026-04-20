@@ -150,15 +150,14 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
         # missing chips with the maximum reported value to get an accurate
         # total_hbm_used and avoid massively over-allocating KV cache.
         max_used = max(used for used, _ in usage)
+        n_zero = sum(1 for used, _ in usage if used == 0)
         usage = [(max_used if used == 0 else used, limit)
                  for used, limit in usage]
-        n_filled = sum(1 for used, _ in usage if used == max_used)
-        if n_filled > 1:
+        if n_zero > 0:
             logger.info(
                 "memory_stats() returned 0 for %d/%d devices; "
                 "filled with max_used=%.2fGiB to prevent KV cache OOM.",
-                n_filled - (len(usage) - n_filled), len(usage),
-                max_used / GBYTES)
+                n_zero, len(usage), max_used / GBYTES)
         # Some devices raised exceptions and were never appended to usage.
         # Pad those missing entries so the caller gets one entry per device.
         if len(usage) < len(devices):

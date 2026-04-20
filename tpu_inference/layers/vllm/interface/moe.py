@@ -82,14 +82,19 @@ def vllm_moe_apply(layer: FusedMoE, weights: FusedMoEWeights,
 
     # For models with topk_method="noaux_tc" (GLM-5.1 / DeepSeek-V3), vLLM
     # stores e_score_correction_bias on the FusedMoE layer. Convert once
-    # (outside JIT) and pass to the MoE kernel via extra_backend_kwargs so
-    # top-k selection uses (scores + bias) while weights stay un-biased.
-    extra_kwargs = dict(quant_method_instance.extra_backend_kwargs or {})
+    # (outside JIT) and cache on quant_method_instance.extra_backend_kwargs
+    # so top-k selection uses (scores + bias) while weights stay un-biased.
     _bias = getattr(layer, "e_score_correction_bias", None)
-    if _bias is not None and "e_score_correction_bias" not in extra_kwargs:
-        from torchax.ops.mappings import t2j
-        extra_kwargs["e_score_correction_bias"] = t2j(
-            _bias.detach(), use_dlpack=False)
+    if _bias is not None:
+        cache = quant_method_instance.extra_backend_kwargs
+        if cache is None:
+            cache = {}
+            quant_method_instance.extra_backend_kwargs = cache
+        if "e_score_correction_bias" not in cache:
+            from torchax.ops.mappings import t2j
+            cache["e_score_correction_bias"] = t2j(
+                _bias.detach(), use_dlpack=False)
+    extra_kwargs = dict(quant_method_instance.extra_backend_kwargs or {})
 
     output_jax = moe_apply(
         layer=layer,

@@ -740,9 +740,23 @@ def process_fp8_moe_weights(
             weight_block_size=weight_block_size,
         )
 
+    # Chunk the experts in *equal* slabs so every call to the jitted
+    # `_process_fp8_moe_weight_chunk` sees the same input shapes and reuses
+    # the same compiled artifact. A tail chunk of a different size would
+    # trigger a second JIT compilation for only one chunk and undo the
+    # cost amortization this helper exists for.
+    if num_experts % expert_chunk_size != 0:
+        # Round up to the nearest chunk size that divides num_experts evenly.
+        for candidate in range(expert_chunk_size, num_experts + 1):
+            if num_experts % candidate == 0:
+                expert_chunk_size = candidate
+                break
+        else:
+            expert_chunk_size = num_experts
+
     processed_chunks = []
     for expert_start in range(0, num_experts, expert_chunk_size):
-        expert_end = min(expert_start + expert_chunk_size, num_experts)
+        expert_end = expert_start + expert_chunk_size
         chunk = _slice_fused_moe_weights(weights, slice(expert_start,
                                                         expert_end))
         processed_chunks.append(
@@ -815,24 +829,13 @@ def process_fp8_moe_weights_direct(
     # split+reorder on axis-3 which requires the expanded (E, N_full, K_blocks)
     # layout.
     w13_scale = expand_2d_block_scale(weights.w13_weight_scale, block_size_n)
-    # w2 compact optimization only for GMM_TP: keep (E, N_blocks, K_blocks).
-    # process_moe_weights swaps to (E, K_blocks, N_blocks) 3D and skips
-    # expand_dims. gmm_v2.make_gmm_configs detects 3D scale and enables
-    # scale_n_block_size mode so the kernel does per-block scalar lookup
-    # instead of per-element N expansion. Other backends (FUSED_MOE, GMM_EP)
-    # keep the legacy expand path — they have their own downstream pad/pack
-    # logic that assumes 4D.
-    #
-    # Rationale: host-side expand on w2 created a 128× memory blow-up on
-    # the N dim (e.g. 48 → 6144 for GLM-5.1), pushed CPU mem past Ray's
-    # 95% OOM threshold on 744B MoE models, and forced a second host-side
-    # `jnp.repeat` to realign axis 1 with TP=32. Keeping w2 scale compact
-    # eliminates both hacks at the cost of a kernel-side scalar load per
-    # block (already supported, just unused).
-    # Compact 3D w2 scale was an earlier optimization for GMM_TP TP=32, but
-    # it breaks downstream paths (PP per-stage TP=4 triggers Mosaic tile error
-    # on N_blocks=48 unaligned to 128; tensor_parallel_gmm's in_specs wrote 4D
-    # spec).  Keep legacy 4D expanded layout everywhere for stability.
+    # Keep legacy 4D expanded w2 scale for all backends.  Compact 3D was tried
+    # for GMM_EP but Mosaic's DMA slicer requires the last dim of the scale
+    # memref be divisible by the tile size (128), which fails on GLM-5.1 where
+    # N_blocks=hidden/128=48.  The CPU-RAM motivation for the compact path is
+    # already handled upstream by `tpu_streaming_loader` + the EP weight
+    # filter, which gives each host only 1/ep_size of the experts so the 128×
+    # host-side expand cost is bounded (~120 MB per host for 75 layers).
     w2_scale = expand_2d_block_scale(weights.w2_weight_scale, block_size_n)
 
     w13_interleave = activation == "swigluoai"

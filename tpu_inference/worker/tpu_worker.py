@@ -25,8 +25,6 @@ from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 try:
     from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 except ImportError:
-    from dataclasses import dataclass
-
     from vllm.v1.worker.worker_base import WorkerBase
 
     # order=True so vllm's `max(CompilationTimes_a, CompilationTimes_b)` works.
@@ -425,44 +423,48 @@ class TPUWorker(WorkerBase):
                     f"{total_hbm_avail_gb=}GiB")
 
         # HBM breakdown probe: enumerate jax.live_arrays() to compare vs
-        # bytes_in_use.  Gap = JAX/PJRT pool overhead + XLA reserved +
+        # bytes_in_use. Gap = JAX/PJRT pool overhead + XLA reserved +
         # transient compile scratch; live_arrays = actual weights + params.
-        try:
-            live = jax.live_arrays()
-            groups: dict[tuple, list[int]] = {}
-            total_live_global = 0
-            for a in live:
-                nbytes = getattr(a, "nbytes", None)
-                if nbytes is None:
-                    shape = tuple(a.shape)
-                    size = 1
-                    for d in shape:
-                        size *= d
-                    nbytes = size * a.dtype.itemsize
-                key = (str(a.dtype), str(tuple(a.shape)))
-                entry = groups.setdefault(key, [0, 0])
-                entry[0] += 1
-                entry[1] += nbytes
-                total_live_global += nbytes
-            per_chip_live = total_live_global / max(len(jax.devices()), 1)
-            logger.info(
-                "HBM probe | live_arrays_total_global=%.2fGiB "
-                "per_chip_live≈%.2fGiB | device_in_use_per_chip=%.2fGiB | "
-                "gap_per_chip=%.2fGiB (pool/scratch/reserved)",
-                total_live_global / utils.GBYTES,
-                per_chip_live / utils.GBYTES,
-                max_per_chip / utils.GBYTES,
-                (max_per_chip - per_chip_live) / utils.GBYTES)
-            sorted_groups = sorted(groups.items(), key=lambda kv: -kv[1][1])
-            logger.info("HBM probe | top 25 live_array (dtype, shape) groups by total global bytes:")
-            for (dtype, shape), (count, total) in sorted_groups[:25]:
-                logger.info(
-                    "  %4d × %s %s = %.3fGiB (per-chip≈%.3fGiB)",
-                    count, shape, dtype,
-                    total / utils.GBYTES,
-                    total / max(len(jax.devices()), 1) / utils.GBYTES)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"HBM probe failed: {e}")
+        # Opt-in because enumerating live arrays is not free and the
+        # top-25 table is verbose; only useful when debugging HBM usage.
+        if os.environ.get("TPU_HBM_PROBE", "0") == "1":
+            try:
+                live = jax.live_arrays()
+                groups: dict[tuple, list[int]] = {}
+                total_live_global = 0
+                for a in live:
+                    nbytes = getattr(a, "nbytes", None)
+                    if nbytes is None:
+                        shape = tuple(a.shape)
+                        size = 1
+                        for d in shape:
+                            size *= d
+                        nbytes = size * a.dtype.itemsize
+                    key = (str(a.dtype), str(tuple(a.shape)))
+                    entry = groups.setdefault(key, [0, 0])
+                    entry[0] += 1
+                    entry[1] += nbytes
+                    total_live_global += nbytes
+                per_chip_live = total_live_global / max(len(jax.devices()), 1)
+                logger.debug(
+                    "HBM probe | live_arrays_total_global=%.2fGiB "
+                    "per_chip_live≈%.2fGiB | device_in_use_per_chip=%.2fGiB "
+                    "| gap_per_chip=%.2fGiB (pool/scratch/reserved)",
+                    total_live_global / utils.GBYTES,
+                    per_chip_live / utils.GBYTES,
+                    max_per_chip / utils.GBYTES,
+                    (max_per_chip - per_chip_live) / utils.GBYTES)
+                sorted_groups = sorted(groups.items(),
+                                       key=lambda kv: -kv[1][1])
+                logger.debug(
+                    "HBM probe | top 25 live_array (dtype, shape) groups:")
+                for (dtype, shape), (count, total) in sorted_groups[:25]:
+                    logger.debug(
+                        "  %4d × %s %s = %.3fGiB (per-chip≈%.3fGiB)",
+                        count, shape, dtype, total / utils.GBYTES,
+                        total / max(len(jax.devices()), 1) / utils.GBYTES)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"HBM probe failed: {e}")
 
         if total_hbm_avail <= 0:
             raise ValueError(f"{total_hbm_used_gb=}GiB exceeds "

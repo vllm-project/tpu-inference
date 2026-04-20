@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from typing import Optional, Union
 
 import jax
@@ -341,7 +340,8 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         if (weight_block_size is not None
                 and envs.MOE_SKIP_REQUANTIZATION):
             # Fast path: skip dequant/requant, direct FP8 shape transform
-            logger.info("[MoE] Skipping requantization — direct FP8 path")
+            logger.info_once(
+                "[MoE] Skipping requantization — direct FP8 path")
             weights = process_fp8_moe_weights_direct(
                 input_weights,
                 moe_backend=self.moe_backend,

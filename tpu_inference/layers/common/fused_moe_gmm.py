@@ -533,11 +533,13 @@ def fused_moe_func(
                                                include_initial=True)
             shard_output_start = group_offsets[experts_start]
             shard_output_end = group_offsets[experts_end]
-            # Assert ragged_gather bounds are valid — prevents silent OOB
-            # on unexpected mesh configurations.
-            assert global_num_experts % num_ep_shard == 0, (
-                f"global_num_experts ({global_num_experts}) must be divisible "
-                f"by EP shard count ({num_ep_shard})")
+            # Validate ragged_gather bounds — prevents silent OOB on
+            # unexpected mesh configurations. Use ValueError so the check
+            # survives `python -O` (asserts get stripped).
+            if global_num_experts % num_ep_shard != 0:
+                raise ValueError(
+                    f"global_num_experts ({global_num_experts}) must be "
+                    f"divisible by EP shard count ({num_ep_shard})")
             x = ragged_gather(
                 hidden_states_local,
                 token_indices_sorted,

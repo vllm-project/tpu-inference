@@ -30,7 +30,6 @@ from vllm.model_executor.model_loader.utils import (
     initialize_model, process_weights_after_loading)
 from vllm.utils.torch_utils import set_default_torch_dtype
 
-from tpu_inference import envs
 from tpu_inference.layers.vllm.quantization.base import VllmQuantizationMethod
 from tpu_inference.logger import init_logger
 
@@ -51,7 +50,6 @@ def _count_groups(sorted_ids: list[int]) -> int:
 
 def _compute_mesh_aware_local_expert_ids(
     num_experts: int,
-    ep_size: int,
 ) -> list[int] | None:
     """Return the GLOBAL expert ids this process's local devices will own,
     ORDERED by mesh flat-iteration of local devices.
@@ -90,11 +88,19 @@ def _compute_mesh_aware_local_expert_ids(
         )
 
         devices = jax.devices()
-        try:
-            device_mesh = mesh_utils.create_device_mesh(
-                mesh_shape, devices, allow_split_physical_axes=True)
-        except (AssertionError, ValueError, RuntimeError):
+        # Mirror tpu_runner.py: when FORCE_LOGICAL_RESHAPE=1, bypass the
+        # physical-optimal mesh and use naive row-major reshape so the loader
+        # picks the same device order as the runner. Otherwise a mesh
+        # divergence between loader and runner would misalign expert ids.
+        force_logical = os.environ.get("FORCE_LOGICAL_RESHAPE", "0") == "1"
+        if force_logical:
             device_mesh = np.array(devices).reshape(mesh_shape)
+        else:
+            try:
+                device_mesh = mesh_utils.create_device_mesh(
+                    mesh_shape, devices, allow_split_physical_axes=True)
+            except (AssertionError, ValueError, RuntimeError):
+                device_mesh = np.array(devices).reshape(mesh_shape)
 
         local_proc = jax.process_index()
         # EXPERT sharding axes = ('attn_dp', 'attn_dp_expert', 'expert', 'model')
@@ -254,7 +260,7 @@ class IncrementalModelLoader(DefaultModelLoader):
             # The returned list is ordered by mesh flat-iteration so
             # make_array_from_process_local_data places each 8-expert chunk on
             # the right local device, matching the kernel's shard_idx*8 rule.
-            ordered = _compute_mesh_aware_local_expert_ids(num_experts, ep_size)
+            ordered = _compute_mesh_aware_local_expert_ids(num_experts)
             if ordered is not None:
                 # vLLM's DefaultModelLoader uses a set for should_skip_weight
                 # membership; keep the ordered list separately for the

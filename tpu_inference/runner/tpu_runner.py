@@ -519,8 +519,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             cache_dtype = self.dtype
         kv_cache_dtype = to_jax_dtype(cache_dtype)
         kv_packing = common_utils.get_dtype_packing(kv_cache_dtype)
+        # Env override so callers who know their workload starts at a larger
+        # padding bucket (e.g. an EP test that only exercises 32+ tokens) can
+        # skip compiling the unused 16/32-token buckets. Default 16 matches
+        # upstream behaviour; users who never set this pay nothing.
+        min_bucket_env = int(os.environ.get("TPU_MIN_TOKEN_BUCKET", "16"))
         self.num_tokens_paddings = runner_utils.get_token_paddings(
-            min_token_size=max(512, next_power_of_2(self.dp_size * kv_packing)),
+            min_token_size=max(min_bucket_env,
+                               next_power_of_2(self.dp_size * kv_packing)),
             max_token_size=scheduler_config.max_num_batched_tokens *
             self.dp_size,
             padding_gap=vllm_envs.VLLM_TPU_BUCKET_PADDING_GAP)

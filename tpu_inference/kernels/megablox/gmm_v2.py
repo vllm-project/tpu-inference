@@ -23,6 +23,8 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference.kernels.megablox.common import tpu_generation
+
 # TPU v4 has no FP8 matmul support (Mosaic E2001). We detect FP8 and dequantize
 # to BF16 inside the Pallas kernel VMEM.
 _FP8_DTYPES = (jnp.float8_e4m3fn, jnp.float8_e5m2)
@@ -412,9 +414,12 @@ def inner_kernel(
 
                     rhs_block = tiled_rhs[k_start:k_end, start_n:end_n]
 
-                    # TPU v4: no FP8 matmul (Mosaic E2001). Dequantize FP8 tile
-                    # in Pallas VMEM to float32 for numerical accuracy.
-                    if cfgs.rhs_cfgs.dtype in _FP8_DTYPES and cfgs.rhs_cfgs.has_scale:
+                    # TPU v4: no FP8 matmul (Mosaic E2001). Dequantize FP8
+                    # tile in Pallas VMEM to float32 for numerical accuracy.
+                    # Newer TPU generations support FP8 matmul natively.
+                    if (cfgs.rhs_cfgs.dtype in _FP8_DTYPES
+                            and cfgs.rhs_cfgs.has_scale
+                            and tpu_generation() == 4):
                         tiled_rhs_scale = tiled_rhs_ref.get_scale()
                         if cfgs.rhs_cfgs.scale_n_block_size is not None:
                             # 2D block scale: tiled_rhs_scale is (K_blocks_per_tile, N_blocks_per_tile)
@@ -924,7 +929,9 @@ def calculate_tiling(
     # TPU v4: FP8→F32 dequant in VMEM keeps the original FP8 tile, the F32
     # intermediate, and the BF16 result coexisting.  Budget conservatively:
     #   per element = FP8 (1 B) + F32 (4 B) = 5 B
-    if rhs_cfgs.dtype in _FP8_DTYPES and rhs_cfgs.has_scale:
+    # Newer TPU generations support FP8 matmul natively and don't dequant.
+    if (rhs_cfgs.dtype in _FP8_DTYPES and rhs_cfgs.has_scale
+            and tpu_generation() == 4):
         fp8_bytes = rhs_bits // 8  # 1
         dequant_bytes = 4  # F32 intermediate
         base_rhs_size_bytes = base_rhs_size_bytes * (fp8_bytes + dequant_bytes) // fp8_bytes

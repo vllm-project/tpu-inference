@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 from jax._src import dtypes
 
+from tpu_inference.kernels.megablox.common import tpu_generation
 from tpu_inference.kernels.quantized_matmul.tuned_block_sizes import TunedValue
 
 
@@ -90,11 +91,12 @@ def xla_quantized_matmul(
     """
     # TPU v4 does not support FP8 matmul (Mosaic E2001:
     # CompileTimeMosaicUnsupportedRhsType).  When weights are stored as FP8,
-    # dequantize them to the activation dtype (BF16) before dot_general so that
-    # we keep FP8 storage but compute in BF16/F32 which v4 MXU supports.
+    # dequantize them to the activation dtype (BF16) before dot_general so
+    # that we keep FP8 storage but compute in BF16/F32 which v4 MXU supports.
+    # Newer TPU generations support FP8 matmul natively and skip this path.
     # w_scale has shape [n_out, 1] (per-output-channel, from quantize_tensor
     # with block_size=None and axis=-1 with keepdims=True).
-    if w_q.dtype in _FP8_DTYPES:
+    if w_q.dtype in _FP8_DTYPES and tpu_generation() == 4:
         # TPU v4 has only 16 MB VMEM.  Dequanting the full weight before
         # dot_general forces XLA to materialise it in VMEM, easily exceeding
         # capacity.  Instead, cast FP8→BF16 (trivially fusible) and apply the
@@ -162,9 +164,10 @@ def xla_quantized_batched_matmul(
     """
     contract_dims, batch_dims = dimension_numbers
 
-    # TPU v4 does not support FP8 matmul (Mosaic E2001).  Cast FP8→BF16
+    # TPU v4 does not support FP8 matmul (Mosaic E2001). Cast FP8→BF16
     # and apply per-channel scale after the matmul to avoid VMEM OOM.
-    if w_q.dtype in _FP8_DTYPES:
+    # Newer TPU generations support FP8 matmul natively and skip this path.
+    if w_q.dtype in _FP8_DTYPES and tpu_generation() == 4:
         w_bf16 = w_q.astype(x.dtype)
         out = jax.lax.dot_general(
             x,

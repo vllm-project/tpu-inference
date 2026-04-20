@@ -206,9 +206,11 @@ def shard_linear_weights(
             continue
         if (weight := getattr(weights, key, None)) is not None:
             sharding = getattr(weight_shardings, key)
-            # Use tp_full_shape from the LinearWeights as global_shape for
-            # multi-host TP-selective loading.
-            global_shape = getattr(weights, "tp_full_shape", None)
+            # tp_full_shape is the full (pre-slice) shape of the main `weight`
+            # tensor only. scale/zero_point/bias have their own shapes and
+            # must not inherit the weight's global_shape.
+            global_shape = (getattr(weights, "tp_full_shape", None)
+                            if key == "weight" else None)
             weight = general_device_put(weight, sharding,
                                         global_shape=global_shape)
             setattr(weights, key, weight)
