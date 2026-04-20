@@ -317,10 +317,10 @@ def test_get_batch_composition_stats(scenario, num_reqs, req_ids, computed,
     (40, 100, InferencePhase.BALANCED),
     (50, 100, InferencePhase.BALANCED),
     (60, 100, InferencePhase.BALANCED),
-    (100, 100, InferencePhase.PREFILL_HEAVY),
+    (100, 100, InferencePhase.PREFILL_ONLY),
     (20, 100, InferencePhase.DECODE_HEAVY),
     (21, 100, InferencePhase.AMBIGUOUS),
-    (0, 100, InferencePhase.DECODE_HEAVY),
+    (0, 100, InferencePhase.DECODE_ONLY),
 ])
 def test_determine_phase_from_batch_composition_stats(prefill_tokens,
                                                       total_tokens,
@@ -426,7 +426,8 @@ def test_phased_profiler_handles_all_phases(profiler_fixture):
 
     stats = {"num_reqs": 2, "total_num_scheduled_tokens": 100}
     phases_to_profile = [
-        InferencePhase.PREFILL_HEAVY, InferencePhase.DECODE_HEAVY,
+        InferencePhase.PREFILL_ONLY, InferencePhase.PREFILL_HEAVY,
+        InferencePhase.DECODE_ONLY, InferencePhase.DECODE_HEAVY,
         InferencePhase.BALANCED
     ]
 
