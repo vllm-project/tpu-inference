@@ -334,6 +334,19 @@ def apply_qwix_quantization(
     head_size_list = []
 
     text_config = getattr(hf_config, "text_config", hf_config)
+
+    # Some models (like Gemma 4) use mixed attention mechanisms across layers.
+    # The 'layer_types' list defines the attention type for each hidden layer.
+    # Example (Gemma 4):
+    # layer_types = [
+    #   "sliding_attention",
+    #   "sliding_attention",
+    #   "sliding_attention",
+    #   "sliding_attention",
+    #   "sliding_attention",
+    #   "full_attention",
+    #   ...
+    # ]
     layer_types = getattr(text_config, "layer_types", None)
     if layer_types:
         if len(layer_types) != num_hidden_layers:
