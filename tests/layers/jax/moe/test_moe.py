@@ -174,7 +174,7 @@ class TestMoE(unittest.TestCase):
                                    apply_expert_weight_before_computation)
 
         with jax.set_mesh(self.mesh):
-            actual_output = moe(self.x)
+            actual_output, _ = moe(self.x)
 
             expected_output = self._compute_ground_truth(moe, self.x)
 
@@ -197,7 +197,7 @@ class TestMoE(unittest.TestCase):
 
         # Run Forward Pass (Distributed)
         with jax.set_mesh(self.mesh):
-            actual_output = moe(self.x)
+            actual_output, _ = moe(self.x)
 
         # Compute Ground Truth using the exact same weights
         expected_output = self._compute_ground_truth(moe, self.x)
@@ -220,13 +220,13 @@ class TestMoE(unittest.TestCase):
         # 1. Run Dense
         moe_dense = self._create_moe(MoEBackend.DENSE_MAT)
         with jax.set_mesh(self.mesh):
-            out_dense = moe_dense(self.x)
+            out_dense, _ = moe_dense(self.x)
 
         # 2. Run Sparse
         # We must re-init with same key to get same weights
         moe_sparse = self._create_moe(MoEBackend.MEGABLX_GMM)
         with jax.set_mesh(self.mesh):
-            out_sparse = moe_sparse(self.x)
+            out_sparse, _ = moe_sparse(self.x)
 
         self.assertTrue(
             jnp.allclose(out_dense, out_sparse, atol=5e-2, rtol=5e-2),

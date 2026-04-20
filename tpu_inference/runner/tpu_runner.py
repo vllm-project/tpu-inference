@@ -936,20 +936,27 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
-                (self.kv_caches, hidden_states, aux_hidden_states,
-                 all_experts) = self.model_fn(
-                     self.state,
-                     self.kv_caches,
-                     input_ids,
-                     attn_metadata,
-                     inputs_embeds,
-                     input_positions,
-                     tuple(self.layer_name_to_kvcache_index.items()),
-                     lora_metadata,
-                     intermediate_tensors,
-                     self.is_first_rank,
-                     self.is_last_rank,
-                 )
+                outputs = self.model_fn(
+                    self.state,
+                    self.kv_caches,
+                    input_ids,
+                    attn_metadata,
+                    inputs_embeds,
+                    input_positions,
+                    tuple(self.layer_name_to_kvcache_index.items()),
+                    lora_metadata,
+                    intermediate_tensors,
+                    self.is_first_rank,
+                    self.is_last_rank,
+                )
+                if len(outputs) == 3:
+                    self.kv_caches, hidden_states, aux_hidden_states = outputs
+                    all_experts = []
+                elif len(outputs) == 4:
+                    self.kv_caches, hidden_states, aux_hidden_states, all_experts = outputs
+                else:
+                    raise ValueError(
+                        f"Unexpected model_fn return length: {len(outputs)}")
 
                 # Extract captured experts from all layers
                 try:
