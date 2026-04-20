@@ -110,6 +110,8 @@ export BENCHMARK_DOCKER_ARGS_STR
 echo "--- Running job in docker via run_in_docker.sh"
 BM_JOB_STATUS=$EXIT_SUCCESS
 
+export BM_INFRA="true"
+
 .buildkite/scripts/run_in_docker.sh bash -c "
   echo always > /sys/kernel/mm/transparent_hugepage/enabled && \
   chmod +x .buildkite/benchmark/scripts/run_bm.sh && \
