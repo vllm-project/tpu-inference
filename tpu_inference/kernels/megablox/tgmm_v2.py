@@ -189,6 +189,52 @@ def tgmm_inner_kernel(
   tiled_rhs_ref = tiled_rhs_ref.reshape(-1, tiled_rhs_ref.shape[-1])
   gm_id = pl.program_id(2)
 
+  def _matmul(is_new_group: bool, is_group_changing: bool):
+    if is_new_group:
+      acc_ref[...] = jnp.zeros_like(acc_ref)
+
+    # Mask out invalid rows in the LHS/RHS tiles.
+    # The DMA loads tiles aligned to sublane boundaries, but the actual group
+    # data may not start/end on those boundaries.
+    m_start = metadata_ref.gm_id_to_m_offset[gm_id]
+    m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
+    m_offset = m_start - m_start % cfgs.dims.size_lhs_sublane
+    m_start_local = m_start - m_offset
+    m_end_local = m_end - m_offset
+    lhs_iota = lax.broadcasted_iota(jnp.int32, tiled_lhs_ref.shape, 0)
+    lhs_mask = jnp.logical_and(m_start_local <= lhs_iota, lhs_iota < m_end_local)
+    lhs_masked = jnp.where(lhs_mask, tiled_lhs_ref[...], 0)
+    rhs_iota = lax.broadcasted_iota(jnp.int32, tiled_rhs_ref.shape, 0)
+    rhs_mask = jnp.logical_and(m_start_local <= rhs_iota, rhs_iota < m_end_local)
+    rhs_masked = jnp.where(rhs_mask, tiled_rhs_ref[...], 0)
+
+    acc = acc_ref[...] + jax.lax.dot_general(
+        lhs_masked,
+        rhs_masked,
+        (((0,), (0,)), ((), ())),
+        preferred_element_type=jnp.float32,
+    )
+
+    if is_group_changing:
+      tiled_out_ref[...] = acc.astype(tiled_out_ref.dtype)
+    acc_ref[...] = acc
+
+  @jax.named_scope("matmul_new_group_and_changing")
+  def matmul_new_group_and_changing():
+    _matmul(is_new_group=True, is_group_changing=True)
+
+  @jax.named_scope("matmul_new_group")
+  def matmul_new_group():
+    _matmul(is_new_group=True, is_group_changing=False)
+
+  @jax.named_scope("matmul")
+  def matmul():
+    _matmul(is_new_group=False, is_group_changing=False)
+
+  @jax.named_scope("matmul_group_changing")
+  def matmul_group_changing():
+    _matmul(is_new_group=False, is_group_changing=True)
+
   prev_gm_id = jnp.where(gm_id > 0, gm_id - 1, 0)
   is_first_gm = gm_id == 0
   group_id_changed = (
@@ -197,41 +243,25 @@ def tgmm_inner_kernel(
   )
   new_group = jnp.logical_or(is_first_gm, group_id_changed)
 
-  @pl.when(new_group)
-  def _():
-    acc_ref[...] = jnp.zeros_like(acc_ref)
-
-  # Now we compute a mask to zero out invalid rows in the LHS/RHS tiles.
-  # Why is it needed? The DMA loads tiles aligned to sublane boundaries, but the actual group data may not start/end on those boundaries. For example, with 'size_lhs_sublane=8' and a group spanning rows 5-20:
-  # - DMA loads rows 0-23 (aligned to sublane boundary: 0 = 5 - 5%8, 24 = cdiv(20,8)*8)
-  # - Rows 0-4 and 20-23 contain data from other groups and must be masked out.
-  m_start = metadata_ref.gm_id_to_m_offset[gm_id]
-  m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
-  m_offset = m_start - m_start % cfgs.dims.size_lhs_sublane
-  m_start_local = m_start - m_offset
-  m_end_local = m_end - m_offset
-  lhs_iota = lax.broadcasted_iota(jnp.int32, tiled_lhs_ref.shape, 0)
-  lhs_mask = jnp.logical_and(m_start_local <= lhs_iota, lhs_iota < m_end_local)
-  lhs_masked = jnp.where(lhs_mask, tiled_lhs_ref[...], 0)
-  rhs_iota = lax.broadcasted_iota(jnp.int32, tiled_rhs_ref.shape, 0)
-  rhs_mask = jnp.logical_and(m_start_local <= rhs_iota, rhs_iota < m_end_local)
-  rhs_masked = jnp.where(rhs_mask, tiled_rhs_ref[...], 0)
-
-  acc_ref[...] += jax.lax.dot_general(
-      lhs_masked,
-      rhs_masked,
-      (((0,), (0,)), ((), ())),
-      preferred_element_type=jnp.float32,
-  )
-
   is_last_gm = gm_id == (pl.num_programs(2) - 1)
   next_gm_id = jnp.where(is_last_gm, gm_id, gm_id + 1)
   next_group_id = metadata_ref.gm_id_to_group_id[next_gm_id]
   cur_group_id = metadata_ref.gm_id_to_group_id[gm_id]
   group_is_changing = jnp.logical_or(is_last_gm, cur_group_id != next_group_id)
-  @pl.when(group_is_changing)
-  def _store_accum():
-    tiled_out_ref[...] = acc_ref[...].astype(tiled_out_ref.dtype)
+
+  lax.cond(
+      new_group,
+      lambda: lax.cond(
+          group_is_changing,
+          matmul_new_group_and_changing,
+          matmul_new_group,
+      ),
+      lambda: lax.cond(
+          group_is_changing,
+          matmul_group_changing,
+          matmul,
+      ),
+  )
 
 
 class TgmmIndexMaps:
