@@ -21,10 +21,10 @@ from enum import Enum
 
 import yaml
 from absl import flags
-from google.cloud import spanner
 
-from tools.kernel.tuner.v1.storage_management.storage_manager import StorageManager
 from tools.kernel.tuner.v1.common.utils import get_timestamp_sec
+from tools.kernel.tuner.v1.storage_management.storage_manager import \
+    StorageManager
 
 FLAGS = flags.FLAGS
 
@@ -86,8 +86,12 @@ class KernelTunerBase:
 
     """
 
-    def __init__(self, *, tuning_key_class = None, tunable_params_class = None,
-                 storage_manager: StorageManager = None, job_bucket_size: int = 100):
+    def __init__(self,
+                 *,
+                 tuning_key_class=None,
+                 tunable_params_class=None,
+                 storage_manager: StorageManager = None,
+                 job_bucket_size: int = 100):
         assert tuning_key_class is not None, "tuning_key_class must be specified"
         assert tunable_params_class is not None, "tunable_params_class must be specified"
         assert storage_manager is not None, "storage_manager must be specified"
@@ -141,10 +145,11 @@ class KernelTunerBase:
             "Specific kernel should implement this to generate the cases for the given case_set_id and desc, and return a list of TuningCase objects representing the tuning cases."
         )
 
-    def _generate_tuning_jobs(self,
-                             case_set_id: str,
-                             desc: str,
-                             ) -> list[tuple[int, int]]:
+    def _generate_tuning_jobs(
+        self,
+        case_set_id: str,
+        desc: str,
+    ) -> list[tuple[int, int]]:
         """Partitions the full case set into fixed-size work buckets.
 
         Calls `generate_cases` to determine the total number of cases, then
@@ -322,11 +327,13 @@ class KernelTunerBase:
 
             begin_case_id_time = time.perf_counter_ns()
             # status can be SUCCESS, FAILED_OOM, UNKNOWN_ERROR.
-            status, warmup_ns, _ = self.run(tuning_key, tunable_params, iters=1)
+            status, warmup_ns, _ = self.run(tuning_key,
+                                            tunable_params,
+                                            iters=1)
             if status != TuningStatus.SUCCESS:
                 results_buffer.append(
-                    (caseset_id, run_id, cid, status.value, FLAGS.worker_id, 0, 0,
-                     get_timestamp_sec()))
+                    (caseset_id, run_id, cid, status.value, FLAGS.worker_id, 0,
+                     0, get_timestamp_sec()))
                 logger.warning(
                     f"Case {cid} failed during warmup with status: {status}. Skipping to next case."
                 )
@@ -334,8 +341,8 @@ class KernelTunerBase:
             warmup_us = warmup_ns // 1000
 
             status, average_latency_ns, _ = self.run(tuning_key,
-                                                  tunable_params,
-                                                  iters=10)
+                                                     tunable_params,
+                                                     iters=10)
             end_time = time.perf_counter_ns()
             total_time = end_time - begin_case_id_time
             if status != TuningStatus.SUCCESS:
