@@ -126,7 +126,7 @@ class KernelTunerBase:
             existing_desc = self.storage_manager.get_case_set_desc(case_set_id)
             if existing_desc != desc:
                 raise ValueError(
-                    f"CaseSetId {case_set_id} already exists with a different description. Existing desc: {existing_desc}, new desc: {desc}. Please use a different CaseSetId or update the description to match the existing one."
+                    f"CaseSetId {case_set_id} already exists with a different description. Existing desc: {existing_desc}, new desc: {desc}. If you intend to create new case set, please use a new case set id. Updating comment of an existing case set is not allowed. Please use a different CaseSetId or update the description to match the existing one."
                 )
             else:
                 logger.info(

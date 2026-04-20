@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import datetime
 import logging
 
 from absl import app, flags
@@ -34,7 +35,7 @@ _RUN_LOCALLY = flags.DEFINE_bool(
 _KERNEL_TUNER_NAME = flags.DEFINE_string('kernel_tuner_name',
                                          'test_kernel_tuner',
                                          'Name of the kernel tuner to run.')
-_CASE_SET_ID = flags.DEFINE_string('case_set_id', None,
+_CASE_SET_ID = flags.DEFINE_string('case_set_id', '',
                                    'The case set ID to use for this run.')
 _RUN_ID = flags.DEFINE_integer(
     'run_id', 0,
@@ -77,6 +78,21 @@ KERNEL_TUNER_REGISTRY = {
 def main(argv):
     del argv  # Unused.
 
+    # env validation
+    if _KERNEL_TUNER_NAME.value not in KERNEL_TUNER_REGISTRY:
+        raise ValueError(
+            f'Kernel tuner {_KERNEL_TUNER_NAME.value} is not registered. Available tuners: {list(KERNEL_TUNER_REGISTRY.keys())}'
+        )
+
+    case_set_id = _CASE_SET_ID.value
+    run_id = _RUN_ID.value
+    case_set_desc = _CASE_SET_DESC.value
+    if not case_set_id:
+        # If case_set_id is not provided, generate one using the current timestamp but in the format of YYYYMMDDHHMMSS to ensure it is sortable and easily readable.
+        case_set_id = datetime.now().strftime("%Y%m%d%H%M%S")
+        run_id = 0
+    logger.info(f'Using case_set_id: {case_set_id}, run_id: {run_id}, case_set_desc: {case_set_desc} for this tuning run.')
+
     # Initialize storage manager
     if _RUN_LOCALLY.value:
         storage_manager = LocalDbManager()
@@ -84,16 +100,10 @@ def main(argv):
         storage_manager = SpannerStorageManager()
 
     # Initialize kernel tuner
-    kernel_tuner_cls = KERNEL_TUNER_REGISTRY.get(_KERNEL_TUNER_NAME.value,
-                                                 None)
+    kernel_tuner_cls = KERNEL_TUNER_REGISTRY.get(_KERNEL_TUNER_NAME.value)
 
-    if kernel_tuner_cls is None:
-        raise ValueError(f'Unknown kernel tuner: {_KERNEL_TUNER_NAME.value}')
     kernel_tuner = kernel_tuner_cls(storage_manager)
 
-    case_set_id = _CASE_SET_ID.value
-    run_id = _RUN_ID.value
-    case_set_desc = _CASE_SET_DESC.value
     if _RUN_LOCALLY.value:
         logger.info(
             'Running in locally mode. Skipping Buildkite pipeline generation and running tuning jobs directly.'
