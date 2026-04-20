@@ -59,7 +59,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Iterable, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
 import numpy as np
 import torch
@@ -398,13 +398,18 @@ def register_tp_full_shape(tensor: torch.Tensor, full_shape: tuple[int, ...]) ->
 
 def lookup_tp_full_shape(t) -> tuple[int, ...] | None:
     # Accept both torch.Tensor (during load) and anything with data_ptr.
+    # Pop-on-lookup: each registered tensor is consumed exactly once by
+    # the matching general_device_put call. Without the pop the registry
+    # would grow unbounded over a full load, and freed tensors' data_ptr
+    # values could be recycled by new allocations, returning a stale
+    # shape for a coincident pointer.
     try:
         dp = t.data_ptr() if hasattr(t, "data_ptr") else None
     except Exception:  # noqa: BLE001
         return None
     if dp is None:
         return None
-    return _TP_FULL_SHAPES.get(dp)
+    return _TP_FULL_SHAPES.pop(dp, None)
 
 
 def _resize_param_to_local(param: torch.nn.Parameter, axis: int,
