@@ -229,10 +229,13 @@ class KernelTunerBase:
             step = {
                 "label":
                 f"cs_id={case_set_id} rid={run_id} Bucket([{case_id_start}, {case_id_end}))",
+                "depends_on": "tpu6e_build_docker",  # Adjust to your Buildkite step dependency
+
                 "agents": {
                     "queue": "tpu_v6e_8_queue"
                 },  # Adjust to your TPU queue
                 "env": {
+                    "USE_PREBUILT_IMAGE": "1",
                     "TPU_VERSION": "tpu6e"
                 },
                 "commands": [
