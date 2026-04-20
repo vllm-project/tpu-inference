@@ -45,8 +45,9 @@ except ImportError:
         Mxfp4Config
     from vllm.model_executor.layers.quantization.mxfp4 import \
         Mxfp4MoEMethod
-assert Mxfp4Config is not None and Mxfp4MoEMethod is not None, (
-    "Neither GptOssMxfp4Config nor Mxfp4Config is available in vllm")
+if Mxfp4Config is None or Mxfp4MoEMethod is None:
+    raise ImportError(
+        "Neither GptOssMxfp4Config nor Mxfp4Config is available in vllm")
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 

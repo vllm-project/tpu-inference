@@ -23,6 +23,8 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference.kernels.megablox.common import tpu_generation
+
 # TPU v4 has no FP8 matmul support (Mosaic E2001). We detect FP8 and dequantize
 # to BF16 inside the Pallas kernel VMEM.
 _FP8_DTYPES = (jnp.float8_e4m3fn, jnp.float8_e5m2)

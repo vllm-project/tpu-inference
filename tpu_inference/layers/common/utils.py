@@ -12,13 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from contextlib import nullcontext
 
 import jax
 import jax.numpy as jnp
 from jax.experimental.layout import Format, Layout
-from jax.sharding import Mesh, NamedSharding, Sharding
+from jax.sharding import Mesh, Sharding
 
 from tpu_inference import envs
 
@@ -143,7 +142,7 @@ def general_device_put(tensor: jax.Array,
         if effective_global is None:
             effective_global = lookup_tp_full_shape(t)
 
-        multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "")
+        multihost_backend = envs.TPU_MULTIHOST_BACKEND
         # Single-host or non-Ray: use jax.device_put directly.
         if multihost_backend != "ray" or (isinstance(t, jax.Array)
                                           and not t.is_fully_addressable):

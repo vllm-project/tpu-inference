@@ -16,7 +16,7 @@ Problem this solves:
 
 Strategy:
   - At load-model time, walk the materialized model and build a plan
-    `disk_name -> (axis, per_rank_size, start)` from each destination
+    `disk_name -> (axis, tp_size, tp_rank)` from each destination
     param's `output_dim` / `input_dim` attribute.
   - **Resize** each TP-aware `param.data` to its local (1/num_hosts) slice
     before load, so CPU RAM usage drops to 1/num_hosts.
@@ -914,7 +914,9 @@ def tp_sliced_iterator(
             return
 
     # --- Fallback: safetensors via gcsfuse ---
-    logger.info("[TP-selective] gcsfuse path (set TPU_GCS_WEIGHT_LOAD=0 is default)")
+    logger.info(
+        "[TP-selective] gcsfuse path (TPU_GCS_WEIGHT_LOAD defaults to 1; "
+        "set =0 to force this fallback)")
     from safetensors import safe_open
     from tqdm import tqdm
     from vllm.model_executor.model_loader.ep_weight_filter import \
