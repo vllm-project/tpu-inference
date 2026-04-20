@@ -68,13 +68,14 @@ steps:
         else
           RUN_ID="${RUN_ID:-0}"
         fi
+        CASE_SET_ID="${CASE_SET_ID}" RUN_ID="${RUN_ID}" \
         .buildkite/scripts/run_in_docker.sh bash -c "
           python -m tools.kernel.tuner.v1.kernel_tuner_runner \
           --kernel_tuner_name=test_kernel_tuner \
           --case_set_desc='testing the infra' \
           --generate_buildkite_pipeline=True \
-          --case_set_id=${CASE_SET_ID} \
-          --run_id=${RUN_ID:-0} \"
+          --case_set_id=\${CASE_SET_ID} \
+          --run_id=\${RUN_ID} \"
           # python3 tools/kernel/tuner/v1/generate_cases_and_yml.py --output-path=/tmp/hf_home/generated_tuning_cases.yml"
       - |
         # Upload the generated YAML as a Buildkite artifact for the next step to consume.
