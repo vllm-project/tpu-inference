@@ -54,8 +54,21 @@ _END_CASE_ID = flags.DEFINE_integer(
     'end_case_id', None,
     'The end case ID for tuning. Only used when --generate_buildkite_pipeline is false and --run_locally is false.'
 )
+_GCP_PROJECT_ID = flags.DEFINE_string(
+    'gcp_project_id', 'cloud-tpu-inference-test',
+    'The GCP project ID to use for Spanner. Only used when --run_locally is false.'
+)
+_SPANNER_INSTANCE_ID = flags.DEFINE_string(
+    'spanner_instance_id', 'vllm-bm-inst',
+    'The Spanner instance ID to use. Only used when --run_locally is false.')
+_SPANNER_DATABASE_ID = flags.DEFINE_string(
+    'spanner_database_id', 'tune-gmm',
+    'The Spanner database ID to use. Only used when --run_locally is false.')
 _WORKER_ID = flags.DEFINE_string('worker_id', get_host_ip(), 'The worker id')
 
+# Note: For simplicity, we are directly referencing the kernel tuner class here. In the future, we can consider a more flexible plugin-based system if we have more kernel tuners.
+# For example, we can define an interface for kernel tuners and dynamically load kernel tuner classes based on the --kernel_tuner_name flag. This would allow us to add new kernel tuners without modifying this runner code.
+# For now, after we implement more kernel tuners, we can simply add them to the KERNEL_TUNER_REGISTRY dictionary below.
 KERNEL_TUNER_REGISTRY = {
     'test_kernel_tuner': TestKernelTuner,
 }

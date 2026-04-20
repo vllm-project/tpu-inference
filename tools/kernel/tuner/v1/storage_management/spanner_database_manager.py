@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from absl import flags
 from google.api_core import retry
 from google.cloud import spanner
 
@@ -21,24 +22,25 @@ from tools.kernel.tuner.v1.storage_management.storage_manager import \
 
 BATCH_SIZE = 1000
 
+FLAGS = flags.FLAGS
+
 
 class SpannerStorageManager(StorageManager):
     # for historical reason, the database_id is still tune-gmm, but it actually contains tuning cases for different kernels, not just gmm. We can consider to rename it in the future for better clarity.
-    def __init__(self,
-                 instance_id='vllm-bm-inst',
-                 database_id='tune-gmm',
-                 worker_id=None,
-                 dry_run=False):
+    def __init__(self, worker_id=None, dry_run=False):
+        gcp_project_id = FLAGS.gcp_project_id
+        spanner_instance_id = FLAGS.spanner_instance_id
+        spanner_database_id = FLAGS.spanner_database_id
         self.current_case_id = 0
         self.invalid_count = 0
         self.buffer = []
         self.worker_id = worker_id or get_host_ip()
         self.dry_run = dry_run
         if not self.dry_run:
-            self.client = spanner.Client(project='cloud-tpu-inference-test',
+            self.client = spanner.Client(project=gcp_project_id,
                                          disable_builtin_metrics=True)
-            self.instance = self.client.instance(instance_id)
-            self.database = self.instance.database(database_id)
+            self.instance = self.client.instance(spanner_instance_id)
+            self.database = self.instance.database(spanner_database_id)
         else:
             self.database = None
 
