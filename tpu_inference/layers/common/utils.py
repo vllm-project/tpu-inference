@@ -155,10 +155,15 @@ def general_device_put(tensor: jax.Array,
         # When a global_shape is provided (either by the caller for EP/MoE or
         # by the TP-selective registry lookup above), each host holds only
         # its local shard.  Use make_array_from_process_local_data to
-        # construct the correct global distributed array.
+        # construct the correct global distributed array, then apply the
+        # caller's Layout on top (the array is already distributed, so this
+        # transforms only the local shard without triggering allgather).
         if effective_global is not None:
-            return jax.make_array_from_process_local_data(
+            arr = jax.make_array_from_process_local_data(
                 sharding, t, effective_global)
+            if layout is not None:
+                return jax.device_put(arr, Format(layout, sharding))
+            return arr
 
         # Replicated/TP-sharded weights (no global_shape): all hosts have
         # identical data.  Use make_array_from_process_local_data instead of
