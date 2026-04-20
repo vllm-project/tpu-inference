@@ -39,7 +39,6 @@ class HostKVPool:
             f"dtype={dtype}, host_sharding={host_sharding}")
         self.pool_size = pool_size
         self.buffers: List[List[jax.Array]] = []
-        self.max_blocks_per_req = max_blocks_per_req
 
         # A thread-safe queue to hold the indices of currently available buffers
         self.available_indices = queue.Queue(maxsize=pool_size)
