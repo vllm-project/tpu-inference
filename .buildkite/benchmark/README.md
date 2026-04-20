@@ -62,7 +62,7 @@ The feature is driven by JSON configuration files. A case file can define a sing
   * `args`: Key-value pairs translated into CLI flags (e.g., `model`, `seed`, `max-model-len`).
   * `env`: Server-command-specific environment variables.
 * `client_command_options`: Controls the workload generator.
-  * `command_type`: Typically `vllm_bench_serve` or `benchmark_serving`. Can also be `lm_eval` for accuracy evaluations. When it is `lm_eval`, the dataset must be specified in the `args`, a specific shell script will be executed based on the dataset configuration, and `server_command_options` does not need to be set.
+  * `command_type`: Typically `vllm_bench_serve`. Can also be `lm_eval` for accuracy evaluations. When it is `lm_eval`, the dataset must be specified in the `args`, a specific shell script will be executed based on the dataset configuration, and `server_command_options` does not need to be set.
   * `args`: Client-side CLI flags (e.g., `num-prompts`, `request-rate`).
   * `env`: Client-command-specific environment variables.
 

@@ -20,8 +20,7 @@ import sys
 CMD_MAP = {
     "vllm_serve": "vllm serve",
     "vllm_bench_serve": "vllm bench serve",
-    "lm_eval": "lm_eval",
-    "benchmark_serving": "python3 scripts/bench_serving/benchmark_serving.py"
+    "lm_eval": "lm_eval"
 }
 
 def get_current_machine_type():
