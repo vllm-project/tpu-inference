@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.kv_cache import (DEFAULT_KV_CACHE_DTYPE,
                                            create_kv_caches)
@@ -292,9 +293,12 @@ def apply_qwix_quantization(
     block_size = vllm_config.cache_config.block_size
     model_config = vllm_config.model_config
 
+    sharding_size = utils.get_mesh_shape_product(mesh,
+                                                 ShardingAxisName.ATTN_HEAD)
+
     # Pad num_kv_heads to multiple of TP size
     num_kv_heads = utils.get_padded_num_heads(
-        model_config.get_total_num_kv_heads(), mesh.shape["model"])
+        model_config.get_total_num_kv_heads(), sharding_size)
 
     # Pad head_dim to multiple of 128
     head_size = model_config.get_head_size()
@@ -332,9 +336,13 @@ def apply_qwix_quantization(
     text_config = getattr(hf_config, "text_config", hf_config)
     layer_types = getattr(text_config, "layer_types", None)
     if layer_types:
+        if len(layer_types) != num_hidden_layers:
+            raise ValueError(
+                f"layer_types length ({len(layer_types)}) does not match "
+                f"num_hidden_layers ({num_hidden_layers})")
+
         for i in range(num_hidden_layers):
-            layer_type = layer_types[i] if i < len(
-                layer_types) else "full_attention"
+            layer_type = layer_types[i]
             is_sliding = layer_type == "sliding_attention"
 
             # Determine head_dim
@@ -347,9 +355,9 @@ def apply_qwix_quantization(
             head_size_list.append(utils.get_padded_head_dim(head_dim_original))
 
             # Determine num_kv_heads
-            use_k_eq_v = ((not is_sliding)
-                          and getattr(text_config, "attention_k_eq_v", False))
-            if use_k_eq_v:
+            should_use_global_kv_heads = ((not is_sliding) and getattr(
+                text_config, "attention_k_eq_v", False))
+            if should_use_global_kv_heads:
                 kv_heads = getattr(
                     text_config, "num_global_key_value_heads",
                     getattr(text_config, "num_key_value_heads", 0))
@@ -358,7 +366,7 @@ def apply_qwix_quantization(
             else:
                 kv_heads = getattr(text_config, "num_key_value_heads", 0)
             num_kv_heads_list.append(
-                utils.get_padded_num_heads(kv_heads, mesh.shape["model"]))
+                utils.get_padded_num_heads(kv_heads, sharding_size))
 
         head_size = tuple(head_size_list)
         num_kv_heads = tuple(num_kv_heads_list)
