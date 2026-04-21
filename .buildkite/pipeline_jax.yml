@@ -443,7 +443,7 @@ steps:
           MODEL: "Qwen/Qwen3-0.6B"
           INPUT_LEN: 1024
           OUTPUT_LEN: 1024
-          NUM_PROMPTS: 5
+          NUM_PROMPTS: 100
           RANDOM_SEED: 10
           MAX_CONCURRENCY: 10
           TEST_MODE: 1
