@@ -168,7 +168,7 @@ class LocalDbManager(StorageManager):
         if len(self.buffer) >= BATCH_SIZE:
             self.flush()
 
-    def create_buckets_for_run(self, cs_id: str, r_id: int, bucket_id: int,
+    def create_bucket_for_run(self, cs_id: str, r_id: int, bucket_id: int,
                                start_case_id: int, end_case_id: int):
         """Creates a new work bucket for a tuning run.
 

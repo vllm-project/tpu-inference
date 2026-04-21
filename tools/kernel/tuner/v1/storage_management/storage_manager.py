@@ -109,7 +109,7 @@ class StorageManager:
         """
         raise NotImplementedError("Subclasses must implement add_tuner_case")
 
-    def create_buckets_for_run(self, cs_id: str, r_id: int, bucket_id: int,
+    def create_bucket_for_run(self, cs_id: str, r_id: int, bucket_id: int,
                                start_case_id: int, end_case_id: int):
         """Creates a new work bucket for a tuning run.
 
