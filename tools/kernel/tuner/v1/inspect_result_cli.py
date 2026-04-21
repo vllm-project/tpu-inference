@@ -256,11 +256,11 @@ def spanner_count_buckets(db, case_set_id, run_id):
                 "SELECT COUNT(*) FROM WorkBuckets WHERE ID = @id AND RunId = @rid",
                 params={
                     'id': case_set_id,
-                    'rid': int(run_id)
+                    'rid': run_id
                 },
                 param_types={
                     'id': gspanner.param_types.STRING,
-                    'rid': gspanner.param_types.INT64
+                    'rid': gspanner.param_types.STRING
                 },
             ))[0][0]
 
@@ -275,11 +275,11 @@ def spanner_list_bucket_status(db, case_set_id, run_id):
                 "WHERE ID = @id AND RunId = @rid GROUP BY Status",
                 params={
                     'id': case_set_id,
-                    'rid': int(run_id)
+                    'rid': run_id
                 },
                 param_types={
                     'id': gspanner.param_types.STRING,
-                    'rid': gspanner.param_types.INT64
+                    'rid': gspanner.param_types.STRING
                 }):
             result[status] = count
     return result
@@ -301,11 +301,11 @@ def spanner_query_run_status(db, case_set_id, run_id):
                 query,
                 params={
                     'id': case_set_id,
-                    'rid': int(run_id)
+                    'rid': run_id
                 },
                 param_types={
                     'id': gspanner.param_types.STRING,
-                    'rid': gspanner.param_types.INT64
+                    'rid': gspanner.param_types.STRING
                 },
             ))[0]
     total_us = total_us or 0
@@ -335,11 +335,11 @@ def spanner_query_min_latency(db, case_set_id, run_id):
                 query,
                 params={
                     'id': case_set_id,
-                    'rid': int(run_id)
+                    'rid': run_id
                 },
                 param_types={
                     'id': gspanner.param_types.STRING,
-                    'rid': gspanner.param_types.INT64
+                    'rid': gspanner.param_types.STRING
                 }):
             try:
                 kv = json.loads(kv_str)
