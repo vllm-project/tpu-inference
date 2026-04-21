@@ -153,6 +153,7 @@ class TestTPUJaxRunner:
         self.runner.input_batch.num_reqs = 1
         self.runner.input_batch.req_ids = ['req1']
         self.runner.input_batch.req_id_to_index = {'req1': 0}
+        self.runner.input_batch.request_distribution = [0, 0, 1]
         self.runner.input_batch.num_computed_tokens_cpu = np.array([10])
         self.runner.input_batch.token_ids_cpu = np.random.randint(
             0, 1000, (8, 64), dtype=np.int32)
