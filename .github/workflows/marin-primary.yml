@@ -1,0 +1,241 @@
+name: Marin Primary Release
+
+on:
+  schedule:
+    - cron: '20 7 * * *'
+  workflow_dispatch:
+    inputs:
+      nightly_tag:
+        description: Optional nightly tag to promote. Defaults to the marin-nightly alias.
+        required: false
+        type: string
+
+concurrency:
+  group: marin-primary
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    name: Promote Marin Primary
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      GH_TOKEN: ${{ secrets.MARIN_RELEASE_TOKEN != '' && secrets.MARIN_RELEASE_TOKEN || github.token }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Require cross-repo release token
+        run: |
+          if [[ -z "${{ secrets.MARIN_RELEASE_TOKEN }}" ]]; then
+            echo "MARIN_RELEASE_TOKEN is required to promote primary releases in both repos." >&2
+            exit 1
+          fi
+
+      - name: Resolve nightly source
+        id: source
+        run: |
+          SOURCE_TAG="${{ inputs.nightly_tag }}"
+          if [[ -z "$SOURCE_TAG" ]]; then
+            SOURCE_TAG="marin-nightly"
+          fi
+          echo "SOURCE_TAG=${SOURCE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Download source nightly assets
+        run: |
+          bash .github/scripts/marin_release.sh download-release-assets \
+            "$GITHUB_REPOSITORY" \
+            "${{ steps.source.outputs.SOURCE_TAG }}" \
+            source-nightly \
+            "*.whl" \
+            "marin-build.json" \
+            "marin-release-pair.json"
+
+      - name: Evaluate primary eligibility
+        id: eligibility
+        run: |
+          NOW=$(date -u +%s)
+          LATEST_PRIMARY_TAG=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            | jq -r '[.[] | select(.tag_name | startswith("marin-primary-"))][0].tag_name // empty')
+
+          if [[ -z "$LATEST_PRIMARY_TAG" ]]; then
+            echo "eligible=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$LATEST_PRIMARY_TAG")
+          PUBLISHED_AT=$(jq -r '.published_at' <<<"$RELEASE_JSON")
+          PUBLISHED_EPOCH=$(date -u -d "$PUBLISHED_AT" +%s)
+          AGE=$((NOW - PUBLISHED_EPOCH))
+
+          bash .github/scripts/marin_release.sh download-release-assets \
+            "$GITHUB_REPOSITORY" \
+            "$LATEST_PRIMARY_TAG" \
+            latest-primary \
+            "marin-release-pair.json"
+
+          if [[ "$AGE" -lt 259200 ]]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "reason=Last immutable primary release is younger than 72 hours." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CURRENT_VLLM_SHA=$(jq -r '.vllm_sha' source-nightly/marin-release-pair.json)
+          CURRENT_TPU_SHA=$(jq -r '.tpu_inference_sha' source-nightly/marin-release-pair.json)
+          LAST_VLLM_SHA=$(jq -r '.vllm_sha' latest-primary/marin-release-pair.json)
+          LAST_TPU_SHA=$(jq -r '.tpu_inference_sha' latest-primary/marin-release-pair.json)
+
+          if [[ "$CURRENT_VLLM_SHA" == "$LAST_VLLM_SHA" && "$CURRENT_TPU_SHA" == "$LAST_TPU_SHA" ]]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "reason=Latest nightly pair is already the current primary pair." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "eligible=true" >> "$GITHUB_OUTPUT"
+
+      - name: Stop when no promotion is due
+        if: steps.eligibility.outputs.eligible != 'true'
+        run: |
+          echo "${{ steps.eligibility.outputs.reason || 'No primary promotion required.' }}"
+
+      - name: Download paired vLLM nightly assets
+        if: steps.eligibility.outputs.eligible == 'true'
+        run: |
+          VLLM_NIGHTLY_TAG=$(jq -r '.vllm_tag' source-nightly/marin-release-pair.json)
+          bash .github/scripts/marin_release.sh download-release-assets \
+            "marin-community/vllm" \
+            "$VLLM_NIGHTLY_TAG" \
+            source-vllm \
+            "*.whl" \
+            "marin-build.json"
+
+      - name: Create primary pair manifest
+        if: steps.eligibility.outputs.eligible == 'true'
+        id: primary
+        run: |
+          DATE=$(date -u +%Y%m%d)
+          VLLM_SHORT_SHA=$(jq -r '.short_sha' source-vllm/marin-build.json)
+          VLLM_SHA=$(jq -r '.sha' source-vllm/marin-build.json)
+          TPU_SHORT_SHA=$(jq -r '.short_sha' source-nightly/marin-build.json)
+          TPU_SHA=$(jq -r '.sha' source-nightly/marin-build.json)
+          RELEASED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          VLLM_PRIMARY_TAG="marin-primary-${DATE}-${VLLM_SHORT_SHA}"
+          TPU_PRIMARY_TAG="marin-primary-${DATE}-${TPU_SHORT_SHA}"
+
+          jq -n \
+            --arg release_type "primary" \
+            --arg released_at "$RELEASED_AT" \
+            --arg vllm_sha "$VLLM_SHA" \
+            --arg vllm_tag "$VLLM_PRIMARY_TAG" \
+            --arg tpu_sha "$TPU_SHA" \
+            --arg tpu_tag "$TPU_PRIMARY_TAG" \
+            '{
+              release_type: $release_type,
+              released_at: $released_at,
+              vllm_sha: $vllm_sha,
+              vllm_tag: $vllm_tag,
+              tpu_inference_sha: $tpu_sha,
+              tpu_inference_tag: $tpu_tag
+            }' > marin-release-pair.json
+
+          {
+            echo "DATE=${DATE}"
+            echo "VLLM_SHA=${VLLM_SHA}"
+            echo "VLLM_SHORT_SHA=${VLLM_SHORT_SHA}"
+            echo "VLLM_PRIMARY_TAG=${VLLM_PRIMARY_TAG}"
+            echo "TPU_SHA=${TPU_SHA}"
+            echo "TPU_SHORT_SHA=${TPU_SHORT_SHA}"
+            echo "TPU_PRIMARY_TAG=${TPU_PRIMARY_TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Promote vLLM primary release
+        if: steps.eligibility.outputs.eligible == 'true'
+        run: |
+          cat > /tmp/vllm-primary-notes.md <<EOF
+          Primary promotion of paired nightly source \`$(jq -r '.vllm_tag' source-nightly/marin-release-pair.json)\`.
+
+          Paired \`tpu-inference\` primary: \`${{ steps.primary.outputs.TPU_PRIMARY_TAG }}\`
+          EOF
+
+          cat > /tmp/vllm-primary-alias-notes.md <<EOF
+          Moving alias for the latest Marin primary release.
+
+          Current immutable release: \`${{ steps.primary.outputs.VLLM_PRIMARY_TAG }}\`
+          Paired \`tpu-inference\` primary: \`${{ steps.primary.outputs.TPU_PRIMARY_TAG }}\`
+          EOF
+
+          bash .github/scripts/marin_release.sh upsert-release \
+            "marin-community/vllm" \
+            "${{ steps.primary.outputs.VLLM_PRIMARY_TAG }}" \
+            "${{ steps.primary.outputs.VLLM_SHA }}" \
+            false \
+            "Marin primary ${{ steps.primary.outputs.DATE }} (${{ steps.primary.outputs.VLLM_SHORT_SHA }})" \
+            /tmp/vllm-primary-notes.md \
+            source-vllm/*.whl \
+            source-vllm/marin-build.json \
+            marin-release-pair.json
+
+          bash .github/scripts/marin_release.sh move-tag \
+            "marin-community/vllm" \
+            "marin-primary" \
+            "${{ steps.primary.outputs.VLLM_SHA }}"
+
+          bash .github/scripts/marin_release.sh upsert-release \
+            "marin-community/vllm" \
+            "marin-primary" \
+            "${{ steps.primary.outputs.VLLM_SHA }}" \
+            false \
+            "Marin primary (latest)" \
+            /tmp/vllm-primary-alias-notes.md \
+            source-vllm/*.whl \
+            source-vllm/marin-build.json \
+            marin-release-pair.json
+
+      - name: Promote TPU primary release
+        if: steps.eligibility.outputs.eligible == 'true'
+        run: |
+          cat > /tmp/tpu-primary-notes.md <<EOF
+          Primary promotion of paired nightly source \`${{ steps.source.outputs.SOURCE_TAG }}\`.
+
+          Paired \`vllm\` primary: \`${{ steps.primary.outputs.VLLM_PRIMARY_TAG }}\`
+          EOF
+
+          cat > /tmp/tpu-primary-alias-notes.md <<EOF
+          Moving alias for the latest Marin primary release.
+
+          Current immutable release: \`${{ steps.primary.outputs.TPU_PRIMARY_TAG }}\`
+          Paired \`vllm\` primary: \`${{ steps.primary.outputs.VLLM_PRIMARY_TAG }}\`
+          EOF
+
+          bash .github/scripts/marin_release.sh upsert-release \
+            "$GITHUB_REPOSITORY" \
+            "${{ steps.primary.outputs.TPU_PRIMARY_TAG }}" \
+            "${{ steps.primary.outputs.TPU_SHA }}" \
+            false \
+            "Marin primary ${{ steps.primary.outputs.DATE }} (${{ steps.primary.outputs.TPU_SHORT_SHA }})" \
+            /tmp/tpu-primary-notes.md \
+            source-nightly/*.whl \
+            source-nightly/marin-build.json \
+            marin-release-pair.json
+
+          bash .github/scripts/marin_release.sh move-tag \
+            "$GITHUB_REPOSITORY" \
+            "marin-primary" \
+            "${{ steps.primary.outputs.TPU_SHA }}"
+
+          bash .github/scripts/marin_release.sh upsert-release \
+            "$GITHUB_REPOSITORY" \
+            "marin-primary" \
+            "${{ steps.primary.outputs.TPU_SHA }}" \
+            false \
+            "Marin primary (latest)" \
+            /tmp/tpu-primary-alias-notes.md \
+            source-nightly/*.whl \
+            source-nightly/marin-build.json \
+            marin-release-pair.json
