@@ -336,7 +336,6 @@ def expert_parallel_gmm(
     num_experts_per_shard = num_experts // ep_size
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
 
-    x_p_spec = P(ShardingAxisName.EXPERT_DATA)
     w1_scale_spec = None if w1_scale is None else ep_p_spec
     w1_bias_spec = None if w1_bias is None else ep_p_spec
     w2_scale_spec = None if w2_scale is None else ep_p_spec
@@ -353,7 +352,7 @@ def expert_parallel_gmm(
         ),
         mesh=mesh,
         in_specs=(
-            x_p_spec,
+            data_p_spec,
             ep_p_spec,
             w1_scale_spec,
             w1_bias_spec,
@@ -551,8 +550,6 @@ def fused_moe_func(
 
         return x, group_sizes_local, topk_argsort_revert_indices
 
-    x_out_spec = (P(ShardingAxisName.EXPERT_DATA)
-                  if use_ep else P(ShardingAxisName.MLP_DATA))
     if all_gather_fp8:
         hidden_states = _apply_all_gather_fp8(hidden_states, mesh, dtype)
 
@@ -564,7 +561,7 @@ def fused_moe_func(
             P(ShardingAxisName.MLP_DATA, None),
         ),
         out_specs=(
-            x_out_spec,
+            P(ShardingAxisName.MLP_DATA),
             P(ShardingAxisName.MLP_DATA),
             P(ShardingAxisName.MLP_DATA),
         ),
