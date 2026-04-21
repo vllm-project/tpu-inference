@@ -45,7 +45,7 @@ steps:
       queue: cpu  # TODO: replace with execution environment
     env:
       TEST_MODEL: Qwen/Qwen3.5-9B
-      TENSOR_PARALLEL_SIZE: 1
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
       MINIMUM_ACCURACY_THRESHOLD: 0  # TODO : replace 0 with your accuracy threshold
     commands:
       - |
@@ -72,7 +72,7 @@ steps:
       queue: cpu  # TODO: replace with execution environment
     env:
       TEST_MODEL: Qwen/Qwen3.5-9B
-      TENSOR_PARALLEL_SIZE: 1
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
       MINIMUM_THROUGHPUT_THRESHOLD: 0  # TODO : replace 0 with your performance threshold
     commands:
       - |
