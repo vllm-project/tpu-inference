@@ -186,23 +186,25 @@ class ForbidCompile:
 
 
 def get_batch_composition_stats(
-        batch_no: int,
-        input_batch: InputBatch, total_num_scheduled_tokens: int,
-        num_reqs: int, padded_total_num_scheduled_tokens: int,
+        batch_id: int, input_batch: InputBatch,
+        total_num_scheduled_tokens: int, num_reqs: int,
+        padded_total_num_scheduled_tokens: int,
         scheduler_output: "VllmSchedulerOutput") -> dict:
     """
     Logs the total number of tokens scheduled for the batch, the number of
     prefill tokens, the number of decode tokens, and the number of padded
     tokens scheduled for the batch.
     Args:
+        batch_id: The sequential id of the batch.
         input_batch: The input batch.
         total_num_scheduled_tokens: The total number of tokens scheduled for the batch.
         num_reqs: The number of requests in the batch.
         padded_total_num_scheduled_tokens: The padded total number of tokens scheduled for the batch.
         scheduler_output: The scheduler output.
     Returns:
-        A string containing the total number of tokens scheduled for the batch, the number of
-        prefill tokens, the number of decode tokens, and the number of padded tokens scheduled for the batch.
+        A dict containing the batch id, the total number of tokens scheduled for the batch, the number of
+        prefill tokens, the number of decode tokens, the number of padded tokens scheduled for the batch,
+        the number of requests in the batch, and the phase of the inference the batch is in.
     """
     num_prefill_tokens = 0
     num_decode_tokens = 0
@@ -236,7 +238,7 @@ def get_batch_composition_stats(
                 num_decode_tokens += 1
 
     stats = {
-        "batch_no": batch_no,
+        "batch_id": batch_id,
         "total_num_scheduled_tokens": total_num_scheduled_tokens,
         "num_prefill_tokens": num_prefill_tokens,
         "num_decode_tokens": num_decode_tokens,

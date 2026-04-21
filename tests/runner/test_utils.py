@@ -293,17 +293,17 @@ def test_get_batch_composition_stats(scenario, num_reqs, req_ids, computed,
     input_batch = MockInputBatch(req_ids, computed)
     scheduler_output = MockSchedulerOutput(scheduled)
     total_tokens = sum(scheduled.values())
-    batch_no = 42
+    batch_id = 42
 
     stats = get_batch_composition_stats(
-        batch_no=batch_no,
+        batch_id=batch_id,
         input_batch=input_batch,
         total_num_scheduled_tokens=total_tokens,
         num_reqs=num_reqs,
         padded_total_num_scheduled_tokens=total_tokens + 8,
         scheduler_output=scheduler_output)
 
-    assert stats["batch_no"] == batch_no
+    assert stats["batch_id"] == batch_id
     assert stats["num_prefill_tokens"] == expected_prefill
     assert stats["num_decode_tokens"] == expected_decode
     assert stats["num_reqs"] == num_reqs
