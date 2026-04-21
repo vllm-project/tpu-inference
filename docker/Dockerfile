@@ -48,6 +48,9 @@ RUN git clone $VLLM_REPO . && \
         git checkout $VLLM_COMMIT_HASH; \
     fi
 
+COPY deepseek_v2.patch .
+RUN git apply deepseek_v2.patch
+
 RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements/tpu.txt --retries 3
 RUN --mount=type=cache,target=/root/.cache/pip VLLM_TARGET_DEVICE="tpu" pip install -e .
 
