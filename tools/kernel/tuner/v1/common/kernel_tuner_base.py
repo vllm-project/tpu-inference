@@ -229,7 +229,8 @@ class KernelTunerBase:
             step = {
                 "label":
                 f"cs_id={case_set_id} rid={run_id} Bucket([{case_id_start}, {case_id_end}))",
-                "depends_on": "tpu6e_build_docker",  # Adjust to your Buildkite step dependency
+                "depends_on":
+                "tpu6e_build_docker",  # Adjust to your Buildkite step dependency
                 "agents": {
                     "queue": "tpu_v6e_8_queue"
                 },  # Adjust to your TPU queue
@@ -242,8 +243,10 @@ class KernelTunerBase:
                 ]
             }
             pipeline["steps"].append(step)
-            self.storage_manager.create_bucket_for_run(
-                case_set_id, run_id, bucket_id, case_id_start, case_id_end)
+            self.storage_manager.create_bucket_for_run(case_set_id, run_id,
+                                                       bucket_id,
+                                                       case_id_start,
+                                                       case_id_end)
 
         pipeline['steps'] = [{
             'group': 'Kernel Sweeping Group',

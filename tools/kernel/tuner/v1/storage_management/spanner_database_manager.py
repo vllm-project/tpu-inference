@@ -156,7 +156,7 @@ class SpannerStorageManager(StorageManager):
             self.flush()
 
     def create_bucket_for_run(self, cs_id: str, r_id: int, bucket_id: int,
-                               start_case_id: int, end_case_id: int):
+                              start_case_id: int, end_case_id: int):
         """Creates a new work bucket for a tuning run.
 
         Used by tuner agents to define discrete units of work (buckets) that can
@@ -171,9 +171,11 @@ class SpannerStorageManager(StorageManager):
         """
         if self.dry_run: return
         self.database.run_in_transaction(lambda tx: tx.insert(
-            columns=('ID', 'RunId', 'BucketId', 'StartCaseId', 'EndCaseId', 'Status', 'WorkerID', 'UpdatedAt'),
+            columns=('ID', 'RunId', 'BucketId', 'StartCaseId', 'EndCaseId',
+                     'Status', 'WorkerID', 'UpdatedAt'),
             table='WorkBuckets',
-            values=[(cs_id, r_id, bucket_id, start_case_id, end_case_id, 'PENDING', self.worker_id, spanner.COMMIT_TIMESTAMP)]))
+            values=[(cs_id, r_id, bucket_id, start_case_id, end_case_id,
+                     'PENDING', self.worker_id, spanner.COMMIT_TIMESTAMP)]))
 
     # tuner agents working on the a bucket will mark the bucket as IN_PROGRESS/COMPLETED
     def mark_bucket_in_progress(self, cs_id, r_id, b_id):

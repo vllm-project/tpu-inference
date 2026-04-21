@@ -169,7 +169,7 @@ class LocalDbManager(StorageManager):
             self.flush()
 
     def create_bucket_for_run(self, cs_id: str, r_id: int, bucket_id: int,
-                               start_case_id: int, end_case_id: int):
+                              start_case_id: int, end_case_id: int):
         """Creates a new work bucket for a tuning run.
 
         Used by tuner agents to define discrete units of work (buckets) that can
