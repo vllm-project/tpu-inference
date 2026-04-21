@@ -57,10 +57,11 @@ class TransformerBlock(nnx.Module):
         normed_ffw_input_TD = self.pre_mlp_norm(attn_output_TD)
 
         expert_ids = None
-        if isinstance(self.custom_module, JaxMoE):
-            logits_TD, expert_ids = self.custom_module(normed_ffw_input_TD)
+        mlp_output = self.custom_module(normed_ffw_input_TD)
+        if isinstance(mlp_output, tuple):
+            logits_TD, expert_ids = mlp_output
         else:
-            logits_TD = self.custom_module(normed_ffw_input_TD)
+            logits_TD = mlp_output
 
         logits_TD += ffw_residual_TD
 
@@ -116,7 +117,11 @@ class SharedExpertsTransformerBlock(TransformerBlock):
 
         expert_ids = None
         if moe_layer is not None:
-            logits_TD, expert_ids = moe_layer(normed_ffw_input_TD)
+            mlp_output = moe_layer(normed_ffw_input_TD)
+            if isinstance(mlp_output, tuple):
+                logits_TD, expert_ids = mlp_output
+            else:
+                logits_TD = mlp_output
             # Add the shared expert outputs to the MoE outputs.
             shared_expert_output_TD = self.shared_experts(normed_ffw_input_TD)
             logits_TD += shared_expert_output_TD

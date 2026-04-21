@@ -633,7 +633,7 @@ class TestFp8FusedMoE:
         with patch.object(layer, 'router', return_value=score):
             # Run the actual forward pass and up-cast
             # to avoid promote error
-            actual = layer(a).astype(expected.dtype)
+            actual = layer(a)[0].astype(expected.dtype)
 
         assert jnp.allclose(expected, actual, atol=5e-2, rtol=1e-1)
 

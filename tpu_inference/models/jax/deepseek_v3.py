@@ -970,10 +970,7 @@ class DeepseekV3DecoderLayer(JaxModule):
         # Residual
         hidden_states = residual + mlp_output
 
-        if expert_indices is not None:
-            return new_cache, hidden_states, expert_indices
-        else:
-            return new_cache, hidden_states
+        return new_cache, hidden_states, expert_indices
 
 
 class DeepSeekV3Router(JaxEinsum):
