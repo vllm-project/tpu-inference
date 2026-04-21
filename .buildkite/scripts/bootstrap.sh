@@ -93,7 +93,7 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     fi
     
     # Validate modified YAML pipelines using bk pipeline validate
-    if .buildkite/scripts/validate_all_pipelines.sh "$NON_SKIPPABLE_FILES"; then
+    if .buildkite/scripts/validate_buildkite_ymls.sh "$NON_SKIPPABLE_FILES"; then
       echo "All pipelines syntax are valid. Proceeding with pipeline upload."
     else
       echo "Some pipelines syntax are invalid. Failing build."
