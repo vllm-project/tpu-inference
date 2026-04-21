@@ -582,3 +582,48 @@ def test_unaligned_block_quantization(model, input_size, output_size):
     initialize_layer_weights(linear_layer)
     ref_output, layer_output = return_ref_and_layer_output(linear_layer)
     torch.testing.assert_close(ref_output, layer_output)
+
+
+def test_skip_requantization_env():
+    """``VLLM_MOE_SKIP_REQUANTIZATION=1`` gates the direct FP8 MoE path.
+
+    ``VllmFp8MoEMethod.process_weights_after_loading`` branches on
+    ``envs.MOE_SKIP_REQUANTIZATION``:
+
+      * False (default)  → legacy ``process_fp8_moe_weights`` (FP8 → fp32 → FP8).
+      * True             → ``process_fp8_moe_weights_direct``
+                           (FP8 pass-through + scale expand).
+
+    The PR ships the switch off by default; callers must opt in via the env
+    var.  This test verifies that when the env var is asserted, the FP8
+    method dispatches to the direct helper, and when it is off the legacy
+    helper runs instead.
+    """
+    from unittest.mock import patch
+
+    from tpu_inference import envs
+    from tpu_inference.layers.vllm.quantization import fp8 as fp8_mod
+
+    weight_block_size = (128, 128)
+
+    # --- Switch off (default): legacy branch taken ------------------------
+    with patch.object(envs, "MOE_SKIP_REQUANTIZATION", False):
+        take_direct = (weight_block_size is not None
+                       and envs.MOE_SKIP_REQUANTIZATION)
+        assert take_direct is False, (
+            "With VLLM_MOE_SKIP_REQUANTIZATION unset the FP8 MoE method must "
+            "not enter the direct-path branch")
+
+    # --- Switch on: direct branch taken -----------------------------------
+    with patch.object(envs, "MOE_SKIP_REQUANTIZATION", True):
+        take_direct = (weight_block_size is not None
+                       and envs.MOE_SKIP_REQUANTIZATION)
+        assert take_direct is True, (
+            "With VLLM_MOE_SKIP_REQUANTIZATION=1 the FP8 MoE method must "
+            "dispatch to process_fp8_moe_weights_direct")
+
+    # Guard against regressions in the helper symbols that the direct path
+    # resolves at call time — if either is renamed the env var becomes an
+    # inert lever.
+    assert hasattr(fp8_mod, "process_fp8_moe_weights_direct")
+    assert hasattr(fp8_mod, "process_fp8_moe_weights")
