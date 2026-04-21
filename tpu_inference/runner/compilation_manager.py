@@ -135,23 +135,16 @@ class CompilationManager:
 
             # Identify multimodal embedding size
             mm_hidden_size = hidden_size
-            try:
-                vision_config = hf_conf.vision_config
-                visual_dim = vision_config.out_hidden_size
-
-                try:
-                    deepstack_indexes = vision_config.deepstack_visual_indexes
+            vision_config = getattr(hf_conf, "vision_config", None)
+            
+            if vision_config:
+                visual_dim = getattr(vision_config, "out_hidden_size", None)
+                deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", None)
+                
+                # If both exist, we apply the deepstack concat logic
+                if visual_dim is not None and deepstack_indexes is not None:
                     deepstack_levels = len(deepstack_indexes)
-                    
-                    # If we have deepstack indexes, we apply the deepstack concat logic.
                     mm_hidden_size = visual_dim * (1 + deepstack_levels)
-                except AttributeError:
-                    # If deepstack_visual_indexes is missing, it's not a deepstack model.
-                    pass
-
-            except AttributeError:
-                # If vision_config or out_hidden_size are missing, we fall back to default mm_hidden_size
-                pass
 
             sharding = NamedSharding(
                 self.runner.mesh,
