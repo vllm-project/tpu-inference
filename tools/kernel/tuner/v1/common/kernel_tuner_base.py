@@ -225,12 +225,11 @@ class KernelTunerBase:
         #     command: "python -m tools.kernel.tuner.v1.kernel_tuner_runner --worker_id=WORKER_ID --case_set_id=CASE_SET_ID --run_id=RUN_ID --begin_case_id=BEGIN_CASE_ID --end_case_id=END_CASE_ID"
         pipeline = {"steps": []}
 
-        for case_id_start, case_id_end in buckets:
+        for bucket_id, (case_id_start, case_id_end) in enumerate(buckets):
             step = {
                 "label":
                 f"cs_id={case_set_id} rid={run_id} Bucket([{case_id_start}, {case_id_end}))",
                 "depends_on": "tpu6e_build_docker",  # Adjust to your Buildkite step dependency
-
                 "agents": {
                     "queue": "tpu_v6e_8_queue"
                 },  # Adjust to your TPU queue
@@ -243,6 +242,8 @@ class KernelTunerBase:
                 ]
             }
             pipeline["steps"].append(step)
+            self.storage_manager.create_buckets_for_run(
+                case_set_id, run_id, bucket_id, case_id_start, case_id_end)
 
         pipeline['steps'] = [{
             'group': 'Kernel Sweeping Group',
@@ -414,3 +415,6 @@ class KernelTunerBase:
         self.storage_manager.mark_bucket_completed(caseset_id, run_id,
                                                    bucket_id,
                                                    bucket_total_time_us)
+        logger.info(
+            f"Worker [{FLAGS.worker_id}] Completed Bucket {bucket_id} ({begin_case_id}-{end_case_id}) for CaseSetId: {caseset_id}, RunId: {run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
+        )

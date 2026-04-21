@@ -141,18 +141,53 @@ class SpannerStorageManager(StorageManager):
         self.buffer = []
 
     def add_tuner_case(self, caseset_id: str, case_id: int, case: str):
-        assert type(
-            caseset_id
-        ) == str, f'param caseset_id should be a string but got {type(caseset_id)}'
-        assert type(
-            case_id
-        ) == int, f'param case_id should be an integer but got {type(case_id)}'
-        assert type(
-            case
-        ) == str, f'param case should be a string representing the key:value but got {type(case)}'
+        assert isinstance(
+            caseset_id, str
+        ), f'param caseset_id should be a string but got {type(caseset_id)}'
+        assert isinstance(
+            case_id,
+            int), f'param case_id should be an integer but got {type(case_id)}'
+        assert isinstance(
+            case, str
+        ), f'param case should be a string representing the key:value but got {type(case)}'
         self.buffer.append((caseset_id, case_id, case))
         self.current_case_id += 1
-        if len(self.buffer) >= BATCH_SIZE: self.flush()
+        if len(self.buffer) >= BATCH_SIZE:
+            self.flush()
+
+    def create_buckets_for_run(self, cs_id: str, r_id: int, bucket_id: int,
+                               start_case_id: int, end_case_id: int):
+        """Creates a new work bucket for a tuning run.
+
+        Used by tuner agents to define discrete units of work (buckets) that can
+        be claimed and processed independently.
+
+        Args:
+            cs_id: Case set ID the bucket belongs to.
+            r_id: Run ID the bucket belongs to.
+            bucket_id: Unique integer identifier for the bucket within the run.
+            start_case_id: Starting case ID (inclusive) for this bucket.
+            end_case_id: Ending case ID (inclusive) for this bucket.
+        """
+        if self.dry_run: return
+        self.database.run_in_transaction(lambda tx: tx.execute_insert(
+            "INSERT INTO WorkBuckets (ID, RunId, BucketId, StartCaseId, EndCaseId, Status, WorkerID, UpdatedAt) VALUES (@id, @rid, @bid, @s, @e, @wid, NULL, PENDING_COMMIT_TIMESTAMP())",
+            params={
+                'id': cs_id,
+                'rid': r_id,
+                'wid': self.worker_id,
+                'bid': bucket_id,
+                's': start_case_id,
+                'e': end_case_id
+            },
+            param_types={
+                'id': spanner.param_types.STRING,
+                'rid': spanner.param_types.STRING,
+                'wid': spanner.param_types.STRING,
+                'bid': spanner.param_types.INT64,
+                's': spanner.param_types.INT64,
+                'e': spanner.param_types.INT64
+            }))
 
     # tuner agents working on the a bucket will mark the bucket as IN_PROGRESS/COMPLETED
     def mark_bucket_in_progress(self, cs_id, r_id, b_id):
@@ -163,6 +198,12 @@ class SpannerStorageManager(StorageManager):
                 'rid': r_id,
                 'bid': b_id,
                 'wid': self.worker_id
+            },
+            param_types={
+                'id': spanner.param_types.STRING,
+                'rid': spanner.param_types.STRING,
+                'bid': spanner.param_types.INT64,
+                'wid': spanner.param_types.STRING
             }))
 
     def mark_bucket_completed(self, cs_id, r_id, b_id, tt_us):
@@ -173,6 +214,12 @@ class SpannerStorageManager(StorageManager):
                 'rid': r_id,
                 'bid': b_id,
                 'tt': tt_us
+            },
+            param_types={
+                'id': spanner.param_types.STRING,
+                'rid': spanner.param_types.STRING,
+                'bid': spanner.param_types.INT64,
+                'tt': spanner.param_types.INT64
             }))
 
     def get_already_processed_ids(self, cs_id, r_id, start, end):

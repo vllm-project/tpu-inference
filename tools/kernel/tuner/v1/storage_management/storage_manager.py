@@ -109,6 +109,23 @@ class StorageManager:
         """
         raise NotImplementedError("Subclasses must implement add_tuner_case")
 
+    def create_buckets_for_run(self, cs_id: str, r_id: int, bucket_id: int,
+                               start_case_id: int, end_case_id: int):
+        """Creates a new work bucket for a tuning run.
+
+        Used by tuner agents to define discrete units of work (buckets) that can
+        be claimed and processed independently.
+
+        Args:
+            cs_id: Case set ID the bucket belongs to.
+            r_id: Run ID the bucket belongs to.
+            bucket_id: Unique integer identifier for the bucket within the run.
+            start_case_id: Starting case ID (inclusive) for this bucket.
+            end_case_id: Ending case ID (inclusive) for this bucket.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement create_buckets_for_run")
+
     def mark_bucket_in_progress(self, cs_id, r_id, b_id):
         """Marks a work bucket as IN_PROGRESS, claiming it for the current worker.
 

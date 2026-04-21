@@ -154,19 +154,50 @@ class LocalDbManager(StorageManager):
         self.buffer = []
 
     def add_tuner_case(self, caseset_id: str, case_id: int, case: str):
-        assert type(
-            caseset_id
-        ) == str, f'param caseset_id should be a string but got {type(caseset_id)}'
-        assert type(
-            case_id
-        ) == int, f'param case_id should be an integer but got {type(case_id)}'
-        assert type(
-            case
-        ) == str, f'param case should be a string representing the key:value but got {type(case)}'
+        assert isinstance(
+            caseset_id, str
+        ), f'param caseset_id should be a string but got {type(caseset_id)}'
+        assert isinstance(
+            case_id,
+            int), f'param case_id should be an integer but got {type(case_id)}'
+        assert isinstance(
+            case, str
+        ), f'param case should be a string representing the key:value but got {type(case)}'
         self.buffer.append((caseset_id, case_id, case))
         self.current_case_id += 1
         if len(self.buffer) >= BATCH_SIZE:
             self.flush()
+
+    def create_buckets_for_run(self, cs_id: str, r_id: int, bucket_id: int,
+                               start_case_id: int, end_case_id: int):
+        """Creates a new work bucket for a tuning run.
+
+        Used by tuner agents to define discrete units of work (buckets) that can
+        be claimed and processed independently.
+
+        Args:
+            cs_id: Case set ID the bucket belongs to.
+            r_id: Run ID the bucket belongs to.
+            bucket_id: Unique integer identifier for the bucket within the run.
+            start_case_id: Starting case ID (inclusive) for this bucket.
+            end_case_id: Ending case ID (inclusive) for this bucket.
+        """
+        table = self._read_table('WorkBuckets')
+        table.append({
+            'ID': cs_id,
+            'RunId': r_id,
+            'BucketId': bucket_id,
+            'StartCaseId': start_case_id,
+            'EndCaseId': end_case_id,
+            'Status': 'PENDING',
+            'WorkerID': None,
+            'TotalTime': None,
+            'UpdatedAt': datetime.now().isoformat()
+        })
+        self._write_table('WorkBuckets', table)
+        logger.info(
+            f'Created bucket: cs_id={cs_id}, r_id={r_id}, bucket_id={bucket_id}, start_case_id={start_case_id}, end_case_id={end_case_id}'
+        )
 
     def mark_bucket_in_progress(self, cs_id, r_id, b_id):
         table = self._read_table('WorkBuckets')

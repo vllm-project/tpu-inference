@@ -28,13 +28,12 @@ Commands:
 import argparse
 import json
 import os
-import sys
 from collections import defaultdict
-
 
 # ---------------------------------------------------------------------------
 # Local backend helpers
 # ---------------------------------------------------------------------------
+
 
 def _read_json(db_path, table_name):
     path = os.path.join(db_path, f'{table_name}.json')
@@ -56,7 +55,8 @@ def local_list_case_sets(db_path, filter_kw=None):
     for cs in case_sets:
         cs_id = cs['ID']
         desc = cs.get('Description', '')
-        if filter_kw and filter_kw.lower() not in cs_id.lower() and filter_kw.lower() not in desc.lower():
+        if filter_kw and filter_kw.lower() not in cs_id.lower(
+        ) and filter_kw.lower() not in desc.lower():
             continue
         rows.append({
             'case_set_id': cs_id,
@@ -83,7 +83,8 @@ def local_list_runs(db_path, case_set_id=None, filter_kw=None):
         if case_set_id and cs_id != case_set_id:
             continue
         desc = cs_desc.get(cs_id, '')
-        if filter_kw and filter_kw.lower() not in str(run_id) and filter_kw.lower() not in desc.lower():
+        if filter_kw and filter_kw.lower() not in str(
+                run_id) and filter_kw.lower() not in desc.lower():
             continue
         rows.append({
             'case_set_id': cs_id,
@@ -111,8 +112,10 @@ def local_list_bucket_status(db_path, case_set_id, run_id):
 
 def local_query_run_status(db_path, case_set_id, run_id):
     buckets = _read_json(db_path, 'WorkBuckets')
-    relevant = [b for b in buckets
-                if b['ID'] == case_set_id and str(b['RunId']) == str(run_id)]
+    relevant = [
+        b for b in buckets
+        if b['ID'] == case_set_id and str(b['RunId']) == str(run_id)
+    ]
     if not relevant:
         return None
 
@@ -123,8 +126,9 @@ def local_query_run_status(db_path, case_set_id, run_id):
          if b.get('Status') == 'COMPLETED' and b.get('UpdatedAt')),
         default='N/A',
     )
-    total_us = sum(b.get('TotalTime', 0) or 0 for b in relevant
-                   if b.get('Status') == 'COMPLETED')
+    total_us = sum(
+        b.get('TotalTime', 0) or 0 for b in relevant
+        if b.get('Status') == 'COMPLETED')
     return {
         'case_set_id': case_set_id,
         'run_id': run_id,
@@ -139,14 +143,15 @@ def local_query_min_latency(db_path, case_set_id, run_id):
     results = _read_json(db_path, 'CaseResults')
     cases = _read_json(db_path, 'KernelTuningCases')
 
-    case_kv_map = {(c['ID'], c['CaseId']): c.get('CaseKeyValue') for c in cases}
+    case_kv_map = {
+        (c['ID'], c['CaseId']): c.get('CaseKeyValue')
+        for c in cases
+    }
 
     relevant = [
         r for r in results
-        if r['ID'] == case_set_id
-        and str(r['RunId']) == str(run_id)
-        and r.get('ProcessedStatus') == 'SUCCESS'
-        and r.get('Latency')
+        if r['ID'] == case_set_id and str(r['RunId']) == str(run_id)
+        and r.get('ProcessedStatus') == 'SUCCESS' and r.get('Latency')
     ]
 
     key_best = {}
@@ -177,35 +182,45 @@ def local_query_min_latency(db_path, case_set_id, run_id):
 # Spanner backend helpers
 # ---------------------------------------------------------------------------
 
+
 def _get_spanner_db(project, instance_id, database_id):
-    from google.cloud import spanner as gspanner  # pylint: disable=import-outside-toplevel
+    from google.cloud import \
+        spanner as gspanner  # pylint: disable=import-outside-toplevel
     client = gspanner.Client(project=project, disable_builtin_metrics=True)
     return client.instance(instance_id).database(database_id)
 
 
 def spanner_list_case_sets(db, filter_kw=None):
-    from google.cloud import spanner as gspanner  # pylint: disable=import-outside-toplevel
+    from google.cloud import \
+        spanner as gspanner  # pylint: disable=import-outside-toplevel
     rows = []
     with db.snapshot() as snap:
         for cs_id, desc, status, scan_space in snap.execute_sql(
-                "SELECT ID, Description, Status, ScanSpace FROM CaseSet ORDER BY ID"):
+                "SELECT ID, Description, Status, ScanSpace FROM CaseSet ORDER BY ID"
+        ):
             if filter_kw and filter_kw.lower() not in cs_id.lower() and \
                     filter_kw.lower() not in (desc or '').lower():
                 continue
             with db.snapshot() as snap2:
-                num_runs = list(snap2.execute_sql(
-                    "SELECT COUNT(DISTINCT RunId) FROM WorkBuckets WHERE ID = @id",
-                    params={'id': cs_id},
-                    param_types={'id': gspanner.param_types.STRING},
-                ))[0][0]
-            rows.append({'case_set_id': cs_id, 'description': desc,
-                         'status': status, 'scan_space': scan_space,
-                         'num_runs': num_runs})
+                num_runs = list(
+                    snap2.execute_sql(
+                        "SELECT COUNT(DISTINCT RunId) FROM WorkBuckets WHERE ID = @id",
+                        params={'id': cs_id},
+                        param_types={'id': gspanner.param_types.STRING},
+                    ))[0][0]
+            rows.append({
+                'case_set_id': cs_id,
+                'description': desc,
+                'status': status,
+                'scan_space': scan_space,
+                'num_runs': num_runs
+            })
     return rows
 
 
 def spanner_list_runs(db, case_set_id=None, filter_kw=None):
-    from google.cloud import spanner as gspanner  # pylint: disable=import-outside-toplevel
+    from google.cloud import \
+        spanner as gspanner  # pylint: disable=import-outside-toplevel
     where = "WHERE wb.ID = @id" if case_set_id else ""
     query = f"""
         SELECT wb.ID, wb.RunId, cs.Description, COUNT(*) AS num_buckets
@@ -223,38 +238,56 @@ def spanner_list_runs(db, case_set_id=None, filter_kw=None):
             if filter_kw and filter_kw.lower() not in str(run_id) and \
                     filter_kw.lower() not in (desc or '').lower():
                 continue
-            rows.append({'case_set_id': cs_id, 'run_id': run_id,
-                         'description': desc, 'num_buckets': num_buckets})
+            rows.append({
+                'case_set_id': cs_id,
+                'run_id': run_id,
+                'description': desc,
+                'num_buckets': num_buckets
+            })
     return rows
 
 
 def spanner_count_buckets(db, case_set_id, run_id):
-    from google.cloud import spanner as gspanner  # pylint: disable=import-outside-toplevel
+    from google.cloud import \
+        spanner as gspanner  # pylint: disable=import-outside-toplevel
     with db.snapshot() as snap:
-        return list(snap.execute_sql(
-            "SELECT COUNT(*) FROM WorkBuckets WHERE ID = @id AND RunId = @rid",
-            params={'id': case_set_id, 'rid': int(run_id)},
-            param_types={'id': gspanner.param_types.STRING,
-                         'rid': gspanner.param_types.INT64},
-        ))[0][0]
+        return list(
+            snap.execute_sql(
+                "SELECT COUNT(*) FROM WorkBuckets WHERE ID = @id AND RunId = @rid",
+                params={
+                    'id': case_set_id,
+                    'rid': int(run_id)
+                },
+                param_types={
+                    'id': gspanner.param_types.STRING,
+                    'rid': gspanner.param_types.INT64
+                },
+            ))[0][0]
 
 
 def spanner_list_bucket_status(db, case_set_id, run_id):
-    from google.cloud import spanner as gspanner  # pylint: disable=import-outside-toplevel
+    from google.cloud import \
+        spanner as gspanner  # pylint: disable=import-outside-toplevel
     result = {}
     with db.snapshot() as snap:
         for status, count in snap.execute_sql(
                 "SELECT Status, COUNT(*) FROM WorkBuckets "
                 "WHERE ID = @id AND RunId = @rid GROUP BY Status",
-                params={'id': case_set_id, 'rid': int(run_id)},
-                param_types={'id': gspanner.param_types.STRING,
-                             'rid': gspanner.param_types.INT64}):
+                params={
+                    'id': case_set_id,
+                    'rid': int(run_id)
+                },
+                param_types={
+                    'id': gspanner.param_types.STRING,
+                    'rid': gspanner.param_types.INT64
+                }):
             result[status] = count
     return result
 
 
 def spanner_query_run_status(db, case_set_id, run_id):
-    from google.cloud import spanner as gspanner  # pylint: disable=import-outside-toplevel
+    from google.cloud import \
+        spanner as gspanner  # pylint: disable=import-outside-toplevel
     query = """
         SELECT
             MIN(UpdatedAt),
@@ -263,12 +296,18 @@ def spanner_query_run_status(db, case_set_id, run_id):
         FROM WorkBuckets WHERE ID = @id AND RunId = @rid
     """
     with db.snapshot() as snap:
-        start, last, total_us = list(snap.execute_sql(
-            query,
-            params={'id': case_set_id, 'rid': int(run_id)},
-            param_types={'id': gspanner.param_types.STRING,
-                         'rid': gspanner.param_types.INT64},
-        ))[0]
+        start, last, total_us = list(
+            snap.execute_sql(
+                query,
+                params={
+                    'id': case_set_id,
+                    'rid': int(run_id)
+                },
+                param_types={
+                    'id': gspanner.param_types.STRING,
+                    'rid': gspanner.param_types.INT64
+                },
+            ))[0]
     total_us = total_us or 0
     return {
         'case_set_id': case_set_id,
@@ -281,7 +320,8 @@ def spanner_query_run_status(db, case_set_id, run_id):
 
 
 def spanner_query_min_latency(db, case_set_id, run_id):
-    from google.cloud import spanner as gspanner  # pylint: disable=import-outside-toplevel
+    from google.cloud import \
+        spanner as gspanner  # pylint: disable=import-outside-toplevel
     query = """
         SELECT cr.CaseId, cr.Latency, cr.WarmupTime, ktc.CaseKeyValue
         FROM CaseResults cr
@@ -293,9 +333,14 @@ def spanner_query_min_latency(db, case_set_id, run_id):
     with db.snapshot() as snap:
         for case_id, lat, warmup, kv_str in snap.execute_sql(
                 query,
-                params={'id': case_set_id, 'rid': int(run_id)},
-                param_types={'id': gspanner.param_types.STRING,
-                             'rid': gspanner.param_types.INT64}):
+                params={
+                    'id': case_set_id,
+                    'rid': int(run_id)
+                },
+                param_types={
+                    'id': gspanner.param_types.STRING,
+                    'rid': gspanner.param_types.INT64
+                }):
             try:
                 kv = json.loads(kv_str)
             except (json.JSONDecodeError, TypeError):
@@ -316,6 +361,7 @@ def spanner_query_min_latency(db, case_set_id, run_id):
 # ---------------------------------------------------------------------------
 # Display
 # ---------------------------------------------------------------------------
+
 
 def _print_table(rows, headers=None):
     if not rows:
@@ -350,38 +396,51 @@ def _print_min_latency(rows):
 # Argument parser
 # ---------------------------------------------------------------------------
 
+
 def _build_parser():
     parser = argparse.ArgumentParser(
         description='Inspect kernel tuning results.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument('--source', choices=['local', 'spanner'], default=None,
+    parser.add_argument('--source',
+                        choices=['local', 'spanner'],
+                        default=None,
                         help='Storage backend.')
-    parser.add_argument('--db-path', default=None,
+    parser.add_argument('--db-path',
+                        default=None,
                         help='Path to local DB folder (local source only).')
-    parser.add_argument('--project', default='cloud-tpu-inference-test',
+    parser.add_argument('--project',
+                        default='cloud-tpu-inference-test',
                         help='GCP project ID (spanner only).')
-    parser.add_argument('--instance', default='vllm-bm-inst',
+    parser.add_argument('--instance',
+                        default='vllm-bm-inst',
                         help='Spanner instance ID (spanner only).')
-    parser.add_argument('--database', default='tune-gmm',
+    parser.add_argument('--database',
+                        default='tune-gmm',
                         help='Spanner database ID (spanner only).')
 
     sub = parser.add_subparsers(dest='command', metavar='COMMAND')
 
     p = sub.add_parser('list_case_sets', help='List available case sets.')
-    p.add_argument('--filter', dest='filter_kw', default=None,
+    p.add_argument('--filter',
+                   dest='filter_kw',
+                   default=None,
                    help='Filter by keyword in case_set_id or description.')
 
     p = sub.add_parser('list_runs', help='List runs for a case set.')
     p.add_argument('--case_set_id', default=None)
-    p.add_argument('--filter', dest='filter_kw', default=None,
+    p.add_argument('--filter',
+                   dest='filter_kw',
+                   default=None,
                    help='Filter by keyword in run_id or description.')
 
-    p = sub.add_parser('count_buckets', help='Count buckets for a case set / run.')
+    p = sub.add_parser('count_buckets',
+                       help='Count buckets for a case set / run.')
     p.add_argument('--case_set_id', required=True)
     p.add_argument('--run_id', required=True)
 
-    p = sub.add_parser('list_bucket_status', help='Show completed vs pending bucket counts.')
+    p = sub.add_parser('list_bucket_status',
+                       help='Show completed vs pending bucket counts.')
     p.add_argument('--case_set_id', required=True)
     p.add_argument('--run_id', required=True)
 
@@ -389,7 +448,8 @@ def _build_parser():
     p.add_argument('--case_set_id', required=True)
     p.add_argument('--run_id', required=True)
 
-    p = sub.add_parser('query_min_latency', help='Show best latency per TuningKey.')
+    p = sub.add_parser('query_min_latency',
+                       help='Show best latency per TuningKey.')
     p.add_argument('--case_set_id', required=True)
     p.add_argument('--run_id', required=True)
 
@@ -399,6 +459,7 @@ def _build_parser():
 # ---------------------------------------------------------------------------
 # Source resolution (prompts when not supplied on CLI)
 # ---------------------------------------------------------------------------
+
 
 def _resolve_source(args):
     source = args.source
@@ -420,10 +481,8 @@ def _resolve_source(args):
     db_path = getattr(args, 'db_path', None)
     if source == 'local' and not db_path:
         candidates = sorted(
-            os.path.join('/tmp', d) for d in os.listdir('/tmp')
-            if os.path.isdir(os.path.join('/tmp', d))
-            and 'kernel_tuner_run' in d
-        )
+            os.path.join('/tmp', d) for d in os.listdir('/tmp') if
+            os.path.isdir(os.path.join('/tmp', d)) and 'kernel_tuner_run' in d)
         if candidates:
             print('Available local DB folders:')
             for i, c in enumerate(candidates, 1):
@@ -447,32 +506,41 @@ def _resolve_source(args):
 # Command dispatch
 # ---------------------------------------------------------------------------
 
+
 def _run_command(args, source, db_path=None, spanner_db=None):
     if source == 'local':
         if args.command == 'list_case_sets':
             _print_table(
                 local_list_case_sets(db_path, filter_kw=args.filter_kw),
-                ['case_set_id', 'description', 'status', 'scan_space', 'num_runs'],
+                [
+                    'case_set_id', 'description', 'status', 'scan_space',
+                    'num_runs'
+                ],
             )
 
         elif args.command == 'list_runs':
             _print_table(
-                local_list_runs(db_path, case_set_id=args.case_set_id,
+                local_list_runs(db_path,
+                                case_set_id=args.case_set_id,
                                 filter_kw=args.filter_kw),
                 ['case_set_id', 'run_id', 'description', 'num_buckets'],
             )
 
         elif args.command == 'count_buckets':
             n = local_count_buckets(db_path, args.case_set_id, args.run_id)
-            print(f'Total buckets for case_set_id={args.case_set_id}, run_id={args.run_id}: {n}')
+            print(
+                f'Total buckets for case_set_id={args.case_set_id}, run_id={args.run_id}: {n}'
+            )
 
         elif args.command == 'list_bucket_status':
             for status, n in sorted(
-                    local_list_bucket_status(db_path, args.case_set_id, args.run_id).items()):
+                    local_list_bucket_status(db_path, args.case_set_id,
+                                             args.run_id).items()):
                 print(f'  {status}: {n}')
 
         elif args.command == 'query_run_status':
-            info = local_query_run_status(db_path, args.case_set_id, args.run_id)
+            info = local_query_run_status(db_path, args.case_set_id,
+                                          args.run_id)
             if info is None:
                 print('No data found.')
             else:
@@ -481,39 +549,49 @@ def _run_command(args, source, db_path=None, spanner_db=None):
 
         elif args.command == 'query_min_latency':
             _print_min_latency(
-                local_query_min_latency(db_path, args.case_set_id, args.run_id))
+                local_query_min_latency(db_path, args.case_set_id,
+                                        args.run_id))
 
     else:  # spanner
         if args.command == 'list_case_sets':
             _print_table(
                 spanner_list_case_sets(spanner_db, filter_kw=args.filter_kw),
-                ['case_set_id', 'description', 'status', 'scan_space', 'num_runs'],
+                [
+                    'case_set_id', 'description', 'status', 'scan_space',
+                    'num_runs'
+                ],
             )
 
         elif args.command == 'list_runs':
             _print_table(
-                spanner_list_runs(spanner_db, case_set_id=args.case_set_id,
+                spanner_list_runs(spanner_db,
+                                  case_set_id=args.case_set_id,
                                   filter_kw=args.filter_kw),
                 ['case_set_id', 'run_id', 'description', 'num_buckets'],
             )
 
         elif args.command == 'count_buckets':
-            n = spanner_count_buckets(spanner_db, args.case_set_id, args.run_id)
-            print(f'Total buckets for case_set_id={args.case_set_id}, run_id={args.run_id}: {n}')
+            n = spanner_count_buckets(spanner_db, args.case_set_id,
+                                      args.run_id)
+            print(
+                f'Total buckets for case_set_id={args.case_set_id}, run_id={args.run_id}: {n}'
+            )
 
         elif args.command == 'list_bucket_status':
             for status, n in sorted(
-                    spanner_list_bucket_status(spanner_db, args.case_set_id, args.run_id).items()):
+                    spanner_list_bucket_status(spanner_db, args.case_set_id,
+                                               args.run_id).items()):
                 print(f'  {status}: {n}')
 
         elif args.command == 'query_run_status':
-            for k, v in spanner_query_run_status(
-                    spanner_db, args.case_set_id, args.run_id).items():
+            for k, v in spanner_query_run_status(spanner_db, args.case_set_id,
+                                                 args.run_id).items():
                 print(f'  {k}: {v}')
 
         elif args.command == 'query_min_latency':
             _print_min_latency(
-                spanner_query_min_latency(spanner_db, args.case_set_id, args.run_id))
+                spanner_query_min_latency(spanner_db, args.case_set_id,
+                                          args.run_id))
 
 
 # ---------------------------------------------------------------------------
@@ -542,7 +620,8 @@ def _console_loop(source, db_path, spanner_db, global_args):
     session_run_id = None
 
     print('\nKernel Tuning Inspector — console mode')
-    print(f'Source: {source}' + (f'  DB: {db_path}' if source == 'local' else ''))
+    print(f'Source: {source}' +
+          (f'  DB: {db_path}' if source == 'local' else ''))
     print(_COMMANDS_HELP)
 
     def _prompt():
@@ -617,6 +696,7 @@ def _console_loop(source, db_path, spanner_db, global_args):
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = _build_parser()
     args = parser.parse_args()
@@ -627,7 +707,8 @@ def main():
         db_path = getattr(args, 'db_path', None)
         spanner_db = None
         if source == 'spanner':
-            spanner_db = _get_spanner_db(args.project, args.instance, args.database)
+            spanner_db = _get_spanner_db(args.project, args.instance,
+                                         args.database)
         _console_loop(source, db_path, spanner_db, args)
         return
 
@@ -636,7 +717,8 @@ def main():
     db_path = getattr(args, 'db_path', None)
     spanner_db = None
     if source == 'spanner':
-        spanner_db = _get_spanner_db(args.project, args.instance, args.database)
+        spanner_db = _get_spanner_db(args.project, args.instance,
+                                     args.database)
     _run_command(args, source, db_path=db_path, spanner_db=spanner_db)
 
 
