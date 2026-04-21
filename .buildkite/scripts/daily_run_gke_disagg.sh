@@ -93,10 +93,10 @@ run_disagg_benchmark() {
     local num_prompts=$5
     local filename="${input_len}_${output_len}.json"
 
-    for RATE in 0.5 1.0 2.0 3.0 4.0 5.0
+    for CONCURRENCY in 16 32 64 128 256
     do
         echo "-------------------------------------------------------"
-        echo "Starting Benchmark: Rate=$RATE, Input=$input_len, Output=$output_len"
+        echo "Starting Benchmark: Concurrency=$CONCURRENCY, Input=$input_len, Output=$output_len"
         echo "-------------------------------------------------------"
 
         kubectl exec "$proxy" -- vllm bench serve \
@@ -108,12 +108,13 @@ run_disagg_benchmark() {
             --ignore-eos \
             --host=localhost \
             --port=10000 \
-            --request-rate="$RATE" \
+            --max-concurrency=$CONCURRENCY \
+            --request-rate=inf \
             --metric-percentiles 90,99 \
             --append-result \
             --result-file="$filename"
 
-        sleep 2
+        sleep 30
     done
 
     kubectl cp "${proxy}:${filename}" "./${filename}"
