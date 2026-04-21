@@ -170,24 +170,10 @@ class SpannerStorageManager(StorageManager):
             end_case_id: Ending case ID (inclusive) for this bucket.
         """
         if self.dry_run: return
-        self.database.run_in_transaction(lambda tx: tx.execute_insert(
-            "INSERT INTO WorkBuckets (ID, RunId, BucketId, StartCaseId, EndCaseId, Status, WorkerID, UpdatedAt) VALUES (@id, @rid, @bid, @s, @e, @wid, NULL, PENDING_COMMIT_TIMESTAMP())",
-            params={
-                'id': cs_id,
-                'rid': r_id,
-                'wid': self.worker_id,
-                'bid': bucket_id,
-                's': start_case_id,
-                'e': end_case_id
-            },
-            param_types={
-                'id': spanner.param_types.STRING,
-                'rid': spanner.param_types.STRING,
-                'wid': spanner.param_types.STRING,
-                'bid': spanner.param_types.INT64,
-                's': spanner.param_types.INT64,
-                'e': spanner.param_types.INT64
-            }))
+        self.database.run_in_transaction(lambda tx: tx.insert(
+            columns=('ID', 'RunId', 'BucketId', 'StartCaseId', 'EndCaseId', 'Status', 'WorkerID', 'UpdatedAt'),
+            table='WorkBuckets',
+            values=(cs_id, r_id, bucket_id, start_case_id, end_case_id, 'PENDING', self.worker_id, spanner.COMMIT_TIMESTAMP)))
 
     # tuner agents working on the a bucket will mark the bucket as IN_PROGRESS/COMPLETED
     def mark_bucket_in_progress(self, cs_id, r_id, b_id):
