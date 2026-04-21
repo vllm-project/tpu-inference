@@ -239,7 +239,7 @@ class KernelTunerBase:
                     "TPU_VERSION": "tpu6e"
                 },
                 "commands": [
-                    f".buildkite/scripts/run_in_docker.sh base -c \"python -m tools.kernel.tuner.v1.kernel_tuner_runner --kernel_tuner_name={self.kernel_tuner_name} --case_set_id={case_set_id} --run_id={run_id} --begin_case_id={case_id_start} --end_case_id={case_id_end}\""
+                    f".buildkite/scripts/run_in_docker.sh bash -c \"python -m tools.kernel.tuner.v1.kernel_tuner_runner --kernel_tuner_name={self.kernel_tuner_name} --case_set_id={case_set_id} --run_id={run_id} --begin_case_id={case_id_start} --end_case_id={case_id_end}\""
                 ]
             }
             pipeline["steps"].append(step)
