@@ -29,7 +29,7 @@ logger = init_logger(__name__)
 class HostKVPoolHMA(HostKVPool):
     """Host KV Pool supporting HMA.
     
-    Each buffer holds a flat list of kv cache jax arrays across for all
+    Each buffer holds a flat list of kv cache jax arrays across all
     layers. A Mamba layer's tuple (ssm + conv state) will be expanded
     into individual entries in the flat list.
     """
@@ -51,26 +51,26 @@ class HostKVPoolHMA(HostKVPool):
         self.pool_size = pool_size
         self.available_indices = queue.Queue(maxsize=pool_size)
         self.buffers: List[List[jax.Array]] = []
-        per_array_shapes = [(n, ) + tuple(inner) for n, inner in zip(
-            per_array_max_blocks, per_array_inner_shape)]
+        per_array_shapes = [
+            (n, ) + tuple(inner)
+            for n, inner in zip(per_array_max_blocks, per_array_inner_shape)
+        ]
         num_kv_arrays = len(per_array_shapes)
         bytes_per_buffer = sum(
             int(np.prod(shape)) * jnp.dtype(dt).itemsize
             for shape, dt in zip(per_array_shapes, per_array_dtype))
         start = time.perf_counter()
         for i in range(pool_size):
-            buffer = self._create_one_buffer(per_array_shapes,
-                                               per_array_dtype,
-                                               per_array_host_sharding)
+            buffer = self._create_one_buffer(per_array_shapes, per_array_dtype,
+                                             per_array_host_sharding)
             self.buffers.append(buffer)
             self.available_indices.put(i)
         end = time.perf_counter()
-        logger.info(
-            f"HostKVPoolHMA --> allocated | pool_size={pool_size} | "
-            f"num_kv_arrays={num_kv_arrays} | "
-            f"bytes_per_buffer={bytes_per_buffer} | "
-            f"total_bytes={pool_size * bytes_per_buffer} | "
-            f"elapsed_s={end - start:.2f}")
+        logger.info(f"HostKVPoolHMA --> allocated | pool_size={pool_size} | "
+                    f"num_kv_arrays={num_kv_arrays} | "
+                    f"bytes_per_buffer={bytes_per_buffer} | "
+                    f"total_bytes={pool_size * bytes_per_buffer} | "
+                    f"elapsed_s={end - start:.2f}")
 
     def _create_one_buffer(
         self,

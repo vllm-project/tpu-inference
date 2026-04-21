@@ -129,13 +129,11 @@ class TPUConnectorHMAScheduler(TPUConnectorScheduler):
                 remote_port=params["remote_port"],
             )
         load_meta = self.reqs_to_load[request.request_id]
-        logger.info(
-            f"TPUConnectorHMAScheduler Decode --> load queued | "
-            f"req_id={request.request_id} | uuid={load_meta.uuid} | "
-            f"remote_host={load_meta.remote_host} | "
-            f"remote_port={load_meta.remote_port} | "
-            f"pending_loads={len(self.reqs_to_load)}")
-
+        logger.info(f"TPUConnectorHMAScheduler Decode --> load queued | "
+                    f"req_id={request.request_id} | uuid={load_meta.uuid} | "
+                    f"remote_host={load_meta.remote_host} | "
+                    f"remote_port={load_meta.remote_port} | "
+                    f"pending_loads={len(self.reqs_to_load)}")
 
     def request_finished_all_groups(
         self,
@@ -173,12 +171,11 @@ class TPUConnectorHMAScheduler(TPUConnectorScheduler):
                                       remote_block_ids=computed_per_group,
                                       remote_host=self.kv_ip,
                                       remote_port=self.kv_port)
-            logger.info(
-                f"TPUConnectorHMAScheduler Prefill --> send queued | "
-                f"req_id={request.request_id} | uuid={uuid} | "
-                f"num_prompt_tokens={len(request.prompt_token_ids)} | "
-                f"num_computed_tokens={request.num_computed_tokens} | "
-                f"pending_sends={len(self.reqs_to_send)}")
+            logger.info(f"TPUConnectorHMAScheduler Prefill --> send queued | "
+                        f"req_id={request.request_id} | uuid={uuid} | "
+                        f"num_prompt_tokens={len(request.prompt_token_ids)} | "
+                        f"num_computed_tokens={request.num_computed_tokens} | "
+                        f"pending_sends={len(self.reqs_to_send)}")
         else:
             kv_transfer_params = {}
         return delay_free_blocks, kv_transfer_params
@@ -191,7 +188,8 @@ class TPUConnectorHMAScheduler(TPUConnectorScheduler):
         raise AssertionError(
             "Unexpected call to TPUConnectorHMAScheduler.request_finished. "
             "This scheduler only expects `request_finished_all_groups` "
-            "to be dispatched for SupportsHMA connectors.")    
+            "to be dispatched for SupportsHMA connectors.")
+
 
 class TPUConnectorHMAWorker(TPUConnectorWorker):
 
@@ -224,7 +222,6 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
                 layer_to_group_id[layer_id] = group_id
         self.layer_to_group_id = layer_to_group_id
 
-
         # Flatten kv cache, since Mamba layer kv cache is a tuple
         # of (ssm, conv)
         leaves, treedef = jax.tree_util.tree_flatten(kv_caches)
@@ -246,13 +243,13 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
                                    cache)
             for layer, cache in enumerate(kv_caches)
         ]
-        self.kv_array_to_group_id, _ = jax.tree_util.tree_flatten(kv_array_to_group_id)
+        self.kv_array_to_group_id, _ = jax.tree_util.tree_flatten(
+            kv_array_to_group_id)
 
         # Attention layers should share the same sharding spec.
         # Pick the first as attention sharding spec.
         attn_specs = [
-            self.kv_array_shardings[i].spec
-            for i in range(self.num_kv_arrays)
+            self.kv_array_shardings[i].spec for i in range(self.num_kv_arrays)
             if not self.group_is_mamba[self.kv_array_to_group_id[i]]
         ]
         assert all(s == attn_specs[0] for s in attn_specs), (
@@ -279,19 +276,18 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
                 per_array_dtype=self.kv_array_dtypes,
                 per_array_host_sharding=self.kv_array_host_shardings,
             )
-            
+
         self._maybe_start_p2p_server()
-        logger.info(
-            f"TPUConnectorHMA Worker {self.node_id} {role} --> init | "
-            f"ip={self.host_ip} | multi_host={self.multi_host} | "
-            f"kv_transfer_port={self.kv_transfer_port} | "
-            f"num_layers={len(kv_caches)} | "
-            f"num_kv_groups={self.num_groups} | "
-            f"group_is_mamba={self.group_is_mamba} | "
-            f"layer_to_group_id={self.layer_to_group_id} | "
-            f"num_kv_arrays={self.num_kv_arrays} | "
-            f"kv_array_to_group_id={self.kv_array_to_group_id} | "
-            f"host_kv_pool_enabled={self.host_kv_pool is not None}")
+        logger.info(f"TPUConnectorHMA Worker {self.node_id} {role} --> init | "
+                    f"ip={self.host_ip} | multi_host={self.multi_host} | "
+                    f"kv_transfer_port={self.kv_transfer_port} | "
+                    f"num_layers={len(kv_caches)} | "
+                    f"num_kv_groups={self.num_groups} | "
+                    f"group_is_mamba={self.group_is_mamba} | "
+                    f"layer_to_group_id={self.layer_to_group_id} | "
+                    f"num_kv_arrays={self.num_kv_arrays} | "
+                    f"kv_array_to_group_id={self.kv_array_to_group_id} | "
+                    f"host_kv_pool_enabled={self.host_kv_pool is not None}")
 
     def _compute_max_blocks_per_group(self) -> list[int]:
         """Compute max num of blocks per request per kv cache group."""
@@ -395,7 +391,8 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
         for idx, array in enumerate(dest_buffer):
             group_id = self.kv_array_to_group_id[idx]
             num_blocks = len(local_block_ids[group_id])
-            sliced_dest_buffer.append(jax.lax.slice_in_dim(array, 0, num_blocks))
+            sliced_dest_buffer.append(
+                jax.lax.slice_in_dim(array, 0, num_blocks))
         end_slice_time = time.perf_counter()
 
         updated_dest_buffer = []
@@ -504,6 +501,7 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
                                      self.kv_array_dtypes[idx],
                                      sharding=self.kv_array_shardings[idx]))
         return specs
+
 
 def _select_from_kv_caches_per_group(
     kv_caches: list,

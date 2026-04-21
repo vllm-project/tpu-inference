@@ -24,9 +24,7 @@ def _bytes_to_mb(num_bytes: int) -> float:
 class TransferStats:
     """Cumulative stats for kv transfer."""
 
-    def __init__(self,
-                 log_prefix: str | None = None,
-                 log_interval: int = 32):
+    def __init__(self, log_prefix: str | None = None, log_interval: int = 32):
         """Initialization
 
         Args:
@@ -56,10 +54,9 @@ class TransferStats:
         self.num_sends += 1
         self.bytes_sent += num_bytes
         if self.num_sends % self.log_interval == 0:
-            logger.info(
-                f"{self._log_prefix()} "
-                f"cumulative_sends={self.num_sends} | "
-                f"cumulative_mb={_bytes_to_mb(self.bytes_sent):.2f}")
+            logger.info(f"{self._log_prefix()} "
+                        f"cumulative_sends={self.num_sends} | "
+                        f"cumulative_mb={_bytes_to_mb(self.bytes_sent):.2f}")
 
     def increment_pull(self, num_bytes: int):
         """Record a kv cache transfer pull
@@ -70,7 +67,6 @@ class TransferStats:
         self.num_pulls += 1
         self.bytes_pulled += num_bytes
         if self.num_pulls % self.log_interval == 0:
-            logger.info(
-                f"{self._log_prefix()} "
-                f"cumulative_pulls={self.num_pulls} | "
-                f"cumulative_mb={_bytes_to_mb(self.bytes_pulled):.2f}")
+            logger.info(f"{self._log_prefix()} "
+                        f"cumulative_pulls={self.num_pulls} | "
+                        f"cumulative_mb={_bytes_to_mb(self.bytes_pulled):.2f}")

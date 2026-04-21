@@ -102,6 +102,7 @@ ReqId = str
 
 logger = init_logger(__name__)
 
+
 @dataclass
 class SendMeta:
     uuid: int
@@ -815,10 +816,12 @@ class TPUConnectorWorker:
 
         if done_sending:
             logger.info(
-                f"TPUConnector Worker {self.node_id} -->  done_sending={done_sending}")
+                f"TPUConnector Worker {self.node_id} -->  done_sending={done_sending}"
+            )
         if done_recving:
             logger.info(
-                f"TPUConnector Worker {self.node_id} -->  done_recving={done_recving}")
+                f"TPUConnector Worker {self.node_id} -->  done_recving={done_recving}"
+            )
         return done_sending, done_recving
 
 
