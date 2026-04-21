@@ -35,7 +35,7 @@ spec:
           spec:
             containers:
             - name: jax-tpu
-              image: vllm/vllm-tpu:nightly-20260407-efc23e9-4ae218c
+              image: vllm/vllm-tpu:nightly
               imagePullPolicy: Always
               securityContext:
                 privileged: true
@@ -63,7 +63,7 @@ spec:
                     pip install --no-deps /tmp/tpu-inference
                     echo "tpu-inference patch installed."
 
-                    pip install jax==0.9.1 jaxlib==0.9.1
+                    # pip install jax==0.9.1 jaxlib==0.9.1
 
                     # Environment variables
                     export VLLM_ENABLE_V1_MULTIPROCESSING=0
@@ -71,7 +71,7 @@ spec:
                     export PHASED_PROFILING_DIR=gs://wenxindong-multipod-dev/profiling/vllm_qwen3_235b_a22b_instruct_2507/__PROFILING_DIR_SUFFIX__
                     export PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=50
                     # export PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=2000
-                    export VLLM_ENGINE_READY_TIMEOUT_S=7200
+                    export VLLM_ENGINE_READY_TIMEOUT_S=72000
                     export MODEL_IMPL_TYPE=vllm
                     export NEW_MODEL_DESIGN=1
                     # export SKIP_JAX_PRECOMPILE=1
