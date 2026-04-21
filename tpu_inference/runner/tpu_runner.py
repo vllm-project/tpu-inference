@@ -14,6 +14,7 @@
 
 import functools
 import logging
+import os
 import random
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -27,7 +28,7 @@ import vllm.envs as vllm_envs
 from flax import nnx
 from jax._src import mesh as mesh_lib
 from jax._src.pallas.utils import next_power_of_2
-from jax.experimental import mesh_utils
+from jax.experimental import mesh_utils, multihost_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
@@ -86,9 +87,49 @@ logger = init_logger(__name__)
 
 logging.getLogger("torchax.tensor").setLevel(logging.ERROR)
 
+
+def _log_mesh_ep_positions(device_mesh, mesh_shape, origin):
+    """Diagnostic: print, per process, the EP-flat slot of each local device.
+
+    EP flat = (attn_dp, attn_dp_expert, expert, model) axes combined.
+    For mesh_shape (model_dp, attn_dp, attn_dp_expert, expert, model) the EP
+    flat index of a device at coord (a,b,c,ep,m) is b*C*E*M + c*E*M + ep*M + m
+    where C,E,M are the sizes of attn_dp_expert/expert/model axes.
+    """
+    try:
+        flat = np.asarray(device_mesh).reshape(-1)
+        _, attn_dp, attn_dp_expert, expert_sz, model_sz = mesh_shape
+        ep_total = attn_dp * attn_dp_expert * expert_sz * model_sz
+        local_proc = jax.process_index()
+        local_slots = []
+        for flat_idx, dev in enumerate(flat):
+            if dev.process_index != local_proc:
+                continue
+            ep_flat = flat_idx % ep_total
+            local_slots.append((dev.id, ep_flat))
+        logger.debug(
+            "[EP_DIAG origin=%s proc=%d] local_devices (dev_id, ep_flat_slot): %s",
+            origin, local_proc, local_slots)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[EP_DIAG] failed to log mesh positions: %s", exc)
+
 INVALID_TOKEN_ID = -1
 # Smallest output size
 MIN_NUM_SEQS = 8
+
+
+def _jax_array_to_host(array: jax.Array) -> np.ndarray:
+    if array.is_fully_addressable:
+        return np.asarray(jax.device_get(array))
+
+    return np.asarray(multihost_utils.process_allgather(array, tiled=True))
+
+
+def _jax_replicated_array_to_host(array: jax.Array) -> np.ndarray:
+    if getattr(array, "is_fully_replicated", False) is True and not array.is_fully_addressable:
+        return np.asarray(array.addressable_data(0))
+
+    return _jax_array_to_host(array)
 
 
 class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
@@ -120,7 +161,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._logprobs_tensors = logprobs_tensors
 
     def get_output(self) -> ModelRunnerOutput:
-        next_tokens_cpu = np.asarray(jax.device_get(self._next_tokens))
+        next_tokens_cpu = _jax_replicated_array_to_host(self._next_tokens)
         if self.logits_indices_selector is not None:
             next_tokens_cpu = next_tokens_cpu[self.logits_indices_selector]
         selected_token_ids = np.expand_dims(next_tokens_cpu[:self._num_reqs],
@@ -218,11 +259,10 @@ def _jax_logprobs_materialize(
         logits_indices_selector: Optional[List[int]] = None,
         cu_num_generated_tokens: Optional[Any] = None) -> LogprobsLists:
     """Materializes logprobs from JAX arrays into NumPy-backed LogprobsLists."""
-    log_token_ids = np.asarray(
-        jax.device_get(logprobs_tensors.logprob_token_ids))
-    logprobs_arr = np.asarray(jax.device_get(logprobs_tensors.logprobs))
-    selected_token_ranks = np.asarray(
-        jax.device_get(logprobs_tensors.selected_token_ranks))
+    log_token_ids = _jax_array_to_host(logprobs_tensors.logprob_token_ids)
+    logprobs_arr = _jax_array_to_host(logprobs_tensors.logprobs)
+    selected_token_ranks = _jax_array_to_host(
+        logprobs_tensors.selected_token_ranks)
 
     if logits_indices_selector is not None:
         log_token_ids = log_token_ids[logits_indices_selector]
@@ -344,21 +384,37 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             sharding_strategy.tp_size,
         )
 
-        # Attempt to create a physically optimized mesh. Fall back to a simple
-        # logical reshape for non-power-of-two device counts (e.g., DP=6) to
-        # bypass strict physical topology constraints.
+        # FORCE_LOGICAL_RESHAPE=1 bypasses physical-optimal reordering and
+        # maps devices by their position in jax.devices() row-major into
+        # mesh_shape. On v4-64 with host-contiguous device IDs (host k owns
+        # chips [k*4:k*4+4]), this guarantees process N's 4 chips land at
+        # contiguous EP flat slots [N*4:N*4+4], matching vLLM's linear
+        # expert_map in FusedMoE.
+        force_logical = os.environ.get("FORCE_LOGICAL_RESHAPE", "0") == "1"
+        if force_logical:
+            logger.info(
+                "FORCE_LOGICAL_RESHAPE=1: using naive np.reshape mesh "
+                "(shape=%s, devices=%d)", mesh_shape, len(self.devices))
+            device_mesh = np.array(self.devices).reshape(mesh_shape)
+            _log_mesh_ep_positions(device_mesh, mesh_shape, origin="forced_logical")
+            return device_mesh
+
         try:
-            return mesh_utils.create_device_mesh(
+            device_mesh = mesh_utils.create_device_mesh(
                 mesh_shape,
                 self.devices,
                 allow_split_physical_axes=True,
             )
+            _log_mesh_ep_positions(device_mesh, mesh_shape, origin="physical")
+            return device_mesh
         except (AssertionError, ValueError, RuntimeError) as e:
             logger.warning(
                 "Physical mesh creation failed (shape=%s, devices=%d). "
                 "Falling back to logical reshape. Error: %s", mesh_shape,
                 len(self.devices), e)
-            return np.array(self.devices).reshape(mesh_shape)
+            device_mesh = np.array(self.devices).reshape(mesh_shape)
+            _log_mesh_ep_positions(device_mesh, mesh_shape, origin="logical_reshape")
+            return device_mesh
 
     def _create_multi_slice_mesh(self, num_slices: int) -> jax.Array:
         sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
@@ -463,8 +519,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             cache_dtype = self.dtype
         kv_cache_dtype = to_jax_dtype(cache_dtype)
         kv_packing = common_utils.get_dtype_packing(kv_cache_dtype)
+        # Default min bucket 512: token-axis on multi-host EP meshes (e.g.
+        # v4-64 TP=4 EP=8 shards the num_tokens axis 32-way across
+        # attn_dp*attn_dp_expert*model*expert). Buckets below that product
+        # fail shard_map divisibility (16 < 32) or force >50% padding at
+        # runtime (32 with 4-17 real prompt tokens → garbage output).
+        # TPU_MIN_TOKEN_BUCKET can lower this for single-host or non-EP
+        # configs whose token axis is not sharded that wide.
+        min_bucket_env = int(os.environ.get("TPU_MIN_TOKEN_BUCKET", "512"))
         self.num_tokens_paddings = runner_utils.get_token_paddings(
-            min_token_size=max(16, next_power_of_2(self.dp_size * kv_packing)),
+            min_token_size=max(min_bucket_env,
+                               next_power_of_2(self.dp_size * kv_packing)),
             max_token_size=scheduler_config.max_num_batched_tokens *
             self.dp_size,
             padding_gap=vllm_envs.VLLM_TPU_BUCKET_PADDING_GAP)
@@ -716,7 +781,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         pre_discard_sampled_tokens_req_indices = self._pre_async_results.discard_sampled_tokens_req_indices
         pre_logits_indices_selector = self._pre_async_results.logits_indices_selector
 
-        next_tokens_cpu = np.asarray(jax.device_get(pre_next_tokens))
+        if hasattr(pre_next_tokens,
+                   "addressable_shards") and not pre_next_tokens.addressable_shards:
+            logger.debug(
+                "Skipping previous async result materialization on worker without addressable shards."
+            )
+            return
+
+        next_tokens_cpu = _jax_replicated_array_to_host(pre_next_tokens)
         if pre_logits_indices_selector is not None:
             next_tokens_cpu = next_tokens_cpu[pre_logits_indices_selector]
         selected_token_ids = np.expand_dims(next_tokens_cpu[:len(pre_req_ids)],

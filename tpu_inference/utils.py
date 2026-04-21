@@ -122,35 +122,93 @@ def get_num_kv_heads_by_tp(num_kv_heads: int, tp_size: int) -> int:
 
 
 def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
-    usage = []
     if vllm_envs.VLLM_TPU_USING_PATHWAYS:
         return pathways_hbm_usage_gb(devices)
 
-    multihost_backend = envs.TPU_MULTIHOST_BACKEND
-    if multihost_backend == "ray":
-        # MemoryStats is only supported for addressable PjRt devices.
-        # Assume all the devices have similar memory usage for now.
-        # TODO(ranlihao): find a proper way to get the memory usage of each device.
-        for device in devices:
-            try:
-                hbm_used = device.memory_stats()["bytes_in_use"]
-                hbm_limit = device.memory_stats()["bytes_limit"]
-                logger.info(
-                    "Get memory stats for device %s. Assuming all devices have the same usage.",
-                    device)
-                usage.extend([(hbm_used, hbm_limit)] * len(devices))
-                break
-            except Exception as e:
-                logger.warning(
-                    "Failed to get memory stats for device %s: %s. ", device,
-                    e)
-    else:
-        for device in devices:
-            hbm_used = device.memory_stats()["bytes_in_use"]
-            hbm_limit = device.memory_stats()["bytes_limit"]
+    # Try memory_stats() first.  On many TPU platforms bytes_in_use is
+    # always 0 because the PJRT runtime does not track JAX-managed
+    # allocations through that API.  Detect this and fall back to the
+    # jax.live_arrays() approach which works everywhere.
+    usage = []
+    all_zero = True
+    for device in devices:
+        try:
+            stats = device.memory_stats()
+            hbm_used = stats["bytes_in_use"]
+            hbm_limit = stats["bytes_limit"]
+            if hbm_used > 0:
+                all_zero = False
             usage.append((hbm_used, hbm_limit))
+        except Exception as e:
+            logger.warning(
+                "Failed to get memory stats for device %s: %s", device, e)
 
-    return usage
+    if not all_zero and usage:
+        # Some chips in a TP-sharded model may return 0 for bytes_in_use
+        # (PJRT only tracks the chip that owns the primary process context).
+        # For TP models every chip holds an equal weight shard, so fill in
+        # missing chips with the maximum reported value to get an accurate
+        # total_hbm_used and avoid massively over-allocating KV cache.
+        max_used = max(used for used, _ in usage)
+        n_zero = sum(1 for used, _ in usage if used == 0)
+        usage = [(max_used if used == 0 else used, limit)
+                 for used, limit in usage]
+        if n_zero > 0:
+            logger.info(
+                "memory_stats() returned 0 for %d/%d devices; "
+                "filled with max_used=%.2fGiB to prevent KV cache OOM.",
+                n_zero, len(usage), max_used / GBYTES)
+        # Some devices raised exceptions and were never appended to usage.
+        # Pad those missing entries so the caller gets one entry per device.
+        if len(usage) < len(devices):
+            hbm_limit_default = usage[0][1] if usage else get_device_hbm_limit()
+            n_padded = len(devices) - len(usage)
+            usage.extend([(max_used, hbm_limit_default)] * n_padded)
+            logger.info(
+                "Padded %d device(s) that raised memory_stats exceptions "
+                "with max_used=%.2fGiB.", n_padded, max_used / GBYTES)
+        return usage
+
+    # Fallback: iterate live JAX arrays and sum per-device shard sizes.
+    logger.info(
+        "device.memory_stats() reported 0 bytes_in_use for all devices; "
+        "falling back to jax.live_arrays() for HBM profiling.")
+    try:
+        hbm_limit = get_device_hbm_limit()
+    except RuntimeError as exc:
+        logger.warning(
+            "Could not determine TPU HBM limit during fallback profiling: %s. "
+            "Returning 0 usage for %d device(s).",
+            exc,
+            len(devices),
+        )
+        return [(0, 0) for _ in devices]
+
+    hbm_used: dict = defaultdict(int)
+    seen_buffers: set = set()
+    for array in jax.live_arrays():
+        for shard in array.addressable_shards:
+            buf_id = id(shard.data)
+            if buf_id not in seen_buffers:
+                seen_buffers.add(buf_id)
+                hbm_used[shard.data.device] += shard.data.nbytes
+
+    result = [(hbm_used.get(device, 0), hbm_limit) for device in devices]
+
+    # In multi-host Ray/PJRT mode, jax.live_arrays() may only enumerate arrays
+    # for the primary device. Secondary devices show 0 even though they hold
+    # the same amount of data. Fill zero-usage entries with the max observed.
+    max_used_live = max((used for used, _ in result), default=0)
+    if max_used_live > 0:
+        n_zero = sum(1 for used, _ in result if used == 0)
+        result = [(max_used_live if used == 0 else used, limit)
+                  for used, limit in result]
+        if n_zero > 0:
+            logger.info(
+                "jax.live_arrays() reported 0 for %d/%d devices; "
+                "filled with max_used=%.2fGiB to prevent KV cache OOM.",
+                n_zero, len(result), max_used_live / GBYTES)
+    return result
 
 
 def get_device_name(num_devices: int | None = None):

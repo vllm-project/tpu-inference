@@ -222,8 +222,11 @@ def moe_gmm_local(
 
     reduction_axis = (ShardingAxisName.MLP_TENSOR
                       if parallelism == "tp" else ShardingAxisName.EXPERT)
+
     # Then global reduction on all ranks for all tokens and all experts
-    return jax.lax.psum(token_hidden, axis_name=reduction_axis).astype(x.dtype)
+    out = jax.lax.psum(token_hidden, axis_name=reduction_axis).astype(x.dtype)
+
+    return out
 
 
 def tensor_parallel_gmm(
@@ -256,8 +259,16 @@ def tensor_parallel_gmm(
         None, None, ShardingAxisName.MLP_TENSOR))
 
     num_blocks = 1 if w2_scale is None else w2_scale.shape[1]
-    w2_scale_spec = (None if num_blocks == 1 else P(
-        None, ShardingAxisName.MLP_TENSOR, None, None))
+    # w2_scale can be 3D compact (E, K_blocks, N_blocks) or 4D legacy
+    # (E, K_blocks, 1, N_full).  process_fp8_moe_weights_direct keeps 3D for
+    # GMM_TP; other paths (FUSED_MOE, GMM_EP) expand to 4D.  Match spec rank
+    # to the actual tensor rank.
+    if w2_scale is None or num_blocks == 1:
+        w2_scale_spec = None
+    elif w2_scale.ndim == 3:
+        w2_scale_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
+    else:  # ndim == 4
+        w2_scale_spec = P(None, ShardingAxisName.MLP_TENSOR, None, None)
     w2_bias_spec = None if w2_bias is None else P(None, None, None)
 
     return jax.shard_map(
@@ -421,6 +432,7 @@ def fused_moe_func(
     scoring_fn: str,
     sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
+    e_score_correction_bias: jax.Array | None = None,
     all_gather_fp8: bool = False,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
@@ -466,10 +478,20 @@ def fused_moe_func(
             key, global_num_experts, shape=(topk, ), replace=False))(
                 jax.random.split(rng_key, num_tokens))
         topk_weights = jax.random.uniform(rng_key, shape=(num_tokens, topk))
+    elif e_score_correction_bias is not None:
+        # noaux_tc topk method: use biased scores for SELECTION, original
+        # (sigmoid'd) scores for WEIGHTING. Without this, routing is wrong
+        # for models like GLM-5.1 / DeepSeek-V3.
+        scores_for_choice = topk_weights + e_score_correction_bias.astype(
+            topk_weights.dtype)
+        _, topk_indices = jax.lax.top_k(scores_for_choice, k=topk)
+        topk_weights = topk_weights[jnp.arange(num_tokens)[:, None],
+                                    topk_indices]
     else:
         topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
+
     # All gathering topk_indices and topk_weights if attention dp is used.
     if get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA) > 1:
         topk_indices, topk_weights = all_gather_topk_indices_and_weights(
@@ -493,6 +515,12 @@ def fused_moe_func(
         topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
 
         if use_ep:
+            # Packed gather: each EP shard picks only the tokens whose topk
+            # expert is local to this rank.  The matching ragged_scatter in
+            # moe_gmm_local then places each shard's contribution at the
+            # correct global token position (zeros elsewhere) so psum along
+            # the EXPERT axis sums disjoint positions and does not mix
+            # contributions from different tokens.
             num_ep_shard = get_mesh_shape_product(mesh,
                                                   ShardingAxisName.EXPERT)
             local_num_experts = global_num_experts // num_ep_shard
@@ -504,6 +532,13 @@ def fused_moe_func(
                                                include_initial=True)
             shard_output_start = group_offsets[experts_start]
             shard_output_end = group_offsets[experts_end]
+            # Validate ragged_gather bounds — prevents silent OOB on
+            # unexpected mesh configurations. Use ValueError so the check
+            # survives `python -O` (asserts get stripped).
+            if global_num_experts % num_ep_shard != 0:
+                raise ValueError(
+                    f"global_num_experts ({global_num_experts}) must be "
+                    f"divisible by EP shard count ({num_ep_shard})")
             x = ragged_gather(
                 hidden_states_local,
                 token_indices_sorted,

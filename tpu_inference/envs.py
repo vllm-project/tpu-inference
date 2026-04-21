@@ -32,6 +32,8 @@ if TYPE_CHECKING:
     REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
     MOE_REQUANTIZE_BLOCK_SIZE: int | None = None
     MOE_REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
+    MOE_REQUANTIZE_EXPERT_CHUNK_SIZE: int | None = 8
+    MOE_SKIP_REQUANTIZATION: bool = False
     LAYOUT_Q_PROJ_AS_NDH: bool = False
     USE_JAX_PROFILER_SERVER: bool = False
     JAX_PROFILER_SERVER_PORT: int = 9999
@@ -224,6 +226,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "MOE_REQUANTIZE_BLOCK_SIZE":
     lambda: int(block_size) if (block_size := os.getenv(
         "MOE_REQUANTIZE_BLOCK_SIZE")) is not None else None,
+    # Chunk load-time FP8 MoE requantization by expert to cap peak host memory
+    "MOE_REQUANTIZE_EXPERT_CHUNK_SIZE":
+    lambda: int(chunk_size) if (chunk_size := os.getenv(
+        "MOE_REQUANTIZE_EXPERT_CHUNK_SIZE")) not in (None, "") else 8,
+    # Skip FP8→FP32→FP8 dequant/requant cycle, do shape transforms directly
+    "MOE_SKIP_REQUANTIZATION":
+    env_bool("VLLM_MOE_SKIP_REQUANTIZATION", default=False),
     # dictates whether to layout q-proj as NDH (q-heads, model dim, head dim)
     # or DNH (model dim, q-heads, head dim), which is the default (False)
     "LAYOUT_Q_PROJ_AS_NDH":

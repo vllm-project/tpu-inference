@@ -520,8 +520,23 @@ def mla_attention(
 
     def _mla_ragged_paged_attention(q, q_rope, k, k_rope, cache, *args):
         # TODO: use auto tuner to find the best block sizes.
-        num_kv_pages_per_block = (3, 1, 1)
-        num_queries_per_block = (1, 16, 16)
+        # TPU v4 has ~16MB of VMEM versus 32MB+ on v5/v6, so its MLA kernel
+        # needs smaller block sizes to fit the scratch buffers.
+        from tpu_inference.kernels.ragged_paged_attention.v3.util import (
+            get_tpu_version as _get_tpu_version,
+        )
+        _tpu_ver = _get_tpu_version()
+        if _tpu_ver == 4:
+            num_kv_pages_per_block = (1, 1, 1)
+            num_queries_per_block = (1, 8, 8)
+            # On TPU v4, bf16 softmax scores can saturate in deep networks
+            # where residual magnitudes are large; use fp32 scores for
+            # numerical stability.  v5/v6 keep the kernel's default dtype.
+            extra_kwargs = dict(s_dtype=jnp.float32)
+        else:
+            num_kv_pages_per_block = (3, 1, 1)
+            num_queries_per_block = (1, 16, 16)
+            extra_kwargs = {}
         decode_batch_size = 4
 
         out, new_cache = mla_ragged_paged_attention(
@@ -537,7 +552,9 @@ def mla_attention(
             decode_batch_size=decode_batch_size,
             q_scale=q_scale,
             k_scale=k_scale,
-            v_scale=v_scale)
+            v_scale=v_scale,
+            **extra_kwargs,
+        )
 
         return new_cache, out
 

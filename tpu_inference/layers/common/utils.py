@@ -107,18 +107,50 @@ def general_device_put(tensor: jax.Array,
                        sharding: Sharding,
                        *,
                        layout: Layout | None = None,
-                       source_mesh: Mesh | None = None) -> jax.Array:
+                       source_mesh: Mesh | None = None,
+                       global_shape: tuple[int, ...] | None = None) -> jax.Array:
     """
     Put a tensor onto devices with the given sharding.
     This method handles both single-host and multi-host cases.
 
     `source_mesh` specifies the mesh on which the input tensor is currently located.
+
+    `global_shape` is used in multi-host EP mode where each host holds a
+    local shard of the weights.  When provided, we use
+    `jax.make_array_from_process_local_data` to construct the correct
+    global distributed array without triggering cross-host communication.
     """
+    from jax.tree_util import tree_map
+
+    # TP-selective loader: if the per-leaf tensor was pre-sliced by the
+    # multi-host loader and its original full shape registered, pick that up
+    # here so `make_array_from_process_local_data` sees the right global
+    # shape without every caller having to plumb it.  No-op when the
+    # registry is empty (env flag off) or the tensor has no torch data_ptr
+    # (already converted to a JAX array upstream). If the import itself
+    # fails (e.g., a code bug in tp_selective_loader), warn once so the
+    # symptom isn't a silent OOM on the replicated fallback path.
+    try:
+        from tpu_inference.models.vllm.tp_selective_loader import \
+            lookup_tp_full_shape
+    except ImportError as _exc:
+        logger.warning(
+            "TP-selective registry disabled: import failed (%s). Weights "
+            "pre-sliced by the streaming loader will fall through to the "
+            "replicated code path, which can cause host OOM on large FP8 "
+            "MoE models.", _exc)
+        lookup_tp_full_shape = lambda _t: None  # type: ignore
 
     def _put(t):
+        # Consult TP-selective registry only when no explicit global_shape was
+        # supplied by the caller.  EP/MoE paths set global_shape directly and
+        # take precedence.
+        effective_global = global_shape
+        if effective_global is None:
+            effective_global = lookup_tp_full_shape(t)
+
         multihost_backend = envs.TPU_MULTIHOST_BACKEND
-        # If we are not in multi-host setup, or the tensor is not fully addressable,
-        # we can use jax.device_put directly.
+        # Single-host or non-Ray: use jax.device_put directly.
         if multihost_backend != "ray" or (isinstance(t, jax.Array)
                                           and not t.is_fully_addressable):
             if layout is not None:
@@ -126,24 +158,60 @@ def general_device_put(tensor: jax.Array,
             else:
                 return jax.device_put(t, sharding)
 
-        # NOTE: at here, num_global_devices != num_local_devices
-        # meaning we are in multi-host setup. Each host will run the same process
-        # and each process only need to handle the devices accessible to this host.
-        ctx = nullcontext() if source_mesh is None else jax.set_mesh(
-            source_mesh)
-        # `t[i]` needs to be operated in the same mesh as `t`, which is provided as
-        # `source_mesh`.
-        with ctx:
-            global_array = jax.make_array_from_callback(
-                t.shape, sharding, lambda index: t[index])
-        if layout is not None:
-            dst_mesh = sharding.mesh
-            with jax.set_mesh(dst_mesh):
-                global_array = jax.device_put(global_array,
-                                              Format(layout, sharding))
-        return global_array
+        # Multi-host Ray mode.
+        # When a global_shape is provided (either by the caller for EP/MoE or
+        # by the TP-selective registry lookup above), each host holds only
+        # its local shard.  Use make_array_from_process_local_data to
+        # construct the correct global distributed array, then apply the
+        # caller's Layout on top. We *expect* device_put(Format(...)) on an
+        # already-distributed array to be a shard-local relayout, but JAX
+        # does not contract this explicitly. Assert afterwards that the
+        # result is still distributed — if a collective fired the array
+        # would become fully addressable on this process, defeating the
+        # whole point of avoiding host-side allgather.
+        if effective_global is not None:
+            arr = jax.make_array_from_process_local_data(
+                sharding, t, effective_global)
+            if layout is not None:
+                arr_fmt = jax.device_put(arr, Format(layout, sharding))
+                if (isinstance(arr_fmt, jax.Array)
+                        and arr_fmt.is_fully_addressable
+                        and not arr.is_fully_addressable):
+                    raise RuntimeError(
+                        "general_device_put: device_put(Format(layout, "
+                        "sharding)) on a distributed array was expected to "
+                        "be a shard-local relayout but materialised the "
+                        "array on this process (is_fully_addressable "
+                        "flipped False -> True). A collective likely fired. "
+                        "This risks host-side OOM on large MoE runs; "
+                        "investigate the jaxlib / PJRT version before "
+                        "relying on the Layout hint.")
+                return arr_fmt
+            return arr
 
-    return jax.tree_util.tree_map(_put, tensor)
+        # Replicated/TP-sharded weights (no global_shape): all hosts have
+        # identical data.  Use make_array_from_process_local_data instead of
+        # device_put: the latter triggers process_allgather in multi-host
+        # mode to verify data consistency across hosts.  That allgather
+        # collects all hosts' data onto every chip, requiring
+        # local_data × num_hosts HBM which causes OOM (e.g., 14.18 GB).
+        # make_array_from_process_local_data skips this verification and
+        # places data directly on devices.
+        # CRITICAL: Must pass global_shape=t.shape explicitly. Without it,
+        # JAX infers global_dim = local_dim × (total_mesh / local_mesh) which
+        # is wrong for replicated weights where all hosts have identical data.
+        # For example: local_dim=16384, total_mesh=32, local_mesh=4 →
+        # inferred global = 16384 × 8 = 131072, per-device = 4096 (should be 512).
+        arr = jax.make_array_from_process_local_data(sharding, t, t.shape)
+
+        # If a Layout is needed, apply it on top of the distributed array.
+        # Since the array is already distributed (is_fully_addressable=False),
+        # this only transforms the local shard without triggering allgather.
+        if layout is not None:
+            return jax.device_put(arr, Format(layout, sharding))
+        return arr
+
+    return tree_map(_put, tensor)
 
 
 def cpu_mesh() -> Mesh:

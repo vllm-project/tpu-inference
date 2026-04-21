@@ -13,9 +13,11 @@
 # limitations under the License.
 from typing import Tuple
 
+import jax
 import jax.numpy as jnp
 import torch
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 from torchax.interop import jax_view, torch_view
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
@@ -28,6 +30,8 @@ from tpu_inference.layers.common.attention_interface import mla_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import (
     quantize_kv, static_per_tensor_quantize_tensor)
+from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.utils import get_mesh_shape_product
 
 
 @register_backend(AttentionBackendEnum.FLASH_ATTN_MLA)
@@ -43,6 +47,17 @@ class PallasMLAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_page_size(vllm_config: VllmConfig) -> int:
+        # TPU v4 has 16MB VMEM. The MLA kernel scratch buffer scales with
+        # page_size * kv_lora_rank * num_heads_per_chip.  For large models
+        # (kv_lora_rank=512, num_heads=64) the default page_size=1024 exceeds
+        # the 16MB limit.  Reduce to 512 when the latent KV dimension is large.
+        try:
+            cfg = vllm_config.model_config.hf_config
+            kv_lora_rank = getattr(cfg, 'kv_lora_rank', 0) or 0
+            if kv_lora_rank > 256:
+                return 512
+        except Exception:
+            pass
         return 1024
 
 
@@ -203,6 +218,27 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
                    jax_view(layer.W_UV_scale)).astype(input_dtype)
         outputs = outputs.reshape(-1, self.num_heads * self.v_head_dim)
 
+        # When expert parallelism splits attention heads, the W_UV einsum
+        # above produces outputs sharded along both `model` (TP) and
+        # `expert` (EP) axes via ShardingAxisName.ATTN_HEAD.  o_proj is a
+        # RowParallelLinear that only all-reduces along `model`; without an
+        # explicit all-gather along `expert`, each rank sees only 1/EP of
+        # the correct head contribution and the attention output is scaled
+        # down by that factor.  Constraining to `P(None, 'model')` triggers
+        # an all-gather of the `expert` axis so o_proj observes the full
+        # head dimension while leaving TP sharding intact.  The constraint
+        # is a no-op when `ATTN_HEAD` reduces to `model` alone (i.e. no EP).
+        attn_head_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
+        tp_actual_size = mesh.shape.get('model', 1)
+        if attn_head_size > tp_actual_size:
+            outputs = jax.lax.with_sharding_constraint(
+                outputs,
+                NamedSharding(mesh, P(None, 'model')),
+            )
+
+        # Upstream torchax change: wrap the JAX output in a torch view and,
+        # if the caller pre-allocated an output buffer, copy into it.  See
+        # vllm-project/tpu-inference#2313.
         out_torch = torch_view(outputs)
         if output is not None:
             output.copy_(out_torch)

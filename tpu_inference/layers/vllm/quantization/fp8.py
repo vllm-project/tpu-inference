@@ -31,11 +31,14 @@ from vllm.model_executor.layers.quantization.base_config import \
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
+from tpu_inference import envs
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.linear_weights import (
     shard_linear_weights, to_parameter_list)
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_fp8_moe_weights, shard_moe_weights)
+    FusedMoEWeights, process_fp8_moe_weights, process_fp8_moe_weights_direct,
+    shard_moe_weights)
+from tpu_inference.layers.common.utils import cpu_mesh_context
 from tpu_inference.layers.common.quant_methods import FP8
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
 from tpu_inference.layers.vllm.interface.moe import (
@@ -50,6 +53,39 @@ from tpu_inference.utils import t2j
 P = PartitionSpec
 
 logger = init_logger(__name__)
+
+
+def _get_local_expert_ids(layer: FusedMoE) -> tuple[int, ...] | None:
+    local_expert_ids = getattr(layer, '_tpu_ep_local_expert_ids', None)
+    if not local_expert_ids:
+        return None
+    return tuple(int(expert_id) for expert_id in local_expert_ids)
+
+
+def _take_local_experts(array, local_expert_ids: tuple[int, ...], axis: int):
+    if isinstance(array, torch.Tensor):
+        expert_indices = torch.as_tensor(local_expert_ids,
+                                         device=array.device,
+                                         dtype=torch.long)
+        return torch.index_select(array, dim=axis, index=expert_indices)
+
+    expert_indices = jnp.asarray(local_expert_ids, dtype=jnp.int32)
+    return jnp.take(array, expert_indices, axis=axis)
+
+
+def _free_cpu_parameter_storage(layer: torch.nn.Module, param_name: str) -> None:
+    tensor = getattr(layer, param_name, None)
+    if tensor is None:
+        return
+
+    try:
+        if isinstance(tensor, torch.Tensor) and tensor.device.type == "cpu":
+            tensor.untyped_storage().resize_(0)
+    except Exception:
+        logger.debug("Could not shrink CPU storage for %s.%s",
+                     type(layer).__name__, param_name)
+
+    delattr(layer, param_name)
 
 
 @register_quantization_config(FP8)
@@ -127,18 +163,31 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
 
         assert self.block_quant
         weight = t2j(layer.weight, use_dlpack=False)
-        delattr(layer, "weight")
+        _free_cpu_parameter_storage(layer, "weight")
 
         weight_scale = t2j(layer.weight_scale_inv, use_dlpack=False)
-        delattr(layer, "weight_scale_inv")
+        _free_cpu_parameter_storage(layer, "weight_scale_inv")
 
         if layer.bias is not None and not layer.skip_bias_add:
             if layer.return_bias:
                 logger.warning_once("Bias might return incorrect value.")
             bias = t2j(layer.bias, use_dlpack=False)
-            delattr(layer, "bias")
+            _free_cpu_parameter_storage(layer, "bias")
         else:
             bias = None
+
+        # TP-selective loader pre-slices params by coarse_tp (8) in build_tp_plan,
+        # but linear_config.output_sizes was captured at model-init time with
+        # TP=1 (full output size). For single-output (non-fused) params the
+        # actual weight dim after slicing won't match; use the real dim instead.
+        # Fused params (gate+up, QKV) are in _skip_names so they are never
+        # pre-sliced — their config sizes remain correct.
+        _cfg_sizes = tuple(self.linear_config.output_sizes)
+        _actual_dim0 = weight.shape[0]
+        if len(_cfg_sizes) == 1 and _cfg_sizes[0] != _actual_dim0:
+            _output_sizes = (_actual_dim0,)
+        else:
+            _output_sizes = _cfg_sizes
 
         weights = common_fp8.process_blockwise_fp8_linear_weights(
             weight,
@@ -146,7 +195,7 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
             bias=bias,
             weight_block_size=tuple(self.weight_block_size),
             requant_block_size=self.linear_config.requant_block_size,
-            output_sizes=tuple(self.linear_config.output_sizes),
+            output_sizes=_output_sizes,
             requant_weight_dtype=self.linear_config.requant_weight_dtype,
             fuse_matmuls=self.linear_config.fuse_matmuls,
             n_shards=self.linear_config.n_shards)
@@ -241,10 +290,38 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         assert not self.moe.has_bias
 
         w13_weight = t2j(layer.w13_weight, use_dlpack=False)
+        _free_cpu_parameter_storage(layer, "w13_weight")
         w13_weight_scale = t2j(layer.w13_weight_scale_inv, use_dlpack=False)
+        _free_cpu_parameter_storage(layer, "w13_weight_scale_inv")
 
         w2_weight = t2j(layer.w2_weight, use_dlpack=False)
+        _free_cpu_parameter_storage(layer, "w2_weight")
         w2_weight_scale = t2j(layer.w2_weight_scale_inv, use_dlpack=False)
+        _free_cpu_parameter_storage(layer, "w2_weight_scale_inv")
+
+        # In multi-host EP, the fused tensor may still have the global expert
+        # axis even though only the local expert shard was loaded on this host.
+        # Slice by the actual global expert ids owned by this worker so the
+        # local weight rows stay aligned with the router logits.
+        # Slice weights to local experts. The pre-allocated tensor has shape
+        # (num_experts_global, ...) with only local experts filled; extract them.
+        local_expert_ids = _get_local_expert_ids(layer)
+        if local_expert_ids is not None and len(local_expert_ids) < w13_weight.shape[0]:
+            w13_weight = _take_local_experts(w13_weight, local_expert_ids, axis=0)
+            w13_weight_scale = _take_local_experts(w13_weight_scale,
+                                                   local_expert_ids,
+                                                   axis=0)
+            w2_weight = _take_local_experts(w2_weight, local_expert_ids, axis=0)
+            w2_weight_scale = _take_local_experts(w2_weight_scale,
+                                                  local_expert_ids,
+                                                  axis=0)
+        else:
+            _local_count = getattr(layer, '_tpu_ep_local_count', None)
+            if _local_count is not None and _local_count < w13_weight.shape[0]:
+                w13_weight = w13_weight[:_local_count]
+                w13_weight_scale = w13_weight_scale[:_local_count]
+                w2_weight = w2_weight[:_local_count]
+                w2_weight_scale = w2_weight_scale[:_local_count]
 
         # TODO: do we need to support bias?
         input_weights = FusedMoEWeights(
@@ -260,16 +337,39 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         if self.weight_block_size is not None:
             weight_block_size = tuple(self.weight_block_size)
 
-        weights = process_fp8_moe_weights(
-            input_weights,
-            moe_backend=self.moe_backend,
-            mesh=self.mesh,
-            activation=layer.activation.value,
-            # Convert to tuple so jax jit can hash it
-            weight_block_size=weight_block_size,
-        )
+        if (weight_block_size is not None
+                and envs.MOE_SKIP_REQUANTIZATION):
+            # Fast path: skip dequant/requant, direct FP8 shape transform.
+            # Same `cpu_mesh_context()` as the legacy branch so the
+            # expand_dims / reshape ops stay on the CPU mesh and don't
+            # allocate temporaries on the TPU HBM during load.
+            logger.info_once(
+                "[MoE] Skipping requantization — direct FP8 path")
+            with cpu_mesh_context():
+                weights = process_fp8_moe_weights_direct(
+                    input_weights,
+                    moe_backend=self.moe_backend,
+                    mesh=self.mesh,
+                    activation=layer.activation.value,
+                    weight_block_size=weight_block_size,
+                )
+        else:
+            with cpu_mesh_context():
+                weights = process_fp8_moe_weights(
+                    input_weights,
+                    moe_backend=self.moe_backend,
+                    mesh=self.mesh,
+                    activation=layer.activation.value,
+                    # Convert to tuple so jax jit can hash it
+                    weight_block_size=weight_block_size,
+                )
+        # layer.num_experts in vLLM's FusedMoE resolves to local_num_experts
+        # (e.g., 32 for EP=8 with 256 experts). shard_moe_weights needs the
+        # GLOBAL count so make_array_from_process_local_data reconstructs
+        # the correct distributed array in multi-host mode.
         weights = torch_view(
-            shard_moe_weights(weights, self.moe_backend, self.mesh))
+            shard_moe_weights(weights, self.moe_backend, self.mesh,
+                              num_experts_global=layer.global_num_experts))
 
         layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
         layer.w2_weight = Parameter(weights.w2_weight, requires_grad=False)
@@ -279,12 +379,31 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         layer.w2_weight_scale_inv = Parameter(weights.w2_weight_scale,
                                               requires_grad=False)
 
+        # shard_moe_weights calls jax.block_until_ready on its output before
+        # returning, so host→device DMAs are complete by this point and
+        # Python's normal refcount drop (end of function scope) reliably
+        # frees the t2j intermediates. No manual gc needed.
+
     def apply_monolithic(
         self,
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
+
+        # Keep router logits aligned with the locally-loaded expert rows.
+        # After EP rank propagation each worker owns a distinct global expert
+        # subset, so slicing the first N experts is incorrect.
+        if not envs.NEW_MODEL_DESIGN:
+            local_expert_ids = _get_local_expert_ids(layer)
+            if local_expert_ids is not None and router_logits.shape[-1] > len(local_expert_ids):
+                router_logits = _take_local_experts(router_logits,
+                                                    local_expert_ids,
+                                                    axis=1)
+            else:
+                _local_count = getattr(layer, '_tpu_ep_local_count', None)
+                if _local_count is not None and router_logits.shape[-1] > _local_count:
+                    router_logits = router_logits[:, :_local_count]
 
         weights = FusedMoEWeights(
             w13_weight=jax_view(layer.w13_weight),
@@ -294,8 +413,10 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
             w2_weight_scale=jax_view(layer.w2_weight_scale_inv),
             w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
         )
-        return vllm_moe_apply(layer=layer,
-                              weights=weights,
-                              quant_method_instance=self,
-                              x=x,
-                              router_logits=router_logits)
+        result = vllm_moe_apply(layer=layer,
+                               weights=weights,
+                               quant_method_instance=self,
+                               x=x,
+                               router_logits=router_logits)
+
+        return result

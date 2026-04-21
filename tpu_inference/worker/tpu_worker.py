@@ -19,7 +19,19 @@ from vllm.v1 import utils as vllm_utils
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
-from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
+# Upstream vllm dropped CompilationTimes from worker_base in some recent
+# builds. Provide a dataclass fallback so the return-type annotation + call
+# sites below keep working whether or not the installed vllm exports it.
+try:
+    from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
+except ImportError:
+    from vllm.v1.worker.worker_base import WorkerBase
+
+    # order=True so vllm's `max(CompilationTimes_a, CompilationTimes_b)` works.
+    @dataclass(order=True)
+    class CompilationTimes:  # type: ignore[no-redef]
+        language_model: float = 0.0
+        encoder: float = 0.0
 
 from tpu_inference import envs, utils
 from tpu_inference.distributed import jax_parallel_state
@@ -169,7 +181,8 @@ class TPUWorker(WorkerBase):
                     tpu_visible_chips=""):
 
         # set tpu visible devices for Jax runtime in PP.
-        multihost_backend = envs.TPU_MULTIHOST_BACKEND
+        multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND",
+                           envs.TPU_MULTIHOST_BACKEND)
         if self.parallel_config.pipeline_parallel_size > 1:
             # Log environment variables for debugging
             tpu_env_vars = [
@@ -264,6 +277,7 @@ class TPUWorker(WorkerBase):
 
         # Initialize the vLLM distribution layer as a single chip environment,
         # we'll swap the model's parallel modules with TPU SPMD equivalents.
+        pp_size = self.parallel_config.pipeline_parallel_size
         with set_current_vllm_config(self.vllm_config):
             temp_file = tempfile.mkstemp()[1]
             init_distributed_environment(
@@ -277,6 +291,41 @@ class TPUWorker(WorkerBase):
                 tensor_model_parallel_size=1,
                 pipeline_model_parallel_size=1,
             )
+
+        # Override vLLM's PP group with the correct rank/size so that
+        # make_layers / get_pp_group correctly partitions layers AND
+        # is_first_rank / is_last_rank return the right values.
+        # vLLM is initialized with pp=1 (single-process gloo), so every
+        # host has rank=0, ranks=[0].  We must patch ALL of:
+        #   rank_in_group  — used by get_pp_indices (layer partitioning)
+        #   world_size     — used by get_pp_indices
+        #   rank           — used by is_first_rank / is_last_rank
+        #   ranks          — first_rank=ranks[0], last_rank=ranks[-1]
+        if pp_size > 1:
+            from vllm.distributed.parallel_state import get_pp_group
+            pp_group = get_pp_group()
+            if pp_group.world_size != 1:
+                # The patch below overwrites whatever PP state is already
+                # there. vLLM initialises the group with world_size=1 on
+                # a fresh process, so seeing a non-1 here means init_device
+                # ran a second time (or somebody else patched it). Warn
+                # before we clobber the previous values — idempotent in the
+                # same-values case, but harmful if the second run picks a
+                # different rank.
+                logger.warning(
+                    "PP group already patched (world_size=%d, rank=%d) "
+                    "before this init_device call; re-patching with "
+                    "rank_in_group=%d world_size=%d.",
+                    pp_group.world_size, pp_group.rank, self.rank, pp_size)
+            pp_group.rank_in_group = self.rank
+            pp_group.world_size = pp_size
+            pp_group.rank = self.rank
+            pp_group.ranks = list(range(pp_size))
+            # parallel_config.rank is used by get_layers_start_end_indices()
+            # to compute pp_rank = (rank // tp_size) % pp_size.
+            # Set it so the formula yields self.rank as the PP rank.
+            tp = self.parallel_config.tensor_parallel_size
+            self.parallel_config.rank = self.rank * tp
 
         jax_parallel_state.init_pp_distributed_environment(
             self.pp_config.ip,
@@ -323,25 +372,130 @@ class TPUWorker(WorkerBase):
 
     def determine_available_memory(self) -> int:
         gpu_memory_utilization = self.cache_config.gpu_memory_utilization
-        hbm_usage = utils.hbm_usage_bytes(self.devices)
-        total_hbm_limit = total_hbm_used = 0
-        for used, limit in hbm_usage:
-            total_hbm_used += used
-            total_hbm_limit += limit
+        fragmentation_reserve_fraction = float(
+            os.environ.get("TPU_HBM_FRAGMENTATION_RESERVE_FRACTION",
+                           "0.05"))
+        # Use only the worker's configured devices that are addressable
+        # by this JAX process. `self.devices` can include remote devices
+        # in multi-host mode (populated from `jax.devices()[:N]`) or a
+        # sub-slice of local chips (when `device_indexes` is set);
+        # `memory_stats()` is only reliable for devices local to this
+        # process. Filtering on `process_index` covers both cases and
+        # also sizes `num_chips` below to the worker's actual footprint.
+        # Fall back to `jax.local_devices()` defensively.
+        local_devs = [
+            d for d in self.devices
+            if d.process_index == jax.process_index()
+        ]
+        if not local_devs:
+            logger.warning(
+                "determine_available_memory: filter by process_index=%d "
+                "returned 0 local devices from %d entries in self.devices. "
+                "This suggests a misconfiguration (e.g. device_indexes "
+                "pointing only at remote chips). Falling back to "
+                "jax.local_devices() so HBM sizing still works, but the "
+                "fallback covers all local chips — num_chips below will "
+                "reflect the process footprint, not the worker's intended "
+                "device subset.",
+                jax.process_index(), len(self.devices))
+            local_devs = jax.local_devices()
+        hbm_usage = utils.hbm_usage_bytes(local_devs)
+        # In multi-host Ray/PJRT mode, jax.live_arrays() distributes model
+        # weights evenly across TP chips so summing gives total logical data
+        # (~6.52GB/chip), not actual HBM per chip (~26GB/chip). The primary
+        # chip's memory_stats() reports the real per-chip HBM usage. Use
+        # max_per_chip × num_chips to get accurate total HBM used.
+        per_chip_values = [used for used, _ in hbm_usage]
+        hbm_limit_per_chip = hbm_usage[0][1] if hbm_usage else utils.get_device_hbm_limit()
+        max_per_chip = max(per_chip_values, default=0)
+        num_chips = len(local_devs)
+        total_hbm_limit = hbm_limit_per_chip * num_chips
+        total_hbm_used = max_per_chip * num_chips
+        logger.info(
+            "HBM per-chip values from hbm_usage_bytes: %s (max=%.2fGiB); "
+            "using max×%d=%.2fGiB as total_hbm_used.",
+            [round(v / utils.GBYTES, 2) for v in per_chip_values],
+            max_per_chip / utils.GBYTES, num_chips,
+            total_hbm_used / utils.GBYTES)
 
         total_hbm_limit_cap = total_hbm_limit * gpu_memory_utilization
-        total_hbm_avail = int(total_hbm_limit_cap - total_hbm_used)
+        raw_total_hbm_avail = int(total_hbm_limit_cap - total_hbm_used)
+        # TPU KV-cache allocation creates many similarly-sized persistent HBM
+        # buffers.  Even when aggregate free HBM is sufficient, allocating all
+        # of it often fails because the largest contiguous free region on a chip
+        # is materially smaller than total free bytes.  Reserve a per-chip
+        # fragmentation margin before sizing KV cache blocks.
+        fragmentation_reserve_per_chip = max(
+            int(hbm_limit_per_chip * fragmentation_reserve_fraction),
+            512 * 1024 * 1024,
+        )
+        total_fragmentation_reserve = fragmentation_reserve_per_chip * num_chips
+        total_hbm_avail = max(0,
+                              raw_total_hbm_avail -
+                              total_fragmentation_reserve)
 
         total_hbm_limit_gb = round(total_hbm_limit / utils.GBYTES, 2)
         total_hbm_limit_cap_gb = round(total_hbm_limit_cap / utils.GBYTES, 2)
         total_hbm_used_gb = round(total_hbm_used / utils.GBYTES, 2)
+        raw_total_hbm_avail_gb = round(raw_total_hbm_avail / utils.GBYTES, 2)
+        fragmentation_reserve_per_chip_gb = round(
+            fragmentation_reserve_per_chip / utils.GBYTES, 2)
+        total_fragmentation_reserve_gb = round(
+            total_fragmentation_reserve / utils.GBYTES, 2)
         total_hbm_avail_gb = round(total_hbm_avail / utils.GBYTES, 2)
 
         logger.info(f"Memory statistics | "
                     f"{total_hbm_limit_gb=}GiB | "
                     f"{total_hbm_limit_cap_gb=}GiB | "
                     f"{total_hbm_used_gb=}GiB | "
+                    f"{raw_total_hbm_avail_gb=}GiB | "
+                    f"{fragmentation_reserve_per_chip_gb=}GiB | "
+                    f"{total_fragmentation_reserve_gb=}GiB | "
                     f"{total_hbm_avail_gb=}GiB")
+
+        # HBM breakdown probe: enumerate jax.live_arrays() to compare vs
+        # bytes_in_use. Gap = JAX/PJRT pool overhead + XLA reserved +
+        # transient compile scratch; live_arrays = actual weights + params.
+        # Opt-in because enumerating live arrays is not free and the
+        # top-25 table is verbose; only useful when debugging HBM usage.
+        if os.environ.get("TPU_HBM_PROBE", "0") == "1":
+            try:
+                live = jax.live_arrays()
+                groups: dict[tuple, list[int]] = {}
+                total_live_global = 0
+                for a in live:
+                    nbytes = getattr(a, "nbytes", None)
+                    if nbytes is None:
+                        shape = tuple(a.shape)
+                        size = 1
+                        for d in shape:
+                            size *= d
+                        nbytes = size * a.dtype.itemsize
+                    key = (str(a.dtype), str(tuple(a.shape)))
+                    entry = groups.setdefault(key, [0, 0])
+                    entry[0] += 1
+                    entry[1] += nbytes
+                    total_live_global += nbytes
+                per_chip_live = total_live_global / max(len(jax.devices()), 1)
+                logger.debug(
+                    "HBM probe | live_arrays_total_global=%.2fGiB "
+                    "per_chip_live≈%.2fGiB | device_in_use_per_chip=%.2fGiB "
+                    "| gap_per_chip=%.2fGiB (pool/scratch/reserved)",
+                    total_live_global / utils.GBYTES,
+                    per_chip_live / utils.GBYTES,
+                    max_per_chip / utils.GBYTES,
+                    (max_per_chip - per_chip_live) / utils.GBYTES)
+                sorted_groups = sorted(groups.items(),
+                                       key=lambda kv: -kv[1][1])
+                logger.debug(
+                    "HBM probe | top 25 live_array (dtype, shape) groups:")
+                for (dtype, shape), (count, total) in sorted_groups[:25]:
+                    logger.debug(
+                        "  %4d × %s %s = %.3fGiB (per-chip≈%.3fGiB)",
+                        count, shape, dtype, total / utils.GBYTES,
+                        total / max(len(jax.devices()), 1) / utils.GBYTES)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"HBM probe failed: {e}")
 
         if total_hbm_avail <= 0:
             raise ValueError(f"{total_hbm_used_gb=}GiB exceeds "
@@ -415,6 +569,20 @@ class TPUWorker(WorkerBase):
             jax.profiler.stop_trace()
 
     def load_model(self) -> None:
+        # In multi-host Ray mode, the Ray executor sets TPU_EP_RANK to the
+        # Ray worker index. However, the mesh device ordering is determined
+        # by jax.process_index() (from PJRT topology discovery), which may
+        # differ from the Ray worker index. Override to ensure the loaded
+        # experts match the mesh position.
+        multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "")
+        if multihost_backend == "ray":
+            os.environ["TPU_EP_RANK"] = str(jax.process_index())
+        else:
+            os.environ.setdefault("TPU_EP_RANK", str(self.rank))
+        sharding_config = getattr(self.vllm_config, "sharding_config", None)
+        if sharding_config is not None:
+            os.environ.setdefault("TPU_EP_SIZE",
+                                  str(sharding_config.expert_size))
         self.model_runner.load_model()
 
     def compile_or_warm_up_model(self) -> CompilationTimes:

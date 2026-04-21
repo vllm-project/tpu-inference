@@ -23,6 +23,17 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference.kernels.megablox.common import is_tpu, tpu_generation
+
+
+_FP8_DTYPES = (jnp.float8_e4m3fn, jnp.float8_e5m2)
+
+
+def _maybe_cast_fp8_to_bf16_for_tpu_v4(x: jax.Array) -> jax.Array:
+    if is_tpu() and tpu_generation() == 4 and x.dtype in _FP8_DTYPES:
+        return lax.convert_element_type(x, jnp.bfloat16)
+    return x
+
 
 def cdiv_on_kv_packing(a, kv_packing):
     assert kv_packing == 1 or kv_packing == 2 or kv_packing == 4
@@ -359,13 +370,27 @@ def _mla_ragged_paged_attention_kernel(
             return jnp.where(bkv_idx == 0, jnp.full_like(ref, init_val),
                              ref[...])
 
+        # TPU v4 Mosaic cannot compile FP8 RHS matmuls. Keep FP8 storage but
+        # cast per-tile operands to BF16 for the actual MXU dot.
+        ql_nope_mma = _maybe_cast_fp8_to_bf16_for_tpu_v4(ql_nope)
+        q_pe_mma = _maybe_cast_fp8_to_bf16_for_tpu_v4(q_pe)
+        kv_c_mma = _maybe_cast_fp8_to_bf16_for_tpu_v4(kv_c)
+        k_pe_mma = _maybe_cast_fp8_to_bf16_for_tpu_v4(k_pe)
+
         # Follow FlashAttention-2 forward pass.
-        q = jnp.concatenate([ql_nope, q_pe], axis=-1)
-        k = jnp.concatenate([kv_c, k_pe], axis=-1)
-        s = jnp.einsum("bnd,bmd->bnm",
-                       q,
-                       k,
-                       preferred_element_type=jnp.float32)
+        s_nope = lax.dot_general(
+            ql_nope_mma,
+            kv_c_mma,
+            dimension_numbers=(((2, ), (2, )), ((0, ), (0, ))),
+            preferred_element_type=jnp.float32,
+        )
+        s_pe = lax.dot_general(
+            q_pe_mma,
+            k_pe_mma,
+            dimension_numbers=(((2, ), (2, )), ((0, ), (0, ))),
+            preferred_element_type=jnp.float32,
+        )
+        s = s_nope + s_pe
         s *= sm_scale
         if k_scale is not None:
             s *= k_scale
@@ -400,17 +425,32 @@ def _mla_ragged_paged_attention_kernel(
         m_prev = load_with_init(head_m_ref, -jnp.inf)
         m_curr = jnp.maximum(m_prev, s_rowmax)
         head_m_ref[...] = m_curr
-        p = jnp.exp(s - broadcast_minor(m_curr, s.shape))
+        # Guard: when m_curr == -inf (all positions masked, e.g., EP shard-map padding
+        # devices that receive zero-padded tokens but see the full cu_q_lens), replace
+        # m_curr with 0 so that s - 0 = -inf → exp(-inf) = 0 instead of
+        # s - (-inf) = -inf - (-inf) = NaN.
+        _m_curr_p = jnp.where(jnp.isinf(m_curr), jnp.zeros_like(m_curr), m_curr)
+        p = jnp.exp(s - broadcast_minor(_m_curr_p, s.shape))
 
-        pv = jnp.einsum("bnm,bmd->bnd",
-                        p,
-                        kv_c,
-                        preferred_element_type=jnp.float32)
+        pv = lax.dot_general(
+            p,
+            kv_c_mma,
+            dimension_numbers=(((2, ), (1, )), ((0, ), (0, ))),
+            preferred_element_type=jnp.float32,
+        )
         if v_scale is not None:
             pv *= v_scale
 
         p_rowsum = jnp.sum(p, axis=2, keepdims=True)
-        exp_m_diff = jnp.exp(m_prev - m_curr)
+        # Guard: when both m_prev and m_curr are -inf (no valid positions in any block
+        # processed so far), m_prev - m_curr = -inf - (-inf) = NaN.  Use 0 instead so
+        # exp(0) = 1.0 (safe rescale of a zero accumulator).
+        _exp_diff_arg = jnp.where(
+            jnp.isinf(m_curr) & jnp.isinf(m_prev),
+            jnp.zeros_like(m_curr),
+            m_prev - m_curr,
+        )
+        exp_m_diff = jnp.exp(_exp_diff_arg)
         l_prev = load_with_init(head_l_ref, 0.0)
         l_curr = exp_m_diff * l_prev + p_rowsum
         head_l_ref[...] = l_curr
@@ -1064,6 +1104,7 @@ def _mla_ragged_paged_attention_kernel(
             q_nope_ref[:, :actual_bq_sz * num_q_heads_per_q_packing],
             q_dtype,
         ).reshape(batch_size, actual_bq_sz * num_q_heads, lkv_dim)
+        q_nope_vec = _maybe_cast_fp8_to_bf16_for_tpu_v4(q_nope_vec)
         q_rope_ref = (bq_rope_x2_ref.bitcast(
             jnp.uint32).at[bq_sem_idx].reshape(
                 batch_size, bq_sz * num_q_heads_per_q_packing, r_dim))
@@ -1071,6 +1112,7 @@ def _mla_ragged_paged_attention_kernel(
             q_rope_ref[:, :actual_bq_sz * num_q_heads_per_q_packing],
             q_dtype,
         ).reshape(batch_size, actual_bq_sz * num_q_heads, r_dim)
+        q_rope_vec = _maybe_cast_fp8_to_bf16_for_tpu_v4(q_rope_vec)
         return q_nope_vec, q_rope_vec
 
     def load_bkv(bkv_sem_idx):
@@ -1082,12 +1124,14 @@ def _mla_ragged_paged_attention_kernel(
                     bkv_sz_per_kv_packing, lkv_dim))
             bkvc_vec = pltpu.bitcast(bkvc_ref[...],
                                      kv_dtype).reshape(bkv_sz, lkv_dim)
+            bkvc_vec = _maybe_cast_fp8_to_bf16_for_tpu_v4(bkvc_vec)
 
             bkpe_ref = (bkpe_x2_ref.bitcast(
                 jnp.uint32).at[bkv_sem_idx, b, :bkv_sz_per_kv_packing].reshape(
                     bkv_sz_per_kv_packing, r_dim))
             bkpe_vec = pltpu.bitcast(bkpe_ref[...],
                                      kv_dtype).reshape(bkv_sz, r_dim)
+            bkpe_vec = _maybe_cast_fp8_to_bf16_for_tpu_v4(bkpe_vec)
             bkvc_vecs.append(bkvc_vec)
             bkpe_vecs.append(bkpe_vec)
         return jnp.stack(bkvc_vecs), jnp.stack(bkpe_vecs)
@@ -1240,8 +1284,14 @@ def _mla_ragged_paged_attention_kernel(
             # Load acc and calculate final output.
             acc = acc_ref[...]
             l = broadcast_minor(l_ref[...], acc.shape)  # noqa
-            out = (lax.div(acc, l) if q_dtype == jnp.float32 else
-                   (acc * pl.reciprocal(l, approx=True)).astype(q_dtype))
+            # Guard: l == 0 means all attention positions were masked for these rows
+            # (e.g., EP shard-map padding devices produce l=0 after the NaN guards
+            # above).  Dividing 0/0 would yield NaN; return zeros instead.
+            _l_is_zero = (l == 0)
+            _l_safe = jnp.where(_l_is_zero, jnp.ones_like(l), l)
+            out = (lax.div(acc, _l_safe) if q_dtype == jnp.float32 else
+                   (acc * pl.reciprocal(_l_safe, approx=True)).astype(q_dtype))
+            out = jnp.where(_l_is_zero, jnp.zeros_like(out).astype(q_dtype), out)
 
             # Wait for previous bo to be fully sent before storing new bo.
             bo_sem_idx = sem_ids_ref[2]

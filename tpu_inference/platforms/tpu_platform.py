@@ -107,6 +107,22 @@ class TpuPlatform(Platform):
         "VLLM_DISABLE_SHARED_EXPERTS_STREAM",
         "MOE_REQUANTIZE_BLOCK_SIZE",
         "MOE_REQUANTIZE_WEIGHT_DTYPE",
+        # New entries below extend propagation to Ray workers for the
+        # multi-host weight loader introduced in this PR.  They are
+        # list-only additions; none of them changes default behavior
+        # unless the caller explicitly sets the variable.
+        "TPU_TRUNCATE_LAYERS",
+        "TPU_TP_SELECTIVE_LOAD",
+        "TPU_GCS_WEIGHT_LOAD",
+        "TPU_FULL_SHARD_THR",
+        "TPU_LOADER_SHM_DIR",
+        "TPU_CHUNK_SIZE_MB",
+        "TPU_CHUNK_WORKERS",
+        "TPU_MIN_TOKEN_BUCKET",
+        "TPU_HBM_PROBE",
+        "TPU_HBM_FRAGMENTATION_RESERVE_FRACTION",
+        "VLLM_MOE_SKIP_REQUANTIZATION",
+        "MOE_REQUANTIZE_EXPERT_CHUNK_SIZE",
         "USE_JAX_PROFILER_SERVER",
         "JAX_PROFILER_SERVER_PORT",
     ]
@@ -198,13 +214,19 @@ class TpuPlatform(Platform):
             )
 
         if vllm_config.model_config and vllm_config.model_config.use_mla:
-            if not envs.NEW_MODEL_DESIGN or not vllm_config.additional_config.get(
-                    "sharding", {}).get("sharding_strategy", {}).get(
-                        "enable_dp_attention", False):
+            if not envs.NEW_MODEL_DESIGN:
                 raise ValueError(
-                    "MLA models require both the NEW_MODEL_DESIGN=1 environment "
-                    "variable to be set and DP attention set via: --additional_config \'{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}\'"
-                )
+                    "MLA models require the NEW_MODEL_DESIGN=1 "
+                    "environment variable.")
+            # DP attention is no longer strictly required for MLA: when
+            # expert parallelism splits attention heads across both `model`
+            # (TP) and `expert` (EP) axes, the output projection `o_proj`
+            # is a RowParallelLinear that only all-reduces along `model`.
+            # The MLA backend (see `flash_attn_mla.py`) now triggers an
+            # explicit all-gather along `expert` before `o_proj`, which
+            # recombines the per-EP-rank head contributions regardless of
+            # whether DP attention is on.  Non-MLA and non-EP code paths
+            # are unaffected.
         cls._initialize_sharding_config(vllm_config)
 
         from vllm.config import CompilationMode

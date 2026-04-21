@@ -180,10 +180,11 @@ class VllmModelWrapper:
             delattr(vllm_config_for_load, 'sharding_config')
         # Clearing the cached compilation config, otherwise vllm model init will fail
 
-        # When expert parallelism is enabled, vLLM loads weight in sharding
-        # aware manner. Since tpu-inference has its own sharding logic, this
-        # may casue errors. Therefore, we disable it during weight loading.
-        vllm_config_for_load.parallel_config.enable_expert_parallel = False
+        # Keep expert parallel disabled only on the legacy path. NEW_MODEL_DESIGN
+        # relies on the 8EP4TP mesh semantics during weight loading so the MoE
+        # backend and sharding config stay aligned with the runtime mesh.
+        if not envs.NEW_MODEL_DESIGN:
+            vllm_config_for_load.parallel_config.enable_expert_parallel = False
 
         use_random_weights = (
             vllm_config_for_load.load_config.load_format == "dummy")

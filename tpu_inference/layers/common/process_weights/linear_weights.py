@@ -38,6 +38,10 @@ class LinearWeights:
     weight_scale: jax.Array | Tensor | list[jax.Array | Tensor] | None
     zero_point: jax.Array | Tensor | list[jax.Array | Tensor] | None
     bias: jax.Array | Tensor | list[jax.Array | Tensor] | None
+    # TP-selective loader: the full (multi-host) shape of the weight before
+    # per-host slicing.  Propagated from the torch param.data registry so
+    # that general_device_put can pass it as global_shape= to JAX.
+    tp_full_shape: tuple[int, ...] | None = None
 
 
 MODEL_MATMUL_FUSION_TRUTH_TABLE = {
@@ -92,6 +96,18 @@ def process_linear_weights(
     zero_point = weights.zero_point
     bias = weights.bias
 
+    # TP-selective loader: capture the full (multi-host) shape from the
+    # torch param.data registry BEFORE jax.lax.slice_in_dim converts it
+    # to a JAX array and loses the data_ptr key.
+    tp_full_shape = getattr(weights, "tp_full_shape", None)
+    if tp_full_shape is None and isinstance(weight, torch.Tensor):
+        try:
+            from tpu_inference.models.vllm.tp_selective_loader import \
+                lookup_tp_full_shape
+            tp_full_shape = lookup_tp_full_shape(weight)
+        except Exception:  # noqa: BLE001
+            pass
+
     dim = 0 if transposed else -1
     if output_sizes is None:
         output_sizes = [weight.shape[dim]]
@@ -138,6 +154,7 @@ def process_linear_weights(
         weight_scale=weight_scale,
         zero_point=zero_point,
         bias=bias,
+        tp_full_shape=tp_full_shape,
     )
 
 
@@ -185,8 +202,16 @@ def shard_linear_weights(
 
     for field in fields(LinearWeights):
         key = field.name
+        if key == "tp_full_shape":
+            continue
         if (weight := getattr(weights, key, None)) is not None:
             sharding = getattr(weight_shardings, key)
-            weight = general_device_put(weight, sharding)
+            # tp_full_shape is the full (pre-slice) shape of the main `weight`
+            # tensor only. scale/zero_point/bias have their own shapes and
+            # must not inherit the weight's global_shape.
+            global_shape = (getattr(weights, "tp_full_shape", None)
+                            if key == "weight" else None)
+            weight = general_device_put(weight, sharding,
+                                        global_shape=global_shape)
             setattr(weights, key, weight)
     return weights
