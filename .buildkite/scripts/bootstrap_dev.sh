@@ -38,10 +38,10 @@ fi
 buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
 echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
 
-# I will check whether the KERNEL_TUNING_KERNEL_NAME flag is set in the environment 
-# variables. If it is, I will upload the pipeline_kernel_tuning.yml pipeline, which
-# includes steps for kernel tuning. If it is not set, I will upload the regular 
-# pipeline_dev.yml pipeline. 
+# Check whether the KERNEL_TUNING_KERNEL_NAME flag is set in the environment variables.
+# If it is, upload the pipeline_kernel_tuning.yml pipeline, which
+# includes steps for generating kernel tuning cases and running kernel tuning jobs. 
+# If it is not set, upload the regular pipeline_dev.yml pipeline. 
 if [ -n "${KERNEL_TUNING_KERNEL_NAME:-}" ]; then
     echo "--- :pipeline: Uploading pipeline_dev_kernel_tuner.yml"
     buildkite-agent pipeline upload .buildkite/pipeline_kernel_tuning.yml
