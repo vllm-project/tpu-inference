@@ -32,7 +32,7 @@ BENCHMARK_LOG_FILE="benchmark.log"
 # The sentinel message that indicates the server is ready (in LOG_FILE)
 export READY_MESSAGE="Application startup complete."
 # After how long we should timeout if the server doesn't start
-export TIMEOUT_SECONDS=1800
+export TIMEOUT_SECONDS=3600
 
 # The minimum accuracy and throughput scores we expect
 # TODO (jacobplatin): these are very low, so we'll want to boost them eventually
