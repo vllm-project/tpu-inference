@@ -28,7 +28,10 @@ set -e
 
 PORT="${1:-8000}"
 BASE="http://127.0.0.1:${PORT}"
-MODEL="/home/lyq/gcs-neuscale/GLM-5.1-FP8"
+# vLLM's /v1/completions requires the `model` field to match the served
+# name (`vllm serve <path>` uses the path as its id).  Override via
+# MODEL when the server registered a different name.
+: "${MODEL:?set MODEL to the id the server registered for GLM-5.1-FP8 (usually the value you passed to \"vllm serve\")}"
 MAX_TOKENS="${MAX_TOKENS:-10}"
 TIMEOUT="${TIMEOUT:-300}"
 
