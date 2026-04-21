@@ -27,7 +27,8 @@ logging.basicConfig(level=logging.INFO)
 
 
 def mock_kernel(key1, key2, param1, param2):
-    # A mock kernel function that takes some time to execute and returns a latency based on the input parameters.
+    # A mock kernel function that takes some time to execute and returns a
+    # latency based on the input parameters.
     time.sleep(random.random() / 5)  # Simulate some computation time
 
 
@@ -44,7 +45,11 @@ class TunableParams:
 
 
 class TestKernelTuner(KernelTunerBase):
-    # This is a reference implementation of a KernelTuner for testing purposes. It defines a simple tuning key and tunable parameters, and simulates running a kernel by sleeping for a random short duration. The latency returned is not based on any real computation, but rather is just a placeholder to demonstrate the tuning pipeline.
+    # This is a reference implementation of a KernelTuner for testing purposes.
+    # It defines a simple tuning key and tunable parameters, and simulates running
+    # a kernel by sleeping for a random short duration. The latency returned is
+    # not based on any real computation, but rather is just a placeholder to
+    # demonstrate the tuning pipeline.
 
     def __init__(self, storage_manager):
         super().__init__(tuning_key_class=TuningKey,
@@ -83,7 +88,8 @@ class TestKernelTuner(KernelTunerBase):
             tuning_key: TuningKey,
             tunable_params: TunableParams,
             iters: int = 1) -> tuple[TuningStatus, float, float]:
-        # Run the mock kernel with the given tuning key and tunable params, and return the latency.
+        # Run the mock kernel with the given tuning key and tunable params, and
+        # return the latency.
         logger.debug(
             f"Running mock kernel with tuning_key={tuning_key}, tunable_params={tunable_params}, iters={iters}"
         )

@@ -358,9 +358,11 @@ class KernelTunerBase:
         bucket_start_perf = time.perf_counter()
         results_buffer = []
         for cid in range(begin_case_id, end_case_id):
-            if cid in processed_ids: continue
+            if cid in processed_ids:
+                continue
             config = all_configs.get(cid)
-            if not config: continue
+            if not config:
+                continue
             _, _, case_key_value = config
             tuning_key, tunable_params = TuningCase.from_string(
                 case_key_value, self.tuning_key_class,
