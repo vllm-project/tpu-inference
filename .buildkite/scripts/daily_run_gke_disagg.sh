@@ -163,10 +163,10 @@ echo "------------------------------------------------"
 PROXY_POD=$(kubectl get pods -l "$PROXY_LABEL" -o jsonpath="{.items[0].metadata.name}")
 
 # Run input=1024, output=8192
-run_disagg_benchmark "$PROXY_POD" "$MODEL" 1024 8192 256
+run_disagg_benchmark "$PROXY_POD" "$MODEL" 1024 8192 10
 
 # Run input=8192, output=1024
-run_disagg_benchmark "$PROXY_POD" "$MODEL" 8192 1024 256
+run_disagg_benchmark "$PROXY_POD" "$MODEL" 8192 1024 10
 
 # Benchmark results should be saved in local files 1024_8192.json and
 # 8192_1024.json.
@@ -192,7 +192,7 @@ for RESULT_FILE in "1024_8192.json" "8192_1024.json"; do
     
     # Dump results to database
     echo "Parsing results and dumping to database..."
-    python3 parse_gke_results.py "$RESULT_FILE" "$RECORD_ID" | while read -r SQL; do
+    python3 ./.buildkite/scripts/parse_gke_results.py "$RESULT_FILE" "$RECORD_ID" | while read -r SQL; do
         if [[ -n "$SQL" ]]; then
             echo "Executing SQL statement..."
             gcloud spanner databases execute-sql "${GCP_DATABASE_ID}" \
