@@ -14,14 +14,12 @@
 # limitations under the License.
 
 
-# This script, by default, will test running Llama3.1-8B-Instruct on 10 prompts on the MMLU dataset to check that the accuracy score and overall throughput are reasonable.
+# This script, by default, will test running one of the listed models on 1000 MMLU prompts and gage whether accuracy & perf is reasonable.
 # Specifically, it will do the following:
-# 1. Spin up a vLLM server
-# 2. Once the server is ready, run 10 prompts of the MMLU benchmark
-# 3. Check the accuracy score and throughput and exit cleanly if and only if they are both reasonably high
-
-# You can also manually invoke this script to run an E2E benchmark on any given model and dataset, making sure
-# you specify the --dataset-name, --dataset-path, and --root-dir flags
+# 1. Download the MMLU dataset
+# 2. Spin up a vLLM server
+# 2. Once the server is ready, run 1000 prompts of the MMLU benchmark
+# 3. Parse out the accuracy score and throughput and exit cleanly if and only if they are both reasonably high
 
 # Example default usage: bash tests/e2e/benchmarking/mmlu.sh -r /local/root_dir
 # Example local docker + JAX TPU usage: BUILDKITE_COMMIT=0f199f1 .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mmlu.sh
@@ -32,7 +30,7 @@ BENCHMARK_LOG_FILE="benchmark.log"
 # The sentinel message that indicates the server is ready (in LOG_FILE)
 export READY_MESSAGE="Application startup complete."
 # After how long we should timeout if the server doesn't start
-export TIMEOUT_SECONDS=3600
+export TIMEOUT_SECONDS=1800
 
 # The minimum accuracy and throughput scores we expect
 # TODO (jacobplatin): these are very low, so we'll want to boost them eventually
@@ -59,7 +57,6 @@ dataset_name=mmlu
 dataset_path=""
 num_prompts=1000
 exit_code=0
-use_dummy_weights=false
 
 helpFunction()
 {
@@ -70,7 +67,6 @@ helpFunction()
    echo -e "\t-p The path to the processed MMLU dataset (default: None, which will download the dataset)"
    echo -e "\t-m A space-separated list of HuggingFace model ids to use (default: Qwen/Qwen2.5-1.5B-Instruct, Qwen/Qwen2.5-0.5B-Instruct, meta-llama/Llama-3.1-8B-Instruct and meta-llama/Llama-4-Scout-17B-16E-Instruct)"
    echo -e "\t-n Number of prompts to use for the benchmark (default: 10)"
-   echo -e "\t--use-dummy-weights Use dummy random weight (default: false)"
    exit 1
 }
 
@@ -105,11 +101,6 @@ while [[ "$#" -gt 0 ]]; do
             shift
             shift
             ;;
-        --use-dummy-weights)
-            use_dummy_weights=true
-            shift
-            shift
-            ;;
         -h|--help)
             helpFunction
             ;;
@@ -141,25 +132,6 @@ if [ -z "$dataset_path" ]; then
     fi
     dataset_path=$dataset_path/data/test/
 fi
-
-if [ "$use_dummy_weights" = true ]; then
-    extra_serve_args+=("--load-format=dummy")
-fi
-
-if [ "$USE_V6E8_QUEUE" == "True" ]; then
-    # Set to 8 if job is in 8 chips queue.
-    # TODO (Qiliang Cui) Rename USE_V6E8_QUEUE to USE_8_CHIPS_QUEUE
-    DEVICE_COUNT=8
-elif [ "$TPU_VERSION" == "tpu7x" ]; then
-    # Set the default value to 8 for tpu v7x
-    DEVICE_COUNT=8
-
-else
-    DEVICE_COUNT=1
-fi
-
-extra_serve_args+=(--tensor-parallel-size "${DEVICE_COUNT}")
-
 
 echo extra_serve_args: "${extra_serve_args[@]}"
 
@@ -275,6 +247,26 @@ for model_name in $model_list; do
 
     # Define model-specific arguments
     current_serve_args=("${extra_serve_args[@]}")
+
+    current_device_count=${DEVICE_COUNT}
+    if [ -z "$current_device_count" ]; then
+        # Set to 8 if job is in 8 chips queue.
+        # TODO (Qiliang Cui) Rename USE_V6E8_QUEUE to USE_8_CHIPS_QUEUE
+        if [ "$USE_V6E8_QUEUE" == "True" ]; then
+            current_device_count=8
+        elif [ "$TPU_VERSION" == "tpu7x" ]; then
+            # Set the default value to 2 for tpu v7x for most models
+            current_device_count=2
+            # If using large model (e.g. DeepSeek, then set the count to 8)
+            if [[ "${model_name,,}" == *"deepseek"* ]]; then
+                current_device_count=8
+            fi
+        else
+            current_device_count=1
+        fi
+    fi
+    current_serve_args+=(--tensor-parallel-size "${current_device_count}")
+
     max_batched_tokens=8192
     served_name=$model_name
     max_num_seqs=64
@@ -286,24 +278,26 @@ for model_name in $model_list; do
         fi
     else
         if [[ "${model_name,,}" == *"deepseek"* ]]; then
+            export TIMEOUT_SECONDS=3600 # DeepSeek needs a longer timeout
             max_batched_tokens=512
             max_model_len=9216
             served_name=deepseek-ai/DeepSeek-R1
             TARGET_ACCURACY="0.84"
-            current_serve_args+=(--served-model-name "${served_name}"  --load-format=runai_streamer   --trust-remote-code --kv-cache-dtype=fp8 )
+            current_serve_args+=(--served-model-name "${served_name}" --load-format=runai_streamer --trust-remote-code)
+            current_serve_args+=(--kv-cache-dtype=fp8)
             if [ "$MODEL_IMPL_TYPE" == "vllm" ]; then
                 current_serve_args+=(--enable-expert-parallel)
                 current_serve_args+=(--additional_config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true}}}')
             elif [ "$MODEL_IMPL_TYPE" == "flax_nnx" ]; then
-                current_serve_args+=(--additional_config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true, "expert_parallelism": 16, "tensor_parallelism": 1}}, "replicate_attn_weights": "True", "sparse_matmul": "True"}')
+                current_serve_args+=(--additional_config '{"sharding": {"sharding_strategy": 
+                    {"enable_dp_attention": true, "expert_parallelism": '"${current_device_count}"', "tensor_parallelism": 1}},
+                        "replicate_attn_weights": "True", "sparse_matmul": "True"}')
             fi
         fi
     fi
 
     # Spin up the vLLM server
     echo "Spinning up the vLLM server..."
-    echo "Running the following settings:\\nvllm serve $model_name --no-enable-prefix-caching --gpu-memory-utilization=0.95 --max-model-len $max_model_len --max-num-batched-tokens $max_batched_tokens ${current_serve_args[@]}"
-    echo "Using the following env vars:\n`printenv`"
     (vllm serve "$model_name" --no-enable-prefix-caching --gpu-memory-utilization=0.95 --max-model-len $max_model_len --max-num-batched-tokens "$max_batched_tokens" "${current_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
 
     # Set initial trap to ensure cleanup happens even on immediate exit
