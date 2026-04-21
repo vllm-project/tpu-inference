@@ -204,7 +204,7 @@ class KernelTunerBase:
             logger.error(f"Error initializing case set {case_set_id}: {e}")
             raise e
 
-    def generate_buildkite_pipeline(self, case_set_id: str, run_id: int,
+    def generate_buildkite_pipeline(self, case_set_id: str, run_id: str,
                                     desc: str) -> str:
         """Generate the Buildkite pipeline for the given tuning jobs. Each tuning job will be represented as a Buildkite step that calls the measure_latency function with the corresponding case_id range.
 
@@ -327,7 +327,7 @@ class KernelTunerBase:
             "Specific kernel should implement this to call the kernl with the inputs from generate_inputs"
         )
 
-    def measure_latency(self, caseset_id: str, run_id: int, begin_case_id: int,
+    def measure_latency(self, caseset_id: str, run_id: str, begin_case_id: int,
                         end_case_id: int):
         """Measure the latency of cases in the caseset with case_id in [begin_case_id, end_case_id). The latency of each case will be persisted in local file or database using storage_management module.
 

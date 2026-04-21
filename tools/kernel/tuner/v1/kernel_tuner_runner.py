@@ -37,8 +37,8 @@ _KERNEL_TUNER_NAME = flags.DEFINE_string('kernel_tuner_name',
                                          'Name of the kernel tuner to run.')
 _CASE_SET_ID = flags.DEFINE_string('case_set_id', '',
                                    'The case set ID to use for this run.')
-_RUN_ID = flags.DEFINE_integer(
-    'run_id', 0,
+_RUN_ID = flags.DEFINE_string(
+    'run_id', '0',
     'The run ID to use for this run. If not specified, a timestamp-based ID will be generated.'
 )
 _CASE_SET_DESC = flags.DEFINE_string('case_set_desc', '',
@@ -90,7 +90,7 @@ def main(argv):
     if not case_set_id:
         # If case_set_id is not provided, generate one using the current timestamp but in the format of YYYYMMDDHHMMSS to ensure it is sortable and easily readable.
         case_set_id = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-        run_id = 0
+        run_id = '0'
     logger.info(
         f'Using case_set_id: {case_set_id}, run_id: {run_id}, case_set_desc: {case_set_desc} for this tuning run.'
     )
