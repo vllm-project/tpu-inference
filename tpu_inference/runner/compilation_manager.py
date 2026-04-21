@@ -174,7 +174,8 @@ class CompilationManager:
                                     inputs_embeds,
                                     intermediate_tensors=None,
                                     is_first_rank=True,
-                                    is_last_rank=True) -> None:
+                                    is_last_rank=True,
+                                    is_full_batch_decode=False) -> None:
         num_tokens = None
         if input_ids is not None:
             num_tokens = input_ids.shape[0]
@@ -216,6 +217,7 @@ class CompilationManager:
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
+                is_full_batch_decode=is_full_batch_decode,
             )
             return attention_metadata_gid
 
@@ -354,14 +356,16 @@ class CompilationManager:
                         "hidden_states": hidden_states,
                         "residual": residual
                     })
-            self._precompile_backbone_helper(
-                f"worker{self.runner.rank} backbone",
-                input_ids=input_ids,
-                positions=positions,
-                inputs_embeds=None,
-                intermediate_tensors=intermediate_tensors,
-                is_first_rank=is_first_rank,
-                is_last_rank=is_last_rank)
+            for is_full_batch_decode in (False, True):
+                self._precompile_backbone_helper(
+                    f"worker{self.runner.rank} backbone",
+                    input_ids=input_ids,
+                    positions=positions,
+                    inputs_embeds=None,
+                    intermediate_tensors=intermediate_tensors,
+                    is_first_rank=is_first_rank,
+                    is_last_rank=is_last_rank,
+                    is_full_batch_decode=is_full_batch_decode)
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
@@ -401,14 +405,16 @@ class CompilationManager:
                     })
             else:
                 intermediate_tensors = None
-            self._precompile_backbone_helper(
-                f"worker{self.runner.rank} backbone with embeds",
-                input_ids=None,
-                positions=positions,
-                inputs_embeds=inputs_embeds,
-                intermediate_tensors=intermediate_tensors,
-                is_first_rank=is_first_rank,
-                is_last_rank=is_last_rank)
+            for is_full_batch_decode in (False, True):
+                self._precompile_backbone_helper(
+                    f"worker{self.runner.rank} backbone with embeds",
+                    input_ids=None,
+                    positions=positions,
+                    inputs_embeds=inputs_embeds,
+                    intermediate_tensors=intermediate_tensors,
+                    is_first_rank=is_first_rank,
+                    is_last_rank=is_last_rank,
+                    is_full_batch_decode=is_full_batch_decode)
 
     def _precompile_select_from_array_helper(
         self,

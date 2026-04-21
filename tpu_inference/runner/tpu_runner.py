@@ -1496,6 +1496,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         request_distribution = np.array(_request_distribution,
                                         dtype=np.int32).ravel()
 
+        # True when every DP rank has decode-only seqs (dist[0] == dist[2]: no mixed/prefill).
+        # The divisibility-by-decode_batch_size invariant is asserted in static_validate_inputs.
+        is_full_batch_decode = all(d[0] == d[2] for d in _request_distribution)
+
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
         spec_decode_metadata = None
@@ -1586,6 +1590,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
+                is_full_batch_decode=is_full_batch_decode,
             )
 
             # This is for making these cpu buffers hidden during tracing
@@ -1816,6 +1821,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                      sharding=data_parallel_attn_sharding)
 
         request_distribution = np.array(self.input_batch.request_distribution)
+        # True when every DP rank has decode-only seqs (dist[0] == dist[2]: no mixed/prefill).
+        is_full_batch_decode = all(
+            d[0] == d[2] for d in request_distribution.reshape(-1, 3))
 
         def build_block_table_host(kv_cache_gid: int) -> None:
             block_table_obj = self.input_batch.block_table[kv_cache_gid]
@@ -1856,7 +1864,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 block_tables=block_tables,
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
-                request_distribution=request_distribution)
+                request_distribution=request_distribution,
+                is_full_batch_decode=is_full_batch_decode,
+            )
             # This is for making these cpu buffers hidden during tracing
             attention_metadata_gid.query_start_loc_cpu = query_start_loc_view
             attention_metadata_gid.seq_lens_cpu = seq_lens_view

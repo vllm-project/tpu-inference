@@ -28,7 +28,9 @@ import jax
         "query_start_loc",
         "request_distribution",
     ],
-    meta_fields=[],
+    # is_full_batch_decode is a Python bool: part of treedef so JAX preserves it
+    # across JIT boundaries and compiles separate versions for True vs False.
+    meta_fields=["is_full_batch_decode"],
     drop_fields=["query_start_loc_cpu", "seq_lens_cpu"],
 )
 @dataclass
@@ -44,6 +46,10 @@ class AttentionMetadata(object):
     query_start_loc: jax.Array = None
     # (3,)
     request_distribution: jax.Array = None
+    # Python bool: True when all seqs are batched-decode with no remainder.
+    # In meta_fields so JAX preserves it across the persistent run_model JIT boundary
+    # and compiles two separate versions (True/False) for static dispatch in the kernel.
+    is_full_batch_decode: bool = False
 
     query_start_loc_cpu: Any = field(init=False)
     seq_lens_cpu: Any = field(init=False)

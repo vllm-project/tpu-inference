@@ -149,11 +149,14 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
 
         # (B, N, P) x (N, P, L) -> (B, N, L)
         # torch nn param
-        q_nope = (jnp.einsum("bnp,npl->bnl",
+        # W_UK_T_scale is [1, N, L]; transpose to [N, 1, L] to broadcast against [N, B, L]
+        scale = jax_view(layer.W_UK_T_scale).transpose(1, 0, 2)
+        q_nope = (jnp.einsum("bnp,npl->nbl",
                              q_nope,
                              jax_view(layer.W_UK_T),
                              preferred_element_type=jnp.float32) *
-                  jax_view(layer.W_UK_T_scale)).astype(input_dtype)
+                  scale).astype(input_dtype)
+        # Result: [N, B, L] — XLA's dot_general gives this layout physically; no copy inserted
 
         q_scale = k_scale = v_scale = None
         if layer.kv_cache_quantized_dtype:
@@ -195,8 +198,8 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             sm_scale=self.scale,
         )
 
-        outputs = outputs.reshape(-1, self.num_heads, self.kv_lora_rank)
-        outputs = (jnp.einsum("bnl,nlv->bnv",
+        outputs = outputs.reshape(self.num_heads, -1, self.kv_lora_rank)
+        outputs = (jnp.einsum("nbl,nlv->bnv",
                               outputs,
                               jax_view(layer.W_UV),
                               preferred_element_type=jnp.float32) *
