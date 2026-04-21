@@ -41,7 +41,11 @@ RUN apt-get update && apt-get install -y \
 # Build vLLM
 WORKDIR /workspace/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_COMMIT_HASH
+
+# TODO(Qiliang): fix the test issue caused by 
+# https://github.com/vllm-project/vllm/pull/32954
+# and unpin
+ARG VLLM_COMMIT_HASH="8c8ebeb941d7bcc380b4aa685fd5201100c9eeca"
 
 RUN git clone $VLLM_REPO . && \
     if [ -n "$VLLM_COMMIT_HASH" ]; then \
