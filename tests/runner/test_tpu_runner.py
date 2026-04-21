@@ -22,6 +22,8 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.config.multimodal import BaseDummyOptions
 
+from tpu_inference.models.common.interface import (ModelInterface,
+                                                   MultiModalInterface)
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
@@ -151,6 +153,7 @@ class TestTPUJaxRunner:
         self.runner.input_batch.num_reqs = 1
         self.runner.input_batch.req_ids = ['req1']
         self.runner.input_batch.req_id_to_index = {'req1': 0}
+        self.runner.input_batch.request_distribution = [0, 0, 1]
         self.runner.input_batch.num_computed_tokens_cpu = np.array([10])
         self.runner.input_batch.token_ids_cpu = np.random.randint(
             0, 1000, (8, 64), dtype=np.int32)
@@ -242,13 +245,12 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
             self.runner.load_model()
 
     def _model_get_model(self):
-        mock_multimodal_fns = {
-            "precompile_vision_encoder_fn": None,
-            "embed_multimodal_fn": None,
-            "embed_input_ids_fn": None,
-            "get_mrope_input_positions_fn": None
-        }
-        return (
+        mock_multimodal_fns = MultiModalInterface(
+            precompile_vision_encoder_fn=None,
+            embed_multimodal_fn=None,
+            embed_input_ids_fn=None,
+            get_mrope_input_positions_fn=None)
+        return ModelInterface(
             MagicMock(),  # TPUModelRunner.model_fn
             MagicMock(),  # TPUModelRunner.compute_logits_fn
             MagicMock(),  # TPUModelRunner.pooler_fn
@@ -288,13 +290,12 @@ class TestTPUJaxRunnerDisableMM:
                                        ('data', 'attn_dp', 'expert', 'model'))
 
     def _model_get_model(self):
-        mock_multimodal_fns = {
-            "precompile_vision_encoder_fn": None,
-            "embed_multimodal_fn": MagicMock(),
-            "embed_input_ids_fn": MagicMock(),
-            "get_mrope_input_positions_fn": None
-        }
-        return (
+        mock_multimodal_fns = MultiModalInterface(
+            precompile_vision_encoder_fn=None,
+            embed_multimodal_fn=MagicMock(),
+            embed_input_ids_fn=MagicMock(),
+            get_mrope_input_positions_fn=None)
+        return ModelInterface(
             MagicMock(),  # TPUModelRunner.model_fn
             MagicMock(),  # TPUModelRunner.compute_logits_fn
             MagicMock(),  # TPUModelRunner.pooler_fn

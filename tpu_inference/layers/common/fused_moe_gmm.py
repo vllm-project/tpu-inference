@@ -21,9 +21,10 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.envs as envs
-from tpu_inference.kernels.gather import gather_reduce as gather_reduce_sc
-from tpu_inference.kernels.gather.ragged_gather import ragged_gather
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
+from tpu_inference.kernels.sparse_core import gather_reduce as gather_reduce_sc
+from tpu_inference.kernels.sparse_core.ragged_gather import ragged_gather
+from tpu_inference.kernels.sparse_core.ragged_scatter import ragged_scatter
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
@@ -194,8 +195,21 @@ def moe_gmm_local(
                                group_offset,
                                preferred_element_type=x.dtype)
 
+        if local_group_size < group_sizes.size:
+            group_offsets = jnp.cumulative_sum(group_sizes,
+                                               include_initial=True)
+            experts_start = group_offset[0]
+            experts_end = group_offset[0] + local_group_size
+            shard_output_start = group_offsets[experts_start]
+            shard_output_end = group_offsets[experts_end]
+            token_hidden = ragged_scatter(gmm2_res,
+                                          topk_argsort_revert_indices,
+                                          shard_output_start, shard_output_end)
+        else:
+            token_hidden = gmm2_res[topk_argsort_revert_indices]
+
         # First run local reduction on topk experts owned by the rank for all tokens
-        token_topk_hidden = gmm2_res[topk_argsort_revert_indices].reshape(
+        token_topk_hidden = token_hidden.reshape(
             (-1, topk, gmm2_res.shape[-1]))
         token_topk_hidden = token_topk_hidden * jnp.expand_dims(topk_weights,
                                                                 axis=-1)
@@ -311,7 +325,6 @@ def expert_parallel_gmm(
     num_experts_per_shard = num_experts // ep_size
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
 
-    x_p_spec = P(ShardingAxisName.EXPERT_DATA)
     w1_scale_spec = None if w1_scale is None else ep_p_spec
     w1_bias_spec = None if w1_bias is None else ep_p_spec
     w2_scale_spec = None if w2_scale is None else ep_p_spec
@@ -328,7 +341,7 @@ def expert_parallel_gmm(
         ),
         mesh=mesh,
         in_specs=(
-            x_p_spec,
+            data_p_spec,
             ep_p_spec,
             w1_scale_spec,
             w1_bias_spec,
@@ -359,6 +372,7 @@ def expert_parallel_gmm(
 
 def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
                           dtype: jnp.dtype) -> jax.Array:
+    logger.info("Apply FP8 all-gather on input of MOE")
     hidden_states_q, scale = quantize_tensor(
         jnp.float8_e4m3fn,
         hidden_states,
@@ -501,8 +515,6 @@ def fused_moe_func(
 
         return x, group_sizes_local, topk_argsort_revert_indices
 
-    x_out_spec = (P(ShardingAxisName.EXPERT_DATA)
-                  if use_ep else P(ShardingAxisName.MLP_DATA))
     if all_gather_fp8:
         hidden_states = _apply_all_gather_fp8(hidden_states, mesh, dtype)
 
@@ -514,7 +526,7 @@ def fused_moe_func(
             P(ShardingAxisName.MLP_DATA, None),
         ),
         out_specs=(
-            x_out_spec,
+            P(ShardingAxisName.MLP_DATA),
             P(ShardingAxisName.MLP_DATA),
             P(ShardingAxisName.MLP_DATA),
         ),

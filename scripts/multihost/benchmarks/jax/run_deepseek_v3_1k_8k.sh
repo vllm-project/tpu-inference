@@ -14,18 +14,18 @@ bash "${NIGHTLY_SCRIPT}" \
   --input-len 1024 \
   --output-len 8192 \
   --tp-size 16 \
-  --max-seqs 128 \
+  --max-seqs 160 \
   --max-model-len 9216 \
   --max-batched-tokens 512 \
-  --num-prompts 2048 \
+  --num-prompts 2560 \
   --dataset-name "random" \
   --run-type "DAILY" \
   --device "tpu7x-16" \
   --created-by "bm-scheduler" \
   --new-model-design "1" \
-  --gpu-memory-utilization "0.92" \
+  --gpu-memory-utilization "0.95" \
   --enable-expert-parallel \
-  --additional-config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true, "expert_parallelism": 16, "tensor_parallelism": 1}}, "replicate_attn_weights": "True", "sparse_matmul": "True"}' \
+  --additional-config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true, "expert_parallelism": 16, "tensor_parallelism": 1}}, "replicate_attn_weights": "True", "sparse_matmul": "True", "compilation_sizes": [2560]}' \
   --disable-shared-experts-stream "0" \
   --generation-config "gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1" \
   --vllm-mla-disable "0" \

@@ -542,6 +542,7 @@ def main(args: argparse.Namespace):
                                     num_requests=args.num_prompts,
                                     input_len=args.mmlu_input_len,
                                     output_len=args.mmlu_output_len,
+                                    chat_template_system_prompt=args.chat_template_system_prompt,
                                     ),
             "mlperf":
             lambda: MLPerfDataset(random_seed=args.seed,
@@ -558,6 +559,7 @@ def main(args: argparse.Namespace):
                                     tokenizer=tokenizer,
                                     num_requests=args.num_prompts,
                                     output_len=args.gpqa_output_len,
+                                    chat_template_system_prompt=args.chat_template_system_prompt,
                                     ),
             "mmmu_pro":
             lambda: MMMUProDataset(
@@ -808,6 +810,12 @@ if __name__ == "__main__":
         required=False,
         default="benchmark-serving",
         help="Specify the prefix of request id.",
+    )
+    parser.add_argument(
+        "--chat-template-system-prompt",
+        type=str,
+        default="Reasoning effort: high",
+        help="The system prompt to use when applying a chat template.",
     )
 
     # group for dataset specific arguments

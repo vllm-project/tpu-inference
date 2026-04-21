@@ -253,6 +253,8 @@ def get_default_maps(model_config, mesh: Mesh,
     sharding_size = mesh.shape["model"]
 
     hf_config = model_config.hf_config
+    if text_config := getattr(hf_config, "text_config", None):
+        hf_config = text_config
 
     num_heads = hf_config.num_attention_heads
     num_kv_heads = hf_config.num_key_value_heads
