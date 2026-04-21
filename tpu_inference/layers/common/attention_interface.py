@@ -513,9 +513,9 @@ def mla_attention(
         P(ShardingAxisName.ATTN_DATA),  # md.distribution
     )
     out_specs = (
+        P(ShardingAxisName.MLP_TENSOR),  # kv cache
         attn_o_tnh_sharding
-        or P(ShardingAxisName.MLP_TENSOR, None, None),  # attn output
-        P(ShardingAxisName.MLP_TENSOR)  # kv cache
+        or P(ShardingAxisName.MLP_TENSOR, None, None)  # attn output
     )
 
     def _mla_ragged_paged_attention(q, q_rope, k, k_rope, cache, *args):

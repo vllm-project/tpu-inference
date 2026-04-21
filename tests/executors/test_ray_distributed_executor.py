@@ -512,6 +512,7 @@ class TestRayDistributedExecutorExecuteDag(unittest.TestCase):
         self.executor.forward_dag = None
         self.executor.has_connector = False
         self.executor.workers = [MagicMock(), MagicMock()]
+        self.executor.kv_output_aggregator = None
 
     def tearDown(self):
         # Reset forward_dag to None so that __del__ -> shutdown() does not

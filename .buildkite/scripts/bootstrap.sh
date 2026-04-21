@@ -60,9 +60,19 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     else
       echo "Code files changed. Proceeding with pipeline upload."
     fi
-    # TODO(#2066): Temporarily disabled static pipeline validation due to upstream schema breakage.
-    # Re-evaluate restoring the validation once Buildkite supports dynamic interpolation in strict mode.
-    echo "Skipping static yaml validation to allow dynamic variables."
+    
+    # Validate modified YAML pipelines using bk pipeline validate
+    if .buildkite/scripts/validate_all_pipelines.sh "$NON_SKIPPABLE_FILES"; then
+      echo "All pipelines syntax are valid. Proceeding with pipeline upload."
+    else
+      echo "Some pipelines syntax are invalid. Failing build."
+      exit 1
+    fi
+
+    # Run generation test if add_model_to_ci.py or its templates were modified
+    if echo "$FILES_CHANGED" | grep -qE "add_model_to_ci.py|tpu_optimized_model_template.yml|vllm_native_model_template.yml"; then
+      .buildkite/pipeline_generation/test_generation.sh
+    fi
 else
     echo "Non-PR build. Bypassing file change check."
     FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r -m "$BUILDKITE_COMMIT")
@@ -97,6 +107,28 @@ fi
 
 buildkite-agent meta-data set "job_priority" "$JOB_PRIORITY"
 
+# Handles the environment state for different TPU generations.
+set_jax_envs() {
+    case $1 in
+        v6)
+            export TESTS_GROUP_LABEL="[jax] TPU6e Tests Group"
+            export TPU_VERSION="tpu6e"
+            export TPU_QUEUE_SINGLE="tpu_v6e_queue"
+            export TPU_QUEUE_MULTI="tpu_v6e_8_queue"
+            ;;
+        v7)
+            export TESTS_GROUP_LABEL="[jax] TPU7x Tests Group"
+            export TPU_VERSION="tpu7x"
+            export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
+            export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
+            export COV_FAIL_UNDER="67"
+            ;;
+        unset)
+            unset TESTS_GROUP_LABEL TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI COV_FAIL_UNDER
+            ;;
+    esac
+}
+
 # Implemented dynamic job prioritization by injecting integers during upload
 upload_with_priority() {
   local yaml_file=$1
@@ -110,16 +142,14 @@ upload_with_priority() {
 upload_pipeline() {
     if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
       # Upload JAX pipeline for v6 (default)
+      set_jax_envs v6
       upload_with_priority .buildkite/pipeline_jax.yml
+      set_jax_envs unset
 
       # Upload JAX pipeline for v7
-      export TESTS_GROUP_LABEL="[jax] TPU7x Tests Group"
-      export TPU_VERSION="tpu7x"
-      export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
-      export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
-      export COV_FAIL_UNDER="67"
+      set_jax_envs v7
       upload_with_priority .buildkite/pipeline_jax.yml
-      unset TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI COV_FAIL_UNDER
+      set_jax_envs unset
 
       # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
       upload_with_priority .buildkite/nightly_releases.yml
@@ -175,16 +205,14 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     upload_with_priority .buildkite/integration_promote.yml
   
     # Upload JAX pipeline for v7
-    export TESTS_GROUP_LABEL="[jax] TPU7x Tests Group"
-    export TPU_VERSION="tpu7x"
-    export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
-    export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
-    export COV_FAIL_UNDER="67"
+    set_jax_envs v7
     upload_with_priority .buildkite/pipeline_jax.yml
-    unset TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI COV_FAIL_UNDER
+    set_jax_envs unset
 
     # Upload JAX pipeline for v6 (default)
+    set_jax_envs v6
     upload_with_priority .buildkite/pipeline_jax.yml
+    set_jax_envs unset
 
 else
   # Note: PR and Nightly pipelines will load VLLM_COMMIT_HASH from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo

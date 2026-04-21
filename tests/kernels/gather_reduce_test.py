@@ -23,7 +23,7 @@ import numpy as np
 from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 
-from tpu_inference.kernels.gather import gather_reduce as gather_reduce_sc
+from tpu_inference.kernels.sparse_core import gather_reduce as gather_reduce_sc
 
 try:
     import xprof

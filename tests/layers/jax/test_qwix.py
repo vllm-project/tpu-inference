@@ -199,6 +199,7 @@ class TestApplyQwixQuantization(unittest.TestCase):
         self.mock_vllm_config.model_config.get_head_size.return_value = 128
         self.mock_vllm_config.model_config.get_total_num_kv_heads.return_value = 8
         self.mock_vllm_config.model_config.hf_config.num_hidden_layers = 32
+        self.mock_vllm_config.model_config.hf_config.text_config.layer_types = None
 
         self.mock_model = MagicMock(name="original_nnx_model",
                                     spec_set=nnx.Module)
@@ -296,9 +297,102 @@ class TestApplyQwixQuantizationLogic(unittest.TestCase):
         self.mock_vllm_config.model_config.get_head_size.return_value = 128
         self.mock_vllm_config.model_config.get_total_num_kv_heads.return_value = 8
         self.mock_vllm_config.model_config.hf_config.num_hidden_layers = 32
+        self.mock_vllm_config.model_config.hf_config.text_config.layer_types = None
         self.mock_model = MagicMock(name="original_nnx_model")
         self.mock_rng = MagicMock(name="mock_rng")
         self.mock_mesh = MagicMock(name="mock_mesh", shape={"model": 1})
+
+    @patch(
+        'tpu_inference.models.jax.utils.qwix.qwix_utils.qwix_quantize_nnx_model'
+    )
+    @patch('tpu_inference.models.jax.utils.qwix.qwix_utils.utils')
+    def test_apply_qwix_quantization_with_layer_types_validation_error(
+            self, mock_utils, mock_quantize_func):
+        """Test that ValueError is raised when layer_types length doesn't match num_hidden_layers."""
+        self.mock_vllm_config.additional_config = {
+            "quantization": {
+                "qwix": {
+                    "rules": [{
+                        "module_path": ".*",
+                        "weight_qtype": "int8"
+                    }]
+                }
+            }
+        }
+        self.mock_vllm_config.model_config.hf_config.num_hidden_layers = 4
+        self.mock_vllm_config.model_config.hf_config.text_config = MagicMock()
+        self.mock_vllm_config.model_config.hf_config.text_config.num_hidden_layers = 4
+        self.mock_vllm_config.model_config.hf_config.text_config.layer_types = [
+            "sliding_attention"
+        ]
+
+        with self.assertRaisesRegex(
+                ValueError,
+                "layer_types length \\(1\\) does not match num_hidden_layers \\(4\\)"
+        ):
+            quantize_qwix.apply_qwix_quantization(self.mock_vllm_config,
+                                                  self.mock_model,
+                                                  self.mock_rng,
+                                                  self.mock_mesh, False)
+
+    @patch(
+        'tpu_inference.models.jax.utils.qwix.qwix_utils.qwix_quantize_nnx_model'
+    )
+    @patch('tpu_inference.models.jax.utils.qwix.qwix_utils.utils')
+    def test_apply_qwix_quantization_with_layer_types_and_global_heads(
+            self, mock_utils, mock_quantize_func):
+        """Test layer_types correctly processes sliding and global kv heads."""
+        self.mock_vllm_config.additional_config = {
+            "quantization": {
+                "qwix": {
+                    "rules": [{
+                        "module_path": ".*",
+                        "weight_qtype": "int8"
+                    }]
+                }
+            }
+        }
+
+        # Setup text_config to simulate Gemma 4 layer_types
+        text_config = MagicMock()
+        text_config.num_hidden_layers = 3
+        text_config.layer_types = [
+            "sliding_attention", "full_attention", "sliding_attention"
+        ]
+        text_config.head_dim = 256
+        text_config.global_head_dim = 512
+        text_config.attention_k_eq_v = True
+        text_config.num_key_value_heads = 16
+        text_config.num_global_key_value_heads = 4
+
+        self.mock_vllm_config.model_config.hf_config.text_config = text_config
+        self.mock_vllm_config.model_config.hf_config.num_hidden_layers = 3
+
+        mock_utils.get_mesh_shape_product.return_value = 1
+        mock_utils.get_padded_head_dim.side_effect = lambda x: x
+        mock_utils.get_padded_num_heads.side_effect = lambda h, s: h
+
+        mock_abstract_model = MagicMock(name="abstract_model")
+        mock_model_fn = MagicMock(name="model_factory",
+                                  return_value=mock_abstract_model)
+
+        # Call abstract model path
+        # apply_to_abstract_model=True returns a factory that when called executes the quantization
+        model_factory = quantize_qwix.apply_qwix_quantization(
+            self.mock_vllm_config,
+            mock_model_fn,
+            self.mock_rng,
+            self.mock_mesh,
+            apply_to_abstract_model=True)
+
+        model_factory()  # Triggers the qwix_quantize_nnx_model partial
+
+        mock_quantize_func.assert_called_once()
+        call_kwargs = mock_quantize_func.call_args.kwargs
+
+        # Assert that head sizes and kv heads were correctly resolved layer by layer
+        self.assertEqual(call_kwargs['kv_cache_head_size'], (256, 512, 256))
+        self.assertEqual(call_kwargs['kv_cache_num_kv_heads'], (16, 4, 16))
 
     def test_quantization_config_without_qwix_rules(self):
         """Test model is unchanged if the config lacks 'qwix' or 'rules'."""

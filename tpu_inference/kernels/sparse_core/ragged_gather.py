@@ -217,13 +217,13 @@ def calculate_col_size(hidden_size: int) -> int:
     num_lanes = tpu_info.num_lanes
     num_simd_lanes = sc_info.num_lanes
 
-    match tpu_info.chip_version:
+    match tpu_info.generation:
         case 6:
-            target_bytes = (256 * 1024) * 0.9
+            target_bytes = (256 * 1024) * 0.8
         case 7:
-            target_bytes = (512 * 1024) * 0.9
+            target_bytes = (512 * 1024) * 0.8
         case _:
-            target_bytes = (128 * 1024) * 0.9
+            target_bytes = (128 * 1024) * 0.8
 
     base_bytes = num_simd_lanes * hidden_size * (32 // 8)
     num_cols = 1
