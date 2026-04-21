@@ -44,6 +44,10 @@ export ENABLE_DP_ATTENTION="${ENABLE_DP_ATTENTION:-0}"
 export NEW_MODEL_DESIGN="${NEW_MODEL_DESIGN:-1}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 export MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"
+# EP on v4 FP8 needs kv-cache-dtype=auto (Known limitations in PR body):
+# FP8 kv-cache produces content-triggered NaN on some prompts under EP; the
+# kernel's isinf guard only covers the all-masked padding case.
+export KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-auto}"
 
 # ── Precision (default per-axis requant; block-scale path has kernel issues
 #    on small K_blocks layers — shared expert down_proj K_blocks=16 < TP×EP=32
