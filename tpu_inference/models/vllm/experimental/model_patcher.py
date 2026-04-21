@@ -90,15 +90,27 @@ def patch_mm_model(
                 input_dtype = inputs_embeds.dtype
                 mm_embeds_flat = mm_embeds_flat.to(dtype=input_dtype)
 
-                # JAX boolean array indexing does not broadcast automatically.
-                # We convert the boolean mask to integer indices which JAX handles natively.
+                # JAX boolean array indexing does not broadcast automatically and dynamic masking
+                # (via jnp.where(mask)[0]) triggers host synchronization, crashing on multihost.
+                # We use a statically shaped approach (cumsum + where) to remain entirely on device.
                 import jax.numpy as jnp
-                if isinstance(is_multimodal, torchax.torch.Tensor):
+                if hasattr(is_multimodal, "jax_device_array"):
                     mask = is_multimodal.jax_device_array
+                    inputs_jax = inputs_embeds.jax_device_array
+                    mm_jax = mm_embeds_flat.jax_device_array
+                    
                     if mask.dtype == jnp.bool_:
-                        # Convert to int indices
-                        idx = jnp.where(mask)[0]
-                        new_embeds = inputs_embeds.jax_device_array.at[idx].set(mm_embeds_flat.jax_device_array)
+                        # Create a dummy row to handle indices for non-multimodal tokens.
+                        dummy_row = jnp.zeros_like(mm_jax[0:1])
+                        # Prepend the dummy row.
+                        flattened_padded = jnp.concatenate([dummy_row, mm_jax], axis=0)
+                        # For non-multimodal tokens, cumsum points to 0. For multimodal tokens, it points to their index.
+                        gather_indices = jnp.cumsum(mask)
+                        update_values = flattened_padded[gather_indices]
+                        
+                        condition = jnp.expand_dims(mask, axis=-1)
+                        new_embeds = jnp.where(condition, update_values, inputs_jax)
+                        
                         return torchax.torch.Tensor.from_jax(new_embeds)
                 
                 # Fallback to standard PyTorch implementation
