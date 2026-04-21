@@ -40,47 +40,109 @@ steps:
   # -----------------------------------------------------------------
   # Build Step (required by all demo steps below)
   # -----------------------------------------------------------------
-  - label: ":docker: Build and Push Base Image (tpu6e)"
-    key: tpu6e_build_docker
+  - label: ":docker: Build and Push Base Image (tpu7x)"
+    key: tpu7x_build_docker
     agents:
-      # queue: tpu_v6e_queue
-      # queue: cpu_64_core
-      queue: tpu_v6e_8_queue
+      queue: cpu_64_core
     env:
-      TPU_VERSION: "tpu6e"
+      TPU_VERSION: "tpu7x"
     commands:
       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
   # -----------------------------------------------------------------
+  # Demo 1: offline_inference.py
+  # Shows the simplest pattern: run a Python script inside Docker.
+  # Use this as a starting point for any offline batch inference test.
   # -----------------------------------------------------------------
-  - label: ":docker: Tuning Cases Generation and Pipeline Upload"
-    key: generate_tuning_cases_and_yml
-    depends_on: tpu6e_build_docker
+  - label: "tpu7x [demo] offline_inference.py"
+    key: tpu7x_demo_offline_inference
+    depends_on: tpu7x_build_docker
     env:
       USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu6e"
+      TPU_VERSION: "tpu7x"
     agents:
-      # queue: tpu_v6e_queue
-      # queue: cpu_64_core
-      queue: tpu_v6e_8_queue
+      queue: tpu_v7x_2_queue
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh bash -c "
-          pip install --upgrade google-cloud-spanner && \
-          pip install --upgrade google-api-core && \
-          pip install --upgrade google-auth && \
-          echo \"tuning_kernel_name = \${KERNEL_TUNING_KERNEL_NAME}\" && \
-          echo \"case_set_desc = \${KERNEL_TUNING_CASE_SET_DESC}\" && \
-          echo \"case_set_id = \${KERNEL_TUNING_CASE_SET_ID}\" && \
-          echo \"run_id = \${KERNEL_TUNING_RUN_ID}\" && \
-          python -m tools.kernel.tuner.v1.kernel_tuner_runner \
-          --kernel_tuner_name=\${KERNEL_TUNING_KERNEL_NAME} \
-          --case_set_desc=\${KERNEL_TUNING_CASE_SET_DESC} \
-          --generate_buildkite_pipeline=True \
-          --case_set_id=\${KERNEL_TUNING_CASE_SET_ID} \
-          --run_id=\${KERNEL_TUNING_RUN_ID} "
+        # Run offline inference with a small model.
+        # --tensor-parallel-size 2: tp=1 is currently unsupported on tpu7x.
+        # Customize --model, --max-model-len, --max-tokens as needed.
+        .buildkite/scripts/run_in_docker.sh bash -c '
+          python3 examples/offline_inference.py \
+            --model Qwen/Qwen3-0.6B \
+            --tensor-parallel-size 2 \
+            --max-model-len 1024 \
+            --max-tokens 128'
+
+  # -----------------------------------------------------------------
+  # Demo 2: vllm serve + vllm bench serve
+  # Shows how to start a server and run a benchmark against it.
+  # Uses --dataset-name random so no dataset file is needed.
+  # -----------------------------------------------------------------
+  - label: "tpu7x [demo] vllm serve + vllm bench serve"
+    key: tpu7x_demo_serve_bench
+    depends_on: tpu7x_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+    agents:
+      queue: tpu_v7x_2_queue
+    commands:
       - |
-        # Upload the generated YAML as a Buildkite artifact for the next step to consume.
-        buildkite-agent artifact upload "/mnt/disks/persist/models/generated_tuning_cases.yml"
-        buildkite-agent pipeline upload "/mnt/disks/persist/models/generated_tuning_cases.yml"
-    artifact_paths: "/mnt/disks/persist/models/generated_tuning_cases.yml"
+        # Customize behaviour via env vars: MODEL, PORT, TENSOR_PARALLEL_SIZE,
+        # MAX_MODEL_LEN, RANDOM_INPUT_LEN, RANDOM_OUTPUT_LEN, NUM_PROMPTS, NUM_WARMUPS.
+        .buildkite/scripts/run_in_docker.sh bash .buildkite/scripts/run_benchmark_demo.sh
+
+  # -----------------------------------------------------------------
+  # Demo 3: DCN-based P/D disaggregation
+  # Mirrors test_25 in pipeline_jax.yml.
+  # Uses run_disagg.sh which delegates to examples/disagg/.
+  # Requires a multi-chip queue (tpu_v7x_8_queue).
+  # -----------------------------------------------------------------
+  - label: "tpu7x [demo] E2E disaggregation (DCN P/D)"
+    key: tpu7x_demo_disagg
+    depends_on: tpu7x_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+      # Customize these to change the disagg benchmark behaviour.
+      MODEL: "Qwen/Qwen3-0.6B"
+      INPUT_LEN: 1024
+      OUTPUT_LEN: 128
+      NUM_PROMPTS: 5
+      RANDOM_SEED: 10
+      MAX_CONCURRENCY: 4
+      TEST_MODE: 1
+    agents:
+      queue: tpu_v7x_8_queue
+    commands:
+      - .buildkite/scripts/run_disagg.sh
+
+  # -----------------------------------------------------------------
+  # Demo 4: Ray-based multi-host inference
+  # Mirrors test_26 in pipeline_jax.yml.
+  # Uses run_multihost.sh to serve a large model across 16 chips (2 hosts).
+  # Requires a 16-chip queue (tpu_v7x_16_queue).
+  # -----------------------------------------------------------------
+  - label: "tpu7x [demo] Ray-based multi-host"
+    key: tpu7x_demo_multihost
+    env:
+      TPU_VERSION: "tpu7x"
+    agents:
+      queue: tpu_v7x_16_queue
+    commands:
+      - |
+        MODEL="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
+        .buildkite/scripts/run_multihost.sh \
+          "vllm serve \${MODEL} \
+            --port 8000 \
+            --tensor-parallel-size 16 \
+            --trust-remote-code \
+            --max-model-len 1024 \
+            --no-async-scheduling \
+            --load-format=runai_streamer \
+            --no-enable-prefix-caching" \
+          "curl http://localhost:8000/v1/completions \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'"
