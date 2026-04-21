@@ -52,11 +52,7 @@ def main(args: dict):
         use_chat_template = True
 
     # Create an LLM
-    llm = LLM(**args)
-
-    # Enable expert IDs returning for testing
-    llm.llm_engine.vllm_config.additional_config[
-        "enable_return_routed_experts"] = True
+    llm = LLM(**args, enable_return_routed_experts=True)
 
     # Create a sampling params object
     sampling_params = llm.get_default_sampling_params()

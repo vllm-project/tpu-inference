@@ -322,8 +322,8 @@ class LlamaModel(nnx.Module):
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         intermediate_tensors: JaxIntermediateTensors | None,
-    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
-            List[jax.Array], JaxIntermediateTensors]:
+    ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
+               List[jax.Array]]:
         if self.is_first_rank:
             x = self.embed(input_ids)
         else:
@@ -384,14 +384,15 @@ class LlamaForCausalLM(nnx.Module):
         _is_first_rank: bool | None = None,
         _is_last_rank: bool | None = None,
         *args,
-    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
-            List[jax.Array], JaxIntermediateTensors]:
-        return self.model(
+    ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
+               List[jax.Array], Optional[jax.Array]]:
+        outputs = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
             intermediate_tensors,
         )
+        return outputs[0], outputs[1], outputs[2], None
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if self.vllm_config.model_config.hf_config.tie_word_embeddings:

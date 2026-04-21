@@ -270,17 +270,16 @@ class VllmModelWrapper:
         return jax_view(params_and_buffers), lora_manager
 
     def jit_step_func(self):
-        out_shardings = [
-            None,  # kv_caches - keep original sharding
-            NamedSharding(self.mesh,
-                          PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
-            None,  # empty list
-            None,  # expert ids
-        ]
 
         @jax.jit(
             donate_argnames=("kv_caches", ),
-            out_shardings=tuple(out_shardings),
+            out_shardings=(
+                None,  # kv_caches - keep original sharding
+                NamedSharding(self.mesh,
+                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
+                None,  # empty list
+                None,  # expert ids
+            ),
             compiler_options={
                 "xla_tpu_all_gather_collective_matmul_mode":
                 "post_spmd_conservative",
