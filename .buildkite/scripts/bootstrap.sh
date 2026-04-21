@@ -112,32 +112,6 @@ fi
 # Store changed files in metadata for sub-pipelines (newlines to commas)
 echo "$FILES_CHANGED" | tr '\n' ',' | buildkite-agent meta-data set "changed_files"
 
-# --- Determine Job Priority ---
-echo "--- Determining job priority"
-if [[ "${NIGHTLY:-0}" == "1" ]]; then
-    # Nightly build (Lowest priority)
-    export JOB_PRIORITY=$PRIORITY_NIGHTLY
-    echo "Build type: Nightly - Priority: $JOB_PRIORITY"
-elif [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
-    # Integration pipeline
-    export JOB_PRIORITY=$PRIORITY_INTEGRATION
-    echo "Build type: Integration - Priority: $JOB_PRIORITY"
-elif [[ "$BUILDKITE_PULL_REQUEST" != "false" ]]; then
-    # Pre-merge PR tests
-    export JOB_PRIORITY=$PRIORITY_PRE_MERGE
-    echo "Build type: Pre-merge (PR #$BUILDKITE_PULL_REQUEST) - Priority: $JOB_PRIORITY"
-elif [[ "$BUILDKITE_BRANCH" == "main" && "$BUILDKITE_PULL_REQUEST" == "false" ]]; then
-    # Post-merge tests on main (Highest priority)
-    export JOB_PRIORITY=$PRIORITY_POST_MERGE
-    echo "Build type: Post-merge (Main branch) - Priority: $JOB_PRIORITY"
-else
-    # Default priority for other branches or manual builds
-    export JOB_PRIORITY=$PRIORITY_DEFAULT
-    echo "Build type: General - Priority: $JOB_PRIORITY"
-fi
-
-buildkite-agent meta-data set "job_priority" "$JOB_PRIORITY"
-
 # Handles the environment state for different TPU generations.
 set_jax_envs() {
     case $1 in
@@ -164,35 +138,17 @@ set_jax_envs() {
     esac
 }
 
-# Implemented dynamic job prioritization by injecting integers during upload
-upload_with_priority() {
-  local yaml_file=$1
-  echo "--- :pipeline: Uploading $yaml_file with priority ${JOB_PRIORITY:-1}"
-  { 
-    echo "priority: ${JOB_PRIORITY:-1}"; 
-    cat "$yaml_file"; 
-  } | buildkite-agent pipeline upload
-}
-
 upload_pipeline() {
     if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
       # Upload JAX pipeline for v6 (default)
       set_jax_envs v6
-      upload_with_priority .buildkite/pipeline_jax.yml
-      set_jax_envs unset
       upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
+      set_jax_envs unset
 
       # Upload JAX pipeline for v7
       set_jax_envs v7
-      upload_with_priority .buildkite/pipeline_jax.yml
-      set_jax_envs unset
-      export TESTS_GROUP_LABEL="[jax] TPU7x Tests Group"
-      export TPU_VERSION="tpu7x"
-      export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
-      export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
-      export COV_FAIL_UNDER="67"
       upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
-      unset TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI COV_FAIL_UNDER
+      set_jax_envs unset
 
       # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
       upload_with_priority .buildkite/nightly_releases.yml "$JOB_PRIORITY"
@@ -249,21 +205,13 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
   
     # Upload JAX pipeline for v7
     set_jax_envs v7
-    upload_with_priority .buildkite/pipeline_jax.yml
-    set_jax_envs unset
-    export TESTS_GROUP_LABEL="[jax] TPU7x Tests Group"
-    export TPU_VERSION="tpu7x"
-    export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
-    export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
-    export COV_FAIL_UNDER="67"
     upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
-    unset TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI COV_FAIL_UNDER
+    set_jax_envs unset
 
     # Upload JAX pipeline for v6 (default)
     set_jax_envs v6
-    upload_with_priority .buildkite/pipeline_jax.yml
-    set_jax_envs unset
     upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
+    set_jax_envs unset
 
 else
   # Note: PR and Nightly pipelines will load VLLM_COMMIT_HASH from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo
