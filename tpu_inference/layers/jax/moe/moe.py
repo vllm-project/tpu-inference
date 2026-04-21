@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 from dataclasses import InitVar, dataclass
 from typing import Any, Iterable, Iterator, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
 from flax.typing import Sharding
 from jax.sharding import NamedSharding, PartitionSpec
@@ -31,7 +33,8 @@ from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
-    jax_array_from_reshaped_torch, shard_put)
+    ensure_cpu_jax_array,
+    shard_put)
 
 modeling_flax_utils = FlaxUtils()
 logger = init_logger(__name__)
@@ -263,7 +266,6 @@ class JaxMoE(JaxModule):
 
         self.quant_method might reuse this method if the quantization method has specific logic for loading weights.
         """
-
         cnt = 0
         for param_name, torch_weight in weights:
             cnt += 1
@@ -289,10 +291,26 @@ class JaxMoE(JaxModule):
 
             assert isinstance(jax_param, nnx.Param)
 
-            jax_weight = jax_array_from_reshaped_torch(
-                torch_weight, reshape_dims=(1, ) +
-                torch_weight.shape)  # add expert dim for concatenation later
-            jax_param._weights_to_load[expert_id] = jax_weight
+            target_shape = tuple(jax_param.value.shape[1:])
+            source_shape = tuple(torch_weight.shape)
+            if source_shape == target_shape:
+                permute_dims = None
+            elif tuple(reversed(source_shape)) == target_shape:
+                permute_dims = (1, 0)
+            else:
+                raise ValueError(
+                    f"Unexpected {param_type} weight layout for {param_name}: "
+                    f"source {source_shape} vs target {target_shape}")
+
+            with cpu_mesh_context(), jax.default_device(jax.devices("cpu")[0]):
+                cpu_weight = np.asarray(
+                    jax.device_get(ensure_cpu_jax_array(torch_weight)))
+                if permute_dims is not None:
+                    cpu_weight = np.transpose(cpu_weight, permute_dims)
+                if cpu_weight.dtype != np.dtype(jax_param.value.dtype):
+                    cpu_weight = cpu_weight.astype(jax_param.value.dtype)
+                cpu_weight = np.expand_dims(cpu_weight, axis=0)
+            jax_param._weights_to_load[expert_id] = cpu_weight
 
         logger.debug(f"Loaded {cnt} weights for {self.prefix} MoE layer.")
 
@@ -306,10 +324,21 @@ class JaxMoE(JaxModule):
         }.items():
             weights_to_load = param._weights_to_load
             if all(w is not None for w in weights_to_load):
-                with cpu_mesh_context():
-                    weights = jnp.concatenate(param._weights_to_load, axis=0)
+                weights = np.concatenate(weights_to_load, axis=0)
+                target_dtype = param.value.dtype
+                # Reclaim the HBM held by the init-time placeholder before
+                # allocating the real weight. `_unsafe_bypass_check=True`
+                # skips the shape-match guard so we can swap in a scalar stub.
+                with cpu_mesh_context(), jax.default_device(jax.devices("cpu")[0]):
+                    param.set_raw_value(jnp.zeros((1,), dtype=target_dtype),
+                                        _unsafe_bypass_check=True)
+                gc.collect()
                 try:
-                    param.value = shard_put(weights, param.sharding)
+                    loaded_value = shard_put(weights,
+                                             param.sharding,
+                                             mesh=self.mesh)
+                    param.set_raw_value(loaded_value,
+                                        _unsafe_bypass_check=True)
                     loaded_names.add(param_name)
                 except Exception as e:
                     raise RuntimeError(

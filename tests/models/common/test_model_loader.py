@@ -133,6 +133,12 @@ def test_get_model_architecture_unsupported():
         model_loader._get_model_architecture(config)
 
 
+def test_qwen3_vl_architectures_not_in_vllm_preferred_set():
+    """Qwen3-VL multimodal models should stay on the JAX/flax_nnx path on TPU."""
+    assert "Qwen3VLForConditionalGeneration" not in model_loader._VLLM_PREFERRED_ARCHITECTURES
+    assert "Qwen3VLMoeForConditionalGeneration" not in model_loader._VLLM_PREFERRED_ARCHITECTURES
+
+
 @pytest.fixture(autouse=True)
 def clear_model_registry_after_test():
     """Clear the model registry after each test to prevent side effects."""
@@ -479,6 +485,23 @@ class TestGetModel:
         (not in _VLLM_REQUIRED_ARCHITECTURES).
         """
         # vllm_config uses Qwen3 which is NOT in _VLLM_REQUIRED_ARCHITECTURES
+        mock_get_flax.return_value = "flax_model_sentinel"
+
+        result = model_loader.get_model(vllm_config, rng, mesh)
+
+        mock_get_flax.assert_called_once_with(vllm_config, rng, mesh, False)
+        mock_get_vllm.assert_not_called()
+        assert result == "flax_model_sentinel"
+
+    @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "auto"}, clear=True)
+    @patch("tpu_inference.models.common.model_loader.get_vllm_model")
+    @patch("tpu_inference.models.common.model_loader.get_flax_model")
+    def test_get_model_auto_resolves_qwen3_vl_to_flax_nnx(
+            self, mock_get_flax, mock_get_vllm, vllm_config, rng, mesh):
+        """Qwen3-VL should stay on flax_nnx so multimodal TPU path avoids Triton."""
+        vllm_config.model_config.hf_config.architectures = [
+            "Qwen3VLForConditionalGeneration"
+        ]
         mock_get_flax.return_value = "flax_model_sentinel"
 
         result = model_loader.get_model(vllm_config, rng, mesh)

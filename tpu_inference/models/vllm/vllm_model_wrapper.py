@@ -410,7 +410,13 @@ class VllmModelWrapper:
 
             with torchax.default_env(), enable_torch_wrap(False):
 
-                def move(v: torch.Tensor) -> torch.Tensor:
+                def move(v):
+                    if isinstance(v, np.ndarray):
+                        if v.dtype.name == 'bfloat16':
+                            v = torch.from_numpy(
+                                v.view(np.uint16)).view(torch.bfloat16)
+                        else:
+                            v = torch.from_numpy(np.ascontiguousarray(v))
                     if not isinstance(v, torch.Tensor):
                         logger.warning(f"Expect torch.Tensor, got {type(v)}")
                         return v
@@ -418,6 +424,11 @@ class VllmModelWrapper:
 
                 # Ensure all tensors are moved into accelerator so the
                 # computation with weights can work properly.
+                # Convert grid_thw tuples to tensors expected by vllm models.
+                for key in ("image_grid_thw", "video_grid_thw"):
+                    if key in kwargs and isinstance(kwargs[key], (list, tuple)):
+                        kwargs[key] = torch.tensor(kwargs[key],
+                                                   dtype=torch.int32)
                 call_kwargs = {
                     k: jax.tree.map(move, v)
                     for k, v in kwargs.items()

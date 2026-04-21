@@ -43,7 +43,12 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
 from tpu_inference.models.jax.qwen2 import Qwen2Model
 # from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from tpu_inference.models.jax.utils.multi_modal_utils import (
-    MultiModalEmbeddings, merge_multimodal_embeddings)
+    MultiModalEmbeddings,
+    merge_multimodal_embeddings,
+    normalize_mm_grid_thw,
+    reshape_mm_tensor,
+    split_mm_embeddings_by_grid,
+)
 from tpu_inference.models.jax.utils.weight_utils import StandardWeightLoader
 
 logger = init_logger(__name__)
@@ -933,38 +938,18 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
 
         return llm_positions, mrope_position_delta
 
-    def _validate_and_reshape_mm_tensor(self, mm_input: object,
-                                        name: str) -> jax.Array:
-        if isinstance(mm_input, list):
-            # Assuming it's a list of arrays (e.g., np.ndarray, torch.Tensor)
-            # that can be concatenated.
-            arrays_to_concat = [jnp.asarray(item) for item in mm_input]
-            return jnp.concatenate(arrays_to_concat, axis=0)
-
-        # Handle single array-like objects (np.ndarray, torch.Tensor, jax.Array)
-        if hasattr(mm_input, 'ndim'):
-            array_input = jnp.asarray(mm_input)
-            if array_input.ndim == 2:
-                return array_input
-            if array_input.ndim == 3:
-                # This reshapes the batched 3D tensor to a 2D tensor.
-                return array_input.reshape(-1, array_input.shape[-1])
-
-        raise ValueError(f"Incorrect type of {name}. "
-                         f"Got type: {type(mm_input)}")
-
     def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[Qwen2_5_VLImageInputs]:
+            self, image_grid_thw: tuple[tuple[int, int, int], ...],
+            **kwargs: object) -> Optional[Qwen2_5_VLImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
-        image_grid_thw = kwargs.pop("image_grid_thw", None)
 
         if pixel_values is None and image_embeds is None:
             return None
 
         if pixel_values is not None:
-            pixel_values = self._validate_and_reshape_mm_tensor(
-                pixel_values, "image pixel values")
+            pixel_values = reshape_mm_tensor(pixel_values,
+                                             "image pixel values")
 
             if not isinstance(pixel_values, jax.Array):
                 raise ValueError("Incorrect type of image pixel values. "
@@ -976,8 +961,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
 
         # Note: comment them out for now and save for future support
         # if image_embeds is not None:
-        #     image_embeds = self._validate_and_reshape_mm_tensor(
-        #         image_embeds, "image embeds")
+        #     image_embeds = reshape_mm_tensor(image_embeds, "image embeds")
 
         #     if not isinstance(image_embeds, jax.Array):
         #         raise ValueError("Incorrect type of image embeddings. "
@@ -987,27 +971,9 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         #         image_embeds=image_embeds,
         #         image_grid_thw=image_grid_thw)
 
-    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        # Convert torch tensors to numpy arrays that JAX can handle.
-        if "pixel_values" in kwargs and isinstance(kwargs["pixel_values"],
-                                                   list):
-            kwargs["pixel_values"] = torch.cat(kwargs["pixel_values"], dim=0)
-        for key in list(kwargs.keys()):
-            value = kwargs[key]
-            if isinstance(value, torch.Tensor):
-                if key == 'image_grid_thw':
-                    # change it to tuple of tuples to make it hashable for JIT
-                    # Shape: (B, N, 3) -> (B*N, 3) -> tuple of tuples
-                    grid_thw_reshaped = value.reshape(-1, 3)
-                    kwargs[key] = tuple(
-                        tuple(row) for row in grid_thw_reshaped.tolist())
-                    continue
-                if value.dtype == torch.bfloat16:
-                    kwargs[key] = value.to(torch.float32).numpy().astype(
-                        jnp.bfloat16)
-                else:
-                    kwargs[key] = value.numpy()
-
+    def _parse_and_validate_multimodal_inputs(
+            self, image_grid_thw: tuple[tuple[int, int, int], ...],
+            **kwargs: object) -> dict:
         mm_input_by_modality = {}
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
@@ -1015,7 +981,8 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             if input_key in ("pixel_values", "image_embeds"
                              ) and "image" not in mm_input_by_modality:
                 mm_input_by_modality[
-                    "image"] = self._parse_and_validate_image_input(**kwargs)
+                    "image"] = self._parse_and_validate_image_input(
+                        image_grid_thw, **kwargs)
             # if input_key in ("pixel_values_videos", "video_embeds"
             #                  ) and "video" not in mm_input_by_modality:
             #     mm_input_by_modality[
@@ -1049,25 +1016,25 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
             image_embeds = jnp.concatenate(image_embeds, axis=0)
 
         # Split concatenated embeddings for each image item.
-        merge_size = self.visual.config.spatial_merge_size
-        sizes = np.prod(np.array(grid_thw, dtype=np.int64),
-                        axis=-1) // merge_size // merge_size
+        image_splits, _ = split_mm_embeddings_by_grid(
+            image_embeds,
+            grid_thw,
+            self.visual.config.spatial_merge_size,
+        )
+        return image_splits
 
-        if sizes.size == 0:
-            return ()
-        if sizes.size == 1:
-            return (image_embeds, )
-
-        split_indices = np.cumsum(sizes)[:-1]
-        return tuple(jnp.split(image_embeds, split_indices))
-
-    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(
+        self,
+        image_grid_thw: tuple[tuple[int, int, int], ...] = (),
+        **kwargs: object,
+    ) -> MultiModalEmbeddings:
 
         if not self.is_first_rank:
             return ()
 
+        image_grid_thw = normalize_mm_grid_thw(image_grid_thw)
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(
-            **kwargs)
+            image_grid_thw, **kwargs)
         if not mm_input_by_modality:
             return []
 

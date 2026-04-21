@@ -124,9 +124,28 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             # Free old params before processing to reduce peak memory.
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
+            del layer.kernel_down_proj_EFD
 
-            # Fuse the weights into w13: [Gate, Up]
-            w13_val = jnp.concatenate([w_gate, w_up], axis=1)
+            # The indexed MoE loading path may leave fully-loaded expert tensors on
+            # host CPU. Move them onto the active TPU mesh before the jitted fusion
+            # path below, otherwise jnp.concatenate/process_unquantized_moe_weights
+            # fails with CPU-vs-TPU mesh mismatches.
+            w_gate = shard_put(w_gate, layer.edf_sharding, mesh=layer.mesh)
+            w_up = shard_put(w_up, layer.edf_sharding, mesh=layer.mesh)
+            w2_val = shard_put(w2_val, layer.efd_sharding, mesh=layer.mesh)
+
+            # Match the common MoE weight-processing contract used by the
+            # vLLM path:
+            #   w13_weight: [num_experts, 2 * intermediate_size, hidden_size]
+            #   w2_weight:  [num_experts, hidden_size, intermediate_size]
+            # JAX expert params are stored as EDF / EFD, so transpose them
+            # into that contract before calling process_unquantized_moe_weights.
+            w13_val = jnp.swapaxes(
+                jnp.concatenate([w_gate, w_up], axis=2),
+                1,
+                2,
+            )
+            w2_val = jnp.swapaxes(w2_val, 1, 2)
             del w_gate, w_up
 
             weights = jax_common.process_unquantized_moe_weights(
@@ -138,10 +157,18 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
                 w2_weight=w2_val,
                 w2_bias=None,
             )
+            fused_gate_up = shard_put(weights.w13_weight,
+                                      layer.edf_sharding,
+                                      mesh=layer.mesh)
+            fused_down = shard_put(weights.w2_weight,
+                                   layer.efd_sharding,
+                                   mesh=layer.mesh)
 
             # TODO (jacobplatin): we probably want to make the sharding configurable
-            layer.kernel_gating_upproj_EDF = nnx.Param(weights.w13_weight)
-            layer.kernel_down_proj_EFD = nnx.Param(weights.w2_weight)
+            layer.kernel_gating_upproj_EDF = nnx.Param(
+                fused_gate_up, sharding=layer.edf_sharding)
+            layer.kernel_down_proj_EFD = nnx.Param(
+                fused_down, sharding=layer.efd_sharding)
 
             del weights
             del w13_val
