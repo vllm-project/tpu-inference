@@ -230,12 +230,13 @@ class VllmModelWrapper:
             unsupported_keys = ["embed_tokens", "lm_head", "logits_processor"]
             
             for name, module in vllm_model.named_modules():
+                logger.debug(f"TPU-Inference Patch: module name={name} iterating")
                 if any(k in name for k in unsupported_keys) and isinstance(module, BaseLayerWithLoRA):
                     parent_name = ".".join(name.split(".")[:-1])
                     child_name = name.split(".")[-1]
                     parent = vllm_model.get_submodule(parent_name) if parent_name else vllm_model
                     setattr(parent, child_name, module.base_layer)
-                    logger.info(f"TPU-Inference Patch: Force reverted {name} to original base layer.")
+                    logger.info(f"TPU-Inference Patch: Force reverted name={name} to original base layer parent={parent_name}.")
             
             replace_set_lora(vllm_model)
 
