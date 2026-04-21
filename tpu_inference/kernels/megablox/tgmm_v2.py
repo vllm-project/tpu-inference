@@ -337,20 +337,6 @@ def tgmm_kernel_main(
       process_empty_groups=True,
   )
 
-  # debug_print metadata begins.
-  jax.debug.print('xw32 line1419 num_gm={}', num_gm)  # num_gm=3
-  def print_metadata(i, _):
-    jax.debug.print(
-        'xw32 line1419 i={} group_id={} m_offset={}',
-        i,
-        metadata_ref.gm_id_to_group_id[i],
-        metadata_ref.gm_id_to_m_offset[i]
-    )
-    return _
-
-  jax.lax.fori_loop(0, num_gm, print_metadata, None)
-  # debug_print metadata ends.
-
   in_specs, out_specs = generate_tgmm_block_specs(metadata_ref, cfgs)
   pipeline_fn = pltpu.emit_pipeline(
       functools.partial(tgmm_inner_kernel, cfgs=cfgs),
