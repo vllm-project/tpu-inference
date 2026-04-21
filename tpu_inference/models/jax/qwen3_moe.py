@@ -109,6 +109,7 @@ class Qwen3MoeSparseMoeBlock(JaxModule):
             hidden_act=config.hidden_act,
             rngs=rng,
             router=self.gate,
+            num_experts_per_tok=config.num_experts_per_tok,
             mesh=mesh,
             activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
             activation_ffw_ted=P(ShardingAxisName.MLP_DATA, None, None),

@@ -52,7 +52,10 @@ def main(args: dict):
         use_chat_template = True
 
     # Create an LLM
-    llm = LLM(**args, enable_return_routed_experts=True)
+    if "additional_config" not in args or args["additional_config"] is None:
+        args["additional_config"] = {}
+    args["additional_config"]["enable_return_routed_experts"] = True
+    llm = LLM(**args)
 
     # Create a sampling params object
     sampling_params = llm.get_default_sampling_params()

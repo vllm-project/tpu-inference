@@ -77,11 +77,18 @@ def vllm_moe_apply(layer: FusedMoE, weights: FusedMoEWeights,
     assert isinstance(quant_method_instance, FusedMoEMethodBase)
     assert isinstance(weights, FusedMoEWeights)
 
-    from vllm.config import get_current_vllm_config_or_none
-    vllm_config = get_current_vllm_config_or_none()
-    enable_return_routed_experts = getattr(vllm_config.additional_config,
-                                           "enable_return_routed_experts",
-                                           False) if vllm_config else False
+    from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+        get_vllm_model_wrapper_context
+    try:
+        context = get_vllm_model_wrapper_context()
+        vllm_config = context.vllm_config
+    except AssertionError:
+        vllm_config = None
+
+    enable_return_routed_experts = vllm_config.additional_config.get(
+        "enable_return_routed_experts", False) if vllm_config and hasattr(
+            vllm_config, 'additional_config') and isinstance(
+                vllm_config.additional_config, dict) else False
 
     if enable_return_routed_experts:
         if isinstance(router_logits, torch.Tensor):
