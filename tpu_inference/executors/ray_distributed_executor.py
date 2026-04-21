@@ -62,10 +62,12 @@ class AsyncResultFuture(Future):
             ret_refs.append(
                 worker.execute_method.remote("get_execute_model_output",
                                              result_id))
-        outputs = ray.get(ret_refs, timeout=timeout)
         if self.aggregator is not None:
+            outputs = ray.get(ret_refs, timeout=timeout)
             return self.aggregator.aggregate(outputs, output_rank=0)
-        return outputs[0]
+        else:
+            return ray.get(ret_refs[0], timeout=timeout)
+        
 
 
 class RayDistributedExecutor(RayDistributedExecutorV1):
