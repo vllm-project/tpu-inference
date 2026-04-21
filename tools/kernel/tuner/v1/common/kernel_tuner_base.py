@@ -242,7 +242,7 @@ class KernelTunerBase:
                 ]
             }
             pipeline["steps"].append(step)
-            self.storage_manager.create_buckets_for_run(
+            self.storage_manager.create_bucket_for_run(
                 case_set_id, run_id, bucket_id, case_id_start, case_id_end)
 
         pipeline['steps'] = [{
