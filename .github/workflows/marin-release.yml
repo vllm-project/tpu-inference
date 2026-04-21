@@ -61,6 +61,18 @@ jobs:
       - name: Syntax-check TPU runner
         run: python -m py_compile tpu_inference/runner/tpu_runner.py
 
+      - name: Smoke-check against paired Marin vLLM wheel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="marin-${{ steps.vars.outputs.DATE }}"
+          uv venv .release-smoke
+          . .release-smoke/bin/activate
+          gh release download "$TAG" -R marin-community/vllm --pattern "*.whl" -D /tmp/marin-vllm-wheel
+          uv pip install requests dist/*.whl
+          uv pip install --no-deps /tmp/marin-vllm-wheel/*.whl
+          python -c "from tpu_inference.runner.tpu_runner import TPUModelRunner"
+
       - name: Compute wheel filename
         id: whl
         run: |
