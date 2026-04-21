@@ -703,9 +703,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 arange,
             )
         return self._sample_from_logits(
-            scheduler_output, attn_metadata, sampling_metadata, input_ids,
-            hidden_states, logits, aux_hidden_states, spec_decode_metadata,
-            kv_connector_output, logits_indices_selector, padded_num_reqs)
+            scheduler_output,
+            attn_metadata,
+            sampling_metadata,
+            input_ids,
+            hidden_states,
+            logits,
+            aux_hidden_states,
+            spec_decode_metadata,
+            kv_connector_output,
+            logits_indices_selector,
+            padded_num_reqs,
+            full_query_hidden_states,
+        )
 
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.

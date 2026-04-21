@@ -58,6 +58,9 @@ jobs:
           VLLM_VERSION_OVERRIDE: ${{ steps.vars.outputs.VERSION }}
         run: uv build --wheel
 
+      - name: Syntax-check TPU runner
+        run: python -m py_compile tpu_inference/runner/tpu_runner.py
+
       - name: Compute wheel filename
         id: whl
         run: |
