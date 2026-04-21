@@ -187,7 +187,7 @@ def test_fused_moe_method_w4(mesh, num_tokens, intermediate_size, hidden_size,
                           params_dtype=torch.bfloat16)
 
     w13_weight_ref, w2_weight_ref = initialize_int4_layer_weights(
-        layer, weight_quant, hidden_size=128)
+        layer, weight_quant, hidden_size=hidden_size)
     method.process_weights_after_loading(layer)
 
     seqlen = num_tokens
