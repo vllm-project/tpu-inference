@@ -67,7 +67,6 @@ class AsyncResultFuture(Future):
             return self.aggregator.aggregate(outputs, output_rank=0)
         else:
             return ray.get(ret_refs[0], timeout=timeout)
-        
 
 
 class RayDistributedExecutor(RayDistributedExecutorV1):
