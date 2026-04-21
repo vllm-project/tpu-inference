@@ -17,7 +17,49 @@
 # shellcheck disable=all
 set -e
 
-MODEL="Qwen/Qwen3-0.6B"
+# Function to print logs on exit
+print_logs_on_exit() {
+  echo "--- Script exiting, displaying logs ---"
+
+  # The logs are written inside containers to /root/logs, which is mapped from $LOG_DIR on the host.
+  LOG_DIR=$HOME/logs
+
+  if [ -d "$LOG_DIR" ]; then
+    echo "--- Contents of $LOG_DIR/prefill_0.txt ---"
+    if [ -f "$LOG_DIR/prefill_0.txt" ]; then
+      cat "$LOG_DIR/prefill_0.txt"
+    else
+      echo "File not found."
+    fi
+
+    echo "--- Contents of $LOG_DIR/decode_0.txt ---"
+    if [ -f "$LOG_DIR/decode_0.txt" ]; then
+      cat "$LOG_DIR/decode_0.txt"
+    else
+      echo "File not found."
+    fi
+
+    echo "--- Contents of $LOG_DIR/benchmark_0.txt ---"
+    if [ -f "$LOG_DIR/benchmark_0.txt" ]; then
+      cat "$LOG_DIR/benchmark_0.txt"
+    else
+      echo "File not found."
+    fi
+  else
+    echo "Log directory '$LOG_DIR' not found."
+  fi
+  echo "--- End of logs ---"
+}
+
+# Register the cleanup function to be called on script exit (normal or error)
+trap print_logs_on_exit EXIT
+
+MODEL=${MODEL:="Qwen/Qwen3-0.6B"}
+INPUT_LEN=${INPUT_LEN:=512}
+OUTPUT_LEN=${OUTPUT_LEN:=128}
+NUM_PROMPTS=${NUM_PROMPTS:=200}
+REQUEST_RATE=${REQUEST_RATE:=4}
+
 
 NUM_PREFILL_INSTANCES=1
 NUM_DECODE_INSTANCES=1
@@ -39,12 +81,19 @@ wait_for_server() {
 
 cleanup_instances() {
   echo "Cleaning up any running vLLM instances..."
-  pkill -f "vllm serve" || true
-  pkill -f "toy_proxy_server" || true
+  pkill -9 -f "vllm serve" || true
+  pkill -9 -f "toy_proxy_server" || true
   sleep 1
 }
 
-mkdir -p $HOME/logs
+LOG_DIR=$HOME/logs
+if [ ! -d $LOG_DIR ]; then
+  mkdir -p $LOG_DIR
+else
+  # Delete old log files to avoid printing stale logs at the end
+  rm -f $LOG_DIR/prefill_0.txt $LOG_DIR/decode_0.txt $LOG_DIR/benchmark_0.txt $LOG_DIR/proxy_0.txt
+fi
+
 cleanup_instances
 
 # Start prefill instances
@@ -73,7 +122,7 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     --no-enable-prefix-caching \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
     --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}" \
-    > $HOME/logs/prefill_$i.txt 2>&1 &
+    > $LOG_DIR/prefill_$i.txt 2>&1 &
 
     PREFILL_HOSTS+=("localhost")
     PREFILL_PORTS+=($PORT)
@@ -104,10 +153,9 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     --gpu-memory-utilization 0.3 \
     --no-enable-prefix-caching \
     --max-num-batched-tokens 1024 \
-    --block-size 128 \
     --tensor-parallel-size $DECODER_TP_SIZE \
     --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}" \
-    > $HOME/logs/decode_$i.txt 2>&1 &
+    > $LOG_DIR/decode_$i.txt 2>&1 &
 
     DECODE_HOSTS+=("localhost")
     DECODE_PORTS+=($PORT)
@@ -133,10 +181,10 @@ python $HOME/tpu-inference/examples/disagg/toy_proxy_server.py \
 --prefiller-ports ${PREFILL_PORTS[@]} \
 --decoder-hosts ${DECODE_HOSTS[@]} \
 --decoder-ports ${DECODE_PORTS[@]} \
-> $HOME/logs/proxy_s.txt 2>&1 &
+> $LOG_DIR/proxy_0.txt 2>&1 &
 
 # run benchmark for both disagg and non-disagg
-LOG_FILE="$HOME/logs/benchmark_single_host.txt"
+LOG_FILE="$LOG_DIR/benchmark_0.txt"
 echo "--- Running Disagg Benchmark ---" > $LOG_FILE
 
 # run ben for disagg
@@ -145,28 +193,13 @@ vllm bench serve \
 --model=$MODEL \
 --num-warmups=3 \
 --dataset-name=random \
---random-input-len=1024 \
---random-output-len=128 \
---num-prompts=30 \
+--random-input-len=${INPUT_LEN} \
+--random-output-len=${OUTPUT_LEN} \
+--num-prompts=${NUM_PROMPTS} \
 --ignore-eos \
 --host=localhost \
 --port 8000 \
---request-rate 4 \
->> $LOG_FILE 2>&1
-
-echo -e "\n\n--- Running Non-Disagg Benchmark ---" >> $LOG_FILE
-# run ben for non-disagg
-vllm bench serve \
---model=$MODEL \
---num-warmups=3 \
---dataset-name=random \
---random-input-len=4096 \
---random-output-len=128 \
---num-prompts=30 \
---ignore-eos \
---host=localhost \
---port 9400 \
---request-rate 4 \
+--request-rate=${REQUEST_RATE} \
 >> $LOG_FILE 2>&1
 set +x
 
