@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time
 from typing import Optional, Union
 
 import jax
@@ -240,11 +241,16 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         assert self.block_quant
         assert not self.moe.has_bias
 
+        logger.info(f"Starting weight processing for MoE layer. w13 shape: {layer.w13_weight.shape}")
+        start_t2j = time.perf_counter()
+
         w13_weight = t2j(layer.w13_weight, use_dlpack=False)
         w13_weight_scale = t2j(layer.w13_weight_scale_inv, use_dlpack=False)
 
         w2_weight = t2j(layer.w2_weight, use_dlpack=False)
         w2_weight_scale = t2j(layer.w2_weight_scale_inv, use_dlpack=False)
+
+        logger.info(f"t2j conversion for MoE layer took {time.perf_counter() - start_t2j:.2f}s")
 
         # TODO: do we need to support bias?
         input_weights = FusedMoEWeights(
@@ -260,6 +266,7 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         if self.weight_block_size is not None:
             weight_block_size = tuple(self.weight_block_size)
 
+        start_jit = time.perf_counter()
         weights = process_fp8_moe_weights(
             input_weights,
             moe_backend=self.moe_backend,
@@ -268,6 +275,7 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
             # Convert to tuple so jax jit can hash it
             weight_block_size=weight_block_size,
         )
+        logger.info(f"process_fp8_moe_weights (JIT) took {time.perf_counter() - start_jit:.2f}s")
         weights = torch_view(
             shard_moe_weights(weights, self.moe_backend, self.mesh))
 

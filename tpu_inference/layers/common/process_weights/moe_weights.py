@@ -558,12 +558,15 @@ def process_fp8_moe_weights(
                               if requant_block_size_from_env else None)
 
     moe_logging_str = (
-        f"[MoE requantization]: re-quantizing MoE weights to {desired_quant_dtype}"
+        f"[MoE requantization]: re-quantizing MoE weights {w13_weight.shape} to {desired_quant_dtype}"
     )
     if requant_block_size is not None:
         moe_logging_str += f" with block size {requant_block_size}"
+    if hasattr(w13_weight, "sharding"):
+        moe_logging_str += f" | sharding: {w13_weight.sharding}"
     logger.info(moe_logging_str)
 
+    jax.debug.print("[Execution] Starting dequantization")
     # Dequantize fp8 2d block quantized weights into fp32.
     w13_weight = dequantize_tensor(w13_weight,
                                    w13_weight_scale, (1, 2),
@@ -577,6 +580,7 @@ def process_fp8_moe_weights(
     w13_interleave = activation == "swigluoai"
     w13_reorder_size = get_mesh_shape_product(mesh,
                                               ShardingAxisName.MLP_TENSOR)
+    jax.debug.print("[Execution] Starting quantization")
     weights = quantize_moe_weights(
         FusedMoEWeights(
             w13_weight=w13_weight,
@@ -589,6 +593,7 @@ def process_fp8_moe_weights(
         desired_quant_dtype,
         requant_block_size,
     )
+    jax.debug.print("[Execution] Starting process_moe_weights (reordering/padding)")
     return process_moe_weights(
         weights,
         moe_backend=moe_backend,
