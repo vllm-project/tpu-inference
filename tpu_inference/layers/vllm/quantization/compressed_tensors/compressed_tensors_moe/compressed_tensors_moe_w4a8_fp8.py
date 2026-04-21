@@ -90,10 +90,11 @@ class VllmCompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod,
         Initializes the weights and scales for the FusedMoE layer.
         Handles packed int4 weights and grouped/channelwise scales.
 
-        This method differs from the parent class's create_weights in that it
-        does not require that the hidden_size and intermediate_size be divisible
-        by 256 and instead only requires them to be divisible by the packed
-        factor.
+        This method differs from the VLLM CompressedTensorsW4A8Fp8MoEMethod's
+        create_weights in that it does not require that the hidden_size and
+        intermediate_size be divisible by 256 and instead only requires them to
+        be divisible by the packed factor.
+        https://github.com/vllm-project/vllm/blob/9db4650e5e4c726eb5ae29330cd55e796567469c/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_w4a8_fp8.py#L68
 
         :param layer: The FusedMoE layer to initialize.
         :param num_experts: Total number of experts.
