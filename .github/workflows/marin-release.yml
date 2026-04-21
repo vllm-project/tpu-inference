@@ -64,12 +64,39 @@ jobs:
       - name: Smoke-check against paired Marin vLLM wheel
         env:
           GH_TOKEN: ${{ github.token }}
+          TPU_ACCELERATOR_TYPE: v6e-8
+          TPU_NAME: ci
+          TPU_WORKER_ID: "0"
         run: |
           TAG="marin-${{ steps.vars.outputs.DATE }}"
           uv venv .release-smoke
           . .release-smoke/bin/activate
           gh release download "$TAG" -R marin-community/vllm --pattern "*.whl" -D /tmp/marin-vllm-wheel
-          uv pip install requests dist/*.whl
+          python - <<'PY'
+          import pathlib
+          import zipfile
+
+          wheel = next(pathlib.Path("/tmp/marin-vllm-wheel").glob("*.whl"))
+          with zipfile.ZipFile(wheel) as zf:
+              metadata_name = next(
+                  name for name in zf.namelist() if name.endswith("METADATA"))
+              metadata = zf.read(metadata_name).decode()
+
+          reqs = []
+          for line in metadata.splitlines():
+              if not line.startswith("Requires-Dist: "):
+                  continue
+              req = line.removeprefix("Requires-Dist: ")
+              req_lower = req.lower()
+              if req_lower.startswith("tpu-inference"):
+                  continue
+              if '; extra ==' in req_lower:
+                  continue
+              reqs.append(req)
+
+          pathlib.Path("/tmp/marin-vllm-reqs.txt").write_text("\n".join(reqs))
+          PY
+          uv pip install -r /tmp/marin-vllm-reqs.txt dist/*.whl
           uv pip install --no-deps /tmp/marin-vllm-wheel/*.whl
           python -c "from tpu_inference.runner.tpu_runner import TPUModelRunner"
 
