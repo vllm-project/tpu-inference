@@ -49,10 +49,11 @@ logger = init_logger(__name__)
 
 class AsyncResultFuture(Future):
 
-    def __init__(self, result_ids_ref, workers):
+    def __init__(self, result_ids_ref, workers, aggregator=None):
         super().__init__()
         self.result_ids_ref = result_ids_ref
         self.workers = workers
+        self.aggregator = aggregator
 
     def result(self, timeout=None):
         result_ids = ray.get(self.result_ids_ref, timeout=timeout)
@@ -61,7 +62,10 @@ class AsyncResultFuture(Future):
             ret_refs.append(
                 worker.execute_method.remote("get_execute_model_output",
                                              result_id))
-        return ray.get(ret_refs[0], timeout=timeout)
+        outputs = ray.get(ret_refs, timeout=timeout)
+        if self.aggregator is not None:
+            return self.aggregator.aggregate(outputs, output_rank=0)
+        return outputs[0]
 
 
 class RayDistributedExecutor(RayDistributedExecutorV1):
@@ -481,7 +485,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
 
         refs = self.forward_dag.execute(
             (scheduler_output, grammar_output))  # type: ignore
-        return AsyncResultFuture(refs, self.workers)
+        return AsyncResultFuture(refs, self.workers, self.kv_output_aggregator)
 
 
 class RayWorkerWrapper(RayWorkerWrapperV1):

@@ -46,6 +46,13 @@ print_logs_on_exit() {
     else
       echo "File not found."
     fi
+
+    echo "--- Contents of $LOG_DIR/correctness.txt ---"
+    if [ -f "$LOG_DIR/correctness.txt" ]; then
+      cat "$LOG_DIR/correctness.txt"
+    else
+      echo "File not found."
+    fi
   else
     echo "Log directory '$LOG_DIR' not found."
   fi
@@ -140,6 +147,9 @@ fi
 LOG_DIR=$HOME/logs
 if [ ! -d $LOG_DIR ]; then
   mkdir -p $LOG_DIR
+else
+  # Delete old log files to avoid printing stale logs at the end
+  rm -f $LOG_DIR/prefill.txt $LOG_DIR/decode.txt $LOG_DIR/benchmark.txt $LOG_DIR/proxy.txt $LOG_DIR/correctness.txt
 fi
 
 # Define local mounts for non-Buildkite environments
@@ -233,10 +243,10 @@ docker exec -d ${CONTAINER_PREFIX}-0 /bin/bash -c \
     "vllm serve $MODEL \
     --port ${PREFILL_VLLM_PORT} \
     --gpu-memory-utilization 0.8 \
+    --no-enable-prefix-caching \
     --max-num-batched-tokens 1024 \
     --tensor-parallel-size 4 \
     --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}' \
-    --no-async-scheduling \
     > /root/logs/prefill.txt 2>&1"
 set +x
 
@@ -306,10 +316,10 @@ docker exec -d ${CONTAINER_PREFIX}-2-0 /bin/bash -c \
     "vllm serve $MODEL \
     --port ${DECODE_VLLM_PORT} \
     --gpu-memory-utilization 0.8 \
+    --no-enable-prefix-caching \
     --max-num-batched-tokens 1024 \
     --tensor-parallel-size 4 \
     --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}' \
-    --no-async-scheduling \
     > /root/logs/decode.txt 2>&1"
 set +x
 
@@ -347,7 +357,7 @@ set +x
 if [ "$TEST_MODE" = "1" ] || [ "$TEST_MODE" = "3" ]; then
     echo "Running benchmark test in container."
     set -x
-    docker exec ${CONTAINER_PREFIX}-proxy-benchmark /bin/bash -c "python3 /workspace/tpu_inference/scripts/vllm/benchmarking/benchmark_serving.py \
+    docker exec ${CONTAINER_PREFIX}-proxy-benchmark /bin/bash -c "vllm bench serve \
         --backend vllm \
         --host localhost \
         --port 8000 \
