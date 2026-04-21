@@ -1,0 +1,32 @@
+"""
+This script is a CLI tool for inspecting the results of kernel tuning runs. It allows users to query and analyze the results stored in the database, providing insights into the performance of different kernel configurations.
+usages:
+1. entry cli command:
+python -m tools.kernel.tuner.v1.inspect_result_cli
+
+
+This cli will prompt the user to input the case_set_id and run_id they want to inspect, and then display the results in a readable format. Users can also specify additional filters or sorting options to further analyze the results.
+
+This cli will support inspecting the result from both local database and remote database, which is useful for different stages of development and deployment.
+
+The main workflow of this CLI looks like this:
+1. Prompt the user to select the source of the results (local or remote database).
+2. If local database is selected, prompt the user to input the path to the local database file. After the path is provided, print out the tables that are available in the database(a foler in this case). and prompt the user to select supported table to query and what options each query supports. After the user selects the table and options, execute the query and display the results in a readable format.
+3. If remote database is selected, prompt the user to input the necessary credentials and connection details to access the remote database. After the connection is established, print out the tables that are available in the database, and prompt the user to select supported table to query and what options each query supports.
+
+The main supported queries from this CLI include:
+1. Query what case set ids are available in the database. The command should named something like "list_case_sets" and the output should include the case_set_id, case_set_desc, and the number of runs for each case set id. The command should support filtering by case_set_id or case_set_desc keywords. For example, users can input "list_case_sets --filter keyword" to only list the case sets which have the keyword in their case_set_id or case_set_desc. If no filter is provided, all case sets will be listed.
+2. Query what run ids are available for a given case set id. The command should be named something like "list_runs" and the output should include the run_id, case_set_id, case_set_desc, and the number of buckets for each run id. The command should support filtering by run_id or case_set_desc keywords. For example, users can input "list_runs --case_set_id xxx --filter keyword" to only list the runs under case set id xxx which have the keyword in their case_set_desc or run_id. If no filter is provided, all runs under the specified case set id will be listed.
+3. Query how many buckets are there for a given case set id and run id. The command should be named something like "count_buckets" and the output should include the total number of buckets for the specified case set id and run id. 
+4. Query how many buckets are completed, and how many are pending given case set id and run id. The command should be named something like "list_bucket_status" and the output should include the number of completed and pending buckets for each run id.
+5. Query how long this tuning run has been running for, when it started, and when the last completed bucket was completed. The command should be named something like "query_run_status" and the output should include the start time, last completed time, and total duration for each run id.
+6. Query the minimal latency results for a given case set id, run id(grouped by the TuningKey), and display the results in a readable format. The command should be named something like "query_min_latency" and the output should include the TuningKey, minimal latency, and the corresponding TunableParam values for each TuningKey which has the minimal latency.
+
+
+KERNEL_TUNING_KERNEL_NAME=test_kernel_tuner
+KERNEL_TUNING_CASE_SET_DESC=tesing_tuning_infra_comment
+KERNEL_TUNING_CASE_SET_ID=testing_tuning_infra
+KERNEL_TUNING_RUN_ID=001
+
+"""
+
