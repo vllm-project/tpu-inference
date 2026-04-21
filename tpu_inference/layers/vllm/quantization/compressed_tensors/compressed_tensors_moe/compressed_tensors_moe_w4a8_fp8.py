@@ -78,8 +78,6 @@ class VllmCompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod,
             "Only symmetric quantization is supported for W4A8 MoE")
         assert self.weight_quant.actorder != "group"
 
-        self.disable_expert_map = False
-
     @property
     def is_monolithic(self) -> bool:
         """Indicates if the MoE operation is monolithic."""
@@ -192,10 +190,6 @@ class VllmCompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod,
         :param self: The method for the layer responsible for processing the weights.
         :param layer: The source PyTorch layer containing the raw, un-sharded weights from the loaded checkpoint.
         :type layer: torch.nn.Module
-
-        Steps:
-        For W4A8, we unpack INT4 weights and upcast them to FP8 to reuse
-        the standard W8A8 logic and kernels.
         """
         assert isinstance(layer, FusedMoE)
 
@@ -234,15 +228,15 @@ class VllmCompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod,
             w13_reorder_size = get_mesh_shape_product(
                 self.mesh, ShardingAxisName.MLP_TENSOR)
 
-            (w13_weight_uint4 - 8).astype(jnp.int4)
-            (w2_weight_uint4 - 8).astype(jnp.int4)
+            w13_weight_int4 = (w13_weight_uint4 - 8).astype(jnp.int4)
+            w2_weight_int4 = (w2_weight_uint4 - 8).astype(jnp.int4)
 
             return process_moe_weights(
                 weights=FusedMoEWeights(
-                    w13_weight=(w13_weight_uint4 - 8).astype(jnp.int4),
+                    w13_weight=w13_weight_int4,
                     w13_weight_scale=w13_weight_scale,
                     w13_bias=w13_bias,
-                    w2_weight=(w2_weight_uint4 - 8).astype(jnp.int4),
+                    w2_weight=w2_weight_int4,
                     w2_weight_scale=w2_weight_scale,
                     w2_bias=w2_bias,
                 ),
