@@ -67,9 +67,13 @@ _SPANNER_DATABASE_ID = flags.DEFINE_string(
     'The Spanner database ID to use. Only used when --run_locally is false.')
 _WORKER_ID = flags.DEFINE_string('worker_id', get_host_ip(), 'The worker id')
 
-# Note: For simplicity, we are directly referencing the kernel tuner class here. In the future, we can consider a more flexible plugin-based system if we have more kernel tuners.
-# For example, we can define an interface for kernel tuners and dynamically load kernel tuner classes based on the --kernel_tuner_name flag. This would allow us to add new kernel tuners without modifying this runner code.
-# For now, after we implement more kernel tuners, we can simply add them to the KERNEL_TUNER_REGISTRY dictionary below.
+# Note: For simplicity, we are directly referencing the kernel tuner class
+# here. In the future, we can consider a more flexible plugin-based system
+# if we have more kernel tuners. For example, we can define an interface for
+# kernel tuners and dynamically load kernel tuner classes based on the
+# --kernel_tuner_name flag. This would allow us to add new kernel tuners
+# without modifying this runner code. For now, after we implement more kernel
+# tuners, we can simply add them to the KERNEL_TUNER_REGISTRY dictionary below.
 KERNEL_TUNER_REGISTRY = {
     'test_kernel_tuner': TestKernelTuner,
 }

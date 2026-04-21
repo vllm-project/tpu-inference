@@ -26,7 +26,9 @@ FLAGS = flags.FLAGS
 
 
 class SpannerStorageManager(StorageManager):
-    # for historical reason, the database_id is still tune-gmm, but it actually contains tuning cases for different kernels, not just gmm. We can consider to rename it in the future for better clarity.
+    # (TODO)For historical reason, the database_id is still tune-gmm, but it
+    # actually contains tuning cases for different kernels, not just gmm. We
+    # can consider to rename it in the future for better clarity.
     def __init__(self, worker_id=None, dry_run=False):
         gcp_project_id = FLAGS.gcp_project_id
         spanner_instance_id = FLAGS.spanner_instance_id
@@ -46,7 +48,8 @@ class SpannerStorageManager(StorageManager):
 
     def init_case_set(self, case_set_id, scan_space, desc):
         """Initializes the CaseSet row."""
-        if self.dry_run: return
+        if self.dry_run:
+            return
 
         def _do_insert(tx):
             tx.execute_update(
@@ -66,7 +69,8 @@ class SpannerStorageManager(StorageManager):
 
     def case_set_id_exists(self, case_set_id) -> bool:
         """Checks whether the given case_set_id already exists in the CaseSet table."""
-        if self.dry_run: return False
+        if self.dry_run:
+            return False
 
         def _do_query(tx):
             result = tx.execute_sql(
@@ -80,7 +84,8 @@ class SpannerStorageManager(StorageManager):
 
     def get_case_set_desc(self, case_set_id) -> str:
         """Gets the description for the given case_set_id from the CaseSet table."""
-        if self.dry_run: return None
+        if self.dry_run:
+            return None
 
         def _do_query(tx):
             result = tx.execute_sql(
@@ -94,7 +99,8 @@ class SpannerStorageManager(StorageManager):
 
     def finish_case_set(self, case_set_id, valid, invalid, duration):
         """Updates tracking columns upon completion."""
-        if self.dry_run: return
+        if self.dry_run:
+            return
 
         def _do_update(tx):
             tx.execute_update(
@@ -115,7 +121,8 @@ class SpannerStorageManager(StorageManager):
         self.database.run_in_transaction(_do_update)
 
     def get_case_set_metadata(self, case_set_id):
-        if self.dry_run: return {}
+        if self.dry_run:
+            return {}
 
         def _do_query(tx):
             result = tx.execute_sql(
@@ -133,7 +140,8 @@ class SpannerStorageManager(StorageManager):
 
     @retry.Retry(predicate=retry.if_transient_error)
     def flush(self):
-        if not self.buffer or self.dry_run: return
+        if not self.buffer or self.dry_run:
+            return
         with self.database.batch() as b:
             b.insert(table='KernelTuningCases',
                      columns=('ID', 'CaseId', 'CaseKeyValue'),
@@ -169,7 +177,8 @@ class SpannerStorageManager(StorageManager):
             start_case_id: Starting case ID (inclusive) for this bucket.
             end_case_id: Ending case ID (inclusive) for this bucket.
         """
-        if self.dry_run: return
+        if self.dry_run:
+            return
         self.database.run_in_transaction(lambda tx: tx.insert(
             columns=('ID', 'RunId', 'BucketId', 'StartCaseId', 'EndCaseId',
                      'Status', 'WorkerID', 'UpdatedAt'),
@@ -226,7 +235,8 @@ class SpannerStorageManager(StorageManager):
 
     # tuner agents will save the result after completing a tuning batch
     def save_results_batch(self, results):
-        if not results: return
+        if not results:
+            return
         with self.database.batch() as b:
             b.insert_or_update(table='CaseResults',
                                columns=('ID', 'RunId', 'CaseId',
