@@ -14,20 +14,6 @@
   </thead>
   <tbody>
     <tr>
-      <td>PP</td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-    </tr>
-    <tr>
-      <td>DP</td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-    </tr>
-    <tr>
       <td>EP</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -37,6 +23,20 @@
     <tr>
       <td>TP</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>PP</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+    </tr>
+    <tr>
+      <td>DP</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
