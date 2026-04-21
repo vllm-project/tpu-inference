@@ -40,16 +40,16 @@ print_logs_on_exit() {
       echo "File not found."
     fi
 
-    echo "--- Contents of $LOG_DIR/benchmark.txt ---"
-    if [ -f "$LOG_DIR/benchmark.txt" ]; then
-      cat "$LOG_DIR/benchmark.txt"
+    echo "--- Contents of $LOG_DIR/correctness.txt ---"
+    if [ -f "$LOG_DIR/correctness.txt" ]; then
+      cat "$LOG_DIR/correctness.txt"
     else
       echo "File not found."
     fi
 
-    echo "--- Contents of $LOG_DIR/correctness.txt ---"
-    if [ -f "$LOG_DIR/correctness.txt" ]; then
-      cat "$LOG_DIR/correctness.txt"
+    echo "--- Contents of $LOG_DIR/benchmark.txt ---"
+    if [ -f "$LOG_DIR/benchmark.txt" ]; then
+      cat "$LOG_DIR/benchmark.txt"
     else
       echo "File not found."
     fi
