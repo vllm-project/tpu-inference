@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
@@ -31,25 +31,59 @@ if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
-class HashableTensor(torch.Tensor):
+class GridTHW(tuple):
+    """Tensor-like wrapper for image/video grid_thw arguments.
 
-    def totuple(self):
+    - tuple subclass so isinstance(x, tuple) is True — passes vLLM's
+    tensor_schema type check (e.g. https://github.com/vllm-project/vllm/blob/9744b699bafed423909ed10da96b80eb0542424b/vllm/model_executor/models/qwen3_vl.py#L2026). 
+    - Registered as a JAX pytree leaf so jax.tree_util.tree_map (used by torchax jax_view) does
+    NOT traverse into the elements, keeping the object intact and hashable
+    for JAX static_argnames.
+    - Implements a minimal tensor-like API (ndim, shape, tolist, prod) expected by vLLM's
+    _process_image_input (https://github.com/vllm-project/vllm/blob/9744b699bafed423909ed10da96b80eb0542424b/vllm/model_executor/models/qwen3_vl.py#L2072)
 
-        def _nested_to_tuple(maybe_list):
-            if isinstance(maybe_list, Iterable):
-                return tuple(_nested_to_tuple(e) for e in maybe_list)
-            return maybe_list
+    We cannot use torch.Tensor[tuple] because jax.jit would complain.
+    """
 
-        return _nested_to_tuple(self.tolist())
+    def __new__(cls, values):
 
-    def __hash__(self):
-        return hash(self.totuple())
+        def _nested_to_tuple(v):
+            if isinstance(v, (list, tuple)):
+                return tuple(_nested_to_tuple(x) for x in v)
+            return int(v)
 
-    def jax(self):
-        print(
-            f"clkbp calling jax() on HashableTensor, returning {self.totuple()=}"
-        )
-        return self.totuple()
+        flat: tuple = _nested_to_tuple(values)
+        return super().__new__(cls, flat)
+
+    # ---- tensor-like API expected by _process_image_input ----
+
+    @property
+    def ndim(self):
+        return 2
+
+    @property
+    def shape(self):
+        return (len(self), 3)
+
+    def tolist(self):
+        return [list(row) for row in self]
+
+    def prod(self, dim=-1):
+        if dim in (-1, 1):
+            return np.array([row[0] * row[1] * row[2] for row in self])
+        raise NotImplementedError(f"GridTHW.prod({dim}) not supported")
+
+    def __repr__(self):
+        return f"GridTHW({tuple(self)})"
+
+
+# Register as a JAX pytree leaf (no children) so jax.tree_util.tree_map
+# returns the GridTHW instance unchanged instead of traversing its elements.
+jax.tree_util.register_pytree_node(
+    GridTHW,
+    lambda x: ([], x),  # flatten: no children, aux_data = self
+    lambda aux, _: aux,  # unflatten: return aux_data unchanged
+)
 
 
 class MultiModalManager:
@@ -135,12 +169,18 @@ class MultiModalManager:
         for _, num_items, mm_kwargs_group in group_and_batch_mm_kwargs(
                 mm_kwargs):
             for k, v in mm_kwargs_group.items():
-                if k in ("image_grid_thw", ):
-                    # Convert to HashableTensor
-                    mm_kwargs_group[k] = HashableTensor(v)
-                elif isinstance(v, torch.Tensor):
-                    with torchax.default_env():
-                        mm_kwargs_group[k] = v.to(device="jax")
+                if k in ("image_grid_thw", "video_grid_thw", "grid_thw"):
+                    mm_kwargs_group[k] = GridTHW(v.tolist())
+                else:
+
+                    def move_to_jax(x):
+                        if isinstance(x, torch.Tensor):
+                            with torchax.default_env():
+                                return torchax.interop.jax_view(
+                                    x.to(device="jax"))
+                        return x
+
+                    mm_kwargs_group[k] = jax.tree.map(move_to_jax, v)
 
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
