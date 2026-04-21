@@ -20,6 +20,9 @@ from jax.experimental.layout import Format, Layout
 from jax.sharding import Mesh, Sharding
 
 from tpu_inference import envs
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
 
 # Lazy initialized, since device might not be ready at import time.
 _cpu_mesh = None

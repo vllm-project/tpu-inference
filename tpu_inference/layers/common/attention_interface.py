@@ -518,6 +518,21 @@ def mla_attention(
         or P(ShardingAxisName.MLP_TENSOR, None, None)  # attn output
     )
 
+    # `ShardingAxisName.MLP_TENSOR` is a tuple of mesh axis names whose
+    # product is the token-axis shard count (e.g. 32-way on v4-64 TP=4
+    # EP=8).  The shard_map body below all-gathers Q / new-K along this
+    # axis so each shard sees the full prefix (needed for correct causal
+    # masking when real tokens span shards — otherwise the kernel computes
+    # q_span from the shard's local iota 0 as if it were the sequence
+    # start, which is wrong for any shard beyond the first that owns real
+    # queries).  A no-op path is kept for single-host / non-sharded meshes
+    # where the product is 1.
+    _mlp_tensor_axes = ShardingAxisName.MLP_TENSOR if isinstance(
+        ShardingAxisName.MLP_TENSOR, tuple) else (ShardingAxisName.MLP_TENSOR, )
+    _mlp_tensor_size = 1
+    for _ax in _mlp_tensor_axes:
+        _mlp_tensor_size *= mesh.shape[_ax]
+
     def _mla_ragged_paged_attention(q, q_rope, k, k_rope, cache, *args):
         # TODO: use auto tuner to find the best block sizes.
         # TPU v4 has ~16MB of VMEM versus 32MB+ on v5/v6, so its MLA kernel
@@ -539,6 +554,50 @@ def mla_attention(
             extra_kwargs = {}
         decode_batch_size = 4
 
+        # Cross-shard-query fix: the MLA kernel computes
+        #   q_span = kv_len - q_len + bq_idx*bq_sz + local_iota
+        # from its shard-local iota 0.  shard_map splits Q / new_K on the
+        # token axis by MLP_TENSOR, but cu_q_lens / kv_lens come in via
+        # P(ATTN_DATA) which is replicated — every shard sees the same seq
+        # descriptor and computes local iota 0 as if it were the global
+        # sequence start.  That only produces correct attention when all
+        # real tokens of a sequence fall inside the first shard; as soon
+        # as they span (e.g. a 17-token prompt at bucket=512 on a 32-way
+        # token mesh, or any prompt at bucket < MLP_TENSOR-size), later
+        # shards apply the wrong causal mask and the last real query's
+        # hidden state is corrupted — the sampler then lands on token 0
+        # ('!' in the tokenizer) or EOS depending on how the corruption
+        # shapes the final logits.
+        #
+        # Fix: all-gather Q / new-K on MLP_TENSOR so every shard sees the
+        # full prefix; call the kernel with the full tensors; then slice
+        # the full attention output back to this shard's token range so
+        # out_spec `P(MLP_TENSOR, None, None)` remains valid.  The kernel
+        # writes new_kv into its local cache slice via input_output_aliases
+        # — with the same full new_kv on every shard, each shard ends up
+        # with a self-consistent local KV copy for subsequent decode.
+        # Cost: ~2 × max_num_tokens × hidden bytes of ICI per attention
+        # call (q + q_rope + k + k_rope), which is negligible against the
+        # weight load and MoE gmm.
+        _shard_local_T = q.shape[0]
+        if _mlp_tensor_size > 1:
+            q = jax.lax.all_gather(q,
+                                   axis_name=_mlp_tensor_axes,
+                                   axis=0,
+                                   tiled=True)
+            q_rope = jax.lax.all_gather(q_rope,
+                                        axis_name=_mlp_tensor_axes,
+                                        axis=0,
+                                        tiled=True)
+            k = jax.lax.all_gather(k,
+                                   axis_name=_mlp_tensor_axes,
+                                   axis=0,
+                                   tiled=True)
+            k_rope = jax.lax.all_gather(k_rope,
+                                        axis_name=_mlp_tensor_axes,
+                                        axis=0,
+                                        tiled=True)
+
         out, new_cache = mla_ragged_paged_attention(
             q,
             q_rope,
@@ -555,6 +614,22 @@ def mla_attention(
             v_scale=v_scale,
             **extra_kwargs,
         )
+
+        if _mlp_tensor_size > 1:
+            # Slice the full attention output down to this shard's token
+            # range.  The shard index is computed at runtime from the
+            # axis_index of each MLP_TENSOR axis, giving a single flat
+            # scalar that shard_map resolves per-shard.
+            _shard_flat_idx = jnp.int32(0)
+            for _ax in _mlp_tensor_axes:
+                _shard_flat_idx = _shard_flat_idx * mesh.shape[
+                    _ax] + jax.lax.axis_index(_ax)
+            _start = _shard_flat_idx * _shard_local_T
+            out = jax.lax.dynamic_slice(
+                out,
+                (_start, 0, 0),
+                (_shard_local_T, out.shape[1], out.shape[2]),
+            )
 
         return new_cache, out
 
