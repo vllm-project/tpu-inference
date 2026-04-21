@@ -72,7 +72,11 @@ logger = init_logger(__name__)
 # GCS direct Range-GET helpers (bypass gcsfuse for TP-selective load)
 # ---------------------------------------------------------------------------
 
-# Env var: set to "0" to force gcsfuse path even when gcsfuse mount detected.
+# Env var: selects the I/O path when weights are on a gcsfuse mount.
+#   "1" (default) — direct GCS HTTP Range GETs (bypass gcsfuse).
+#   "0"           — read through the gcsfuse mount with safetensors.
+# Neither is universally faster; the right pick depends on the gcsfuse
+# config (buffered-read, file-cache, etc.).
 _GCS_WEIGHT_LOAD_ENV = "TPU_GCS_WEIGHT_LOAD"
 
 _ST_DTYPE_ELEM_SIZE: dict[str, int] = {
@@ -137,11 +141,11 @@ def _find_gcs_mount(file_path: str) -> Optional[tuple[str, str]]:
                 return best_bucket, best_mp
     except OSError as _exc:
         # /proc/mounts missing or unreadable — not fatal, just means
-        # the gcsfuse fast path can't be detected for this file. Log
-        # so the silent fallback to regular safetensors isn't a mystery
-        # when someone is debugging load speed.
+        # the direct-GCS path can't be detected for this file. Log so
+        # the silent use of regular safetensors isn't a mystery when
+        # someone is debugging load speed.
         logger.debug("_find_gcs_mount: /proc/mounts read failed (%s); "
-                     "gcsfuse fast path disabled for %s", _exc, file_path)
+                     "direct-GCS path disabled for %s", _exc, file_path)
     return None
 
 
@@ -933,14 +937,20 @@ def tp_sliced_iterator(
 ) -> Iterator[tuple[str, torch.Tensor]]:
     """Iterate safetensors files yielding per-host TP-sliced tensors.
 
-    Automatically uses direct GCS Range GETs when the weight files live on a
-    gcsfuse mount (detected via /proc/mounts).  Set TPU_GCS_WEIGHT_LOAD=0 to
-    force the safetensors/gcsfuse fallback path.
+    Two I/O paths are supported when the checkpoint lives on a gcsfuse mount
+    (detected via /proc/mounts):
+      * ``TPU_GCS_WEIGHT_LOAD=1`` (default): direct GCS HTTP Range GETs,
+        bypassing the gcsfuse layer.
+      * ``TPU_GCS_WEIGHT_LOAD=0``: read through the gcsfuse mount with
+        ``safetensors.safe_open``.
+    Neither is universally faster — the right choice depends on how gcsfuse
+    is configured. A mount with ``--enable-buffered-read`` can beat the
+    direct-range path; a default mount typically loses to it.
 
     Falls back to full-load for tensors absent from ``plan`` (replicated
     params) and for tensors whose TP axis is not divisible by ``tp_size``.
     """
-    # --- GCS fast path ---
+    # --- Direct GCS Range mode ---
     if hf_weights_files and os.environ.get(_GCS_WEIGHT_LOAD_ENV, "1") != "0":
         gcs_info = _find_gcs_mount(hf_weights_files[0])
         if gcs_info is not None:
@@ -953,10 +963,10 @@ def tp_sliced_iterator(
                 local_expert_ids, pp_skip_fn, bucket_name, mount_point)
             return
 
-    # --- Fallback: safetensors via gcsfuse ---
+    # --- gcsfuse-mount path ---
     logger.info(
-        "[TP-selective] gcsfuse path (TPU_GCS_WEIGHT_LOAD defaults to 1; "
-        "set =0 to force this fallback)")
+        "[TP-selective] gcsfuse-mount path (TPU_GCS_WEIGHT_LOAD=0 or no "
+        "gcsfuse mount detected)")
     from safetensors import safe_open
     from tqdm import tqdm
     from vllm.model_executor.model_loader.ep_weight_filter import \

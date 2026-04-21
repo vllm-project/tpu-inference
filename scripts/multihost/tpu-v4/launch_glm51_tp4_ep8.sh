@@ -58,7 +58,13 @@ export KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-auto}"
 # ── MoE direct FP8 path (skip dequant/requant roundtrip, ~30x faster PWAL) ────
 export VLLM_MOE_SKIP_REQUANTIZATION="${VLLM_MOE_SKIP_REQUANTIZATION:-1}"
 
-# ── gcsfuse path (kernel VFS page cache; GCS direct cold capped ~200 MB/s) ────
+# ── I/O path for weights on a gcsfuse mount ──────────────────────────────────
+# 0 = read through the gcsfuse mount (safetensors.safe_open).
+# 1 = bypass gcsfuse with direct GCS HTTP Range GETs.
+# On this pod gcsfuse is configured with --enable-buffered-read, which streams
+# ~200-400 MB/s per host. That beats direct Range GETs here (~20 s/shard vs
+# ~3.75 s/shard with the mount path). Deployments with differently-configured
+# gcsfuse mounts may want to flip this back to 1.
 export TPU_GCS_WEIGHT_LOAD="${TPU_GCS_WEIGHT_LOAD:-0}"
 
 # ── Streaming loader (REQUIRED for EP=8 on 744GB FP8 model) ───────────────────
