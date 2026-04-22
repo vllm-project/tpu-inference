@@ -20,6 +20,7 @@ from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
+import tpu_inference.envs as envs
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.kernels.sparse_core import gather_reduce as gather_reduce_sc
 from tpu_inference.kernels.sparse_core.ragged_gather import ragged_gather
