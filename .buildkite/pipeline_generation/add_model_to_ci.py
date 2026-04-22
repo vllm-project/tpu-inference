@@ -17,8 +17,6 @@ import sys
 from enum import Enum
 from pathlib import Path
 
-from constant import QUEUE_TO_TENSOR_PARALLEL_SIZE_MAP
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = SCRIPT_DIR.parent / "models"
 
@@ -33,27 +31,38 @@ class ModelCategory(str, Enum):
     MULTIMODAL = "multimodal"
 
 
+class HostScale(str, Enum):
+    SINGLE = "single"
+    MULTI = "multi"
+
+
 MODEL_TYPE_TO_TEMPLATE = {
     ModelType.TPU_OPTIMIZED.value: "tpu_optimized_model_template.yml",
     ModelType.VLLM_NATIVE.value: "vllm_native_model_template.yml",
 }
 
+HOST_SCALE_TO_SETTINGS = {
+    HostScale.SINGLE.value: {
+        "queue": "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}",
+        "tp_size": "${TENSOR_PARALLEL_SIZE_SINGLE:-1}",
+    },
+    HostScale.MULTI.value: {
+        "queue": "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}",
+        "tp_size": "${TENSOR_PARALLEL_SIZE_MULTI:-8}",
+    },
+}
 
-def generate_from_template(model_name: str, queue: str, model_type: str,
-                           model_category: str) -> None:
+
+def generate_from_template(model_name: str, model_type: str,
+                           model_category: str, host_scale: str) -> None:
     """
     Generates a buildkite yml file from model template.
     Args:
         model_name (str): The full name of the model on Hugging Face.
-        queue (str): The buildkite queue to run tests for this model on.
         model_type (str): The type of model (tpu-optimized or vllm-native).
+        model_category (str): The category of the model.
+        host_scale (str): The host scale to run on (single or multi).
     """
-    if queue not in QUEUE_TO_TENSOR_PARALLEL_SIZE_MAP:
-        print(
-            f"Queue {queue} not previously registered on Buildkite. If you added a queue, please add it to QUEUE_TO_TENSOR_PARALLEL_SIZE_MAP"
-        )
-        sys.exit(1)
-
     print(f"Starting to generate for model '{model_name}'")
 
     # Check if the template file exists.
@@ -79,14 +88,16 @@ def generate_from_template(model_name: str, queue: str, model_type: str,
     # replace characters to satisfy filename and buildkite step key naming restrictions
     sanitized_model_name = model_name.replace("/", "_").replace(".", "_")
 
+    host_scale_settings = HOST_SCALE_TO_SETTINGS[host_scale]
+
     # Substitute the placeholders with the provided arguments.
     try:
         generated_content = template_content.format(
             MODEL_NAME=model_name,
             CATEGORY=model_category,
             SANITIZED_MODEL_NAME=sanitized_model_name,
-            QUEUE=queue,
-            TENSOR_PARALLEL_SIZE=QUEUE_TO_TENSOR_PARALLEL_SIZE_MAP[queue],
+            QUEUE=host_scale_settings["queue"],
+            TP_SIZE=host_scale_settings["tp_size"],
         )
         print("File content generated.")
     except KeyError as e:
@@ -122,14 +133,9 @@ def main():
         "The full name of the model on Hugging Face (ex: 'meta-llama/Llama-3.1-8B')."
     )
     parser.add_argument(
-        "--queue",
-        type=str,
-        required=True,
-        help="The name of the agent queue to use (ex: 'tpu_v6e_queue')")
-    parser.add_argument(
         '--type',
         choices=[ModelType.TPU_OPTIMIZED.value, ModelType.VLLM_NATIVE.value],
-        default='tpu-optimized',
+        default=ModelType.TPU_OPTIMIZED.value,
         help=
         '[OPTIONAL] Type of model. Must be tpu-optimized or vllm-native. (Default: tpu-optimized)'
     )
@@ -138,16 +144,24 @@ def main():
         choices=[
             ModelCategory.TEXT_ONLY.value, ModelCategory.MULTIMODAL.value
         ],
-        default='text-only',
+        default=ModelCategory.TEXT_ONLY.value,
         help=
         '[OPTIONAL] Category of model. Must be "text-only" or "multimodal". (Default: text-only)'
     )
 
+    parser.add_argument(
+        '--host-scale',
+        choices=[HostScale.SINGLE.value, HostScale.MULTI.value],
+        default=HostScale.SINGLE.value,
+        help=
+        '[OPTIONAL] Host scale to run on. Must be "single" or "multi". (Default: single)'
+    )
+
     args = parser.parse_args()
     generate_from_template(model_name=args.model_name,
-                           queue=args.queue,
                            model_type=args.type,
-                           model_category=args.category)
+                           model_category=args.category,
+                           host_scale=args.host_scale)
 
 
 if __name__ == "__main__":

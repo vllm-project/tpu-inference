@@ -17,7 +17,7 @@ import jax.numpy as jnp
 from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 
-from tpu_inference.kernels.gather.ragged_gather import ragged_gather
+from tpu_inference.kernels.sparse_core.ragged_gather import ragged_gather
 
 jax.config.parse_flags_with_absl()
 

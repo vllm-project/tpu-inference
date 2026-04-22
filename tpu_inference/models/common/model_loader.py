@@ -32,6 +32,8 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common.interface import (ModelInterface,
+                                                   MultiModalInterface)
 from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
     load_random_weights_into_qwix_abstract_model,
@@ -49,8 +51,6 @@ _MODEL_REGISTRY = {}
 _VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset({
     "GptOssForCausalLM",
     "Qwen3MoeForCausalLM",
-    # Gemma4 model is lacking vision support in "flax_nnx" implementation.
-    "Gemma4ForConditionalGeneration",
 })
 
 # List of architectures that don't have pipeline parallelism support in jax yet.
@@ -68,7 +68,8 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # would cause JAX init failure when using multi hosts with Ray.
 
     from tpu_inference.models.jax.deepseek_v3 import DeepseekV3ForCausalLM
-    from tpu_inference.models.jax.gemma4 import Gemma4ForCausalLM
+    from tpu_inference.models.jax.gemma4_mm import \
+        Gemma4ForConditionalGeneration
     from tpu_inference.models.jax.gpt_oss import GptOss
     from tpu_inference.models.jax.llama3 import LlamaForCausalLM
     from tpu_inference.models.jax.llama4 import Llama4ForCausalLM
@@ -90,7 +91,8 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["Eagle3LlamaForCausalLM"] = EagleLlama3ForCausalLM
     _MODEL_REGISTRY["GptOssForCausalLM"] = GptOss
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
-    _MODEL_REGISTRY["Gemma4ForConditionalGeneration"] = Gemma4ForCausalLM
+    _MODEL_REGISTRY[
+        "Gemma4ForConditionalGeneration"] = Gemma4ForConditionalGeneration
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -283,7 +285,7 @@ def get_flax_model(
     rng: jax.Array,
     mesh: Mesh,
     is_draft_model: bool = False,
-) -> nnx.Module:
+) -> ModelInterface:
     original_dtype = vllm_config.model_config.dtype
     model_dtype = to_jax_dtype(original_dtype)
     vllm_config.model_config.dtype = model_dtype
@@ -388,14 +390,23 @@ def get_flax_model(
         jit_model,
         "get_mrope_input_positions") else jit_model.get_mrope_input_positions
 
-    multimodal_fns = {
-        "precompile_vision_encoder_fn": precompile_vision_encoder_fn,
-        "embed_multimodal_fn": embed_multimodal_fn,
-        "embed_input_ids_fn": embed_input_ids_fn,
-        "get_mrope_input_positions_fn": get_mrope_input_positions_fn,
-    }
+    multimodal_fns = MultiModalInterface(
+        precompile_vision_encoder_fn=precompile_vision_encoder_fn,
+        embed_multimodal_fn=embed_multimodal_fn,
+        embed_input_ids_fn=embed_input_ids_fn,
+        get_mrope_input_positions_fn=get_mrope_input_positions_fn,
+    )
 
-    return model_fn, compute_logits_fn, _not_support, combine_hidden_states_fn, multimodal_fns, state, lora_manager, model
+    return ModelInterface(
+        model_fn=model_fn,
+        compute_logits_fn=compute_logits_fn,
+        pooler_fn=_not_support,
+        combine_hidden_states_fn=combine_hidden_states_fn,
+        multimodal_fns=multimodal_fns,
+        state=state,
+        lora_manager=lora_manager,
+        model=model,
+    )
 
 
 def get_vllm_model(
@@ -403,7 +414,7 @@ def get_vllm_model(
     rng: jax.Array,
     mesh: Mesh,
     is_draft_model: bool = False,
-):
+) -> ModelInterface:
     model_dtype = to_torch_dtype(vllm_config.model_config.dtype)
     vllm_config.model_config.dtype = model_dtype
     from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
@@ -421,19 +432,32 @@ def get_vllm_model(
     pooler_fn = model.build_pooler_func()
     combine_hidden_states_fn = model.jit_combine_hidden_states_func()
 
-    multimodal_fns = {
-        "precompile_vision_encoder_fn":
-        getattr(model.model.vllm_model, "precompile_vision_encoder", None),
-        "embed_multimodal_fn":
-        model.wrap_embed_multimodal_func(),
-        "embed_input_ids_fn":
-        model.wrap_embed_input_ids_func(),
-        "get_mrope_input_positions_fn":
-        getattr(model.model.vllm_model, "get_mrope_input_positions", None),
-    }
+    multimodal_fns = MultiModalInterface(
+        precompile_vision_encoder_fn=getattr(
+            model.model.vllm_model,
+            "precompile_vision_encoder",
+            None,
+        ),
+        embed_multimodal_fn=model.wrap_embed_multimodal_func(),
+        embed_input_ids_fn=model.wrap_embed_input_ids_func(),
+        get_mrope_input_positions_fn=getattr(
+            model.model.vllm_model,
+            "get_mrope_input_positions",
+            None,
+        ),
+    )
 
     # the model needs to be returned because lora weights are neither torch.nn.parameter nor torch.nn.buffer. After we load the lora weights and set it to the torch.nn.Module, we can shard it and move it to TPU.
-    return jit_model, compute_logits_fn, pooler_fn, combine_hidden_states_fn, multimodal_fns, params, lora_manager, model
+    return ModelInterface(
+        model_fn=jit_model,
+        compute_logits_fn=compute_logits_fn,
+        pooler_fn=pooler_fn,
+        combine_hidden_states_fn=combine_hidden_states_fn,
+        multimodal_fns=multimodal_fns,
+        state=params,
+        lora_manager=lora_manager,
+        model=model,
+    )
 
 
 def get_model(
@@ -441,7 +465,7 @@ def get_model(
     rng: jax.Array,
     mesh: Mesh,
     is_draft_model: bool = False,
-) -> Any:
+) -> ModelInterface:
     if is_draft_model:
         impl = envs.DRAFT_MODEL_IMPL_TYPE
     else:

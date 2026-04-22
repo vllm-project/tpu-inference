@@ -7,9 +7,8 @@ Feature,CorrectnessTest,PerformanceTest
 "Out-of-tree model support",✅ Passing,✅ Passing
 "Prefix Caching",✅ Passing,✅ Passing
 "Single Program Multi Data",✅ Passing,✅ Passing
-"Single-Host-P-D-disaggregation",✅ Passing,❓ Untested
 "Speculative Decoding: Eagle3",✅ Passing,✅ Passing
-"Speculative Decoding: Ngram",✅ Passing,✅ Passing
+"Speculative Decoding: Ngram",✅ Passing,❌ Failing
 "async scheduler",✅ Passing,✅ Passing
 "hybrid kv cache",✅ Passing,❓ Untested
 "multi-host",❓ Untested,❓ Untested

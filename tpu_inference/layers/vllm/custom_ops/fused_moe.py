@@ -13,22 +13,11 @@
 # limitations under the License.
 
 import torch
-from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE
 
 
 @FusedMoE.register_oot
 class VllmFusedMoE(FusedMoE):
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return super().forward(hidden_states, router_logits)
-
-
-@SharedFusedMoE.register_oot
-class VllmSharedFusedMoE(SharedFusedMoE):
 
     def forward(
         self,

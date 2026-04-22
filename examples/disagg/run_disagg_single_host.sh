@@ -17,7 +17,49 @@
 # shellcheck disable=all
 set -e
 
-MODEL="Qwen/Qwen3-0.6B"
+# Function to print logs on exit
+print_logs_on_exit() {
+  echo "--- Script exiting, displaying logs ---"
+
+  # The logs are written inside containers to /root/logs, which is mapped from $LOG_DIR on the host.
+  LOG_DIR=$HOME/logs
+
+  if [ -d "$LOG_DIR" ]; then
+    echo "--- Contents of $LOG_DIR/prefill_0.txt ---"
+    if [ -f "$LOG_DIR/prefill_0.txt" ]; then
+      cat "$LOG_DIR/prefill_0.txt"
+    else
+      echo "File not found."
+    fi
+
+    echo "--- Contents of $LOG_DIR/decode_0.txt ---"
+    if [ -f "$LOG_DIR/decode_0.txt" ]; then
+      cat "$LOG_DIR/decode_0.txt"
+    else
+      echo "File not found."
+    fi
+
+    echo "--- Contents of $LOG_DIR/benchmark_0.txt ---"
+    if [ -f "$LOG_DIR/benchmark_0.txt" ]; then
+      cat "$LOG_DIR/benchmark_0.txt"
+    else
+      echo "File not found."
+    fi
+  else
+    echo "Log directory '$LOG_DIR' not found."
+  fi
+  echo "--- End of logs ---"
+}
+
+# Register the cleanup function to be called on script exit (normal or error)
+trap print_logs_on_exit EXIT
+
+MODEL=${MODEL:="Qwen/Qwen3-0.6B"}
+INPUT_LEN=${INPUT_LEN:=512}
+OUTPUT_LEN=${OUTPUT_LEN:=128}
+NUM_PROMPTS=${NUM_PROMPTS:=200}
+REQUEST_RATE=${REQUEST_RATE:=4}
+
 
 NUM_PREFILL_INSTANCES=1
 NUM_DECODE_INSTANCES=1
@@ -28,23 +70,59 @@ PREFILL_HOSTS=()
 PREFILL_PORTS=()
 DECODE_HOSTS=()
 DECODE_PORTS=()
+PREFILL_PIDS=()
+DECODE_PIDS=()
 
 wait_for_server() {
   local port=$1
+  local pid=$2
   timeout 1200 bash -c "
     until curl -s localhost:${port}/health > /dev/null; do
+      if ! kill -0 $pid 2>/dev/null; then
+        echo \"Error: vLLM server on port $port (PID $pid) crashed or failed to start!\" >&2
+        exit 1
+      fi
       sleep 1
     done" && return 0 || return 1
 }
 
+check_failed_requests() {
+  local log_file="$1"
+  local failed_requests
+  failed_requests=$(grep "Failed requests:" "$log_file" | awk '{print $3}' || true)
+
+  if [ -z "$failed_requests" ]; then
+    echo "Error: Could not find 'Failed requests:' in the benchmark output." >&2
+    return 1
+  fi
+
+  if [ "$failed_requests" -gt 0 ]; then
+    echo "Error: Benchmark reported $failed_requests failed requests." >&2
+    return 1
+  fi
+  
+  echo "Success: Benchmark reported $failed_requests failed requests." >&2
+  return 0
+}
+
 cleanup_instances() {
   echo "Cleaning up any running vLLM instances..."
-  pkill -f "vllm serve" || true
+  pkill -f "vllm" || true
   pkill -f "toy_proxy_server" || true
   sleep 1
 }
 
-mkdir -p $HOME/logs
+LOG_DIR=$HOME/logs
+
+echo "--- The HOME variable is : $HOME ---"
+
+if [ ! -d $LOG_DIR ]; then
+  mkdir -p $LOG_DIR
+else
+  # Delete old log files to avoid printing stale logs at the end
+  rm -f $LOG_DIR/prefill_0.txt $LOG_DIR/decode_0.txt $LOG_DIR/benchmark_0.txt $LOG_DIR/proxy_0.txt
+fi
+
 cleanup_instances
 
 # Start prefill instances
@@ -63,7 +141,9 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     \
     TPU_KV_TRANSFER_PORT=$KV_PORT \
     TPU_SIDE_CHANNEL_PORT=$SIDE_PORT \
-    SKIP_JAX_PRECOMPILE=1 \
+    SKIP_JAX_PRECOMPILE=0 \
+    VLLM_XLA_CHECK_RECOMPILATION=0 \
+    VLLM_XLA_CACHE_PATH="/tmp/jax_cache_$PORT" \
     \
     vllm serve $MODEL \
     --port $PORT \
@@ -73,10 +153,11 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     --no-enable-prefix-caching \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
     --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}" \
-    > $HOME/logs/prefill_$i.txt 2>&1 &
+    > $LOG_DIR/prefill_$i.txt 2>&1 &
 
     PREFILL_HOSTS+=("localhost")
     PREFILL_PORTS+=($PORT)
+    PREFILL_PIDS+=($!)
 done
 
 
@@ -97,78 +178,70 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     \
     TPU_KV_TRANSFER_PORT=$KV_PORT \
     TPU_SIDE_CHANNEL_PORT=$SIDE_PORT \
-    SKIP_JAX_PRECOMPILE=1 \
+    SKIP_JAX_PRECOMPILE=0 \
+    VLLM_XLA_CHECK_RECOMPILATION=0 \
+    VLLM_XLA_CACHE_PATH="/tmp/jax_cache_$PORT" \
     \
     vllm serve $MODEL \
     --port $PORT \
     --gpu-memory-utilization 0.3 \
     --no-enable-prefix-caching \
     --max-num-batched-tokens 1024 \
-    --block-size 128 \
     --tensor-parallel-size $DECODER_TP_SIZE \
     --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}" \
-    > $HOME/logs/decode_$i.txt 2>&1 &
+    > $LOG_DIR/decode_$i.txt 2>&1 &
 
     DECODE_HOSTS+=("localhost")
     DECODE_PORTS+=($PORT)
+    DECODE_PIDS+=($!)
 done
 
 # Wait for all instances to start
-for PORT in "${PREFILL_PORTS[@]}"; do
+for i in "${!PREFILL_PORTS[@]}"; do
+    PORT=${PREFILL_PORTS[$i]}
     echo "Waiting for prefill on port $PORT to start..."
-    wait_for_server $PORT
+    wait_for_server $PORT ${PREFILL_PIDS[$i]}
 done
 
-for PORT in "${DECODE_PORTS[@]}"; do
+for i in "${!DECODE_PORTS[@]}"; do
+    PORT=${DECODE_PORTS[$i]}
     echo "Waiting for decode on port $PORT to start..."
-    wait_for_server $PORT
+    wait_for_server $PORT ${DECODE_PIDS[$i]}
 done
 
 echo "starting proxy server"
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 # Start proxy server
-python $HOME/tpu-inference/examples/disagg/toy_proxy_server.py \
+python $SCRIPT_DIR/toy_proxy_server.py \
 --host localhost \
 --port 8000 \
 --prefiller-hosts ${PREFILL_HOSTS[@]} \
 --prefiller-ports ${PREFILL_PORTS[@]} \
 --decoder-hosts ${DECODE_HOSTS[@]} \
 --decoder-ports ${DECODE_PORTS[@]} \
-> $HOME/logs/proxy_s.txt 2>&1 &
+> $LOG_DIR/proxy_0.txt 2>&1 &
 
 # run benchmark for both disagg and non-disagg
-LOG_FILE="$HOME/logs/benchmark_single_host.txt"
+LOG_FILE="$LOG_DIR/benchmark_0.txt"
 echo "--- Running Disagg Benchmark ---" > $LOG_FILE
 
 # run ben for disagg
 set -x
 vllm bench serve \
---model=$MODEL \
---num-warmups=3 \
---dataset-name=random \
---random-input-len=1024 \
---random-output-len=128 \
---num-prompts=30 \
---ignore-eos \
---host=localhost \
---port 8000 \
---request-rate 4 \
->> $LOG_FILE 2>&1
-
-echo -e "\n\n--- Running Non-Disagg Benchmark ---" >> $LOG_FILE
-# run ben for non-disagg
-vllm bench serve \
---model=$MODEL \
---num-warmups=3 \
---dataset-name=random \
---random-input-len=4096 \
---random-output-len=128 \
---num-prompts=30 \
---ignore-eos \
---host=localhost \
---port 9400 \
---request-rate 4 \
->> $LOG_FILE 2>&1
+  --model=$MODEL \
+  --num-warmups=3 \
+  --dataset-name=random \
+  --random-input-len=${INPUT_LEN} \
+  --random-output-len=${OUTPUT_LEN} \
+  --num-prompts=${NUM_PROMPTS} \
+  --ignore-eos \
+  --host=localhost \
+  --port 8000 \
+  --request-rate=${REQUEST_RATE} \
+  >> $LOG_FILE 2>&1
 set +x
+
+check_failed_requests "$LOG_FILE"
 
 cat <<'EOF'
 The proxy server has been launched on: 127.0.0.1:8000
