@@ -286,8 +286,6 @@ class TPUWorker(WorkerBase):
             self.devices[0],
             need_pp=self.parallel_config.pipeline_parallel_size > 1)
 
-        ensure_kv_transfer_initialized(self.vllm_config)
-
         is_first_rank = True
         is_last_rank = True
         self.topology_order_id = self.rank
@@ -508,6 +506,10 @@ class TPUWorker(WorkerBase):
                  and self.model_runner.model_config.enforce_eager)):
             self.model_runner.compilation_manager._precompile_sampling()
             self.model_runner.compilation_manager._precompile_gather_logprobs()
+
+        # Init kv cache connector here, because it requires `kv_cache_config`.
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+
         self.model_runner.initialize_kv_cache(kv_cache_config,
                                               self.topology_order_id)
 
