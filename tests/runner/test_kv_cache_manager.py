@@ -766,9 +766,7 @@ class TestKVCacheManager:
             self.runner.vllm_config.sharding_config = MagicMock()
             self.runner.vllm_config.sharding_config.total_dp_size = 1
 
-        with patch('tpu_inference.runner.kv_cache_manager.logger.warning_once'
-                   ) as mock_warning_once, patch(
-                       'dataclasses.replace') as mock_replace:
+        with patch('dataclasses.replace') as mock_replace:
             mock_replaced_spec = MagicMock()
             mock_replaced_spec.page_size_bytes = page_size_bytes
             mock_replace.return_value = mock_replaced_spec
@@ -777,11 +775,6 @@ class TestKVCacheManager:
         # Even though DUPLICATE_SHARED_KV_CACHE_LAYERS=False, Mamba does not
         # support shared layers right now, so we force it to fallback to True.
         assert len(self.runner.kv_caches) == 4
-
-        # Verify the warning is triggered exactly once for the fallback
-        mock_warning_once.assert_called_once_with(
-            "MambaSpec does not support shared layers for now, defaulting to single KV cache per layer..."
-        )
 
         for i in range(4):
             mamba_states = self.runner.kv_caches[i]

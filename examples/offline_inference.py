@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-import os
 
 from vllm import LLM, EngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -105,6 +104,8 @@ def main(args: dict):
         'Who wrote the novel "Pride and Prejudice"?',
     ]
 
+    prompts = prompts * 12
+
     profiler_config = llm.llm_engine.vllm_config.profiler_config
     if profiler_config.profiler == "torch":
         llm.start_profile()
@@ -138,7 +139,7 @@ def main(args: dict):
 
 if __name__ == "__main__":
     # Skip long warmup for local simple test.
-    os.environ.setdefault('SKIP_JAX_PRECOMPILE', '1')
+    # os.environ.setdefault('SKIP_JAX_PRECOMPILE', '1')
 
     parser = create_parser()
     args: dict = vars(parser.parse_args())

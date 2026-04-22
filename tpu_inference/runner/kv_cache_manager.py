@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import dataclasses
 from typing import TYPE_CHECKING, List
 
 import jax
@@ -363,12 +362,6 @@ class KVCacheManager:
                 if any(
                         isinstance(layer_name_to_spec[layer_name], MambaSpec)
                         for layer_name in kv_cache_tensor.shared_by):
-                    # TODO (jacobplatin): we should not be replicating the kv cache for each layer and instead
-                    # should follow the native GPU/Torch approach where every group of layers (shared_by)
-                    # shares the same underlying raw tensor.
-                    logger.warning_once(
-                        "MambaSpec does not support shared layers for now, defaulting to single KV cache per layer..."
-                    )
                     duplicate_shared_layers = True
                     # assert that each kv_cache_tensor in kv_cache_config.kv_cache_tensors has the same number of shared layers
                     # This is needed for models like Qwen3.5 where every 4 layers share the same KV cache (3 linear attn and 1 full attn)
@@ -382,19 +375,7 @@ class KVCacheManager:
 
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             if duplicate_shared_layers:
-                total_group_page_size = 0
-                for name in kv_cache_tensor.shared_by:
-                    spec = layer_name_to_spec[name]
-                    # MambaSpec has a padded page size to unify it with full
-                    # attention layers. If duplicating, use unpadded size for
-                    # num_blocks calculation to make it consistent with actual
-                    # allocation and avoid underutilization of HBM.
-                    if isinstance(spec, MambaSpec):
-                        total_group_page_size += dataclasses.replace(
-                            spec, page_size_padded=None).page_size_bytes
-                    else:
-                        total_group_page_size += spec.page_size_bytes
-                num_blocks = kv_cache_tensor.size // total_group_page_size
+                num_blocks = kv_cache_config.num_blocks
             else:
                 # If sharing KV cache, compute `num_blocks` using the page size
                 # of the first layer.
