@@ -1556,13 +1556,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         dev_arrays_payload = jax.device_put(metadata_blob,
                                             data_parallel_attn_sharding)
 
-        metadata = common_utils.DeviceBuffer.unpack_arrays(
-            dev_arrays_payload, metadata_layout)
-        input_ids = metadata["input_ids"].ravel()
-        query_start_loc = metadata["query_start_loc"].ravel()
-        seq_lens = metadata["seq_lens"].ravel()
-        logits_indices = metadata["logits_indices"].ravel()
-        request_distribution = metadata["request_distribution"].ravel()
+        metadata = common_utils.DeviceBuffer.unpack_arrays(dev_arrays_payload,
+                                                           metadata_layout,
+                                                           shape=(-1, ))
+        input_ids = metadata["input_ids"]
+        query_start_loc = metadata["query_start_loc"]
+        seq_lens = metadata["seq_lens"]
+        logits_indices = metadata["logits_indices"]
+        request_distribution = metadata["request_distribution"]
 
         # Place positions on device
         if self.uses_mrope:
@@ -1607,12 +1608,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0
             block_tables = metadata.get(
                 "block_tables_gid_0") if not no_kv_cache else None
-            if block_tables is not None:
-                block_tables = block_tables.ravel()
             attention_metadata = build_attn(block_tables)
         else:
             attention_metadata = {
-                name: build_attn(metadata[f"block_tables_gid_{gid}"].ravel())
+                name: build_attn(metadata[f"block_tables_gid_{gid}"])
                 for gid, kv_cache_group in enumerate(
                     self.kv_cache_config.kv_cache_groups)
                 for name in kv_cache_group.layer_names
@@ -1844,8 +1843,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         dev_arrays_payload = jax.device_put(metadata_blob,
                                             data_parallel_attn_sharding)
 
-        metadata = common_utils.DeviceBuffer.unpack_arrays(
-            dev_arrays_payload, metadata_layout)
+        metadata = common_utils.DeviceBuffer.unpack_arrays(dev_arrays_payload,
+                                                           metadata_layout,
+                                                           shape=(-1, ))
         input_ids = metadata["input_ids"]
         query_start_loc = metadata["query_start_loc"]
         seq_lens = metadata["seq_lens"]
@@ -1891,12 +1891,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0
             block_tables = metadata.get(
                 "block_tables_gid_0") if not no_kv_cache else None
-            if block_tables is not None:
-                block_tables = block_tables.ravel()
             attention_metadata = build_attn(block_tables)
         else:
             attention_metadata = {
-                name: build_attn(metadata[f"block_tables_gid_{gid}"].ravel())
+                name: build_attn(metadata[f"block_tables_gid_{gid}"])
                 for gid, kv_cache_group in enumerate(
                     self.kv_cache_config.kv_cache_groups)
                 for name in kv_cache_group.layer_names
