@@ -950,29 +950,29 @@ class DPScheduler(SchedulerInterface):
             global_indices = [g.req_id_to_index[rid] for rid in req_ids]
             rank_req_id_to_index = {rid: i for i, rid in enumerate(req_ids)}
 
-            outputs.append(
-                ModelRunnerOutput(
-                    req_ids=req_ids,
-                    req_id_to_index=rank_req_id_to_index,
-                    sampled_token_ids=([
-                        g.sampled_token_ids[i] for i in global_indices
-                    ] if g.sampled_token_ids else []),
-                    logprobs=(self._slice_logprobs(g.logprobs, global_indices)
-                              if g.logprobs is not None and global_indices else
-                              None),
-                    prompt_logprobs_dict={
-                        rid: g.prompt_logprobs_dict[rid]
-                        for rid in req_ids if rid in g.prompt_logprobs_dict
-                    },
-                    pooler_output=([
-                        g.pooler_output[i] for i in global_indices
-                    ] if g.pooler_output else None),
-                    num_nans_in_logits=({
-                        rid: g.num_nans_in_logits[rid]
-                        for rid in req_ids if rid in g.num_nans_in_logits
-                    } if g.num_nans_in_logits else None),
-                    kv_connector_output=g.kv_connector_output,
-                ))
+            rank_model_runner_output = ModelRunnerOutput(
+                req_ids=req_ids,
+                req_id_to_index=rank_req_id_to_index,
+                sampled_token_ids=(
+                    [g.sampled_token_ids[i]
+                     for i in global_indices] if g.sampled_token_ids else []),
+                logprobs=(self._slice_logprobs(g.logprobs, global_indices) if
+                          g.logprobs is not None and global_indices else None),
+                prompt_logprobs_dict={
+                    rid: g.prompt_logprobs_dict[rid]
+                    for rid in req_ids if rid in g.prompt_logprobs_dict
+                },
+                pooler_output=([g.pooler_output[i] for i in global_indices]
+                               if g.pooler_output else None),
+                num_nans_in_logits=({
+                    rid: g.num_nans_in_logits[rid]
+                    for rid in req_ids if rid in g.num_nans_in_logits
+                } if g.num_nans_in_logits else None),
+                kv_connector_output=g.kv_connector_output,
+            )
+            rank_model_runner_output.expert_indices = getattr(
+                g, 'expert_indices', None)
+            outputs.append(rank_model_runner_output)
 
         return outputs
 
