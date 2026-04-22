@@ -9,6 +9,10 @@ on:
         description: Optional SHA or ref to publish. Defaults to the latest successful marin-validate run on main.
         required: false
         type: string
+      vllm_tag:
+        description: Optional vLLM release tag to validate against. Defaults to the marin-nightly alias.
+        required: false
+        type: string
 
 concurrency:
   group: marin-nightly
@@ -25,7 +29,7 @@ jobs:
     timeout-minutes: 45
 
     env:
-      GH_TOKEN: ${{ secrets.MARIN_RELEASE_TOKEN != '' && secrets.MARIN_RELEASE_TOKEN || github.token }}
+      GH_TOKEN: ${{ github.token }}
       JAX_PLATFORMS: cpu
       TPU_ACCELERATOR_TYPE: v6e-8
       TPU_NAME: ci
@@ -36,13 +40,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Require cross-repo release token
-        run: |
-          if [[ -z "${{ secrets.MARIN_RELEASE_TOKEN }}" ]]; then
-            echo "MARIN_RELEASE_TOKEN is required to attach paired manifests in marin-community/vllm." >&2
-            exit 1
-          fi
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
@@ -58,6 +55,15 @@ jobs:
             TARGET_SHA=$(git rev-parse "${{ inputs.ref }}^{commit}")
           fi
           echo "TARGET_SHA=${TARGET_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve vLLM source tag
+        id: vllm
+        run: |
+          VLLM_TAG="${{ inputs.vllm_tag }}"
+          if [[ -z "$VLLM_TAG" ]]; then
+            VLLM_TAG="marin-nightly"
+          fi
+          echo "VLLM_TAG=${VLLM_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Download validated artifact
         run: |
@@ -76,7 +82,7 @@ jobs:
         run: |
           bash .github/scripts/marin_release.sh download-release-assets \
             "marin-community/vllm" \
-            "marin-nightly" \
+            "${{ steps.vllm.outputs.VLLM_TAG }}" \
             paired-vllm \
             "*.whl" \
             "marin-build.json"
@@ -110,7 +116,7 @@ jobs:
 
           This release reuses the exact wheel produced by the latest successful \`marin-validate.yml\` run on \`main\`.
 
-          The paired \`vllm\` nightly manifest is attached to this release and the matching \`marin-community/vllm\` release after the pair gate passes.
+          Paired \`vllm\` release: \`${{ steps.vllm.outputs.VLLM_TAG }}\`
           EOF
 
           bash .github/scripts/marin_release.sh upsert-release \
@@ -155,17 +161,14 @@ jobs:
       - name: Create pair manifest
         id: pair
         run: |
-          VLLM_DATE=$(jq -r '.date' paired-vllm/marin-build.json)
-          VLLM_SHORT_SHA=$(jq -r '.short_sha' paired-vllm/marin-build.json)
           VLLM_SHA=$(jq -r '.sha' paired-vllm/marin-build.json)
-          VLLM_TAG="marin-nightly-${VLLM_DATE}-${VLLM_SHORT_SHA}"
           RELEASED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
           jq -n \
             --arg release_type "nightly" \
             --arg released_at "$RELEASED_AT" \
             --arg vllm_sha "$VLLM_SHA" \
-            --arg vllm_tag "$VLLM_TAG" \
+            --arg vllm_tag "${{ steps.vllm.outputs.VLLM_TAG }}" \
             --arg tpu_sha "${{ steps.immutable.outputs.SHA }}" \
             --arg tpu_tag "${{ steps.immutable.outputs.TAG }}" \
             '{
@@ -178,61 +181,24 @@ jobs:
             }' > marin-release-pair.json
 
           {
-            echo "VLLM_TAG=${VLLM_TAG}"
+            echo "VLLM_TAG=${{ steps.vllm.outputs.VLLM_TAG }}"
             echo "VLLM_SHA=${VLLM_SHA}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Attach paired manifest to both repos
+      - name: Attach paired manifest to nightly releases
         run: |
-          VLLM_IMMUTABLE_TITLE="Marin nightly $(jq -r '.date' paired-vllm/marin-build.json) ($(jq -r '.short_sha' paired-vllm/marin-build.json))"
-
-          cat > /tmp/vllm-nightly-paired-notes.md <<EOF
-          Auto-published nightly release for \`${{ steps.pair.outputs.VLLM_SHA }}\`.
-
-          Paired \`tpu-inference\` nightly: \`${{ steps.immutable.outputs.TAG }}\`
-          EOF
-
-          cat > /tmp/vllm-nightly-alias-paired-notes.md <<EOF
-          Moving alias for the latest Marin nightly release.
-
-          Current immutable release: \`${{ steps.pair.outputs.VLLM_TAG }}\`
-          Paired \`tpu-inference\` nightly: \`${{ steps.immutable.outputs.TAG }}\`
-          EOF
-
           cat > /tmp/tpu-nightly-paired-notes.md <<EOF
           Auto-published nightly release for \`${{ steps.immutable.outputs.SHA }}\`.
 
-          Paired \`vllm\` nightly: \`${{ steps.pair.outputs.VLLM_TAG }}\`
+          Paired \`vllm\` release: \`${{ steps.pair.outputs.VLLM_TAG }}\`
           EOF
 
           cat > /tmp/tpu-nightly-alias-paired-notes.md <<EOF
           Moving alias for the latest Marin nightly release.
 
           Current immutable release: \`${{ steps.immutable.outputs.TAG }}\`
-          Paired \`vllm\` nightly: \`${{ steps.pair.outputs.VLLM_TAG }}\`
+          Paired \`vllm\` release: \`${{ steps.pair.outputs.VLLM_TAG }}\`
           EOF
-
-          bash .github/scripts/marin_release.sh upsert-release \
-            "marin-community/vllm" \
-            "${{ steps.pair.outputs.VLLM_TAG }}" \
-            "${{ steps.pair.outputs.VLLM_SHA }}" \
-            true \
-            "$VLLM_IMMUTABLE_TITLE" \
-            /tmp/vllm-nightly-paired-notes.md \
-            paired-vllm/*.whl \
-            paired-vllm/marin-build.json \
-            marin-release-pair.json
-
-          bash .github/scripts/marin_release.sh upsert-release \
-            "marin-community/vllm" \
-            "marin-nightly" \
-            "${{ steps.pair.outputs.VLLM_SHA }}" \
-            true \
-            "Marin nightly (latest)" \
-            /tmp/vllm-nightly-alias-paired-notes.md \
-            paired-vllm/*.whl \
-            paired-vllm/marin-build.json \
-            marin-release-pair.json
 
           bash .github/scripts/marin_release.sh upsert-release \
             "$GITHUB_REPOSITORY" \
