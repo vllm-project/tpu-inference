@@ -64,6 +64,10 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash -c "
+          if [ -z \"\${KERNEL_TUNING_RUN_ID}\" ] || [ -z \"\${KERNEL_TUNING_CASE_SET_ID}\" ]; then
+            echo \"Error: KERNEL_TUNING_RUN_ID or KERNEL_TUNING_CASE_SET_ID not set\"
+            exit 1
+          fi && \
           pip install --upgrade google-cloud-spanner && \
           pip install --upgrade google-api-core && \
           pip install --upgrade google-auth && \
