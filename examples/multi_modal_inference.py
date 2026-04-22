@@ -279,6 +279,8 @@ def main(args):
     if engine_args.get("compilation_config") is None:
         engine_args["compilation_config"] = {}
     engine_args["compilation_config"]["cudagraph_capture_sizes"] = []
+    # Fix for pydantic validation error in recent vLLM versions
+    engine_args["compilation_config"]["pass_config"] = {"fuse_minimax_qk_norm": False}
 
     llm = LLM(**engine_args)
 
