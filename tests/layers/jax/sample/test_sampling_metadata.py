@@ -163,7 +163,7 @@ def test_from_input_batch_with_sampling_and_padding(mesh: Mesh):
     np.testing.assert_allclose(np.asarray(metadata.top_p), expected_top_p)
 
 
-def test_from_input_batch_no_padding_needed(mesh: Mesh):
+def test_from_input_batch_id_padding_needed(mesh: Mesh):
     """
     Tests the case where `num_reqs` equals `padded_num_reqs`, so **no padding** should occur.
     """
@@ -240,21 +240,21 @@ def test_from_input_batch_with_logprobs(mesh: Mesh):
     assert metadata_with.logprobs, "logprobs should be True when max_num_logprobs > 0"
 
     # Case 2: Logprobs are not requested (max_num_logprobs is 0)
-    mock_batch_no_logprobs_zero = MockInputBatch(all_greedy=True,
+    mock_batch_id_logprobs_zero = MockInputBatch(all_greedy=True,
                                                  max_num_logprobs=0)
     metadata_without_zero = _create_sampling_metadata(
         mesh=mesh,
-        mock_batch=mock_batch_no_logprobs_zero,
+        mock_batch=mock_batch_id_logprobs_zero,
         padded_num_reqs=4,
     )
     assert not metadata_without_zero.logprobs, "logprobs should be False when max_num_logprobs is 0"
 
     # Case 3: Logprobs are not requested (max_num_logprobs is None)
-    mock_batch_no_logprobs_none = MockInputBatch(all_greedy=True,
+    mock_batch_id_logprobs_none = MockInputBatch(all_greedy=True,
                                                  max_num_logprobs=None)
     metadata_without_none = _create_sampling_metadata(
         mesh=mesh,
-        mock_batch=mock_batch_no_logprobs_none,
+        mock_batch=mock_batch_id_logprobs_none,
         padded_num_reqs=4,
     )
     assert not metadata_without_none.logprobs, "logprobs should be False when max_num_logprobs is None"

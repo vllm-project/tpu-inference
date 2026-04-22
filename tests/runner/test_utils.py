@@ -264,47 +264,51 @@ class MockSchedulerOutput:
 
 
 @pytest.mark.parametrize(
-    "scenario, num_reqs, req_ids, computed, scheduled, expected_prefill, expected_decode",
+    "scenario, num_reqs, req_ids, computed, scheduled, expected_prefill, expected_decode, expected_phase",
     [
         ("prefill_only", 2, [101, 102], [0, 0], {
             101: 50,
             102: 100
-        }, 150, 0),
+        }, 150, 0, "PREFILL_ONLY"),
         ("decode_only", 3, [201, 202, 203], [10, 20, 5], {
             201: 1,
             202: 1,
             203: 1
-        }, 0, 3),
+        }, 0, 3, "DECODE_ONLY"),
         ("mixed_batch", 4, [301, 302, 303, 304], [0, 10, 0, 20], {
             301: 100,
             302: 1,
             303: 50,
             304: 1
-        }, 150, 2),
+        }, 150, 2, "PREFILL_HEAVY"),
         ("chunked_prefill", 2, [401, 402], [50, 10], {
             401: 50,
             402: 1
-        }, 50, 1),
+        }, 50, 1, "PREFILL_HEAVY"),
     ])
 def test_get_batch_composition_stats(scenario, num_reqs, req_ids, computed,
                                      scheduled, expected_prefill,
-                                     expected_decode):
+                                     expected_decode, expected_phase):
     """Tests get_batch_composition_stats for various scenarios."""
     input_batch = MockInputBatch(req_ids, computed)
     scheduler_output = MockSchedulerOutput(scheduled)
     total_tokens = sum(scheduled.values())
+    batch_id = 42
 
     stats = get_batch_composition_stats(
+        batch_id=batch_id,
         input_batch=input_batch,
         total_num_scheduled_tokens=total_tokens,
         num_reqs=num_reqs,
         padded_total_num_scheduled_tokens=total_tokens + 8,
         scheduler_output=scheduler_output)
 
+    assert stats["batch_id"] == batch_id
     assert stats["num_prefill_tokens"] == expected_prefill
     assert stats["num_decode_tokens"] == expected_decode
     assert stats["num_reqs"] == num_reqs
     assert stats["total_num_scheduled_tokens"] == total_tokens
+    assert stats["phase"] == expected_phase
 
 
 @pytest.mark.parametrize("prefill_tokens, total_tokens, expected_phase", [
