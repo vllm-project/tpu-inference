@@ -54,16 +54,39 @@ _F32 = VectorTypeHelper(ir.F32Type.get)
 _BF16 = VectorTypeHelper(ir.BF16Type.get)
 
 
-def is_supported_by_sc_gather_reduce(x_shape: int, sc_kernel_threshold: int,
+def is_supported_by_sc_gather_reduce(x_shape: int, hidden_dim: int,
                                      reduce_group_size: int) -> bool:
-    if x_shape > sc_kernel_threshold and pltpu.get_tpu_info(
-    ).generation == 7 and reduce_group_size == 8:
-        return True
+    # Hardcoded performance crossover threshold based on benchmark (Tokens * Hidden Dim)
+    # empirically found.
+    SC_CROSSOVER_THRESHOLD = 1_150_000
 
-    logger.warning(
-        'Plattform does not support SparseCore, gather reduce not performed on SparseCore.'
-    )
-    return False
+    # --- 1. Hardware Generation Check ---
+    if pltpu.get_tpu_info().generation != 7:
+        logger.warning(
+            'Platform does not support SparseCore (requires TPU v7). Gather reduce not performed on SC.'
+        )
+        return False
+
+    # --- 2. Hardware Safety Constraints (Tile Alignment & OOB Prevention) ---
+    if reduce_group_size != 8:
+        logger.warning(
+            f'SparseCore gather reduce currently strictly expects reduce_group_size=8, got {reduce_group_size}.'
+        )
+        return False
+
+    if hidden_dim < 2048 or hidden_dim % 128 != 0:
+        logger.warning(
+            f'Hidden dim {hidden_dim} is unsafe for SC macro-tile alignment (must be >= 2048 and a multiple of 128). Gather reduce not performed on SC.'
+        )
+        return False
+
+    # --- 3. Performance Crossover Check ---
+    total_elements = x_shape * hidden_dim
+    if total_elements <= SC_CROSSOVER_THRESHOLD:
+        # Silently fall back to Ragged Scatter, as it is mathematically faster for this shape
+        return False
+
+    return True
 
 
 def get_valid_col_chunk_size(total_cols: int,

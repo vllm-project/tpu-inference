@@ -123,7 +123,6 @@ def moe_gmm_local(
     activation: str,
     topk: int,
     parallelism: Literal["tp", "ep"],
-    sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
 ) -> jax.Array:
     """Main MoE logic on a local shard can run in TP or EP mode.
@@ -163,7 +162,7 @@ def moe_gmm_local(
         )[topk_argsort_revert_indices]
 
     if gather_reduce_sc.is_supported_by_sc_gather_reduce(
-            gmm1_res.shape[0], sc_kernel_threshold, topk):
+            gmm1_res.shape[0], gmm1_res.shape[1], topk):
         gmm2_res = gmm_wrapper(gmm1_res,
                                w2,
                                w2_scale,
@@ -246,7 +245,6 @@ def tensor_parallel_gmm(
     activation: str,
     topk: int,
     mesh: Mesh,
-    sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
 ) -> jax.Array:
     data_p_spec = P(ShardingAxisName.MLP_DATA)
@@ -271,7 +269,6 @@ def tensor_parallel_gmm(
             activation=activation,
             topk=topk,
             parallelism="tp",
-            sc_kernel_threshold=sc_kernel_threshold,
             sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
         ),
         mesh=mesh,
@@ -320,7 +317,6 @@ def expert_parallel_gmm(
     activation: str,
     topk: int,
     mesh: Mesh,
-    sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
 ) -> jax.Array:
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
@@ -341,7 +337,6 @@ def expert_parallel_gmm(
             activation=activation,
             topk=topk,
             parallelism="ep",
-            sc_kernel_threshold=sc_kernel_threshold,
             sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
         ),
         mesh=mesh,
@@ -405,7 +400,6 @@ def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
     "use_ep",
     "activation",
     "scoring_fn",
-    "sc_kernel_threshold",
     "sc_kernel_col_chunk_size",
     "all_gather_fp8",
 ))
@@ -424,7 +418,6 @@ def fused_moe_func(
     use_ep: bool,
     activation: str,
     scoring_fn: str,
-    sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
     all_gather_fp8: bool = False,
 ) -> jax.Array:
@@ -560,7 +553,6 @@ def fused_moe_func(
             activation=activation,
             topk=topk,
             mesh=mesh,
-            sc_kernel_threshold=sc_kernel_threshold,
             sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
         )
     else:
@@ -578,7 +570,6 @@ def fused_moe_func(
             activation=activation,
             topk=topk,
             mesh=mesh,
-            sc_kernel_threshold=sc_kernel_threshold,
             sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
         )
 
