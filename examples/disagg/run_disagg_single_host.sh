@@ -141,7 +141,8 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     \
     TPU_KV_TRANSFER_PORT=$KV_PORT \
     TPU_SIDE_CHANNEL_PORT=$SIDE_PORT \
-    SKIP_JAX_PRECOMPILE=1 \
+    SKIP_JAX_PRECOMPILE=0 \
+    VLLM_XLA_CHECK_RECOMPILATION=0 \
     VLLM_XLA_CACHE_PATH="/tmp/jax_cache_$PORT" \
     \
     vllm serve $MODEL \
@@ -177,7 +178,8 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     \
     TPU_KV_TRANSFER_PORT=$KV_PORT \
     TPU_SIDE_CHANNEL_PORT=$SIDE_PORT \
-    SKIP_JAX_PRECOMPILE=1 \
+    SKIP_JAX_PRECOMPILE=0 \
+    VLLM_XLA_CHECK_RECOMPILATION=0 \
     VLLM_XLA_CACHE_PATH="/tmp/jax_cache_$PORT" \
     \
     vllm serve $MODEL \
