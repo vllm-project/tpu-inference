@@ -433,7 +433,7 @@ steps:
               .buildkite/scripts/run_in_docker.sh bash -c 'SKIP_JAX_PRECOMPILE=0 USE_MOE_EP_KERNEL=1 VLLM_XLA_CHECK_RECOMPILATION=1  MODEL_IMPL_TYPE=vllm python examples/offline_inference.py --model Qwen/Qwen1.5-MoE-A2.7B  --tensor-parallel-size 4 --enable-expert-parallel --no-async-scheduling --max-model-len 32 --max-num-batched-tokens 32 --max-num-seqs 8'
             fi
 
-      - label: "${TPU_VERSION:-tpu6e} E2E test for DCN-based P/D disaggregation"
+      - label: "${TPU_VERSION:-tpu6e} E2E test for Multihost DCN-based P/D disaggregation"
         key: ${TPU_VERSION:-tpu6e}_test_25
         depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
@@ -443,7 +443,7 @@ steps:
           MODEL: "Qwen/Qwen3-0.6B"
           INPUT_LEN: 1024
           OUTPUT_LEN: 1024
-          NUM_PROMPTS: 5
+          NUM_PROMPTS: 100
           RANDOM_SEED: 10
           MAX_CONCURRENCY: 10
           TEST_MODE: 1
@@ -583,11 +583,29 @@ steps:
         soft_fail: true
         env:
           TEST_MODEL: Qwen/Qwen2.5-VL-7B-Instruct
-          TENSOR_PARALLEL_SIZE: 1
+          TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
           MINIMUM_ACCURACY_THRESHOLD: 0.72
         commands:
           - |
             .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
+
+      - label: "${TPU_VERSION:-tpu6e} E2E test for Single Host DCN-based P/D disaggregation"
+        key: ${TPU_VERSION:-tpu6e}_test_34
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        soft_fail: true
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+          MODEL: "Qwen/Qwen3-0.6B"
+          INPUT_LEN: 512
+          OUTPUT_LEN: 128
+          NUM_PROMPTS: 200
+          REQUEST_RATE: 4
+        agents:
+          queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+        commands:
+          - |
+            .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/examples/disagg/run_disagg_single_host.sh
 
       # -----------------------------------------------------------------
       # NOTIFICATION STEP
@@ -629,9 +647,10 @@ steps:
           - ${TPU_VERSION:-tpu6e}_test_31
           - ${TPU_VERSION:-tpu6e}_test_32
           - ${TPU_VERSION:-tpu6e}_test_33
+          - ${TPU_VERSION:-tpu6e}_test_34
         agents:
           queue: cpu
         commands:
           - |
             .buildkite/scripts/check_results.sh \
-              "TPU JAX Tests Failed" ${TPU_VERSION:-tpu6e}_test_0 ${TPU_VERSION:-tpu6e}_test_1 ${TPU_VERSION:-tpu6e}_test_2 ${TPU_VERSION:-tpu6e}_test_3 ${TPU_VERSION:-tpu6e}_test_4 ${TPU_VERSION:-tpu6e}_test_6 ${TPU_VERSION:-tpu6e}_test_7_1 ${TPU_VERSION:-tpu6e}_test_7_2 ${TPU_VERSION:-tpu6e}_test_7_3 ${TPU_VERSION:-tpu6e}_test_8 ${TPU_VERSION:-tpu6e}_test_9 ${TPU_VERSION:-tpu6e}_test_10 ${TPU_VERSION:-tpu6e}_test_11 ${TPU_VERSION:-tpu6e}_test_12 ${TPU_VERSION:-tpu6e}_test_13 ${TPU_VERSION:-tpu6e}_test_15 ${TPU_VERSION:-tpu6e}_test_16 ${TPU_VERSION:-tpu6e}_test_17 ${TPU_VERSION:-tpu6e}_test_18 ${TPU_VERSION:-tpu6e}_test_19 ${TPU_VERSION:-tpu6e}_test_20 ${TPU_VERSION:-tpu6e}_test_21 ${TPU_VERSION:-tpu6e}_test_22 ${TPU_VERSION:-tpu6e}_test_23 ${TPU_VERSION:-tpu6e}_test_24 ${TPU_VERSION:-tpu6e}_test_25 ${TPU_VERSION:-tpu6e}_test_26 ${TPU_VERSION:-tpu6e}_test_27 ${TPU_VERSION:-tpu6e}_test_28 ${TPU_VERSION:-tpu6e}_test_29 ${TPU_VERSION:-tpu6e}_test_30 ${TPU_VERSION:-tpu6e}_test_31 ${TPU_VERSION:-tpu6e}_test_32 ${TPU_VERSION:-tpu6e}_test_33
+              "TPU JAX Tests Failed" ${TPU_VERSION:-tpu6e}_test_0 ${TPU_VERSION:-tpu6e}_test_1 ${TPU_VERSION:-tpu6e}_test_2 ${TPU_VERSION:-tpu6e}_test_3 ${TPU_VERSION:-tpu6e}_test_4 ${TPU_VERSION:-tpu6e}_test_6 ${TPU_VERSION:-tpu6e}_test_7_1 ${TPU_VERSION:-tpu6e}_test_7_2 ${TPU_VERSION:-tpu6e}_test_7_3 ${TPU_VERSION:-tpu6e}_test_8 ${TPU_VERSION:-tpu6e}_test_9 ${TPU_VERSION:-tpu6e}_test_10 ${TPU_VERSION:-tpu6e}_test_11 ${TPU_VERSION:-tpu6e}_test_12 ${TPU_VERSION:-tpu6e}_test_13 ${TPU_VERSION:-tpu6e}_test_15 ${TPU_VERSION:-tpu6e}_test_16 ${TPU_VERSION:-tpu6e}_test_17 ${TPU_VERSION:-tpu6e}_test_18 ${TPU_VERSION:-tpu6e}_test_19 ${TPU_VERSION:-tpu6e}_test_20 ${TPU_VERSION:-tpu6e}_test_21 ${TPU_VERSION:-tpu6e}_test_22 ${TPU_VERSION:-tpu6e}_test_23 ${TPU_VERSION:-tpu6e}_test_24 ${TPU_VERSION:-tpu6e}_test_25 ${TPU_VERSION:-tpu6e}_test_26 ${TPU_VERSION:-tpu6e}_test_27 ${TPU_VERSION:-tpu6e}_test_28 ${TPU_VERSION:-tpu6e}_test_29 ${TPU_VERSION:-tpu6e}_test_30 ${TPU_VERSION:-tpu6e}_test_31 ${TPU_VERSION:-tpu6e}_test_32 ${TPU_VERSION:-tpu6e}_test_33 ${TPU_VERSION:-tpu6e}_test_34

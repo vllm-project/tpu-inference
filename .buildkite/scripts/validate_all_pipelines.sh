@@ -52,6 +52,8 @@ done < <(echo "$YAML_FILES_TO_CHECK")
 
 echo "--- 🔍 Validating changed YAML files"
 if [ ${#VALIDATE_ARGS[@]} -gt 0 ]; then
+    # TODO: Currently using standard 'bk pipeline validate' for syntax checking.
+    # In the future, this could be extended to include more complex validation logic.
     if ! bk pipeline validate "${VALIDATE_ARGS[@]}"; then
         echo "+++ ❌ Validation Failed"
         echo "Result: FAIL (Please fix the YAML syntax errors above)"
