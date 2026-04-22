@@ -83,6 +83,7 @@ steps:
       TEST_MODEL: google/gemma-4-31B-it
       TENSOR_PARALLEL_SIZE: 8
       MINIMUM_THROUGHPUT_THRESHOLD: 2
+      TIMEOUT_SECONDS: 720
     # TODO(#2333): enable performance benchmark on v6e
     commands:
       - |
