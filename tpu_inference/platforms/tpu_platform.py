@@ -283,7 +283,12 @@ class TpuPlatform(Platform):
 
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
-            assert kv_transfer_config.kv_connector == "TPUConnector"
+            allowed = ("TPUConnector", "TPUConnectorHMA")
+            if kv_transfer_config.kv_connector not in allowed:
+                raise ValueError(
+                    f"Unsupported kv_connector "
+                    f"'{kv_transfer_config.kv_connector}' for the TPU "
+                    f"platform. Expected one of {allowed}.")
         # Late initialization to avoid circular import.
         from tpu_inference.core.sched.dp_scheduler import \
             update_vllm_config_for_dp_scheduler

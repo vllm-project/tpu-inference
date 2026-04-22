@@ -243,9 +243,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES":
     env_str_list("REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES"),
     "RAGGED_GATED_DELTA_RULE_IMPL":
-    env_with_choices(
-        "RAGGED_GATED_DELTA_RULE_IMPL", "ragged_gated_delta_rule_chunked",
-        ["ragged_gated_delta_rule_ref", "ragged_gated_delta_rule_chunked"]),
+    env_with_choices("RAGGED_GATED_DELTA_RULE_IMPL",
+                     "ragged_gated_delta_rule_chunked", [
+                         "ragged_gated_delta_rule_ref",
+                         "ragged_gated_delta_rule_chunked", "fused_gdn_kernel"
+                     ]),
     "MOE_ALL_GATHER_ACTIVATION_DTYPE":
     lambda: os.getenv("MOE_ALL_GATHER_ACTIVATION_DTYPE", ""),
 }
