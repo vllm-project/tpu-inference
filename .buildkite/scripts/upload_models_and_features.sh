@@ -127,6 +127,8 @@ if [[ "${#pipeline_v6e_fragments[@]}" -gt 0 ]]; then
   export TPU_QUEUE_SINGLE="tpu_v6e_queue"
   export TPU_QUEUE_MULTI="tpu_v6e_8_queue"
   export TPU_VERSION="tpu6e"
+  export TENSOR_PARALLEL_SIZE_SINGLE=1
+  export TENSOR_PARALLEL_SIZE_MULTI=8
   buildkite-agent meta-data set "run_v6_matrix" "true"
   {
     echo "priority: ${JOB_PRIORITY:-1}"
@@ -147,6 +149,8 @@ if [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
   export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
   export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
   export TPU_VERSION="tpu7x"
+  export TENSOR_PARALLEL_SIZE_SINGLE=2
+  export TENSOR_PARALLEL_SIZE_MULTI=8
   buildkite-agent meta-data set "run_v7_matrix" "true"
   {
     echo "priority: ${JOB_PRIORITY:-1}"

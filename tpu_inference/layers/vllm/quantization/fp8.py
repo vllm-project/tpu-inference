@@ -122,6 +122,26 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
                 "Blockwise quantization is supported by quantized matmul kernel. Please enable quantized_matmul_kernel or unset the quantize block size to trigger XLA per-channel quantization."
             )
 
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        # Per https://github.com/vllm-project/vllm/pull/33892, use_marlin is set again
+        # in vllm/model_executor/layers/quantization/fp8.py `create_weights`.
+        # The flag is set on whether a specific type of GPU kernel is being used which
+        # means it is set to False for TPU.
+        # We need to return it back to True here.
+        super().create_weights(layer, input_size_per_partition,
+                               output_partition_sizes, input_size, output_size,
+                               params_dtype, **extra_weight_attrs)
+        self.use_marlin = True
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, vllm_linear.LinearBase)
 

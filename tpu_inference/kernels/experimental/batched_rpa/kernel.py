@@ -34,7 +34,7 @@ def strided_load_bkv(
     b_idx: int,
     start: int,
     *,
-    cfgs: configs.RPAConfig,
+    cfgs: configs.RpaConfigs,
 ) -> list[tuple[jax.Array, jax.Array]]:
     assert start % cfgs.serve.packing_kv == 0
     start //= cfgs.serve.packing_kv
@@ -69,12 +69,12 @@ def strided_load_bkv(
 
 def calculate_and_store_out(
     step_idx: jax.Array,
-    schedule_ref: schedule.RPASchedule,
+    schedule_ref: schedule.RpaSchedule,
     acc_scratch_ref: jax.Ref,
     l_scratch_ref: jax.Ref,
     o_vref: jax.Ref,
     *,
-    cfgs: configs.RPAConfig,
+    cfgs: configs.RpaConfigs,
 ):
 
     def _accum(b_idx: int):
@@ -115,7 +115,7 @@ def rpa_body(
     # Outputs
     o_vref: jax.Ref,
     # Scratches.
-    schedule_ref: schedule.RPASchedule,
+    schedule_ref: schedule.RpaSchedule,
     m_scratch_ref: jax.Ref,
     l_scratch_ref: jax.Ref,
     acc_scratch_ref: jax.Ref,
@@ -124,7 +124,7 @@ def rpa_body(
     cu_q_lens_ref: jax.Ref,
     kv_lens_ref: jax.Ref,
     # Configs.
-    cfgs: configs.RPAConfig,
+    cfgs: configs.RpaConfigs,
 ):
     step = pl.program_id(0)
 
@@ -215,21 +215,50 @@ def rpa_body(
     l_val = l_scratch_ref[...]
     acc_val = acc_scratch_ref[...]
 
-    m_next, l_next, o_next = flash_attention.flash_attention(
-        q,
-        k,
+    prev_p = prev_alpha = prev_q_slice = None
+    for bq_start in range(0, cfgs.bq_sz, cfgs.bq_c_sz):
+        bq_end = min(bq_start + cfgs.bq_c_sz, cfgs.bq_sz)
+        q_start = bq_start * cfgs.model.num_q_heads_per_kv_head
+        q_end = bq_end * cfgs.model.num_q_heads_per_kv_head
+        q_slice = slice(q_start, q_end)
+
+        p, alpha, m_next, l_next = flash_attention.flash_attention_qk_softmax(
+            q[:, :, q_slice],
+            k,
+            m_val[:, :, q_slice],
+            l_val[:, :, q_slice],
+            processed_q_len=processed_q_len,
+            processed_kv_len=processed_kv_len,
+            effective_kv_len=effective_kv_len,
+            cfgs=cfgs,
+            bq_start=bq_start,
+        )
+        m_scratch_ref[:, :, q_slice] = m_next
+        l_scratch_ref[:, :, q_slice] = l_next
+
+        if prev_p is not None:
+            o_next = flash_attention.flash_attention_pv(
+                prev_p,
+                v,
+                prev_alpha,
+                acc_val[:, :, prev_q_slice],
+                cfgs=cfgs,
+            )
+            acc_scratch_ref[:, :, prev_q_slice] = o_next
+
+        prev_p = p
+        prev_alpha = alpha
+        prev_q_slice = q_slice
+
+    assert prev_p is not None
+    o_next = flash_attention.flash_attention_pv(
+        prev_p,
         v,
-        acc_val,
-        m_val,
-        l_val,
-        processed_q_len=processed_q_len,
-        processed_kv_len=processed_kv_len,
-        effective_kv_len=effective_kv_len,
+        prev_alpha,
+        acc_val[:, :, prev_q_slice],
         cfgs=cfgs,
     )
-    m_scratch_ref[...] = m_next
-    l_scratch_ref[...] = l_next
-    acc_scratch_ref[...] = o_next
+    acc_scratch_ref[:, :, prev_q_slice] = o_next
 
     # Step 4: Write back outputs.
     calculate_and_store_out(
@@ -246,7 +275,7 @@ def rpa_body(
 
 
 def create_allocs(
-    kv_cache_hbm_ref: jax.Ref, o_hbm_ref: jax.Ref, cfgs: configs.RPAConfig
+    kv_cache_hbm_ref: jax.Ref, o_hbm_ref: jax.Ref, cfgs: configs.RpaConfigs
 ) -> tuple[
         bref_override.BatchingQRef,
         bref_override.KVBufferedRef,
@@ -298,7 +327,7 @@ def create_allocs(
     return q_alloc, kv_cache_alloc, o_alloc
 
 
-def get_kernel_name(cfgs: configs.RPAConfig) -> str:
+def get_kernel_name(cfgs: configs.RpaConfigs) -> str:
     name = f"RPA{cfgs.mode.symbol}-p{cfgs.serve.page_size}"
     name += f"-b{cfgs.batch_size}-q{cfgs.bq_sz}-k{cfgs.bkv_sz}"
     if cfgs.model.sliding_window:
@@ -307,7 +336,7 @@ def get_kernel_name(cfgs: configs.RPAConfig) -> str:
 
 
 def get_kernel_metadata(
-    cfgs: configs.RPAConfig, ) -> dict[str, str | int | float]:
+    cfgs: configs.RpaConfigs, ) -> dict[str, str | int | float]:
     cfgs_dict = dataclasses.asdict(cfgs)
     ret = {}
     for path, val in jax.tree_util.tree_leaves_with_path(cfgs_dict):
@@ -322,12 +351,12 @@ def rpa_kernel(
     cu_q_lens: jax.Array,
     kv_lens: jax.Array,
     page_indices: jax.Array,
-    schedule_hbm: schedule.RPASchedule,
+    schedule_hbm: schedule.RpaSchedule,
     q_hbm: jax.Array,
     new_kv_hbm: jax.Array,
     kv_cache_hbm: jax.Array,
     *,
-    cfgs: configs.RPAConfig,
+    cfgs: configs.RpaConfigs,
 ) -> tuple[jax.Array, jax.Array]:
     """Perform batched ragged paged attention with scheduler data.
 
@@ -363,7 +392,7 @@ def rpa_kernel(
         kv_lens_ref: jax.Ref,
         page_indices_ref: jax.Ref,
         # Inputs.
-        schedule_hbm_ref: schedule.RPASchedule,
+        schedule_hbm_ref: schedule.RpaSchedule,
         q_hbm_ref: jax.Ref,
         new_kv_hbm_ref: jax.Ref,
         kv_cache_hbm_ref: jax.Ref,
