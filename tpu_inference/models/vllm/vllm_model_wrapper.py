@@ -419,11 +419,11 @@ class VllmModelWrapper:
                         else:
                             call_kwargs[k] = None
                     else:
+
                         def move(val):
                             if not isinstance(val, torch.Tensor):
                                 logger.warning(
-                                    f"Expect torch.Tensor, got {type(val)}"
-                                )
+                                    f"Expect torch.Tensor, got {type(val)}")
                                 return val
                             return val.to(device="jax")
 
