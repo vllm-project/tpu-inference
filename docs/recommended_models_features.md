@@ -26,7 +26,7 @@ These tables show the models currently tested for accuracy and performance.
 
 === "Release"
 
-    --8<-- "docs/includes/release_model_support.md"
+    --8<-- "docs/includes/model_support.md"
 
 === "Nightly"
 
@@ -38,7 +38,7 @@ This table shows the features currently tested for accuracy and performance.
 
 === "Release"
 
-    --8<-- "docs/includes/release_core_features.md"
+    --8<-- "docs/includes/core_features.md"
 
 === "Nightly"
 
@@ -56,7 +56,7 @@ This section outlines the detailed hardware and precision validation for our cor
 
 === "Release"
 
-    --8<-- "docs/includes/release_microbenchmarks.md"
+    --8<-- "docs/includes/microbenchmarks.md"
 
 === "Nightly"
 
@@ -68,7 +68,7 @@ This table shows the current parallelism support status.
 
 === "Release"
 
-    --8<-- "docs/includes/release_parallelism.md"
+    --8<-- "docs/includes/parallelism.md"
 
 === "Nightly"
 
@@ -80,7 +80,7 @@ This table shows the current quantization support status.
 
 === "Release"
 
-    --8<-- "docs/includes/release_quantization.md"
+    --8<-- "docs/includes/quantization.md"
 
 === "Nightly"
 
