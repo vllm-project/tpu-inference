@@ -8,7 +8,7 @@ Feature,CorrectnessTest,PerformanceTest
 "Prefix Caching",✅ Passing,✅ Passing
 "Single Program Multi Data",✅ Passing,✅ Passing
 "Speculative Decoding: Eagle3",✅ Passing,✅ Passing
-"Speculative Decoding: Ngram",✅ Passing,❌ Failing
+"Speculative Decoding: Ngram",✅ Passing,✅ Passing
 "async scheduler",✅ Passing,✅ Passing
 "hybrid kv cache",✅ Passing,❓ Untested
 "multi-host",❓ Untested,❓ Untested
