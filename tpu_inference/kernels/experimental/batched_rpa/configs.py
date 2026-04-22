@@ -17,6 +17,7 @@ import enum
 
 import jax
 import jax.numpy as jnp
+from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.experimental.batched_rpa import utils
@@ -27,6 +28,7 @@ class BlockSizes:
     """Tuning parameters for the RPA kernel."""
 
     bq_sz: int
+    bq_c_sz: int
     bkv_sz: int
     batch_size: int
     n_buffer: int
@@ -130,7 +132,7 @@ class RpaCase(enum.StrEnum):
 
 
 @dataclasses.dataclass(frozen=True, eq=True)
-class RPAConfig:
+class RpaConfigs:
     block: BlockSizes
     model: ModelConfigs
     serve: ServingConfigs
@@ -142,6 +144,10 @@ class RPAConfig:
     @property
     def bq_sz(self) -> int:
         return self.block.bq_sz
+
+    @property
+    def bq_c_sz(self) -> int:
+        return self.block.bq_c_sz
 
     @property
     def bkv_sz(self) -> int:
@@ -207,7 +213,8 @@ class RPAConfig:
 
     @property
     def bkv_stride(self) -> int:
-        bkv_stride = (self.model.num_kv_heads * 2) // self.serve.packing_kv
+        bkv_stride = pl.cdiv(self.model.num_kv_heads * 2,
+                             self.serve.packing_kv)
 
         if utils.has_bank_conflicts(bkv_stride):
             bkv_stride += 1
@@ -219,9 +226,9 @@ class RPAConfig:
         return utils.align_to(self.model.head_dim, num_lanes)
 
     @property
-    def aligned_num_kv_heads(self) -> int:
+    def aligned_num_kv_heads_x2(self) -> int:
         packing_kv = self.serve.packing_kv
-        return utils.align_to(self.model.num_kv_heads, packing_kv)
+        return utils.align_to(self.model.num_kv_heads * 2, packing_kv)
 
     @property
     def aligned_num_q_heads_per_kv_head(self) -> int:
@@ -237,10 +244,6 @@ class RPAConfig:
     @property
     def fuse_accum(self) -> bool:
         return self.mode == RpaCase.DECODE
-
-    @property
-    def mask_v(self) -> bool:
-        return self.mode != RpaCase.DECODE
 
     @property
     def q_vmem_shape(self):
@@ -283,3 +286,74 @@ class RPAConfig:
             self.block.bq_sz * self.model.num_q_heads_per_kv_head,
             self.model.head_dim,
         )
+
+    def validate_inputs(
+        self,
+        q: jax.Array,
+        k: jax.Array,
+        v: jax.Array,
+        kv_cache: jax.Array,
+        kv_lens: jax.Array,
+        page_indices: jax.Array,
+        cu_q_lens: jax.Array,
+        distribution: jax.Array,
+    ):
+        """Validate inputs to the RPA kernel statically."""
+
+        if not q.ndim == k.ndim == v.ndim == 3:
+            raise ValueError(
+                f"Expected 3D array for {q.shape=}, {k.shape=}, {v.shape=}")
+        if k.shape != v.shape:
+            raise ValueError(f"Expected {k.shape=} to be equal to {v.shape=}")
+        if not (q.shape[0] == k.shape[0] == v.shape[0]):
+            raise ValueError(
+                "Expected number of sequences in Q, K, and V to be the same, but got"
+                f" {q.shape[0]=}, {k.shape[0]=}, and {v.shape[0]=}")
+        if not (q.shape[2] == k.shape[2] == v.shape[2]):
+            raise ValueError(
+                "Expected number of head dimensions in Q, K, and V to be the same,"
+                f" but got {q.shape[2]=}, {k.shape[2]=}, and {v.shape[2]=}")
+
+        expected_kv_cache_shape = (
+            kv_cache.shape[0],
+            self.serve.page_size,
+            self.aligned_num_kv_heads_x2 // self.serve.packing_kv,
+            self.serve.packing_kv,
+            self.aligned_head_dim,
+        )
+
+        if kv_cache.shape != expected_kv_cache_shape:
+            raise ValueError(f"Expected {kv_cache.shape=} to be equal to"
+                             f" {expected_kv_cache_shape=}")
+
+        # Integer kv quantization is currently not supported.
+        if not jnp.issubdtype(kv_cache.dtype, jnp.floating):
+            raise ValueError(
+                f"Expected {kv_cache.dtype=} to be a floating point.")
+        if not (kv_cache.dtype == k.dtype == v.dtype):
+            raise ValueError(
+                "Expected KV cache dtype and K/V dtype to be the same, but got"
+                f" {kv_cache.dtype=}, {k.dtype=}, and {v.dtype=}")
+
+        if not (jnp.int32 == kv_lens.dtype == page_indices.dtype ==
+                cu_q_lens.dtype == distribution.dtype):
+            raise ValueError(
+                f"Expected int32 dtype for {kv_lens.dtype=}, {page_indices.dtype=},"
+                f" {cu_q_lens.dtype=}, {distribution.dtype=}")
+
+        if not (kv_lens.ndim == page_indices.ndim == cu_q_lens.ndim == 1):
+            raise ValueError(
+                f"Expected 1D array for {kv_lens.shape=}, {page_indices.shape=},"
+                f" {cu_q_lens.shape=}")
+
+        max_num_seqs = kv_lens.shape[0]
+        num_page_indices = page_indices.shape[0]
+        if num_page_indices % max_num_seqs != 0:
+            raise ValueError(
+                f"Expected {num_page_indices=} to be divisible by {max_num_seqs=}."
+            )
+        if cu_q_lens.shape != (max_num_seqs + 1, ):
+            raise ValueError(
+                f"Expected {cu_q_lens.shape=} to be ({max_num_seqs + 1},).")
+        if distribution.shape != (3, ):
+            raise ValueError(f"Expected {distribution.shape=} to be (3,).")
