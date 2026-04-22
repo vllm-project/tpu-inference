@@ -76,6 +76,7 @@ def reference_gmm(
 ):
   num_tokens = lhs.shape[0]
   num_groups, in_size, out_size = rhs.shape
+  assert num_groups > 0, f'rhs must have at least 1 group, got {num_groups}'
   assert lhs.shape[1] == in_size
 
   if group_offset is None:
@@ -159,18 +160,18 @@ def reference_tgmm(
 class GmmTest(jtu.JaxTestCase):
 
   @parameterized.product(
-      # batch_size=[128],
+      # batch_size=[128, 512],
       # in_size=[512, 1024],
       # out_size=[512, 1024],
       # num_groups=[16, 32],
       # has_bias=[True, False],
       # group_offset=[0, 2, 3],
-      batch_size=[128],
+      batch_size=[512],
       in_size=[512],
       out_size=[1024],
-      num_groups=[16],
+      num_groups=[1],
       has_bias=[False],
-      group_offset=[1],
+      group_offset=[0],
   )
   def test_gmm_basic(
       self, batch_size, in_size, out_size, num_groups, has_bias, group_offset
@@ -222,7 +223,7 @@ class GmmTest(jtu.JaxTestCase):
     self.assertArraysAllClose(grad_rhs, expected_grad_rhs)
 
   @parameterized.product(
-      batch_size=[128, 512],
+      batch_size=[128, 1024],
       in_size=[512, 1024],
       out_size=[512, 1024],
       num_groups=[5, 16, 32],
@@ -233,7 +234,7 @@ class GmmTest(jtu.JaxTestCase):
       # num_groups=[5],
       # group_offset=[1],
   )
-  def test_tgmm(self, batch_size, in_size, out_size, num_groups, group_offset):
+  def test_tgmm_basic(self, batch_size, in_size, out_size, num_groups, group_offset):
     num_local_groups = num_groups - group_offset
     key = jax.random.key(0)
     key1, key2 = jax.random.split(key, 2)
