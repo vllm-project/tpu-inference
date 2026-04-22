@@ -163,7 +163,7 @@ def moe_gmm_local(
         )[topk_argsort_revert_indices]
 
     if gather_reduce_sc.is_supported_by_sc_gather_reduce(
-            gmm1_res.shape[0], sc_kernel_threshold):
+            gmm1_res.shape[0], sc_kernel_threshold, topk):
         gmm2_res = gmm_wrapper(gmm1_res,
                                w2,
                                w2_scale,
