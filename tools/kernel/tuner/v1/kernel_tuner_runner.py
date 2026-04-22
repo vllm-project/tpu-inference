@@ -18,6 +18,7 @@ import logging
 from absl import app, flags
 
 from tools.kernel.tuner.v1.common.utils import get_host_ip
+from tools.kernel.tuner.v1.rpa_v3_kernel_tuner import RpaV3KernelTuner
 from tools.kernel.tuner.v1.storage_management.local_db_manager import \
     LocalDbManager
 from tools.kernel.tuner.v1.storage_management.spanner_database_manager import \
@@ -76,6 +77,7 @@ _WORKER_ID = flags.DEFINE_string('worker_id', get_host_ip(), 'The worker id')
 # tuners, we can simply add them to the KERNEL_TUNER_REGISTRY dictionary below.
 KERNEL_TUNER_REGISTRY = {
     'test_kernel_tuner': TestKernelTuner,
+    'rpa_v3_kernel_tuner': RpaV3KernelTuner,
 }
 
 
