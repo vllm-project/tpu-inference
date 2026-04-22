@@ -70,11 +70,18 @@ PREFILL_HOSTS=()
 PREFILL_PORTS=()
 DECODE_HOSTS=()
 DECODE_PORTS=()
+PREFILL_PIDS=()
+DECODE_PIDS=()
 
 wait_for_server() {
   local port=$1
+  local pid=$2
   timeout 1200 bash -c "
     until curl -s localhost:${port}/health > /dev/null; do
+      if ! kill -0 $pid 2>/dev/null; then
+        echo \"Error: vLLM server on port $port (PID $pid) crashed or failed to start!\" >&2
+        exit 1
+      fi
       sleep 1
     done" && return 0 || return 1
 }
@@ -129,6 +136,7 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
 
     PREFILL_HOSTS+=("localhost")
     PREFILL_PORTS+=($PORT)
+    PREFILL_PIDS+=($!)
 done
 
 
@@ -162,17 +170,20 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
 
     DECODE_HOSTS+=("localhost")
     DECODE_PORTS+=($PORT)
+    DECODE_PIDS+=($!)
 done
 
 # Wait for all instances to start
-for PORT in "${PREFILL_PORTS[@]}"; do
+for i in "${!PREFILL_PORTS[@]}"; do
+    PORT=${PREFILL_PORTS[$i]}
     echo "Waiting for prefill on port $PORT to start..."
-    wait_for_server $PORT
+    wait_for_server $PORT ${PREFILL_PIDS[$i]}
 done
 
-for PORT in "${DECODE_PORTS[@]}"; do
+for i in "${!DECODE_PORTS[@]}"; do
+    PORT=${DECODE_PORTS[$i]}
     echo "Waiting for decode on port $PORT to start..."
-    wait_for_server $PORT
+    wait_for_server $PORT ${DECODE_PIDS[$i]}
 done
 
 echo "starting proxy server"
