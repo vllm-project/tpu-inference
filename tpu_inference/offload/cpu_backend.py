@@ -17,6 +17,7 @@ from collections import OrderedDict
 from typing import Any, Optional
 
 from tpu_inference.logger import init_logger
+from tpu_inference.offload.metrics import TPUKVCacheMetrics
 from tpu_inference.offload.utils import CpuChunkId
 
 logger = init_logger(__name__)
@@ -40,6 +41,7 @@ class LocalCPUBackend:
         self.cache: OrderedDict[CpuChunkId, Any] = OrderedDict()
         self.current_size_bytes = 0
         self._num_saved_cpu_chunks = 0
+        self.metrics_collector = TPUKVCacheMetrics.get_or_create()
         logger.info(
             "LocalCPUBackend initialized."
             f"CPU cache capacity: {self.max_num_cpu_chunks} chunks / pages.")
@@ -89,6 +91,8 @@ class LocalCPUBackend:
         logger.debug(
             f"Cache: {self.current_size_bytes} bytes, {self._num_saved_cpu_chunks} occupied chunks."
         )
+        self.metrics_collector.record_host_memory_usage(
+            self.current_size_bytes)
         return True
 
     def get(self, chunk_id: CpuChunkId) -> Optional[Any]:
@@ -115,3 +119,5 @@ class LocalCPUBackend:
         logger.debug(
             f" Reclaimed {len(unoccupied_chunk_ids)} unoccupied chunks, "
             f"with {reclaimed_size_bytes} bytes.")
+        self.metrics_collector.record_host_memory_usage(
+            self.current_size_bytes)

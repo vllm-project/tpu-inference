@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     TPU_OFFLOAD_NUM_STAGING_BLOCKS: int = 128
     TPU_OFFLOAD_SAVE_THREADS: int = 1
     TPU_OFFLOAD_BATCHED_SAVE: bool = False
+    TPU_OFFLOAD_METRICS_LOG_INTERVAL: int = 5
 
 
 def env_with_choices(
@@ -264,6 +265,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # kv offload to dram: batch multiple requests' save operations into a single swap call
     "TPU_OFFLOAD_BATCHED_SAVE":
     lambda: bool(int(os.getenv("TPU_OFFLOAD_BATCHED_SAVE", "0"))),
+    # kv offload to dram: prometheus metrics log interval in seconds
+    "TPU_OFFLOAD_METRICS_LOG_INTERVAL":
+    lambda: int(os.getenv("TPU_OFFLOAD_METRICS_LOG_INTERVAL", "10")),
 }
 
 

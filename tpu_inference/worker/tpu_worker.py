@@ -30,6 +30,7 @@ from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.offload.metrics import TPUKVCacheStatsLogger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
@@ -314,6 +315,23 @@ class TPUWorker(WorkerBase):
                     f"total devices={jax.devices()} | "
                     f"local_devices={jax.local_devices()}")
         vllm_utils.report_usage_stats(self.vllm_config)
+
+        # Initialize the background metrics logger ONLY if KV offloading is enabled
+        self.stats_logger = None
+        if self.vllm_config.kv_transfer_config is not None:
+            kv_transfer_config = self.vllm_config.kv_transfer_config
+            if (kv_transfer_config.kv_connector == "TPUOffloadConnector"
+                    and kv_transfer_config.kv_connector_module_path
+                    == "tpu_inference.offload.tpu_offload_connector"):
+
+                # Start the background thread (logging every TPU_OFFLOAD_METRICS_LOG_INTERVAL seconds)
+                self.stats_logger = TPUKVCacheStatsLogger(
+                    log_interval=envs.TPU_OFFLOAD_METRICS_LOG_INTERVAL,
+                    model_name=self.model_config.model,
+                    device_type=self.device_config.device_type)
+                logger.info(
+                    f"TPUKVCacheStatsLogger initialized on worker rank {self.rank}."
+                )
 
     def initialize_pp_transfer_connect(self):
         if self.rank == 0:
