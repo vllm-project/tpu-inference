@@ -56,14 +56,13 @@ _BF16 = VectorTypeHelper(ir.BF16Type.get)
 
 def is_supported_by_sc_gather_reduce(x_shape: int, hidden_dim: int,
                                      reduce_group_size: int) -> bool:
-    # Hardcoded performance crossover threshold based on benchmark (Tokens * Hidden Dim)
-    # empirically found.
-    SC_CROSSOVER_THRESHOLD = 1_150_000
+
+    tpu_info = pltpu.get_tpu_info()
 
     # --- 1. Hardware Generation Check ---
-    if pltpu.get_tpu_info().generation != 7:
+    if tpu_info.generation < 7:
         logger.warning(
-            'Platform does not support SparseCore (requires TPU v7). Gather reduce not performed on SC.'
+            f'Platform does not support SparseCore (requires TPU v7 or higher, got v{tpu_info.generation}). Gather reduce not performed on SC.'
         )
         return False
 
@@ -80,12 +79,25 @@ def is_supported_by_sc_gather_reduce(x_shape: int, hidden_dim: int,
         )
         return False
 
-    # --- 3. Performance Crossover Check ---
-    total_elements = x_shape * hidden_dim
-    if total_elements <= SC_CROSSOVER_THRESHOLD:
-        # Silently fall back to Ragged Scatter, as it is mathematically faster for this shape
+    # --- 3. Dynamic Performance Crossover Check (VMEM Based) ---
+    # Calculate Ragged Scatter memory footprint in bytes (assuming bfloat16 = 2 bytes)
+    num_tokens = x_shape
+    topk = reduce_group_size
+
+    # Live tensors during Scatter execution: Input + Intermediate + Output
+    gmm_bytes = num_tokens * topk * hidden_dim * 2
+    inter_bytes = num_tokens * topk * hidden_dim * 2
+    out_bytes = num_tokens * hidden_dim * 2
+
+    total_scatter_footprint_bytes = gmm_bytes + inter_bytes + out_bytes
+
+    # If the required memory easily fits inside the TensorCore VMEM, Scatter is faster.
+    # We use a 1.1x multiplier (10% buffer) because XLA compiler aliasing often
+    # saves a tiny bit of memory overhead right at the boundary.
+    if total_scatter_footprint_bytes <= (tpu_info.vmem_capacity_bytes * 1.1):
         return False
 
+    # If it exceeds VMEM, HBM thrashing will occur. Route to SparseCore.
     return True
 
 
