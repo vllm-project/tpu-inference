@@ -175,6 +175,9 @@ def moe_gmm_local(
         if local_group_size < group_sizes.size:
             mask = mask.reshape(-1, topk)
             topk_weights = jnp.where(mask, topk_weights, 0)
+            topk_wgt_zero_nan = True
+        else:
+            topk_wgt_zero_nan = False
 
         inds = topk_argsort_revert_indices
         topk_weights = topk_weights.flatten().reshape(-1, 128)
@@ -185,6 +188,7 @@ def moe_gmm_local(
             reduce_group_size=topk,
             topk_weights=topk_weights,
             col_chunk_size=sc_kernel_col_chunk_size,
+            topk_wgt_zero_nan=topk_wgt_zero_nan,
         )
     else:
         gmm2_res = gmm_wrapper(gmm1_res,
