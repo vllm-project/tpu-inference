@@ -216,7 +216,7 @@ def test_from_input_batch_with_logprobs(mesh: Mesh):
                                                  max_num_logprobs=0)
     metadata_without_zero = TPUSupportedSamplingMetadata.from_input_batch(
         mesh=mesh,
-        mock_batch=mock_batch_id_logprobs_zero,
+        input_batch=mock_batch_id_logprobs_zero,
         padded_num_reqs=4,
     )
     assert not metadata_without_zero.logprobs, "logprobs should be False when max_num_logprobs is 0"
@@ -226,7 +226,7 @@ def test_from_input_batch_with_logprobs(mesh: Mesh):
                                                  max_num_logprobs=None)
     metadata_without_none = TPUSupportedSamplingMetadata.from_input_batch(
         mesh=mesh,
-        mock_batch=mock_batch_id_logprobs_none,
+        input_batch=mock_batch_id_logprobs_none,
         padded_num_reqs=4,
     )
     assert not metadata_without_none.logprobs, "logprobs should be False when max_num_logprobs is None"
