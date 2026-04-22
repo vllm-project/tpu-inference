@@ -235,6 +235,7 @@ steps:
         commands:
           - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
 
+      # TODO (jacobplatin): re-enable this after b/467105149 is fixed
       - label: "${TPU_VERSION:-tpu6e} E2E MLperf tests for DeepSeek-R1 (no accuracy, 5-decoder layers only)"
         key: ${TPU_VERSION:-tpu6e}_test_12
         depends_on: "${TPU_VERSION:-tpu6e}_build_docker"

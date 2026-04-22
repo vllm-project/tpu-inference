@@ -124,8 +124,8 @@ if [ -z "$dataset_path" ]; then
     fi
     # Only download the dataset if it doesn't already exist
     dataset_path="$root_dir"/mmlu/
-    mkdir -p $dataset_path
-    cd $dataset_path
+    mkdir -p "$dataset_path"
+    cd "$dataset_path" || exit
     if [ ! -d "$dataset_path/data/test" ]; then
         wget https://people.eecs.berkeley.edu/~hendrycks/data.tar -P .
         tar -xvf data.tar
@@ -298,7 +298,7 @@ for model_name in $model_list; do
 
     # Spin up the vLLM server
     echo "Spinning up the vLLM server..."
-    (vllm serve "$model_name" --no-enable-prefix-caching --gpu-memory-utilization=0.95 --max-model-len $max_model_len --max-num-batched-tokens "$max_batched_tokens" "${current_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
+    (vllm serve "$model_name" --no-enable-prefix-caching --gpu-memory-utilization=0.95 --max-model-len $max_model_len --max-num-seqs $max_num_seqs --max-num-batched-tokens "$max_batched_tokens" "${current_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
 
     # Set initial trap to ensure cleanup happens even on immediate exit
     trap 'cleanUp "$model_name"' EXIT
