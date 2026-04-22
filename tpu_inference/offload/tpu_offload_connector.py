@@ -1405,7 +1405,7 @@ class TPUOffloadConnectorWorker:
             self.host_sharding = jax.sharding.NamedSharding(
                 mesh=self.device_sharding.mesh,
                 spec=jax.sharding.PartitionSpec(None, None, "model"),
-                memory_kind="pinned_host")
+                memory_kind="unpinned_host")
             # [num_blocks * block_size, num_head, 2, head_dim]
             self.flatten_device_sharding = jax.sharding.NamedSharding(
                 mesh=self.device_sharding.mesh,
@@ -1414,12 +1414,12 @@ class TPUOffloadConnectorWorker:
             self.flatten_host_sharding = jax.sharding.NamedSharding(
                 mesh=self.device_sharding.mesh,
                 spec=jax.sharding.PartitionSpec(None, "model"),
-                memory_kind="pinned_host")
+                memory_kind="unpinned_host")
             # [1, num_layers, block_size, num_head, 2, head_dim]
             self.expanded_host_sharding = jax.sharding.NamedSharding(
                 mesh=self.device_sharding.mesh,
                 spec=jax.sharding.PartitionSpec(None, None, None, "model"),
-                memory_kind="pinned_host")
+                memory_kind="unpinned_host")
             self.expanded_device_sharding = jax.sharding.NamedSharding(
                 mesh=self.device_sharding.mesh,
                 spec=jax.sharding.PartitionSpec(None, None, None, "model"),
