@@ -557,7 +557,6 @@ def fill_metadata(
     metadata_ref: MetadataRef,
     *,
     cfgs: GmmConfigs,
-    process_empty_groups: bool = False,
 ) -> jax.Array:
   """Fills the metadata for the given lhs group sizes and group offset.
 
@@ -572,9 +571,6 @@ def fill_metadata(
     metadata_ref: Metadata that is used to determine the group id and m offsets
       for each gmm tile.
     cfgs: GmmConfigs.
-    process_empty_groups: Whether to process empty groups. If True, do not
-          squeeze tiles for empty groups out of the metadata. This is necessary
-          for tgmm, where we at least need to zero the output for each group.
 
   Returns:
       The number of gm tiles to process lhs with given group offset.
@@ -628,9 +624,7 @@ def fill_metadata(
     # We need to handle cases where we should not process the group.
     # 1. Even if group_size is 0, if local_offset is not 0, cdiv will return 1.
     # 2. If group comes before the group_offset, we should not process it.
-    should_process = jnp.logical_and(
-        jnp.logical_or(group_size > 0, process_empty_groups), group_id >= 0
-    )
+    should_process = jnp.logical_and(group_size > 0, group_id >= 0)
     curr_num_gm = jnp.where(should_process, curr_num_gm, 0)
     next_num_gm = num_gm + curr_num_gm
 
