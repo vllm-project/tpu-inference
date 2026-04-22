@@ -438,6 +438,7 @@ class DeviceBuffer:
         self._last_offset = 0
         self._keys: List[str] = []
         self._sizes: List[int] = []
+        self._views: Dict[str, np.ndarray] = {}
 
     def _ensure_capacity(self, size: int):
         """Ensure the internal buffer has enough space for 'size' more elements along the last axis."""
@@ -477,6 +478,7 @@ class DeviceBuffer:
         self._offset += size
         if key:
             self.set_key(key)
+            self._views[key] = view
         return view
 
     def set_key(self, key: str):
@@ -497,6 +499,11 @@ class DeviceBuffer:
         self._last_offset = 0
         self._keys = []
         self._sizes = []
+        self._views = {}
+
+    def get_allocated_view(self, key: str) -> np.ndarray:
+        """Get an allocated view by key."""
+        return self._views[key]
 
     @staticmethod
     @functools.partial(jax.jit, static_argnums=(1, 2))

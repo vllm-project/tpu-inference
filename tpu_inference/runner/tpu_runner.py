@@ -1318,6 +1318,37 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         else:
             return self._prepare_inputs_non_dp(scheduler_output)
 
+    def _define_device_buffer_layout_dp(
+        self,
+        padded_num_scheduled_tokens_per_dp_rank: int,
+        max_num_reqs_per_dp_rank: int,
+        logits_indices_shape: Tuple[int, ...],
+        padded_num_reqs_per_dp_rank: int,
+    ) -> None:
+        self.device_buffer.reset()
+        self.device_buffer.get_view(
+            (padded_num_scheduled_tokens_per_dp_rank, ), key="input_ids")
+        self.device_buffer.get_view((max_num_reqs_per_dp_rank + 1, ),
+                                    key="query_start_loc")
+        self.device_buffer.get_view((max_num_reqs_per_dp_rank, ),
+                                    key="seq_lens")
+        self.device_buffer.get_view(logits_indices_shape, key="logits_indices")
+        self.device_buffer.get_view((3, ), key="request_distribution")
+
+        TPUSupportedSamplingMetadata.add_to_device_buffer(
+            self.device_buffer,
+            self.input_batch,
+            padded_num_reqs_per_dp_rank,
+            self.dp_size,
+        )
+
+        for gid in range(len(self.kv_cache_config.kv_cache_groups)):
+            block_table_obj = self.input_batch.block_table[gid]
+            self.device_buffer.get_view(
+                (max_num_reqs_per_dp_rank,
+                 block_table_obj.max_num_blocks_per_req),
+                key=f"block_tables_gid_{gid}")
+
     def _prepare_inputs_dp(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -1352,15 +1383,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                  req_ids_dp, scheduled_tokens_per_dp_rank,
                  padded_num_scheduled_tokens_per_dp_rank, dp_size)
 
-        self.device_buffer.reset()
-
-        input_ids_view = self.device_buffer.get_view(
-            (padded_num_scheduled_tokens_per_dp_rank, ), key="input_ids")
-        query_start_loc_view = self.device_buffer.get_view(
-            (max_num_reqs_per_dp_rank + 1, ), key="query_start_loc")
-        seq_lens_view = self.device_buffer.get_view(
-            (max_num_reqs_per_dp_rank, ), key="seq_lens")
-
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
 
@@ -1380,8 +1402,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices_shape = (padded_logits_length, )
         else:
             logits_indices_shape = (padded_num_reqs_per_dp_rank, )
-        logits_indices_view = self.device_buffer.get_view(logits_indices_shape,
-                                                          key="logits_indices")
+        self._define_device_buffer_layout_dp(
+            padded_num_scheduled_tokens_per_dp_rank,
+            max_num_reqs_per_dp_rank,
+            logits_indices_shape,
+            padded_num_reqs_per_dp_rank,
+        )
+
+        input_ids_view = self.device_buffer.get_allocated_view("input_ids")
+        query_start_loc_view = self.device_buffer.get_allocated_view(
+            "query_start_loc")
+        seq_lens_view = self.device_buffer.get_allocated_view("seq_lens")
+        logits_indices_view = self.device_buffer.get_allocated_view(
+            "logits_indices")
 
         # Populates input_ids and positions
         for dp_rank in range(dp_size):
@@ -1482,8 +1515,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         mrope_positions = self.mrope_positions_cpu[:, :
                                                    padded_total_num_scheduled_tokens]
-        req_dist_view = self.device_buffer.get_view((3, ),
-                                                    key="request_distribution")
+        req_dist_view = self.device_buffer.get_allocated_view(
+            "request_distribution")
+
         for dp_rank in range(dp_size):
             _num_reqs = num_req_per_dp_rank[dp_rank]
             # The batch has been reordered by _reorder_batch so decode requests come first
@@ -1511,21 +1545,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             )[:] = spec_decode_metadata.final_logits_indices.ravel()
 
         # Add sampling metadata to buffer
-        TPUSupportedSamplingMetadata.add_to_device_buffer(
-            self.device_buffer,
-            self.input_batch,
-            padded_num_reqs_per_dp_rank,
-            dp_size,
-        )
 
         # Collect block tables host arrays loops zone presence zones legality
         def build_block_table_host(kv_cache_gid: int) -> None:
 
             block_table_obj = self.input_batch.block_table[kv_cache_gid]
-            block_tables_view = self.device_buffer.get_view(
-                (max_num_reqs_per_dp_rank,
-                 block_table_obj.max_num_blocks_per_req),
-                key=f"block_tables_gid_{kv_cache_gid}")
+            block_tables_view = self.device_buffer.get_allocated_view(
+                f"block_tables_gid_{kv_cache_gid}")
 
             # Zero out the view once for correct padding
             block_tables_view.fill(0)
@@ -1688,11 +1714,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             self.phase_based_profiler.step(batch_composition_stats)
 
-        self.device_buffer.reset()
-
-        input_ids_view = self.device_buffer.get_view(
-            (padded_total_num_scheduled_tokens, ), key="input_ids")
-
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
 
@@ -1711,12 +1732,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         else:
             logits_indices_shape = (padded_num_reqs, )
 
-        logits_indices_view = self.device_buffer.get_view(logits_indices_shape,
-                                                          key="logits_indices")
-        query_start_loc_view = self.device_buffer.get_view(
-            (self.max_num_reqs + 1, ), key="query_start_loc")
-        seq_lens_view = self.device_buffer.get_view((self.max_num_reqs, ),
-                                                    key="seq_lens")
+        self._define_device_buffer_layout_dp(
+            padded_total_num_scheduled_tokens,
+            self.max_num_reqs,
+            logits_indices_shape,
+            padded_num_reqs,
+        )
+
+        input_ids_view = self.device_buffer.get_allocated_view("input_ids")
+        logits_indices_view = self.device_buffer.get_allocated_view(
+            "logits_indices")
+        query_start_loc_view = self.device_buffer.get_allocated_view(
+            "query_start_loc")
+        seq_lens_view = self.device_buffer.get_allocated_view("seq_lens")
 
         # Get the number of scheduled tokens for each request.
         num_scheduled_tokens_per_req = []
@@ -1808,24 +1836,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             )[:] = spec_decode_metadata.final_logits_indices.ravel()
 
         # Add sampling metadata to buffer
-        TPUSupportedSamplingMetadata.add_to_device_buffer(
-            self.device_buffer,
-            self.input_batch,
-            padded_num_reqs,
-            dp_size=1,
-        )
 
         # Add positions to buffer
 
-        req_dist_view = self.device_buffer.get_view((3, ),
-                                                    key="request_distribution")
+        req_dist_view = self.device_buffer.get_allocated_view(
+            "request_distribution")
+
         req_dist_view[:] = self.input_batch.request_distribution
 
         def build_block_table_host(kv_cache_gid: int) -> None:
             block_table_obj = self.input_batch.block_table[kv_cache_gid]
-            block_tables_view = self.device_buffer.get_view(
-                (self.max_num_reqs, block_table_obj.max_num_blocks_per_req),
-                key=f"block_tables_gid_{kv_cache_gid}")
+            block_tables_view = self.device_buffer.get_allocated_view(
+                f"block_tables_gid_{kv_cache_gid}")
 
             cpu_tensor = block_table_obj.get_cpu_tensor()
             np.copyto(block_tables_view[:num_reqs], cpu_tensor[:num_reqs])

@@ -130,7 +130,6 @@ class CompilationManager:
 
     def _precompile_unpack_arrays(self) -> None:
         logger.info("Compiling unpack_arrays with different input shapes.")
-        from tpu_inference.utils import DeviceBuffer
 
         dp_size = self.runner.dp_size
         original_buffer = self.runner.device_buffer
@@ -138,11 +137,6 @@ class CompilationManager:
         needs_logprobs_options = [False]
         if self.runner.vllm_config.model_config.max_logprobs and self.runner.vllm_config.model_config.max_logprobs > 0:
             needs_logprobs_options.append(True)
-
-        leading_shape = (dp_size, ) if dp_size > 1 else ()
-        temp_buffer = DeviceBuffer(leading_shape=leading_shape,
-                                   initial_capacity=1024)
-        self.runner.device_buffer = temp_buffer
 
         try:
             if dp_size > 1:
@@ -153,13 +147,12 @@ class CompilationManager:
                                 for padded_logits_length in self.runner.num_logits_paddings:
                                     self.runner._define_device_buffer_layout_dp(
                                         num_tokens, num_reqs,
-                                        (padded_logits_length, ),
-                                        needs_logprobs)
+                                        (padded_logits_length, ), num_reqs)
                                     self._compile_unpack_arrays_helper(dp_size)
                             else:
                                 self.runner._define_device_buffer_layout_dp(
                                     num_tokens, num_reqs, (num_reqs, ),
-                                    needs_logprobs)
+                                    num_reqs)
                                 self._compile_unpack_arrays_helper(dp_size)
             else:
                 for num_tokens in self.runner.num_tokens_paddings:
@@ -167,16 +160,16 @@ class CompilationManager:
                         for needs_logprobs in needs_logprobs_options:
                             if self.runner.speculative_config:
                                 for padded_logits_length in self.runner.num_logits_paddings:
-                                    self.runner._define_device_buffer_layout_non_dp(
-                                        num_tokens, num_reqs,
-                                        (padded_logits_length, ),
-                                        needs_logprobs)
+                                    self.runner._define_device_buffer_layout_dp(
+                                        num_tokens, self.runner.max_num_reqs,
+                                        (padded_logits_length, ), num_reqs)
                                     self._compile_unpack_arrays_helper(1)
                             else:
-                                self.runner._define_device_buffer_layout_non_dp(
-                                    num_tokens, num_reqs, (num_reqs, ),
-                                    needs_logprobs)
+                                self.runner._define_device_buffer_layout_dp(
+                                    num_tokens, self.runner.max_num_reqs,
+                                    (num_reqs, ), num_reqs)
                                 self._compile_unpack_arrays_helper(1)
+
         finally:
             self.runner.device_buffer = original_buffer
 
