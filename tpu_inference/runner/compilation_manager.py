@@ -153,13 +153,13 @@ class CompilationManager:
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
 
             dummy_multimodal_embeddings = self._create_dummy_tensor(
-                (1, num_tokens, mm_hidden_size),
+                (num_tokens, mm_hidden_size),
                 self.runner.vllm_config.model_config.dtype,
                 sharding=sharding)
             dummy_input_ids = self._create_dummy_tensor(
                 (num_tokens, ), jnp.int32, sharding=input_sharding)
             dummy_is_multimodal = self._create_dummy_tensor(
-                (num_tokens, ), jnp.int32, sharding=input_sharding)
+                (num_tokens, ), jnp.bool_, sharding=input_sharding)
 
             self._run_compilation(
                 "input_embeddings_merger",
