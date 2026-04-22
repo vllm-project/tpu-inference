@@ -159,7 +159,7 @@ class TestEagleLlama3ForCausalLM:
             if mock_vllm_config.cache_config.cache_dtype == "fp8" else
             jnp.bfloat16)
 
-        _, output_hidden_states, aux_hidden_states = model(
+        _, output_hidden_states, aux_hidden_states, _ = model(
             kv_caches, input_ids, hidden_states, attention_metadata)
 
         logits = model.compute_logits(output_hidden_states)

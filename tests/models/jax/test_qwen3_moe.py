@@ -105,7 +105,7 @@ class TestQwen3MoeForCausalLM:
                                          kv_dtype)
 
         with jax.set_mesh(mesh):
-            jax_output, _ = jax_layer_0(
+            kv_cache, jax_output, _ = jax_layer_0(
                 kv_cache=jnp.zeros(cache_shape, dtype=kv_dtype),
                 x=input_tensor_jax,
                 attention_metadata=AttentionMetadata(
