@@ -57,9 +57,41 @@ class JaxEmbed(nnx.Embed, JaxModule):
             return self.weight
 
     def __call__(self, x) -> jax.Array:
-        if self.quant_method is None:
-            return super().__call__(x)
-        return self.quant_method.apply_jax(self, x)
+        if self.quant_method is not None:
+            return self.quant_method.apply_jax(self, x)
+
+        # Qwix manual logic wraps the QArray in a WithAux container
+        q_container = self.weight
+        if hasattr(q_container, 'array'):
+            q_container = q_container.array
+
+        # Check if we successfully unwrapped a QArray-like structure
+        if hasattr(q_container, 'qvalue') and hasattr(q_container, 'scale'):
+            # Fetch the quantized bytes (which are wrapped in nnx.Param)
+            q_vals = jax.numpy.take(q_container.qvalue.value, x, axis=0)
+
+            # Fetch scales (which are wrapped in nnx.Param)
+            scales = q_container.scale.value
+            # If the scale has length > 1 along the vocabulary axis, we must take it too
+            if scales.shape[0] > 1:
+                scales = jax.numpy.take(scales, x, axis=0)
+
+            # Perform the dequantization dynamically
+            return q_vals.astype(scales.dtype) * scales
+
+        return super().__call__(x)
 
     def decode(self, x: jax.Array) -> jax.Array:
+        q_container = self.weight
+        if hasattr(q_container, 'array'):
+            q_container = q_container.array
+
+        if hasattr(q_container, 'qvalue') and hasattr(q_container, 'scale'):
+            # Dequantize the full vocabulary weight matrix
+            # qvalue is shape (V, D)
+            q_vals = q_container.qvalue.value
+            scales = q_container.scale.value
+            weight_val = q_vals.astype(scales.dtype) * scales
+            return jax.numpy.dot(x, weight_val.T)
+
         return jax.numpy.dot(x, self.weight.value.T)

@@ -213,6 +213,83 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
     }
     model = qwix.quantize_model(model, qwix.PtqProvider(qwix_rules),
                                 **model_input)
+
+    import re
+
+    from tpu_inference.layers.jax.embed import JaxEmbed
+    for path, module in nnx.iter_graph(model):
+        if isinstance(module, JaxEmbed):
+            path_str = ".".join([str(x) for x in path])
+            matching_rule = None
+            for rule in qwix_rules:
+                if re.match(rule.module_path, path_str):
+                    matching_rule = rule
+                    break
+
+            if matching_rule and matching_rule.weight_qtype:
+                logger.info(f"Manually quantizing embedding layer: {path_str}")
+                weight_param = module.weight
+                weight_val = weight_param.value
+                qtype = getattr(jnp, matching_rule.weight_qtype)
+
+                # Use lower-level quantization to avoid Flax module context requirements
+                from qwix._src import flax_util
+                from qwix._src.providers.ptq import WithAux
+                from qwix._src.providers.ptq import qarray as qarray_module
+
+                how = qarray_module.HowToQuantize(
+                    qtype=qtype,
+                    channelwise_axes=[1],
+                    tiled_axes={},
+                    calibration_method=matching_rule.weight_calibration_method
+                    or 'absmax')
+
+                # Create the quantized array structure directly
+                q_array = qarray_module.quantize(weight_val, how)
+                unboxed = WithAux(q_array, how)
+
+                # Re-box into nnx.Params to preserve sharding and metadata
+                boxed = jax.tree.map(
+                    lambda value: flax_util.update_boxed(weight_param,
+                                                         value=value), unboxed)
+                module.weight = boxed
+
+    print(
+        "\nDEBUG: Model structure after qwix.quantize_model (Layer-skipped printout):"
+    )
+    num_layers_to_display = 2
+    # Tracking skip status for both text and vision layer paths
+    skip_text_layers = False
+    skip_vision_layers = False
+
+    for path, var in nnx.iter_graph(model):
+        if not isinstance(var, (nnx.Variable, qwix.QArray)):
+            continue
+
+        name = ".".join([str(x) for x in path])
+
+        # Logic for skipping layers in text/main model
+        if f"layers.{num_layers_to_display}." in name and "vision_tower" not in name:
+            skip_text_layers = True
+        if skip_text_layers and "layers." in name and "vision_tower" not in name:
+            continue
+
+        # Logic for skipping layers in vision model
+        if f"vision_tower.layers.{num_layers_to_display}." in name:
+            skip_vision_layers = True
+        if skip_vision_layers and "vision_tower.layers." in name:
+            continue
+
+        if isinstance(var, qwix.QArray):
+            print(f"  [Q] {name} : {var.qtype} {var.shape}")
+        elif hasattr(var, 'value'):
+            v = var.value
+            # For JAX arrays, print dtype and shape
+            if hasattr(v, 'dtype'):
+                print(f"  [P] {name} : {v.dtype}{v.shape}")
+            else:
+                print(f"  [V] {name} : {type(v)}")
+
     return model
 
 
