@@ -499,7 +499,7 @@ class DeviceBuffer:
         self._sizes = []
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnums=(1, 2, 3))
+    @functools.partial(jax.jit, static_argnums=(1, 2))
     def unpack_arrays(
         blob: jax.Array,
         metadata: DeviceBufferMetadata,
