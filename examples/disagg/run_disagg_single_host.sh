@@ -86,6 +86,25 @@ wait_for_server() {
     done" && return 0 || return 1
 }
 
+check_failed_requests() {
+  local log_file="$1"
+  local failed_requests
+  failed_requests=$(grep "Failed requests:" "$log_file" | awk '{print $3}' || true)
+
+  if [ -z "$failed_requests" ]; then
+    echo "Error: Could not find 'Failed requests:' in the benchmark output." >&2
+    return 1
+  fi
+
+  if [ "$failed_requests" -gt 0 ]; then
+    echo "Error: Benchmark reported $failed_requests failed requests." >&2
+    return 1
+  fi
+  
+  echo "Success: Benchmark reported $failed_requests failed requests." >&2
+  return 0
+}
+
 cleanup_instances() {
   echo "Cleaning up any running vLLM instances..."
   pkill -f "vllm" || true
@@ -219,6 +238,8 @@ vllm bench serve \
   --request-rate=${REQUEST_RATE} \
   >> $LOG_FILE 2>&1
 set +x
+
+check_failed_requests "$LOG_FILE"
 
 cat <<'EOF'
 The proxy server has been launched on: 127.0.0.1:8000
