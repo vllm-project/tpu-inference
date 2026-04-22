@@ -1050,7 +1050,7 @@ def make_gmm_configs(
         is_rhs_float = jnp.issubdtype(rhs_quant_dtype, jnp.floating)
         tpu_info = pltpu.get_tpu_info()
         # Check if there is hardware compute support for rhs dtype group.
-        if is_rhs_float:
+        if is_rhs_float or rhs_quant_dtype == jnp.int4:
             if tpu_info.fp8_ops_per_second > 0:
                 lhs_q_dtype = jnp.float8_e4m3fn.dtype
         else:

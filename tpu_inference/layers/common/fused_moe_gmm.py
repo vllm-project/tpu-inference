@@ -78,18 +78,18 @@ def gmm_wrapper(lhs,
                 group_sizes,
                 group_offset,
                 fuse_act=None,
-                preferred_element_type=None):
-    gmm_res = gmm_v2(
-        lhs=lhs,
-        rhs=rhs,
-        rhs_scale=rhs_scale,
-        rhs_bias=rhs_bias,
-        group_sizes=group_sizes,
-        group_offset=group_offset[0],
-        zero_initialize=False,
-        fuse_act=fuse_act,
-        preferred_element_type=preferred_element_type,
-    )
+                preferred_element_type=None,
+                maybe_quantize_lhs=True):
+    gmm_res = gmm_v2(lhs=lhs,
+                     rhs=rhs,
+                     rhs_scale=rhs_scale,
+                     rhs_bias=rhs_bias,
+                     group_sizes=group_sizes,
+                     group_offset=group_offset[0],
+                     zero_initialize=False,
+                     fuse_act=fuse_act,
+                     preferred_element_type=preferred_element_type,
+                     maybe_quantize_lhs=maybe_quantize_lhs)
     return gmm_res
 
 
@@ -125,6 +125,7 @@ def moe_gmm_local(
     parallelism: Literal["tp", "ep"],
     sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
+    maybe_quantize_lhs: bool = True,
 ) -> jax.Array:
     """Main MoE logic on a local shard can run in TP or EP mode.
 
@@ -143,6 +144,7 @@ def moe_gmm_local(
         group_offset,
         fuse_act=activation,
         preferred_element_type=x.dtype,
+        maybe_quantize_lhs=maybe_quantize_lhs,
     )
 
     # When the parallelism is TP since w2_bias is not sharded, we should only apply bias
@@ -164,13 +166,16 @@ def moe_gmm_local(
 
     if gather_reduce_sc.is_supported_by_sc_gather_reduce(
             gmm1_res.shape[0], sc_kernel_threshold):
-        gmm2_res = gmm_wrapper(gmm1_res,
-                               w2,
-                               w2_scale,
-                               w2_bias,
-                               group_sizes,
-                               group_offset,
-                               preferred_element_type=jnp.float32.dtype)
+        gmm2_res = gmm_wrapper(
+            gmm1_res,
+            w2,
+            w2_scale,
+            w2_bias,
+            group_sizes,
+            group_offset,
+            preferred_element_type=jnp.float32.dtype,
+            maybe_quantize_lhs=maybe_quantize_lhs,
+        )
 
         if local_group_size < group_sizes.size:
             mask = mask.reshape(-1, topk)
@@ -187,13 +192,16 @@ def moe_gmm_local(
             col_chunk_size=sc_kernel_col_chunk_size,
         )
     else:
-        gmm2_res = gmm_wrapper(gmm1_res,
-                               w2,
-                               w2_scale,
-                               w2_bias,
-                               group_sizes,
-                               group_offset,
-                               preferred_element_type=x.dtype)
+        gmm2_res = gmm_wrapper(
+            gmm1_res,
+            w2,
+            w2_scale,
+            w2_bias,
+            group_sizes,
+            group_offset,
+            preferred_element_type=x.dtype,
+            maybe_quantize_lhs=maybe_quantize_lhs,
+        )
 
         if local_group_size < group_sizes.size:
             group_offsets = jnp.cumulative_sum(group_sizes,
@@ -243,6 +251,7 @@ def tensor_parallel_gmm(
     mesh: Mesh,
     sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
+    maybe_quantize_lhs: bool = True,
 ) -> jax.Array:
     data_p_spec = P(ShardingAxisName.MLP_DATA)
     group_offset = jnp.array([0])
@@ -268,6 +277,7 @@ def tensor_parallel_gmm(
             parallelism="tp",
             sc_kernel_threshold=sc_kernel_threshold,
             sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
+            maybe_quantize_lhs=maybe_quantize_lhs,
         ),
         mesh=mesh,
         in_specs=(
@@ -317,6 +327,7 @@ def expert_parallel_gmm(
     mesh: Mesh,
     sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
+    maybe_quantize_lhs: bool = True,
 ) -> jax.Array:
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
@@ -339,6 +350,7 @@ def expert_parallel_gmm(
             parallelism="ep",
             sc_kernel_threshold=sc_kernel_threshold,
             sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
+            maybe_quantize_lhs=maybe_quantize_lhs,
         ),
         mesh=mesh,
         in_specs=(
@@ -404,6 +416,7 @@ def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
     "sc_kernel_threshold",
     "sc_kernel_col_chunk_size",
     "all_gather_fp8",
+    "maybe_quantize_lhs",
 ))
 def fused_moe_func(
     hidden_states: jax.Array,
@@ -423,6 +436,7 @@ def fused_moe_func(
     sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
     all_gather_fp8: bool = False,
+    maybe_quantize_lhs: bool = True,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -560,6 +574,7 @@ def fused_moe_func(
             mesh=mesh,
             sc_kernel_threshold=sc_kernel_threshold,
             sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
+            maybe_quantize_lhs=maybe_quantize_lhs,
         )
     else:
         x = tensor_parallel_gmm(
@@ -578,6 +593,7 @@ def fused_moe_func(
             mesh=mesh,
             sc_kernel_threshold=sc_kernel_threshold,
             sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
+            maybe_quantize_lhs=maybe_quantize_lhs,
         )
 
     return x[:num_tokens, :hidden_size]
