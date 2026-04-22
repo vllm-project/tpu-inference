@@ -22,6 +22,8 @@ def fmt(val, is_str=False):
     """Helper to safely format python values to SQL values"""
     if val is None or val == 'NULL':
         return 'NULL'
+    if str(val) == 'inf':
+        return "CAST('inf' AS FLOAT64)"
     if is_str:
         return f"'{val}'"
     return str(val)
