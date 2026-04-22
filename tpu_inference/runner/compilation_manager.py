@@ -246,14 +246,12 @@ class CompilationManager:
             is_first_rank,
             is_last_rank,
         ):
-            outputs = self.runner.model_fn(state, kv_caches, input_ids,
-                                           attention_metadata, inputs_embeds,
-                                           positions,
-                                           layer_name_to_kvcache_index,
-                                           lora_metadata, intermediate_tensors,
-                                           is_first_rank, is_last_rank)
-            self.runner.kv_caches = outputs[0]
-            return outputs[1]
+            kv_caches, hidden_states, *_ = self.runner.model_fn(
+                state, kv_caches, input_ids, attention_metadata, inputs_embeds,
+                positions, layer_name_to_kvcache_index, lora_metadata,
+                intermediate_tensors, is_first_rank, is_last_rank)
+            self.runner.kv_caches = kv_caches
+            return hidden_states
 
         with self.runner.maybe_select_dummy_loras(
                 self.runner.lora_config, np.array([num_tokens],

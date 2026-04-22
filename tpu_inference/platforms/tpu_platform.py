@@ -289,51 +289,9 @@ class TpuPlatform(Platform):
             update_vllm_config_for_dp_scheduler
         update_vllm_config_for_dp_scheduler(vllm_config)
 
-        # Monkeypatch vLLM Scheduler to attach expert indices to outputs
-        from vllm.v1.core.sched.scheduler import Scheduler
-
-        original_update_from_output = Scheduler.update_from_output
-
-        def custom_update_from_output(self, scheduler_output,
-                                      model_runner_output):
-            expert_indices = getattr(model_runner_output, "expert_indices",
-                                     None)
-
-            if expert_indices is not None:
-                num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-                current_token_offset = 0
-                for req_id, num_tokens_scheduled in num_scheduled_tokens.items(
-                ):
-                    start_idx = current_token_offset
-                    end_idx = start_idx + num_tokens_scheduled
-                    current_token_offset = end_idx
-
-                    request = self.requests.get(req_id)
-                    if request is not None:
-                        step_experts = expert_indices[:, start_idx:
-                                                      end_idx, :].transpose(
-                                                          1, 0, 2)
-                        if not hasattr(request, "_accumulated_routed_experts"):
-                            request._accumulated_routed_experts = []
-                        request._accumulated_routed_experts.append(
-                            step_experts)
-
-            return original_update_from_output(self, scheduler_output,
-                                               model_runner_output)
-
-        Scheduler.update_from_output = custom_update_from_output
-
-        original_get_routed_experts = Scheduler._get_routed_experts
-
-        def custom_get_routed_experts(self, request):
-            if hasattr(request, "_accumulated_routed_experts"
-                       ) and request._accumulated_routed_experts:
-                import numpy as np
-                return np.concatenate(request._accumulated_routed_experts,
-                                      axis=0)
-            return original_get_routed_experts(self, request)
-
-        Scheduler._get_routed_experts = custom_get_routed_experts
+        from tpu_inference.core.sched.utils import \
+            update_vllm_scheduler_for_exporting_expert_ids
+        update_vllm_scheduler_for_exporting_expert_ids()
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
