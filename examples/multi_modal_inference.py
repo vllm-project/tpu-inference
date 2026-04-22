@@ -37,8 +37,7 @@ class ModelRequestData(NamedTuple):
 
 
 # Currently Qwen2.5-VL and Qwen3-VL are supported
-def run_qwen_vl(questions: list[str], modality: str,
-                   args) -> ModelRequestData:
+def run_qwen_vl(questions: list[str], modality: str, args) -> ModelRequestData:
     engine_args = EngineArgs(
         model=args.model,
         max_model_len=args.max_model_len,
@@ -65,12 +64,10 @@ def run_qwen_vl(questions: list[str], modality: str,
     if args.test_multi_image:
         placeholder_full += f"<|vision_start|>{placeholder}<|vision_end|>"
 
-    prompts = [
-        ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-         f"<|im_start|>user\n{placeholder_full}"
-         f"{question}<|im_end|>\n"
-         "<|im_start|>assistant\n") for question in questions
-    ]
+    prompts = [("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+                f"<|im_start|>user\n{placeholder_full}"
+                f"{question}<|im_end|>\n"
+                "<|im_start|>assistant\n") for question in questions]
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -82,12 +79,9 @@ def get_model_runner(model_name: str):
     """Returns the appropriate run function for the given model."""
     if "qwen" in model_name.lower():
         return run_qwen_vl
-        
-    raise ValueError(
-        f"Unsupported model: {model_name}. "
-        "Please add support for this model in get_model_runner."
-    )
 
+    raise ValueError(f"Unsupported model: {model_name}. "
+                     "Please add support for this model in get_model_runner.")
 
 
 def get_multi_modal_input(args):
@@ -113,6 +107,7 @@ def get_multi_modal_input(args):
             "questions": img_questions,
         }
 
+
 def get_multi_modal_input_multi(args):
     """
     Returns multiple images for testing compare.
@@ -120,8 +115,7 @@ def get_multi_modal_input_multi(args):
     if args.modality == "image":
         image1 = convert_image_mode(
             ImageAsset("cherry_blossom").pil_image, "RGB")
-        image2 = convert_image_mode(
-            ImageAsset("stop_sign").pil_image, "RGB")
+        image2 = convert_image_mode(ImageAsset("stop_sign").pil_image, "RGB")
         images = [image1, image2]
         img_questions = [
             "What are shown in these two images? Compare them.",
@@ -229,7 +223,6 @@ def parse_args():
         help="Set the seed when initializing `vllm.LLM`.",
     )
 
-
     parser.add_argument(
         "--test-multi-image",
         action="store_true",
@@ -280,7 +273,9 @@ def main(args):
         engine_args["compilation_config"] = {}
     engine_args["compilation_config"]["cudagraph_capture_sizes"] = []
     # Fix for pydantic validation error in recent vLLM versions
-    engine_args["compilation_config"]["pass_config"] = {"fuse_minimax_qk_norm": False}
+    engine_args["compilation_config"]["pass_config"] = {
+        "fuse_minimax_qk_norm": False
+    }
 
     llm = LLM(**engine_args)
 

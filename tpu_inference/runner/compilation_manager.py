@@ -128,19 +128,20 @@ class CompilationManager:
         self.runner.vllm_config.compilation_config.compilation_time += elapsed
 
     def _precompile_input_embeddings_merger(self) -> None:
-        import functools
         for num_tokens in self.runner.num_tokens_paddings:
-            hidden_size = self.runner.vllm_config.model_config.get_hidden_size()
+            hidden_size = self.runner.vllm_config.model_config.get_hidden_size(
+            )
             hf_conf = self.runner.vllm_config.model_config.hf_config
 
             # Identify multimodal embedding size
             mm_hidden_size = hidden_size
             vision_config = getattr(hf_conf, "vision_config", None)
-            
+
             if vision_config:
                 visual_dim = getattr(vision_config, "out_hidden_size", None)
-                deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", None)
-                
+                deepstack_indexes = getattr(vision_config,
+                                            "deepstack_visual_indexes", None)
+
                 # If both exist, we apply the deepstack concat logic
                 if visual_dim is not None and deepstack_indexes is not None:
                     deepstack_levels = len(deepstack_indexes)
