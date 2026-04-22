@@ -74,7 +74,7 @@ def _run_inference_with_config(model_name: str,
     finally:
         del llm
         # Wait for TPUs to be released
-        time.sleep(5)
+        time.sleep(15)
 
 
 @pytest.mark.parametrize(

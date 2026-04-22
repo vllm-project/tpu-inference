@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import random
 from typing import TYPE_CHECKING, Optional, Tuple, Union
 
 import jax.numpy as jnp
+import numpy
 import torch
 import vllm.envs as vllm_envs
 from vllm.platforms.interface import Platform, PlatformEnum
@@ -90,7 +92,7 @@ class TpuPlatform(Platform):
     simple_compile_backend: str = "openxla"
 
     supported_quantization: list[str] = [
-        "tpu_int8", "compressed-tensors", "awq", "fp8", "mxfp4"
+        "tpu_int8", "compressed-tensors", "awq", "fp8", "gpt_oss_mxfp4"
     ]
 
     additional_env_vars: list[str] = [
@@ -281,7 +283,12 @@ class TpuPlatform(Platform):
 
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
-            assert kv_transfer_config.kv_connector == "TPUConnector"
+            allowed = ("TPUConnector", "TPUConnectorHMA")
+            if kv_transfer_config.kv_connector not in allowed:
+                raise ValueError(
+                    f"Unsupported kv_connector "
+                    f"'{kv_transfer_config.kv_connector}' for the TPU "
+                    f"platform. Expected one of {allowed}.")
         # Late initialization to avoid circular import.
         from tpu_inference.core.sched.dp_scheduler import \
             update_vllm_config_for_dp_scheduler
@@ -369,3 +376,8 @@ class TpuPlatform(Platform):
         on the TPU device(s).
         """
         return torch.device("cpu")
+
+    @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        random.seed(seed)
+        numpy.random.seed(seed)

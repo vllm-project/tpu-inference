@@ -13,7 +13,7 @@
 # limitations under the License.
 
 UNQUANTIZED = "unquantized"
-MXFP4 = "mxfp4"
+MXFP4 = "gpt_oss_mxfp4"
 AWQ = "awq"
 COMPRESSED_TENSORS = "compressed-tensors"
 FP8 = "fp8"

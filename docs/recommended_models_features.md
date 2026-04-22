@@ -7,7 +7,7 @@ We are still landing components in tpu-inference that will improve performance f
 
 If you’d like us to prioritize something specific, please submit a GitHub feature request [here](https://github.com/vllm-project/tpu-inference/issues/new/choose).
 
-<details markdown="1">
+<details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
 
 > - ✅ **Passing:** Tested and works as expected. Ready for use.

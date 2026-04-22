@@ -329,6 +329,36 @@ class TestPallasAttentionBackendImpl:
                          metadata,
                          output_scale=output_scale)
 
+    def test_forward_with_output_block_scale_raises_error(self, mesh):
+        impl = PallasAttentionBackendImpl(
+            num_heads=NUM_HEADS,
+            head_size=HEAD_DIM,
+            scale=0.088,
+            num_kv_heads=NUM_KV_HEADS,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="auto",
+            attn_type=AttentionType.DECODER,
+        )
+
+        layer = MagicMock()
+        layer.layer_name = "0"
+
+        query, key, value, kv_cache, metadata = create_inputs(mesh)
+        output_block_scale = torch.tensor([1.0])
+
+        with torchax.default_env(), set_vllm_model_wrapper_context(
+                kv_caches=[kv_cache],
+                mesh=mesh), pytest.raises(NotImplementedError,
+                                          match="fused output quantization"):
+            impl.forward(layer,
+                         query,
+                         key,
+                         value,
+                         torch.tensor([]),
+                         metadata,
+                         output_block_scale=output_block_scale)
+
     def test_forward_with_attention_sink(self, mesh):
         head_dim = 64
         sinks = torch.rand([NUM_HEADS], dtype=torch.float32)
