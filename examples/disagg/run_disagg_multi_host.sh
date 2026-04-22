@@ -129,6 +129,25 @@ wait_for_server() {
   return 1
 }
 
+check_failed_requests() {
+  local log_file="$1"
+  local failed_requests
+  failed_requests=$(grep "Failed requests:" "$log_file" | awk '{print $3}' || true)
+
+  if [ -z "$failed_requests" ]; then
+    echo "Error: Could not find 'Failed requests:' in the benchmark output." >&2
+    return 1
+  fi
+
+  if [ "$failed_requests" -gt 0 ]; then
+    echo "Error: Benchmark reported $failed_requests failed requests." >&2
+    return 1
+  fi
+
+  echo "Success: Benchmark reported $failed_requests failed requests." >&2
+  return 0
+}
+
 # clear existing container if there is
 CONTAINERS=$(docker ps -a --filter "name=${CONTAINER_PREFIX}*" -q)
 if [ -n "$CONTAINERS" ]; then
@@ -371,6 +390,8 @@ if [ "$TEST_MODE" = "1" ] || [ "$TEST_MODE" = "3" ]; then
         --trust-remote-code \
         --seed ${RANDOM_SEED} > /root/logs/benchmark.txt 2>&1"
     set +x
+
+    check_failed_requests "$LOG_DIR/benchmark.txt"
 fi
 
 # Run correctness test inside the proxy-benchmark-node container

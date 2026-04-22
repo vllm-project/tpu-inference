@@ -93,8 +93,16 @@ run_disagg_benchmark() {
     local num_prompts=$5
     local filename="${input_len}_${output_len}.json"
 
-    for CONCURRENCY in 16 32 64 128 256
+    for CONCURRENCY in 1 4 16 32 64 128 256
     do
+        # Run smaller number of prompts at lower concurrency
+        local effective_num_prompts=$num_prompts
+        if [ "$CONCURRENCY" -eq 1 ]; then
+            effective_num_prompts=32
+        elif [ "$CONCURRENCY" -eq 4 ]; then
+            effective_num_prompts=64
+        fi
+
         echo "-------------------------------------------------------"
         echo "Starting Benchmark: Concurrency=$CONCURRENCY, Input=$input_len, Output=$output_len"
         echo "-------------------------------------------------------"
@@ -102,9 +110,10 @@ run_disagg_benchmark() {
         kubectl exec "$proxy" -- vllm bench serve \
             --model="$model" \
             --dataset-name=random \
+            --num-warmups 10 \
             --random-input-len="$input_len" \
             --random-output-len="$output_len" \
-            --num-prompts="$num_prompts" \
+            --num-prompts="$effective_num_prompts" \
             --ignore-eos \
             --host=localhost \
             --port=10000 \
