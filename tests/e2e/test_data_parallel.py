@@ -280,7 +280,7 @@ def _test_data_parallelism(
 ):
     """Correctness and performance test for model DP."""
     os.environ['MODEL_IMPL_TYPE'] = "flax_nnx"
-    model_name = "meta-llama/Meta-Llama-3-8B"
+    model_name = "Qwen/Qwen3-0.6B"
 
     cfg = TestConfig.for_performance(
     ) if check_performance else TestConfig.for_correctness()
