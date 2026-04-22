@@ -91,7 +91,7 @@ def parse_and_dump(file_path, record_id):
                 MeanITL, MedianITL, StdITL, P90ITL, P99ITL
             ) VALUES (
                 '{unique_record_id}', 'COMPLETED', {spanner_timestamp}, CURRENT_TIMESTAMP(),
-                'GKE', {fmt(data.get('model_id', 'N/A'), True)}, 'TEST', 'N/A', 'random', 'scheduler', {input_len}, {output_len},
+                'GKE', {fmt(data.get('model_id', 'N/A'), True)}, 'GKE_DISAGG', 'N/A', 'random', 'scheduler', {input_len}, {output_len},
                 {fmt(data.get('endpoint_type'), True)}, {fmt(data.get('backend'), True)}, {fmt(data.get('label'), True)}, {fmt(data.get('tokenizer_id'), True)}, 
                 {fmt(data.get('num_prompts'))}, {fmt(data.get('request_rate'))}, {fmt(data.get('burstiness'))}, {fmt(data.get('max_concurrency'))},
                 {fmt(data.get('duration'))}, {fmt(data.get('completed'))}, {fmt(data.get('failed'))}, {fmt(data.get('total_input_tokens'))}, {fmt(data.get('total_output_tokens'))}, {fmt(data.get('max_concurrent_requests'))},
