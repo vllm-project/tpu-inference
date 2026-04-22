@@ -21,8 +21,7 @@ from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig, int4_w4a16_moe_quant_config)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import \
     CompressedTensorsMoEMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
@@ -283,17 +282,8 @@ class VllmCompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod,
 
     def get_fused_moe_quant_config(
             self, layer: torch.nn.Module) -> FusedMoEQuantConfig | None:
-        # The VLLM equivalent scheme quantizes the weights scales to fp8 and stores quantization scales; both per-group and per-channel
-        # Here the weight_scales are kept in higher precision.
-        return FusedMoEQuantConfig.make(
-            torch.float8_e4m3fn,  # quant dtype for activations
-            w1_scale=layer.w13_weight_scale,  # group scale
-            w2_scale=layer.w2_weight_scale,  # group scale
-            per_act_token_quant=True,  # always use dynamic per-token
-            per_out_ch_quant=True,  # always use per-channel
-            block_shape=None,
-            weight_dtype="int4",  # weight dtype for weights
-        )
+        # Quantization is handled in the kernel.
+        return None
 
     def apply_monolithic(
         self,
@@ -324,10 +314,5 @@ class VllmCompressedTensorsW4A16MoEMethod(
 
     def get_fused_moe_quant_config(
             self, layer: torch.nn.Module) -> FusedMoEQuantConfig | None:
-        return int4_w4a16_moe_quant_config(
-            w1_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
-            w1_zp=None,
-            w2_zp=None,
-            block_shape=[0, self.group_size],
-        )
+        # Quantization is handled in the kernel.
+        return None
