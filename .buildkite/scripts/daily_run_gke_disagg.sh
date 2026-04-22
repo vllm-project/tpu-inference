@@ -32,29 +32,29 @@ init_env() {
 
     # Create storage class
     echo "kubectl apply -f ./kubernetes/manifests/storageclass.yaml"
-    kubectl apply -f ./kubernetes/manifests/storageclass.yaml
+    kubectl apply -f ./.buildkite/kubernetes/manifests/storageclass.yaml
 }
 
 deploy_1p1d() {
     echo "kubectl apply -f ./kubernetes/manifests/v7x/single_prefill.yaml"
-    kubectl apply -f ./kubernetes/manifests/v7x/single_prefill.yaml
+    kubectl apply -f ./.buildkite/kubernetes/manifests/v7x/single_prefill.yaml
 
     echo "kubectl apply -f ./kubernetes/manifests/v7x/single_decode.yaml"
-    kubectl apply -f ./kubernetes/manifests/v7x/single_decode.yaml
+    kubectl apply -f ./.buildkite/kubernetes/manifests/v7x/single_decode.yaml
 
     echo "kubectl apply -f ./kubernetes/manifests/v7x/proxy1p1d.yaml"
-    kubectl apply -f ./kubernetes/manifests/v7x/proxy1p1d.yaml
+    kubectl apply -f ./.buildkite/kubernetes/manifests/v7x/proxy1p1d.yaml
 }
 
 cleanup_1p1d() {
     echo "kubectl delete -f ./kubernetes/manifests/v7x/single_prefill.yaml"
-    kubectl delete -f ./kubernetes/manifests/v7x/single_prefill.yaml
+    kubectl delete -f ./.buildkite/kubernetes/manifests/v7x/single_prefill.yaml
 
     echo "kubectl delete -f ./kubernetes/manifests/v7x/single_decode.yaml"
-    kubectl delete -f ./kubernetes/manifests/v7x/single_decode.yaml
+    kubectl delete -f ./.buildkite/kubernetes/manifests/v7x/single_decode.yaml
 
     echo "kubectl delete -f ./kubernetes/manifests/v7x/proxy1p1d.yaml"
-    kubectl delete -f ./kubernetes/manifests/v7x/proxy1p1d.yaml
+    kubectl delete -f ./.buildkite/kubernetes/manifests/v7x/proxy1p1d.yaml
 }
 
 wait_for_vllm() {
@@ -201,7 +201,7 @@ for RESULT_FILE in "1024_8192.json" "8192_1024.json"; do
     
     # Dump results to database
     echo "Parsing results and dumping to database..."
-    python3 parse_gke_results.py "$RESULT_FILE" "$RECORD_ID" | while read -r SQL; do
+    python3 ./.buildkite/scripts/parse_gke_results.py "$RESULT_FILE" "$RECORD_ID" | while read -r SQL; do
         if [[ -n "$SQL" ]]; then
             echo "Executing SQL statement..."
             gcloud spanner databases execute-sql "${GCP_DATABASE_ID}" \
