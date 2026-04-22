@@ -122,6 +122,7 @@ def make_tgmm_configs(
     acc_dtype: jnp.dtype | None,
 ):
   """Fills the GMM config for the TGMM kernel."""
+  assert out_dtype, "out_dtype cannot be None"
   assert lhs.shape[0] == rhs.shape[0], f'lhs and rhs m-dim mismatch: {lhs.shape[0]}!={rhs.shape[0]} {lhs.shape} vs {rhs.shape}'
   size_m, size_k = lhs.shape
   _, size_n = rhs.shape
@@ -204,20 +205,24 @@ def tgmm_inner_kernel(
     lhs_iota = lax.broadcasted_iota(jnp.int32, tiled_lhs_ref.shape, 0)
     lhs_mask = jnp.logical_and(m_start_local <= lhs_iota, lhs_iota < m_end_local)
     lhs_masked = jnp.where(lhs_mask, tiled_lhs_ref[...], 0)
-    # masking both lhs and rhs shouldn't be necessary. as long as there isn't
-    # NaNs, we can just mask out one of either argument and get the same
-    # numeric result.
+    # If there are no NaNs, masking both lhs and rhs shouldn't be necessary.
+    # But without masking both, we sometimes see the result contain NaNs so we
+    # decide to mask both to be safe.
+    rhs_iota = lax.broadcasted_iota(jnp.int32, tiled_rhs_ref.shape, 0)
+    rhs_mask = jnp.logical_and(m_start_local <= rhs_iota, rhs_iota < m_end_local)
+    rhs_masked = jnp.where(rhs_mask, tiled_rhs_ref[...], 0)
 
     acc = acc_ref[...] + jax.lax.dot_general(
         lhs_masked,
-        tiled_rhs_ref[...],
+        rhs_masked,
         (((0,), (0,)), ((), ())),
         preferred_element_type=jnp.float32,
     )
 
     if is_group_changing:
       tiled_out_ref[...] = acc.astype(tiled_out_ref.dtype)
-    acc_ref[...] = acc
+    else:
+      acc_ref[...] = acc
 
   @jax.named_scope("matmul_new_group_and_changing")
   def matmul_new_group_and_changing():
