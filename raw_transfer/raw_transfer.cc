@@ -71,12 +71,13 @@ xla::PjRtBuffer* GetPjrtBufferFromPyObject(PyObject* obj) {
   xla::ifrt::Array* ifrt_array = storage->ifrt_array.get();
 
   std::cerr << "ifrt_array type: " << typeid(*ifrt_array).name() << std::endl;
-  std::string type_name = typeid(*ifrt_array).name();
-  if (type_name.find("PjRtArray") == std::string::npos) {
-    throw std::runtime_error(std::string("Not a PjRt compatible array! Actual type: ") + type_name);
+  auto* arr = dynamic_cast<xla::ifrt::PjRtArray*>(ifrt_array);
+  if (arr) {
+    return arr->pjrt_buffers().front().get();
   }
-  auto* arr = reinterpret_cast<xla::ifrt::PjRtCompatibleArray*>(ifrt_array);
-  return arr->pjrt_buffers().front().get();
+  
+  std::cerr << "GetPjrtBufferFromPyObject: dynamic_cast to PjRtArray failed" << std::endl;
+  return nullptr;
 }
 
 }  // namespace jax
