@@ -56,6 +56,13 @@ class KVCacheManager:
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
         self.use_mla = self.runner.model_config.use_mla
+        # Set by `update_mamba_page_size_padded` for hybrid attention+mamba
+        # models. When set, every attention layer spec reports this as its
+        # `page_size_padded` so vLLM sees a uniform page size across groups
+        # and computes `num_blocks` that matches what each layer actually gets
+        # on the TPU side (where we duplicate the shared tensor per layer
+        # because mamba and attention caches have different shapes).
+        self._hybrid_uniform_page_size_bytes: int | None = None
 
     def _create_attention_spec(
             self,
@@ -67,38 +74,72 @@ class KVCacheManager:
             page_size_bytes = get_attention_page_size_bytes(
                 self.runner.mesh, block_size, num_kv_heads, head_size,
                 self.runner.kv_cache_dtype, True)
+            padded = (self._hybrid_uniform_page_size_bytes
+                      if self._hybrid_uniform_page_size_bytes is not None else
+                      int(page_size_bytes))
             return MLAAttentionSpec(block_size=block_size,
                                     num_kv_heads=1,
                                     head_size=head_size,
                                     dtype=self.runner.kv_cache_dtype,
                                     cache_dtype_str=self.runner.vllm_config.
                                     cache_config.cache_dtype,
-                                    page_size_padded=int(page_size_bytes))
+                                    page_size_padded=padded)
         else:
             page_size_bytes = get_attention_page_size_bytes(
                 self.runner.mesh, block_size, num_kv_heads, head_size,
                 self.runner.kv_cache_dtype, False)
+            padded = (self._hybrid_uniform_page_size_bytes
+                      if self._hybrid_uniform_page_size_bytes is not None else
+                      int(page_size_bytes))
             if sliding_window is not None:
                 return SlidingWindowSpec(block_size=block_size,
                                          num_kv_heads=num_kv_heads,
                                          head_size=head_size,
                                          dtype=self.runner.kv_cache_dtype,
                                          sliding_window=sliding_window,
-                                         page_size_padded=int(page_size_bytes))
+                                         page_size_padded=padded)
             else:
                 return FullAttentionSpec(block_size=block_size,
                                          num_kv_heads=num_kv_heads,
                                          head_size=head_size,
                                          dtype=self.runner.kv_cache_dtype,
-                                         page_size_padded=int(page_size_bytes))
+                                         page_size_padded=padded)
 
     def update_mamba_page_size_padded(
             self, layers: dict[str, AttentionLayerBase]) -> None:
-        """Set mamba padded page size to match the full attention page size.
+        """Pad attention and mamba page sizes so vLLM's num_blocks matches
+        what the TPU allocates per layer.
 
-        vLLM expects hybrid models to share KV cache across different attention
-        modules. This updates `mamba_page_size_padded` to the larger footprint
-        of full attention layers to unify the page sizes.
+        For hybrid attention+mamba models, vLLM groups a tensor's memory so
+        that one `KVCacheTensor` is `shared_by` one layer from each kv-cache
+        group (e.g., Qwen3.5: 1 full-attn + 3 linear-attn per shared_by).
+        vLLM's scheduler assumes these layers share a single physical
+        tensor at the byte level — each layer's block_table indexes into
+        disjoint slots of the same backing allocation, and device kernels
+        reinterpret the bytes as attention KV or mamba state depending on
+        which layer is accessing the slot.
+
+        TPU `jax.Array`s are strongly typed, so we cannot overlay an
+        attention tensor and a mamba tensor on the same bytes.
+        `initialize_kv_cache` therefore allocates one physical array per
+        layer in the `shared_by` group, carving the group's byte budget
+        into separate per-layer tensors. Without the compensation done
+        here, vLLM's block pool would hold `num_shared_layers`× more
+        block IDs than each per-layer array has slots — the scheduler
+        would hand out block IDs beyond a layer's leading dimension,
+        JAX's indexed writes would silently clip them, and multiple
+        requests' mamba recurrent states would collapse onto the same
+        slot (corrupted state → gibberish generation).
+
+        The fix: set every layer's reported `page_size_padded` equal to the
+        full per-`shared_by` footprint — `num_attn_groups × attn_page +
+        num_mamba_groups × mamba_unpadded`, where `attn_page` is the
+        TPU-actual per-block bytes (from `get_attention_page_size_bytes`,
+        which accounts for dtype packing like fp8) and `mamba_unpadded` is
+        the natural `prod(shape) × dtype_size`. vLLM then computes a
+        smaller `num_blocks` that exactly matches what we allocate per layer
+        on the TPU side. HBM usage is unchanged; only the block-ID
+        accounting lines up.
 
         Args:
             layers: A dictionary mapping layer names to their corresponding
@@ -122,12 +163,156 @@ class KVCacheManager:
                                                 ShardingAxisName.ATTN_HEAD))
         head_size = common_utils.get_padded_head_dim(
             first_attn_module.head_size)
-        page_size_bytes = get_attention_page_size_bytes(
+        attn_page_size_bytes = get_attention_page_size_bytes(
             self.runner.mesh, self.runner.cache_config.block_size,
             num_kv_heads, head_size, self.runner.kv_cache_dtype, False)
-        logger.debug("Setting padded mamba page size in cache config to %d",
-                     page_size_bytes)
-        self.runner.cache_config.mamba_page_size_padded = page_size_bytes
+
+        mamba_modules = [
+            module for module in layers.values()
+            if isinstance(module, MambaBase)
+        ]
+        if not mamba_modules:
+            # Not hybrid; set `mamba_page_size_padded` to the attention
+            # page size as a no-op default (vLLM's platform interface sets
+            # this too when it detects hybrid). No layer duplication will
+            # happen without mamba layers, so no block-ID mismatch to fix.
+            logger.debug(
+                "Setting padded mamba page size in cache config to %d",
+                attn_page_size_bytes)
+            self.runner.cache_config.mamba_page_size_padded = (
+                attn_page_size_bytes)
+            return
+
+        # Compute the unpadded mamba page size from an actual mamba module's
+        # spec (shapes × dtype-size), ignoring any existing padding.
+        first_mamba_spec = mamba_modules[0].get_kv_cache_spec(
+            self.runner.vllm_config)
+        assert isinstance(first_mamba_spec, MambaSpec)
+        unpadded_mamba_page_size = dataclasses.replace(
+            first_mamba_spec, page_size_padded=None).page_size_bytes
+
+        # Derive vLLM's kv-cache group layout. vLLM groups layers by spec
+        # type, then splits each type into equal-sized groups. The
+        # group_size logic below duplicates the heuristic in
+        # `vllm/v1/core/kv_cache_utils.py::_get_kv_cache_groups_uniform_page_size`
+        # because vLLM's grouping requires a fully-populated spec dict,
+        # but we need the group layout *before* we can finish creating
+        # the specs (chicken-and-egg: padding depends on grouping, spec
+        # creation depends on padding). Keep this in sync with vLLM if
+        # that heuristic ever changes — which has been stable since the
+        # hybrid allocator landed.
+        #
+        # Heuristic: default to the minimum layer count across types,
+        # but bump to the max if it's within 1.5× (avoids excess padding
+        # for e.g. 12 sw + 13 full). For every `shared_by` tensor,
+        # exactly one layer per group ends up inside, so
+        # `num_shared = num_attn_groups + num_mamba_groups`.
+        num_attn = len(attn_modules)
+        num_mamba = len(mamba_modules)
+        min_count = min(num_attn, num_mamba)
+        max_count = max(num_attn, num_mamba)
+        # Match vLLM exactly: float comparison, no int() truncation (matters
+        # at e.g. min=3, max=4, where 4 < 4.5 but 4 < int(4.5)==4 differs).
+        if max_count < min_count * 1.5:
+            group_size = max_count
+        else:
+            group_size = min_count
+        num_attn_groups = (num_attn + group_size - 1) // group_size
+        num_mamba_groups = (num_mamba + group_size - 1) // group_size
+
+        uniform_page_size_bytes = (num_attn_groups * attn_page_size_bytes +
+                                   num_mamba_groups * unpadded_mamba_page_size)
+
+        logger.info(
+            "Hybrid KV cache: padding every layer spec to %d bytes "
+            "(num_attn_groups=%d × attn_page=%d + "
+            "num_mamba_groups=%d × mamba_unpadded=%d). This makes vLLM's "
+            "num_blocks match per-layer TPU allocation when mamba layers "
+            "cannot be truly shared.", uniform_page_size_bytes,
+            num_attn_groups, attn_page_size_bytes, num_mamba_groups,
+            unpadded_mamba_page_size)
+
+        self._hybrid_uniform_page_size_bytes = int(uniform_page_size_bytes)
+        self.runner.cache_config.mamba_page_size_padded = int(
+            uniform_page_size_bytes)
+
+        # Pin vLLM's num_blocks to the value that falls out of the
+        # physical byte budget when allocated per-layer. Without an
+        # override, vLLM would compute
+        #   floor(avail / (uniform × group_size))
+        # from the padded spec. That can exceed the per-layer value
+        #   floor(attn_page × floor(avail / (attn_page × group_size))
+        #         / uniform)
+        # by 1 at flooring boundaries — leaving the scheduler with a
+        # larger pool than the TPU physically allocates, and bumping
+        # peak HBM by ~1 block × uniform × num_tensors. Setting the
+        # override aligns the scheduler's view with the physical
+        # allocation exactly.
+        self._maybe_set_num_blocks_override(attn_page_size_bytes,
+                                            int(uniform_page_size_bytes),
+                                            group_size)
+
+    def _maybe_set_num_blocks_override(self, attn_page_size_bytes: int,
+                                       uniform_page_size_bytes: int,
+                                       group_size: int) -> None:
+        """Compute `cache_config.num_gpu_blocks_override` to match the
+        per-layer block count the TPU physically allocates.
+
+        Formula:
+          `num_blocks_vllm_naive = floor(avail / (attn_page × group_size))`
+          `num_blocks_tpu        = floor(attn_page × num_blocks_vllm_naive
+                                          / uniform)`
+
+        On the TPU side, `initialize_kv_cache`'s `duplicate_shared_layers`
+        path divides `tensor.size` by `uniform` to get per-layer num_blocks.
+        Setting the override to the value above makes the scheduler's pool
+        size equal the per-layer tensor's leading dimension exactly.
+
+        No internal safety margin is applied — `gpu_memory_utilization` is
+        the knob users already have for reserving headroom. Adding a
+        silent reduction here would conflict with their explicit budget.
+
+        Skipped if the user has explicitly set `num_gpu_blocks_override` or
+        if HBM usage isn't readable (e.g. in tests without real devices).
+        Spec padding alone still fixes the OOB bug in that case; only the
+        ~1-block-per-tensor flooring-boundary precision is lost.
+        """
+        cache_config = self.runner.cache_config
+        if cache_config.num_gpu_blocks_override is not None:
+            return
+
+        devices = self.runner.mesh.devices.flatten()
+        try:
+            hbm_usage = utils.hbm_usage_bytes(devices)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "Skipping num_gpu_blocks_override: hbm_usage_bytes failed "
+                "(%s). Spec padding alone still fixes the OOB bug; the "
+                "scheduler's pool may exceed per-layer TPU capacity by one "
+                "block at flooring boundaries.", exc)
+            return
+
+        total_limit = sum(limit for _, limit in hbm_usage)
+        total_used = sum(used for used, _ in hbm_usage)
+        gpu_mem_util = cache_config.gpu_memory_utilization
+        avail = int(total_limit * gpu_mem_util - total_used)
+        if avail <= 0:
+            return
+
+        naive_vllm_num_blocks = avail // (attn_page_size_bytes * group_size)
+        if naive_vllm_num_blocks <= 0:
+            return
+        naive_tensor_size = attn_page_size_bytes * naive_vllm_num_blocks
+        num_blocks_tpu = naive_tensor_size // uniform_page_size_bytes
+        if num_blocks_tpu <= 0:
+            return
+
+        cache_config.num_gpu_blocks_override = int(num_blocks_tpu)
+        logger.info(
+            "Hybrid KV cache: setting num_gpu_blocks_override=%d to align "
+            "the scheduler's block pool with per-layer TPU allocation "
+            "(avail=%d, naive_vllm_num_blocks=%d).", num_blocks_tpu, avail,
+            naive_vllm_num_blocks)
 
     def get_kv_cache_spec(self):
         # TODO(xiang): this hack tricks engine core to init successfully
@@ -385,15 +570,23 @@ class KVCacheManager:
                 total_group_page_size = 0
                 for name in kv_cache_tensor.shared_by:
                     spec = layer_name_to_spec[name]
-                    # MambaSpec has a padded page size to unify it with full
-                    # attention layers. If duplicating, use unpadded size for
-                    # num_blocks calculation to make it consistent with actual
-                    # allocation and avoid underutilization of HBM.
+                    # Use the per-layer *TPU-actual* per-block bytes so the
+                    # sum equals the `page_size_padded` that
+                    # `update_mamba_page_size_padded` installed on every
+                    # spec (== attn_page + N × mamba_unpadded). For
+                    # attention, the TPU-actual size includes dtype-
+                    # specific packing (e.g., fp8 KV packs 4 elements per
+                    # 32-bit word) which `spec.real_page_size_bytes`
+                    # doesn't account for — on fp8 models they differ by
+                    # 2×, which would break the num_blocks match here.
                     if isinstance(spec, MambaSpec):
                         total_group_page_size += dataclasses.replace(
                             spec, page_size_padded=None).page_size_bytes
                     else:
-                        total_group_page_size += spec.page_size_bytes
+                        total_group_page_size += get_attention_page_size_bytes(
+                            self.runner.mesh, spec.block_size,
+                            spec.num_kv_heads, spec.head_size, spec.dtype,
+                            self.use_mla)
                 num_blocks = kv_cache_tensor.size // total_group_page_size
             else:
                 # If sharing KV cache, compute `num_blocks` using the page size
@@ -506,6 +699,13 @@ class KVCacheManager:
                 self.runner.layer_name_to_kvcache_index[
                     layer_name] = self.runner.layer_name_to_kvcache_index[
                         target_layer_name]
+
+        logger.info(
+            "Hybrid KV cache layout: num_kv_cache_groups=%d, "
+            "num_kv_cache_tensors=%d, kv_cache_config.num_blocks=%d, "
+            "duplicate_shared_layers=%s", len(kv_cache_config.kv_cache_groups),
+            len(kv_cache_config.kv_cache_tensors), kv_cache_config.num_blocks,
+            duplicate_shared_layers)
 
         log_parts = [
             "Init kv-cache", f"num_total_layers={len(kv_caches)}",
