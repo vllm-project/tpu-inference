@@ -81,12 +81,15 @@ wait_for_server() {
 
 cleanup_instances() {
   echo "Cleaning up any running vLLM instances..."
-  pkill -9 -f "vllm serve" || true
-  pkill -9 -f "toy_proxy_server" || true
+  pkill -f "vllm" || true
+  pkill -f "toy_proxy_server" || true
   sleep 1
 }
 
 LOG_DIR=$HOME/logs
+
+echo "--- The HOME variable is : $HOME ---"
+
 if [ ! -d $LOG_DIR ]; then
   mkdir -p $LOG_DIR
 else
@@ -173,8 +176,9 @@ for PORT in "${DECODE_PORTS[@]}"; do
 done
 
 echo "starting proxy server"
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 # Start proxy server
-python $HOME/tpu-inference/examples/disagg/toy_proxy_server.py \
+python $SCRIPT_DIR/toy_proxy_server.py \
 --host localhost \
 --port 8000 \
 --prefiller-hosts ${PREFILL_HOSTS[@]} \
@@ -190,17 +194,17 @@ echo "--- Running Disagg Benchmark ---" > $LOG_FILE
 # run ben for disagg
 set -x
 vllm bench serve \
---model=$MODEL \
---num-warmups=3 \
---dataset-name=random \
---random-input-len=${INPUT_LEN} \
---random-output-len=${OUTPUT_LEN} \
---num-prompts=${NUM_PROMPTS} \
---ignore-eos \
---host=localhost \
---port 8000 \
---request-rate=${REQUEST_RATE} \
->> $LOG_FILE 2>&1
+  --model=$MODEL \
+  --num-warmups=3 \
+  --dataset-name=random \
+  --random-input-len=${INPUT_LEN} \
+  --random-output-len=${OUTPUT_LEN} \
+  --num-prompts=${NUM_PROMPTS} \
+  --ignore-eos \
+  --host=localhost \
+  --port 8000 \
+  --request-rate=${REQUEST_RATE} \
+  >> $LOG_FILE 2>&1
 set +x
 
 cat <<'EOF'
