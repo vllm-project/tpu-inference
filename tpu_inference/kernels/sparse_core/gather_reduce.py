@@ -92,7 +92,7 @@ def is_supported_by_sc_gather_reduce(x_shape: int, hidden_dim: int,
     total_scatter_footprint_bytes = gmm_bytes + inter_bytes + out_bytes
 
     # If the required memory easily fits inside the TensorCore VMEM, Scatter is faster.
-    # We use a 1.1x multiplier (10% buffer) because XLA compiler aliasing often
+    # We use a 1.10x multiplier (10% buffer) because XLA compiler aliasing often
     # saves a tiny bit of memory overhead right at the boundary.
     if total_scatter_footprint_bytes <= (tpu_info.vmem_capacity_bytes * 1.1):
         return False
