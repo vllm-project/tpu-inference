@@ -63,8 +63,6 @@ spec:
                     pip install --no-deps /tmp/tpu-inference
                     echo "tpu-inference patch installed."
 
-                    # pip install jax==0.9.1 jaxlib==0.9.1
-
                     # Environment variables
                     export VLLM_ENABLE_V1_MULTIPROCESSING=0
                     export HF_TOKEN=${HF_TOKEN}
@@ -92,7 +90,6 @@ spec:
                     --max-num-seqs 256 \
                     --max-num-batched-tokens 4096 \
                     --load-format dummy \
-                    --enable-expert-parallel \
                     __ADDITIONAL_CONFIG__
                   ) & PID=$!
                   
@@ -200,7 +197,7 @@ spec:
     template:
       metadata:
         labels:
-          kueue.x-k8s.io/queue-name: lq
+          kueue.x-k8s.io/queue-name: multislice-queue
         annotations:
           cloud.google.com/gke-tpu-slice-topology: __TOPOLOGY__ # Use your favorite 4m x 4n x 4k topology
       spec:
