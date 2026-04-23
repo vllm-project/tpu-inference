@@ -438,7 +438,7 @@ class DeviceBuffer:
         self._last_offset = 0
         self._keys: List[str] = []
         self._sizes: List[int] = []
-        self._views: Dict[str, np.ndarray] = {}
+        self._views: Dict[str, Any] = {}
 
     def _ensure_capacity(self, size: int):
         """Ensure the internal buffer has enough space for 'size' more elements along the last axis."""
@@ -449,6 +449,13 @@ class DeviceBuffer:
                                   dtype=np.int32)
             new_buffer[..., :self._offset] = self.buffer[..., :self._offset]
             self.buffer = new_buffer
+
+            # Repoint the Python descriptors to the new memory address
+            for key, info in self._views.items():
+                off, sz, shp = info["offset"], info["size"], info["shape"]
+                info["view"] = self.buffer[..., off:off +
+                                           sz].reshape(self.leading_shape +
+                                                       shp)
 
     def append(self, array: np.ndarray, key: Optional[str] = None):
         """Append data to the buffer along the last axis."""
@@ -473,12 +480,18 @@ class DeviceBuffer:
             size = int(np.prod(shape))
 
         self._ensure_capacity(size)
-        view = self.buffer[..., self._offset:self._offset +
+        current_offset = self._offset
+        view = self.buffer[..., current_offset:current_offset +
                            size].reshape(self.leading_shape + shape)
         self._offset += size
         if key:
             self.set_key(key)
-            self._views[key] = view
+            self._views[key] = {
+                "offset": current_offset,
+                "size": size,
+                "shape": shape,
+                "view": view
+            }
         return view
 
     def set_key(self, key: str):
@@ -503,22 +516,28 @@ class DeviceBuffer:
 
     def get_allocated_view(self, key: str) -> np.ndarray:
         """Get an allocated view by key."""
-        return self._views[key]
+        return self._views[key]["view"]
 
     @staticmethod
     @functools.partial(jax.jit, static_argnums=(1, 2))
+    def _unpack_arrays_jit(
+            blob: jax.Array,
+            metadata: DeviceBufferMetadata,
+            shape: Optional[Tuple[int, ...]] = None) -> List[jax.Array]:
+        indices = tuple(np.cumsum(metadata.sizes)[:-1])
+        parts = jnp.split(blob, indices, axis=-1)
+        if shape:
+            return [x.reshape(shape) for x in parts]
+        return parts
+
+    @staticmethod
     def unpack_arrays(
-        blob: jax.Array,
-        metadata: DeviceBufferMetadata,
-        shape: Optional[Tuple[int, ...]] = None,
-    ) -> Dict[str, jax.Array]:
+            blob: jax.Array,
+            metadata: DeviceBufferMetadata,
+            shape: Optional[Tuple[int, ...]] = None) -> Dict[str, jax.Array]:
         """
         Unpack a blob into a dictionary of arrays based on provided metadata.
         Uses JIT and jnp.split along the last axis.
         """
-        indices = tuple(np.cumsum(metadata.sizes)[:-1])
-        parts = jnp.split(blob, indices, axis=-1)
-        if shape:
-            parts = [x.reshape(shape) for x in parts]
-
+        parts = DeviceBuffer._unpack_arrays_jit(blob, metadata, shape)
         return {key: parts[i] for i, key in enumerate(metadata.keys)}
