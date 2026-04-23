@@ -76,20 +76,21 @@ def compute_schedule_table_v2(
     needs_transition = ((seq_end % alignment != 0) & (~is_last_seq) &
                         (~is_swallowed))
 
+    needs_start_transition = (prev_seq_end % alignment != 0) & (~is_swallowed)
+
     effective_end = jnp.where(needs_transition, next_aligned_start, seq_end)
     effective_end = jnp.maximum(effective_start, effective_end)
 
     # Block counts per sequence
     num_regular_blocks = (effective_end - effective_start + chunk_size -
                           1) // chunk_size
-    total_blocks_per_seq = num_regular_blocks + needs_transition.astype(
-        jnp.int32)
+    total_blocks_per_seq = (num_regular_blocks +
+                            needs_transition.astype(jnp.int32) +
+                            needs_start_transition.astype(jnp.int32))
     total_blocks_per_seq = jnp.where(is_swallowed, 0, total_blocks_per_seq)
 
     # Calculate the last perfectly aligned decode boundary
-    aligned_decode_boundary = (decode_tokens // alignment) * alignment
-
-    is_pure_decode = seq_end <= aligned_decode_boundary
+    is_pure_decode = seq_end <= decode_tokens
     total_blocks_per_seq = jnp.where(is_pure_decode, 0, total_blocks_per_seq)
 
     # Starting block index for each sequence
@@ -111,25 +112,36 @@ def compute_schedule_table_v2(
     # index of block within blocks for a sequence
     local_b = b_idx - base_idx[r_for_block]
 
-    is_trans_block = needs_transition[r_for_block] & (
-        local_b == num_regular_blocks[r_for_block])
+    start_trans_offset = (seq_start[r_for_block] // alignment) * alignment
 
-    # Gather regular properties, effective start maps sequence to start index,
-    # r_for_block returns sequences sorted by grid index
-    reg_offset = effective_start[r_for_block] + local_b * chunk_size
+    is_start_trans = needs_start_transition[r_for_block] & (local_b == 0)
+
+    # Adjust local_b for regular blocks if there was a start transition
+    adj_local_b = jnp.where(needs_start_transition[r_for_block], local_b - 1,
+                            local_b)
+
+    is_end_trans = needs_transition[r_for_block] & (
+        adj_local_b == num_regular_blocks[r_for_block])
+
+    reg_offset = effective_start[r_for_block] + adj_local_b * chunk_size
     reg_count = jnp.minimum(chunk_size,
                             effective_end[r_for_block] - reg_offset)
-    reg_is_last = reg_offset + reg_count >= seq_end[r_for_block]
-    reg_is_first = reg_offset == seq_start[r_for_block]
+    # reg_is_last = reg_offset + reg_count >= seq_end[r_for_block]
+    # reg_is_first = reg_offset == seq_start[r_for_block]
 
-    # Gather transition properties
     trans_offset = next_aligned_start[r_for_block]
 
     # Apply predication
-    block_offset = jnp.where(is_trans_block, trans_offset, reg_offset)
-    block_count = jnp.where(is_trans_block, alignment, reg_count)
-    block_is_last = jnp.where(is_trans_block, False, reg_is_last)
-    block_is_first = jnp.where(is_trans_block, False, reg_is_first)
+    block_offset = jnp.where(
+        is_start_trans,
+        start_trans_offset,
+        jnp.where(is_end_trans, trans_offset, reg_offset),
+    )
+
+    block_count = jnp.where(is_start_trans, alignment,
+                            jnp.where(is_end_trans, alignment, reg_count))
+
+    is_trans_block = is_start_trans | is_end_trans
 
     # =========================================================================
     # 3. Metadata for shared sublane tiles
@@ -137,8 +149,13 @@ def compute_schedule_table_v2(
     glob_idxs = block_offset[:, None] + jnp.arange(alignment)[None, :]
 
     # [safe_max_blocks, sublane size, num_seqs]
+    valid_mask = glob_idxs < num_tokens
     t_reqs = (jnp.sum(glob_idxs[:, :, None] >= query_start_loc[None, None, :],
                       axis=-1) - 1)
+    # there could be padding in query_start_loc
+    last_valid_seq = jnp.max(
+        jnp.where(total_blocks_per_seq > 0, jnp.arange(num_seqs), -1))
+    t_reqs = jnp.where(valid_mask, t_reqs, last_valid_seq)
     t_reqs = jnp.minimum(jnp.maximum(t_reqs, 0), num_seqs - 1)
 
     is_first_tok = (glob_idxs == query_start_loc[t_reqs]).astype(jnp.int32)
@@ -162,8 +179,10 @@ def compute_schedule_table_v2(
     block_offset = jnp.where(prefill_valid_mask, block_offset, 0)
     r_for_block = jnp.where(prefill_valid_mask, r_for_block, 0)
     block_count = jnp.where(prefill_valid_mask, block_count, 0)
-    block_is_last = jnp.where(prefill_valid_mask, block_is_last, False)
+    block_is_first = block_offset <= seq_start[r_for_block]
+    block_is_last = (block_offset + block_count) >= seq_end[r_for_block]
     block_is_first = jnp.where(prefill_valid_mask, block_is_first, False)
+    block_is_last = jnp.where(prefill_valid_mask, block_is_last, False)
     is_trans_block = jnp.where(prefill_valid_mask, is_trans_block, False)
     t_reqs = jnp.where(prefill_valid_mask[:, None], t_reqs, 0)
     is_first_tok = jnp.where(prefill_valid_mask[:, None], is_first_tok, 0)

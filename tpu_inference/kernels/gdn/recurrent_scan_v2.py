@@ -1042,7 +1042,7 @@ def recurrent_scan(
       - Updated recurrent state of shape [max_reqs, n_v, d_k, d_v].
       - The mixed_qkv array of shape [num_tokens, 2 * n_kq * d_k + n_v * d_v].
   """
-    # jax.debug.print("recurrent_scan: query_start_loc={}", query_start_loc)
+    jax.debug.print("recurrent_scan: query_start_loc={}", query_start_loc)
     # TODO(kunjanp): Compute beta and g inside the kernel to save HBM bandwidth.
     # We could pass raw a and b and compute sigmoid/softplus on the fly.
     # beta = jax.nn.sigmoid(b)
