@@ -33,6 +33,25 @@ from tpu_inference.utils import get_mesh_shape_product
 logger = init_logger(__name__)
 
 
+def _override_token_indices_for_random_routing(
+        topk_indices: jax.Array, global_num_experts: int) -> jax.Array:
+    logger.warning(
+        "Forcing random routing should be used for performance testing only.")
+    original_topk_indices = topk_indices
+    num_tokens, topk = original_topk_indices.shape
+    # Forcing random routing is useful to get rid of the effect
+    # of routing imbalance during performance debugging.
+    # (original_topk_indices // global_num_experts) is just zero, but we keep it so that
+    # the all-gather of topk_indices won't be skipped so that the performance comparison between
+    # with and without random routing is fair.
+    rng_key = jax.random.PRNGKey(42)
+    topk_indices = jax.vmap(lambda key: jax.random.choice(
+        key, global_num_experts, shape=(topk, ), replace=False))(
+            jax.random.split(rng_key, num_tokens)) + (original_topk_indices //
+                                                      global_num_experts)
+    return topk_indices
+
+
 def all_gather_topk_indices_and_weights(
         topk_indices: jax.Array, topk_weights: jax.Array, dtype: jnp.dtype,
         mesh: Mesh) -> tuple[jax.Array, jax.Array]:
@@ -455,19 +474,7 @@ def fused_moe_func(
     assert gating_output.shape == (num_tokens, global_num_experts)
 
     topk_weights = apply_scoring_fn(scoring_fn, gating_output)
-    if envs.FORCE_MOE_RANDOM_ROUTING:
-        logger.warning(
-            "Forcing random routing should be used for performance testing purpose only."
-        )
-        # Forcing random routing is useful to get rid of the effect
-        # of routing imbalance during performance debugging.
-        rng_key = jax.random.PRNGKey(42)
-        topk_indices = jax.vmap(lambda key: jax.random.choice(
-            key, global_num_experts, shape=(topk, ), replace=False))(
-                jax.random.split(rng_key, num_tokens))
-        topk_weights = jax.random.uniform(rng_key, shape=(num_tokens, topk))
-    else:
-        topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
+    topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
     # All gathering topk_indices and topk_weights if attention dp is used.
@@ -477,6 +484,15 @@ def fused_moe_func(
     topk_weights = topk_weights.astype(dtype)
     topk_weights = jax.lax.with_sharding_constraint(
         topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
+
+    if envs.FORCE_MOE_RANDOM_ROUTING:
+        logger.warning(
+            "Forcing random routing should be used for performance testing only."
+        )
+        # Forcing random routing is useful to get rid of the effect
+        # of routing imbalance during performance debugging.
+        topk_indices = _override_token_indices_for_random_routing(
+            topk_indices, global_num_experts)
 
     def _process_tokens_locally(hidden_states_local, topk_indices_local):
         num_tokens_local = hidden_states_local.shape[0]
