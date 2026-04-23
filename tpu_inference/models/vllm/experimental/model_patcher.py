@@ -124,12 +124,21 @@ def patch_mm_model(
             RMSNorm._original_forward_native = RMSNorm.forward_native
 
             def _patched_rms_norm_forward_native(self, x, residual=None):
-                # Always use forward_static because it uses self.weight instead of 
-                # self.weight.data, allowing functional_call to intercept and 
-                # wrap the parameter correctly for torchax.
+                import torch
                 weight_param = None
                 if getattr(self, "has_weight", True) and hasattr(self, "weight"):
-                    weight_param = self.weight
+                    w = self.weight
+                    # In eager mode, self.weight is an nn.Parameter which TorchAX cannot
+                    # directly do math with. We must unwrap it to get the TorchAX tensor.
+                    if isinstance(w, torch.nn.Parameter):
+                        w = w.data
+                    
+                    # If it somehow remained a raw CPU tensor (e.g. dummy torch.ones),
+                    # push it to the JAX device to avoid mixed math errors.
+                    if type(w) is torch.Tensor:
+                        w = w.to(device="jax")
+                        
+                    weight_param = w
 
                 return self.forward_static(
                     x,
