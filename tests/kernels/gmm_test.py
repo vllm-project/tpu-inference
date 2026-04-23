@@ -22,7 +22,7 @@ from jax._src import test_util as jtu
 
 from tpu_inference.kernels.megablox.gmm_v2 import (TileSizes, apply_act_fn)
 from tpu_inference.kernels.megablox.ops_v2 import gmm_v2
-from tpu_inference.kernels.megablox.tgmm_v2 import _tgmm_v2_impl
+from tpu_inference.kernels.megablox.tgmm_v2 import tgmm_v2
 
 jax.config.parse_flags_with_absl()
 
@@ -253,7 +253,7 @@ class GmmTest(jtu.JaxTestCase):
     expected = reference_tgmm(
         lhs_t, grad, group_sizes, num_local_groups, group_offset=group_offset
     )
-    actual = _tgmm_v2_impl(
+    actual = tgmm_v2(
         lhs, grad, group_sizes, num_local_groups, group_offset=group_offset, preferred_element_type=jnp.bfloat16
     )
     self.assertEqual(actual.shape, (num_local_groups, in_size, out_size))
@@ -289,7 +289,7 @@ class GmmTest(jtu.JaxTestCase):
     expected = reference_tgmm(
         lhs_t, grad, group_sizes, num_local_groups, group_offset=group_offset
     )
-    actual = _tgmm_v2_impl(
+    actual = tgmm_v2(
         lhs, grad, group_sizes, num_local_groups,
         group_offset=group_offset,
         preferred_element_type=jnp.bfloat16,
@@ -327,7 +327,7 @@ class GmmTest(jtu.JaxTestCase):
     expected = reference_tgmm(
         lhs_t, grad, group_sizes, num_local_groups, group_offset=group_offset
     )
-    actual = _tgmm_v2_impl(
+    actual = tgmm_v2(
         lhs, grad, group_sizes, num_local_groups,
         group_offset=group_offset,
         preferred_element_type=jnp.bfloat16,

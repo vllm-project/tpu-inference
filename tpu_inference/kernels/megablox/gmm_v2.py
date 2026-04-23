@@ -1127,7 +1127,7 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
         "fuse_act",
     ]
 )
-def _gmm_v2_impl(
+def gmm_v2(
     lhs: jax.Array,  # [size_m, size_k]
     rhs: jax.Array,  # [size_group, size_k, size_n]
     group_sizes: jax.Array,  # int32[size_lhs_group]

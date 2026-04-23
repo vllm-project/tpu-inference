@@ -368,7 +368,7 @@ def tgmm_kernel_main(
         "acc_dtype",
     ],
 )
-def _tgmm_v2_impl(
+def tgmm_v2(
     lhs: jax.Array,  # [size_m, size_k]
     rhs: jax.Array,  # [size_m, size_n]
     group_sizes: jax.Array,

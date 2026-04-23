@@ -22,11 +22,11 @@ import jax.numpy as jnp
 from tpu_inference.kernels.megablox.gmm_v2 import (
     TileFn,
     TileSizes,
-    _gmm_v2_impl,
+    gmm_v2 as gmm_v2_impl,
     calculate_tiling,
 )
 from tpu_inference.kernels.megablox.tgmm_v2 import (
-    _tgmm_v2_impl,
+    tgmm_v2,
     calculate_tgmm_tiling,
 )
 
@@ -61,7 +61,7 @@ def gmm_v2(
     fuse_act: str | None = None,
 ):
   """GMM kernel."""
-  return _gmm_v2_impl(
+  return gmm_v2_impl(
       lhs,
       rhs,
       group_sizes,
@@ -96,7 +96,7 @@ def _gmm_v2_fwd(
     fuse_act: str | None = None,
 ):
   """Forward pass for GMM kernel."""
-  out = _gmm_v2_impl(
+  out = gmm_v2_impl(
       lhs,
       rhs,
       group_sizes,
@@ -162,7 +162,7 @@ def _gmm_v2_bwd(
   # d(lhs) = dout @ rhs^T — no bias term so rhs_scale and rhs_bias should be
   # None. So should the fuse_act.
   # TODO: Consider fusing the transposition of rhs into the gmm kernel.
-  grad_lhs = _gmm_v2_impl(
+  grad_lhs = gmm_v2_impl(
       grad,  # [m, n]
       rhs.swapaxes(1, 2),  # [num_groups, n, k]
       group_sizes,
@@ -178,7 +178,7 @@ def _gmm_v2_bwd(
       zero_initialize=zero_initialize,
       fuse_act=None,
   )
-  grad_rhs = _tgmm_v2_impl(
+  grad_rhs = tgmm_v2(
       lhs,  # [m, k]
       grad,  # [m, n]
       group_sizes,
