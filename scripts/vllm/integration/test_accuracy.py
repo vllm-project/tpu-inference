@@ -31,14 +31,9 @@ def run_test(model_name, expected_value, more_args=None):
     print(f"Running test for model: {model_name}")
 
     if model_name in ["Qwen/Qwen3-30B-A3B", "Qwen/Qwen2.5-VL-7B-Instruct"]:
-        model_args = f"pretrained={model_name},max_model_len=4096,max_num_batched_tokens=16384"
-    elif model_name in [
-            "meta-llama/Llama-3.1-8B-Instruct",
-            "meta-llama/Llama-3.3-70B-Instruct"
-    ]:
-        model_args = f"pretrained={model_name},max_model_len=4096,add_bos_token=False"
+        model_args = f"pretrained={model_name},max_model_len=4096,add_bos_token=False,max_num_batched_tokens=16384"
     else:
-        model_args = f"pretrained={model_name},max_model_len=4096"
+        model_args = f"pretrained={model_name},max_model_len=4096,add_bos_token=False"
 
     if more_args is not None:
         model_args = "{},{}".format(model_args, more_args)
