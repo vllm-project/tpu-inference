@@ -155,6 +155,40 @@ def patch_mm_model(
     except Exception as e:
         logger.warning(f"Failed to patch vLLM's RMSNorm: {e}")
 
+    # Patch vLLM's default_unquantized_gemm to unwrap custom ModelWeightParameters
+    # which cause mixed-math errors in torchax eager mode.
+    try:
+        import vllm.model_executor.layers.utils as vllm_layer_utils
+
+        if not hasattr(vllm_layer_utils, "_original_default_unquantized_gemm"):
+            vllm_layer_utils._original_default_unquantized_gemm = (
+                vllm_layer_utils.default_unquantized_gemm
+            )
+
+            def _patched_default_unquantized_gemm(layer, x, weight, bias=None):
+                import torch
+                # If weight is an nn.Parameter or custom vLLM parameter, 
+                # we must unwrap it to get the raw tensor for torchax.
+                if isinstance(weight, torch.nn.Parameter):
+                    weight = weight.data
+                
+                # If it remained a raw CPU tensor, push to JAX.
+                if type(weight) is torch.Tensor:
+                    weight = weight.to(device="jax")
+                
+                if bias is not None:
+                    if isinstance(bias, torch.nn.Parameter):
+                        bias = bias.data
+                    if type(bias) is torch.Tensor:
+                        bias = bias.to(device="jax")
+
+                return torch.nn.functional.linear(x, weight, bias)
+
+            vllm_layer_utils.default_unquantized_gemm = _patched_default_unquantized_gemm
+            logger.info("Patched vLLM's default_unquantized_gemm.")
+    except Exception as e:
+        logger.warning(f"Failed to patch vLLM's default_unquantized_gemm: {e}")
+
     if not jitted_mm_module_keys:
         return model, params_and_buffers
 
