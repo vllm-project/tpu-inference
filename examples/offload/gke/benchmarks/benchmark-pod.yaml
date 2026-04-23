@@ -50,20 +50,20 @@ spec:
     - name: PORT
       value: "80"
     - name: MODEL
-      value: "meta-llama/Llama-3.3-70B-Instruct"
+      value: "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
     - name: HF_TOKEN
       valueFrom:
         secretKeyRef:
           name: hf-token-secret
           key: token
     - name: GSP_NUM_GROUPS
-      value: "2"
+      value: "100"
     - name: GSP_PROMPTS_PER_GROUP
-      value: "16"
+      value: "30"
     - name: GSP_SYSTEM_PROMPT_LEN
-      value: "2048"
+      value: "16384"
     - name: GSP_QUESTION_LEN
-      value: "256"
+      value: "128"
     - name: GSP_OUTPUT_LEN
-      value: "512"
+      value: "256"
   restartPolicy: Never

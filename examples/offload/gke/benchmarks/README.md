@@ -6,8 +6,7 @@ This guide outlines the steps to deploy a vLLM serving instance on Google Kubern
 
 * `kubectl` configured to connect to your GKE cluster.
 * `gcloud` CLI installed and authenticated.
-* A GKE cluster with TPU nodes (the below steps have been verified with `ct6e-standard-8t` GKE node)
-* Access to Llama-3.3-70B model on Hugging Face
+* A GKE cluster with TPU nodes (the below steps have been verified with `tpu7x-standard-4t` GKE node)
 
 ## 1. Create Hugging Face Token Secret
 
