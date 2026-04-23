@@ -73,11 +73,11 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [[ "${BUILDKITE:-false}" == "true" ]]; then
-  # Ingore the error because in case of using uv, the packages are installed outside this script.
-  pip install evaluate==0.4.5 || true
-  pip install rouge-score==0.1.2 || true
-  # Install lm_eval with dependencies, version is same as https://github.com/vllm-project/vllm/blob/main/.buildkite/scripts/hardware_ci/run-tpu-v1-test.sh#L64
-  pip install "lm-eval[api,math]>=0.4.9.2" || true
+  # TODO: Re-enable and check for compatible versions if running accuracy or lm-eval tasks.
+  # pip install evaluate==0.4.5 || true
+  # pip install rouge-score==0.1.2 || true
+  # # Install lm_eval with dependencies, version is same as https://github.com/vllm-project/vllm/blob/main/.buildkite/scripts/hardware_ci/run-tpu-v1-test.sh#L64
+  # pip install "lm-eval[api,math]>=0.4.9.2" || true
 
   # Set umask so that any newly created files/directories have 777/666 permissions by default.
   # This ensures that the host user can delete artifacts created by the docker root user.
