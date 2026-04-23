@@ -422,39 +422,32 @@ class DeviceBufferMetadata:
 
 class DeviceBuffer:
     """
-    A utility to pack numpy arrays into a monolithic buffer.
+    A utility to pack 1D numpy arrays into a monolithic buffer.
     Supports appending data or getting views, then tagging the accumulated
-    data with a key. The internal buffer has shape `leading_shape + (capacity,)`
-    and grows dynamically along the last axis.
+    data with a key. The internal buffer grows dynamically as needed.
     """
 
-    def __init__(self,
-                 leading_shape: Tuple[int, ...] = (),
-                 initial_capacity: int = 1024):
-        self.leading_shape = leading_shape
-        self.buffer = np.zeros(leading_shape + (initial_capacity, ),
-                               dtype=np.int32)
+    def __init__(self, initial_capacity: int = 1024):
+        self.buffer = np.zeros(initial_capacity, dtype=np.int32)
         self._offset = 0
         self._last_offset = 0
         self._keys: List[str] = []
         self._sizes: List[int] = []
 
     def _ensure_capacity(self, size: int):
-        """Ensure the internal buffer has enough space for 'size' more elements along the last axis."""
-        if self._offset + size > self.buffer.shape[-1]:
-            new_capacity = max(self.buffer.shape[-1] * 2,
+        """Ensure the internal buffer has enough space for 'size' more elements."""
+        if self._offset + size > self.buffer.size:
+            new_capacity = max(self.buffer.size * 2,
                                self._offset + size + 1024)
-            new_buffer = np.zeros(self.leading_shape + (new_capacity, ),
-                                  dtype=np.int32)
-            new_buffer[..., :self._offset] = self.buffer[..., :self._offset]
+            new_buffer = np.zeros(new_capacity, dtype=np.int32)
+            new_buffer[:self._offset] = self.buffer[:self._offset]
             self.buffer = new_buffer
 
     def append(self, array: np.ndarray, key: Optional[str] = None):
-        """Append data to the buffer along the last axis."""
-        assert array.shape[:-1] == self.leading_shape
-        size = array.shape[-1]
+        """Append data to the buffer and advance offset."""
+        size = array.size
         self._ensure_capacity(size)
-        self.buffer[..., self._offset:self._offset + size] = array
+        self.buffer[self._offset:self._offset + size] = array.ravel()
         self._offset += size
         if key:
             self.set_key(key)
@@ -462,9 +455,7 @@ class DeviceBuffer:
     def get_view(self,
                  shape: Union[int, Tuple[int, ...]],
                  key: Optional[str] = None) -> np.ndarray:
-        """Reserve space in the buffer and return a view for direct writing.
-        'shape' is the shape of the reserved space per leading dimension instance.
-        """
+        """Reserve space in the buffer and return a reshaped view for direct writing."""
         if isinstance(shape, (int, np.integer)):
             size = int(shape)
             shape = (size, )
@@ -472,8 +463,7 @@ class DeviceBuffer:
             size = int(np.prod(shape))
 
         self._ensure_capacity(size)
-        view = self.buffer[..., self._offset:self._offset +
-                           size].reshape(self.leading_shape + shape)
+        view = self.buffer[self._offset:self._offset + size].reshape(shape)
         self._offset += size
         if key:
             self.set_key(key)
@@ -488,7 +478,7 @@ class DeviceBuffer:
 
     def build(self) -> Tuple[np.ndarray, DeviceBufferMetadata]:
         """Return the active portion of the buffer and its layout metadata."""
-        return self.buffer[..., :self._offset], DeviceBufferMetadata(
+        return self.buffer[:self._offset], DeviceBufferMetadata(
             keys=tuple(self._keys), sizes=tuple(self._sizes))
 
     def reset(self):
@@ -503,9 +493,9 @@ class DeviceBuffer:
     def unpack_arrays(blob: jax.Array,
                       metadata: DeviceBufferMetadata) -> Dict[str, jax.Array]:
         """
-        Unpack a blob into a dictionary of arrays based on provided metadata.
-        Uses JIT and jnp.split along the last axis.
+        Unpack a 1D blob into a dictionary of arrays based on provided metadata.
+        Uses JIT and jnp.split to minimize dispatch overhead.
         """
         indices = tuple(np.cumsum(metadata.sizes)[:-1])
-        parts = jnp.split(blob, indices, axis=-1)
+        parts = jnp.split(blob, indices)
         return {key: parts[i] for i, key in enumerate(metadata.keys)}
