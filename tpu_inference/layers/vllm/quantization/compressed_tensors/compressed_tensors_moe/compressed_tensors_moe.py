@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import torch
-from jax.experimental.pallas import tpu as pltpu
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe import \
     CompressedTensorsMoEMethod
@@ -65,30 +64,14 @@ class VllmCompressedTensorsMoEMethod(CompressedTensorsMoEMethod):
         if quant_config._is_fp8_w8a8(weight_quant, input_quant):
             return VllmCompressedTensorsW8A8Fp8MoEMethod(
                 weight_quant, input_quant, layer.moe_config, quant_config.mesh)
-        elif (weight_quant.num_bits == 4 and not input_quant):
-            from .compressed_tensors_moe_w4a8_fp8 import \
-                VllmCompressedTensorsW4A16MoEMethod
-            return VllmCompressedTensorsW4A16MoEMethod(weight_quant,
-                                                       input_quant,
-                                                       layer.moe_config,
-                                                       quant_config.mesh)
-        elif quant_config._is_fp8_w4a8(weight_quant, input_quant):
-            tpu_info = pltpu.get_tpu_info()
-            if tpu_info.fp8_ops_per_second > 0:
-                from .compressed_tensors_moe_w4a8_fp8 import \
-                    VllmCompressedTensorsW4A8Fp8MoEMethod
-                return VllmCompressedTensorsW4A8Fp8MoEMethod(
-                    weight_quant, input_quant, layer.moe_config,
-                    quant_config.mesh)
-            else:
-                logger.warning(
-                    "W4A8 FP8 quantization is selected but the current TPU does not support it. Falling back to W4A16 quantization."
-                )
-                from .compressed_tensors_moe_w4a8_fp8 import \
-                    VllmCompressedTensorsW4A16MoEMethod
-                return VllmCompressedTensorsW4A16MoEMethod(
-                    weight_quant, input_quant, layer.moe_config,
-                    quant_config.mesh)
+        # Uses fp8 or int8 activations depending on the TPU generation.
+        elif weight_quant.num_bits == 4:
+            from .compressed_tensors_moe_w4a8 import \
+                VllmCompressedTensorsW4A8MoEMethod
+            return VllmCompressedTensorsW4A8MoEMethod(weight_quant,
+                                                      input_quant,
+                                                      layer.moe_config,
+                                                      quant_config.mesh)
         else:
             raise RuntimeError(
                 f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}")

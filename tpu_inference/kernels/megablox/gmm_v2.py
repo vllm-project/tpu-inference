@@ -438,10 +438,11 @@ def inner_kernel(
                     # Convert lhs into quantized dtype.
                     block_lhs_q = (block_lhs *
                                    block_scale_inv).astype(lhs_q_dtype)
-
+                    # Mixed int precision matmuls are not supported.
+                    block_rhs_match_dtype = block_rhs.astype(lhs_q_dtype)
                     block_acc = jnp.matmul(
                         block_lhs_q,
-                        block_rhs,
+                        block_rhs_match_dtype,
                         preferred_element_type=preferred_element_type,
                     ).astype(acc_ref.dtype)
 

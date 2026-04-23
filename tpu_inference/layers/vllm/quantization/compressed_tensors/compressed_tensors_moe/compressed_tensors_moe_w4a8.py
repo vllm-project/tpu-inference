@@ -42,10 +42,13 @@ from tpu_inference.utils import get_mesh_shape_product, t2j
 logger = init_logger(__name__)
 
 
-class VllmCompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod,
-                                            VllmQuantConfig):
+class VllmCompressedTensorsW4A8MoEMethod(CompressedTensorsMoEMethod,
+                                         VllmQuantConfig):
     """
-    MoE method for int4xfp8 (INT4 weights, FP8 activations).
+    MoE method for int4 weights and 8 bit activations.
+
+    Uses fp8 activations for TPU generations that support fp8 compute and int8
+    activations for generations that do not support int8 compute.
     """
 
     def __init__(
@@ -304,15 +307,3 @@ class VllmCompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod,
                               quant_method_instance=self,
                               x=x,
                               router_logits=router_logits)
-
-
-class VllmCompressedTensorsW4A16MoEMethod(
-        VllmCompressedTensorsW4A8Fp8MoEMethod, VllmQuantConfig):
-    """
-    MoE method for int4xfp8 (INT4 weights, FP8 activations).
-    """
-
-    def get_fused_moe_quant_config(
-            self, layer: torch.nn.Module) -> FusedMoEQuantConfig | None:
-        # Quantization is handled in the kernel.
-        return None
