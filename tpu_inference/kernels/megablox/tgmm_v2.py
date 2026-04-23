@@ -50,8 +50,11 @@ def calculate_tgmm_tiling(
   """Calculate optimal tile sizes for TGMM kernel."""
   # In tgmm, we calculate lhs.T @ dout which doesn't require quantization.
   # Since we use it in MOE, the m can be dynamic and small. So we don't
-  # want it to be too big.
-  bf16_bf16_tile_m = 128
+  # want it to be too big. At the same time, because the mxu size is 256, the
+  # rhs is divided into 256x256 tiles. The lhs is divided to blocks of 256-wide
+  # (256 on the contracting dimension) rows. So any size less than 256 will 
+  # have the same perf as using 256.
+  bf16_bf16_tile_m = 256
   tile_m = min(bf16_bf16_tile_m, dims.size_m)
   tile_m = max(tile_m, dims.size_lhs_sublane)
 
