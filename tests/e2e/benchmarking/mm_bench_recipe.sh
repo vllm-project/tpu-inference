@@ -18,6 +18,7 @@
 model_name="${TEST_MODEL:-Qwen/Qwen2.5-VL-7B-Instruct}"
 tp_size="${TENSOR_PARALLEL_SIZE:-1}"
 max_model_len=16384
+block_size="${BLOCK_SIZE:-}"
 dataset_name="random-mm"
 backend="openai-chat"
 num_prompts=128
@@ -93,7 +94,11 @@ checkThroughput() {
 }
 
 echo "Spinning up the vLLM server..."
-(vllm serve "$model_name" --tensor-parallel-size "$tp_size" --pipeline-parallel-size 1 --dtype bfloat16 --gpu-memory-utilization 0.98 --max-model-len "$max_model_len" --limit-mm-per-prompt '{"image": 10, "video": 0}' --mm-processor-kwargs '{"size": {"longest_edge": 1003520, "shortest_edge": 3136}}' --disable-chunked-mm-input  2>&1 | tee -a "$LOG_FILE") &
+vllm_cmd=(vllm serve "$model_name" --tensor-parallel-size "$tp_size" --pipeline-parallel-size 1 --dtype bfloat16 --gpu-memory-utilization 0.98 --max-model-len "$max_model_len" --limit-mm-per-prompt '{"image": 10, "video": 0}' --mm-processor-kwargs '{"size": {"longest_edge": 1003520, "shortest_edge": 3136}}' --disable-chunked-mm-input)
+if [ -n "$block_size" ]; then
+    vllm_cmd+=(--block-size "$block_size")
+fi
+"${vllm_cmd[@]}" 2>&1 | tee -a "$LOG_FILE" &
 
 
 # Run a busy loop to block until the server is ready to receive requests
