@@ -27,15 +27,15 @@ spec:
         app: tpu-offline-inference
     spec:
       nodeSelector:
-        cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
-        cloud.google.com/gke-tpu-topology: 2x4 # Specify the physical topology for the TPU slice.
+        cloud.google.com/gke-tpu-accelerator: tpu7x
+        cloud.google.com/gke-tpu-topology: 2x2x1 # Specify the physical topology for the TPU slice.
       containers:
       - name: tpu-job
         image: <your-tpu-inference-container-image>
         imagePullPolicy: Always
         command: ["/bin/sh", "-c"]
         args:
-        - "vllm serve meta-llama/Llama-3.3-70B-Instruct --port 8000 --enable-chunked-prefill --tensor-parallel-size 8 --seed 42 --enable_prefix_caching --gpu-memory-utilization 0.9"
+        - "vllm serve Qwen/Qwen3-235B-A22B-Instruct-2507-FP8 --port 8000 --enable-chunked-prefill --tensor-parallel-size 8 --seed 42 --enable_prefix_caching --gpu-memory-utilization 0.9"
         env:
         - name: HUGGING_FACE_HUB_TOKEN
           valueFrom:
@@ -48,6 +48,6 @@ spec:
         - containerPort: 8000
         resources:
           requests:
-            google.com/tpu: 8
+            google.com/tpu: 4
           limits:
-            google.com/tpu: 8
+            google.com/tpu: 4

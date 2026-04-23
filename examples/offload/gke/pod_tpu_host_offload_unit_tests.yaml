@@ -22,8 +22,8 @@ metadata:
 spec:
   restartPolicy: Never
   nodeSelector:
-    cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
-    cloud.google.com/gke-tpu-topology: 2x4 # Specify the physical topology for the TPU slice.
+    cloud.google.com/gke-tpu-accelerator: tpu7x
+    cloud.google.com/gke-tpu-topology: 2x2x1 # Specify the physical topology for the TPU slice.
   containers:
   - name: tpu-job
     image: <your-tpu-inference-container-image>
@@ -40,6 +40,6 @@ spec:
           key: token
     resources:
       requests:
-        google.com/tpu: 8
+        google.com/tpu: 4
       limits:
-        google.com/tpu: 8
+        google.com/tpu: 4
