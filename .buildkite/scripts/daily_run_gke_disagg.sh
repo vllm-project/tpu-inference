@@ -32,29 +32,29 @@ init_env() {
 
     # Create storage class
     echo "kubectl apply -f ./kubernetes/manifests/storageclass.yaml"
-    kubectl apply -f ./kubernetes/manifests/storageclass.yaml
+    kubectl apply -f ./.buildkite/kubernetes/manifests/storageclass.yaml
 }
 
 deploy_1p1d() {
     echo "kubectl apply -f ./kubernetes/manifests/v7x/single_prefill.yaml"
-    kubectl apply -f ./kubernetes/manifests/v7x/single_prefill.yaml
+    kubectl apply -f ./.buildkite/kubernetes/manifests/v7x/single_prefill.yaml
 
     echo "kubectl apply -f ./kubernetes/manifests/v7x/single_decode.yaml"
-    kubectl apply -f ./kubernetes/manifests/v7x/single_decode.yaml
+    kubectl apply -f ./.buildkite/kubernetes/manifests/v7x/single_decode.yaml
 
     echo "kubectl apply -f ./kubernetes/manifests/v7x/proxy1p1d.yaml"
-    kubectl apply -f ./kubernetes/manifests/v7x/proxy1p1d.yaml
+    kubectl apply -f ./.buildkite/kubernetes/manifests/v7x/proxy1p1d.yaml
 }
 
 cleanup_1p1d() {
     echo "kubectl delete -f ./kubernetes/manifests/v7x/single_prefill.yaml"
-    kubectl delete -f ./kubernetes/manifests/v7x/single_prefill.yaml
+    kubectl delete -f ./.buildkite/kubernetes/manifests/v7x/single_prefill.yaml
 
     echo "kubectl delete -f ./kubernetes/manifests/v7x/single_decode.yaml"
-    kubectl delete -f ./kubernetes/manifests/v7x/single_decode.yaml
+    kubectl delete -f ./.buildkite/kubernetes/manifests/v7x/single_decode.yaml
 
     echo "kubectl delete -f ./kubernetes/manifests/v7x/proxy1p1d.yaml"
-    kubectl delete -f ./kubernetes/manifests/v7x/proxy1p1d.yaml
+    kubectl delete -f ./.buildkite/kubernetes/manifests/v7x/proxy1p1d.yaml
 }
 
 wait_for_vllm() {
@@ -93,27 +93,37 @@ run_disagg_benchmark() {
     local num_prompts=$5
     local filename="${input_len}_${output_len}.json"
 
-    for RATE in 0.5 1.0 2.0 3.0 4.0 5.0
+    for CONCURRENCY in 1 4 16 32 64 128 256
     do
+        # Run smaller number of prompts at lower concurrency
+        local effective_num_prompts=$num_prompts
+        if [ "$CONCURRENCY" -eq 1 ]; then
+            effective_num_prompts=32
+        elif [ "$CONCURRENCY" -eq 4 ]; then
+            effective_num_prompts=64
+        fi
+
         echo "-------------------------------------------------------"
-        echo "Starting Benchmark: Rate=$RATE, Input=$input_len, Output=$output_len"
+        echo "Starting Benchmark: Concurrency=$CONCURRENCY, Input=$input_len, Output=$output_len"
         echo "-------------------------------------------------------"
 
         kubectl exec "$proxy" -- vllm bench serve \
             --model="$model" \
             --dataset-name=random \
+            --num-warmups 10 \
             --random-input-len="$input_len" \
             --random-output-len="$output_len" \
-            --num-prompts="$num_prompts" \
+            --num-prompts="$effective_num_prompts" \
             --ignore-eos \
             --host=localhost \
             --port=10000 \
-            --request-rate="$RATE" \
+            --max-concurrency=$CONCURRENCY \
+            --request-rate=inf \
             --metric-percentiles 90,99 \
             --append-result \
             --result-file="$filename"
 
-        sleep 2
+        sleep 30
     done
 
     kubectl cp "${proxy}:${filename}" "./${filename}"
@@ -191,7 +201,7 @@ for RESULT_FILE in "1024_8192.json" "8192_1024.json"; do
     
     # Dump results to database
     echo "Parsing results and dumping to database..."
-    python3 parse_gke_results.py "$RESULT_FILE" "$RECORD_ID" | while read -r SQL; do
+    python3 ./.buildkite/scripts/parse_gke_results.py "$RESULT_FILE" "$RECORD_ID" | while read -r SQL; do
         if [[ -n "$SQL" ]]; then
             echo "Executing SQL statement..."
             gcloud spanner databases execute-sql "${GCP_DATABASE_ID}" \

@@ -15,6 +15,7 @@
 import json
 import os
 import sys
+import uuid
 from datetime import datetime
 
 
@@ -22,6 +23,8 @@ def fmt(val, is_str=False):
     """Helper to safely format python values to SQL values"""
     if val is None or val == 'NULL':
         return 'NULL'
+    if str(val).lower() == 'inf' or str(val) == 'Infinity':
+        return "CAST('inf' AS FLOAT64)"
     if is_str:
         return f"'{val}'"
     return str(val)
@@ -59,6 +62,8 @@ def parse_and_dump(file_path, record_id):
                 continue
 
             rate = data.get('request_rate')
+            concurrency = data.get('max_concurrency')
+            short_suffix = uuid.uuid4().hex[:5]
             # Parse date from JSON
             # Example: "20260402-195133" -> "2026-04-02T19:51:33Z"
             date_str = data.get('date')
@@ -72,8 +77,7 @@ def parse_and_dump(file_path, record_id):
                         f"Warning: Could not parse date string: {date_str}. Using CURRENT_TIMESTAMP()",
                         file=sys.stderr)
 
-            # Generate a unique RecordId for this rate
-            unique_record_id = f"{record_id}_{rate}"
+            unique_record_id = f"{record_id}_{rate}_c{concurrency}_{short_suffix}"
 
             sql = f"""
             INSERT INTO RunRecord (
