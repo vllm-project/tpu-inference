@@ -556,14 +556,14 @@ def sc_gather_reduce(
                     weights_evens = tpu.unpack_subelements(
                         _F32[16],
                         raw_weights,
-                        1,
+                        0,
                         ir.Attribute.parse("#tpu.pack_format<interleaved>"),
                     )
                     # part=0 corresponds to sc_tpu.unpackf result 0 (Odd indices)
                     weights_odds = tpu.unpack_subelements(
                         _F32[16],
                         raw_weights,
-                        0,
+                        1,
                         ir.Attribute.parse("#tpu.pack_format<interleaved>"),
                     )
 
@@ -644,14 +644,14 @@ def sc_gather_reduce(
                             vec_f32_evens = tpu.unpack_subelements(
                                 _F32[16],
                                 vec_bf16_2x16,
-                                1,
+                                0,
                                 ir.Attribute.parse(
                                     "#tpu.pack_format<interleaved>"),
                             )
                             vec_f32_odds = tpu.unpack_subelements(
                                 _F32[16],
                                 vec_bf16_2x16,
-                                0,
+                                1,
                                 ir.Attribute.parse(
                                     "#tpu.pack_format<interleaved>"),
                             )
@@ -709,7 +709,7 @@ def sc_gather_reduce(
 
                     packed = tpu.pack_subelements(
                         _BF16[2, vreg_size],
-                        [row0, row8],
+                        [row8, row0],
                         [0, 1],
                         ir.Attribute.parse("#tpu.pack_format<interleaved>"),
                     )
