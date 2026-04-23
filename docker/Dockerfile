@@ -38,6 +38,9 @@ RUN apt-get update && apt-get install -y \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 
+# Suppress noisy XLA CPU AOT loader warnings
+ENV TF_CPP_MIN_LOG_LEVEL=3
+
 # Build vLLM
 WORKDIR /workspace/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
