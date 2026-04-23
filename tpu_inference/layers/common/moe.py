@@ -129,13 +129,6 @@ def moe_apply(
                 all_gather_fp8 = (bool(activation_dtype)
                                   and to_jax_dtype(activation_dtype)
                                   == jnp.float8_e4m3fn)
-                if activation_dtype:
-                    jax_act_dtype = to_jax_dtype(activation_dtype)
-                    if jnp.issubdtype(jax_act_dtype, jnp.floating
-                                      ) and jnp.finfo(jax_act_dtype).bits > 8:
-                        quantize_lhs = False
-                else:
-                    quantize_lhs = True
 
                 output = fused_moe_func(
                     hidden_states=x,
@@ -155,7 +148,6 @@ def moe_apply(
                     sc_kernel_threshold=envs.SC_KERNEL_THRESHOLD,
                     sc_kernel_col_chunk_size=envs.SC_KERNEL_COL_CHUNK_SIZE,
                     all_gather_fp8=all_gather_fp8,
-                    maybe_quantize_lhs=quantize_lhs,
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance

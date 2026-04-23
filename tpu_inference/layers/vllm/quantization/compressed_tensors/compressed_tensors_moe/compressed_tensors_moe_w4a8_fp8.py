@@ -312,17 +312,6 @@ class VllmCompressedTensorsW4A16MoEMethod(
     MoE method for int4xfp8 (INT4 weights, FP8 activations).
     """
 
-    def __init__(
-        self,
-        weight_quant: QuantizationArgs,
-        input_quant: QuantizationArgs,
-        moe: FusedMoEConfig,
-        mesh: jax.sharding.Mesh,
-        ep_axis_name: str = "model",
-    ):
-        super().__init__(weight_quant, input_quant, moe, mesh, ep_axis_name)
-        self.extra_backend_kwargs.update({"activation_dtype": jnp.float16})
-
     def get_fused_moe_quant_config(
             self, layer: torch.nn.Module) -> FusedMoEQuantConfig | None:
         # Quantization is handled in the kernel.
