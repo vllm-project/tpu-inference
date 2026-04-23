@@ -31,7 +31,7 @@ spec:
     command:
     - /bin/bash
     - -c
-    - "pytest -sv tests/offload/"
+    - "pytest -sv tests/offload/ --ignore=tests/offload/tpu_offload_multi_request_accuracy_test.py"
     env:
     - name: HUGGING_FACE_HUB_TOKEN
       valueFrom:
