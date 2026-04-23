@@ -127,17 +127,25 @@ fi
       awk -v label="$label" '$0 ~ label { print $NF }'
     }
 
-    # Median values
+    echo "[DEBUG] Starting metric extraction. This script will fail if any metric is missing."
+    echo "[DEBUG] Extracting MedianITL..."
     MedianITL=$(extract_value "ITL" "Median")
+    echo "[DEBUG] Extracting MedianTPOT..."
     MedianTPOT=$(extract_value "TPOT" "Median")
+    echo "[DEBUG] Extracting MedianTTFT..."
     MedianTTFT=$(extract_value "TTFT" "Median")
+    echo "[DEBUG] Extracting MedianETEL..."
     MedianETEL=$(extract_value "E2EL" "Median")
 
-    # P99 values
+    echo "[DEBUG] Extracting P99ITL..."
     P99ITL=$(extract_value "ITL" "P99")
+    echo "[DEBUG] Extracting P99TPOT..."
     P99TPOT=$(extract_value "TPOT" "P99")
+    echo "[DEBUG] Extracting P99TTFT..."
     P99TTFT=$(extract_value "TTFT" "P99")
+    echo "[DEBUG] Extracting P99ETEL..."
     P99ETEL=$(extract_value "E2EL" "P99")
+    echo "[DEBUG] Metric extraction completed."
 
     # Write results to file
     (

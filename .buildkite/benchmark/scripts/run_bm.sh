@@ -237,9 +237,9 @@ if ! kill -0 "$VLLM_PID" 2>/dev/null; then
     exit 1
 fi
 
-echo "wait for 60 minutes.."
+echo "wait for 90 minutes.."
 echo
-for _ in {1..360}; do
+for _ in {1..540}; do
     if grep -Fq "raise RuntimeError" "$VLLM_LOG"; then
         echo "Detected RuntimeError, exiting."
         cat "$VLLM_LOG"
@@ -292,6 +292,10 @@ run_benchmark(){
   echo "[DEBUG] Executing client_cmd: ${CLIENT_CMD_ENVS[*]} ${CLIENT_CMD[*]} > $BM_LOG" >&2
   # Execute the array directly, preserving strict argument boundaries
   env "${CLIENT_CMD_ENVS[@]}" "${CLIENT_CMD[@]}" > "$BM_LOG" 2>&1
+  
+  echo "[DEBUG] --- Raw BM_LOG start ---"
+  cat "$BM_LOG"
+  echo "[DEBUG] --- Raw BM_LOG end ---"
 
   throughput=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
   p99_e2el=$(grep "P99 E2EL (ms):" "$BM_LOG" | awk '{print $NF}')

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import functools
 import logging
 import random
@@ -464,13 +465,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             cache_dtype = self.dtype
         kv_cache_dtype = to_jax_dtype(cache_dtype)
         kv_packing = common_utils.get_dtype_packing(kv_cache_dtype)
-        self.num_tokens_paddings = runner_utils.get_token_paddings(
-            min_token_size=max(16, next_power_of_2(self.dp_size * kv_packing)),
-            max_token_size=scheduler_config.max_num_batched_tokens *
-            self.dp_size,
-            padding_gap=vllm_envs.VLLM_TPU_BUCKET_PADDING_GAP)
-        self.num_tokens_paddings = sorted(self.num_tokens_paddings +
-                                          additional_sizes)
+
+        exact_sizes_str = os.environ.get("EXACT_COMPILATION_SIZES", "")
+        if exact_sizes_str:
+            self.num_tokens_paddings = [int(x.strip()) for x in exact_sizes_str.split(",")]
+            logger.info(f"BENCHMARK MODE: Forcing exact compilation sizes: {self.num_tokens_paddings}")
+        else:
+            self.num_tokens_paddings = runner_utils.get_token_paddings(
+                min_token_size=max(16, next_power_of_2(self.dp_size * kv_packing)),
+                max_token_size=scheduler_config.max_num_batched_tokens *
+                self.dp_size,
+                padding_gap=vllm_envs.VLLM_TPU_BUCKET_PADDING_GAP)
+            self.num_tokens_paddings = sorted(self.num_tokens_paddings +
+                                            additional_sizes)
         self.num_tokens_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_tokens_paddings
         ]
