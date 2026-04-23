@@ -203,10 +203,6 @@ class GmmConfigs:
 TileFn = Callable[
     [Dimensions, InputConfigs, InputConfigs, int, str | None], TileSizes
 ]
-TileTgmmFn = Callable[
-    [Dimensions, InputConfigs, InputConfigs, int, jnp.dtype, jnp.dtype],
-    TileSizes,
-]
 
 
 class IndexMaps:
@@ -632,6 +628,18 @@ def fill_metadata(
         jnp.logical_or(group_size > 0, process_empty_groups), group_id >= 0
     )
     curr_num_gm = jnp.where(should_process, curr_num_gm, 0)
+
+    # When process_empty_group is True, if group_size is 0 and
+    # local_offset is 0 or aligned (e.g., for the first group if it's empty),
+    # curr_num_gm will be 0. Since the intention of process_empty_groups is to
+    # ensure at least one tile is generated to zero out the output, we should
+    # ensure curr_num_gm is at least 1 when should_process is True.
+    curr_num_gm = jnp.where(
+        jnp.logical_and(curr_num_gm == 0, jnp.logical_and(process_empty_groups, group_id>=0)),
+        1,
+        curr_num_gm,
+    )
+
     next_num_gm = num_gm + curr_num_gm
 
     tm_loop_fn = functools.partial(

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import functools
-from typing import Tuple
+from typing import Callable, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -27,12 +27,16 @@ from tpu_inference.kernels.megablox.gmm_v2 import (
     InputConfigs,
     MetadataRef,
     TileSizes,
-    TileTgmmFn,
     align_to,
     fill_metadata,
     get_metadata,
     get_scope_name,
 )
+
+TileTgmmFn = Callable[
+    [Dimensions, InputConfigs, InputConfigs, int, jnp.dtype, jnp.dtype],
+    TileSizes,
+]
 
 
 def calculate_tgmm_tiling(
@@ -354,8 +358,7 @@ def tgmm_kernel_main(
   scratches = [acc_ref, metadata_ref]
   pipeline_fn(lhs_in, rhs_in, out_ref, scratches=scratches)
 
-@functools.partial(
-    jax.jit,
+@jax.jit(
     static_argnames=[
         "num_actual_groups",
         "tile_info",

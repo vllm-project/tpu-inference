@@ -299,6 +299,44 @@ class GmmTest(jtu.JaxTestCase):
 
   @parameterized.product(
       batch_size=[128],
+      in_size=[512],
+      out_size=[512],
+      num_groups=[4],
+      group_offset=[0],
+      empty_group_index=[0, 1, 2, 3],
+  )
+  def test_tgmm_empty_group(
+      self, batch_size, in_size, out_size, num_groups, group_offset,
+      empty_group_index,
+  ):
+    """Test that TGMM correctly zeros output for empty groups."""
+    num_local_groups = num_groups - group_offset
+    key = jax.random.key(0)
+    key1, key2 = jax.random.split(key, 2)
+    lhs = jax.random.normal(key1, (batch_size, in_size), dtype=jnp.bfloat16)
+    grad = jax.random.normal(key2, (batch_size, out_size), dtype=jnp.bfloat16)
+
+    group_sizes = get_group_sizes(batch_size, num_groups)
+    # Redistribute the empty group's tokens to the last group.
+    group_sizes = group_sizes.at[-1].add(group_sizes[empty_group_index])
+    group_sizes = group_sizes.at[empty_group_index].set(0)
+
+    group_offset = jnp.array(group_offset, dtype=jnp.int32)
+
+    lhs_t = lhs.swapaxes(0, 1)
+    expected = reference_tgmm(
+        lhs_t, grad, group_sizes, num_local_groups, group_offset=group_offset
+    )
+    actual = _tgmm_v2_impl(
+        lhs, grad, group_sizes, num_local_groups,
+        group_offset=group_offset,
+        preferred_element_type=jnp.bfloat16,
+    )
+    self.assertEqual(actual.shape, (num_local_groups, in_size, out_size))
+    self.assertArraysAllClose(actual, expected)
+
+  @parameterized.product(
+      batch_size=[128],
       in_size=[512, 1024],
       out_size=[512, 1024],
       num_groups=[16, 32],
