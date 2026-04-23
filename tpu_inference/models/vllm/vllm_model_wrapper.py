@@ -292,7 +292,7 @@ class VllmModelWrapper:
             ),
         )
         def step_fun(
-            params_and_buffers,  # This has been wrapped into torchax TorchValue
+            params_and_buffers,
             kv_caches: List[jax.Array],
             input_ids: jax.Array,
             attn_metadata: AttentionMetadata,
@@ -319,6 +319,7 @@ class VllmModelWrapper:
                     self.model, lora_metadata, self.vllm_config.lora_config)
                 if not is_first_rank:
                     intermediate_tensors = intermediate_tensors.to_torch()
+
                 output_from_torch = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
@@ -330,6 +331,7 @@ class VllmModelWrapper:
                     },
                     tie_weights=False,
                 )
+
                 replace_lora_metadata(self.model, original_lora_metadata,
                                       self.vllm_config.lora_config)
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()

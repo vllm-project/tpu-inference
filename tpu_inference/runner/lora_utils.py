@@ -64,6 +64,17 @@ class LoraUtils:
         if self.runner.lora_config is None:
             return None
 
+        def _is_safe(val):
+            if isinstance(val, (torch.Tensor, jax.Array, np.ndarray)):
+                return True
+            if isinstance(val, (int, float, bool, type(None))):
+                return True
+            if isinstance(val, (list, tuple)):
+                return all(_is_safe(x) for x in val)
+            if isinstance(val, dict):
+                return all(_is_safe(x) for x in val.values())
+            return False
+
         metadata = {}
         punica_wrapper = None
         for _, m in self.runner.model.model.named_modules():
@@ -79,7 +90,7 @@ class LoraUtils:
         # fine because we only care about instance attributes.
         for k in vars(punica_wrapper):
             v = getattr(punica_wrapper, k, None)
-            if k == 'device':  # Exclude string as it can't be traced by jax.jit
+            if not _is_safe(v):  # Exclude non-safe values as they can't be traced by jax.jit
                 continue
             metadata[k] = v
         return jax_view(metadata)

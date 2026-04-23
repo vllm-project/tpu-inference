@@ -471,6 +471,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padding_gap=vllm_envs.VLLM_TPU_BUCKET_PADDING_GAP)
         self.num_tokens_paddings = sorted(self.num_tokens_paddings +
                                           additional_sizes)
+        max_compilation_tokens = self.vllm_config.additional_config.get(
+            "max_compilation_tokens", None)
+        if max_compilation_tokens is not None:
+            self.num_tokens_paddings = [
+                p for p in self.num_tokens_paddings
+                if p <= max_compilation_tokens
+            ]
+            logger.info(
+                "Capped num_tokens_paddings at %d: %s",
+                max_compilation_tokens, self.num_tokens_paddings)
         self.num_tokens_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_tokens_paddings
         ]

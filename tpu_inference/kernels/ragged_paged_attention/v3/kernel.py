@@ -20,6 +20,7 @@ during inference.
 """
 import functools
 from enum import Enum
+import os
 from typing import Any
 
 import jax
@@ -1494,6 +1495,27 @@ def get_default_block_sizes(
     Note the default block sizes are not necessarily optimal.
     """
     tpu_version = get_tpu_version()
+    # Set e.g. RPA_D_BLOCK_SIZES="1,4096,1,256" to override decode block sizes.
+    # Set e.g. RPA_P_BLOCK_SIZES="32,4096,32,256" to override prefill block sizes.
+    # Set e.g. RPA_M_BLOCK_SIZES="32,4096,32,256" to override mixed block sizes.
+    env_key = {
+        RpaCase.DECODE: "RPA_D_BLOCK_SIZES",
+        RpaCase.PREFILL: "RPA_P_BLOCK_SIZES",
+        RpaCase.MIXED: "RPA_M_BLOCK_SIZES",
+    }[case]
+    env_val = os.environ.get(env_key)
+    if env_val is not None:
+        parts = [int(x.strip()) for x in env_val.split(",")]
+        assert len(parts) == 4, f"Expected 4 values for {env_key}, got {parts}"
+        print(f"[RPA DEBUG] Overriding {case.name} block sizes from {env_key}:"
+              f" bq_sz={parts[0]}, bkv_sz={parts[1]},"
+              f" bq_csz={parts[2]}, bkv_csz={parts[3]}")
+        return {
+            "bq_sz": parts[0],
+            "bkv_sz": parts[1],
+            "bq_csz": parts[2],
+            "bkv_csz": parts[3],
+        }
 
     kv_packing = get_dtype_packing(kv_dtype)
     num_kv_heads_x2 = next_power_of_2(
