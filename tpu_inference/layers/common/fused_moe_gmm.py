@@ -161,8 +161,9 @@ def moe_gmm_local(
             group_offset + local_group_size,
         )[topk_argsort_revert_indices]
 
-    if gather_reduce_sc.is_supported_by_sc_gather_reduce(
-            gmm1_res.shape[0], gmm1_res.shape[1], topk):
+    # if gather_reduce_sc.is_supported_by_sc_gather_reduce(
+    #         gmm1_res.shape[0], gmm1_res.shape[1], topk):
+    if False:
         gmm2_res = gmm_wrapper(gmm1_res,
                                w2,
                                w2_scale,
