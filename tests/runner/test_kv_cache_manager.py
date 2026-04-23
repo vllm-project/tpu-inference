@@ -824,18 +824,95 @@ class TestKVCacheManager:
         }
         self.runner.vllm_config.compilation_config.static_forward_context = layers
 
+        # Unpadded mamba page size for DummyMamba: (3*12288)*2 + (64*128*128)*4
+        expected_mamba_unpadded = 3 * 12288 * 2 + 64 * 128 * 128 * 4
+        expected_attn_page_size = 1081344  # what update_mamba_page_size_padded
+        # previously set. For this 1:1 hybrid the new uniform page size is
+        # attn_page + mamba_unpadded.
+        expected_uniform = expected_attn_page_size + expected_mamba_unpadded
+
         with patch(
                 'tpu_inference.runner.kv_cache_manager.get_layers_from_vllm_config',
                 return_value=layers):
             kv_cache_spec = self.runner.get_kv_cache_spec()
 
-            # Verify the mamba page size was unified with full attention.
-            assert self.runner.cache_config.mamba_page_size_padded == 1081344
+            # Every layer spec (both mamba and attn) is padded to the
+            # per-shared_by sum so vLLM sees a uniform page size and sizes
+            # its block pool to match per-layer TPU allocation.
+            assert self.runner.cache_config.mamba_page_size_padded == \
+                expected_uniform
 
-            # The layer spec should reflect the cache config update.
             mamba_spec = kv_cache_spec['linear_attn']
             assert isinstance(mamba_spec, MambaSpec)
-            assert mamba_spec.page_size_padded == 1081344
+            assert mamba_spec.page_size_padded == expected_uniform
+
+            attn_spec = kv_cache_spec['full_attn']
+            assert isinstance(attn_spec, FullAttentionSpec)
+            assert attn_spec.page_size_padded == expected_uniform
+            # Uniform check: vLLM would fail otherwise.
+            assert attn_spec.page_size_bytes == mamba_spec.page_size_bytes
+
+    def test_get_kv_cache_spec_hybrid_uniform_page_size_qwen35_ratio(self):
+        """Verify update_mamba_page_size_padded for a 10:30 attn:mamba model.
+
+        For Qwen3.5 (10 full-attn layers + 30 linear-attn layers), vLLM's
+        hybrid grouping produces `group_size=10` and 4 kv-cache groups
+        (1 attn + 3 mamba). The fix pads each layer spec to
+        `attn_page + 3 * mamba_unpadded` so vLLM's num_blocks matches
+        per-layer TPU allocation.
+        """
+        self.runner.cache_config.block_size = 1056
+        self.runner.cache_config.mamba_block_size = 1056
+        self.runner.kv_cache_dtype = torch.float8_e4m3fn
+        self.runner.cache_config.mamba_page_size_padded = None
+
+        class DummyMamba(MambaBase):
+
+            def __init__(self):
+                super().__init__()
+
+            def get_state_shape(self):
+                return ((3, 12288), (64, 128, 128))
+
+            def get_state_dtype(self):
+                return (torch.bfloat16, torch.float32)
+
+            @property
+            def mamba_type(self):
+                return "dummy"
+
+        layers: dict = {}
+        for i in range(30):
+            layers[f'linear_attn.{i}'] = DummyMamba()
+        for i in range(10):
+            mock_attn = MagicMock(spec=Attention)
+            mock_attn.attn_type = AttentionType.DECODER
+            mock_attn.num_kv_heads = 2
+            mock_attn.head_size = 256
+            mock_attn.sliding_window = None
+            mock_attn.kv_sharing_target_layer_name = None
+            layers[f'full_attn.{i}'] = mock_attn
+
+        mamba_unpadded = 3 * 12288 * 2 + 64 * 128 * 128 * 4
+        attn_page = 1081344
+        expected_uniform = attn_page + 3 * mamba_unpadded
+
+        self.runner.vllm_config.compilation_config.static_forward_context = \
+            layers
+
+        with patch(
+                'tpu_inference.runner.kv_cache_manager.get_layers_from_vllm_config',
+                return_value=layers):
+            kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        assert self.runner.cache_config.mamba_page_size_padded == \
+            expected_uniform, (
+                f"expected {expected_uniform}, "
+                f"got {self.runner.cache_config.mamba_page_size_padded}")
+        for name, spec in kv_cache_spec.items():
+            assert spec.page_size_bytes == expected_uniform, (
+                f"layer {name} has page_size_bytes={spec.page_size_bytes} "
+                f"but expected uniform={expected_uniform}")
 
     def test_get_kv_cache_spec_pure_attention_no_cache_config_updates(self):
         mock_attn = MagicMock(spec=MambaBase)
@@ -848,7 +925,20 @@ class TestKVCacheManager:
 
     def test_hybrid_mamba_num_blocks(self):
         num_blocks = 100
-        attn_page_size = 67584
+        # The duplicate-path num_blocks calc now uses the TPU-actual
+        # attention per-block size (`get_attention_page_size_bytes`) on
+        # both sides of the comparison — so the mock spec's `num_kv_heads`,
+        # `head_size`, `block_size`, and `dtype` have to produce the
+        # expected `attn_page_size` when fed through that function.
+        attn_spec_block_size = self.runner.vllm_config.cache_config.block_size
+        attn_spec_num_kv_heads = 8
+        attn_spec_head_size = 128
+        attn_spec_dtype = torch.bfloat16
+        attn_page_size = get_attention_page_size_bytes(self.runner.mesh,
+                                                       attn_spec_block_size,
+                                                       attn_spec_num_kv_heads,
+                                                       attn_spec_head_size,
+                                                       attn_spec_dtype, False)
 
         mamba_shapes = ((4, 128), (8, 32, 32))
         mamba_dtypes = (torch.bfloat16, torch.float32)
@@ -861,17 +951,17 @@ class TestKVCacheManager:
             block_size=self.runner.vllm_config.cache_config.block_size,
             shapes=mamba_shapes,
             dtypes=mamba_dtypes,
-            page_size_padded=67584)
+            page_size_padded=attn_page_size)
 
         # Total tensor size derived from sum of the unpadded Mamba page size and the Attention page size
         tensor_size = num_blocks * (mamba_unpadded_page_size + attn_page_size)
 
         attn_spec = MagicMock(spec=FullAttentionSpec)
-        attn_spec.block_size = self.runner.vllm_config.cache_config.block_size
+        attn_spec.block_size = attn_spec_block_size
         attn_spec.page_size_bytes = attn_page_size
-        attn_spec.num_kv_heads = 8
-        attn_spec.head_size = 128
-        attn_spec.dtype = torch.bfloat16
+        attn_spec.num_kv_heads = attn_spec_num_kv_heads
+        attn_spec.head_size = attn_spec_head_size
+        attn_spec.dtype = attn_spec_dtype
 
         layer_names = ['layer.0', 'layer.1']
         kv_cache_groups = [
@@ -904,3 +994,117 @@ class TestKVCacheManager:
 
         attn_cache = self.runner.kv_caches[1]
         assert attn_cache.shape[0] == num_blocks
+
+    def test_hybrid_num_blocks_matches_vllm_pool_for_qwen35_topology(self):
+        """Regression test for the OOB block-id bug observed on Qwen3.5.
+
+        vLLM's hybrid allocator groups Qwen3.5's 40 layers into 4 kv-cache
+        groups (1 full-attn + 3 linear-attn/mamba), then builds
+        `group_size=10` `KVCacheTensor`s, each `shared_by` one layer per
+        group (so shared_by has 4 layer names). Block ids are drawn from a
+        single shared pool of size `kv_cache_config.num_blocks`. Before the
+        fix, per-layer num_blocks on TPU was `tensor.size /
+        total_group_page_size` (~vllm_num_blocks / 3.5 for Qwen3.5), so the
+        scheduler could hand out a block id beyond a layer's cache range.
+
+        After the fix, every layer spec is padded so
+        `tensor.size / uniform_page_size == kv_cache_config.num_blocks`, and
+        each duplicated per-layer cache has exactly that many slots.
+        """
+        num_blocks = 7  # matches gpu-memory-utilization=0.36 in the repro
+
+        # Attention per-block size comes from `get_attention_page_size_bytes`
+        # (same as what `update_mamba_page_size_padded` uses) — on fp8
+        # models this differs from `spec.real_page_size_bytes` because of
+        # TPU packing, so stay consistent.
+        attn_spec_block_size = self.runner.vllm_config.cache_config.block_size
+        attn_spec_num_kv_heads = 8
+        attn_spec_head_size = 128
+        attn_spec_dtype = torch.bfloat16
+        attn_page_size = get_attention_page_size_bytes(self.runner.mesh,
+                                                       attn_spec_block_size,
+                                                       attn_spec_num_kv_heads,
+                                                       attn_spec_head_size,
+                                                       attn_spec_dtype, False)
+
+        mamba_shapes = ((3, 12288), (64, 128, 128))
+        mamba_dtypes = (torch.bfloat16, torch.float32)
+        mamba_unpadded = sum(
+            int(np.prod(shape)) * torch.tensor([], dtype=dtype).element_size()
+            for shape, dtype in zip(mamba_shapes, mamba_dtypes))
+
+        # 1 full-attn + 3 linear-attn per shared_by, so the spec padding
+        # applied by the fix is (1*attn + 3*mamba_unpadded).
+        uniform_page_size = attn_page_size + 3 * mamba_unpadded
+
+        # vLLM computes this for hybrid: tensor.size = uniform * num_blocks.
+        tensor_size = uniform_page_size * num_blocks
+
+        # Every layer spec reports `page_size_bytes == uniform_page_size`
+        # after the fix (MambaSpec via page_size_padded, AttentionSpec via
+        # page_size_padded as well).
+        mamba_spec = MambaSpec(
+            block_size=self.runner.vllm_config.cache_config.block_size,
+            shapes=mamba_shapes,
+            dtypes=mamba_dtypes,
+            page_size_padded=uniform_page_size,
+        )
+
+        attn_spec = MagicMock(spec=FullAttentionSpec)
+        attn_spec.block_size = attn_spec_block_size
+        attn_spec.page_size_bytes = uniform_page_size
+        attn_spec.num_kv_heads = attn_spec_num_kv_heads
+        attn_spec.head_size = attn_spec_head_size
+        attn_spec.dtype = attn_spec_dtype
+
+        # 10 shared_by tensors, each holding 1 attn + 3 mamba layers
+        # (Qwen3.5: 10 full-attn, 30 linear-attn).
+        layer_names_per_tensor = [(f'attn.{i}', f'mamba_a.{i}', f'mamba_b.{i}',
+                                   f'mamba_c.{i}') for i in range(10)]
+        attn_layer_names = [t[0] for t in layer_names_per_tensor]
+        mamba_a_names = [t[1] for t in layer_names_per_tensor]
+        mamba_b_names = [t[2] for t in layer_names_per_tensor]
+        mamba_c_names = [t[3] for t in layer_names_per_tensor]
+
+        kv_cache_groups = [
+            KVCacheGroupSpec(layer_names=attn_layer_names,
+                             kv_cache_spec=attn_spec),
+            KVCacheGroupSpec(layer_names=mamba_a_names,
+                             kv_cache_spec=mamba_spec),
+            KVCacheGroupSpec(layer_names=mamba_b_names,
+                             kv_cache_spec=mamba_spec),
+            KVCacheGroupSpec(layer_names=mamba_c_names,
+                             kv_cache_spec=mamba_spec),
+        ]
+        kv_cache_tensors = [
+            KVCacheTensor(size=tensor_size, shared_by=list(names))
+            for names in layer_names_per_tensor
+        ]
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        self.runner.initialize_kv_cache(kv_cache_config)
+
+        # 10 tensors × 4 duplicated layers = 40 caches, one per layer.
+        assert len(self.runner.kv_caches) == 40
+
+        # The whole point of the fix: every layer's physical cache holds
+        # exactly `kv_cache_config.num_blocks` slots so block ids from
+        # vLLM's shared pool can never index out of range.
+        for name in (attn_layer_names + mamba_a_names + mamba_b_names +
+                     mamba_c_names):
+            idx = self.runner.layer_name_to_kvcache_index[name]
+            cache = self.runner.kv_caches[idx]
+            if isinstance(cache, tuple):  # mamba: (conv_state, ssm_state)
+                for state in cache:
+                    assert state.shape[0] == num_blocks, (
+                        f"layer {name} mamba state has "
+                        f"{state.shape[0]} blocks but vLLM pool has "
+                        f"{num_blocks}")
+            else:
+                assert cache.shape[0] == num_blocks, (
+                    f"layer {name} attn cache has {cache.shape[0]} blocks "
+                    f"but vLLM pool has {num_blocks}")
