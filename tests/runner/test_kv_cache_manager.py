@@ -862,6 +862,7 @@ class TestKVCacheManager:
         per-layer TPU allocation.
         """
         self.runner.cache_config.block_size = 1056
+        self.runner.cache_config.mamba_block_size = 1056
         self.runner.kv_cache_dtype = torch.float8_e4m3fn
         self.runner.cache_config.mamba_page_size_padded = None
 
