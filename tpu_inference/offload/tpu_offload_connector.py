@@ -329,7 +329,6 @@ class KVOffloadConnectorStats(KVConnectorStats):
         # Must be serializable
         self.data: dict[str, dict[str, list[int]]] = {
             "finished_save_chunks": dict(),
-            "finished_gather_blocks": dict(),
             "finished_load_chunks": dict(),
         }
 
@@ -344,12 +343,6 @@ class KVOffloadConnectorStats(KVConnectorStats):
             self.data["finished_load_chunks"][req] = []
         self.data["finished_load_chunks"][req].extend(
             copy.deepcopy(loaded_chunk_ids))
-
-    def record_gather(self, req: ReqId, gathered_block_ids: list[int]):
-        if req not in self.data["finished_gather_blocks"]:
-            self.data["finished_gather_blocks"][req] = []
-        self.data["finished_gather_blocks"][req].extend(
-            copy.deepcopy(gathered_block_ids))
 
     def clone_and_reset(self) -> "KVOffloadConnectorStats":
         old = copy.copy(self)
@@ -366,14 +359,10 @@ class KVOffloadConnectorStats(KVConnectorStats):
         # Compute compact representative stats suitable for CLI logging
         if self.is_empty():
             return {
-                "Num finished gather blocks ": 0,
                 "Num finished save chunks ": 0,
                 "Num finished load chunks ": 0,
             }
 
-        finished_gather_blocks = sum(
-            len(block_list)
-            for block_list in self.data["finished_gather_blocks"].values())
         finished_save_chunks = sum(
             len(chunk_list)
             for chunk_list in self.data["finished_save_chunks"].values())
@@ -382,7 +371,6 @@ class KVOffloadConnectorStats(KVConnectorStats):
             for chunk_list in self.data["finished_load_chunks"].values())
 
         return {
-            "Num finished gather blocks": finished_gather_blocks,
             "Num finished save chunks ": finished_save_chunks,
             "Num finished load chunks": finished_load_chunks,
         }
@@ -585,13 +573,6 @@ class TPUOffloadConnectorScheduler():
         # request ID -> set(block hashes being saved/loaded)
         self._reqs_being_saved = defaultdict[ReqId, set[CpuChunkId]](set)
         self._reqs_being_loaded = defaultdict[ReqId, set[CpuChunkId]](set)
-        # request ID -> set(src_block_ids to gather into the staging buffer)
-        self._save_reqs_w_pending_gather = defaultdict[ReqId, set[int]](set)
-
-        # finished requests but with pending save / load ops
-        self._finished_reqs_w_pending_ops: set[ReqId] = set()
-        # finished requests without any pending ops
-        self._fully_finished_reqs: set[ReqId] = set()
 
         model_name = self.vllm_config.model_config.model
 
@@ -919,7 +900,6 @@ class TPUOffloadConnectorScheduler():
                         dst_chunks=dst_chunks,
                     )
                     self._reqs_being_saved[req_id] |= set(dst_chunks)
-                    self._save_reqs_w_pending_gather[req_id] |= set(src_blocks)
                     num_allocated_blocks = self.staging_buffer_manager.allocate(
                         tracker.req_id,
                         num_blocks=adjusted_num_blocks_to_save,
@@ -986,9 +966,8 @@ class TPUOffloadConnectorScheduler():
         )
         for finished_req_id in scheduler_output.finished_req_ids:
             logger.debug(f"  - Processing finished req: {finished_req_id}")
-            tracker = self._request_trackers[finished_req_id]
+            tracker = self._request_trackers.get(finished_req_id, None)
 
-            # TODO: If tracker is none, will it ever process the other?
             if not tracker:
                 logger.warning(
                     f"  - No tracker found for finished req: {finished_req_id}. Skipping."
@@ -1000,36 +979,6 @@ class TPUOffloadConnectorScheduler():
             self._unfinished_requests.pop(finished_req_id, None)
             self.load_specs.pop(finished_req_id, None)
 
-        # Note: fully_finished (finished w/o any pending ops) requests
-        # are ready to be released (delayed due to pending ops before).
-        # We use a no-op SaveSpec to notify the worker to put them in
-        # the finished_saves list.
-        for _finished_req_id in self._fully_finished_reqs:
-            _save_spec = SaveSpec(
-                num_skip_leading_tokens=0,
-                num_total_tokens=0,
-                src_blocks=[],
-                dst_chunks=[],
-                is_final_save=True,
-                skip_save=True,
-            )
-            _tracker = RequestTracker(
-                req_id=_finished_req_id,
-                prompt_len=0,
-                block_ids=[],
-                token_ids=[],
-                save_watermark=0,
-            )
-            req_meta = self._create_request_meta(_tracker,
-                                                 _save_spec,
-                                                 load_spec=None)
-            if req_meta:
-                logger.debug(
-                    f"  - Creating final save metadata for req: {_finished_req_id}"
-                )
-                metadata.requests_meta.append(req_meta)
-        self._fully_finished_reqs = set()
-
         # Phase 2: Process newly scheduled requests
         # This block handles requests being scheduled for the very first time.
         # It creates the initial RequestTracker and prepares the first work order.
@@ -1039,7 +988,13 @@ class TPUOffloadConnectorScheduler():
         for request in scheduler_output.scheduled_new_reqs:
             req_id = request.req_id
 
-            _request = self._unfinished_requests[req_id]
+            _request = self._unfinished_requests.get(req_id, None)
+            if not _request:
+                logger.warning(
+                    f"  - No unfinished requests found for new req: {req_id}. Skipping."
+                )
+                continue
+
             logger.debug(
                 f"  - Processing new req: {req_id}, {len(_request.block_hashes)} block_hashes."
             )
@@ -1100,10 +1055,10 @@ class TPUOffloadConnectorScheduler():
         logger.debug(
             f"Phase 3: Processing {len(cached_reqs.req_ids)} cached requests.")
         for i, req_id in enumerate(cached_reqs.req_ids):
-            _request = self._unfinished_requests.get(req_id)
+            _request = self._unfinished_requests.get(req_id, None)
             if _request is None:
                 logger.warning(
-                    f"  - No full request found for cached req: {req_id}. Skipping."
+                    f"  - No unfinished requests found for cached req: {req_id}. Skipping."
                 )
                 continue
 
@@ -1183,28 +1138,9 @@ class TPUOffloadConnectorScheduler():
         if connector_output.kv_connector_stats and connector_output.kv_connector_stats.data is not None:
             assert isinstance(connector_output.kv_connector_stats,
                               KVOffloadConnectorStats)
-            assert "finished_gather_blocks" in connector_output.kv_connector_stats.data
             assert "finished_save_chunks" in connector_output.kv_connector_stats.data
             assert "finished_load_chunks" in connector_output.kv_connector_stats.data
 
-            for req_id, gathered_block_ids in connector_output.kv_connector_stats.data[
-                    "finished_gather_blocks"].items():
-                num_gathered_blocks = len(gathered_block_ids)
-                logger.debug(
-                    f"  finished_gather_blocks for {req_id}: {num_gathered_blocks}"
-                )
-                # update pending gathers
-                for gathered_block_id in gathered_block_ids:
-                    assert gathered_block_id in self._save_reqs_w_pending_gather[
-                        req_id]
-                    self._save_reqs_w_pending_gather[req_id].remove(
-                        gathered_block_id)
-                if len(self._save_reqs_w_pending_gather[req_id]) == 0:
-                    self._save_reqs_w_pending_gather.pop(req_id, None)
-                else:
-                    logger.debug(
-                        f"  remaining_gather_blocks:{req_id}, {self._save_reqs_w_pending_gather[req_id]}."
-                    )
             for req_id, saved_chunk_ids in connector_output.kv_connector_stats.data[
                     "finished_save_chunks"].items():
                 num_saved_chunks = len(saved_chunk_ids)
@@ -1215,17 +1151,14 @@ class TPUOffloadConnectorScheduler():
                     req_id, usage="save", num_finished_blocks=num_saved_chunks)
 
                 # update in-flight save
+                # NOTE(jcgu):  there might be in-flight savings,
+                # even if the requests has been finished.
                 for saved_chunk_id in saved_chunk_ids:
                     assert saved_chunk_id in self._reqs_being_saved[req_id]
                     self._reqs_being_saved[req_id].remove(saved_chunk_id)
                 if len(self._reqs_being_saved[req_id]) == 0:
                     self._reqs_being_saved.pop(req_id, None)
-                    assert req_id not in self._save_reqs_w_pending_gather
                 else:
-                    if req_id in self._save_reqs_w_pending_gather:
-                        assert len(self._reqs_being_saved[req_id]) >= len(
-                            self._save_reqs_w_pending_gather[req_id]
-                        ), f"{req_id}, {self._reqs_being_saved[req_id]}, {self._save_reqs_w_pending_gather[req_id]}"
                     logger.debug(
                         f"  remaining_saving_blocks:{req_id}, {self._reqs_being_saved[req_id]}."
                     )
@@ -1249,31 +1182,12 @@ class TPUOffloadConnectorScheduler():
                     self._reqs_being_loaded[req_id].remove(loaded_chunk_id)
                 if len(self._reqs_being_loaded[req_id]) == 0:
                     self._reqs_being_loaded.pop(req_id, None)
+                else:
+                    logger.debug(
+                        f"  remaining_loading_blocks:{req_id}, {self._reqs_being_loaded[req_id]}."
+                    )
                 # update the status of occupied cpu chunks
                 self.offload_manager.mark_completion(loaded_chunk_ids, "load")
-
-        # clean up the status of the finished requests
-        # save
-        for req_id in connector_output.finished_sending or []:
-            if req_id in self._save_reqs_w_pending_gather:
-                assert len(self._save_reqs_w_pending_gather[req_id]) == 0
-                self._save_reqs_w_pending_gather.pop(req_id)
-
-            # NOTE(jcgu): finished_sending == gather_done != swap_out done
-            # there might be in-flight savings, we can not clean up
-            # the staging buffer of the request yet!
-
-        _finished_reqs = list(self._finished_reqs_w_pending_ops)
-        for req_id in _finished_reqs:
-            is_gather_done = req_id not in self._save_reqs_w_pending_gather
-            is_load_done = req_id not in self._reqs_being_loaded
-
-            # NOTE(jcgu): we need to wait for gathers and loads before
-            # release the request
-            if is_gather_done and is_load_done:
-                self._fully_finished_reqs.add(req_id)
-                self._finished_reqs_w_pending_ops.discard(req_id)
-                logger.debug(f"Request {req_id} is now fully finished.")
 
     def request_finished(
         self,
@@ -1291,31 +1205,11 @@ class TPUOffloadConnectorScheduler():
         return:
             delay_free_blocks, kv_xfer_params
         """
-        logger.debug(" Entering request_finished")
+        delay_free = False
         # Return True to indicate the request is being saved asynchronously
         # and its blocks should not be freed yet.
 
-        req_id = request.request_id
-        delay_free = False
-        if req_id in self._save_reqs_w_pending_gather and len(
-                self._save_reqs_w_pending_gather[req_id]) > 0:
-            self._finished_reqs_w_pending_ops.add(req_id)
-            logger.debug(
-                f"not_free_with_gather:{req_id}, {self._save_reqs_w_pending_gather[req_id]}"
-            )
-            delay_free = True
-        if req_id in self._reqs_being_loaded and len(
-                self._reqs_being_loaded[req_id]) > 0:
-            self._finished_reqs_w_pending_ops.add(req_id)
-            logger.debug(
-                f"not_free_with_load:{req_id}, {self._reqs_being_loaded[req_id]}"
-            )
-            delay_free = True
-
-        if not delay_free:
-            logger.debug(f" finished request: {req_id}")
-            self._save_reqs_w_pending_gather.pop(req_id, None)
-            self._reqs_being_loaded.pop(req_id, None)
+        logger.debug(f" finished request: {request.request_id}")
 
         return delay_free, None
 
@@ -1795,15 +1689,6 @@ class TPUOffloadConnectorWorker:
                 total_num_blocks_to_save)
         self.runner.kv_caches = kv_caches
 
-        # Record gather synchronously to signal scheduler for these requests
-        # after successful TPU gather.
-        for info in manifest:
-            if info.num_blocks > 0:
-                self.offload_stats.record_gather(
-                    req=info.req_id,
-                    gathered_block_ids=self._get_blocks_for_req_from_metadata(
-                        info, metadata))
-
         if gathered_kv_caches_tpu is not None:
             logger.debug(
                 f"extracted_blocks_tpu (batch): {gathered_kv_caches_tpu[0].shape}, {gathered_kv_caches_tpu[0].sharding}"
@@ -2014,16 +1899,12 @@ class TPUOffloadConnectorWorker:
                         self.finished_save_reqs.add(meta.req_id)
                     continue
 
-                # 1. SYNC BLOCKING: Gather from TPU
+                # 1. non-blocking gather from TPU
                 # We wrap this in a try/except to catch validation errors immediately.
                 try:
                     gather_result = self._gather_tpu_blocks(
                         meta.req_id, meta.local_block_ids, meta.token_ids,
                         meta.save_spec)
-                    if len(meta.save_spec.src_blocks) > 0:
-                        self.offload_stats.record_gather(
-                            req=meta.req_id,
-                            gathered_block_ids=meta.save_spec.src_blocks)
                 except Exception as e:
                     logger.error(
                         f"Error gathering blocks for request {meta.req_id}: {e}",
@@ -2296,6 +2177,7 @@ class TPUOffloadConnectorWorker:
         self.finished_save_reqs = set()
         # NOTE: add back self.finished_load_reqs and report it back to vllm scheduler when async load gets implemented.
         finished_loads = set()
+        # NOTE(jcgu): both are empty now.
         logger.debug(f"Finished saves: {finished_saves}, "
                      f"Finished loads: {finished_loads}")
         return finished_saves, finished_loads
