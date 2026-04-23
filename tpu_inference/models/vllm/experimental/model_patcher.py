@@ -66,61 +66,65 @@ def patch_mm_model(
     Returns:
         The patched model and the updated parameters and buffers.
     """
+    # Monkey patch vLLM's _merge_multimodal_embeddings to support JAX/torchax
+    # broadcasting limitations with boolean masks.
+    try:
+        import vllm.model_executor.models.utils as vllm_utils
+
+        # Save the original to avoid recursion if patched multiple times
+        if not hasattr(vllm_utils, "_original_merge_multimodal_embeddings"):
+            vllm_utils._original_merge_multimodal_embeddings = vllm_utils._merge_multimodal_embeddings
+
+            def _jax_compatible_merge_multimodal_embeddings(
+                    inputs_embeds, multimodal_embeddings, is_multimodal):
+                if len(multimodal_embeddings) == 0:
+                    return inputs_embeds
+
+                import jax.numpy as jnp
+                import torchax
+
+                def to_jax(t):
+                    if hasattr(t, "jax_device_array"):
+                        return t.jax_device_array
+                    return torchax.to_jax(t)
+
+                mm_embeds_flat = vllm_utils._flatten_embeddings(
+                    multimodal_embeddings)
+                input_dtype = inputs_embeds.dtype
+                mm_embeds_flat = mm_embeds_flat.to(dtype=input_dtype)
+
+                mask = to_jax(is_multimodal)
+                inputs_jax = to_jax(inputs_embeds)
+                mm_jax = to_jax(mm_embeds_flat)
+
+                # Create a dummy row to handle indices for non-multimodal tokens.
+                dummy_row = jnp.zeros_like(mm_jax[0:1])
+                # Prepend the dummy row.
+                flattened_padded = jnp.concatenate([dummy_row, mm_jax], axis=0)
+
+                # For non-multimodal tokens, cumsum points to 0. For multimodal tokens, it points to their index.
+                gather_indices = jnp.cumsum(mask)
+                update_values = flattened_padded[gather_indices]
+
+                condition = jnp.expand_dims(mask, axis=-1)
+                new_embeds = jnp.where(condition, update_values, inputs_jax)
+
+                return torchax.torch.Tensor.from_jax(new_embeds)
+
+            vllm_utils._merge_multimodal_embeddings = _jax_compatible_merge_multimodal_embeddings
+            logger.info(
+                "Patched vLLM's _merge_multimodal_embeddings with static JAX logic."
+            )
+    except Exception as e:
+        logger.warning(
+            f"Failed to patch vLLM's _merge_multimodal_embeddings: {e}")
+
     if not jitted_mm_module_keys:
         return model, params_and_buffers
 
     logger.warning_once(
         "JIT compilation for multi-modal (MM) modules is an experimental feature."
     )
-
-    # Monkey patch vLLM's _merge_multimodal_embeddings to support JAX/torchax
-    # broadcasting limitations with boolean masks.
-    try:
-        import vllm.model_executor.models.utils as vllm_utils
-        
-        # Save the original to avoid recursion if patched multiple times
-        if not hasattr(vllm_utils, "_original_merge_multimodal_embeddings"):
-            vllm_utils._original_merge_multimodal_embeddings = vllm_utils._merge_multimodal_embeddings
-
-            def _jax_compatible_merge_multimodal_embeddings(inputs_embeds, multimodal_embeddings, is_multimodal):
-                if len(multimodal_embeddings) == 0:
-                    return inputs_embeds
-                
-                mm_embeds_flat = vllm_utils._flatten_embeddings(multimodal_embeddings)
-                input_dtype = inputs_embeds.dtype
-                mm_embeds_flat = mm_embeds_flat.to(dtype=input_dtype)
-
-                # JAX boolean array indexing does not broadcast automatically and dynamic masking
-                # (via jnp.where(mask)[0]) triggers host synchronization, crashing on multihost.
-                # We use a statically shaped approach (cumsum + where) to remain entirely on device.
-                import jax.numpy as jnp
-                if hasattr(is_multimodal, "jax_device_array"):
-                    mask = is_multimodal.jax_device_array
-                    inputs_jax = inputs_embeds.jax_device_array
-                    mm_jax = mm_embeds_flat.jax_device_array
-                    
-                    if mask.dtype == jnp.bool_:
-                        # Create a dummy row to handle indices for non-multimodal tokens.
-                        dummy_row = jnp.zeros_like(mm_jax[0:1])
-                        # Prepend the dummy row.
-                        flattened_padded = jnp.concatenate([dummy_row, mm_jax], axis=0)
-                        # For non-multimodal tokens, cumsum points to 0. For multimodal tokens, it points to their index.
-                        gather_indices = jnp.cumsum(mask)
-                        update_values = flattened_padded[gather_indices]
-                        
-                        condition = jnp.expand_dims(mask, axis=-1)
-                        new_embeds = jnp.where(condition, update_values, inputs_jax)
-                        
-                        return torchax.torch.Tensor.from_jax(new_embeds)
-                
-                # Fallback to standard PyTorch implementation
-                inputs_embeds[is_multimodal] = mm_embeds_flat
-                return inputs_embeds
-            
-            vllm_utils._merge_multimodal_embeddings = _jax_compatible_merge_multimodal_embeddings
-            logger.info("Patched vLLM's _merge_multimodal_embeddings for JAX compatibility.")
-    except Exception as e:
-        logger.warning(f"Failed to patch vLLM's _merge_multimodal_embeddings: {e}")
 
     # Flatten custom pytree to jax for jit
     # eg. transformers.modeling_outputs.BaseModelOutputWithPast
