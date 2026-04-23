@@ -80,37 +80,31 @@ def patch_mm_model(
                 if len(multimodal_embeddings) == 0:
                     return inputs_embeds
 
-                import jax.numpy as jnp
-                import torchax
-                from torchax.ops.mappings import t2j
-
-                def to_jax(t):
-                    if hasattr(t, "jax_device_array"):
-                        return t.jax_device_array
-                    return t2j(t)
+                import torch
 
                 mm_embeds_flat = vllm_utils._flatten_embeddings(
                     multimodal_embeddings)
                 input_dtype = inputs_embeds.dtype
                 mm_embeds_flat = mm_embeds_flat.to(dtype=input_dtype)
 
-                mask = to_jax(is_multimodal)
-                inputs_jax = to_jax(inputs_embeds)
-                mm_jax = to_jax(mm_embeds_flat)
-
+                # PyTorch boolean indexing (inputs[mask] = values) requires dynamic 
+                # host-synchronization. We use static math ops (cumsum, where) 
+                # which trace perfectly via torchax into JAX without deadlocking.
+                
                 # Create a dummy row to handle indices for non-multimodal tokens.
-                dummy_row = jnp.zeros_like(mm_jax[0:1])
+                dummy_row = torch.zeros_like(mm_embeds_flat[0:1])
                 # Prepend the dummy row.
-                flattened_padded = jnp.concatenate([dummy_row, mm_jax], axis=0)
+                flattened_padded = torch.cat([dummy_row, mm_embeds_flat], dim=0)
 
-                # For non-multimodal tokens, cumsum points to 0. For multimodal tokens, it points to their index.
-                gather_indices = jnp.cumsum(mask)
+                # For non-multimodal tokens, cumsum points to 0. 
+                # For multimodal tokens, it points to their 1-based index in the padded array.
+                gather_indices = is_multimodal.to(torch.int64).cumsum(dim=0)
                 update_values = flattened_padded[gather_indices]
 
-                condition = jnp.expand_dims(mask, axis=-1)
-                new_embeds = jnp.where(condition, update_values, inputs_jax)
+                condition = is_multimodal.unsqueeze(-1)
+                new_embeds = torch.where(condition, update_values, inputs_embeds)
 
-                return torchax.torch.Tensor.from_jax(new_embeds)
+                return new_embeds
 
             vllm_utils._merge_multimodal_embeddings = _jax_compatible_merge_multimodal_embeddings
             logger.info(
