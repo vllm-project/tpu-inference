@@ -114,6 +114,38 @@ def patch_mm_model(
         logger.warning(
             f"Failed to patch vLLM's _merge_multimodal_embeddings: {e}")
 
+    # Patch vLLM's RMSNorm to avoid mixed-math errors with self.weight.data 
+    # when using torchax + functional_call.
+    try:
+        from vllm.model_executor.layers.layernorm import RMSNorm
+
+        # Store original if not already patched
+        if not hasattr(RMSNorm, "_original_forward_native"):
+            RMSNorm._original_forward_native = RMSNorm.forward_native
+
+            def _patched_rms_norm_forward_native(self, x, residual=None):
+                # Always use forward_static because it uses self.weight instead of 
+                # self.weight.data, allowing functional_call to intercept and 
+                # wrap the parameter correctly for torchax.
+                weight_param = None
+                if getattr(self, "has_weight", True) and hasattr(self, "weight"):
+                    weight_param = self.weight
+
+                return self.forward_static(
+                    x,
+                    self.variance_epsilon,
+                    self.hidden_size,
+                    x.dtype,
+                    weight_param,
+                    residual,
+                    self.variance_size_override,
+                )
+
+            RMSNorm.forward_native = _patched_rms_norm_forward_native
+            logger.info("Patched vLLM's RMSNorm.forward_native to use forward_static.")
+    except Exception as e:
+        logger.warning(f"Failed to patch vLLM's RMSNorm: {e}")
+
     if not jitted_mm_module_keys:
         return model, params_and_buffers
 
