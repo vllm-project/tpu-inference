@@ -112,6 +112,8 @@ lm_eval_args=(
     --batch_size auto
     --apply_chat_template
     --num_fewshot 8
+    # --log_samples
+    # --output_path /mnt/disks/kunjanp-dev-disk-2/lm_eval_output
 )
 
 # Append --limit if provided
@@ -119,7 +121,7 @@ if [ -n "$LIMIT" ]; then
     lm_eval_args+=(--limit "$LIMIT")
 fi
 
-output=$(VLLM_XLA_CHECK_RECOMPILATION=0 USE_MOE_EP_KERNEL=${USE_MOE_EP_KERNEL} MODEL_IMPL_TYPE=vllm lm_eval "${lm_eval_args[@]}")
+output=$(VLLM_XLA_CHECK_RECOMPILATION=0 USE_MOE_EP_KERNEL=${USE_MOE_EP_KERNEL} HF_HOME="/mnt/disks/kunjanp-dev-disk-2/hf-cache" RAGGED_GATED_DELTA_RULE_IMPL="ragged_gated_delta_rule_chunked" MODEL_IMPL_TYPE=vllm lm_eval "${lm_eval_args[@]}")
 
 echo "Evaluation output:"
 echo "$output"

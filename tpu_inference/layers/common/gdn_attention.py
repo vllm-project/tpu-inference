@@ -24,6 +24,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
+from tpu_inference.kernels.gdn import recurrent_scan_v2
 from tpu_inference.layers.common.ragged_conv1d_jax import \
     ragged_conv1d as ragged_conv1d_jax
 from tpu_inference.layers.common.ragged_gated_delta_rule_chunked import \
@@ -41,6 +42,8 @@ class RaggedConv1dImpl(enum.Enum):
 class RaggedGatedDeltaRuleImpl(enum.Enum):
     REF = "ragged_gated_delta_rule_ref"
     CHUNKED = "ragged_gated_delta_rule_chunked"
+    V2 = "ragged_recurrent_scan_v2"
+    COMBINED = "ragged_gated_delta_rule_chunked_scan"
 
 
 @jax.tree_util.register_dataclass
@@ -120,9 +123,10 @@ def run_jax_gdn_attention_local(
         kernel_size=kernel_size,
     )
 
-    out_mixed_qkv = jax.nn.silu(out_mixed_qkv)
+    # out_mixed_qkv = jax.nn.silu(out_mixed_qkv)
 
     if config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.REF:
+        out_mixed_qkv = jax.nn.silu(out_mixed_qkv)
         ragged_gdn_impl = functools.partial(
             ragged_gated_delta_rule_ref,
             n_kq=n_kq,
@@ -130,7 +134,8 @@ def run_jax_gdn_attention_local(
             d_k=d_k,
             d_v=d_v,
         )
-    else:
+    elif config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.CHUNKED:
+        out_mixed_qkv = jax.nn.silu(out_mixed_qkv)
         ragged_gdn_impl = functools.partial(
             ragged_gated_delta_rule_chunked,
             n_kq=n_kq,
@@ -138,8 +143,57 @@ def run_jax_gdn_attention_local(
             d_k=d_k,
             d_v=d_v,
             use_qk_norm_in_gdn=True,
+            chunk_size=64,
+            # triangle_solver_impl=config.triangle_solver_impl,
+            use_v2_in_chunked=False,
         )
+    elif config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.V2:
 
+        def ragged_gdn_impl(
+            mixed_qkv,
+            b,
+            a,
+            recurrent_state,
+            A_log,
+            dt_bias,
+            query_start_loc,
+            state_indices,
+            distribution,
+        ):
+            return recurrent_scan_v2.recurrent_scan(
+                mixed_qkv,
+                b,
+                a,
+                recurrent_state,
+                A_log,
+                dt_bias,
+                query_start_loc,
+                state_indices,
+                distribution,
+                n_kq=n_kq,
+                n_v=n_v,
+                d_k=d_k,
+                d_v=d_v,
+                chunk_size=128,
+                BT=128,
+                use_qk_norm_in_gdn=True,
+            )
+    elif config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.COMBINED:
+        ragged_gdn_impl = functools.partial(
+            ragged_gated_delta_rule_chunked,
+            n_kq=n_kq,
+            n_v=n_v,
+            d_k=d_k,
+            d_v=d_v,
+            use_qk_norm_in_gdn=True,
+            chunk_size=64,
+            # triangle_solver_impl=config.triangle_solver_impl,
+            use_v2_in_chunked=True,
+        )
+    else:
+        raise ValueError(
+            f"Unsupported implementation: {config.ragged_gated_delta_rule_impl}"
+        )
     new_recurrent_state, output = ragged_gdn_impl(
         out_mixed_qkv,
         b,
