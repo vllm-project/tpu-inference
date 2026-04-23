@@ -100,6 +100,8 @@ def process_blockwise_fp8_linear_weights(
         original_block_size = weight_block_size[0]
         output_sizes_blocks = [s // original_block_size for s in output_sizes]
 
+        # vLLM naturally loads block scales inverted [in_blocks, out_blocks].
+        # Safely transpose if shape[1] verifies it corresponds to the out_blocks count.
         if weight_scale.ndim == 2 and weight_scale.shape[1] == sum(
                 output_sizes_blocks):
             weight_scale = jnp.transpose(weight_scale)
@@ -120,16 +122,17 @@ def process_blockwise_fp8_linear_weights(
             weight_scale_processed = reorder_concatenated_tensor_for_sharding(
                 weight_scale, output_sizes_blocks, n_shards, dim=0)
         else:
-            weight_scale_processed = []
-            start = 0
-            for size in output_sizes_blocks:
-                end = start + size
-                tensor_split = jax.lax.slice_in_dim(weight_scale,
-                                                    start,
-                                                    end,
-                                                    axis=0)
-                weight_scale_processed.append(tensor_split)
-                start = end
+            raise ValueError("Not implemented")
+            # weight_scale_processed = []
+            # start = 0
+            # for size in output_sizes_blocks:
+            #     end = start + size
+            #     tensor_split = jax.lax.slice_in_dim(weight_scale,
+            #                                         start,
+            #                                         end,
+            #                                         axis=0)
+            #     weight_scale_processed.append(tensor_split)
+            #     start = end
 
         linear_weights.weight_scale = weight_scale_processed
         return linear_weights

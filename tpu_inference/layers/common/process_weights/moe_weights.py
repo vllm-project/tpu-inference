@@ -563,16 +563,25 @@ def process_fp8_moe_weights(
         # Check if scales need transposing to match expected shape for process_moe_weights.
         # process_moe_weights expects (num_experts, out_dim, num_blocks)
         logger.info_once("Disabled weigth requant")
+
+        in_block_size = weight_block_size[
+            1] if weight_block_size is not None else 128
         if w13_weight_scale is not None and w13_weight_scale.ndim == 3:
             # out_dim = 2 * inter, in_dim = hidden
             # we want (experts, out_blocks, in_blocks)
             # check if it is (experts, in_blocks, out_blocks)
-            if w13_weight_scale.shape[1] == w13_weight.shape[2] // 128:
+            in_blocks_13 = w13_weight.shape[2] // in_block_size
+            if w13_weight_scale.shape[
+                    1] == in_blocks_13 and w13_weight_scale.shape[
+                        2] != in_blocks_13:
                 w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
         if w2_weight_scale is not None and w2_weight_scale.ndim == 3:
             # out_dim = hidden, in_dim = inter
             # we want (experts, out_blocks, in_blocks)
-            if w2_weight_scale.shape[1] == w2_weight.shape[2] // 128:
+            in_blocks_2 = w2_weight.shape[2] // in_block_size
+            if w2_weight_scale.shape[
+                    1] == in_blocks_2 and w2_weight_scale.shape[
+                        2] != in_blocks_2:
                 w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
 
         return process_moe_weights(

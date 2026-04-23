@@ -31,7 +31,6 @@ from vllm.model_executor.layers.quantization.base_config import \
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
-import tpu_inference.envs as envs
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.linear_weights import (
     shard_linear_weights, to_parameter_list)
@@ -114,15 +113,14 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
         self.use_marlin = True
 
         self.linear_config = linear_config
-        if not envs.DISABLE_WEIGHT_REQUANTIZATION:
-            if self.linear_config.enable_quantized_matmul_kernel and not self.linear_config.requant_block_size:
-                raise ValueError(
-                    "You should set REQUANTIZE_BLOCK_SIZE to enable quantized matmul kernel. Please set the value or disable the quantized matmul kernel."
-                )
-            if not self.linear_config.enable_quantized_matmul_kernel and self.linear_config.requant_block_size:
-                raise ValueError(
-                    "Blockwise quantization is supported by quantized matmul kernel. Please enable quantized_matmul_kernel or unset the quantize block size to trigger XLA per-channel quantization."
-                )
+        if self.linear_config.enable_quantized_matmul_kernel and not self.linear_config.requant_block_size:
+            raise ValueError(
+                "You should set REQUANTIZE_BLOCK_SIZE to enable quantized matmul kernel. Please set the value or disable the quantized matmul kernel."
+            )
+        if not self.linear_config.enable_quantized_matmul_kernel and self.linear_config.requant_block_size:
+            raise ValueError(
+                "Blockwise quantization is supported by quantized matmul kernel. Please enable quantized_matmul_kernel or unset the quantize block size to trigger XLA per-channel quantization."
+            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, vllm_linear.LinearBase)
@@ -152,42 +150,12 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
             requant_weight_dtype=self.linear_config.requant_weight_dtype,
             fuse_matmuls=self.linear_config.fuse_matmuls,
             n_shards=self.linear_config.n_shards)
-
         if self.linear_config.enable_quantized_matmul_kernel:
-            # The quantized_matmul_kernel expects weight scales shaped (n_blocks, 1, n_out_features) for blockwisze quantization.
-            def format_scale(s):
-                if s is None:
-                    return s
-                # sharded_quantized_matmul -> xla_quantized_matmul expects [num_blocks, 1, out_size]
-                if s.ndim == 2:
-                    # current: [N_blocks, K_blocks] (if transposed in process_blockwise)
-                    # We need [K_blocks, 1, N_blocks * original_block_size] where N_blocks * original_block_size is out_size
-                    # Wait, process_blockwise_fp8_linear_weights transposed it to [out_blocks, in_blocks]
-                    # We want [in_blocks, 1, out_size_in_elements] for quantized_matmul_kernel
-                    # NOTE: when DISABLE_WEIGHT_REQUANTIZATION is True, the scale elements correspond to out_blocks.
-                    # This means we must duplicate the block scale elements across the out_size_in_elements dimension.
-
-                    if envs.DISABLE_WEIGHT_REQUANTIZATION:
-                        # s is currently [out_blocks, in_blocks].
-                        # Transpose to [in_blocks, out_blocks].
-                        s_t = jnp.transpose(s)
-                        in_blocks, out_blocks = s_t.shape
-                        original_block_size = self.weight_block_size[0]
-                        # Repeat the elements along the out_blocks dimension to form out_size_in_elements
-                        s_t = jnp.repeat(s_t, original_block_size, axis=1)
-                        # Add the middle dimension: [in_blocks, 1, out_size_in_elements]
-                        return jnp.expand_dims(s_t, axis=1)
-                    else:
-                        return jnp.expand_dims(jnp.transpose(s), axis=1)
-                return s
-
-            if isinstance(weights.weight_scale, list):
-                weights.weight_scale = [
-                    format_scale(s) for s in weights.weight_scale
-                ]
-            else:
-                weights.weight_scale = format_scale(weights.weight_scale)
-
+            # The quantized_matmul_kernel expects weight scales shaped (n_out_features, 1, n_blocks) for blockwisze quantization.
+            weights.weight_scale = jnp.expand_dims(
+                jnp.transpose(weights.weight_scale),
+                axis=1,
+            )
         weights = torch_view(
             shard_linear_weights(
                 weights,
