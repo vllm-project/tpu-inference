@@ -23,31 +23,6 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from tpu_inference.layers.jax.sample.sampling_metadata import (
     DEFAULT_SAMPLING_PARAMS, TPUSupportedSamplingMetadata)
 
-
-def _create_sampling_metadata(mesh, mock_batch, padded_num_reqs, dp_size=1):
-    from tpu_inference.utils import DeviceBuffer
-    padded_num_reqs_per_dp_rank = padded_num_reqs // dp_size
-    buffer = DeviceBuffer(leading_shape=(dp_size, ), initial_capacity=1024)
-
-    TPUSupportedSamplingMetadata.add_to_device_buffer(
-        buffer=buffer,
-        input_batch=mock_batch,
-        padded_num_reqs_per_dp_rank=padded_num_reqs_per_dp_rank,
-        dp_size=dp_size)
-
-    blob, metadata_layout = buffer.build()
-    from tpu_inference.utils import device_array
-    sharding = NamedSharding(mesh, PartitionSpec(None, None))
-    blob_jax = device_array(mesh, blob, sharding=sharding)
-    unpacked_metadata = DeviceBuffer.unpack_arrays(blob_jax, metadata_layout)
-
-    return TPUSupportedSamplingMetadata.from_unpacked_blob(
-        mesh=mesh,
-        metadata=unpacked_metadata,
-        input_batch=mock_batch,
-        padded_num_reqs=padded_num_reqs)
-
-
 ## Mocks and Fixtures
 
 
@@ -83,9 +58,8 @@ def test_from_input_batch_all_greedy(mesh: Mesh):
     mock_batch = MockInputBatch(all_greedy=True)
     padded_num_reqs = 4
 
-    metadata = _create_sampling_metadata(mesh=mesh,
-                                         mock_batch=mock_batch,
-                                         padded_num_reqs=padded_num_reqs)
+    metadata = TPUSupportedSamplingMetadata.from_input_batch(
+        mesh=mesh, input_batch=mock_batch, padded_num_reqs=padded_num_reqs)
 
     assert not metadata.do_sampling, "do_sampling should be False for greedy requests"
     assert metadata.temperature is None
@@ -114,9 +88,8 @@ def test_from_input_batch_with_sampling_and_padding(mesh: Mesh):
         top_p_cpu=top_p_tensor,
     )
 
-    metadata = _create_sampling_metadata(mesh=mesh,
-                                         mock_batch=mock_batch,
-                                         padded_num_reqs=padded_num_reqs)
+    metadata = TPUSupportedSamplingMetadata.from_input_batch(
+        mesh=mesh, input_batch=mock_batch, padded_num_reqs=padded_num_reqs)
 
     # 1. Check metadata flags and types
     assert metadata.do_sampling, "do_sampling should be True"
@@ -130,7 +103,7 @@ def test_from_input_batch_with_sampling_and_padding(mesh: Mesh):
     assert metadata.top_p.shape == (padded_num_reqs, )
 
     # 3. Check sharding (should be fully replicated)
-    expected_sharding = NamedSharding(mesh, PartitionSpec())
+    expected_sharding = NamedSharding(mesh, PartitionSpec(None))
     assert metadata.temperature.sharding == expected_sharding
     assert metadata.top_k.sharding == expected_sharding
     assert metadata.top_p.sharding == expected_sharding
@@ -182,9 +155,8 @@ def test_from_input_batch_id_padding_needed(mesh: Mesh):
         top_p_cpu=top_p_tensor,
     )
 
-    metadata = _create_sampling_metadata(mesh=mesh,
-                                         mock_batch=mock_batch,
-                                         padded_num_reqs=padded_num_reqs)
+    metadata = TPUSupportedSamplingMetadata.from_input_batch(
+        mesh=mesh, input_batch=mock_batch, padded_num_reqs=padded_num_reqs)
 
     assert metadata.do_sampling
     # Check that values are identical to the input, since no padding was needed
@@ -232,9 +204,9 @@ def test_from_input_batch_with_logprobs(mesh: Mesh):
     # Case 1: Logprobs are requested
     mock_batch_with_logprobs = MockInputBatch(all_greedy=True,
                                               max_num_logprobs=5)
-    metadata_with = _create_sampling_metadata(
+    metadata_with = TPUSupportedSamplingMetadata.from_input_batch(
         mesh=mesh,
-        mock_batch=mock_batch_with_logprobs,
+        input_batch=mock_batch_with_logprobs,
         padded_num_reqs=4,
     )
     assert metadata_with.logprobs, "logprobs should be True when max_num_logprobs > 0"
@@ -242,9 +214,9 @@ def test_from_input_batch_with_logprobs(mesh: Mesh):
     # Case 2: Logprobs are not requested (max_num_logprobs is 0)
     mock_batch_id_logprobs_zero = MockInputBatch(all_greedy=True,
                                                  max_num_logprobs=0)
-    metadata_without_zero = _create_sampling_metadata(
+    metadata_without_zero = TPUSupportedSamplingMetadata.from_input_batch(
         mesh=mesh,
-        mock_batch=mock_batch_id_logprobs_zero,
+        input_batch=mock_batch_id_logprobs_zero,
         padded_num_reqs=4,
     )
     assert not metadata_without_zero.logprobs, "logprobs should be False when max_num_logprobs is 0"
@@ -252,9 +224,9 @@ def test_from_input_batch_with_logprobs(mesh: Mesh):
     # Case 3: Logprobs are not requested (max_num_logprobs is None)
     mock_batch_id_logprobs_none = MockInputBatch(all_greedy=True,
                                                  max_num_logprobs=None)
-    metadata_without_none = _create_sampling_metadata(
+    metadata_without_none = TPUSupportedSamplingMetadata.from_input_batch(
         mesh=mesh,
-        mock_batch=mock_batch_id_logprobs_none,
+        input_batch=mock_batch_id_logprobs_none,
         padded_num_reqs=4,
     )
     assert not metadata_without_none.logprobs, "logprobs should be False when max_num_logprobs is None"
@@ -275,9 +247,8 @@ def test_from_input_batch_sampling_with_logprobs(mesh: Mesh):
         max_num_logprobs=10,
     )
 
-    metadata = _create_sampling_metadata(mesh=mesh,
-                                         mock_batch=mock_batch,
-                                         padded_num_reqs=padded_num_reqs)
+    metadata = TPUSupportedSamplingMetadata.from_input_batch(
+        mesh=mesh, input_batch=mock_batch, padded_num_reqs=padded_num_reqs)
 
     assert metadata.do_sampling, "do_sampling should be True"
     assert metadata.logprobs, "logprobs should be True"
