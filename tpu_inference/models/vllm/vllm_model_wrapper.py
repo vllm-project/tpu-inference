@@ -33,6 +33,7 @@ from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
 from torchax.ops.ops_registry import register_torch_function_op
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
+from vllm.ir import enable_torch_wrap
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.layers.pooler import Pooler
@@ -427,7 +428,7 @@ class VllmModelWrapper:
                     return v
                 return v.to(device="jax")
 
-            with torchax.default_env():
+            with torchax.default_env(), enable_torch_wrap(False):
                 # Ensure all tensors are moved into accelerator so the
                 # computation with weights can work properly.
                 call_kwargs = {
@@ -467,6 +468,8 @@ class VllmModelWrapper:
                         torch_mm_embeds = [torch_view(x) for x in mm_embeds]
                     else:
                         torch_mm_embeds = torch_view(mm_embeds)
+                    assert is_multimodal is not None
+                    torch_mm_embeds = torch_mm_embeds[is_multimodal]
                     call_args = (torch_view(input_ids), torch_mm_embeds)
                 else:
                     call_args = (torch_view(input_ids), )

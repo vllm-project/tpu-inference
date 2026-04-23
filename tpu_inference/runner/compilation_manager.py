@@ -77,11 +77,15 @@ class CompilationManager:
             return inner_val != outer_val
         return inner_val > outer_val
 
-    def _run_compilation(self, name: str, fn: Callable, *args,
+    def _run_compilation(self,
+                         name: str,
+                         fn: Callable,
+                         *args,
+                         call_kwargs=dict(),
                          **kwargs) -> None:
         logger.info(f"Precompile {name} --> {kwargs}")
         start = time.perf_counter()
-        result = fn(*args)
+        result = fn(*args, **call_kwargs)
         jax.tree.map(lambda r: r.block_until_ready(), result)
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
@@ -145,19 +149,21 @@ class CompilationManager:
 
             self._run_compilation(
                 "input_embeddings_merger",
-                functools.partial(self.runner.embed_input_ids_fn, is_multimodal=dummy_is_multimodal),
+                self.runner.embed_input_ids_fn,
                 self.runner.state,
                 dummy_input_ids,
                 dummy_multimodal_embeddings,
+                call_kwargs={"is_multimodal": dummy_is_multimodal},
                 num_tokens=num_tokens,
             )
 
             self._run_compilation(
                 "input_embeddings_merger_text_only",
-                functools.partial(self.runner.embed_input_ids_fn, is_multimodal=dummy_is_multimodal),
+                self.runner.embed_input_ids_fn,
                 self.runner.state,
                 dummy_input_ids,
                 None,
+                call_kwargs={"is_multimodal": None},
                 num_tokens=num_tokens,
             )
 
