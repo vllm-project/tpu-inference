@@ -139,36 +139,19 @@ class CompilationManager:
             needs_logprobs_options.append(True)
 
         try:
-            if dp_size > 1:
-                for num_tokens in self.runner.num_tokens_paddings_per_dp:
-                    for num_reqs in self.runner.num_reqs_paddings_per_dp:
-                        for needs_logprobs in needs_logprobs_options:
-                            if self.runner.speculative_config:
-                                for padded_logits_length in self.runner.num_logits_paddings:
-                                    self.runner._define_device_buffer_layout_dp(
-                                        num_tokens, num_reqs,
-                                        (padded_logits_length, ), num_reqs)
-                                    self._compile_unpack_arrays_helper(dp_size)
-                            else:
+            for num_tokens in self.runner.num_tokens_paddings_per_dp:
+                for num_reqs in self.runner.num_reqs_paddings_per_dp:
+                    for needs_logprobs in needs_logprobs_options:
+                        if self.runner.speculative_config:
+                            for padded_logits_length in self.runner.num_logits_paddings:
                                 self.runner._define_device_buffer_layout_dp(
-                                    num_tokens, num_reqs, (num_reqs, ),
-                                    num_reqs)
+                                    num_tokens, num_reqs,
+                                    (padded_logits_length, ), num_reqs)
                                 self._compile_unpack_arrays_helper(dp_size)
-            else:
-                for num_tokens in self.runner.num_tokens_paddings:
-                    for num_reqs in self.runner.num_reqs_paddings:
-                        for needs_logprobs in needs_logprobs_options:
-                            if self.runner.speculative_config:
-                                for padded_logits_length in self.runner.num_logits_paddings:
-                                    self.runner._define_device_buffer_layout_dp(
-                                        num_tokens, self.runner.max_num_reqs,
-                                        (padded_logits_length, ), num_reqs)
-                                    self._compile_unpack_arrays_helper(1)
-                            else:
-                                self.runner._define_device_buffer_layout_dp(
-                                    num_tokens, self.runner.max_num_reqs,
-                                    (num_reqs, ), num_reqs)
-                                self._compile_unpack_arrays_helper(1)
+                        else:
+                            self.runner._define_device_buffer_layout_dp(
+                                num_tokens, num_reqs, (num_reqs, ), num_reqs)
+                            self._compile_unpack_arrays_helper(dp_size)
 
         finally:
             self.runner.device_buffer = original_buffer
