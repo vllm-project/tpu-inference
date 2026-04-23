@@ -291,16 +291,14 @@ class CompilationManager:
                 padded_token_in_tpu_cur_input_indices = np.zeros(
                     (num_tokens, ), dtype=np.int32)
                 padded_token_in_tpu_pre_next_tokens_indices = np.zeros(
-                    (num_tokens, ), dtype=np.int32)
-
-                combined_indices = np.concatenate([
-                    padded_token_in_tpu_cur_input_indices,
-                    padded_token_in_tpu_pre_next_tokens_indices
-                ])
-
-                combined_indices = jax.device_put(
-                    combined_indices,
-                    NamedSharding(self.runner.mesh, PartitionSpec()))
+                    (num_tokens, ), dtype=jnp.int32)
+                (padded_token_in_tpu_cur_input_indices,
+                 padded_token_in_tpu_pre_next_tokens_indices) = device_array(
+                     self.runner.mesh,
+                     (padded_token_in_tpu_cur_input_indices,
+                      padded_token_in_tpu_pre_next_tokens_indices),
+                     sharding=NamedSharding(self.runner.mesh,
+                                            PartitionSpec(None)))
 
                 input_ids = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32, dp_sharding)
@@ -314,7 +312,8 @@ class CompilationManager:
                     "_substitute_placeholder_token_fn",
                     self.runner._substitute_placeholder_token_fn,
                     input_ids,
-                    combined_indices,
+                    padded_token_in_tpu_cur_input_indices,
+                    padded_token_in_tpu_pre_next_tokens_indices,
                     next_tokens,
                     placeholder_num,
                     num_tokens=num_tokens,
@@ -583,15 +582,12 @@ class CompilationManager:
 
                     # Use a dummy tensor with a unique shape for each logprobs config.
                     # This avoids persistent cache collisions.
-                    dummy_len = 1 if logprobs else 2
-                    dummy_shape = (self.runner.dp_size * dummy_len, )
+                    dummy_shape = (1 if logprobs else 2, )
                     _cache_collision_dummy = jnp.zeros(dummy_shape,
                                                        dtype=jnp.int32)
                     _cache_collision_dummy = jax.device_put(
                         _cache_collision_dummy,
-                        NamedSharding(
-                            self.runner.mesh,
-                            PartitionSpec(ShardingAxisName.ATTN_DATA)))
+                        NamedSharding(self.runner.mesh, PartitionSpec(None)))
 
                     sampling_metadata = TPUSupportedSamplingMetadata(
                         temperature=temperature,
@@ -694,15 +690,12 @@ class CompilationManager:
                     # Use a dummy tensor with a unique shape for each logprobs config.
                     # Currently logprobs=False for rejection_sampler.
                     logprobs_dummy = False
-                    dummy_len = 1 if logprobs_dummy else 2
-                    dummy_shape = (self.runner.dp_size * dummy_len, )
+                    dummy_shape = (1 if logprobs_dummy else 2, )
                     _cache_collision_dummy = jnp.zeros(dummy_shape,
                                                        dtype=jnp.int32)
                     _cache_collision_dummy = jax.device_put(
                         _cache_collision_dummy,
-                        NamedSharding(
-                            self.runner.mesh,
-                            PartitionSpec(ShardingAxisName.ATTN_DATA)))
+                        NamedSharding(self.runner.mesh, PartitionSpec(None)))
 
                     if do_sampling:
                         compilation_name = "random_rejection_sampler"

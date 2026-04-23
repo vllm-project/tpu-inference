@@ -22,7 +22,7 @@ dataset_name="random-mm"
 backend="openai-chat"
 num_prompts=128
 
-TIMEOUT_SECONDS=600
+TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-600}"
 READY_MESSAGE="Application startup complete."
 LOG_FILE="server.log"
 BENCHMARK_LOG_FILE="benchmark.log"
