@@ -82,11 +82,12 @@ def patch_mm_model(
 
                 import jax.numpy as jnp
                 import torchax
+                from torchax.ops.mappings import t2j
 
                 def to_jax(t):
                     if hasattr(t, "jax_device_array"):
                         return t.jax_device_array
-                    return torchax.to_jax(t)
+                    return t2j(t)
 
                 mm_embeds_flat = vllm_utils._flatten_embeddings(
                     multimodal_embeddings)
