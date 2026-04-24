@@ -13,36 +13,22 @@
 # limitations under the License.
 
 import pytest
-from vllm import SamplingParams
-from vllm.config import KVTransferConfig
 
 from tests.offload.tpu_offload_accuracy_test import (
     _test_kv_cache_cpu_offloading_accuracy, read_prompt_from_file)
 
 
 @pytest.fixture
-def sampling_config():
-    """deterministic sampling config"""
-    return SamplingParams(temperature=0.0,
-                          max_tokens=10,
-                          seed=42,
-                          ignore_eos=True)
-
-
-@pytest.fixture
-def kv_transfer_config():
-    """use TPUOffloadConnector"""
-    return KVTransferConfig(
-        kv_connector="TPUOffloadConnector",
-        kv_role="kv_both",
-        kv_connector_module_path="tpu_inference.offload.tpu_offload_connector",
-    )
+def sampling_config(accuracy_sampling_config):
+    """deterministic sampling config with max_tokens=10 for accuracy"""
+    accuracy_sampling_config.max_tokens = 10
+    return accuracy_sampling_config
 
 
 def _run_multi_request_test_logic(
     monkeypatch: pytest.MonkeyPatch,
-    sampling_config: SamplingParams,
-    kv_transfer_config: KVTransferConfig,
+    sampling_config,
+    kv_transfer_config,
     group_indices: list,
     num_req_per_group: int,
     label: str,
@@ -102,8 +88,8 @@ def _run_multi_request_test_logic(
 
 def test_kv_cache_cpu_offloading_accuracy_multi_request_1G_1R(
     monkeypatch: pytest.MonkeyPatch,
-    sampling_config: SamplingParams,
-    kv_transfer_config: KVTransferConfig,
+    sampling_config,
+    kv_transfer_config,
 ):
     """1 Group, 1 Request per group: Uses prompt group 1"""
     _run_multi_request_test_logic(monkeypatch, sampling_config,
@@ -112,8 +98,8 @@ def test_kv_cache_cpu_offloading_accuracy_multi_request_1G_1R(
 
 def test_kv_cache_cpu_offloading_accuracy_multi_request_1G_2R(
     monkeypatch: pytest.MonkeyPatch,
-    sampling_config: SamplingParams,
-    kv_transfer_config: KVTransferConfig,
+    sampling_config,
+    kv_transfer_config,
 ):
     """1 Group, 2 Requests per group: Uses prompt group 2"""
     _run_multi_request_test_logic(monkeypatch, sampling_config,
@@ -122,8 +108,8 @@ def test_kv_cache_cpu_offloading_accuracy_multi_request_1G_2R(
 
 def test_kv_cache_cpu_offloading_accuracy_multi_request_2G_1R(
     monkeypatch: pytest.MonkeyPatch,
-    sampling_config: SamplingParams,
-    kv_transfer_config: KVTransferConfig,
+    sampling_config,
+    kv_transfer_config,
 ):
     """2 Groups, 1 Request per group: Uses prompt groups 3, 4"""
     _run_multi_request_test_logic(monkeypatch, sampling_config,

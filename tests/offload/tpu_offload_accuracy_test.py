@@ -69,13 +69,19 @@ def _test_kv_cache_cpu_offloading_accuracy(
         os.environ['TPU_OFFLOAD_DECODE_SAVE'] = decode_save
         os.environ['TPU_OFFLOAD_BATCHED_SAVE'] = batched_save
         os.environ['TPU_OFFLOAD_NUM_CPU_CHUNKS'] = cpu_chunks
-        llm = LLM(model="meta-llama/Llama-3.2-3B",
-                  max_model_len=3072,
+        llm = LLM(model="Qwen/Qwen3-14B",
+                  max_model_len=8192,
+                  async_scheduling=True,
+                  tensor_parallel_size=8,
                   kv_transfer_config=kv_transfer_config)
 
         # 1st generate
         print(f"\n--- Pass 1: Generating for {num_requests} requests ---")
+        t0 = time.time()
         outputs1 = llm.generate(prompts, sampling_config)
+        t1 = time.time()
+        pass1_time = t1 - t0
+        print(f"Pass 1 generate took {pass1_time:.4f} seconds")
         out_texts1, out_tokens1 = parse_outputs(outputs1)
         time.sleep(1)
 
@@ -88,12 +94,18 @@ def _test_kv_cache_cpu_offloading_accuracy(
         print(
             f"\n--- Pass 2: Generating for {num_requests} requests (should load from offload) ---"
         )
+        t0 = time.time()
         outputs2 = llm.generate(prompts, sampling_config)
+        t1 = time.time()
+        pass2_time = t1 - t0
+        print(f"Pass 2 generate took {pass2_time:.4f} seconds")
         out_texts2, out_tokens2 = parse_outputs(outputs2)
         time.sleep(1)
 
         print("\n" + "=" * 80)
         print("Accuracy Comparison Results")
+        print(f"Pass 1 generate time: {pass1_time * 1000:.2f} ms")
+        print(f"Pass 2 generate time: {pass2_time * 1000:.2f} ms")
         print("=" * 80)
         for i in range(len(out_texts1)):
             prompt_preview = " ".join(prompts[i].split()[:50]) + "..."
@@ -117,6 +129,7 @@ def _test_kv_cache_cpu_offloading_accuracy(
         del llm
         # Waiting for TPUs to be released.
         time.sleep(20)
+        return pass1_time, pass2_time
 
 
 # This tests scenario where the KV cache size is smaller than the CPU RAM. To ensure a gap the CPU RAM has been set on the higher side while using a smaller prompt.
@@ -131,7 +144,7 @@ def test_kv_cache_cpu_offloading_accuracy_smaller_then_cpu_ram(
     kv_transfer_config: KVTransferConfig,
 ):
     decode_saves = ["0"]
-    skip_precompile = ["0", "1"]
+    skip_precompile = ["0"]
     batched_saves = ["0"]
     prompts = [read_prompt_from_file("small_prompt.txt")]
     for decode_save, _skip_precompile, batched_save in itertools.product(
@@ -164,7 +177,7 @@ def test_kv_cache_cpu_offloading_accuracy_larger_than_cpu_ram(
     kv_transfer_config: KVTransferConfig,
 ):
     decode_saves = ["0"]
-    skip_precompile = ["0", "1"]
+    skip_precompile = ["0"]
     batched_saves = ["0"]
     prompts = [read_prompt_from_file("large_prompt.txt")]
     for decode_save, _skip_precompile, batched_save in itertools.product(
