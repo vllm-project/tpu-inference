@@ -192,12 +192,9 @@ def _scheduler_worker_process(
                     _send_result(result)
 
                 case SchedulerCommand.GET_GRAMMAR_BITMASK:
-                    if _cached_scheduler_outputs:
-                        cached_output = _cached_scheduler_outputs[-1]
-                    else:
-                        cached_output = None
-                    result = (scheduler.get_grammar_bitmask(cached_output)
-                              if cached_output is not None else None)
+                    assert _cached_scheduler_outputs is not None
+                    cached_output = _cached_scheduler_outputs[-1]
+                    result = scheduler.get_grammar_bitmask(cached_output)
                     _send_result(result)
 
                 case SchedulerCommand.MAKE_STATS:
@@ -487,8 +484,6 @@ class DPScheduler(SchedulerInterface):
 
             if gc_was_enabled:
                 gc.enable()
-
-            deserialize_time = time()
 
             end_time = time()
             total_time = end_time - start_time
