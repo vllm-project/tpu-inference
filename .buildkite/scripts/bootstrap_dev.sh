@@ -39,6 +39,6 @@ buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
 echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
 
 echo "--- :pipeline: Uploading pipeline_dev.yml"
-buildkite-agent pipeline upload .buildkite/pipeline_dev.yml
+buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
 
 echo "--- Buildkite Dev Bootstrap Finished"
