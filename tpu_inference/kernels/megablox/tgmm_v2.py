@@ -30,13 +30,21 @@ from tpu_inference.kernels.megablox.gmm_v2 import (
     align_to,
     fill_metadata,
     get_metadata,
-    get_scope_name,
 )
 
 TileTgmmFn = Callable[
     [Dimensions, InputConfigs, InputConfigs, int, jnp.dtype, jnp.dtype],
     TileSizes,
 ]
+
+
+def get_scope_name(cfgs: GmmConfigs) -> str:
+  dims = cfgs.dims
+  tiles = cfgs.tiles
+  return (
+      f"tgmm_v2-g_{dims.size_group}-m_{dims.size_m}-k_{dims.size_k}-act_{cfgs.fuse_act}"
+      f"-n_{dims.size_n}-tm_{tiles.tile_m}-tk_{tiles.tile_k}-tn_{tiles.tile_n}"
+  )
 
 
 def calculate_tgmm_tiling(
