@@ -56,8 +56,8 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
-from tpu_inference.models.vllm.experimental.mistral_patcher import \
-    maybe_apply_mistral_patches
+from tpu_inference.models.vllm.experimental.generic_patcher import \
+    apply_generic_tpu_patches
 from tpu_inference.models.vllm.experimental.model_patcher import patch_mm_model
 from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
     maybe_apply_qwen3_vl_patches
@@ -261,8 +261,8 @@ class VllmModelWrapper:
         # NOTE: Apply Qwen3-VL model specific patches
         maybe_apply_qwen3_vl_patches(self.model.vllm_model)
 
-        # NOTE: Apply Mistral model specific patches
-        maybe_apply_mistral_patches(self.model.vllm_model)
+        # NOTE: Apply generic TPU patches (like RMSNorm mixed-math fix)
+        apply_generic_tpu_patches()
 
         loading_end = time.time()
         total_loading_time = loading_end - loading_start

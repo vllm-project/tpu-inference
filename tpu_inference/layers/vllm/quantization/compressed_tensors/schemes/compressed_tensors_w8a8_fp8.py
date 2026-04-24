@@ -22,6 +22,7 @@ from compressed_tensors.quantization import (QuantizationArgs,
 from jax.sharding import NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
+import vllm.model_executor.kernels.linear as vllm_linear
 from vllm.model_executor.kernels.linear import (FP8ScaledMMLinearKernel,
                                                 register_linear_kernel)
 from vllm.model_executor.kernels.linear.scaled_mm import \
@@ -80,6 +81,11 @@ class TpuFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
 
 register_linear_kernel(TpuFP8ScaledMMLinearKernel, PlatformEnum.TPU, "fp8")
+if hasattr(vllm_linear, "_POSSIBLE_FP8_BLOCK_KERNELS"):
+    if PlatformEnum.TPU not in vllm_linear._POSSIBLE_FP8_BLOCK_KERNELS:
+        vllm_linear._POSSIBLE_FP8_BLOCK_KERNELS[PlatformEnum.TPU] = []
+    if TpuFP8ScaledMMLinearKernel not in vllm_linear._POSSIBLE_FP8_BLOCK_KERNELS[PlatformEnum.TPU]:
+        vllm_linear._POSSIBLE_FP8_BLOCK_KERNELS[PlatformEnum.TPU].append(TpuFP8ScaledMMLinearKernel)
 
 
 class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):

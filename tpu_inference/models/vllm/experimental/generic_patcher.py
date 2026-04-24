@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Mistral specific patches to ensure TPU compatibility."""
+"""Generic TPU patches to ensure compatibility."""
 
 import torch
 from tpu_inference.logger import init_logger
@@ -19,15 +19,11 @@ from tpu_inference.logger import init_logger
 logger = init_logger(__name__)
 
 
-def maybe_apply_mistral_patches(model: torch.nn.Module):
-    """Apply patches if the model is a Mistral model."""
-    model_class_name = model.__class__.__name__
-    if "Mistral" not in model_class_name:
-        return
-
+def apply_generic_tpu_patches():
+    """Apply global patches to vLLM operations for TPU compatibility."""
     _patch_rms_norm()
     _patch_default_unquantized_gemm()
-    logger.info("Applied Mistral-specific TPU patches for %s", model_class_name)
+    logger.info("Applied generic TPU patches.")
 
 
 def _patch_rms_norm():
