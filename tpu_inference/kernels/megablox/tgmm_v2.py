@@ -206,8 +206,6 @@ def tgmm_inner_kernel(
   gm_id = pl.program_id(2)
 
   def _matmul(is_new_group: bool, is_group_changing: bool):
-    if is_new_group:
-      acc_ref[...] = jnp.zeros_like(acc_ref)
 
     # Mask out invalid rows in the LHS/RHS tiles.
     # The DMA loads tiles aligned to sublane boundaries, but the actual group
@@ -227,12 +225,15 @@ def tgmm_inner_kernel(
     rhs_mask = jnp.logical_and(m_start_local <= rhs_iota, rhs_iota < m_end_local)
     rhs_masked = jnp.where(rhs_mask, tiled_rhs_ref[...], 0)
 
-    acc = acc_ref[...] + jax.lax.dot_general(
+    acc = jax.lax.dot_general(
         lhs_masked,
         rhs_masked,
         (((0,), (0,)), ((), ())),
         preferred_element_type=jnp.float32,
     )
+
+    if not is_new_group:
+      acc += acc_ref[...]
 
     if is_group_changing:
       tiled_out_ref[...] = acc.astype(tiled_out_ref.dtype)
