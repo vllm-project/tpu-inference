@@ -154,6 +154,7 @@ mkdir -p "$VLLM_TORCH_PROFILER_DIR"
 PYTHON_PARSER="$SCRIPT_DIR/parser_case.py"
 # Evaluate the Python output to set variables in the current shell context
 eval "$(python3 "$PYTHON_PARSER" "$CASE_FILE" "$TARGET_CASE_NAME")"
+printf "[DEBUG] Check export %s %s %s" "$MAX_NUM_SEQS" "$MAX_NUM_BATCHED_TOKENS" "$MAX_MODEL_LEN \n"
 
 VLLM_LOG="$LOG_FOLDER/vllm_log.txt"
 BM_LOG="$LOG_FOLDER/bm_log.txt"
@@ -161,8 +162,12 @@ BEST_BM_LOG="$LOG_FOLDER/best_bm_log.txt"
 printf "[INFO] %-25s = %s\n" "VLLM_LOG" "$VLLM_LOG"
 printf "[INFO] %-25s = %s\n" "BM_LOG" "$BM_LOG"
 printf "[INFO] %-25s = %s\n" "ARTIFACT_FOLDER" "$ARTIFACT_FOLDER"
+printf "[DEBUG] ls=%s\n\n" "$(ls "$ARTIFACT_FOLDER/../")" || true
 
 echo "model: $MODEL"
+echo "dataset: ${DATASET:-}"
+echo "(not use)lm_eval cmd: ${LM_EVAL_CMD:-}"
+echo "tp size: ${TENSOR_PARALLEL_SIZE:-}"
 
 # Helper function to check if a value is in an array
 contains_element () {
@@ -316,9 +321,9 @@ fi
 
 if [ "$COMMAND_TYPE" = "lm_eval" ]; then
   {
-    ".buildkite/benchmark/lm_eval/$DATASET/run.sh"
+    ".buildkite/benchmark/lm_eval/$DATASET/run.sh" "$LOG_FOLDER"
     printf "AccuracyMetrics: "
-    tr -d '\n' < "/workspace/${DATASET}_accuracy.json"
+    tr -d '\n' < "${LOG_FOLDER}/${DATASET}_accuracy.json"
     echo ""
   } >> "$BM_LOG"
   echo "Finished running $DATASET benchmark."

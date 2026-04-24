@@ -16,31 +16,35 @@
 # Exit immediately if a command exits with a non-zero status.
 set -ex
 
-# Change to the script's directory to ensure relative paths work correctly.
-cd "$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- Configuration ---
-export LOG_DIR=./results
+export LOG_DIR=$1
 export MODEL_NAME=$MODEL
+export TASK_NAME=mmlu
 # Use a specific MMLU subtask if the MMLU_SUBTASK env var is set, otherwise default to the full mmlu group task.
 OUTPUT_PREFIX="${TASK_NAME}_${MODEL_NAME//\//-}"
 export OUTPUT_PREFIX
 
 export OUTPUT_BASE_PATH=$LOG_DIR/$OUTPUT_PREFIX.json
-export ACCURACY_JSON_PATH=/workspace/mmlu_accuracy.json
+export ACCURACY_JSON_PATH=$LOG_DIR/mmlu_accuracy.json
 
 echo "Running lm_eval for task: $TASK_NAME"
 echo "Output will be timestamped in: $LOG_DIR"
 
+unset MODEL_IMPL_TYPE VLLM_XLA_CHECK_RECOMPILATION
+
 mkdir -p "$LOG_DIR"
 
 # Default model arguments
-MODEL_ARGS="pretrained=$MODEL_NAME,tensor_parallel_size=${TP_SIZE:-8},dtype=auto,max_model_len=2048,gpu_memory_utilization=0.98"
+MODEL_ARGS="pretrained=$MODEL_NAME,tensor_parallel_size=${TENSOR_PARALLEL_SIZE:-8},dtype=auto,max_model_len=${MAX_MODEL_LEN},gpu_memory_utilization=0.98"
 
-# Check if running on v7x-8 hardware
-if [[ "$DEVICE" == v7x-8 ]]; then
+# Check if running on tpu7x-8 hardware
+if [[ "$DEVICE" == tpu7x-8 ]]; then
     echo "Running on v7x hardware, adjusting model arguments for DeepSeek-R1."
-    MODEL_ARGS="pretrained=$MODEL_NAME,tensor_parallel_size=8,dtype=auto,max_model_len=2048,max_num_seqs=128,max_num_batched_tokens=128,gpu_memory_utilization=0.95"
+    MODEL_ARGS="pretrained=$MODEL_NAME,tensor_parallel_size=${TENSOR_PARALLEL_SIZE:-8},dtype=auto,max_model_len=${MAX_MODEL_LEN},max_num_seqs=${MAX_NUM_SEQS},max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS},gpu_memory_utilization=0.95"
+    # MODEL_ARGS="pretrained=$MODEL_NAME,tensor_parallel_size=8,dtype=auto,max_model_len=2048,max_num_seqs=128,max_num_batched_tokens=128,gpu_memory_utilization=0.95,additional_config={\"sharding\":{\"sharding_strategy\":{\"enable_dp_attention\":true}}}"
+    # MODEL_ARGS="{\"pretrained\": \"${MODEL_NAME}\", \"tensor_parallel_size\": 8, \"dtype\": \"auto\", \"max_model_len\": 2048, \"max_num_seqs\": 128, \"max_num_batched_tokens\": 128, \"gpu_memory_utilization\": 0.95, \"additional_config\": {\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}}"
 fi
 
 CMD=(
@@ -75,4 +79,4 @@ fi
 echo "Found and using file: $LATEST_FILE"
 
 echo "Parsing results and writing to $ACCURACY_JSON_PATH..."
-python parse_lm_eval_mmlu_results.py "$LATEST_FILE" > "$ACCURACY_JSON_PATH"
+python "$SCRIPT_DIR/parse_lm_eval_mmlu_results.py" "$LATEST_FILE" > "$ACCURACY_JSON_PATH"
