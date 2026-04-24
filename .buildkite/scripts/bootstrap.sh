@@ -92,6 +92,14 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
       echo "Code files changed. Proceeding with pipeline upload."
     fi
     
+    # Validate custom pipeline metadata (Uniqueness & Completeness)
+    if .buildkite/scripts/validate_pipeline_metadata.sh "$NON_SKIPPABLE_FILES"; then
+      echo "Pipeline metadata validation passed."
+    else
+      echo "+++ ❌ Pipeline metadata validation failed. Failing build."
+      exit 1
+    fi
+
     # Validate modified YAML pipelines using bk pipeline validate
     if .buildkite/scripts/validate_buildkite_ymls.sh "$NON_SKIPPABLE_FILES"; then
       echo "All pipelines syntax are valid. Proceeding with pipeline upload."
