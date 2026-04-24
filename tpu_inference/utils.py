@@ -145,10 +145,18 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
                     "Failed to get memory stats for device %s: %s. ", device,
                     e)
     else:
+        # On multi-host TPU pods, only addressable (local) devices support
+        # memory_stats(). Query local devices and assume remote devices
+        # have similar memory usage, matching the Ray backend behavior.
+        current_process = jax.process_index()
         for device in devices:
+            if device.process_index != current_process:
+                continue
             hbm_used = device.memory_stats()["bytes_in_use"]
             hbm_limit = device.memory_stats()["bytes_limit"]
             usage.append((hbm_used, hbm_limit))
+        if usage and len(usage) < len(list(devices)):
+            usage = [usage[0]] * len(list(devices))
 
     return usage
 
