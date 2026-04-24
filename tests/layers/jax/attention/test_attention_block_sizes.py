@@ -45,12 +45,14 @@ class TestEnvVarBlockSizePassthrough(unittest.TestCase):
         mock_envs.RPA_M_BLOCK_SIZES = None
 
         self.assertIsNone(
-            parse_block_sizes(mock_envs.RPA_D_BLOCK_SIZES, "RPA_D_BLOCK_SIZES"))
+            parse_block_sizes(mock_envs.RPA_D_BLOCK_SIZES,
+                              "RPA_D_BLOCK_SIZES"))
         self.assertIsNone(
-            parse_block_sizes(mock_envs.RPA_P_BLOCK_SIZES, "RPA_P_BLOCK_SIZES"))
+            parse_block_sizes(mock_envs.RPA_P_BLOCK_SIZES,
+                              "RPA_P_BLOCK_SIZES"))
         self.assertIsNone(
-            parse_block_sizes(mock_envs.RPA_M_BLOCK_SIZES, "RPA_M_BLOCK_SIZES"))
-
+            parse_block_sizes(mock_envs.RPA_M_BLOCK_SIZES,
+                              "RPA_M_BLOCK_SIZES"))
 
 
 if __name__ == "__main__":
