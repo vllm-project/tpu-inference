@@ -38,10 +38,8 @@ Core Components:
 
 Scheduler Lifecycle and State Coordination:
 1. Work Construction (`build_connector_meta()`):
-    - Phase 1 (Cleanup): Purges trackers for requests that finished in the
-      previous step. For requests previously in a 'delayed-free' state that
-      are now fully cleared, it sends a final no-op `SaveSpec` to the Worker
-      to finalize device-side state.
+    - Phase 1 (Cleanup): Purges trackers and internal states for requests that
+      finished in the previous step.
     - Phase 2 (New): Initializes `RequestTracker` for newly scheduled
       requests. It sets the `save_watermark` to the boundary of tokens already
       persisted in CPU memory (or already resident in HBM cache) to ensure
@@ -55,9 +53,8 @@ Scheduler Lifecycle and State Coordination:
 2. Feedback Loop (`update_connector_output()`): Processes granular transfer
     stats from the Worker. It releases staging slots in `StagingBufferManager`
     and updates chunk states in `LRUCacheManager`. For requests parked in the
-    'delayed-free' state, it monitors the clearing of pending gather operations
-    (tracked in `_save_reqs_w_pending_gather` or `_reqs_being_loaded`); once
-    cleared, the request moves to the `_fully_finished_reqs` pool.
+    'delayed-free' state, it monitors the clearing of pending operations
+    (tracked in `_reqs_being_saved` or `_reqs_being_loaded`).
 3. Completion Gatekeeping (`request_finished()`): Triggered when a request
     is logically done. If the Scheduler detects in-flight operations, it
     returns `delay_free=True`. This prevents vLLM from reclaiming HBM blocks
@@ -97,8 +94,8 @@ feedback mechanism mediated by the vLLM engine's `KVConnectorOutput`.
      a) Release specific slots in the `StagingBufferManager`.
      b) Transition chunks in `LRUCacheManager` to 'ready_to_load' status,
         making them immediately available for prefix-matching in new requests.
-   - Request Finalization: The Scheduler uses `finished_sending` (Request IDs)
-     to perform final resource reclamation and remove the request from
+   - Request Finalization: The Scheduler monitors chunk-level stats 
+     (`finished_save_chunks`) to incrementally clear pending operations from 
      internal tracking sets (`_reqs_being_saved`).
 """
 import copy
@@ -2175,7 +2172,7 @@ class TPUOffloadConnectorWorker:
 
         finished_saves = self.finished_save_reqs
         self.finished_save_reqs = set()
-        # NOTE: add back self.finished_load_reqs and report it back to vllm scheduler when async load gets implemented.
+        # TODO: add back self.finished_load_reqs and report it back to vllm scheduler when async load gets implemented.
         finished_loads = set()
         # NOTE(jcgu): both are empty now.
         logger.debug(f"Finished saves: {finished_saves}, "
