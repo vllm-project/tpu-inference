@@ -34,5 +34,5 @@ bash "${NIGHTLY_SCRIPT}" \
   --moe-requantize-weight-dtype "fp4" \
   --moe-all-gather-activation-dtype "fp8" \
   --force-moe-random-routing "1" \
-  --phased-profiling-dir "gs://tpu-commons-ci/xprof/deepseek-r1/torchax/1k-8k" \
+  --phased-profiling-dir "gs://tpu-commons-ci/xprof/deepseek-r1/torchax/1k-8k-random-routing" \
   --skip-db-upload
