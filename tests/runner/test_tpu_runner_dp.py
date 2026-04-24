@@ -99,19 +99,6 @@ class TestTPUJaxRunnerDPInputsLightweight:
             num_scheduled_tokens_dict.values())
         mock_output.scheduled_spec_decode_tokens = scheduled_spec_decode_tokens or {}
         mock_output.grammar_bitmask = None
-
-        # Build req_ids_per_rank and scheduled_tokens_per_rank from
-        # assigned_dp_ranks, preserving insertion order.
-        dp_size = self.runner.dp_size
-        req_ids_per_rank = {r: [] for r in range(dp_size)}
-        scheduled_tokens_per_rank = {r: [] for r in range(dp_size)}
-        for req_id, tokens in num_scheduled_tokens_dict.items():
-            rank = assigned_dp_ranks[req_id]
-            req_ids_per_rank[rank].append(req_id)
-            scheduled_tokens_per_rank[rank].append(tokens)
-        mock_output.req_ids_per_rank = req_ids_per_rank
-        mock_output.scheduled_tokens_per_rank = scheduled_tokens_per_rank
-
         return mock_output
 
     def _create_mock_hybrid_kv_cache_config(self):
@@ -1332,8 +1319,6 @@ class TestSamplingMetadataPassthrough:
         scheduler_output.assigned_dp_rank = {"req1": 0, "req2": 1}
         scheduler_output.total_num_scheduled_tokens = 5
         scheduler_output.scheduled_spec_decode_tokens = {}
-        scheduler_output.req_ids_per_rank = {0: ["req1"], 1: ["req2"]}
-        scheduler_output.scheduled_tokens_per_rank = {0: [3], 1: [2]}
 
         TPUModelRunner._prepare_inputs_dp(runner, scheduler_output)
 
