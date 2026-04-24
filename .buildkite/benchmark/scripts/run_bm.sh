@@ -133,6 +133,7 @@ BEST_BM_LOG="$LOG_FOLDER/best_bm_log.txt"
 printf "[INFO] %-25s = %s\n" "VLLM_LOG" "$VLLM_LOG"
 printf "[INFO] %-25s = %s\n" "BM_LOG" "$BM_LOG"
 printf "[INFO] %-25s = %s\n" "ARTIFACT_FOLDER" "$ARTIFACT_FOLDER"
+printf "[DEBUG] ls=%s\n\n" "$(ls "$ARTIFACT_FOLDER/../")" || true
 
 echo "model: $MODEL"
 echo "dataset: ${DATASET:-}"
@@ -309,7 +310,6 @@ else
 fi
 printf "[DEBUG] Checking folder structure (Environment: %s)...\n" "$ENV_CONTEXT"
 printf "[DEBUG] pwd=%s\n\nls $ARTIFACT_FOLDER=\n%s\n" "$(pwd)" "$(ls "$ARTIFACT_FOLDER")" || true
-printf "[DEBUG] ls=%s\n\n" "$(ls "$ARTIFACT_FOLDER/../")" || true
 printf "[DEBUG] ls $ARTIFACT_FOLDER/temp_logs=\n%s\n" "$(ls "$ARTIFACT_FOLDER"/temp_logs)" || true
 
 # request_rate use default value (inf)
