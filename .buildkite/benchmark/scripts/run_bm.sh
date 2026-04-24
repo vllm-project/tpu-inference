@@ -196,6 +196,10 @@ if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
   fi
 fi
 
+printf "[DEBUG] 1. ls=%s\n\n" "$(ls ".buildkite/benchmark/lm_eval/")" || true
+printf "[DEBUG] 2. ls=%s\n\n" "$(ls ".buildkite/benchmark/lm_eval/$DATASET/")" || true
+printf "[DEBUG] 3. ls=%s\n\n" "$(ls "/workspace/tpu_inference/.buildkite/benchmark/lm_eval/")" || true
+
 if [ "$COMMAND_TYPE" = "lm_eval" ]; then
   {
     ".buildkite/benchmark/lm_eval/$DATASET/run.sh"
