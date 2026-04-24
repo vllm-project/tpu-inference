@@ -109,13 +109,18 @@ class LatencyTracker:
         self.name = name
 
     def __enter__(self):
+        logger.debug(f"LatencyTracker: Entering {self.name}")
         self.start_time = time.perf_counter()
+        self.trace = jax.profiler.TraceAnnotation(self.name)
+        self.trace.__enter__()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        self.trace.__exit__(exc_type, exc_val, exc_tb)
         self.end_time = time.perf_counter()
         elapsed_time = self.end_time - self.start_time
         logger.debug(f"Latency for '{self.name}': {elapsed_time:.3f} seconds")
+
 
 
 class ForbidCompile:

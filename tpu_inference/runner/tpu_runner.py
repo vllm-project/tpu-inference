@@ -697,8 +697,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             scheduler_output, self.get_mrope_input_positions_fn)
         if not scheduler_output.total_num_scheduled_tokens:
             if has_kv_transfer_group():
-                return DUMMY_METADATA, self.kv_connector_no_forward(
-                    scheduler_output, self.vllm_config)
+                logger.debug("TPURunner: Calling kv_connector_no_forward due to empty scheduled tokens")
+                with jax.profiler.TraceAnnotation("KV_Cache_Wait_Stall"):
+                    return DUMMY_METADATA, self.kv_connector_no_forward(
+                        scheduler_output, self.vllm_config)
 
             # Return empty ModelRunnerOutput if there's no work to do.
             # TODO(fhzhang): We rely on empty cycles to remove requests in input batch. Fix it to reduce overhead.
@@ -713,16 +715,27 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT
 
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
-        (
-            input_ids,
-            input_positions,
-            attn_metadata,
-            _,
-            logits_indices,
-            spec_decode_metadata,
-            logits_indices_selector,
-            padded_num_reqs,
-        ) = self._prepare_inputs(scheduler_output)
+        # ---------------- DRAFT CODE START ----------------
+        is_decode_only = True
+        for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
+            if num_tokens > 1:
+                is_decode_only = False
+                break
+        
+        role_str = "DECODE" if is_decode_only else "PREFILL"
+        
+        with jax.profiler.TraceAnnotation(f"vLLM_{role_str}_PrepareInputs"):
+        # ---------------- DRAFT CODE END ------------------
+            (
+                input_ids,
+                input_positions,
+                attn_metadata,
+                _,
+                logits_indices,
+                spec_decode_metadata,
+                logits_indices_selector,
+                padded_num_reqs,
+            ) = self._prepare_inputs(scheduler_output)
 
         is_llama_guard_4 = (
             hasattr(
@@ -770,20 +783,63 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
-                (self.kv_caches, hidden_states,
-                 aux_hidden_states) = self.model_fn(
-                     self.state,
-                     self.kv_caches,
-                     input_ids,
-                     attn_metadata,
-                     inputs_embeds,
-                     input_positions,
-                     tuple(self.layer_name_to_kvcache_index.items()),
-                     lora_metadata,
-                     intermediate_tensors,
-                     self.is_first_rank,
-                     self.is_last_rank,
-                 )
+                
+                # ---------------- DRAFT CODE START ----------------
+                try:
+                    num_reqs = self.input_batch.num_reqs
+                    active_req_ids = [str(rid) for rid in self.input_batch.req_ids[:num_reqs] if rid is not None]
+                    req_ids_str = ";".join(active_req_ids)
+                    
+                    flow_meta = ""
+                    if active_req_ids:
+                        first_req_id = active_req_ids[0]
+                        tpu_meta = scheduler_output.kv_connector_metadata
+                        if tpu_meta and hasattr(tpu_meta, 'reqs_to_load') and first_req_id in tpu_meta.reqs_to_load:
+                            load_meta = tpu_meta.reqs_to_load[first_req_id]
+                            flow_meta = f"#_ct=10,_c={load_meta.uuid}#"
+                            logger.info(f"TPUConnector: ModelForward flow_meta={flow_meta} | batch_size={num_reqs} | req_ids={req_ids_str}")
+                        else:
+                            logger.info(f"TPUConnector: ModelForward no flow_meta | batch_size={num_reqs} | req_ids={req_ids_str}")
+                except Exception as e:
+                    req_ids_str = f"error_{type(e).__name__}"
+                    flow_meta = ""
+                
+                if flow_meta:
+                    logger.info(f"TPUConnector: TraceAnnotation vLLM_{role_str}_ModelForward_Flow{flow_meta}")
+                    with jax.profiler.TraceAnnotation(f"vLLM_{role_str}_ModelForward_Flow{flow_meta}"):
+                        with jax.profiler.TraceAnnotation(f"vLLM_{role_str}_ModelForward", requests=req_ids_str):
+                            # ---------------- DRAFT CODE END ------------------
+                            (self.kv_caches, hidden_states,
+                             aux_hidden_states) = self.model_fn(
+                                 self.state,
+                                 self.kv_caches,
+                                 input_ids,
+                                 attn_metadata,
+                                 inputs_embeds,
+                                 input_positions,
+                                 tuple(self.layer_name_to_kvcache_index.items()),
+                                 lora_metadata,
+                                 intermediate_tensors,
+                                 self.is_first_rank,
+                                 self.is_last_rank,
+                             )
+                else:
+                    with jax.profiler.TraceAnnotation(f"vLLM_{role_str}_ModelForward", requests=req_ids_str):
+                        # ---------------- DRAFT CODE END ------------------
+                        (self.kv_caches, hidden_states,
+                         aux_hidden_states) = self.model_fn(
+                             self.state,
+                             self.kv_caches,
+                             input_ids,
+                             attn_metadata,
+                             inputs_embeds,
+                             input_positions,
+                             tuple(self.layer_name_to_kvcache_index.items()),
+                             lora_metadata,
+                             intermediate_tensors,
+                             self.is_first_rank,
+                             self.is_last_rank,
+                         )
             if not get_pp_group().is_last_rank:
                 assert isinstance(hidden_states, JaxIntermediateTensors)
                 hidden_states.kv_connector_output = kv_connector_output

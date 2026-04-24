@@ -1,0 +1,11 @@
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  env:
+  - 'DOCKER_BUILDKIT=1'
+  script: |
+    docker build --build-arg VLLM_COMMIT_HASH=963dc0b865a3b6011fde7e0d938f86245dccbfac \
+      --cache-from=us-west2-docker.pkg.dev/$PROJECT_ID/maniket-vllm-repo/vllm-image:tag16 \
+      -t us-west2-docker.pkg.dev/$PROJECT_ID/maniket-vllm-repo/vllm-image:tag19 . -f docker/Dockerfile
+  automapSubstitutions: true
+images:
+- 'us-west2-docker.pkg.dev/$PROJECT_ID/maniket-vllm-repo/vllm-image:tag19'

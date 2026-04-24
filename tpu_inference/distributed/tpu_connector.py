@@ -122,6 +122,7 @@ class LoadMeta:
     remote_block_ids: list[int]
     remote_host: str | list[str]
     remote_port: int | list[int]
+    request_id: str
 
 
 @dataclass
@@ -336,7 +337,9 @@ class TPUConnectorScheduler():
                 remote_block_ids=params["remote_block_ids"],
                 remote_host=params["remote_host"],
                 remote_port=params["remote_port"],
+                request_id=request.request_id,
             )
+            logger.info(f"TPUConnector: Added request {request.request_id} to reqs_to_load with uuid={params['uuid']}")
         else:
             # This branch means two cases:
             # 1. We don't need to load KV-cache from remote because of full local cache.
@@ -348,7 +351,9 @@ class TPUConnectorScheduler():
                 remote_block_ids=None,
                 remote_host=params["remote_host"],
                 remote_port=params["remote_port"],
+                request_id=request.request_id,
             )
+            logger.info(f"TPUConnector: Added request {request.request_id} to reqs_to_load (no pull needed) with uuid={params['uuid']}")
         logger.info(
             f"TPUConnector Scheduler update_state_after_alloc -->  reqs_to_load={self.reqs_to_load}"
         )
@@ -543,8 +548,8 @@ class TPUConnectorWorker:
                 # Set the expiration time of this request to -1, mark to be done
                 self.reqs_wait_pull[req_id][1] = -1
             else:
-                raise ValueError(
-                    f"Disagg producer recives a non-exist pulling finished notification request {req_id}"
+                logger.warning(
+                    f"Disagg producer received a non-existent pulling finished notification request {req_id}. Ignoring."
                 )
             time.sleep(0)
             # The response is not really needed.
@@ -592,7 +597,15 @@ class TPUConnectorWorker:
         # So we have to set use_raw_buffers=False and stores the kv, then the kv buffer
         # will be safely destroyed by either D notifying or expiration.
         self.reqs_wait_pull[req_id] = [kv, req_meta.expiration_time]
-        self.kv_transfer_server.await_pull(req_meta.uuid, kv)
+        
+        if jax.profiler.TraceAnnotation.is_enabled():
+            total_bytes = sum(x.nbytes for x in kv)
+            logger.debug(f"TPUConnector: Awaiting pull for req_id={req_id}, uuid={req_meta.uuid}, size={total_bytes}")
+            with jax.profiler.TraceAnnotation("KV_Cache_Await_Pull", req_id=req_id, uuid=req_meta.uuid, size=total_bytes):
+                self.kv_transfer_server.await_pull(req_meta.uuid, kv)
+        else:
+            logger.debug(f"TPUConnector: Awaiting pull for req_id={req_id}, uuid={req_meta.uuid} (Profiling disabled)")
+            self.kv_transfer_server.await_pull(req_meta.uuid, kv)
 
     def _maybe_build_kv_connection(self, req_meta: LoadMeta) -> Any:
         if isinstance(req_meta.remote_host, list):
@@ -623,7 +636,43 @@ class TPUConnectorWorker:
         kv_spec = self._get_kv_spec(len(remote_block_ids))
         # TODO(xiang): pad block_ids to avoid recompilation
         indices = device_array(self.mesh, np.array(local_block_ids))
-        kv = conn.pull(req_meta.uuid, kv_spec)
+        
+        logger.info(
+            f"Worker {self.node_id} --> kv transfer | start pull uuid={req_meta.uuid}"
+        )
+        logger.info(f"TPUConnector: is_enabled() in worker thread = {jax.profiler.TraceAnnotation.is_enabled()}")
+        start_time = time.perf_counter()
+        
+        source_address = f"{req_meta.remote_host}:{req_meta.remote_port}"
+        total_bytes = sum(np.prod(s.shape) * np.dtype(s.dtype).itemsize for s in kv_spec)
+        if kv_spec:
+            dimensions = f"({len(kv_spec)}, {', '.join(map(str, kv_spec[0].shape))})"
+        else:
+            dimensions = "()"
+        logger.info(f"TPUConnector: Pull flow_meta=#_pt=1,_p={req_meta.uuid}# for req_id={req_meta.request_id}")
+
+        if jax.profiler.TraceAnnotation.is_enabled():
+            logger.info(f"TPUConnector: Pulling KV for req_id={req_meta.request_id} (Trace enabled)")
+            logger.info(f"TPUConnector: TraceAnnotation KV_Cache_Pull_Flow#_pt=10,_p={req_meta.uuid}#")
+            with jax.profiler.TraceAnnotation(f"KV_Cache_Pull_Flow#_pt=10,_p={req_meta.uuid}#"):
+                with jax.profiler.TraceAnnotation(
+                    "KV_Cache_Pull", 
+                    request_id=req_meta.request_id,
+                    uuid=req_meta.uuid,
+                    source=source_address,
+                    bytes=total_bytes,
+                    dimensions=dimensions,
+                    local_blocks=str(req_meta.local_block_ids),
+                    remote_blocks=str(req_meta.remote_block_ids)
+                ):
+                    kv = conn.pull(req_meta.uuid, kv_spec)
+        else:
+            logger.info(f"TPUConnector: Pulling KV for req_id={req_meta.request_id} (Trace disabled)")
+            kv = conn.pull(req_meta.uuid, kv_spec)
+
+        end_time = time.perf_counter()
+
+        kv_size_mb = sum(k.nbytes for k in kv) / (1024 * 1024)
         logger.info(
             f"Worker {self.node_id} --> kv transfer | pull uuid={req_meta.uuid}"
         )
