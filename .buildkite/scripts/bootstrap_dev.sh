@@ -74,7 +74,8 @@ echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH"
 
 echo "--- :pipeline: Uploading pipeline_dev.yml"
 set_jax_envs v7
-upload_with_highest_priority .buildkite/pipeline_jax.yml
+# upload_with_highest_priority .buildkite/pipeline_jax.yml
+buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
 set_jax_envs unset
 
 echo "--- Buildkite Dev Bootstrap Finished"
