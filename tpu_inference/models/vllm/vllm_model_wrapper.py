@@ -583,14 +583,20 @@ class VllmModelWrapper:
             hidden_states: jax.Array,
             pooling_metadata: PoolingMetadata,
             seq_lens: np.ndarray,
+            num_scheduled_tokens: Optional[np.ndarray] = None,
         ) -> PoolerOutput:
             assert self._pooler is not None, "Model does not support pooling"
+
+            if num_scheduled_tokens is None:
+                num_scheduled_tokens = seq_lens
 
             torch_states: torch.Tensor = torch_view(hidden_states)
             with torchax.default_env():
                 torch_states = torch_states.to('cpu', non_blocking=True)
+                
+                # Ensure correct alignment for chunked prefill
                 pooling_metadata.build_pooling_cursor(
-                    seq_lens,
+                    num_scheduled_tokens,
                     torch.tensor(seq_lens),
                     device=torch_states.device,
                 )
@@ -598,6 +604,11 @@ class VllmModelWrapper:
                     torch_states,
                     pooling_metadata,
                 )
+                
+                # Qwen3-Embedding requires L2 normalization.
+                # In vLLM V1, this is handled by PoolerNormalize in the head.
+                # We assume self._pooler (TokenPooler) executes the full pipeline.
+                
                 return outputs
 
         return compute_pooler_output

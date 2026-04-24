@@ -354,3 +354,40 @@ class TestQwen3ForCausalLM:
                 rtol=1e-2,
                 atol=1e-2,
             )
+
+    def test_vocab_padding_for_sharding(self, rng, mesh):
+        """Verify that embed_tokens shape is rounded up when tensor_parallel_size > 1."""
+        from tpu_inference.distributed.jax_parallel_state import init_pp_distributed_environment
+        
+        init_pp_distributed_environment(
+            ip="",
+            rank=0,
+            world_size=1,
+            device=jax.devices()[0],
+            need_pp=False,
+        )
+        
+        model_name = "Qwen/Qwen3-0.6B"
+        mock_vllm_config = MockVllmConfig(model_name, "auto")
+        
+        # Set tensor_parallel_size = 2
+        mock_vllm_config.parallel_config = MagicMock()
+        mock_vllm_config.parallel_config.tensor_parallel_size = 2
+        
+        # Get original vocab size
+        vocab_size = mock_vllm_config.model_config.get_vocab_size()
+        
+        # Initialize model
+        with jax.set_mesh(mesh):
+            model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
+            
+        # Verify embed_tokens shape
+        embed_weight = model.model.embed_tokens.weight[...]
+        
+        # Expected shape: (padded_vocab_size, hidden_size)
+        tp_size = 2
+        expected_padded_vocab_size = (vocab_size + tp_size - 1) // tp_size * tp_size
+        
+        assert embed_weight.shape[0] == expected_padded_vocab_size
+        if vocab_size % 2 != 0:
+            assert embed_weight.shape[0] > vocab_size

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Protocol
+from typing import Any, Callable, Dict, Optional, Protocol
 
 import jax
 import numpy as np
@@ -23,6 +23,7 @@ class PoolerFunc(Protocol):
         hidden_states: jax.Array,
         pooling_metadata: PoolingMetadata,
         seq_lens: np.ndarray,
+        num_scheduled_tokens: Optional[np.ndarray] = None,
     ) -> PoolerOutput:
         ...
 

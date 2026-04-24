@@ -113,3 +113,110 @@ class TestJaxAutoWeightsLoader:
                                    jax_output,
                                    rtol=1e-3,
                                    atol=1e-2)
+
+    def test_weight_prefix_mapping(self):
+        """Test that 'model.' is prepended correctly based on module structure."""
+        from unittest.mock import patch, MagicMock
+        from tpu_inference.models.jax.utils.weight_utils import JaxAutoWeightsLoader
+        
+        class MockModel(JaxModule):
+            def __init__(self):
+                super().__init__()
+                self.model = MagicMock() # Simulate having 'model' attribute
+                
+        model = MockModel()
+        loader = JaxAutoWeightsLoader(model)
+        
+        weights = [
+            ("embed_tokens.weight", torch.zeros((2, 2))),
+            ("lm_head.weight", torch.zeros((2, 2))),
+            ("visual.weight", torch.zeros((2, 2))),
+            ("model.layers.0.weight", torch.zeros((2, 2))),
+        ]
+        
+        with patch('tpu_inference.models.jax.utils.weight_utils.AutoWeightsLoader._load_module') as mock_super_load:
+            mock_super_load.return_value = iter([]) # Yield nothing
+            list(loader._load_module("", model, weights))
+            
+            assert mock_super_load.called
+            args, kwargs = mock_super_load.call_args
+            modified_weights = list(args[2])
+            
+            expected_keys = [
+                "model.embed_tokens.weight",
+                "lm_head.weight",
+                "visual.weight",
+                "model.layers.0.weight",
+            ]
+            
+            received_keys = [name for name, _ in modified_weights]
+            assert received_keys == expected_keys
+            
+        # Test with model WITHOUT 'model' attribute
+        class MockModelNoModel(JaxModule):
+            def __init__(self):
+                super().__init__()
+                self.w1 = MagicMock()
+                
+        model_no = MockModelNoModel()
+        loader_no = JaxAutoWeightsLoader(model_no)
+        
+        with patch('tpu_inference.models.jax.utils.weight_utils.AutoWeightsLoader._load_module') as mock_super_load_no:
+            mock_super_load_no.return_value = iter([])
+            list(loader_no._load_module("", model_no, weights))
+            
+            args, kwargs = mock_super_load_no.call_args
+            modified_weights_no = list(args[2])
+            received_keys_no = [name for name, _ in modified_weights_no]
+            
+            expected_keys_no = [
+                "embed_tokens.weight",
+                "lm_head.weight",
+                "visual.weight",
+                "model.layers.0.weight",
+            ]
+            assert received_keys_no == expected_keys_no
+
+    def test_weight_interception_for_pooler(self):
+        """Test that pooler weights are intercepted and loaded into PyTorch pooler."""
+        from unittest.mock import MagicMock
+        from tpu_inference.models.jax.utils.weight_utils import JaxAutoWeightsLoader
+        
+        class MockModel(JaxModule):
+            def __init__(self):
+                super().__init__()
+                
+        model = MockModel()
+        mock_pytorch_pooler = MagicMock()
+        
+        loader = JaxAutoWeightsLoader(model, pytorch_pooler=mock_pytorch_pooler)
+        
+        weights = [
+            ("embed_tokens.weight", torch.zeros((2, 2))),
+            ("pooler.weight", torch.zeros((2, 2))),
+            ("model.pooler.bias", torch.zeros((2,))),
+        ]
+        
+        from unittest.mock import patch
+        with patch('tpu_inference.models.jax.utils.weight_utils.AutoWeightsLoader._load_module') as mock_super_load:
+            seen_weights = []
+            def side_effect(bp, mod, w_iter):
+                for item in w_iter:
+                    seen_weights.append(item)
+                return iter(seen_weights)
+                
+            mock_super_load.side_effect = side_effect
+            
+            list(loader._load_module("", model, weights))
+            
+            assert mock_pytorch_pooler.load_state_dict.called
+            args, kwargs = mock_pytorch_pooler.load_state_dict.call_args
+            loaded_state_dict = args[0]
+            
+            assert "weight" in loaded_state_dict
+            assert "bias" in loaded_state_dict
+            
+            received_keys = [name for name, _ in seen_weights]
+            assert "pooler.weight" not in received_keys
+            assert "model.pooler.bias" not in received_keys
+            assert "embed_tokens.weight" in received_keys

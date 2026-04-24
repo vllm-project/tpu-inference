@@ -16,6 +16,7 @@ from typing import Dict
 
 import jax
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
+from vllm.v1.pool.metadata import PoolingStates
 
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
@@ -151,6 +152,7 @@ class PersistentBatchManager:
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
+                pooling_states=PoolingStates() if new_req_data.pooling_params is not None else None,
             )
 
             req_ids_to_add.append(req_id)

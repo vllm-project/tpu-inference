@@ -29,6 +29,7 @@ class CachedRequestState(NewRequestData):
     generator: Optional[Any] = None
     mrope_positions: Optional[jax.Array] = None
     mrope_position_delta: Optional[int] = None
+    pooling_states: Optional[PoolingStates] = None
 
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
@@ -174,14 +175,19 @@ class InputBatch:
         pooling_params = self.get_pooling_params()
         pooling_states = self.get_pooling_states()
 
-        # Prompt token ID is used by StepPooler.
-        # As embedding task for converted model is not implemented yet,
-        # so it's ok to set prompt token ID list to None here.
+        # Extract prompt token IDs from token_ids_cpu
+        # Shape of token_ids_cpu is (max_num_reqs, max_model_len)
+        max_prompt_len = int(self.num_prompt_tokens[:self.num_reqs].max()) if self.num_reqs > 0 else 0
+        prompt_token_ids_tensor = torch.zeros((self.num_reqs, max_prompt_len), dtype=torch.int32)
+        for i in range(self.num_reqs):
+            num_prompt = self.num_prompt_tokens[i]
+            prompt_token_ids_tensor[i, :num_prompt] = torch.from_numpy(self.token_ids_cpu[i, :num_prompt]).to(torch.int32)
+
         return PoolingMetadata(
             prompt_lens=torch.from_numpy(
                 self.num_prompt_tokens[:self.num_reqs]),
-            prompt_token_ids=None,
-            prompt_token_ids_cpu=None,
+            prompt_token_ids=prompt_token_ids_tensor,
+            prompt_token_ids_cpu=prompt_token_ids_tensor,
             pooling_params=pooling_params,
             pooling_states=pooling_states,
         )
@@ -282,7 +288,7 @@ class InputBatch:
 
         if pooling_params := request.pooling_params:
             self.pooling_params[req_id] = pooling_params
-            self.pooling_states[req_id] = PoolingStates()
+            self.pooling_states[req_id] = request.pooling_states if request.pooling_states is not None else PoolingStates()
 
         # Add request lora ID
         if request.lora_request:
