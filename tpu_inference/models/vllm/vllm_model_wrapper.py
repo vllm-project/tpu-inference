@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import copy
+import functools
 import time
 from collections.abc import Sequence
 from contextlib import nullcontext
@@ -59,8 +60,8 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
 from tpu_inference.models.vllm.experimental.model_patcher import patch_mm_model
 from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
     maybe_apply_qwen3_vl_patches
-from tpu_inference.models.vllm.experimental.vision_tower_jit import \
-    maybe_jit_embed_multimodal_func
+from tpu_inference.models.vllm.experimental.vision_tower_jit import (
+    maybe_jit_embed_multimodal_func, maybe_precompile_vision_encoder_fn)
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_inference.runner.lora_utils import replace_lora_metadata
@@ -400,6 +401,18 @@ class VllmModelWrapper:
 
         return draft_step_fun if self.is_draft_model else step_fun
 
+    def wrap_precompile_vision_encoder_fn(
+        self,
+        params: Any,
+    ) -> Optional[Any]:
+        """Return a precompile function for the vision encoder, or None."""
+        if not self.vllm_config.model_config.is_multimodal_model:
+            return None
+        embed_multimodal_fn = self.wrap_embed_multimodal_func()
+        return maybe_precompile_vision_encoder_fn(params, embed_multimodal_fn,
+                                                  self.vllm_config)
+
+    @functools.cache
     def wrap_embed_multimodal_func(self):
         if not self.vllm_config.model_config.is_multimodal_model:
             return None

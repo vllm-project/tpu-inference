@@ -436,7 +436,7 @@ def get_vllm_model(
         precompile_vision_encoder_fn=getattr(
             model.model.vllm_model,
             "precompile_vision_encoder",
-            None,
+            model.wrap_precompile_vision_encoder_fn(params),
         ),
         embed_multimodal_fn=model.wrap_embed_multimodal_func(),
         embed_input_ids_fn=model.wrap_embed_input_ids_func(),
