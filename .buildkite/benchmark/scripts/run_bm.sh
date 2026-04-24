@@ -135,6 +135,9 @@ printf "[INFO] %-25s = %s\n" "BM_LOG" "$BM_LOG"
 printf "[INFO] %-25s = %s\n" "ARTIFACT_FOLDER" "$ARTIFACT_FOLDER"
 
 echo "model: $MODEL"
+echo "dataset: ${DATASET:-}"
+echo "(not use)lm_eval cmd: ${LM_EVAL_CMD:-}"
+echo "tp size: ${TENSOR_PARALLEL_SIZE:-}"
 
 # Helper function to check if a value is in an array
 contains_element () {
@@ -194,7 +197,7 @@ fi
 
 if [ "$COMMAND_TYPE" = "lm_eval" ]; then
   {
-    ".buildkite/benchmark/lm_eval/$DATASET/run.sh $LOG_FOLDER"
+    ".buildkite/benchmark/lm_eval/$DATASET/run.sh"
     printf "AccuracyMetrics: "
     tr -d '\n' < "/workspace/${DATASET}_accuracy.json"
     echo ""
@@ -306,6 +309,7 @@ else
 fi
 printf "[DEBUG] Checking folder structure (Environment: %s)...\n" "$ENV_CONTEXT"
 printf "[DEBUG] pwd=%s\n\nls $ARTIFACT_FOLDER=\n%s\n" "$(pwd)" "$(ls "$ARTIFACT_FOLDER")" || true
+printf "[DEBUG] ls=%s\n\n" "$(ls "$ARTIFACT_FOLDER/../")" || true
 printf "[DEBUG] ls $ARTIFACT_FOLDER/temp_logs=\n%s\n" "$(ls "$ARTIFACT_FOLDER"/temp_logs)" || true
 
 # request_rate use default value (inf)

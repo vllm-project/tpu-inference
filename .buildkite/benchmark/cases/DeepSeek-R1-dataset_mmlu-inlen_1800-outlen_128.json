@@ -5,7 +5,6 @@
     "GCP_INSTANCE_ID": "vllm-bm-inst",
     "GCP_DATABASE_ID": "vllm-bm-bk-runs",
     "EXPECTED_ETEL": 3600000,
-
     "INPUT_LEN": 1800,
     "OUTPUT_LEN": 128
   },
@@ -16,7 +15,12 @@
     "command_type": "lm_eval",
     "args": {
       "model": "deepseek-ai/DeepSeek-R1",
-      "dataset-name": "mmlu"
+      "dataset-name": "mmlu",
+      "tensor-parallel-size": {
+        "v6e-8": 8,
+        "v7x-8": 8,
+        "default": 8
+      }
     }
   }
 }
