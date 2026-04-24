@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 import jax
 import jax.numpy as jnp
 import numpy as np
-from torchax.ops.mappings import t2j
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_and_batch_mm_kwargs
@@ -28,49 +27,6 @@ from tpu_inference.models.jax.utils.multi_modal_utils import (
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
-
-
-class GridTHW(tuple):
-    """Tensor-like wrapper for image/video grid_thw arguments.
-
-    - tuple subclass so isinstance(x, tuple) is True — passes vLLM's
-    tensor_schema type check (e.g. https://github.com/vllm-project/vllm/blob/9744b699bafed423909ed10da96b80eb0542424b/vllm/model_executor/models/qwen3_vl.py#L2026). 
-    - Implements a minimal tensor-like API (ndim, shape, tolist, prod) expected by vLLM's
-    _process_image_input (https://github.com/vllm-project/vllm/blob/9744b699bafed423909ed10da96b80eb0542424b/vllm/model_executor/models/qwen3_vl.py#L2072)
-
-    We cannot use torch.Tensor[tuple] because jax.jit would complain.
-    """
-
-    def __new__(cls, values):
-
-        def _nested_to_tuple(v):
-            if isinstance(v, (list, tuple)):
-                return tuple(_nested_to_tuple(x) for x in v)
-            return int(v)
-
-        flat: tuple = _nested_to_tuple(values)
-        return super().__new__(cls, flat)
-
-    # ---- tensor-like API expected by _process_image_input ----
-
-    @property
-    def ndim(self):
-        return 2
-
-    @property
-    def shape(self):
-        return (len(self), 3)
-
-    def tolist(self):
-        return [list(row) for row in self]
-
-    def prod(self, dim=-1):
-        if dim in (-1, 1):
-            return np.array([row[0] * row[1] * row[2] for row in self])
-        raise NotImplementedError(f"GridTHW.prod({dim}) not supported")
-
-    def __repr__(self):
-        return f"GridTHW({tuple(self)})"
 
 
 class MultiModalManager:
@@ -155,13 +111,6 @@ class MultiModalManager:
         encoder_outputs = []
         for _, num_items, mm_kwargs_group in group_and_batch_mm_kwargs(
                 mm_kwargs):
-            for k, v in mm_kwargs_group.items():
-                if k in ("image_grid_thw", "video_grid_thw", "grid_thw"):
-                    mm_kwargs_group[k] = GridTHW(v.tolist())
-                else:
-                    mm_kwargs_group[k] = jax.tree.map(
-                        lambda t: t2j(t, use_dlpack=False), v)
-
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
             # 1. A tensor of shape (num_items, feature_size, hidden_size)

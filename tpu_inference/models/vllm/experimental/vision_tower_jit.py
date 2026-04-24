@@ -32,7 +32,7 @@ JITTABLE_ARCHS = {
 
 
 def maybe_jit_embed_multimodal_func(embed_multimodal_func_jax: Callable,
-                                    vllm_config: VllmConfig):
+                                    vllm_config: VllmConfig) -> Callable:
     """Conditionally wrap `embed_multimodal_func_jax` with jax.jit based on the VllmConfig.
 
     Args:
@@ -85,7 +85,7 @@ def maybe_precompile_vision_encoder_fn(
 
     def precompile_fn(run_compilation_fn: Callable) -> None:
         # Deferred import avoids circular dependencies at module load time.
-        from tpu_inference.runner.multimodal_manager import GridTHW
+        from tpu_inference.models.vllm.vllm_model_wrapper import GridTHW
 
         for num_patches in num_patches_paddings:
             # Split num_patches into (h, w) by distributing bits evenly.
