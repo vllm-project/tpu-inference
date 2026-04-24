@@ -78,7 +78,7 @@ ls -lh "${OUTPUT_DIR}"/${TEST_FILE_PATTERN}
 echo "--- :mag: Validating generated YAML files syntax"
 
 # Use OUTPUT_DIR and strip the repo root prefix to get relative paths starting with .buildkite/
-# (required by validate_all_pipelines.sh grep rules)
+# (required by validate_buildkite_ymls.sh grep rules)
 # shellcheck disable=SC2012,SC2086
 GENERATED_FILES=$(ls .buildkite/models/${TEST_FILE_PATTERN} 2>/dev/null || true)
 
@@ -89,7 +89,7 @@ fi
 
 # Run validation and capture status
 VALIDATE_STATUS=0
-.buildkite/scripts/validate_all_pipelines.sh "$GENERATED_FILES" || VALIDATE_STATUS=$?
+.buildkite/scripts/validate_buildkite_ymls.sh "$GENERATED_FILES" || VALIDATE_STATUS=$?
 
 if [ $VALIDATE_STATUS -eq 0 ]; then
     echo "✅ All generated pipelines are syntactically valid!"
