@@ -35,10 +35,47 @@ if [ -z "${VLLM_COMMIT_HASH}" ]; then
     exit 1
 fi
 
+upload_with_highest_priority() {
+  local yaml_file=$1
+  local JOB_PRIORITY=10
+  echo "--- :pipeline: Uploading $yaml_file with priority ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
+  { 
+    echo "priority: ${JOB_PRIORITY:-PRIORITY_DEFAULT}"; 
+    cat "$yaml_file"; 
+  } | buildkite-agent pipeline upload
+}
+
+set_jax_envs() {
+    case $1 in
+        v6)
+            export TESTS_GROUP_LABEL="[jax] TPU6e Tests Group"
+            export TPU_VERSION="tpu6e"
+            export TPU_QUEUE_SINGLE="tpu_v6e_queue"
+            export TPU_QUEUE_MULTI="tpu_v6e_8_queue"
+            export TENSOR_PARALLEL_SIZE_SINGLE=1
+            export TENSOR_PARALLEL_SIZE_MULTI=8
+            ;;
+        v7)
+            export TESTS_GROUP_LABEL="[jax] TPU7x Tests Group"
+            export TPU_VERSION="tpu7x"
+            export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
+            export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
+            export TENSOR_PARALLEL_SIZE_SINGLE=2
+            export TENSOR_PARALLEL_SIZE_MULTI=8
+            export COV_FAIL_UNDER="67"
+            ;;
+        unset)
+            unset TESTS_GROUP_LABEL TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI TENSOR_PARALLEL_SIZE_SINGLE TENSOR_PARALLEL_SIZE_MULTI COV_FAIL_UNDER
+            ;;
+    esac
+}
 buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
 echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
 
 echo "--- :pipeline: Uploading pipeline_dev.yml"
-buildkite-agent pipeline upload .buildkite/pipeline_dev.yml
+set_jax_envs v7
+# upload_with_highest_priority .buildkite/pipeline_jax.yml
+buildkite-agent pipeline upload .buildkite/pipeline_jax.yml
+set_jax_envs unset
 
 echo "--- Buildkite Dev Bootstrap Finished"
