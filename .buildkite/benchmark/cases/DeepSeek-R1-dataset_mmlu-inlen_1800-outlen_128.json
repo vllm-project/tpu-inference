@@ -13,6 +13,11 @@
   ],
   "client_command_options": {
     "command_type": "lm_eval",
+    "env": {
+      "VLLM_MLA_DISABLE": 1,
+      "NEW_MODEL_DESIGN": true,
+      "TPU_BACKEND_TYPE": "jax"
+    },
     "args": {
       "model": "deepseek-ai/DeepSeek-R1",
       "dataset-name": "mmlu",
