@@ -144,7 +144,7 @@ def test_kv_cache_cpu_offloading_accuracy_smaller_then_cpu_ram(
     kv_transfer_config: KVTransferConfig,
 ):
     decode_saves = ["0"]
-    skip_precompile = ["0", "1"]
+    skip_precompile = ["0"]
     batched_saves = ["0"]
     prompts = [read_prompt_from_file("small_prompt.txt")]
     for decode_save, _skip_precompile, batched_save in itertools.product(
