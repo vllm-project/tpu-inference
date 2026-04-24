@@ -17,17 +17,17 @@
 set -ex
 
 # Change to the script's directory to ensure relative paths work correctly.
-cd "$(dirname "$0")"
+# cd "$(dirname "$0")"
 
 # --- Configuration ---
-export LOG_DIR=./results
+export LOG_DIR=$1
 export MODEL_NAME=$MODEL
 # Use a specific MMLU subtask if the MMLU_SUBTASK env var is set, otherwise default to the full mmlu group task.
 OUTPUT_PREFIX="${TASK_NAME}_${MODEL_NAME//\//-}"
 export OUTPUT_PREFIX
 
 export OUTPUT_BASE_PATH=$LOG_DIR/$OUTPUT_PREFIX.json
-export ACCURACY_JSON_PATH=/workspace/mmlu_accuracy.json
+export ACCURACY_JSON_PATH=$LOG_DIR/mmlu_accuracy.json
 
 echo "Running lm_eval for task: $TASK_NAME"
 echo "Output will be timestamped in: $LOG_DIR"
@@ -37,8 +37,8 @@ mkdir -p "$LOG_DIR"
 # Default model arguments
 MODEL_ARGS="pretrained=$MODEL_NAME,tensor_parallel_size=${TP_SIZE:-8},dtype=auto,max_model_len=2048,gpu_memory_utilization=0.98"
 
-# Check if running on v7x-8 hardware
-if [[ "$DEVICE" == v7x-8 ]]; then
+# Check if running on tpu7x-8 hardware
+if [[ "$DEVICE" == "tpu7x-8" ]]; then
     echo "Running on v7x hardware, adjusting model arguments for DeepSeek-R1."
     MODEL_ARGS="pretrained=$MODEL_NAME,tensor_parallel_size=8,dtype=auto,max_model_len=2048,max_num_seqs=128,max_num_batched_tokens=128,gpu_memory_utilization=0.95"
 fi

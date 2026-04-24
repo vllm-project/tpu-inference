@@ -1,0 +1,22 @@
+{
+  "env": {
+    "GCP_PROJECT_ID": "cloud-tpu-inference-test",
+    "GCS_BUCKET": "vllm-cb-storage2",
+    "GCP_INSTANCE_ID": "vllm-bm-inst",
+    "GCP_DATABASE_ID": "vllm-bm-bk-runs",
+    "EXPECTED_ETEL": 3600000,
+
+    "INPUT_LEN": 1800,
+    "OUTPUT_LEN": 128
+  },
+  "ci_queue": [
+    "tpu_v7x_8_queue"
+  ],
+  "client_command_options": {
+    "command_type": "lm_eval",
+    "args": {
+      "model": "deepseek-ai/DeepSeek-R1",
+      "dataset-name": "mmlu"
+    }
+  }
+}

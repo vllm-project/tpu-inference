@@ -194,7 +194,7 @@ fi
 
 if [ "$COMMAND_TYPE" = "lm_eval" ]; then
   {
-    ".buildkite/benchmark/lm_eval/$DATASET/run.sh"
+    ".buildkite/benchmark/lm_eval/$DATASET/run.sh $LOG_FOLDER"
     printf "AccuracyMetrics: "
     tr -d '\n' < "/workspace/${DATASET}_accuracy.json"
     echo ""
