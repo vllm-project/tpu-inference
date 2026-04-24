@@ -438,11 +438,14 @@ def inner_kernel(
                     # Convert lhs into quantized dtype.
                     block_lhs_q = (block_lhs *
                                    block_scale_inv).astype(lhs_q_dtype)
-                    # Mixed int precision matmuls are not supported.
-                    block_rhs_match_dtype = block_rhs.astype(lhs_q_dtype)
+                    # Some mixed precision matmuls are not supported.
+                    if not pltpu.get_tpu_info().is_matmul_supported(
+                            lhs_q_dtype, block_rhs.dtype):
+                        block_rhs = block_rhs.astype(lhs_q_dtype)
+
                     block_acc = jnp.matmul(
                         block_lhs_q,
-                        block_rhs_match_dtype,
+                        block_rhs,
                         preferred_element_type=preferred_element_type,
                     ).astype(acc_ref.dtype)
 
@@ -1051,9 +1054,12 @@ def make_gmm_configs(
         is_rhs_float = jnp.issubdtype(rhs_quant_dtype, jnp.floating)
         tpu_info = pltpu.get_tpu_info()
         # Check if there is hardware compute support for rhs dtype group.
-        if is_rhs_float or rhs_quant_dtype == jnp.int4:
+        if is_rhs_float:
             if tpu_info.fp8_ops_per_second > 0:
                 lhs_q_dtype = jnp.float8_e4m3fn.dtype
+        # Int4 weights use fp8 or int8 activations depending on TPU generation.
+        elif rhs_quant_dtype == jnp.int4 and tpu_info.fp8_ops_per_second > 0:
+            lhs_q_dtype = jnp.float8_e4m3fn.dtype
         else:
             if tpu_info.int8_ops_per_second > 0:
                 lhs_q_dtype = jnp.int8.dtype
