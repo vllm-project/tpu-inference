@@ -27,19 +27,20 @@ Core Components:
     In decode phase, it triggers only on block boundaries to minimize overhead.
 - StagingBufferManager: The resource gatekeeper for memory-intensive scatter/gather
     operations. It manages a fixed pool of "staging slots" to prevent
-    TPU (HBM) memory exhaustion. The staging area is pre-allocated during
-    connector's scheduler component initialization.
+    TPU (HBM) memory exhaustion. The HBM space for staging buffer is reserved before 
+    KV cache setup.
     - OOM Prevention: By enforcing a hard limit on in-flight blocks, it
         ensures that concurrent Save/Load operations never exceed the
-        pre-allocated physical staging area.
+        limit of staging area.
     - Transactional Allocation: The Scheduler 'check out' slots during
         metadata construction. If slots are unavailable, the transfer is
         downsized or deferred to a later step.
 
 Scheduler Lifecycle and State Coordination:
 1. Work Construction (`build_connector_meta()`):
-    - Phase 1 (Cleanup): Purges trackers and internal states for requests that
-      finished in the previous step.
+    - Phase 1 (Cleanup): Purges trackers for requests that finished in the
+      previous steps. Please note that even finished requests may have 
+      in-flight save operations.
     - Phase 2 (New): Initializes `RequestTracker` for newly scheduled
       requests. It sets the `save_watermark` to the boundary of tokens already
       persisted in CPU memory (or already resident in HBM cache) to ensure
@@ -56,21 +57,21 @@ Scheduler Lifecycle and State Coordination:
     'delayed-free' state, it monitors the clearing of pending operations
     (tracked in `_reqs_being_saved` or `_reqs_being_loaded`).
 3. Completion Gatekeeping (`request_finished()`): Triggered when a request
-    is logically done. If the Scheduler detects in-flight operations, it
-    returns `delay_free=True`. This prevents vLLM from reclaiming HBM blocks
-    while hardware is still accessing them.
+    is logically done. Currently, delay-free is always returned False, since
+    D2H data transfer (in save) operates on the staging buffer instead of 
+    model runner's KV cache.
 
 Worker Execution:
 1. start_load_kv: A blocking operation. It fetches tensors from the CPU backend,
-    performs H2D transfer, and uses JIT-fused kernels to scatter slices into
-    the physical KV cache.
+    performs H2D transfer, and uses parallel kernels to scatter slices from 
+    staging buffer into model runner's KV cache.
 2. start_save_kv: An asynchronous multi-stage pipeline:
-    - Step A (Gather): Blocking TPU operation to collect non-contiguous HBM
-        blocks into a contiguous staging buffer.
-    - Step B (Transfer): Non-blocking transfer (D2H) handled by a
+    - Step A (Gather): Collect non-contiguous HBM blocks into a contiguous 
+        staging buffer.
+    - Step B (Transfer): Async transfer (D2H) handled by a
         background thread pool.
-    - Step C (Processing): Post-transfer registration of chunks into the
-        CPU Backend and metadata reconciliation.
+    - Step C (Post-processing): Post-transfer registration of chunks into the
+        CPU Backend and metadata update.
 
 Asynchronous Coordination & Feedback Loop:
 The Scheduler and Worker maintain synchronization through a closed-loop
@@ -91,7 +92,7 @@ feedback mechanism mediated by the vLLM engine's `KVConnectorOutput`.
      `update_connector_output()`.
    - Incremental Updates: The Scheduler uses the chunk-level stats
      (`finished_save_chunks`) to:
-     a) Release specific slots in the `StagingBufferManager`.
+     a) Release specified slots in the `StagingBufferManager`.
      b) Transition chunks in `LRUCacheManager` to 'ready_to_load' status,
         making them immediately available for prefix-matching in new requests.
    - Request Finalization: The Scheduler monitors chunk-level stats 
@@ -405,9 +406,6 @@ class TPUOffloadConnector(KVConnectorBase_V1):
             self.connector_worker = TPUOffloadConnectorWorker(
                 vllm_config, self)
 
-    ############################################################
-    # Class Methods
-    ############################################################
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig):
         if vllm_config.model_config is None:
@@ -415,7 +413,7 @@ class TPUOffloadConnector(KVConnectorBase_V1):
                                 "Fallback to default kv cache layout.")
             return None
 
-        # TODO(jcgu): test mla
+        # TODO(jcgu): mla is not supported yet.
         use_mla = vllm_config.model_config.use_mla
         if use_mla:
             # which fallback to the default behavior.
@@ -791,7 +789,7 @@ class TPUOffloadConnectorScheduler():
         should_save = False
         # Determine if a save is needed for this step
         # when there are new token KVs:
-        # 1. Prefill: always save
+        # 1. Prefill: always save (default)
         # 2. Decode (with save_decode=True)
         #  2.1 regular decode (not finished): accumulate until getting a full block
         #  2.2 request finished: save
@@ -910,12 +908,10 @@ class TPUOffloadConnectorScheduler():
                         tracker.save_watermark = adjusted_num_total_tokens
 
         if is_finished and save_spec is None:
-            # For finished requests, there must be a no-op save to update the state in the worker side.
-            # This is a "completion-only" signal because should_save is False.
-            # NOTE(jcgu): num_total_tokens will be used to unpin tokens;
-            #  apply the number of saved tokens;
             # TODO(jcgu): rm the no-op save, since save status has been updated
             # through kv_connector_output.kv_connector_stats
+            # For finished requests, there must be a no-op save to update the state in the worker side.
+            # This is a "completion-only" signal because should_save is False.
             save_spec = SaveSpec(
                 num_skip_leading_tokens=tracker.save_watermark,
                 num_total_tokens=tracker.save_watermark,
@@ -1403,9 +1399,6 @@ class TPUOffloadConnectorWorker:
                             self.device_sharding.spec,
                             self.indices_sharding.spec)
 
-                        # paged_kv_for_compilation = update_kv_caches(
-                        #     paged_kv_for_compilation, stacked_dummy_kv_caches_tpu,
-                        #     dummy_block_ids, self.stacked_kv_block_dim_nums)
                         jax.block_until_ready(updated_kv_caches)
                         paged_kv_for_compilation = updated_kv_caches
 
@@ -1957,12 +1950,10 @@ class TPUOffloadConnectorWorker:
         start_time = time.time()
         completed_count = 0
         remaining_futures: list[tuple[Future, list[SaveReqInfo]]] = []
-        # TODO Metrics data transfer operation in process
-        # PENDING_SAVE_FUTURES_SIZE.set(len(self._pending_save_futures))
+        # TODO: Metrics data transfer operation in process
         for future, manifest in self._pending_save_futures:
             if future.done():
                 # Ensure the task finished successfully.
-
                 try:
                     future.result()
                     # Record saves for all requests in the manifest
@@ -1971,8 +1962,7 @@ class TPUOffloadConnectorWorker:
                             self.offload_stats.record_save(
                                 req=info.req_id,
                                 saved_chunk_ids=info.dst_chunks)
-                            # TODO Metrics data transfer complete
-                            # RECORD_SAVE_TOTAL.inc()
+                            # TODO: Metrics data transfer complete
 
                     completed_count += 1
                 except Exception as e:
@@ -2069,19 +2059,12 @@ class TPUOffloadConnectorWorker:
                 f"Fetching delta of {num_tokens_to_load_delta} tokens from cache for "
                 f"{num_blocks_to_load} blocks.")
 
-            # Assemble the per-layer data for the delta tokens on the CPU.
-            # We create a list of lists, where the outer list represents layers
-            # and the inner lists will hold the data chunks for that layer.
-            # assembled_kv_on_cpu = [[] for _ in range(self.num_layers)]
-            assembled_kv_on_cpu = []
-
             # Fetch and chunks from the backend.
+            assembled_kv_on_cpu = []
             for i in range(num_blocks_to_load):
                 src_chunk_id = src_chunks[i]
                 cached_value = self.cpu_backend.get(src_chunk_id)
                 if cached_value is not None:
-                    # for j in range(self.num_layers):
-                    #     assembled_kv_on_cpu[j].append(cached_value[j])
                     assembled_kv_on_cpu.append(cached_value)
                 else:
                     logger.error(
@@ -2172,7 +2155,8 @@ class TPUOffloadConnectorWorker:
 
         finished_saves = self.finished_save_reqs
         self.finished_save_reqs = set()
-        # TODO: add back self.finished_load_reqs and report it back to vllm scheduler when async load gets implemented.
+        # TODO: add back self.finished_load_reqs and report it back to
+        # vllm scheduler when async load gets implemented.
         finished_loads = set()
         # NOTE(jcgu): both are empty now.
         logger.debug(f"Finished saves: {finished_saves}, "
