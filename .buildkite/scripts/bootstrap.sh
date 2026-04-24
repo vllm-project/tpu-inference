@@ -61,7 +61,7 @@ echo "--- :git: Checking changed files"
 BASE_BRANCH=${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-"main"}
 FILES_CHANGED=""
 
-if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
+# if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     echo "PR detected. Target branch: $BASE_BRANCH"
 
     # Fetch base and current commit to ensure local history exists for diff
@@ -112,10 +112,10 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     if echo "$FILES_CHANGED" | grep -qE "add_model_to_ci.py|tpu_optimized_model_template.yml|vllm_native_model_template.yml"; then
       .buildkite/pipeline_generation/test_generation.sh
     fi
-else
-    echo "Non-PR build. Bypassing file change check."
-    FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r -m "$BUILDKITE_COMMIT")
-fi
+# else
+#     echo "Non-PR build. Bypassing file change check."
+#     FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r -m "$BUILDKITE_COMMIT")
+# fi
 
 # Store changed files in metadata for sub-pipelines (newlines to commas)
 echo "$FILES_CHANGED" | tr '\n' ',' | buildkite-agent meta-data set "changed_files"
