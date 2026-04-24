@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
 from itertools import islice
 from typing import (Any, Callable, Iterable, List, Literal, NamedTuple,
                     Optional, Tuple, TypedDict)
@@ -34,21 +35,25 @@ except ImportError:
 from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
 from tpu_inference.layers.jax import JaxModule
-from tpu_inference.layers.jax.linear import JaxEinsum
+from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
 from tpu_inference.layers.jax.norm import JaxRmsNorm
-from tpu_inference.layers.jax.pp_utils import make_layers
+from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 from tpu_inference.models.jax.utils.multi_modal_utils import \
     merge_multimodal_embeddings
-from tpu_inference.models.jax.utils.weight_utils import (LoadableWithIterator,
-                                                         StandardWeightLoader)
+from tpu_inference.models.jax.utils.weight_utils import (
+    JaxAutoWeightsLoader, LoadableWithIterator, StandardWeightLoader,
+    jax_array_from_reshaped_torch)
 
 logger = init_logger(__name__)
 
 POSITIONS_PAD_VALUE = -1
 init_fn = nnx.initializers.normal(stddev=0.02)
+uniform_init_fn = nnx.initializers.uniform()
 
 
 class Gemma4ImagePixelInputs(TypedDict):
@@ -595,22 +600,23 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             if self.model.is_last_rank:
                 vocab_size = model_config.get_vocab_size()
                 hidden_size = model_config.hf_config.text_config.hidden_size
-                from tpu_inference.layers.jax.linear import JaxEinsum
-                self.lm_head = JaxEinsum(
-                    "TD,DV->TV",
-                    (hidden_size, vocab_size),
+                self.lm_head = JaxLinear(
+                    hidden_size,
+                    vocab_size,
+                    use_bias=False,
                     param_dtype=model_config.dtype,
-                    kernel_init=nnx.with_partitioning(init_fn,
-                                                      ("model", None)),
+                    kernel_init=nnx.with_partitioning(uniform_init_fn,
+                                                      (None, "model")),
                     rngs=rng,
                     quant_config=vllm_config.quant_config,
                     prefix="lm_head",
                 )
             else:
-                from tpu_inference.layers.jax.pp_utils import PPMissingLayer
                 self.lm_head = PPMissingLayer()
 
     def load_weights(self, weights: Iterable[Tuple[str, Any]]):
+        loader = JaxAutoWeightsLoader(self)
+        loaded_original_names = set()
 
         def map_name(name: str) -> str:
             # Gemma 4 multimodal remappings
@@ -635,10 +641,10 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
             return tensor
 
-        def filter_weights(weights_iterator):
-            import re
-            for name, weight in weights_iterator:
+        def mapped_weights_generator():
+            for name, weight in weights:
                 mapped_name = map_name(name)
+                was_loaded = False
 
                 # Handle packed QKV weights for the text tower
                 if "qkv_proj" in mapped_name:
@@ -646,8 +652,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                     if m:
                         layer_idx = int(m.group(1))
                         if self.model.start_layer <= layer_idx < self.model.end_layer:
-                            jax_attn = self.model.layers[
-                                layer_idx - self.model.start_layer].self_attn
+                            jax_attn = self.model.layers[layer_idx].self_attn
                             q_size = jax_attn.num_heads * jax_attn.head_dim_original
                             kv_size = jax_attn.num_kv_heads * jax_attn.head_dim_original
 
@@ -668,11 +673,19 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                                 "qkv_proj", "v_proj"), process_tensor(
                                     mapped_name.replace("qkv_proj", "v_proj"),
                                     v_weight)
-                            continue
+                            was_loaded = True
 
-                yield mapped_name, process_tensor(mapped_name, weight)
+                if not was_loaded:
+                    yield mapped_name, process_tensor(mapped_name, weight)
 
-        return super().load_weights(filter_weights(weights))
+                loaded_original_names.add(name)
+
+        mapped_weights = list(mapped_weights_generator())
+        print(
+            f"DEBUG: Gemma4MM.load_weights yielding {len(mapped_weights)} weights"
+        )
+        loader.load_weights(mapped_weights)
+        return loaded_original_names
 
     def embed_input_ids(self,
                         input_ids: jax.Array,
@@ -728,13 +741,10 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         if pixel_values is None:
             return None
         if isinstance(pixel_values, torch.Tensor):
-            pixel_values = pixel_values.contiguous().view(
-                torch.int16).numpy().view(jnp.bfloat16)
-            pixel_values = jnp.asarray(pixel_values)
+            pixel_values = jax_array_from_reshaped_torch(pixel_values)
         if isinstance(pixel_position_ids, torch.Tensor):
-            pixel_position_ids = pixel_position_ids.to(
-                torch.int32).contiguous().numpy()
-            pixel_position_ids = jnp.asarray(pixel_position_ids)
+            pixel_position_ids = jax_array_from_reshaped_torch(
+                pixel_position_ids)
 
         return Gemma4ImagePixelInputs(type="pixel_values",
                                       pixel_values=pixel_values,
@@ -797,13 +807,11 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             kv_caches,
             input_ids,
             attention_metadata,
-            inputs_embeds,
+            inputs_embeds=inputs_embeds,
             layer_name_to_kv_cache=layer_name_to_kv_cache,
         )
 
         if not is_last_rank:
-            from tpu_inference.models.jax.jax_intermediate_tensor import \
-                JaxIntermediateTensors
             x = JaxIntermediateTensors(tensors={"hidden_states": x})
 
         return kv_caches, x, []

@@ -195,10 +195,11 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
     request_distribution = jnp.array([0, 0, num_seqs[0]] * dp_size,
                                      dtype=jnp.int32)
 
-    (input_ids, positions, block_tables,
-     query_start_loc, seq_lens, request_distribution) = device_array(
+    (input_ids, positions, block_tables, query_start_loc, seq_lens,
+     request_distribution) = device_array(
          mesh, (input_ids, positions, block_tables, query_start_loc, seq_lens,
-                request_distribution))
+                request_distribution),
+         sharding=NamedSharding(mesh, P(ShardingAxisName.MLP_DATA)))
 
     model_input = {
         "kv_caches":

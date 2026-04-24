@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 from functools import partial
 from itertools import islice
 from typing import Any, Iterable, List, Optional, Tuple
@@ -19,7 +20,8 @@ from typing import Any, Iterable, List, Optional, Tuple
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
 try:
     from transformers import Gemma4TextConfig
@@ -39,6 +41,8 @@ from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.common.process_weights.moe_weights import (
+    FusedMoEWeights, process_moe_weights)
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
@@ -47,18 +51,29 @@ from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
+from tpu_inference.layers.jax.quantization.unquantized import \
+    UnquantizedFusedMoEMethod
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (
-    LoadableWithIterator, StandardWeightLoader,
-    load_nnx_param_from_reshaped_torch)
+    JaxAutoWeightsLoader, LoadableWithIterator, StandardWeightLoader,
+    jax_array_from_reshaped_torch, shard_put)
 
 logger = init_logger(__name__)
 
 init_fn = nnx.initializers.uniform()
+
+
+class Gemma4MoEMethod(UnquantizedFusedMoEMethod):
+    """Custom MoE method for Gemma4 to prevent generic re-processing."""
+
+    def process_weights_after_loading(self, layer: "Gemma4MoE") -> bool:
+        # We handle weight processing manually in Gemma4MoE.load_weights
+        # to ensure correct sharding and avoid the generic axis-swap bugs.
+        return True
 
 
 # MLP arch is the same as Gemma3
@@ -114,15 +129,7 @@ class Gemma4MLP(JaxModule):
 
 
 class Gemma4Router(JaxModule):
-    """Router for Gemma4 MoE that preprocesses input before projection.
-
-    Applies RMSNorm (no learned weight), root_size scaling
-    (hidden_size^{-0.5}), then a learned per-dimension scale before
-    projecting to expert logits.
-
-    This preprocessing is applied ONLY to the router's input, not to
-    the expert MLPs' input.
-    """
+    """Router for Gemma4 MoE that preprocesses input before projection."""
 
     def __init__(
         self,
@@ -148,12 +155,13 @@ class Gemma4Router(JaxModule):
                                eager_sharding=False)
         # Constant 1/sqrt(hidden_size) scaling factor
         self.root_size = self.hidden_size**-0.5
-        # Project to expert logits; replicated across TP for consistent routing
+        # Project to expert logits; sharded across TP to save memory
         self.proj = JaxLinear(
             self.hidden_size,
             config.num_experts,
             rngs=rngs,
             use_bias=False,
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             quant_config=quant_config,
             prefix=f"{prefix}.proj",
         )
@@ -176,10 +184,6 @@ class Gemma4MoE(JaxMoE):
 
     Wraps FusedMoE with custom routing. The router projection is
     external (Gemma4Router) — this class only handles expert dispatch.
-
-    Gemma4 routing: softmax over ALL experts → top-k → renormalize.
-    per_expert_scale is folded into routing weights for mathematical
-    correctness with FusedMoE's fused kernel.
     """
 
     def __init__(
@@ -194,88 +198,110 @@ class Gemma4MoE(JaxMoE):
         noop_router = JaxModule()
         noop_router.num_experts_per_tok = config.top_k_experts
 
-        # FusedMoE experts with custom Gemma4 routing
+        # FusedMoE experts with custom Gemma4 routing.
         JaxMoE.__init__(
             self,
             dtype=dtype,
             num_local_experts=config.num_experts,
-            hidden_size=config.hidden_size,
-            intermediate_size_moe=config.moe_intermediate_size,
+            hidden_size=config.hidden_size,  # D
+            intermediate_size_moe=config.moe_intermediate_size,  # F
             hidden_act="gelu",
             rngs=rngs,
             router=noop_router,
             mesh=mesh,
             activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-            activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
-            edf_sharding=(None, None, None),
-            efd_sharding=(None, None, None),
+            # Intermediate activation after gate/up is sharded on F
+            activation_ffw_ted=(ShardingAxisName.MLP_DATA, None,
+                                ShardingAxisName.MLP_TENSOR),
+            # We will handle sharding manually during loading to avoid issues
+            edf_sharding=(),
+            efd_sharding=(),
             apply_expert_weight_before_computation=False,
             expert_axis_name=None,
-            # Disable EP for MVP, can enable later if needed
-            # TODO: Enable EP
             num_expert_parallelism=1,
             moe_backend=MoEBackend.GMM_TP,
-            scoring_func=
-            "softmax",  # vLLM implementation has a custom routing function, here we just use "softmax" for MVP
+            scoring_func="softmax",
             renormalize=True,
             quant_config=quant_config,
             prefix=prefix)
 
-    def __call__(self, x_TD: jax.Array, router_logits: jax.Array):
-        """Performs the forward pass of the MoE layer.
-
-        Args:
-            x_TD: Input array of shape (sequence_length, d_model).
-            router_logits: Router logits of shape (sequence_length, num_experts).
-
-        Returns:
-            Output array of shape (sequence_length, d_model) after passing through MoE.
-        """
-        if self.quant_method is not None:
-            return self.quant_method.apply_jax(self,
-                                               x_TD,
-                                               router_logits=router_logits)
-        raise ValueError("Expected quant_method to be set!")
+        # Override generic method to prevent re-processing
+        if self.quant_method is None:
+            self.quant_method = Gemma4MoEMethod()
 
     def load_weights(self, weights: Iterable):
-        """Load weights for Gemma4 MoE layer.
+        """Load, fuse, and shard weights for Gemma4 MoE layer.
 
-        Unlike other MoE, Gemma4 didn't provide per-expert weights, but already fuse projection weight in the checkpoint.
+        Correctly handles the (E, 2*F, D) checkpoint layout and ensures
+        experts are sharded across the TPU mesh to prevent OOM.
         """
-        loaded = set()
+        w_gate = None
+        w_up = None
+        w_down = None
+
+        print(
+            f"DEBUG: Gemma4MoE.load_weights called for prefix {getattr(self, 'prefix', 'unknown')}"
+        )
+
         for name, tensor in weights:
+            print(f"DEBUG: Gemma4MoE processing weight {name}")
             if name.endswith("down_proj"):
-                load_nnx_param_from_reshaped_torch(self.kernel_down_proj_EFD,
-                                                   tensor,
-                                                   permute_dims=(0, 2, 1),
-                                                   param_name=name)
-                loaded.add("kernel_down_proj_EFD")
-                self.kernel_down_proj_EFD._weights_to_load.clear()
-                # Other MoE models store expert weights in shape (D, F) and permute in *FusedMoEMethod.process_weights_after_loading.
-                # For compatibility, we permute here then expect another permute in process_weights_after_loading.
-                self.kernel_down_proj_EFD.value = jnp.swapaxes(
-                    self.kernel_down_proj_EFD.value, 1, 2)
+                # HF tensor is (E, D, F). Put it on TPU mesh with shard_put.
+                w_down = shard_put(jax_array_from_reshaped_torch(tensor),
+                                   shardings=NamedSharding(self.mesh, P()),
+                                   mesh=self.mesh)
             elif name.endswith("gate_up_proj"):
                 F = tensor.shape[1] // 2
-                load_nnx_param_from_reshaped_torch(self.kernel_gating_EDF,
-                                                   tensor[:, :F, :],
-                                                   permute_dims=(0, 2, 1),
-                                                   param_name=name)
-                load_nnx_param_from_reshaped_torch(self.kernel_up_proj_EDF,
-                                                   tensor[:, F:, :],
-                                                   permute_dims=(0, 2, 1),
-                                                   param_name=name)
-                loaded.add("kernel_up_proj_EDF")
-                self.kernel_up_proj_EDF._weights_to_load.clear()
-                loaded.add("kernel_gating_EDF")
-                self.kernel_gating_EDF._weights_to_load.clear()
-                # Other MoE models store expert weights in shape (F, D) and permute in *FusedMoEMethod.process_weights_after_loading.
-                # For compatibility, we permute here then expect another permute in process_weights_after_loading.
-                self.kernel_up_proj_EDF.value = jnp.swapaxes(
-                    self.kernel_up_proj_EDF.value, 1, 2)
-                self.kernel_gating_EDF.value = jnp.swapaxes(
-                    self.kernel_gating_EDF.value, 1, 2)
-        return loaded
+                # HF tensor is (E, 2*F, D). Put it on TPU mesh with shard_put.
+                w_gate_up = shard_put(jax_array_from_reshaped_torch(tensor),
+                                      shardings=NamedSharding(self.mesh, P()),
+                                      mesh=self.mesh)
+                w_gate = w_gate_up[:, :F, :].swapaxes(1, 2)  # (E, D, F)
+                w_up = w_gate_up[:, F:, :].swapaxes(1, 2)  # (E, D, F)
+                del w_gate_up
+
+        if w_gate is not None and w_up is not None and w_down is not None:
+            # 1. Fuse gate and up: (E, 2*F, D)
+            # Generic process_moe_weights expects F to be concatenated on axis 1.
+            w13_val = jnp.concatenate(
+                [w_gate.swapaxes(1, 2),
+                 w_up.swapaxes(1, 2)], axis=1)
+
+            # 2. Call process_moe_weights with correct shapes
+            # w13: (E, 2*F, D), w2: (E, D, F)
+            # It will perform swaps and padding to reach (E, D, 2*F) and (E, F, D).
+            processed = process_moe_weights(
+                weights=FusedMoEWeights(
+                    w13_weight=w13_val,
+                    w2_weight=w_down,
+                    w13_weight_scale=None,
+                    w13_bias=None,
+                    w2_weight_scale=None,
+                    w2_bias=None,
+                ),
+                moe_backend=self.moe_backend,
+                w13_reorder_size=utils.get_mesh_shape_product(
+                    self.mesh, ShardingAxisName.MLP_TENSOR),
+            )
+
+            # 3. Apply final sharding and set as NNX parameters
+            # process_moe_weights returns sharded arrays with the right layouts.
+            self.kernel_gating_upproj_EDF = nnx.Param(processed.w13_weight)
+            self.kernel_gating_upproj_EDF.set_metadata("_is_loaded", True)
+            self.kernel_down_proj_EFD = nnx.Param(processed.w2_weight)
+            self.kernel_down_proj_EFD.set_metadata("_is_loaded", True)
+
+            # These were created by JaxMoE but are now redundant (fused)
+            # Mark them as loaded to satisfy vLLM's initialization check
+            self.kernel_gating_EDF.set_metadata("_is_loaded", True)
+            self.kernel_up_proj_EDF.set_metadata("_is_loaded", True)
+
+            # Clean up temporary arrays
+            del w_gate, w_up, w_down, w13_val, processed
+            gc.collect()
+            return {"kernel_gating_upproj_EDF", "kernel_down_proj_EFD"}
+
+        return set()
 
 
 class Gemma4Attention(JaxModule):
@@ -628,7 +654,7 @@ class Gemma4DecoderLayer(JaxModule):
                 prefix=prefix + ".pre_feedforward_layernorm_2")
         else:
             self.router = None
-            self.moe = None
+            self.experts = None
             self.post_feedforward_layernorm_1 = None
             self.post_feedforward_layernorm_2 = None
             self.pre_feedforward_layernorm_2 = None
@@ -807,10 +833,13 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
             if self.model.is_last_rank:
                 vocab_size = model_config.get_vocab_size()
                 hidden_size = model_config.hf_config.text_config.hidden_size
-                self.lm_head = JaxEinsum(
-                    einsum_str="TD,DV->TV",
-                    kernel_shape=(hidden_size, vocab_size),
-                    dtype=model_config.dtype,
+                self.lm_head = JaxLinear(
+                    hidden_size,
+                    vocab_size,
+                    use_bias=False,
+                    param_dtype=model_config.dtype,
+                    kernel_init=nnx.with_partitioning(init_fn,
+                                                      (None, "model")),
                     rngs=rng,
                     quant_config=vllm_config.quant_config,
                     prefix="lm_head",
@@ -819,18 +848,25 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
                 self.lm_head = PPMissingLayer()
 
     def load_weights(self, weights: Iterable[Tuple[str, Any]]):
-        allowed_layers = set(f"layers.{i}."
-                             for i in range(len(self.model.layers)))
-        stripped_weights = (
-            (clean_name, tensor) for name, tensor in weights
-            if (clean_name := name.replace("language_model.", "")).startswith((
-                "model.", "lm_head")) and
-            "vision" not in clean_name  # Exclude vision tower weights for now
+        loader = JaxAutoWeightsLoader(self)
+        loaded_original_names = set()
+
+        def mapped_weights_generator():
+            for name, tensor in weights:
+                clean_name = name.replace("language_model.", "")
+                if not clean_name.startswith(("model.", "lm_head")):
+                    continue
+                if "vision" in clean_name:
+                    continue
+                yield clean_name, tensor
+                loaded_original_names.add(name)
+
+        mapped_weights = list(mapped_weights_generator())
+        print(
+            f"DEBUG: Gemma4.load_weights yielding {len(mapped_weights)} weights"
         )
-        return super().load_weights(
-            (name, tensor) for name, tensor in stripped_weights
-            if not ("layers." in name and not any(
-                layer_prefix in name for layer_prefix in allowed_layers)))
+        loader.load_weights(mapped_weights)
+        return loaded_original_names
 
     def __call__(
         self,
@@ -858,7 +894,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
             kv_caches,
             input_ids,
             attention_metadata,
-            inputs_embeds,
+            inputs_embeds=inputs_embeds,
             layer_name_to_kv_cache=layer_name_to_kv_cache,
         )
 
