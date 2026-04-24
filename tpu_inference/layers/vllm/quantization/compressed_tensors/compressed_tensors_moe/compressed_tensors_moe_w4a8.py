@@ -48,7 +48,7 @@ class VllmCompressedTensorsW4A8MoEMethod(CompressedTensorsMoEMethod,
     MoE method for int4 weights and 8 bit activations.
 
     Uses fp8 activations for TPU generations that support fp8 compute and int8
-    activations for generations that do not support int8 compute.
+    activations for generations that support int8 compute.
     """
 
     def __init__(
