@@ -92,25 +92,28 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
         is_static_input_scheme: bool,
         linear_config: VllmQuantLinearConfig,
     ):
-        self.weight_quant = weight_quant
-        self.strategy = weight_quant.strategy
+        super().__init__(weight_quant=weight_quant,
+                         is_static_input_scheme=is_static_input_scheme)
+
+        self.linear_config = linear_config
         self.out_dtype = torch.get_default_dtype()
-        self.is_static_input_scheme = is_static_input_scheme
         self.weight_block_size = self.weight_quant.block_structure
 
         if self.weight_block_size is not None:
-            self.cutlass_block_fp8_supported = False
-            self.use_aiter_and_is_supported = False
-            assert not self.is_static_input_scheme
-            self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
-            self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
-                weight_group_shape=GroupShape(*self.weight_block_size),
-                act_quant_group_shape=self.act_q_group_shape,
-                cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
-                use_aiter_and_is_supported=self.use_aiter_and_is_supported,
-            )
+            self._setup_blockwise()
 
-        self.linear_config = linear_config
+    def _setup_blockwise(self):
+        """Setup blockwise quantization parameters."""
+        self.cutlass_block_fp8_supported = False
+        self.use_aiter_and_is_supported = False
+        assert not self.is_static_input_scheme
+        self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
+        self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
+            weight_group_shape=GroupShape(*self.weight_block_size),
+            act_quant_group_shape=self.act_q_group_shape,
+            cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
+            use_aiter_and_is_supported=self.use_aiter_and_is_supported,
+        )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = t2j(layer.weight, use_dlpack=False)
@@ -193,7 +196,6 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                         jnp.transpose(weights.weight_scale),
                         axis=1,
                     )
-                    print(f"DEBUG: compressed_tensors scale shape: {weights.weight_scale.shape}")
                 else:
                     weights.weight_scale = jnp.expand_dims(
                         jnp.transpose(weights.weight_scale),
