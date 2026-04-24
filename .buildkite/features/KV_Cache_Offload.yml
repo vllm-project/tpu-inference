@@ -31,6 +31,7 @@ steps:
     key: "record_KV_Cache_Offload_CorrectnessTest"
     depends_on: "KV_Cache_Offload_CorrectnessTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu7x}"
       CI_TARGET: "KV Cache Offload"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "feature support matrix"
@@ -48,11 +49,13 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-        buildkite-agent meta-data set "KV_Cache_Offload_PerformanceTest" "to be added"
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/offload/tpu_offload_performance_test.py
   - label: "Record performance test result for KV Cache Offload"
     key: "record_KV_Cache_Offload_PerformanceTest"
     depends_on: "KV_Cache_Offload_PerformanceTest"
     env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu7x}"
       CI_TARGET: "KV Cache Offload"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "feature support matrix"
