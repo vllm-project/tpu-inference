@@ -28,8 +28,6 @@ from vllm.model_executor.kernels.linear.scaled_mm import \
     FP8ScaledMMLinearLayerConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
     CompressedTensorsW8A8Fp8
-from vllm.model_executor.layers.quantization.utils.fp8_utils import \
-    W8A8BlockFp8LinearOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     GroupShape
 from vllm.platforms import PlatformEnum
@@ -108,12 +106,6 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
         self.use_aiter_and_is_supported = False
         assert not self.is_static_input_scheme
         self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
-        self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
-            weight_group_shape=GroupShape(*self.weight_block_size),
-            act_quant_group_shape=self.act_q_group_shape,
-            cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
-            use_aiter_and_is_supported=self.use_aiter_and_is_supported,
-        )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = t2j(layer.weight, use_dlpack=False)
