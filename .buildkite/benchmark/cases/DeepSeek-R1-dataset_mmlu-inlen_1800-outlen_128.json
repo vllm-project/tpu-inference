@@ -9,7 +9,7 @@
     "OUTPUT_LEN": 128
   },
   "ci_queue": [
-    "tpu_v7x_2_queue"
+    "tpu_v7x_8_queue"
   ],
   "client_command_options": {
     "command_type": "lm_eval",

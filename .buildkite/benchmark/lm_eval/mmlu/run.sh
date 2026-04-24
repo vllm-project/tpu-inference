@@ -38,7 +38,7 @@ mkdir -p "$LOG_DIR"
 MODEL_ARGS="pretrained=$MODEL_NAME,tensor_parallel_size=${TP_SIZE:-8},dtype=auto,max_model_len=2048,gpu_memory_utilization=0.98"
 
 # Check if running on tpu7x-8 hardware
-if [[ "$DEVICE" == "tpu7x-8" ]]; then
+if [[ "$DEVICE" == tpu7x-8 ]]; then
     echo "Running on v7x hardware, adjusting model arguments for DeepSeek-R1."
     MODEL_ARGS="pretrained=$MODEL_NAME,tensor_parallel_size=8,dtype=auto,max_model_len=2048,max_num_seqs=128,max_num_batched_tokens=128,gpu_memory_utilization=0.95"
 fi
