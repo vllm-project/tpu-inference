@@ -212,16 +212,10 @@ def tgmm_inner_kernel(
     lhs_iota = lax.broadcasted_iota(jnp.int32, tiled_lhs_ref.shape, 0)
     lhs_mask = jnp.logical_and(m_start_local <= lhs_iota, lhs_iota < m_end_local)
     lhs_masked = jnp.where(lhs_mask, tiled_lhs_ref[...], 0)
-    # If there are no NaNs, masking both lhs and rhs shouldn't be necessary.
-    # But without masking both, we sometimes see the result contain NaNs so we
-    # decide to mask both to be safe.
-    rhs_iota = lax.broadcasted_iota(jnp.int32, tiled_rhs_ref.shape, 0)
-    rhs_mask = jnp.logical_and(m_start_local <= rhs_iota, rhs_iota < m_end_local)
-    rhs_masked = jnp.where(rhs_mask, tiled_rhs_ref[...], 0)
 
     acc = acc_ref[...] + jax.lax.dot_general(
         lhs_masked,
-        rhs_masked,
+        tiled_rhs_ref[...],
         (((0,), (0,)), ((), ())),
         preferred_element_type=jnp.float32,
     )
@@ -325,7 +319,7 @@ def generate_tgmm_block_specs(
       index_map.out_index_map,
   )
 
-  return (lhs_block_spec, rhs_block_spec), out_block_spec
+  return (lhs_block_spec, rhs_block_spec), (out_block_spec,)
 
 
 def tgmm_kernel_main(
@@ -350,16 +344,22 @@ def tgmm_kernel_main(
   )
 
   in_specs, out_specs = generate_tgmm_block_specs(metadata_ref, cfgs)
-  pipeline_fn = pltpu.emit_pipeline(
+  pipeline_fn, make_allocation = pltpu.emit_pipeline_with_allocations(
       functools.partial(tgmm_inner_kernel, cfgs=cfgs),
       grid=(num_n, num_k, num_gm),
       in_specs=in_specs,
       out_specs=out_specs,
+      should_accumulate_out=(False,),
   )
   lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, lhs_ref.shape[-1])
   rhs_in = rhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, rhs_ref.shape[-1])
-  scratches = [acc_ref, metadata_ref]
-  pipeline_fn(lhs_in, rhs_in, out_ref, scratches=scratches)
+  allocations = make_allocation(lhs_in, rhs_in, out_ref)
+  def with_allocations(allocations):
+    allocations[1].window_ref[...] = jnp.zeros_like(allocations[1].window_ref[...])
+    scratches = [acc_ref, metadata_ref]
+    pipeline_fn(lhs_in, rhs_in, out_ref, scratches=scratches, allocations=allocations)
+  
+  pl.run_scoped(with_allocations, allocations)
 
 @jax.jit(
     static_argnames=[
