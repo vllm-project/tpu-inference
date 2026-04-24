@@ -4,11 +4,12 @@
 # Nightly benchmark wrapper for DeepSeek V3 (1k input, 8k output).
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
-NIGHTLY_SCRIPT="${SCRIPT_DIR}/../../nightly_benchmarking.sh"
+NIGHTLY_SCRIPT="${SCRIPT_DIR}/../../../nightly_benchmarking.sh"
 
 # Adjust model-path, max-seqs, and code-hash below when officially serving DeepSeek.
 bash "${NIGHTLY_SCRIPT}" \
-  --model-path "/mnt/disks/checkpoint/hub/models--deepseek-ai--DeepSeek-R1/snapshots/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/" \
+  --model-path "gs://tpu-commons-ci/deepseek/r1" \
+  --load-format "runai_streamer" \
   --model-name "DeepSeek-R1" \
   --tokenizer "deepseek-ai/DeepSeek-R1" \
   --input-len 1024 \
@@ -31,6 +32,7 @@ bash "${NIGHTLY_SCRIPT}" \
   --vllm-mla-disable "0" \
   --moe-requantize-block-size "512" \
   --moe-requantize-weight-dtype "fp4" \
-  --api-server-count 3 \
+  --moe-all-gather-activation-dtype "fp8" \
   --force-moe-random-routing "1" \
-  --run-accuracy "mmlu"
+  --phased-profiling-dir "gs://tpu-commons-ci/xprof/deepseek-r1/torchax/1k-8k" \
+  --skip-db-upload
