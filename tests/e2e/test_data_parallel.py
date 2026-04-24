@@ -99,7 +99,7 @@ def _run_inference(
     elapsed_time = time.time() - start_time
 
     del llm
-    time.sleep(10)
+    time.sleep(15)
     return outputs, elapsed_time
 
 

@@ -18,6 +18,7 @@ from typing import List, Tuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from tpu_inference.logger import init_logger
 
@@ -39,7 +40,6 @@ class HostKVPool:
             f"dtype={dtype}, host_sharding={host_sharding}")
         self.pool_size = pool_size
         self.buffers: List[List[jax.Array]] = []
-        self.max_blocks_per_req = max_blocks_per_req
 
         # A thread-safe queue to hold the indices of currently available buffers
         self.available_indices = queue.Queue(maxsize=pool_size)
@@ -49,13 +49,14 @@ class HostKVPool:
 
         logger.info(f"Allocating {pool_size} Host DRAM buffers for KV pool.")
         start_time = time.perf_counter()
+
+        host_zeros = np.zeros(shape=layer_buffer_shape, dtype=dtype)
+
         for i in range(pool_size):
             # Each item in the pool is a list of JAX arrays (one for each transformer layer)
             layer_buffers = [
-                self._create_single_layer_kv_cache_zeros(
-                    cache_shape=layer_buffer_shape,
-                    cache_dtype=dtype,
-                    cache_sharding=host_sharding) for _ in range(num_layers)
+                jax.device_put(host_zeros, host_sharding)
+                for _ in range(num_layers)
             ]
             self.buffers.append(layer_buffers)
 
@@ -65,15 +66,6 @@ class HostKVPool:
         logger.info(
             f"Host DRAM KV pool allocation complete. Time taken: {end_time - start_time:.2f} seconds."
         )
-
-    def _create_single_layer_kv_cache_zeros(self, cache_shape, cache_dtype,
-                                            cache_sharding):
-
-        def _allocate():
-            return jnp.zeros(shape=cache_shape, dtype=cache_dtype)
-
-        sharded_allocate = jax.jit(_allocate, out_shardings=cache_sharding)
-        return sharded_allocate()
 
     def get_buffer(self,
                    block: bool = True,
@@ -105,7 +97,7 @@ class HostKVPool:
         """
         Returns the buffer to the pool so other requests can use it.
         """
-        # logger.info(f"Returning buffer to HostKVPool (idx={idx})")
+        logger.info(f"Returning buffer to HostKVPool (idx={idx})")
 
         if updated_buffer is not None:
             # Overwrite the donated Python references with the new valid ones

@@ -43,6 +43,8 @@ class InferencePhase(Enum):
     DECODE_HEAVY = 1
     BALANCED = 2
     AMBIGUOUS = 3
+    PREFILL_ONLY = 4
+    DECODE_ONLY = 5
 
 
 def get_padded_num_reqs_with_upper_limit(x: int, upper_limit: int) -> int:
@@ -184,22 +186,25 @@ class ForbidCompile:
 
 
 def get_batch_composition_stats(
-        input_batch: InputBatch, total_num_scheduled_tokens: int,
-        num_reqs: int, padded_total_num_scheduled_tokens: int,
+        batch_id: int, input_batch: InputBatch,
+        total_num_scheduled_tokens: int, num_reqs: int,
+        padded_total_num_scheduled_tokens: int,
         scheduler_output: "VllmSchedulerOutput") -> dict:
     """
     Logs the total number of tokens scheduled for the batch, the number of
     prefill tokens, the number of decode tokens, and the number of padded
     tokens scheduled for the batch.
     Args:
+        batch_id: The sequential id of the batch.
         input_batch: The input batch.
         total_num_scheduled_tokens: The total number of tokens scheduled for the batch.
         num_reqs: The number of requests in the batch.
         padded_total_num_scheduled_tokens: The padded total number of tokens scheduled for the batch.
         scheduler_output: The scheduler output.
     Returns:
-        A string containing the total number of tokens scheduled for the batch, the number of
-        prefill tokens, the number of decode tokens, and the number of padded tokens scheduled for the batch.
+        A dict containing the batch id, the total number of tokens scheduled for the batch, the number of
+        prefill tokens, the number of decode tokens, the number of padded tokens scheduled for the batch,
+        the number of requests in the batch, and the phase of the inference the batch is in.
     """
     num_prefill_tokens = 0
     num_decode_tokens = 0
@@ -231,13 +236,17 @@ def get_batch_composition_stats(
             else:
                 # It's a single token for an ongoing request, so it's decode
                 num_decode_tokens += 1
-    return {
+
+    stats = {
+        "batch_id": batch_id,
         "total_num_scheduled_tokens": total_num_scheduled_tokens,
         "num_prefill_tokens": num_prefill_tokens,
         "num_decode_tokens": num_decode_tokens,
         "padded_total_num_scheduled_tokens": padded_total_num_scheduled_tokens,
         "num_reqs": num_reqs
     }
+    stats["phase"] = determine_phase_from_batch_composition_stats(stats).name
+    return stats
 
 
 def determine_phase_from_batch_composition_stats(
@@ -260,15 +269,19 @@ def determine_phase_from_batch_composition_stats(
     total_num_scheduled_tokens = batch_composition_stats[
         "total_num_scheduled_tokens"]
     prefill_ratio_for_batch = num_prefill_tokens / total_num_scheduled_tokens
+    if prefill_ratio_for_batch == 1.0:
+        return InferencePhase.PREFILL_ONLY
+    if prefill_ratio_for_batch == 0.0:
+        return InferencePhase.DECODE_ONLY
     if prefill_ratio_for_batch >= PREFILL_HEAVY_RATIO_THRESHOLD:
         return InferencePhase.PREFILL_HEAVY
-    elif prefill_ratio_for_batch <= DECODE_HEAVY_RATIO_THRESHOLD:
+    if prefill_ratio_for_batch <= DECODE_HEAVY_RATIO_THRESHOLD:
         return InferencePhase.DECODE_HEAVY
-    elif prefill_ratio_for_batch >= BALANCED_RATIO_THRESHOLD[
+    if prefill_ratio_for_batch >= BALANCED_RATIO_THRESHOLD[
             0] and prefill_ratio_for_batch <= BALANCED_RATIO_THRESHOLD[1]:
         return InferencePhase.BALANCED
-    else:
-        return InferencePhase.AMBIGUOUS
+
+    return InferencePhase.AMBIGUOUS
 
 
 class PhasedBasedProfiler:
@@ -307,7 +320,9 @@ class PhasedBasedProfiler:
         self.profile_dir: str = profile_dir
         # NOTE: we purposely don't have AMBIGUOUS here
         self.inference_phase_seen: dict = {
+            InferencePhase.PREFILL_ONLY: False,
             InferencePhase.PREFILL_HEAVY: False,
+            InferencePhase.DECODE_ONLY: False,
             InferencePhase.DECODE_HEAVY: False,
             InferencePhase.BALANCED: False
         }

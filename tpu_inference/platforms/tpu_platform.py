@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import random
 from typing import TYPE_CHECKING, Optional, Tuple, Union
 
 import jax.numpy as jnp
+import numpy
 import torch
 import vllm.envs as vllm_envs
 from vllm.platforms.interface import Platform, PlatformEnum
@@ -90,7 +92,7 @@ class TpuPlatform(Platform):
     simple_compile_backend: str = "openxla"
 
     supported_quantization: list[str] = [
-        "tpu_int8", "compressed-tensors", "awq", "fp8", "mxfp4"
+        "tpu_int8", "compressed-tensors", "awq", "fp8", "gpt_oss_mxfp4"
     ]
 
     additional_env_vars: list[str] = [
@@ -194,6 +196,15 @@ class TpuPlatform(Platform):
             assert not vllm_envs.VLLM_ENABLE_V1_MULTIPROCESSING, (
                 "VLLM_ENABLE_V1_MULTIPROCESSING must be 0 when using Pathways(JAX_PLATFORMS=proxy)"
             )
+
+        if vllm_config.model_config and vllm_config.model_config.use_mla:
+            if not envs.NEW_MODEL_DESIGN or not vllm_config.additional_config.get(
+                    "sharding", {}).get("sharding_strategy", {}).get(
+                        "enable_dp_attention", False):
+                raise ValueError(
+                    "MLA models require both the NEW_MODEL_DESIGN=1 environment "
+                    "variable to be set and DP attention set via: --additional_config \'{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}\'"
+                )
         cls._initialize_sharding_config(vllm_config)
 
         from vllm.config import CompilationMode
@@ -244,6 +255,8 @@ class TpuPlatform(Platform):
                             min_page_size,
                         )
                         cache_config.block_size = min_page_size  # type: ignore[assignment]
+            if envs.USE_BATCHED_RPA_KERNEL and cache_config.block_size < 256:
+                cache_config.block_size = 256
             logger.info(
                 f"Using KV cache block size: {cache_config.block_size}")
 
@@ -285,7 +298,12 @@ class TpuPlatform(Platform):
 
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
-            assert kv_transfer_config.kv_connector == "TPUConnector"
+            allowed = ("TPUConnector", "TPUConnectorHMA")
+            if kv_transfer_config.kv_connector not in allowed:
+                raise ValueError(
+                    f"Unsupported kv_connector "
+                    f"'{kv_transfer_config.kv_connector}' for the TPU "
+                    f"platform. Expected one of {allowed}.")
         # Late initialization to avoid circular import.
         from tpu_inference.core.sched.dp_scheduler import \
             update_vllm_config_for_dp_scheduler
@@ -296,14 +314,23 @@ class TpuPlatform(Platform):
         # TODO: TPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
 
-        # Align block/mamba sizes for hybrid model (may override user settings).
-        if vllm_config.model_config.is_hybrid:
-            backend_cls = cls._find_non_ssm_backend(vllm_config)
-            if backend_cls is None:
-                return
-            cls._align_hybrid_block_size(vllm_config, backend_cls)
-
-        return
+        # vLLM uses `tensor_parallel_size` to calculate the number of KV heads
+        # per partition. When data parallelism is enabled, the global
+        # `tensor_parallel_size` (total workers) is larger than the actual
+        # `tp_size` used.
+        # https://github.com/vllm-project/tpu-inference/blob/618dea5f5c0ca556a6c76a2e1cc130ff6a30893c/tpu_inference/layers/common/sharding.py#L196
+        # Use the sharding calculated `tp_size` for block size calculations.
+        orig_tp_size = vllm_config.parallel_config.tensor_parallel_size
+        vllm_config.parallel_config.tensor_parallel_size = vllm_config.sharding_config.tp_size
+        try:
+            if vllm_config.model_config.is_hybrid:
+                backend_cls = cls._find_non_ssm_backend(vllm_config)
+                if backend_cls is not None:
+                    # Align block/mamba sizes for hybrid model (may override
+                    # user settings).
+                    cls._align_hybrid_block_size(vllm_config, backend_cls)
+        finally:
+            vllm_config.parallel_config.tensor_parallel_size = orig_tp_size
 
     @classmethod
     def is_pin_memory_available(cls):
@@ -364,3 +391,8 @@ class TpuPlatform(Platform):
         on the TPU device(s).
         """
         return torch.device("cpu")
+
+    @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        random.seed(seed)
+        numpy.random.seed(seed)

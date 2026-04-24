@@ -190,10 +190,14 @@ class TestVllmTPUMLAAttention:
             outputs = attn.forward(q, kv_c_normed, k_pe)
 
             mock_get_attention_context.assert_called_once_with("test_layer")
-            attn.impl.forward.assert_called_once_with(q, kv_c_normed, k_pe,
+            attn.impl.forward.assert_called_once_with(q,
+                                                      kv_c_normed,
+                                                      k_pe,
                                                       kv_cache,
-                                                      mock_attn_metadata, mesh,
-                                                      attn)
+                                                      mock_attn_metadata,
+                                                      mesh,
+                                                      attn,
+                                                      output=None)
 
             assert isinstance(outputs, torch.Tensor)
             context = get_vllm_model_wrapper_context()

@@ -22,6 +22,8 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.config.multimodal import BaseDummyOptions
 
+from tpu_inference.models.common.interface import (ModelInterface,
+                                                   MultiModalInterface)
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
@@ -158,14 +160,11 @@ class TestTPUJaxRunner:
         # Mock block tables
         # there will be 2 block tables since there are 2 kv cache groups
         mock_block_table = MagicMock()
-        mock_block_table.get_cpu_tensor.return_value = np.zeros(
-            self.runner.block_tables_cpu[0].shape)
+        mock_block_table.max_num_blocks_per_req = 8
+        mock_block_table.get_cpu_tensor.return_value = np.zeros((1, 8),
+                                                                dtype=np.int32)
         self.runner.input_batch.block_table = [
             mock_block_table, mock_block_table
-        ]
-        self.runner.block_tables_cpu = [
-            np.zeros(self.runner.block_tables_cpu[0].shape, dtype=np.int32),
-            np.zeros(self.runner.block_tables_cpu[0].shape, dtype=np.int32)
         ]
 
         mock_sampling_instance = MagicMock()
@@ -208,7 +207,8 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
              patch('jax.random.key', return_value=self.mock_rng_key), \
              patch('tpu_inference.runner.tpu_runner.nnx.Rngs', return_value=self.mock_rng_key), \
              patch('tpu_inference.runner.tpu_runner.get_model', return_value=self._model_get_model()), \
-             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh', return_value=self.mock_mesh):
+             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh', return_value=self.mock_mesh), \
+             patch('jax.device_put', side_effect=lambda x, *args, **kwargs: x):
 
             model_config = ModelConfig(tokenizer_mode="auto",
                                        trust_remote_code=False,
@@ -244,13 +244,12 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
             self.runner.load_model()
 
     def _model_get_model(self):
-        mock_multimodal_fns = {
-            "precompile_vision_encoder_fn": None,
-            "embed_multimodal_fn": None,
-            "embed_input_ids_fn": None,
-            "get_mrope_input_positions_fn": None
-        }
-        return (
+        mock_multimodal_fns = MultiModalInterface(
+            precompile_vision_encoder_fn=None,
+            embed_multimodal_fn=None,
+            embed_input_ids_fn=None,
+            get_mrope_input_positions_fn=None)
+        return ModelInterface(
             MagicMock(),  # TPUModelRunner.model_fn
             MagicMock(),  # TPUModelRunner.compute_logits_fn
             MagicMock(),  # TPUModelRunner.pooler_fn
@@ -290,13 +289,12 @@ class TestTPUJaxRunnerDisableMM:
                                        ('data', 'attn_dp', 'expert', 'model'))
 
     def _model_get_model(self):
-        mock_multimodal_fns = {
-            "precompile_vision_encoder_fn": None,
-            "embed_multimodal_fn": MagicMock(),
-            "embed_input_ids_fn": MagicMock(),
-            "get_mrope_input_positions_fn": None
-        }
-        return (
+        mock_multimodal_fns = MultiModalInterface(
+            precompile_vision_encoder_fn=None,
+            embed_multimodal_fn=MagicMock(),
+            embed_input_ids_fn=MagicMock(),
+            get_mrope_input_positions_fn=None)
+        return ModelInterface(
             MagicMock(),  # TPUModelRunner.model_fn
             MagicMock(),  # TPUModelRunner.compute_logits_fn
             MagicMock(),  # TPUModelRunner.pooler_fn
@@ -338,7 +336,8 @@ class TestTPUJaxRunnerDisableMM:
              patch('jax.random.key', return_value=self.mock_rng_key), \
              patch('tpu_inference.runner.tpu_runner.nnx.Rngs', return_value=self.mock_rng_key), \
              patch('tpu_inference.runner.tpu_runner.get_model', return_value=self._model_get_model()), \
-             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh', return_value=self.mock_mesh):
+             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh', return_value=self.mock_mesh), \
+             patch('jax.device_put', side_effect=lambda x, *args, **kwargs: x):
 
             model_config = ModelConfig(tokenizer_mode="auto",
                                        trust_remote_code=False,
