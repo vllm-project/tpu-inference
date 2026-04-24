@@ -221,12 +221,9 @@ class TpuPlatform(Platform):
 
         # Dump all keys from text_config to hf_config if they don't exist
         hf_config = vllm_config.model_config.hf_config
-        print(f"{hf_config=}")
         text_config = getattr(hf_config, "text_config", None)
-        print(f"{text_config=}")
         if text_config:
           config_dict = text_config if isinstance(text_config, dict) else getattr(text_config, "to_dict", lambda: {})()
-          print(f"{config_dict=}")
           for key, value in config_dict.items():
             if not hasattr(hf_config, key):
               setattr(hf_config, key, value)

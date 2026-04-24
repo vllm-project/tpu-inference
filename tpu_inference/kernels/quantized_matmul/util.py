@@ -271,16 +271,6 @@ def validate_inputs(
                                              != w_scale.shape[2]):
         raise ValueError(
             f"{w_q.shape[0]=} must be equal to {w_scale.shape[1]=}")
-    # if w_scale.ndim == 3:
-    #     if w_q.shape[0] != w_scale.shape[2]:
-    #         raise ValueError(
-    #             f"{w_q.shape[0]=} must be equal to {w_scale.shape[2]=} for 3D scale"
-    #         )
-    # else:
-    #     if w_q.shape[0] != w_scale.shape[1]:
-    #         raise ValueError(
-    #             f"{w_q.shape[0]=} must be equal to {w_scale.shape[1]=} for 2D scale"
-    #         )
     if x_abs_max is not None and x_abs_max.shape != (1, x.shape[0]):
         raise ValueError(
             f"{x_abs_max.shape=} must be equal to (1, {x.shape[0]=})")

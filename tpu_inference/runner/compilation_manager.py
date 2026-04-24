@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import time
-import functools
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 
 import jax

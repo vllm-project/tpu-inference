@@ -151,7 +151,6 @@ class VllmCompressedTensorsW8A8Int8(CompressedTensorsW8A8Int8):
             )
 
         weights = process_int8_linear_weights(weight, weight_scale, bias)
-
         weights = torch_view(
             shard_linear_weights(
                 weights,
