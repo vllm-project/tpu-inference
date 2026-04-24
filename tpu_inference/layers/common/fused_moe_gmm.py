@@ -242,7 +242,10 @@ def moe_gmm_local(
     reduction_axis = (ShardingAxisName.MLP_TENSOR
                       if parallelism == "tp" else ShardingAxisName.EXPERT)
     # Then global reduction on all ranks for all tokens and all experts
-    return jax.lax.psum(token_hidden, axis_name=reduction_axis).astype(x.dtype)
+    # return jax.lax.psum(token_hidden, axis_name=reduction_axis).astype(x.dtype)
+    return jax.lax.psum_scatter(token_hidden,
+                                axis_name=reduction_axis,
+                                tiled=True).astype(x.dtype)
 
 
 def tensor_parallel_gmm(
@@ -372,7 +375,7 @@ def expert_parallel_gmm(
             data_p_spec,
             data_p_spec,
         ),
-        out_specs=(data_p_spec),
+        out_specs=(P(ShardingAxisName.EXPERT)),
         check_vma=False,
     )(
         x,

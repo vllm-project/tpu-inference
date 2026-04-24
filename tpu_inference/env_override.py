@@ -12,7 +12,10 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 # will be used by default, effectively overriding this value
 # TODO (jrplatin/clee1994): remove this after https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/kernels/gather/gather_reduce.py
 # is moved to Pallas
-os.environ["LIBTPU_INIT_ARGS"] = "--xla_tpu_use_tc_device_shape_on_sc=true " + os.environ.get("LIBTPU_INIT_ARGS", "")
+os.environ["LIBTPU_INIT_ARGS"] = (
+    "--xla_tpu_use_tc_device_shape_on_sc=true "
+    "--xla_tpu_enable_sparse_core_reduce_scatter_padding=true "
+    + os.environ.get("LIBTPU_INIT_ARGS", ""))
 # AOT compile is currently a Torch-only feature and thus we should not enable it
 # for TPU
 os.environ["VLLM_USE_AOT_COMPILE"] = "0"
