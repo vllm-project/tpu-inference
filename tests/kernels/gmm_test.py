@@ -862,6 +862,54 @@ class GmmTest(jtu.JaxTestCase):
 
     self.assertArraysAllClose(actual, expected, atol=atol, rtol=rtol)
 
+  def test_gmm_deepseekv3(self):
+    num_groups = 256
+    m = 262144
+    k = 7168
+    n = 2048
+    lhs_dtype = jnp.bfloat16
+
+    key = jax.random.key(0)
+    k1, k2 = jax.random.split(key)
+    lhs = jax.random.normal(k1, (m, k), dtype=lhs_dtype)
+    rhs = jax.random.normal(
+        key, (num_groups, k, n), dtype=jnp.bfloat16
+    )
+    weight_dtype = jnp.float8_e4m3fn
+    block_size = 512
+    rhs_q, rhs_scale = quantize_tensor(
+        rhs, weight_dtype, axis=1, block_size=block_size
+    )
+    rhs_scale = jnp.expand_dims(rhs_scale, axis=2)
+    cotangent = jax.random.normal(
+        k2, (m, n), dtype=lhs_dtype
+    )
+    group_sizes = get_group_sizes(m, num_groups)
+
+    actual = gmm_v2(
+        lhs,
+        rhs_q,
+        group_sizes,
+        rhs_scale=rhs_scale,
+    )
+    actual.block_until_ready()
+
+    grad_lhs = gmm_v2(
+        cotangent,
+        rhs_q.swapaxes(1, 2),
+        group_sizes,
+    )
+    grad_lhs.block_until_ready()
+
+    grad_rhs = tgmm_v2(
+        lhs,
+        cotangent,
+        group_sizes,
+        num_groups,
+        preferred_element_type=jnp.bfloat16,
+    )
+    grad_rhs.block_until_ready()
+
 
 if __name__ == "__main__":
   absltest.main(testLoader=jtu.JaxTestLoader())
