@@ -15,7 +15,7 @@
     "command_type": "lm_eval",
     "env": {
       "VLLM_MLA_DISABLE": 1,
-      "NEW_MODEL_DESIGN": true,
+      "NEW_MODEL_DESIGN": 1,
       "TPU_BACKEND_TYPE": "jax"
     },
     "args": {
