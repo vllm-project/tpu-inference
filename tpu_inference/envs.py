@@ -43,6 +43,10 @@ if TYPE_CHECKING:
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
     RAGGED_GATED_DELTA_RULE_IMPL: str = "ragged_gated_delta_rule_chunked"
     MOE_ALL_GATHER_ACTIVATION_DTYPE: str = ""
+    # RPA kernel block size overrides (format: "bq_sz,bkv_sz,bq_csz,bkv_csz")
+    RPA_D_BLOCK_SIZES: str | None = None
+    RPA_P_BLOCK_SIZES: str | None = None
+    RPA_M_BLOCK_SIZES: str | None = None
 
 
 def env_with_choices(
@@ -253,6 +257,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
                      ]),
     "MOE_ALL_GATHER_ACTIVATION_DTYPE":
     lambda: os.getenv("MOE_ALL_GATHER_ACTIVATION_DTYPE", ""),
+    # RPA kernel block size overrides (format: "bq_sz,bkv_sz,bq_csz,bkv_csz")
+    # e.g. RPA_D_BLOCK_SIZES="1,4096,1,256"
+    "RPA_D_BLOCK_SIZES":
+    lambda: os.getenv("RPA_D_BLOCK_SIZES", None),
+    # e.g. RPA_P_BLOCK_SIZES="32,4096,32,256"
+    "RPA_P_BLOCK_SIZES":
+    lambda: os.getenv("RPA_P_BLOCK_SIZES", None),
+    # e.g. RPA_M_BLOCK_SIZES="32,4096,32,256"
+    "RPA_M_BLOCK_SIZES":
+    lambda: os.getenv("RPA_M_BLOCK_SIZES", None),
 }
 
 
