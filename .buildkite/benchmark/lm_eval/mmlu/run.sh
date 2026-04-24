@@ -40,7 +40,8 @@ MODEL_ARGS="pretrained=$MODEL_NAME,tensor_parallel_size=${TP_SIZE:-8},dtype=auto
 # Check if running on tpu7x-8 hardware
 if [[ "$DEVICE" == tpu7x-8 ]]; then
     echo "Running on v7x hardware, adjusting model arguments for DeepSeek-R1."
-    MODEL_ARGS="pretrained=$MODEL_NAME,tensor_parallel_size=8,dtype=auto,max_model_len=2048,max_num_seqs=128,max_num_batched_tokens=128,gpu_memory_utilization=0.95"
+    # MODEL_ARGS="pretrained=$MODEL_NAME,tensor_parallel_size=8,dtype=auto,max_model_len=2048,max_num_seqs=128,max_num_batched_tokens=128,gpu_memory_utilization=0.95"
+    MODEL_ARGS="pretrained=$MODEL_NAME,tensor_parallel_size=8,dtype=auto,max_model_len=2048,max_num_seqs=128,max_num_batched_tokens=128,gpu_memory_utilization=0.95,additional_config={\"sharding\":{\"sharding_strategy\":{\"enable_dp_attention\":true}}}"
 fi
 
 CMD=(
