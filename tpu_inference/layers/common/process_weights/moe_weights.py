@@ -562,7 +562,7 @@ def process_fp8_moe_weights(
     if envs.DISABLE_WEIGHT_REQUANTIZATION:
         # Check if scales need transposing to match expected shape for process_moe_weights.
         # process_moe_weights expects (num_experts, out_dim, num_blocks)
-        logger.info_once("Disabled weigth requant")
+        logger.info_once("Disabled weight requantization")
 
         in_block_size = weight_block_size[
             1] if weight_block_size is not None else 128
