@@ -681,11 +681,9 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                 loaded_original_names.add(name)
 
         mapped_weights = list(mapped_weights_generator())
-        print(
-            f"DEBUG: Gemma4MM.load_weights yielding {len(mapped_weights)} weights"
-        )
-        loader.load_weights(mapped_weights)
-        return loaded_original_names
+        mapped_weights.sort(key=lambda x: x[0])
+        loaded_weights = loader.load_weights(mapped_weights)
+        return loaded_weights
 
     def embed_input_ids(self,
                         input_ids: jax.Array,

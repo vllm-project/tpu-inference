@@ -228,6 +228,13 @@ class Gemma4MoE(JaxMoE):
         # Override generic method to prevent re-processing
         if self.quant_method is None:
             self.quant_method = Gemma4MoEMethod()
+        else:
+            # If Qwix or another quantizer is active, it will try to run the generic
+            # FusedMoE process_weights_after_loading which crashes looking for unfused params.
+            # Gemma4MoE already handles fusion manually, so we disable it.
+            import types
+            self.quant_method.process_weights_after_loading = types.MethodType(
+                lambda self, layer: True, self.quant_method)
 
     def load_weights(self, weights: Iterable):
         """Load, fuse, and shard weights for Gemma4 MoE layer.
@@ -239,12 +246,7 @@ class Gemma4MoE(JaxMoE):
         w_up = None
         w_down = None
 
-        print(
-            f"DEBUG: Gemma4MoE.load_weights called for prefix {getattr(self, 'prefix', 'unknown')}"
-        )
-
         for name, tensor in weights:
-            print(f"DEBUG: Gemma4MoE processing weight {name}")
             if name.endswith("down_proj"):
                 # HF tensor is (E, D, F). Put it on TPU mesh with shard_put.
                 w_down = shard_put(jax_array_from_reshaped_torch(tensor),
@@ -259,6 +261,8 @@ class Gemma4MoE(JaxMoE):
                 w_gate = w_gate_up[:, :F, :].swapaxes(1, 2)  # (E, D, F)
                 w_up = w_gate_up[:, F:, :].swapaxes(1, 2)  # (E, D, F)
                 del w_gate_up
+
+        loaded_keys = set()
 
         if w_gate is not None and w_up is not None and w_down is not None:
             # 1. Fuse gate and up: (E, 2*F, D)
@@ -286,22 +290,47 @@ class Gemma4MoE(JaxMoE):
 
             # 3. Apply final sharding and set as NNX parameters
             # process_moe_weights returns sharded arrays with the right layouts.
-            self.kernel_gating_upproj_EDF = nnx.Param(processed.w13_weight)
+
+            # Explicitly create fresh PartitionSpecs. We ONLY shard the Expert (E) dimension.
+            # Using both EXPERT and MLP_TENSOR causes DuplicateSpecError on 1D meshes because
+            # both map to the "model" axis.
+            edf_spec = P(ShardingAxisName.EXPERT, None, None)
+            efd_spec = P(ShardingAxisName.EXPERT, None, None)
+
+            self.kernel_gating_upproj_EDF = nnx.Param(
+                shard_put(processed.w13_weight,
+                          NamedSharding(self.mesh, edf_spec)))
             self.kernel_gating_upproj_EDF.set_metadata("_is_loaded", True)
-            self.kernel_down_proj_EFD = nnx.Param(processed.w2_weight)
+            self.kernel_down_proj_EFD = nnx.Param(
+                shard_put(processed.w2_weight,
+                          NamedSharding(self.mesh, efd_spec)))
             self.kernel_down_proj_EFD.set_metadata("_is_loaded", True)
 
-            # These were created by JaxMoE but are now redundant (fused)
-            # Mark them as loaded to satisfy vLLM's initialization check
-            self.kernel_gating_EDF.set_metadata("_is_loaded", True)
-            self.kernel_up_proj_EDF.set_metadata("_is_loaded", True)
+            # These were created by JaxMoE but are now redundant (fused).
+            # We must delete them so Qwix doesn't try to trace over their ShapeDtypeStructs.
+            if hasattr(self, "kernel_gating_EDF"):
+                del self.kernel_gating_EDF
+            if hasattr(self, "kernel_up_proj_EDF"):
+                del self.kernel_up_proj_EDF
+
+            # Mark the original checkpoint keys as loaded to satisfy vLLM
+            loaded_keys.update({
+                "kernel_gating_upproj_EDF", "kernel_down_proj_EFD",
+                "kernel_gating_EDF", "kernel_up_proj_EDF"
+            })
 
             # Clean up temporary arrays
             del w_gate, w_up, w_down, w13_val, processed
             gc.collect()
-            return {"kernel_gating_upproj_EDF", "kernel_down_proj_EFD"}
 
-        return set()
+        return loaded_keys
+
+    def __call__(self, x_TD: jax.Array, router_logits: jax.Array) -> jax.Array:
+        if self.quant_method is not None:
+            return self.quant_method.apply_jax(self,
+                                               x_TD,
+                                               router_logits=router_logits)
+        raise ValueError("Expected quant_method to be set!")
 
 
 class Gemma4Attention(JaxModule):
@@ -849,7 +878,6 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
 
     def load_weights(self, weights: Iterable[Tuple[str, Any]]):
         loader = JaxAutoWeightsLoader(self)
-        loaded_original_names = set()
 
         def mapped_weights_generator():
             for name, tensor in weights:
@@ -859,14 +887,11 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
                 if "vision" in clean_name:
                     continue
                 yield clean_name, tensor
-                loaded_original_names.add(name)
 
         mapped_weights = list(mapped_weights_generator())
-        print(
-            f"DEBUG: Gemma4.load_weights yielding {len(mapped_weights)} weights"
-        )
-        loader.load_weights(mapped_weights)
-        return loaded_original_names
+        mapped_weights.sort(key=lambda x: x[0])
+        loaded_weights = loader.load_weights(mapped_weights)
+        return loaded_weights
 
     def __call__(
         self,
