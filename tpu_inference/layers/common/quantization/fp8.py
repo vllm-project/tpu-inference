@@ -29,6 +29,9 @@ from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.common.utils import (
     reorder_concatenated_tensor_for_sharding,
     slice_sharded_tensor_for_concatenation)
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class Fp8LinearMethod:
@@ -97,6 +100,7 @@ def process_blockwise_fp8_linear_weights(
     n_shards,
 ) -> LinearWeights:
     if envs.DISABLE_WEIGHT_REQUANTIZATION:
+        logger.info_once("Disabled weight requantization")
         original_block_size = weight_block_size[0]
         output_sizes_blocks = [s // original_block_size for s in output_sizes]
 

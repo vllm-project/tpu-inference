@@ -79,7 +79,13 @@ def sharded_quantized_matmul(x: jax.Array,
             out_axis,
         )
     else:
-        scale_sharding = P(out_axis, )
+        # Blockwise case
+        if len(w_s.shape) == 2:
+            # 2D FP8 block scales must be sharded identically to the weights
+            scale_sharding = weight_spec
+        else:
+            # 1D per-channel scales shard along the output axis
+            scale_sharding = P(out_axis, )
     out_sharding = P(ShardingAxisName.ATTN_DATA, out_axis)
 
     if x_q_dtype is None:
