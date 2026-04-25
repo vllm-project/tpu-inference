@@ -417,8 +417,15 @@ def get_vllm_model(
 ) -> ModelInterface:
     model_dtype = to_torch_dtype(vllm_config.model_config.dtype)
     vllm_config.model_config.dtype = model_dtype
-    from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
+    from vllm.model_executor.models.registry import ModelRegistry
+    if "AFMTextV7Wrapper" not in ModelRegistry.get_supported_archs():
+        ModelRegistry.register_model(
+            "AFMTextV7Wrapper",
+            "torchtitan.experiments.tpu.afmv7:AFMTextV7Wrapper")
+        logger.info(
+            "Dynamically registered AFMTextV7Wrapper with vLLM registry.")
 
+    from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
     model = VllmModelWrapper(
         vllm_config=vllm_config,
         rng=rng,
