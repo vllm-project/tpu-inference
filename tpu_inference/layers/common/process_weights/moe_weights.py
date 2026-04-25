@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass, fields
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -164,7 +165,38 @@ def process_w13_for_gmm(tensor,
                         padded_output_sizes: list[int] | None = None,
                         name: str = "w13",
                         scale_ratio: int = 1):
-    """helper to split, pad, concatenate, and reorder w13 tensors."""
+    """Splits, pads, concatenates, and optionally reorders W13 tensors for GMM backends.
+
+    This function takes a fused W13 tensor (which contains both W1 and W3 weights
+    or their corresponding scales), splits them apart, applies specific padding
+    for alignment, and then recombines them.
+
+    Args:
+        tensor: The input JAX array. Can be the actual weight tensor or its
+            corresponding block-quantized scale tensor.
+        concat_dim: The axis dimension along which W1 and W3 are concatenated.
+        config: A `W13PaddingConfig` object containing the unscaled sizes and padding
+            amounts calculated based on the full *weight* tensor dimensions.
+        padded_output_sizes: Optional list of sizes for the padded W1 and W3 blocks.
+            If provided, triggers a reordering of the concatenated tensor for optimal
+            TP sharding.
+        name: String identifier used for logging tensor shapes.
+        scale_ratio: The dimensional reduction factor of the `tensor` compared to the
+            base weight tensor.
+            - For standard weights, this is 1.
+            - For block-quantized scales (not using the requantized path
+            block size (e.g., 128).  This dynamically scales down the split and pad
+            indices in `config` to  prevent index out-of-bounds errors on the smaller scale
+            tensors. Finally, it upsamples (repeats) the resulting tensor by this ratio
+            so the final scales align 1-to-1 with the dimensions of the full weight tensor.
+
+    Returns:
+        The processed JAX array, appropriately padded and dimensionally aligned
+        for the target MoE hardware backend.
+    """
+
+    if not envs.DISABLE_WEIGHT_REQUANTIZATION:
+        assert scale_ratio == 1, "If not requantizing, scale_ratio should be 1!"
 
     # Adjust config values for scale tensors with reduced dimensions
     intermediate_size = config.intermediate_size // scale_ratio
@@ -260,10 +292,6 @@ def process_moe_weights(
                 w3_weight_scale = w13_weight_scale[:, 1::2, :]
                 w13_weight_scale = jnp.concat(
                     [w1_weight_scale, w3_weight_scale], axis=1)
-            elif w13_weight_scale.ndim == 3 and w13_weight_scale.shape[
-                    1] * 2 == w13_weight.shape[1] // 128:
-                # This case shouldn't really happen with current SwiGLU implementations
-                pass
 
         if w13_bias is not None:
             w1_bias = w13_bias[:, ::2]
@@ -279,23 +307,15 @@ def process_moe_weights(
     w2_weight = with_layout_constraint(w2_weight, Layout((0, 1, 2)))
 
     if w13_weight_scale is not None:
-        w13_weight_scale = w13_weight_scale.astype(jnp.float32)
         # For block scales (experts, out_blocks, in_blocks), we need to maintain the block dims
-        if w13_weight_scale.ndim == 3:
-            w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
-            w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
-        else:
-            w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
-            w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
+        w13_weight_scale = w13_weight_scale.astype(jnp.float32)
+        w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
+        w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
 
     if w2_weight_scale is not None:
         w2_weight_scale = w2_weight_scale.astype(jnp.float32)
-        if w2_weight_scale.ndim == 3:
-            w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
-            w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
-        else:
-            w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
-            w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
+        w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
+        w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
 
     if w13_bias is not None:
         w13_bias = w13_bias.astype(jnp.float32)
@@ -339,11 +359,20 @@ def process_moe_weights(
             )
 
             if w13_weight_scale is not None:
-                # TODO: handle block scales for FUSED_MOE if needed
-                pass
+                w13_weight_scale = w13_weight_scale.reshape(
+                    num_experts, -1, 2, 1, intermediate_size)
+                w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
+                w13_weight_scale = jnp.pad(
+                    w13_weight_scale,
+                    ((0, 0), (0, 0), (0, pad_width_hidden_size), (0, 0),
+                     (0, pad_width_intermediate_size)),
+                )
             if w2_weight_scale is not None:
-                # TODO: handle block scales for FUSED_MOE if needed
-                pass
+                w2_weight_scale = jnp.pad(
+                    w2_weight_scale,
+                    ((0, 0), (0, pad_width_intermediate_size), (0, 0),
+                     (0, pad_width_hidden_size)),
+                )
 
             if w13_bias is not None:
                 w13_bias = w13_bias.reshape(num_experts, 2, 1,
@@ -371,34 +400,31 @@ def process_moe_weights(
                 pad_config.padded_intermediate_size
             ]
 
-            w13_weight = process_w13_for_gmm(
-                tensor=w13_weight,
-                concat_dim=2,
-                config=pad_config,
-                padded_output_sizes=padded_output_sizes,
-                name="w13_weight")
+            process_w13_tp = partial(process_w13_for_gmm,
+                                     config=pad_config,
+                                     padded_output_sizes=padded_output_sizes)
+
+            w13_weight = process_w13_tp(tensor=w13_weight,
+                                        concat_dim=2,
+                                        name="w13_weight")
 
             if w13_weight_scale is not None:
                 scale_ratio = w13_weight.shape[2] // w13_weight_scale.shape[3]
-                w13_weight_scale = process_w13_for_gmm(
-                    tensor=w13_weight_scale,
-                    concat_dim=3,
-                    config=pad_config,
-                    padded_output_sizes=padded_output_sizes,
-                    name="w13_weight_scale",
-                    scale_ratio=scale_ratio)
+                w13_weight_scale = process_w13_tp(tensor=w13_weight_scale,
+                                                  concat_dim=3,
+                                                  name="w13_weight_scale",
+                                                  scale_ratio=scale_ratio)
 
             if w13_bias is not None:
-                w13_bias = process_w13_for_gmm(
-                    tensor=w13_bias,
-                    concat_dim=2,
-                    config=pad_config,
-                    padded_output_sizes=padded_output_sizes,
-                    name="w13_bias")
+                w13_bias = process_w13_tp(tensor=w13_bias,
+                                          concat_dim=2,
+                                          name="w13_bias")
 
             if w2_weight_scale is not None:
                 # upscale out_dim // block_size to hidden_size
                 scale_ratio = hidden_size // w2_weight_scale.shape[3]
+                if not envs.DISABLE_WEIGHT_REQUANTIZATION:
+                    assert scale_ratio == 1, "If not requantizing, scale_ratio should be 1!"
                 if scale_ratio > 1:
                     w2_weight_scale = jnp.repeat(w2_weight_scale,
                                                  scale_ratio,
@@ -409,25 +435,30 @@ def process_moe_weights(
                                                 reorder_size=1,
                                                 align=128)
 
-            w13_weight = process_w13_for_gmm(tensor=w13_weight,
-                                             concat_dim=2,
-                                             config=pad_config,
-                                             name="w13_weight")
+            process_w13_ep = partial(process_w13_for_gmm, config=pad_config)
+
+            w13_weight = process_w13_ep(tensor=w13_weight,
+                                        concat_dim=2,
+                                        name="w13_weight")
+
             if w13_weight_scale is not None:
                 scale_ratio = w13_weight.shape[2] // w13_weight_scale.shape[3]
-                w13_weight_scale = process_w13_for_gmm(tensor=w13_weight_scale,
-                                                       concat_dim=3,
-                                                       config=pad_config,
-                                                       name="w13_weight_scale",
-                                                       scale_ratio=scale_ratio)
+                if not envs.DISABLE_WEIGHT_REQUANTIZATION:
+                    assert scale_ratio == 1, "If not requantizing, scale_ratio should be 1!"
+                w13_weight_scale = process_w13_ep(tensor=w13_weight_scale,
+                                                  concat_dim=3,
+                                                  name="w13_weight_scale",
+                                                  scale_ratio=scale_ratio)
+
             if w13_bias is not None:
-                w13_bias = process_w13_for_gmm(tensor=w13_bias,
-                                               concat_dim=2,
-                                               config=pad_config,
-                                               name="w13_bias")
+                w13_bias = process_w13_ep(tensor=w13_bias,
+                                          concat_dim=2,
+                                          name="w13_bias")
 
             if w2_weight_scale is not None:
                 scale_ratio = hidden_size // w2_weight_scale.shape[3]
+                if not envs.DISABLE_WEIGHT_REQUANTIZATION:
+                    assert scale_ratio == 1, "If not requantizing, scale_ratio should be 1!"
                 if scale_ratio > 1:
                     w2_weight_scale = jnp.repeat(w2_weight_scale,
                                                  scale_ratio,
@@ -550,18 +581,14 @@ def process_fp8_moe_weights(
 ) -> FusedMoEWeights:
     w13_weight = weights.w13_weight
     w13_weight_scale = weights.w13_weight_scale
-    w13_bias = weights.w13_bias
     w2_weight = weights.w2_weight
     w2_weight_scale = weights.w2_weight_scale
-    w2_bias = weights.w2_bias
 
     w13_interleave = activation == "swigluoai"
     w13_reorder_size = get_mesh_shape_product(mesh,
                                               ShardingAxisName.MLP_TENSOR)
 
     if envs.DISABLE_WEIGHT_REQUANTIZATION:
-        # Check if scales need transposing to match expected shape for process_moe_weights.
-        # process_moe_weights expects (num_experts, out_dim, num_blocks)
         logger.info_once("Disabled weight requantization")
 
         in_block_size = weight_block_size[
@@ -584,14 +611,15 @@ def process_fp8_moe_weights(
                         2] != in_blocks_2:
                 w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
 
+        # TODO (jacobplatin): add support for bias
         return process_moe_weights(
             FusedMoEWeights(
                 w13_weight=w13_weight,
                 w13_weight_scale=w13_weight_scale,
-                w13_bias=w13_bias,
+                w13_bias=None,
                 w2_weight=w2_weight,
                 w2_weight_scale=w2_weight_scale,
-                w2_bias=w2_bias,
+                w2_bias=None,
             ),
             moe_backend=moe_backend,
             w13_reorder_size=w13_reorder_size,
