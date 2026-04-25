@@ -148,6 +148,7 @@ def moe_apply(
                     sc_kernel_threshold=envs.SC_KERNEL_THRESHOLD,
                     sc_kernel_col_chunk_size=envs.SC_KERNEL_COL_CHUNK_SIZE,
                     all_gather_fp8=all_gather_fp8,
+                    sc_psum_num_chunks=envs.SC_PSUM_NUM_CHUNKS,
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance

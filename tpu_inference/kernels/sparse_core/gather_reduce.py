@@ -32,6 +32,10 @@ from jax.interpreters import mlir
 from jaxlib.mlir import ir
 from jaxlib.mlir.dialects import arith, func, memref, scf, vector
 
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 class VectorTypeHelper:
     """Helper to create VectorType with a specific element type."""
@@ -50,11 +54,37 @@ _F32 = VectorTypeHelper(ir.F32Type.get)
 _BF16 = VectorTypeHelper(ir.BF16Type.get)
 
 
-def is_supported_by_sc_gather_reduce(x_shape: int,
-                                     sc_kernel_threshold: int) -> bool:
-    if x_shape > sc_kernel_threshold and pltpu.get_tpu_info().generation == 7:
+def is_supported_by_sc_gather_reduce(x_shape: int, sc_kernel_threshold: int,
+                                     reduce_group_size: int) -> bool:
+    if x_shape > sc_kernel_threshold and pltpu.get_tpu_info(
+    ).generation == 7 and reduce_group_size == 8:
         return True
+
+    logger.warning(
+        'Plattform does not support SparseCore, gather reduce not performed on SparseCore.'
+    )
     return False
+
+
+def get_valid_col_chunk_size(total_cols: int,
+                             requested_chunk_size: int) -> int:
+    """Ensures the chunk size perfectly divides the total columns.
+    
+    If it doesn't, returns the largest valid divisor smaller than the requested size.
+    """
+    if total_cols % requested_chunk_size == 0:
+        return requested_chunk_size
+
+    # Iterate backwards from the requested size to find the nearest valid divisor
+    for divisor in range(requested_chunk_size - 1, 0, -1):
+        if total_cols % divisor == 0:
+            logger.warning(
+                f"sc_kernel_col_chunk_size ({requested_chunk_size}) does not evenly "
+                f"divide the hidden size ({total_cols}). Automatically adjusting to "
+                f"the nearest valid divisor: {divisor}.")
+            return divisor
+
+    return 1  # Fallback (1 perfectly divides everything)
 
 
 @jax.jit(static_argnames=[
@@ -84,7 +114,7 @@ def sc_gather_reduce(
     loop_parallel_access_1: bool = True,
     loop_parallel_access_2: bool = False,
     loop_parallel_access_3: bool = False,
-    topk_wgt_zero_nan: bool = False,
+    topk_wgt_zero_nan: bool = True,
 ) -> jax.Array:
     """Performs a gather-reduce operation on SparseCore.
 
@@ -200,23 +230,23 @@ def sc_gather_reduce(
                                       col_pos):
                 """Fills the offset tile for indirect DMA gather.
 
-        This function calculates the HBM offsets from which to gather rows
-        based on the indices in idx_tile_local, for a given column chunk.
-        The offsets are calculated to correctly index into the operand `op`
-        in HBM, considering the memory layout and the current column chunk
-        being processed. The calculated offsets are stored in
-        offset_tile_local, which is later used by tpu.enqueue_indirect_dma.
+                This function calculates the HBM offsets from which to gather rows
+                based on the indices in idx_tile_local, for a given column chunk.
+                The offsets are calculated to correctly index into the operand `op`
+                in HBM, considering the memory layout and the current column chunk
+                being processed. The calculated offsets are stored in
+                offset_tile_local, which is later used by tpu.enqueue_indirect_dma.
 
-        Args:
-          offset_tile_local: The destination memref in TileSpMem to store
-            calculated offsets.
-          idx_tile_local: A memref in TileSpMem containing a chunk of indices of
-            rows to gather from `op`.
-          col_pos: The index of the current column chunk being processed.
+                Args:
+                  offset_tile_local: The destination memref in TileSpMem to store
+                    calculated offsets.
+                  idx_tile_local: A memref in TileSpMem containing a chunk of indices of
+                    rows to gather from `op`.
+                  col_pos: The index of the current column chunk being processed.
 
-        Returns:
-          The offset_tile_local memref filled with offsets for DMA gather.
-        """
+                Returns:
+                  The offset_tile_local memref filled with offsets for DMA gather.
+                """
                 idx_loaded = tpu.load(
                     _I32[row_chunk_size],
                     idx_tile_local,
@@ -609,62 +639,38 @@ def sc_gather_reduce(
                                 enable_all_sublanes_mask,
                             )
 
-                    row0 = get_row_val(0)
-                    if weights_local is not None:
-                        row0 = arith.mulf(row0, weights_vecs[0])
-                        if topk_wgt_zero_nan:
-                            row0 = arith.select(
-                                arith.cmpf(arith.CmpFPredicate.OEQ,
-                                           weights_vecs[0], zero_vec_f32),
-                                zero_vec_f32,
-                                row0,
-                            )
-
-                    row8 = get_row_val(8)
-                    if weights_local is not None:
-                        row8 = arith.mulf(row8, weights_vecs[8])
-                        if topk_wgt_zero_nan:
-                            row8 = arith.select(
-                                arith.cmpf(arith.CmpFPredicate.OEQ,
-                                           weights_vecs[8], zero_vec_f32),
-                                zero_vec_f32,
-                                row8,
-                            )
-
-                    for sum_idx in range(7):
-                        tmp_row0 = get_row_val(sum_idx + 1)
+                    def get_val_weighted(idx):
+                        val = get_row_val(idx)
                         if weights_local is not None:
-                            tmp_row0 = arith.mulf(tmp_row0,
-                                                  weights_vecs[sum_idx + 1])
+                            val = arith.mulf(val, weights_vecs[idx])
                             if topk_wgt_zero_nan:
-                                tmp_row0 = arith.select(
-                                    arith.cmpf(
-                                        arith.CmpFPredicate.OEQ,
-                                        weights_vecs[sum_idx + 1],
-                                        zero_vec_f32,
-                                    ),
+                                val = arith.select(
+                                    arith.cmpf(arith.CmpFPredicate.OEQ,
+                                               weights_vecs[idx],
+                                               zero_vec_f32),
                                     zero_vec_f32,
-                                    tmp_row0,
+                                    val,
                                 )
+                        return val
 
-                        row0 = arith.addf(row0, tmp_row0)
+                    vals0 = [get_val_weighted(i) for i in range(8)]
+                    vals8 = [get_val_weighted(8 + i) for i in range(8)]
 
-                        tmp_row8 = get_row_val(8 + sum_idx + 1)
-                        if weights_local is not None:
-                            tmp_row8 = arith.mulf(
-                                tmp_row8, weights_vecs[8 + sum_idx + 1])
-                            if topk_wgt_zero_nan:
-                                tmp_row8 = arith.select(
-                                    arith.cmpf(
-                                        arith.CmpFPredicate.OEQ,
-                                        weights_vecs[8 + sum_idx + 1],
-                                        zero_vec_f32,
-                                    ),
-                                    zero_vec_f32,
-                                    tmp_row8,
-                                )
+                    def tree_reduce(vals):
+                        # Stride-based reduction for 8 elements to match JAX exactly
+                        # Level 1
+                        s1 = arith.addf(vals[0], vals[4])
+                        s2 = arith.addf(vals[1], vals[5])
+                        s3 = arith.addf(vals[2], vals[6])
+                        s4 = arith.addf(vals[3], vals[7])
+                        # Level 2
+                        s12 = arith.addf(s1, s3)
+                        s34 = arith.addf(s2, s4)
+                        # Level 3
+                        return arith.addf(s12, s34)
 
-                        row8 = arith.addf(row8, tmp_row8)
+                    row0 = tree_reduce(vals0)
+                    row8 = tree_reduce(vals8)
 
                     packed = tpu.pack_subelements(
                         _BF16[2, vreg_size],
