@@ -989,13 +989,13 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         # Convert torch tensors to numpy arrays that JAX can handle.
-        if "pixel_values" in kwargs and isinstance(kwargs["pixel_values"],
-                                                   list):
-            kwargs["pixel_values"] = torch.cat(kwargs["pixel_values"], dim=0)
+        for pv_key in ("pixel_values", "pixel_values_videos"):
+            if pv_key in kwargs and isinstance(kwargs[pv_key], list):
+                kwargs[pv_key] = torch.cat(kwargs[pv_key], dim=0)
         for key in list(kwargs.keys()):
             value = kwargs[key]
             if isinstance(value, torch.Tensor):
-                if key == 'image_grid_thw':
+                if key in ('image_grid_thw', 'video_grid_thw'):
                     # change it to tuple of tuples to make it hashable for JIT
                     # Shape: (B, N, 3) -> (B*N, 3) -> tuple of tuples
                     grid_thw_reshaped = value.reshape(-1, 3)
