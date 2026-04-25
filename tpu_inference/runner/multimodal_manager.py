@@ -36,9 +36,6 @@ class GridTHW(tuple):
 
     - tuple subclass so isinstance(x, tuple) is True — passes vLLM's
     tensor_schema type check (e.g. https://github.com/vllm-project/vllm/blob/9744b699bafed423909ed10da96b80eb0542424b/vllm/model_executor/models/qwen3_vl.py#L2026). 
-    - Registered as a JAX pytree leaf so jax.tree_util.tree_map (used by torchax jax_view) does
-    NOT traverse into the elements, keeping the object intact and hashable
-    for JAX static_argnames.
     - Implements a minimal tensor-like API (ndim, shape, tolist, prod) expected by vLLM's
     _process_image_input (https://github.com/vllm-project/vllm/blob/9744b699bafed423909ed10da96b80eb0542424b/vllm/model_executor/models/qwen3_vl.py#L2072)
 
@@ -75,15 +72,6 @@ class GridTHW(tuple):
 
     def __repr__(self):
         return f"GridTHW({tuple(self)})"
-
-
-# Register as a JAX pytree leaf (no children) so jax.tree_util.tree_map
-# returns the GridTHW instance unchanged instead of traversing its elements.
-jax.tree_util.register_pytree_node(
-    GridTHW,
-    lambda x: ([], x),  # flatten: no children, aux_data = self
-    lambda aux, _: aux,  # unflatten: return aux_data unchanged
-)
 
 
 class MultiModalManager:

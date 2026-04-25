@@ -45,7 +45,8 @@ def maybe_jit_embed_multimodal_func(embed_multimodal_func_jax: Callable,
         logger.info_once(
             f"JIT-compiling embed_multimodal_func_jax for architectures: {archs & JITTABLE_ARCHS}"
         )
-        return jax.jit(embed_multimodal_func_jax)
+        return jax.jit(static_argnames=("image_grid_thw", "video_grid_thw",
+                                        "grid_thw"))(embed_multimodal_func_jax)
     else:
         return embed_multimodal_func_jax
 
