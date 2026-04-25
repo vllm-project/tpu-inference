@@ -67,6 +67,7 @@ def run_jax_gdn_attention_local(
     query_start_loc: jnp.ndarray,
     state_indices: jnp.ndarray,
     distribution: jnp.ndarray,
+    has_initial_state: jnp.ndarray,
     n_kq: int,
     n_v: int,
     d_k: int,
@@ -96,6 +97,14 @@ def run_jax_gdn_attention_local(
           state index.
         distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end,
           mixed_end)`.
+        has_initial_state: Boolean tensor of shape `(max_reqs,)`. ``True`` for
+          requests whose slot already holds a valid recurrent/conv state
+          (chunked-prefill continuation, prefix-cache hit, or running decode);
+          ``False`` for brand-new prefills, in which case the gathered
+          conv_state and recurrent_state are treated as zeros. Without this,
+          a reused mamba slot's stale state would silently corrupt the
+          first conv outputs and the entire recurrent trajectory of every
+          new request.
         n_kq: Number of key/query heads.
         n_v: Number of value heads.
         d_k: Dimension of key.
@@ -120,6 +129,7 @@ def run_jax_gdn_attention_local(
         query_start_loc,
         state_indices,
         distribution,
+        has_initial_state,
         kernel_size=kernel_size,
     )
 
@@ -151,17 +161,34 @@ def run_jax_gdn_attention_local(
             use_qk_norm_in_gdn=True,
         )
 
-    new_recurrent_state, output = ragged_gdn_impl(
-        out_mixed_qkv,
-        b,
-        a,
-        recurrent_state,
-        A_log,
-        dt_bias,
-        query_start_loc,
-        state_indices,
-        distribution,
-    )
+    if config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.FUSED:
+        # The fused kernel does not yet honor `has_initial_state`. Fall
+        # through with the existing call signature; the chunked/ref paths
+        # used in production already mask via the new argument below.
+        new_recurrent_state, output = ragged_gdn_impl(
+            out_mixed_qkv,
+            b,
+            a,
+            recurrent_state,
+            A_log,
+            dt_bias,
+            query_start_loc,
+            state_indices,
+            distribution,
+        )
+    else:
+        new_recurrent_state, output = ragged_gdn_impl(
+            out_mixed_qkv,
+            b,
+            a,
+            recurrent_state,
+            A_log,
+            dt_bias,
+            query_start_loc,
+            state_indices,
+            distribution,
+            has_initial_state,
+        )
 
     return (new_conv_state, new_recurrent_state), output
 
@@ -179,6 +206,7 @@ def run_jax_gdn_attention(
     state_indices: jnp.ndarray,
     query_start_loc: jnp.ndarray,
     distribution: jnp.ndarray,
+    has_initial_state: jnp.ndarray,
     n_kq: int,
     n_v: int,
     d_k: int,
@@ -210,6 +238,10 @@ def run_jax_gdn_attention(
           each sequence.
         distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end,
           mixed_end)`.
+        has_initial_state: Boolean tensor of shape `(max_reqs,)` indicating
+          which requests already have a valid prior state in their slot.
+          ``False`` entries get zero initial state for both the conv and
+          recurrent paths, matching GPU behavior.
         n_kq: Number of key/query heads.
         n_v: Number of value heads.
         d_k: Dimension of key.
@@ -242,6 +274,7 @@ def run_jax_gdn_attention(
         P(ShardingAxisName.ATTN_DATA),  # query_start_loc
         P(ShardingAxisName.ATTN_DATA),  # state_indices
         P(ShardingAxisName.ATTN_DATA),  # distribution
+        P(ShardingAxisName.ATTN_DATA),  # has_initial_state
     )
 
     out_specs = (
@@ -287,6 +320,7 @@ def run_jax_gdn_attention(
         query_start_loc,
         state_indices,
         distribution,
+        has_initial_state,
     )
 
     return (new_conv_state, new_recurrent_state), output

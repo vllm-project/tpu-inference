@@ -104,6 +104,23 @@ def gdn_attention_core_tpu(
     # Map tokens to their respective requests
     q_loc = jax_view(attn_metadata.query_start_loc)
     distribution = jax_view(attn_metadata.request_distribution)
+
+    # Derive has_initial_state per request: True if the request already has
+    # computed tokens in its slot (chunked-prefill continuation, prefix-cache
+    # hit, or running decode), False for brand-new prefills. We cannot rely
+    # on the slot's contents being zero — vLLM's kv-cache pool reuses freed
+    # slots without clearing them, so a new request that lands on a slot
+    # previously held by another request would silently consume that
+    # request's recurrent state. GPU's GDN backend handles this via
+    # `initial_state[~has_initial_state, ...] = 0` in
+    # `gdn_linear_attn._forward_core`; without the equivalent on TPU, every
+    # slot reuse corrupts the new request's GDN trajectory.
+    #
+    # context_len = seq_len - query_len. If > 0, prior tokens exist.
+    j_seq_lens = jax_view(attn_metadata.seq_lens)
+    query_lens = q_loc[1:] - q_loc[:-1]
+    has_initial_state = (j_seq_lens - query_lens) > 0
+
     config = GdnAttentionConfig(
         ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl(
             envs.RAGGED_GATED_DELTA_RULE_IMPL))
@@ -121,6 +138,7 @@ def gdn_attention_core_tpu(
                                                             state_indices,
                                                             q_loc,
                                                             distribution,
+                                                            has_initial_state,
                                                             n_kq,
                                                             n_v,
                                                             d_k,
