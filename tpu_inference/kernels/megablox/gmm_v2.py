@@ -368,12 +368,12 @@ def inner_kernel(
             mxu_size = pltpu.get_tpu_info().mxu_column_size
             rhs_qbs = cfgs.rhs_cfgs.quant_block_size
 
-            # Dequantize inside VMEM to avoid small contracting dimension in jnp.matmul.
+            # This should only be taken in the case where we don't requantize
+            # the scales and thus we need to dequantize inside VMEM to avoid small contracting
+            # dimmensions
             if cfgs.rhs_cfgs.has_scale and rhs_qbs < mxu_size:
                 tiled_rhs_scale = tiled_rhs_ref.get_scale().astype(
                     acc_ref.dtype)
-                # tiled_rhs: [tile_k, tile_n]
-                # tiled_rhs_scale: [num_blocks, 1, tile_n]
                 num_blocks = cfgs.num_quant_blocks_per_tile_k
                 tiled_rhs_dequant = tiled_rhs.astype(acc_ref.dtype).reshape(
                     num_blocks, rhs_qbs, rhs_tile_n)
@@ -435,7 +435,9 @@ def inner_kernel(
             # MXU ops for the next [tile_m, mxu_size].
             mxu_size = pltpu.get_tpu_info().mxu_column_size
 
-            # Dequantize inside VMEM to avoid small contracting dimension in jnp.matmul.
+            # Same as the unquantized matmul path -- this is where we don't requantize
+            # the scales and thus we need to dequantize inside VMEM to avoid small contracting
+            # dimmensions
             rhs_qbs = cfgs.rhs_cfgs.quant_block_size
             if cfgs.rhs_cfgs.has_scale and rhs_qbs < mxu_size:
                 tiled_rhs_scale = tiled_rhs_ref.get_scale().astype(
@@ -478,7 +480,7 @@ def inner_kernel(
 
                     block_acc = jnp.matmul(
                         block_lhs_q,
-                        block_rhs.astype(preferred_element_type),
+                        block_rhs,
                         preferred_element_type=preferred_element_type,
                     ).astype(acc_ref.dtype)
 
@@ -975,7 +977,7 @@ def validate_inputs(
     if rhs_scale is not None:
         num_quant_blocks = rhs_scale.shape[1]
         assert rhs_scale.shape == (size_group, num_quant_blocks, 1, size_n)
-        assert size_k % num_quant_blocks == 0, f"{size_k=}, {num_quant_blocks=}"
+        assert size_k % num_quant_blocks == 0, f"{size_k=} but received {num_quant_blocks=}"
 
     assert group_offset.shape == (1, )
 

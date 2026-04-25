@@ -180,7 +180,7 @@ def shard_linear_weights(
     elif isinstance(sample_scale, (jax.Array, Tensor)) and len(
             sample_scale.shape) == 2 and not per_tensor:
         # In case of 2D block-wise quantization scales [out_blocks, in_blocks],
-        # it should follow the weight sharding.
+        # we should follow the weight sharding (also 2D)
         weight_scale_sharding = NamedSharding(mesh, weight_p_spec)
     else:
         weight_scale_sharding = NamedSharding(
