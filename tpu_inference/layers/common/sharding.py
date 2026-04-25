@@ -71,11 +71,9 @@ class ShardingAxisName2D:
     EXPERT = 'model'
     EXPERT_DATA = ('data', 'model')
     VOCAB = ('data', 'model')
-
-    KV_CACHE_BLOCK = 'data'
-    KV_CACHE_PAGE = None
+    BATCH = 'data'
+    CONTEXT = None
     KV_CACHE_HEAD = 'model'
-
 
 # Lazily initialize the ShardingAxisName so that we can decide which one to use based on the
 # propagated / updated environment variables in the multi-host setup.

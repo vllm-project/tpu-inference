@@ -126,8 +126,7 @@ def create_kv_caches(
     if use_mla:
         sharding = NamedSharding(
             mesh,
-            PartitionSpec(ShardingAxisName.BATCH,
-                          ShardingAxisName.CONTEXT))
+            PartitionSpec(ShardingAxisName.MLP_TENSOR))
     else:
         sharding = NamedSharding(
             mesh,
