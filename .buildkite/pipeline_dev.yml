@@ -119,6 +119,28 @@ steps:
       - .buildkite/scripts/run_disagg.sh
 
   # -----------------------------------------------------------------
+  # Demo 5: Single Host DCN-based P/D disaggregation
+  # Mirrors test_34 in pipeline_jax.yml.
+  # Reproduces the timeout seen on tpu_v7x_8_queue.
+  # -----------------------------------------------------------------
+  - label: "tpu7x [demo] E2E disaggregation Single Host (tp=1 baseline)"
+    key: tpu7x_demo_disagg_single_host
+    depends_on: tpu7x_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+      MODEL: "Qwen/Qwen3-0.6B"
+      INPUT_LEN: 512
+      OUTPUT_LEN: 128
+      NUM_PROMPTS: 200
+      REQUEST_RATE: 4
+    agents:
+      queue: tpu_v7x_8_queue
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/examples/disagg/run_disagg_single_host.sh
+
+  # -----------------------------------------------------------------
   # Demo 4: Ray-based multi-host inference
   # Mirrors test_26 in pipeline_jax.yml.
   # Uses run_multihost.sh to serve a large model across 16 chips (2 hosts).
