@@ -1535,27 +1535,19 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
 
     def embed_multimodal(
         self,
-        image_grid_thw: Tuple[Tuple[int, int, int], ...],
+        image_grid_thw: Tuple[Tuple[int, int, int], ...] = (),
+        video_grid_thw: Tuple[Tuple[int, int, int], ...] = (),
         **kwargs,
     ) -> dict:
         """Get multimodal embeddings from pixel values.
 
-        This method is called by the serving infrastructure (multimodal_manager).
-        DeepStack embeddings are returned alongside visual embeddings for caching.
-
-        Args:
-            image_grid_thw: Grid dimensions (T, H, W) for each image
-            **kwargs: Contains 'pixel_values' for vision encoder
-
-        Returns:
-            A dict with:
-              - "embeds": Tuple of embeddings, one per image (Qwen 2.5 VL format)
-              - "deepstack": Optional list of per-image DeepStack embeddings
+        Qwen3-VL feeds image and video frames through the same vision tower
+        with identical grid_thw semantics, so we collapse them into one set
+        of grids before encoding.
         """
         image_grid_thw = normalize_mm_grid_thw(image_grid_thw)
         if not image_grid_thw:
-            image_grid_thw = normalize_mm_grid_thw(
-                kwargs.get("video_grid_thw", None))
+            image_grid_thw = normalize_mm_grid_thw(video_grid_thw)
 
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(
             image_grid_thw, **kwargs)

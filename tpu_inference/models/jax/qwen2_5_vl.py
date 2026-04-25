@@ -1020,11 +1020,16 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
     def embed_multimodal(
         self,
         image_grid_thw: tuple[tuple[int, int, int], ...] = (),
+        video_grid_thw: tuple[tuple[int, int, int], ...] = (),
         **kwargs: object,
     ) -> MultiModalEmbeddings:
 
         if not self.is_first_rank:
             return ()
+
+        # Video path is not yet implemented for Qwen2.5-VL; the kwarg is
+        # accepted so the multimodal manager can pass it uniformly.
+        del video_grid_thw
 
         image_grid_thw = normalize_mm_grid_thw(image_grid_thw)
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(

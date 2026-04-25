@@ -126,8 +126,6 @@ class MultiModalManager:
                 batched_mm_inputs.pop("image_grid_thw", None))
             video_grid_thw = normalize_mm_grid_thw(
                 batched_mm_inputs.pop("video_grid_thw", None))
-            if video_grid_thw:
-                batched_mm_inputs["video_grid_thw"] = video_grid_thw
 
             for key, value in batched_mm_inputs.items():
                 if isinstance(value, torch.Tensor):
@@ -146,6 +144,7 @@ class MultiModalManager:
             curr_group_outputs = self.runner.embed_multimodal_fn(
                 self.runner.state,
                 image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
                 **batched_mm_inputs)
             deepstack_group_outputs = None
             if isinstance(curr_group_outputs, dict):

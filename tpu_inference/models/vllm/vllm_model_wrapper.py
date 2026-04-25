@@ -425,10 +425,15 @@ class VllmModelWrapper:
                 # Ensure all tensors are moved into accelerator so the
                 # computation with weights can work properly.
                 # Convert grid_thw tuples to tensors expected by vllm models.
+                # Empty tuples are dropped so non-grid_thw vLLM models do not
+                # see a meaningless zero-element tensor in their kwargs.
                 for key in ("image_grid_thw", "video_grid_thw"):
                     if key in kwargs and isinstance(kwargs[key], (list, tuple)):
-                        kwargs[key] = torch.tensor(kwargs[key],
-                                                   dtype=torch.int32)
+                        if len(kwargs[key]) == 0:
+                            kwargs.pop(key)
+                        else:
+                            kwargs[key] = torch.tensor(kwargs[key],
+                                                       dtype=torch.int32)
                 call_kwargs = {
                     k: jax.tree.map(move, v)
                     for k, v in kwargs.items()
