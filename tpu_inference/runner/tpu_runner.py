@@ -336,13 +336,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         return jax.sharding.Mesh(devices_array, MESH_AXIS_NAMES)
 
     def _create_single_slice_mesh(self) -> jax.Array:
-        sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
+        sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
         mesh_shape = (
-            sharding_strategy.model_dp_size,
-            sharding_strategy.attn_dp_size,
-            sharding_strategy.attn_dp_expert_size,
-            sharding_strategy.expert_size,
-            sharding_strategy.tp_size,
+            sharding_config.model_dp_size,
+            sharding_config.attn_dp_size,
+            sharding_config.attn_dp_expert_size,
+            sharding_config.expert_size,
+            sharding_config.tp_size,
+            sharding_config.decode_cp_size,
         )
 
         # Attempt to create a physically optimized mesh. Fall back to a simple
@@ -362,18 +363,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             return np.array(self.devices).reshape(mesh_shape)
 
     def _create_multi_slice_mesh(self, num_slices: int) -> jax.Array:
-        sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
-        dp_inner = sharding_strategy.model_dp_size // num_slices
+        sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
+        dp_inner = sharding_config.model_dp_size // num_slices
 
         # Splits data parallelism across multiple slices.
         ici_mesh_shape = (
             dp_inner,
-            sharding_strategy.attn_dp_size,
-            sharding_strategy.attn_dp_expert_size,
-            sharding_strategy.expert_size,
-            sharding_strategy.tp_size,
+            sharding_config.attn_dp_size,
+            sharding_config.attn_dp_expert_size,
+            sharding_config.expert_size,
+            sharding_config.tp_size,
+            sharding_config.decode_cp_size,
         )
-        dcn_mesh_shape = (num_slices, 1, 1, 1, 1)
+        dcn_mesh_shape = (num_slices, 1, 1, 1, 1, 1)
 
         # Attempt to create a physically optimized hybrid mesh (ICI + DCN).
         # Fall back to a logical reshape for non-power-of-two device counts
