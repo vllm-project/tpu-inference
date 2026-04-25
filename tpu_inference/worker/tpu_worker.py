@@ -285,7 +285,17 @@ class TPUWorker(WorkerBase):
             self.devices[0],
             need_pp=self.parallel_config.pipeline_parallel_size > 1)
 
-        ensure_kv_transfer_initialized(self.vllm_config)
+        # The TPU offload connector needs `kv_cache_config` at __init__,
+        # which isn't available yet. Defer its initialization to
+        # `initialize_from_config` (called after kv_cache_config is built).
+        # Other TPU connectors do not require it and are happy with the
+        # early init.
+        kv_xfer_config = self.vllm_config.kv_transfer_config
+        defer_kv_xfer_init = (kv_xfer_config is not None
+                              and kv_xfer_config.kv_connector
+                              == "TPUOffloadConnector")
+        if not defer_kv_xfer_init:
+            ensure_kv_transfer_initialized(self.vllm_config)
 
         is_first_rank = True
         is_last_rank = True
@@ -459,6 +469,10 @@ class TPUWorker(WorkerBase):
                  and self.model_runner.model_config.enforce_eager)):
             self.model_runner.compilation_manager._precompile_sampling()
             self.model_runner.compilation_manager._precompile_gather_logprobs()
+        # Initialize KV transfer connector now that kv_cache_config exists.
+        # Idempotent: this is a no-op for connectors already created in
+        # init_device (the legacy TPUConnector and TPUConnectorHMA).
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         self.model_runner.initialize_kv_cache(kv_cache_config,
                                               self.topology_order_id)
 

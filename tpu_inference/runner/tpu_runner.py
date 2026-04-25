@@ -613,6 +613,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def get_kv_cache_spec(self):
         return self.kv_cache_manager.get_kv_cache_spec()
 
+    def get_kv_cache_layout(self):
+        # Used by KV-transfer connectors (e.g. TPUOffloadConnector) to
+        # describe the kv cache memory layout, normally "NHD" or "HND".
+        from vllm.v1.attention.backends.utils import get_kv_cache_layout
+        return get_kv_cache_layout()
+
     def initialize_kv_cache(self,
                             kv_cache_config: KVCacheConfig,
                             topology_order_id: int = 0) -> None:

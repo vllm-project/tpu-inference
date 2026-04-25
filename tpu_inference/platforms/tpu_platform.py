@@ -278,14 +278,40 @@ class TpuPlatform(Platform):
 
         if scheduler_config.is_multimodal_model and not \
             scheduler_config.disable_chunked_mm_input:
-            logger.warning("TPU does not support running Multimodal models"
-                           " without setting `--disable_chunked_mm_input`. "
-                           "Forcing --disable_chunked_mm_input.")
-            scheduler_config.disable_chunked_mm_input = True
+            # Escape hatch: text-only inference on a model that *can* take
+            # multimodal input doesn't actually need this restriction —
+            # there's no MM input to be in the middle of. The hybrid mamba
+            # `align` cache mode (required for prefix caching on Qwen3Next-
+            # family models like Qwen3.5) explicitly asserts that
+            # chunked_mm_input is enabled, so blanket-disabling it bricks
+            # prefix caching for hybrid text-only workloads on TPU.
+            # TODO(mamba-alignment): once upstream Qwen3Next implements
+            # SupportsMambaPrefixCaching (so mamba_cache_mode="all" works),
+            # this escape hatch should still be safe but the underlying
+            # constraint may relax — re-evaluate whether the override is
+            # still needed.
+            if envs.TPU_ALLOW_CHUNKED_MM_INPUT_FOR_TEXT_ONLY:
+                logger.warning(
+                    "TPU_ALLOW_CHUNKED_MM_INPUT_FOR_TEXT_ONLY=1 is set: "
+                    "leaving chunked_mm_input enabled despite the model "
+                    "being multimodal. This is only safe for text-only "
+                    "workloads (no image/video inputs). If you actually "
+                    "send MM inputs, scheduling may produce incorrect "
+                    "results.")
+            else:
+                logger.warning(
+                    "TPU does not support running Multimodal models"
+                    " without setting `--disable_chunked_mm_input`. "
+                    "Forcing --disable_chunked_mm_input. (For text-only "
+                    "inference on a multimodal model — e.g. enabling "
+                    "prefix caching for Qwen3.5 — set "
+                    "TPU_ALLOW_CHUNKED_MM_INPUT_FOR_TEXT_ONLY=1.)")
+                scheduler_config.disable_chunked_mm_input = True
 
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
-            allowed = ("TPUConnector", "TPUConnectorHMA")
+            allowed = ("TPUConnector", "TPUConnectorHMA",
+                       "TPUOffloadConnector")
             if kv_transfer_config.kv_connector not in allowed:
                 raise ValueError(
                     f"Unsupported kv_connector "
