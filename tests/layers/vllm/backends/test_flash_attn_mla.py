@@ -69,16 +69,18 @@ def create_mla_inputs(
     max_blocks_per_seq: int = MAX_BLOCKS_PER_SEQ,
 ):
     key = jax.random.key(0)
-    qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
 
-    q = jax.random.uniform(key, (total_tokens, num_heads, qk_head_dim),
-                           dtype=q_dtype)
+    q_nope = jax.random.uniform(key,
+                                (total_tokens, num_heads, qk_nope_head_dim),
+                                dtype=q_dtype)
+    q_pe = jax.random.uniform(key, (total_tokens, num_heads, qk_rope_head_dim),
+                              dtype=q_dtype)
     kv_c_normed = jax.random.uniform(key, (total_tokens, kv_lora_rank),
                                      dtype=q_dtype)
     k_pe = jax.random.uniform(key, (total_tokens, 1, qk_rope_head_dim),
                               dtype=q_dtype)
 
-    q = torch_view(q)
+    q = (torch_view(q_nope), torch_view(q_pe))
     kv_c_normed = torch_view(kv_c_normed)
     k_pe = torch_view(k_pe)
 
