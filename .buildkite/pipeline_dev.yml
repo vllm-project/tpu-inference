@@ -50,12 +50,11 @@ steps:
       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
   # -----------------------------------------------------------------
-  # Demo 1: offline_inference.py
-  # Shows the simplest pattern: run a Python script inside Docker.
-  # Use this as a starting point for any offline batch inference test.
+  # JAX unit tests split validation
+  # Testing the 5-part split of JAX unit tests
   # -----------------------------------------------------------------
-  - label: "tpu7x [demo] offline_inference.py"
-    key: tpu7x_demo_offline_inference
+  - label: "tpu7x JAX unit tests part1"
+    key: tpu7x_test_7_1
     depends_on: tpu7x_build_docker
     env:
       USE_PREBUILT_IMAGE: "1"
@@ -64,23 +63,10 @@ steps:
       queue: tpu_v7x_2_queue
     commands:
       - |
-        # Run offline inference with a small model.
-        # --tensor-parallel-size 2: tp=1 is currently unsupported on tpu7x.
-        # Customize --model, --max-model-len, --max-tokens as needed.
-        .buildkite/scripts/run_in_docker.sh bash -c '
-          python3 examples/offline_inference.py \
-            --model Qwen/Qwen3-0.6B \
-            --tensor-parallel-size 2 \
-            --max-model-len 1024 \
-            --max-tokens 128'
+        .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/layers/vllm/backends/test_flash_attn.py /workspace/tpu_inference/tests/layers/vllm/test_awq.py /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_int8.py"
 
-  # -----------------------------------------------------------------
-  # Demo 2: vllm serve + vllm bench serve
-  # Shows how to start a server and run a benchmark against it.
-  # Uses --dataset-name random so no dataset file is needed.
-  # -----------------------------------------------------------------
-  - label: "tpu7x [demo] vllm serve + vllm bench serve"
-    key: tpu7x_demo_serve_bench
+  - label: "tpu7x JAX unit tests part2"
+    key: tpu7x_test_7_2
     depends_on: tpu7x_build_docker
     env:
       USE_PREBUILT_IMAGE: "1"
@@ -89,60 +75,40 @@ steps:
       queue: tpu_v7x_2_queue
     commands:
       - |
-        # Customize behaviour via env vars: MODEL, PORT, TENSOR_PARALLEL_SIZE,
-        # MAX_MODEL_LEN, RANDOM_INPUT_LEN, RANDOM_OUTPUT_LEN, NUM_PROMPTS, NUM_WARMUPS.
-        .buildkite/scripts/run_in_docker.sh bash .buildkite/scripts/run_benchmark_demo.sh
+        .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/layers/vllm/test_unquantized.py"
 
-  # -----------------------------------------------------------------
-  # Demo 3: DCN-based P/D disaggregation
-  # Mirrors test_25 in pipeline_jax.yml.
-  # Uses run_disagg.sh which delegates to examples/disagg/.
-  # Requires a multi-chip queue (tpu_v7x_8_queue).
-  # -----------------------------------------------------------------
-  - label: "tpu7x [demo] E2E disaggregation (DCN P/D)"
-    key: tpu7x_demo_disagg
+  - label: "tpu7x JAX unit tests part3"
+    key: tpu7x_test_7_3
     depends_on: tpu7x_build_docker
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu7x"
-      # Customize these to change the disagg benchmark behaviour.
-      MODEL: "Qwen/Qwen3-0.6B"
-      INPUT_LEN: 1024
-      OUTPUT_LEN: 128
-      NUM_PROMPTS: 5
-      RANDOM_SEED: 10
-      MAX_CONCURRENCY: 4
-      TEST_MODE: 1
     agents:
-      queue: tpu_v7x_8_queue
-    commands:
-      - .buildkite/scripts/run_disagg.sh
-
-  # -----------------------------------------------------------------
-  # Demo 4: Ray-based multi-host inference
-  # Mirrors test_26 in pipeline_jax.yml.
-  # Uses run_multihost.sh to serve a large model across 16 chips (2 hosts).
-  # Requires a 16-chip queue (tpu_v7x_16_queue).
-  # -----------------------------------------------------------------
-  - label: "tpu7x [demo] Ray-based multi-host"
-    key: tpu7x_demo_multihost
-    env:
-      TPU_VERSION: "tpu7x"
-    agents:
-      queue: tpu_v7x_16_queue
+      queue: tpu_v7x_2_queue
     commands:
       - |
-        MODEL="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
-        .buildkite/scripts/run_multihost.sh \
-          "vllm serve \${MODEL} \
-            --port 8000 \
-            --tensor-parallel-size 16 \
-            --trust-remote-code \
-            --max-model-len 1024 \
-            --no-async-scheduling \
-            --load-format=runai_streamer \
-            --no-enable-prefix-caching" \
-          "curl http://localhost:8000/v1/completions \
-            -X POST \
-            -H 'Content-Type: application/json' \
-            -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'"
+        .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/layers/vllm/test_fp8.py /workspace/tpu_inference/tests/layers/jax/quantization/test_fp8.py"
+
+  - label: "tpu7x JAX unit tests part4"
+    key: tpu7x_test_7_4
+    depends_on: tpu7x_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+    agents:
+      queue: tpu_v7x_2_queue
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_qwen3.py /workspace/tpu_inference/tests/models/jax/test_qwen3_moe.py /workspace/tpu_inference/tests/models/jax/test_gemma4.py /workspace/tpu_inference/tests/models/jax/test_llama3.py /workspace/tpu_inference/tests/models/jax/test_qwen2.py"
+
+  - label: "tpu7x JAX unit tests part5"
+    key: tpu7x_test_7_5
+    depends_on: tpu7x_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+    agents:
+      queue: tpu_v7x_2_queue
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ --ignore=/workspace/tpu_inference/tests/layers/vllm/backends/test_flash_attn.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_awq.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_int8.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_unquantized.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_fp8.py --ignore=/workspace/tpu_inference/tests/layers/jax/quantization/test_fp8.py --ignore=/workspace/tpu_inference/tests/models/jax/test_qwen3.py --ignore=/workspace/tpu_inference/tests/models/jax/test_qwen3_moe.py --ignore=/workspace/tpu_inference/tests/models/jax/test_gemma4.py --ignore=/workspace/tpu_inference/tests/models/jax/test_llama3.py --ignore=/workspace/tpu_inference/tests/models/jax/test_qwen2.py --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py"

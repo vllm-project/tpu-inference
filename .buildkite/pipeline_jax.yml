@@ -136,14 +136,65 @@ steps:
         commands:
           - rm -f .coverage.part2.${TPU_VERSION:-tpu6e}
           - |
-            .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ --ignore=/workspace/tpu_inference/tests/layers/vllm/backends/test_flash_attn.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_awq.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_int8.py --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part2.${TPU_VERSION:-tpu6e}; else exit 1; fi"
+            .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/layers/vllm/test_unquantized.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part2.${TPU_VERSION:-tpu6e}; else exit 1; fi"
           - cp /mnt/disks/persist/models/.coverage.part2.${TPU_VERSION:-tpu6e} ./
+
+      - label: "${TPU_VERSION:-tpu6e} JAX unit tests part3"
+        key: ${TPU_VERSION:-tpu6e}_test_7_3
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        soft_fail: true
+        artifact_paths: ".coverage.part3.${TPU_VERSION:-tpu6e}"
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+        agents:
+          queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
+        commands:
+          - rm -f .coverage.part3.${TPU_VERSION:-tpu6e}
+          - |
+            .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/layers/vllm/test_fp8.py /workspace/tpu_inference/tests/layers/jax/quantization/test_fp8.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part3.${TPU_VERSION:-tpu6e}; else exit 1; fi"
+          - cp /mnt/disks/persist/models/.coverage.part3.${TPU_VERSION:-tpu6e} ./
+
+      - label: "${TPU_VERSION:-tpu6e} JAX unit tests part4"
+        key: ${TPU_VERSION:-tpu6e}_test_7_4
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        soft_fail: true
+        artifact_paths: ".coverage.part4.${TPU_VERSION:-tpu6e}"
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+        agents:
+          queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
+        commands:
+          - rm -f .coverage.part4.${TPU_VERSION:-tpu6e}
+          - |
+            .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_qwen3.py /workspace/tpu_inference/tests/models/jax/test_qwen3_moe.py /workspace/tpu_inference/tests/models/jax/test_gemma4.py /workspace/tpu_inference/tests/models/jax/test_llama3.py /workspace/tpu_inference/tests/models/jax/test_qwen2.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part4.${TPU_VERSION:-tpu6e}; else exit 1; fi"
+          - cp /mnt/disks/persist/models/.coverage.part4.${TPU_VERSION:-tpu6e} ./
+
+      - label: "${TPU_VERSION:-tpu6e} JAX unit tests part5"
+        key: ${TPU_VERSION:-tpu6e}_test_7_5
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        soft_fail: true
+        artifact_paths: ".coverage.part5.${TPU_VERSION:-tpu6e}"
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+        agents:
+          queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
+        commands:
+          - rm -f .coverage.part5.${TPU_VERSION:-tpu6e}
+          - |
+            .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ --ignore=/workspace/tpu_inference/tests/layers/vllm/backends/test_flash_attn.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_awq.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_int8.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_unquantized.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_fp8.py --ignore=/workspace/tpu_inference/tests/layers/jax/quantization/test_fp8.py --ignore=/workspace/tpu_inference/tests/models/jax/test_qwen3.py --ignore=/workspace/tpu_inference/tests/models/jax/test_qwen3_moe.py --ignore=/workspace/tpu_inference/tests/models/jax/test_gemma4.py --ignore=/workspace/tpu_inference/tests/models/jax/test_llama3.py --ignore=/workspace/tpu_inference/tests/models/jax/test_qwen2.py --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part5.${TPU_VERSION:-tpu6e}; else exit 1; fi"
+          - cp /mnt/disks/persist/models/.coverage.part5.${TPU_VERSION:-tpu6e} ./
 
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests combine and report"
         depends_on:
           - "${TPU_VERSION:-tpu6e}_test_7_1"
           - "${TPU_VERSION:-tpu6e}_test_7_2"
-        key: ${TPU_VERSION:-tpu6e}_test_7_3
+          - "${TPU_VERSION:-tpu6e}_test_7_3"
+          - "${TPU_VERSION:-tpu6e}_test_7_4"
+          - "${TPU_VERSION:-tpu6e}_test_7_5"
+        key: ${TPU_VERSION:-tpu6e}_test_7_combine
         soft_fail: true
         agents:
           queue: cpu
@@ -158,7 +209,7 @@ steps:
             echo "    ." >> .coveragerc
             echo "    /workspace/tpu_inference/" >> .coveragerc
           - |
-            python3 ./coverage.pex combine .coverage.part1.${TPU_VERSION:-tpu6e} .coverage.part2.${TPU_VERSION:-tpu6e}
+            python3 ./coverage.pex combine .coverage.part1.${TPU_VERSION:-tpu6e} .coverage.part2.${TPU_VERSION:-tpu6e} .coverage.part3.${TPU_VERSION:-tpu6e} .coverage.part4.${TPU_VERSION:-tpu6e} .coverage.part5.${TPU_VERSION:-tpu6e}
             python3 ./coverage.pex report --fail-under=69
             EXIT_CODE=$?
             rm -f .coverage.part* .coveragerc pex coverage.pex .coverage
