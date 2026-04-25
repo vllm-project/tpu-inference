@@ -86,8 +86,8 @@ def xla_quantized_matmul(
         Output of the quantized matmul.
     """
     if w_scale is not None and w_scale.ndim == 2:
-        # If w_scale is 2D, it means we have blockwise quantization (e.g. from a skipped requantization).
-        # In the XLA fallback path, we dequantize the weight first to perform a standard matmul.
+        # If w_scale is 2D, we assume 2d-blockwise quantization and thus we
+        # want to de-quantize first before the matmul.
         out_features, in_features = w_q.shape
         out_blocks, in_blocks = w_scale.shape
         block_size_out = out_features // out_blocks
