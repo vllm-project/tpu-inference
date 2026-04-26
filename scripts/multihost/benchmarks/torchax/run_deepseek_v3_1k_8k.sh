@@ -32,4 +32,5 @@ bash "${NIGHTLY_SCRIPT}" \
   --moe-requantize-block-size "512" \
   --moe-requantize-weight-dtype "fp4" \
   --api-server-count 3 \
+  --moe-all-gather-activation-dtype "fp8" \
   --run-accuracy "mmlu"
