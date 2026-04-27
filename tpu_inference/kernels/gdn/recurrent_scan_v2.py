@@ -19,8 +19,8 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from tpu_inference.kernels.gdn.compute_schedule_v2 import \
-    compute_schedule_table_v2
+from tpu_inference.kernels.gdn import \
+    compute_schedule_v2 as compute_schedule_table_v2
 
 
 def invert_triangular_matrix(A, block_size=16):
@@ -138,10 +138,12 @@ def inner_kernel(
     # Number of decode tokens (requests) in the batch
     decode_tokens,
 ):
+    """Inner kernel for recurrent scan processing both prefill and decode.
+
+  This function is called for each step in the schedule table and dispatches
+  work to either `process_decode` or `process_regular_prefill`/`process_transition_prefill`.
+  """
     step = pl.program_id(0)
-    print(
-        f"A log shape in kernel: {a_log_ref.shape}, dt_bias shape in kernel: {dt_bias_ref.shape}"
-    )
 
     # READ table
 
@@ -158,6 +160,8 @@ def inner_kernel(
 
     is_last_chunk = schedule_table[step, 8][...]
     is_first_chunk = schedule_table[step, 9][...]
+
+    #   jax.debug.print("inner_kernel step: {} | prefill_valid: {} | prefill_offset: {} | decode_valid: {} | decode_offset: {} | decode_count: {}", step, prefill_valid, prefill_offset, decode_valid, decode_offset, decode_count)
 
     def l2_normalize(x, eps=1e-6):
         norm = jnp.sqrt(jnp.sum(x * x, axis=-1, keepdims=True) + eps)
@@ -371,6 +375,7 @@ def inner_kernel(
             ### this kernel design could be optimized lot by not doing this every chunk
             # 1. Extract Q, K, V, g, beta for the chunk
             key_dim = n_kq * d_k
+
             # Workaround: Upcast to fp32 to avoid NaNs in long sequences
             qkv_chunk = prefill_qkv_ref[...].astype(jnp.float32)  # (C, d)
             # Fused SiLU
@@ -511,9 +516,10 @@ def inner_kernel(
             def store_state():
                 state_commit_scratch[0] = prefill_scratch[prefill_slot].astype(
                     state_commit_scratch.dtype)
+                state_idx = state_indices[prefill_req_id][...]
                 copy_op = pltpu.make_async_copy(
                     src_ref=state_commit_scratch,
-                    dst_ref=recurrent_state_out.at[pl.ds(prefill_req_id, 1)],
+                    dst_ref=recurrent_state_out.at[pl.ds(state_idx, 1)],
                     sem=prefill_semaphore.at[prefill_slot],
                 )
                 copy_op.start()
@@ -538,8 +544,7 @@ def inner_kernel(
             key_dim = n_kq * d_k
 
             # Workaround: Upcast to fp32 to avoid NaNs
-            qkv_chunk = prefill_qkv_ref[...]
-            qkv_chunk = qkv_chunk[:C_trans, :].astype(jnp.float32)
+            qkv_chunk = prefill_qkv_ref[:C_trans, :].astype(jnp.float32)
             # Fused SiLU
             qkv_chunk = qkv_chunk * jax.nn.sigmoid(qkv_chunk)
             q = qkv_chunk[:, :key_dim]
@@ -554,8 +559,9 @@ def inner_kernel(
             a_raw_processed = a_raw_chunk[:C_trans, :n_v].T
             b_raw_processed = b_raw_chunk[:C_trans, :n_v].T
 
-            # Compute gates in VMEM in full fp32
+            # NOTE: b is upcasted to f32 in ref before sigmoid, beta is bf16
             beta_chunk = jax.nn.sigmoid(b_raw_processed)
+            # NOTE: a is upcasted to f32 before add to dt_bias
             g_chunk = -jnp.exp(a_log_ref[...][:, None].astype(
                 jnp.float32)) * jax.nn.softplus(a_raw_processed + dt_bias_ref[
                     ...][:, None].astype(jnp.float32))
@@ -580,8 +586,10 @@ def inner_kernel(
             scale = d_k**-0.5
             q = q * scale
 
+            # state indice for req
             first_req_id = schedule_table[step, 12][...]
             first_is_first = schedule_table[step, 12 + C_trans][...]
+            # NOTE: its wrong, this uses index instead of logical sequence id
             first_slot = first_req_id % 2
             h = prefill_scratch[first_slot]
             h = jnp.where(first_is_first > 0, jnp.zeros_like(h), h)
@@ -592,14 +600,17 @@ def inner_kernel(
             # loop over token by token
             for i in range(sublanesize):
                 # read transition token metadata
+                # NOTE: reads state index instead of sequence index
                 t_req = schedule_table[step, 12 + i][...]
+                # get sequence index for token i in sublane
                 t_is_first = schedule_table[step, 12 + C_trans + i][...]
                 t_is_last = schedule_table[step, 12 + 2 * C_trans + i][...]
 
                 is_new_seq = t_req != current_r
                 sequence_valid = jnp.where(is_new_seq, True, sequence_valid)
 
-                # Ignore tokens that belong to decode requests
+                # Ignore tokens that belong to decode requests,
+                # (assumes decode tokens are at packed at head)
                 is_decode_token = t_req < decode_tokens
                 sequence_valid = jnp.where(is_decode_token, False,
                                            sequence_valid)
@@ -611,14 +622,16 @@ def inner_kernel(
                 prefill_scratch[0] = jnp.where(c_slot == 0, h, h0)
                 prefill_scratch[1] = jnp.where(c_slot == 1, h, h1)
 
+                # prefill_scratch in f32, state_commit might be in bf16
                 state_commit_scratch[0] = prefill_scratch[c_slot].astype(
                     state_commit_scratch.dtype)
 
                 def do_write():
                     # TODO: Make async
+                    state_idx = state_indices[current_r][...]
                     copy_op = pltpu.make_async_copy(
                         src_ref=state_commit_scratch,
-                        dst_ref=recurrent_state_out.at[pl.ds(current_r, 1)],
+                        dst_ref=recurrent_state_out.at[pl.ds(state_idx, 1)],
                         sem=prefill_semaphore.at[c_slot],
                     )
                     copy_op.start()
@@ -676,9 +689,10 @@ def inner_kernel(
 
             def do_final_write():
                 # TODO: make async
+                state_idx = state_indices[current_r][...]
                 copy_op = pltpu.make_async_copy(
                     src_ref=state_commit_scratch,
-                    dst_ref=recurrent_state_out.at[pl.ds(current_r, 1)],
+                    dst_ref=recurrent_state_out.at[pl.ds(state_idx, 1)],
                     sem=prefill_semaphore.at[final_slot],
                 )
                 copy_op.start()
@@ -755,8 +769,9 @@ def get_qkv_index_map_v2(
     offset = pl.multiple_of(offset, alignment)
     count = schedule_table[step, count_col][...]
 
-    safe_offset = jnp.where(valid > 0, offset, num_tokens - 1)
+    safe_offset = jnp.where(valid > 0, offset, 0)
     safe_offset = pl.multiple_of(safe_offset, alignment)
+    #   jax.debug.print("get_qkv_index_map_v2: step={}, valid={}, offset={}, num_tokens={}, safe_offset={}", step, valid, offset, num_tokens, safe_offset)
 
     safe_count = pl.cdiv(count, alignment) * alignment
     return (pl.ds(safe_offset, safe_count), 0)
@@ -890,7 +905,7 @@ def fused_kernel(
     total_blocks = total_blocks_ref[0]
 
     # num_decode_batches = (decode_tokens + BT - 1) // BT
-    print(f"fused_kernel: total_blocks={total_blocks}")
+    #   print(f"fused_kernel: total_blocks={total_blocks}")
 
     d = mixed_qkv_ref.shape[-1]
 
@@ -904,8 +919,11 @@ def fused_kernel(
         recurrent_state_ref.shape,
         mixed_qkv_ref.shape[0],
     )
-    print(f"fused_kernel: len(in_specs)={len(in_specs)},"
-          f" len(out_specs)={len(out_specs)}")
+
+    #   print(
+    #       f"fused_kernel: len(in_specs)={len(in_specs)},"
+    #       f" len(out_specs)={len(out_specs)}"
+    #   )
 
     def _run_with_scratch(
         scratch_ref,
@@ -917,7 +935,7 @@ def fused_kernel(
         decode_write_sem,
         prefill_sem,
     ):
-        print(f"Running fused kernel body A_log shape {a_log_ref.shape}")
+
         pipeline_func = pltpu.emit_pipeline(
             body=functools.partial(
                 inner_kernel,
@@ -976,6 +994,100 @@ def fused_kernel(
         pltpu.SemaphoreType.DMA((1, )),  # decode_write_semaphore
         pltpu.SemaphoreType.DMA((2, )),  # prefill_semaphore
     )
+
+
+def compute_schedule_table(
+    query_start_loc: jax.Array,
+    decode_tokens: int | jax.Array,
+    num_tokens: int,
+    chunk_size: int,
+    BT: int | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Computes the schedule table for the recurrent scan kernel."""
+    if BT is None:
+        BT = chunk_size
+    num_decode_batches = (decode_tokens + BT - 1) // BT
+    num_seqs = query_start_loc.shape[0] - 1
+    all_req_lens = query_start_loc[1:] - query_start_loc[:-1]
+    req_indices = jnp.arange(all_req_lens.shape[0])
+    is_prefill_req = req_indices >= decode_tokens
+
+    # chunks_per_req: shape [num_requests], range [1,
+    # ceil(max_seq_len/chunk_size)]
+    chunks_per_req = (all_req_lens + chunk_size - 1) // chunk_size
+    # prefill_chunks: shape [num_requests], range [0,
+    # ceil(max_seq_len/chunk_size)]
+    prefill_chunks = jnp.where(is_prefill_req, chunks_per_req, 0)
+
+    # num_prefill_chunks: scalar, sum of chunks for all prefill requests
+    num_prefill_chunks = jnp.sum(prefill_chunks)
+    # total_blocks: scalar, max of decode and prefill chunks
+    total_blocks = jnp.maximum(num_decode_batches,
+                               num_prefill_chunks).astype(jnp.int32)
+
+    max_blocks = (num_tokens + chunk_size - 1) // chunk_size
+
+    def build_paired_table(i, carry):
+        table, r, current_prefill_offset = carry
+
+        decode_valid = i < num_decode_batches
+        decode_offset = i * BT
+        decode_count = jnp.where(
+            decode_valid, jnp.minimum(BT, decode_tokens - decode_offset), 0)
+        decode_req_id = jnp.where(decode_valid, i * BT, 0)
+
+        prefill_valid = i < num_prefill_chunks
+        prefill_offset = current_prefill_offset
+
+        def cond_fun(r_val):
+            return (prefill_offset
+                    >= query_start_loc[r_val + 1]) & (r_val < num_seqs - 1)
+
+        def body_fun(r_val):
+            return r_val + 1
+
+        r_new = jax.lax.while_loop(cond_fun, body_fun, r)
+        prefill_req_id = r_new
+
+        safe_next_req = jnp.minimum(prefill_req_id + 1, num_seqs)
+        prefill_count = jnp.where(
+            prefill_valid,
+            jnp.minimum(chunk_size,
+                        query_start_loc[safe_next_req] - prefill_offset),
+            0,
+        )
+        next_prefill_offset = prefill_offset + prefill_count
+
+        is_last_chunk = prefill_valid & (
+            (prefill_offset + prefill_count) >= query_start_loc[safe_next_req])
+        is_first_chunk = prefill_valid & (prefill_offset
+                                          == query_start_loc[prefill_req_id])
+
+        table = table.at[i, 0].set(prefill_valid.astype(jnp.int32))
+        table = table.at[i, 1].set(jnp.where(prefill_valid, prefill_offset, 0))
+        table = table.at[i, 2].set(prefill_req_id)
+        table = table.at[i, 3].set(prefill_count)
+
+        table = table.at[i, 4].set(decode_valid.astype(jnp.int32))
+        table = table.at[i, 5].set(jnp.where(decode_valid, decode_offset, 0))
+        table = table.at[i, 6].set(decode_req_id)
+        table = table.at[i, 7].set(decode_count)
+        table = table.at[i, 8].set(is_last_chunk.astype(jnp.int32))
+        table = table.at[i, 9].set(is_first_chunk.astype(jnp.int32))
+
+        return table, r_new, next_prefill_offset
+
+    initial_r = decode_tokens
+    initial_prefill_offset = query_start_loc[decode_tokens]
+    safe_max_blocks = max_blocks + num_seqs
+    table_init = jnp.zeros((safe_max_blocks, 10), dtype=jnp.int32)
+    schedule_table, _, _ = jax.lax.fori_loop(
+        0,
+        total_blocks,
+        build_paired_table,
+        (table_init, initial_r, initial_prefill_offset),
+    )
+    return schedule_table, total_blocks
 
 
 @functools.partial(
@@ -1042,7 +1154,8 @@ def recurrent_scan(
       - Updated recurrent state of shape [max_reqs, n_v, d_k, d_v].
       - The mixed_qkv array of shape [num_tokens, 2 * n_kq * d_k + n_v * d_v].
   """
-    jax.debug.print("recurrent_scan: query_start_loc={}", query_start_loc)
+    #   jax.debug.print("recurrent_scan: query_start_loc={}", query_start_loc)
+    #   jax.debug.print("recurrent_scan: state_indices={}", state_indices)
     # TODO(kunjanp): Compute beta and g inside the kernel to save HBM bandwidth.
     # We could pass raw a and b and compute sigmoid/softplus on the fly.
     # beta = jax.nn.sigmoid(b)
@@ -1056,12 +1169,6 @@ def recurrent_scan(
     a_padded = jnp.pad(a, ((0, 0), (0, 128 - n_v)))
     b_padded = jnp.pad(b, ((0, 0), (0, 128 - n_v)))
 
-    print(
-        f"From recurrent scan n_kq={n_kq}, n_v={n_v}, d_k={d_k}, d_v={d_v}, chunk_size={chunk_size}, BT={BT}, max_reqs={max_reqs}, use_qk_norm_in_gdn={use_qk_norm_in_gdn}"
-    )
-    print(
-        f"recurrent_scan: mixed_qkv.shape={mixed_qkv.shape}, recurrent_state.shape={recurrent_state.shape}, state_indices.shape={state_indices.shape}, A_log.shape={A_log.shape}, dt_bias.shape={dt_bias.shape}, query_start_loc.shape={query_start_loc.shape}, distribution.shape={distribution.shape} "
-    )
     # TODO(kunjanp): Materialize identity matrix directly inside the kernel
     identity = jnp.eye(chunk_size, dtype=jnp.float32)
 
@@ -1073,20 +1180,30 @@ def recurrent_scan(
 
     # change to by dtype size
     sublanesize = 8 if mixed_qkv.dtype == jnp.float32 else 16
-    schedule_table, total_blocks = (compute_schedule_table_v2(
-        query_start_loc,
-        decode_tokens,
-        mixed_qkv.shape[0],
-        chunk_size,
-        BT,
-        alignment=sublanesize,
-    ))
+    schedule_table, total_blocks = (
+        compute_schedule_table_v2.compute_schedule_table_v2(
+            query_start_loc,
+            decode_tokens,
+            distribution[2],
+            mixed_qkv.shape[0] - chunk_size,
+            chunk_size,
+            BT,
+            alignment=sublanesize,
+        ))
+    jax.debug.print("prefill_tokens={}", prefill_tokens)
+    jax.debug.print("decode_tokens={}", decode_tokens)
+    jax.debug.print("total_blocks={}", total_blocks)
 
     # sublane,128
     decode_tokens_arr = jnp.expand_dims(decode_tokens, 0)
     prefill_tokens_arr = jnp.expand_dims(prefill_tokens, 0)
     total_blocks_arr = jnp.expand_dims(total_blocks, 0)
-
+    valid_schedule = schedule_table[:total_blocks]
+    has_nan = jnp.isnan(valid_schedule.astype(jnp.float32)).any()
+    jax.lax.cond(
+        has_nan,
+        lambda: jax.debug.print("ERROR: Schedule table contains NaN!"),
+        lambda: None)
     grid_spec = pl.GridSpec(
         grid=(1, ),
         in_specs=[
