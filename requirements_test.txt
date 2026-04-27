@@ -1,2 +1,8 @@
 buildkite-test-collector
 hf_transfer
+pytest-asyncio
+pytest-cov
+pytest-split
+git+https://github.com/thuml/depyf.git
+lm-eval[api]==0.4.11
+tblib
