@@ -132,6 +132,7 @@ def _scheduler_worker_process(
     kv_cache_config: Any,
     structured_output_manager: Any,
     block_size: int,
+    hash_block_size: int,
     mm_registry: Any,
     include_finished_set: bool,
     log_stats: bool,
@@ -144,6 +145,7 @@ def _scheduler_worker_process(
         kv_cache_config=kv_cache_config,
         structured_output_manager=structured_output_manager,
         block_size=block_size,
+        hash_block_size=hash_block_size,
         mm_registry=mm_registry,
         include_finished_set=include_finished_set,
         log_stats=log_stats,
@@ -337,12 +339,14 @@ class DPScheduler(SchedulerInterface):
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
         block_size: int,
+        hash_block_size: int = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
     ) -> None:
         self.vllm_config = vllm_config
         self.block_size = block_size
+        self.hash_block_size = hash_block_size if hash_block_size is not None else block_size
         self.log_stats = log_stats
         self.connector = None
         self.structured_output_manager = structured_output_manager
@@ -399,6 +403,7 @@ class DPScheduler(SchedulerInterface):
                     self.per_rank_kv_cache_configs[rank],
                     structured_output_manager,
                     block_size,
+                    self.hash_block_size,
                     mm_registry,
                     include_finished_set,
                     log_stats,
