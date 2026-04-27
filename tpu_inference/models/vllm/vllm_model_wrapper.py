@@ -409,26 +409,19 @@ class VllmModelWrapper:
         ) -> Any:
 
             with torchax.default_env(), enable_torch_wrap(False):
-                static_argnames = {"image_grid_thw"}
-                call_kwargs = {}
-                for k, v in kwargs.items():
-                    if k in static_argnames:
-                        if v is not None:
-                            call_kwargs[k] = torch.tensor(
-                                v, dtype=torch.long).to(device="jax")
-                        else:
-                            call_kwargs[k] = None
-                    else:
 
-                        def move(val):
-                            if not isinstance(val, torch.Tensor):
-                                logger.warning(
-                                    f"Expect torch.Tensor, got {type(val)}")
-                                return val
-                            return val.to(device="jax")
+                def move(v: torch.Tensor) -> torch.Tensor:
+                    if not isinstance(v, torch.Tensor):
+                        logger.warning(f"Expect torch.Tensor, got {type(v)}")
+                        return v
+                    return v.to(device="jax")
 
-                        call_kwargs[k] = jax.tree.map(move, v)
-
+                # Ensure all tensors are moved into accelerator so the
+                # computation with weights can work properly.
+                call_kwargs = {
+                    k: jax.tree.map(move, v)
+                    for k, v in kwargs.items()
+                }
                 output_from_torch = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
