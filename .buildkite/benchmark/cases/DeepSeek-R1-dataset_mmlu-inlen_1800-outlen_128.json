@@ -6,20 +6,20 @@
     "GCP_DATABASE_ID": "vllm-bm-bk-runs",
     "EXPECTED_ETEL": 3600000,
     "INPUT_LEN": 1800,
-    "OUTPUT_LEN": 128
+    "OUTPUT_LEN": 128,
+    "MAX_MODEL_LEN": 2048
   },
   "ci_queue": [
-    "tpu_v7x_8_queue"
+    "tpu_v6e_8_queue"
   ],
   "client_command_options": {
     "command_type": "lm_eval",
     "env": {
-      "VLLM_MLA_DISABLE": 1,
       "NEW_MODEL_DESIGN": 1,
       "TPU_BACKEND_TYPE": "jax"
     },
     "args": {
-      "model": "deepseek-ai/DeepSeek-R1",
+      "model": "meta-llama/Llama-3.3-70B-Instruct",
       "dataset-name": "mmlu",
       "tensor-parallel-size": {
         "v6e-8": 8,

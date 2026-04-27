@@ -22,6 +22,7 @@ set -ex
 # --- Configuration ---
 export LOG_DIR=$1
 export MODEL_NAME=$MODEL
+export TASK_NAME=mmlu
 # Use a specific MMLU subtask if the MMLU_SUBTASK env var is set, otherwise default to the full mmlu group task.
 OUTPUT_PREFIX="${TASK_NAME}_${MODEL_NAME//\//-}"
 export OUTPUT_PREFIX
