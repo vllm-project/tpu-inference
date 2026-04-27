@@ -25,6 +25,7 @@ def create_parser():
     sampling_group.add_argument("--temperature", type=float)
     sampling_group.add_argument("--top-p", type=float)
     sampling_group.add_argument("--top-k", type=int)
+    sampling_group.add_argument("--log-probs", type=int)
 
     return parser
 
@@ -35,6 +36,7 @@ def main(args: dict):
     temperature = args.pop("temperature")
     top_p = args.pop("top_p")
     top_k = args.pop("top_k")
+    log_probs = args.pop("log_probs")
 
     # Create an LLM
     if "additional_config" not in args or args["additional_config"] is None:
@@ -52,6 +54,8 @@ def main(args: dict):
         sampling_params.top_p = top_p
     if top_k is not None:
         sampling_params.top_k = top_k
+    if log_probs is not None:
+        sampling_params.logprobs = log_probs
 
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
@@ -108,9 +112,7 @@ def main(args: dict):
         prompt = output.prompt
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
-        print("-" * 50)
 
-    for output in outputs:
         for completion in output.outputs:
             if completion.routed_experts is not None:
                 # Shape will be [len(completion.token_ids), num_layers, top_k]
@@ -119,6 +121,11 @@ def main(args: dict):
                 print(
                     f"First token expert selection: {completion.routed_experts[0]}"
                 )
+
+            if completion.logprobs is not None:
+                print(f"Logprobs for first token: {completion.logprobs[0]}")
+
+        print("-" * 50)
 
 
 if __name__ == "__main__":
