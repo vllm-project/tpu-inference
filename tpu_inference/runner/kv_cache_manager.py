@@ -31,6 +31,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, MambaSpec,
                                         MLAAttentionSpec, SlidingWindowSpec)
 
+from tpu_inference import envs as tpu_envs
 from tpu_inference import utils
 from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -70,6 +71,16 @@ class KVCacheManager:
         # on the TPU side (where we duplicate the shared tensor per layer
         # because mamba and attention caches have different shapes).
         self._hybrid_uniform_page_size_bytes: int | None = None
+        # Mamba leading-dim cap for hybrid models. Mamba state is recurrent
+        # (one slot per active request), so allocating `num_blocks` slots per
+        # mamba layer wastes most of them — only `max_num_seqs` are ever live
+        # at once. When this is set, `initialize_kv_cache` allocates this many
+        # slots for each mamba layer instead of `num_blocks`, freeing HBM that
+        # `update_mamba_page_size_padded` then redirects into more attention
+        # blocks (raising `num_gpu_blocks_override`). The GDN op compensates
+        # by indexing into the smaller mamba arrays with `req_idx` instead of
+        # the (now-larger) block-table block IDs — see `gdn_attention_op`.
+        self._mamba_num_blocks: int | None = None
 
     def _create_attention_spec(
             self,
@@ -252,17 +263,200 @@ class KVCacheManager:
         self.runner.cache_config.mamba_page_size_padded = int(
             uniform_page_size_bytes)
 
-        # Pin vLLM's num_blocks via a two-step flooring that keeps peak
-        # HBM within `gpu_memory_utilization × total_hbm` at high
-        # utilization. See `_maybe_set_num_blocks_override` for the
-        # formula and rationale; the short version is that vLLM's
-        # single-step `floor(avail / (uniform × group_size))` can land
-        # one block higher than the two-step value, and that extra
-        # block × group_size × uniform bytes is enough to push past the
-        # budget against imprecision in vLLM's `avail` estimate.
+        # Pin vLLM's num_blocks. Two cases:
+        #  (a) compact-mamba: cap each mamba layer at `max_num_seqs+1` slots
+        #      (one per active request, plus the null block) and redirect the
+        #      freed HBM into more attention blocks. This is the common path
+        #      and gives a substantial throughput win on hybrid models where
+        #      mamba layers dominate the per-block footprint (e.g., Qwen3.5
+        #      where each block currently spends ~50% of its bytes on mamba
+        #      state that is never indexed past `max_num_seqs`).
+        #  (b) legacy: keep TPU and vLLM's num_blocks identical (the original
+        #      OOB fix). Used when compact-mamba is disabled or the avail
+        #      memory probe fails (e.g., in tests without real devices).
+        if tpu_envs.COMPACT_MAMBA_KV_CACHE:
+            self._maybe_set_compact_mamba_num_blocks_override(
+                attn_page_size_bytes, int(unpadded_mamba_page_size),
+                num_attn_groups, num_mamba_groups, num_attn, num_mamba,
+                group_size)
+            if self._mamba_num_blocks is not None:
+                # Successfully sized mamba compactly. Done.
+                return
+
         self._maybe_set_num_blocks_override(attn_page_size_bytes,
                                             int(uniform_page_size_bytes),
                                             group_size)
+
+    def _maybe_set_compact_mamba_num_blocks_override(
+            self, attn_page_size_bytes: int,
+            unpadded_mamba_page_size_bytes: int, num_attn_groups: int,
+            num_mamba_groups: int, num_attn_layers: int, num_mamba_layers: int,
+            group_size: int) -> None:
+        """Cap mamba allocation at `max_num_seqs+1` slots, redirect freed HBM
+        into more attention blocks, and pin `num_gpu_blocks_override` to the
+        resulting attention pool size.
+
+        Why this is a big win
+        ---------------------
+        Mamba state is recurrent: one slot per *active request* per layer,
+        independent of context length. With Qwen3.5 (15 attn + 45 mamba
+        layers) the legacy code allocates `num_blocks` mamba slots per layer
+        even though only ~`max_num_seqs` are ever live at once. On TP=8
+        with 307 GiB available, that wastes ~80 GiB on mamba slots that
+        will never be addressed. Folded back into attention, those bytes
+        buy ~1.6× the attention block pool — roughly a 60% jump in the
+        steady-state concurrent-request count, which is the dominant
+        throughput driver at high concurrency.
+
+        How it stays correct
+        --------------------
+        vLLM still hands out block IDs from a single shared pool of size
+        `num_gpu_blocks_override`, but on TPU we allocate only
+        `_mamba_num_blocks` slots per mamba layer. Indexing a smaller array
+        with a possibly-large block ID would walk off the end. The GDN op
+        avoids this by indexing mamba state with `req_idx` (the position
+        in the persistent batch, ∈ [0, max_num_reqs)) instead of the
+        block-table value — each persistent-batch slot owns a dedicated
+        mamba slot for its lifetime.
+
+        Sizing math
+        -----------
+        Each `KVCacheTensor` is shared across one layer from each kv-cache
+        group (`num_attn_groups + num_mamba_groups` layers per tensor) and
+        there are `group_size` such tensors. Total HBM:
+
+          avail = group_size × (num_attn_groups × N_attn × attn_page
+                                + num_mamba_groups × N_mamba × mamba_unpadded)
+
+        We fix `N_mamba = max_num_seqs + 1` (one per request plus a null
+        block), then solve for `N_attn`:
+
+          N_attn = floor((avail/group_size
+                          - num_mamba_groups × N_mamba × mamba_unpadded)
+                         / (num_attn_groups × attn_page))
+
+        and round down to a multiple of the sharding divisor.
+
+        Skipped if HBM usage isn't readable (tests w/o real devices) or if
+        the user has explicitly set `num_gpu_blocks_override`. Falls back
+        to the legacy two-step floor in those cases.
+
+        Args:
+            attn_page_size_bytes: TPU-actual bytes per block per attention
+                layer (accounts for dtype packing like fp8).
+            unpadded_mamba_page_size_bytes: bytes per mamba state per layer
+                (`prod(shape) × dtype_size`, no padding).
+            num_attn_groups: vLLM kv-cache groups containing attention
+                layers.
+            num_mamba_groups: vLLM kv-cache groups containing mamba layers.
+            num_attn_layers: total attention layers in the model.
+            num_mamba_layers: total mamba layers in the model.
+            group_size: layers per kv-cache group (= number of
+                `KVCacheTensor`s; vLLM pads short groups up to this).
+
+        Returns:
+            None. Side effects on success: sets
+            `cache_config.num_gpu_blocks_override` and `_mamba_num_blocks`
+            so `initialize_kv_cache` allocates the compact mamba arrays.
+            On failure (no override possible), leaves both unset and
+            returns; the caller falls back to the legacy override path.
+        """
+        cache_config = self.runner.cache_config
+        if cache_config.num_gpu_blocks_override is not None:
+            return
+
+        devices = self.runner.mesh.devices.flatten()
+        try:
+            hbm_usage = utils.hbm_usage_bytes(devices)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "Skipping compact-mamba override: hbm_usage_bytes failed "
+                "(%s). Falling back to legacy override.", exc)
+            return
+
+        total_limit = sum(limit for _, limit in hbm_usage)
+        total_used = sum(used for used, _ in hbm_usage)
+        gpu_mem_util = cache_config.gpu_memory_utilization
+        avail = int(total_limit * gpu_mem_util - total_used)
+        if avail <= 0:
+            return
+
+        # Sharding divisor: num_blocks for each layer must be a multiple of
+        # the per-axis device count so JAX shardings don't round up. MLA
+        # uses MLP_TENSOR; everything else uses ATTN_DATA. Match
+        # `initialize_kv_cache`.
+        if self.use_mla and not self.runner.vllm_config.additional_config.get(
+                "sharding", {}).get("sharding_strategy", {}).get(
+                    "enable_dp_attention", False):
+            divisor = common_utils.get_mesh_shape_product(
+                self.runner.mesh, ShardingAxisName.MLP_TENSOR)
+        else:
+            divisor = common_utils.get_mesh_shape_product(
+                self.runner.mesh, ShardingAxisName.ATTN_DATA)
+        if divisor <= 0:
+            divisor = 1
+
+        # Mamba slot budget: enough for every persistent-batch slot the
+        # runner is sized for, plus one null block, rounded up to the
+        # sharding divisor. `runner.max_num_reqs` already accounts for DP
+        # (= dp_size × scheduler_config.max_num_seqs) so the GDN op's
+        # `state_indices = arange(max_reqs)` is guaranteed in-bounds.
+        mamba_num_blocks = self.runner.max_num_reqs + 1
+        mamba_num_blocks = (
+            (mamba_num_blocks + divisor - 1) // divisor) * divisor
+
+        # Compute attn_num_blocks that fits the remaining HBM after mamba.
+        avail_per_tensor = avail // group_size
+        mamba_per_tensor = (num_mamba_groups * mamba_num_blocks *
+                            unpadded_mamba_page_size_bytes)
+        attn_per_tensor_avail = avail_per_tensor - mamba_per_tensor
+        if attn_per_tensor_avail <= 0:
+            # Even mamba alone exceeds budget — the mamba cap is too high
+            # for this configuration. Fall back to the legacy override.
+            logger.debug(
+                "Compact-mamba override skipped: mamba_num_blocks=%d × "
+                "num_mamba_groups=%d × mamba_unpadded=%d exceeds per-tensor "
+                "budget %d. Falling back to legacy override.",
+                mamba_num_blocks, num_mamba_groups,
+                unpadded_mamba_page_size_bytes, avail_per_tensor)
+            return
+
+        attn_num_blocks = attn_per_tensor_avail // (num_attn_groups *
+                                                    attn_page_size_bytes)
+        attn_num_blocks = (attn_num_blocks // divisor) * divisor
+        if attn_num_blocks <= 0:
+            return
+
+        # Sanity check: redirecting HBM into attention should be a strict
+        # win over the legacy single-num_blocks layout. If it isn't (rare
+        # corner case where the legacy num_blocks already saturates), keep
+        # the legacy path.
+        legacy_num_blocks = avail // (self._hybrid_uniform_page_size_bytes *
+                                      group_size)
+        if attn_num_blocks <= legacy_num_blocks:
+            logger.debug(
+                "Compact-mamba override skipped: attn_num_blocks=%d "
+                "<= legacy_num_blocks=%d. Falling back to legacy override.",
+                attn_num_blocks, legacy_num_blocks)
+            return
+
+        cache_config.num_gpu_blocks_override = int(attn_num_blocks)
+        self._mamba_num_blocks = int(mamba_num_blocks)
+
+        logger.info(
+            "Compact-mamba KV cache: num_gpu_blocks_override=%d (attn) and "
+            "_mamba_num_blocks=%d (vs legacy num_blocks≈%d). HBM split: "
+            "attn=%d layers × %d blocks × %d B = %.2f GiB; mamba=%d layers "
+            "× %d slots × %d B = %.2f GiB; total=%.2f GiB / avail=%.2f GiB.",
+            attn_num_blocks, mamba_num_blocks, legacy_num_blocks,
+            num_attn_layers, attn_num_blocks, attn_page_size_bytes,
+            num_attn_layers * attn_num_blocks * attn_page_size_bytes /
+            (1 << 30), num_mamba_layers, mamba_num_blocks,
+            unpadded_mamba_page_size_bytes, num_mamba_layers *
+            mamba_num_blocks * unpadded_mamba_page_size_bytes / (1 << 30),
+            (num_attn_layers * attn_num_blocks * attn_page_size_bytes +
+             num_mamba_layers * mamba_num_blocks *
+             unpadded_mamba_page_size_bytes) / (1 << 30), avail / (1 << 30))
 
     def _maybe_set_num_blocks_override(self, attn_page_size_bytes: int,
                                        uniform_page_size_bytes: int,
@@ -654,6 +848,15 @@ class KVCacheManager:
             # num_blocks must be a multiple of the sharding divisor
             num_blocks = (num_blocks // divisor) * divisor
 
+            # When compact-mamba is active, mamba layers allocate
+            # `_mamba_num_blocks` (≈ max_num_seqs+1) slots while attention
+            # layers allocate the full `num_blocks` from the (now larger)
+            # attention pool. The two values diverge here; outside compact
+            # mode they are equal and behavior is unchanged.
+            mamba_num_blocks = (self._mamba_num_blocks
+                                if self._mamba_num_blocks is not None else
+                                num_blocks)
+
             for j, layer_name in enumerate(kv_cache_tensor.shared_by):
                 layer_spec = layer_name_to_spec[layer_name]
                 if isinstance(layer_spec, MambaSpec):
@@ -661,7 +864,7 @@ class KVCacheManager:
                     for state_index, (shape, dtype) in enumerate(
                             zip(layer_spec.shapes, layer_spec.dtypes)):
                         jax_dtype = t2j_dtype(dtype)
-                        cache_shape = (num_blocks, *shape)
+                        cache_shape = (mamba_num_blocks, *shape)
                         if state_index == 0:
                             # conv_state: [num_blocks, conv_kernel_size, intermediate_size]
                             spec = PartitionSpec(ShardingAxisName.ATTN_DATA,
@@ -738,7 +941,8 @@ class KVCacheManager:
                 # if duplicate_shared_layers is False.  Otherwise, if duplicate_shared_layers
                 # is True, we should add the blocks for each layer in shared_by.
                 if j == 0 or duplicate_shared_layers:
-                    num_blocks_list.append(num_blocks)
+                    num_blocks_list.append(mamba_num_blocks if isinstance(
+                        layer_spec, MambaSpec) else num_blocks)
                 layer_idx = (i * num_shared_layers
                              ) + j if duplicate_shared_layers else i
                 self.runner.layer_name_to_kvcache_index[layer_name] = layer_idx
