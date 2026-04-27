@@ -16,8 +16,7 @@
 # Exit immediately if a command exits with a non-zero status.
 set -ex
 
-# Change to the script's directory to ensure relative paths work correctly.
-# cd "$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- Configuration ---
 export LOG_DIR=$1
@@ -80,4 +79,4 @@ fi
 echo "Found and using file: $LATEST_FILE"
 
 echo "Parsing results and writing to $ACCURACY_JSON_PATH..."
-python parse_lm_eval_mmlu_results.py "$LATEST_FILE" > "$ACCURACY_JSON_PATH"
+python "$SCRIPT_DIR/parse_lm_eval_mmlu_results.py" "$LATEST_FILE" > "$ACCURACY_JSON_PATH"
