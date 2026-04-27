@@ -278,6 +278,7 @@ class VllmModelWrapper:
                 NamedSharding(self.mesh,
                               PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
                 None,  # empty list
+                None,  # expert ids
             ),
             compiler_options={
                 "xla_tpu_all_gather_collective_matmul_mode":
@@ -304,15 +305,17 @@ class VllmModelWrapper:
             is_first_rank: bool = True,
             is_last_rank: bool = True,
             *args,
-        ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
+        ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
+                List[jax.Array], jax.Array, List[jax.Array], jax.Array]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
             lora_metadata = torch_view(lora_metadata)
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
                     mesh=self.mesh,
-                    layer_name_to_kvcache_index=layer_name_to_kvcache_index
-            ), set_forward_context(attn_metadata=attn_metadata,
-                                   vllm_config=self.vllm_config):
+                    layer_name_to_kvcache_index=layer_name_to_kvcache_index,
+                    vllm_config=self.vllm_config), set_forward_context(
+                        attn_metadata=attn_metadata,
+                        vllm_config=self.vllm_config):
                 # We need to wrap args from jax land into TorchValue with
                 # torch_view in order to call the Torch function.
                 original_lora_metadata = replace_lora_metadata(
@@ -334,6 +337,10 @@ class VllmModelWrapper:
                                       self.vllm_config.lora_config)
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
+
+                expert_indices_list = getattr(vllm_model_wrapper_context,
+                                              "expert_indices_list", [])
+
             # Wrap the output(hidden states or intermediate tensor)
             # from torch land into a JaxValue for the jax code to consume.
             aux_hidden_states = []
@@ -344,7 +351,13 @@ class VllmModelWrapper:
                     output, aux_hidden_states = jax_view(output_from_torch)
                 else:
                     output = jax_view(output_from_torch)
-            return new_kv_caches, output, aux_hidden_states
+
+            if expert_indices_list:
+                import jax.numpy as jnp
+                expert_indices = jnp.stack(expert_indices_list, axis=0)
+            else:
+                expert_indices = None
+            return new_kv_caches, output, aux_hidden_states, expert_indices
 
         @jax.jit(
             donate_argnames=("kv_caches", ),
@@ -353,6 +366,7 @@ class VllmModelWrapper:
                 NamedSharding(self.mesh,
                               PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
                 None,  # list of aux hidden states
+                None,  # expert ids
             ),
             compiler_options={
                 "xla_tpu_all_gather_collective_matmul_mode":
@@ -369,7 +383,8 @@ class VllmModelWrapper:
             hidden_states: jax.Array,
             attn_metadata: AttentionMetadata,
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
-        ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
+        ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array],
+                   Optional[jax.Array]]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
@@ -394,7 +409,7 @@ class VllmModelWrapper:
             hidden_states, hidden_prenorm = output_from_torch
             hidden_states = jax_view(hidden_states)
             hidden_prenorm = jax_view(hidden_prenorm)
-            return new_kv_caches, hidden_states, [hidden_prenorm]
+            return new_kv_caches, hidden_states, [hidden_prenorm], None
 
         return draft_step_fun if self.is_draft_model else step_fun
 

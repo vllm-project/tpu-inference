@@ -172,7 +172,7 @@ class TestLlamaForCausalLM:
             jnp.bfloat16)
         # 1 seq with 16 tokens
         input_ids, attention_metadata, indices_do_sample = mock_model_inputs
-        kv_caches, hidden_states, aux_hidden_states = model(
+        kv_caches, hidden_states, aux_hidden_states, _ = model(
             kv_caches, input_ids, attention_metadata, None, None, None, None,
             None, True, True)
         assert hidden_states.shape == (8, hidden_size)

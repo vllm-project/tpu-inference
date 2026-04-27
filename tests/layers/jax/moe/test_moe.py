@@ -166,6 +166,46 @@ class TestMoE(unittest.TestCase):
 
         return jnp.array(expected_output, dtype=self.dtype)
 
+    def _compute_ground_truth_with_fixed_ids(self, moe_instance, x_input,
+                                             expert_ids):
+        """Computes ground truth using fixed expert IDs instead of router decisions."""
+        weights, _ = moe_instance.router(x_input)
+        gating_kernel_full = jax.device_get(
+            moe_instance.kernel_gating_EDF.value)
+        up_proj_kernel_full = jax.device_get(
+            moe_instance.kernel_up_proj_EDF.value)
+        down_proj_kernel_full = jax.device_get(
+            moe_instance.kernel_down_proj_EFD.value)
+
+        flat_x = x_input.reshape(-1, self.D)
+        flat_weights = weights.reshape(-1, self.K)
+        flat_indices = expert_ids.reshape(-1, self.K)
+
+        expected_output = np.zeros_like(flat_x)
+
+        for t in range(flat_x.shape[0]):
+            token_val = flat_x[t]
+            token_accum = np.zeros_like(token_val)
+
+            for k in range(self.K):
+                expert_idx = flat_indices[t, k]
+                router_weight = flat_weights[t, k]
+
+                w_gating = gating_kernel_full[expert_idx]
+                w_up = up_proj_kernel_full[expert_idx]
+                w_down = down_proj_kernel_full[expert_idx]
+
+                gate_out = np.dot(token_val, w_gating)
+                up_out = np.dot(token_val, w_up)
+                silu_out = gate_out * (1 / (1 + np.exp(-gate_out)))
+                expert_out = silu_out * up_out
+                down_out = np.dot(expert_out, w_down)
+                token_accum += down_out * router_weight
+
+            expected_output[t] = token_accum
+
+        return jnp.array(expected_output, dtype=self.dtype)
+
     def test_dense_backend_correctness(self):
         """Verifies the DENSE_MAT backend against the sequential ground truth."""
         for apply_expert_weight_before_computation in [False, True]:
@@ -174,7 +214,7 @@ class TestMoE(unittest.TestCase):
                                    apply_expert_weight_before_computation)
 
         with jax.set_mesh(self.mesh):
-            actual_output = moe(self.x)
+            actual_output, _ = moe(self.x)
 
             expected_output = self._compute_ground_truth(moe, self.x)
 
@@ -197,7 +237,7 @@ class TestMoE(unittest.TestCase):
 
         # Run Forward Pass (Distributed)
         with jax.set_mesh(self.mesh):
-            actual_output = moe(self.x)
+            actual_output, _ = moe(self.x)
 
         # Compute Ground Truth using the exact same weights
         expected_output = self._compute_ground_truth(moe, self.x)
@@ -220,15 +260,36 @@ class TestMoE(unittest.TestCase):
         # 1. Run Dense
         moe_dense = self._create_moe(MoEBackend.DENSE_MAT)
         with jax.set_mesh(self.mesh):
-            out_dense = moe_dense(self.x)
+            out_dense, _ = moe_dense(self.x)
 
         # 2. Run Sparse
         # We must re-init with same key to get same weights
         moe_sparse = self._create_moe(MoEBackend.MEGABLX_GMM)
         with jax.set_mesh(self.mesh):
-            out_sparse = moe_sparse(self.x)
+            out_sparse, _ = moe_sparse(self.x)
 
         self.assertTrue(
             jnp.allclose(out_dense, out_sparse, atol=5e-2, rtol=5e-2),
             "Dense and Sparse backends produced different results for identical initialization."
         )
+
+    def test_moe_replay_correctness(self):
+        """Tests that the MoE output can be reconstructed using saved expert IDs."""
+        moe = self._create_moe(MoEBackend.DENSE_MAT)
+
+        # Enable returning expert IDs
+        moe.enable_return_routed_experts = True
+
+        with jax.set_mesh(self.mesh):
+            output_run1, expert_ids = moe(self.x)
+
+        self.assertIsNotNone(expert_ids,
+                             "expert_ids should not be None when enabled")
+
+        # Compute ground truth with the saved expert_ids
+        reconstructed = self._compute_ground_truth_with_fixed_ids(
+            moe, self.x, expert_ids)
+
+        self.assertTrue(
+            jnp.allclose(output_run1, reconstructed, atol=1e-2, rtol=1e-2),
+            "Reconstructed output does not match run1 output.")

@@ -63,7 +63,7 @@ class TestTransformerBlock(unittest.TestCase):
         mock_pre_attn_norm.side_effect = lambda val: val
         mock_pre_mlp_norm.side_effect = lambda val: val
 
-        new_kv_cache, final_output = transformer_block(
+        new_kv_cache, final_output, _ = transformer_block(
             x,
             is_prefill=True,
             kv_cache=initial_kv_cache,
@@ -134,7 +134,7 @@ class TestTransformerBlock(unittest.TestCase):
         mock_pre_attn_norm.side_effect = lambda val: val
         mock_pre_mlp_norm.side_effect = lambda val: val
 
-        new_kv_cache, final_output = transformer_block(
+        new_kv_cache, final_output, _ = transformer_block(
             x,
             is_prefill=True,
             kv_cache=initial_kv_cache,

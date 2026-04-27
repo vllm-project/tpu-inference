@@ -597,7 +597,8 @@ class TestQwen2_5_VLForConditionalGeneration:
                               (1, 10, model.config.text_config.hidden_size)))
         model.model.return_value = mock_lm_output
 
-        new_kvs, x, aux_hidden_states = model(kv_caches, input_ids, attn_meta)
+        new_kvs, x, aux_hidden_states, _ = model(kv_caches, input_ids,
+                                                 attn_meta)
         model.model.assert_called_once_with(kv_caches=kv_caches,
                                             input_ids=input_ids,
                                             attention_metadata=attn_meta,
@@ -698,11 +699,11 @@ class TestQwen2_5_VLPipelineParallel:
             attn_meta = MagicMock(spec=AttentionMetadata)
 
             model.model.return_value = (kv_caches, jnp.ones((3, 16)))
-            new_kvs, x, aux = model(kv_caches,
-                                    input_ids,
-                                    attn_meta,
-                                    is_first_rank=True,
-                                    is_last_rank=False)
+            new_kvs, x, aux, _ = model(kv_caches,
+                                       input_ids,
+                                       attn_meta,
+                                       is_first_rank=True,
+                                       is_last_rank=False)
             assert isinstance(x, JaxIntermediateTensors)
             assert "hidden_states" in x.tensors
             model.model.assert_called_once()
@@ -724,12 +725,12 @@ class TestQwen2_5_VLPipelineParallel:
                 tensors={"hidden_states": jnp.ones((3, 16))})
 
             model.model.return_value = (kv_caches, jnp.ones((3, 16)))
-            new_kvs, x, aux = model(kv_caches,
-                                    None,
-                                    attn_meta,
-                                    intermediate_tensors=intermediate,
-                                    is_first_rank=False,
-                                    is_last_rank=True)
+            new_kvs, x, aux, _ = model(kv_caches,
+                                       None,
+                                       attn_meta,
+                                       intermediate_tensors=intermediate,
+                                       is_first_rank=False,
+                                       is_last_rank=True)
             assert isinstance(x, jax.Array)
             model.model.assert_called_once()
             _, kwargs = model.model.call_args
