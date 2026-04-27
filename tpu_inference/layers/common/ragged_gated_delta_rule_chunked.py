@@ -11,7 +11,46 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Ragged gated delta rule packed JAX implementation."""
+"""Ragged gated delta rule packed JAX implementation.
+
+Precision discipline (Qwen3.5 397B GPQA fix, 2026-04-26)
+--------------------------------------------------------
+The original implementation ran the entire decode-side recurrent step
+at TPU's default precision (bf16 multiply, fp32 accumulate). On long
+CoT generations (``max_gen_toks=32768``) the per-token bf16 multiply
+error compounds through the recurrent state, contributing to a
+GPQA-Diamond gap vs. GPU (TPU 0.7929 vs. GPU 0.8343, full N=198). The
+fix mirrors GPU FLA's fp32 precision discipline across five kernel
+sites (see commit body for the full ablation table):
+
+  ALL load-bearing — do not revert without re-running the full eval:
+    - ``recurrent_gated_delta_rule_step``: fp32 inputs + HIGHEST matmul.
+    - ``ragged_conv1d_jax``: fp32 conv accumulation.
+    - ``l2norm`` (chunked + ref): fp32 sum-of-squares reduction.
+    - ``sigmoid(b)`` for the beta gate (chunked + ref): fp32 input.
+    - ``has_initial_state`` plumbing in mixed-prefill init carry.
+
+What we ablated (full GPQA-Diamond, N=198, flexible-extract):
+    no fixes:                0.7929
+    fixes (1)+(2)+(3):       0.8232    (+0.030 over baseline)
+    all 5 fixes:             0.8485    (+0.056 over baseline,
+                                        +0.025 over (1)+(2)+(3))
+    GPU reference:           0.8343
+
+We did NOT ablate (1) vs (2) vs (3) individually, so the ranking
+inside that group is unproven. We can say that (1)+(2)+(3) is
+necessary but not sufficient on its own, and (4)+(5) close the
+remaining gap.
+
+The TPU perf cost of the full fp32 set is ~0% throughput on a
+30-prompt × 512-token decode bench (957.55 → 956.47 tokens/sec). The
+decode path is HBM-bandwidth-bound and these are tiny per-token ops.
+
+If you change the recurrent matmul precision OR remove any of the
+fp32 promotions above, re-run
+``gpqa_diamond_cot_zeroshot`` (full N=198, no ``--limit``) against
+``Qwen/Qwen3.5-397B-A17B-FP8`` before merging.
+"""
 
 import jax
 import jax.numpy as jnp
@@ -23,17 +62,26 @@ import tpu_inference.kernels.gdn.triangle_solver as triangle_solver
 def l2norm(x: jnp.ndarray, dim: int = -1, eps: float = 1e-6) -> jnp.ndarray:
     """Normalizes x along the specified dimension using L2 norm.
 
+  Computes the sum-of-squares and rsqrt in float32 even when the input
+  is bf16, matching GPU FLA's ``l2norm_fwd``
+  (`vllm/model_executor/layers/fla/ops/l2norm.py`). This fix is part
+  of the bundle that closes the GPQA-Diamond gap; we did not ablate
+  l2norm individually but joint removal of l2norm + sigmoid below
+  drops full-Diamond score from 0.8485 to 0.8232. See the module
+  docstring for the full ablation.
+
   Args:
     x: Input array.
     dim: Dimension along which to normalize.
     eps: Epsilon value to avoid division by zero.
 
   Returns:
-    Normalized array.
+    Normalized array, in the same dtype as ``x``.
   """
-    inv_norm = jax.lax.rsqrt((x * x).sum(axis=dim, keepdims=True) +
-                             jnp.array(eps, dtype=x.dtype))
-    return x * inv_norm
+    x_f32 = x.astype(jnp.float32)
+    inv_norm = jax.lax.rsqrt((x_f32 * x_f32).sum(axis=dim, keepdims=True) +
+                             eps)
+    return (x_f32 * inv_norm).astype(x.dtype)
 
 
 def pack_inputs_single_stream(
@@ -199,6 +247,7 @@ def ragged_gated_delta_rule_mixed_prefill(
     recurrent_state: jnp.ndarray,
     state_indices: jnp.ndarray,
     distribution: jnp.ndarray,
+    has_initial_state: jnp.ndarray,
     chunk_size: int = 64,
     use_qk_norm_in_gdn: bool = False,
     compute_dtype: jnp.dtype = jnp.bfloat16,
@@ -229,6 +278,12 @@ def ragged_gated_delta_rule_mixed_prefill(
       state_indices: Indices mapping sequences to recurrent state slots.
       distribution: Distribution tensor containing number of valid sequences at
         index 2.
+      has_initial_state: Boolean tensor of shape `(max_reqs,)`. ``True`` when
+        the request has prior recurrent state to use (chunked-prefill
+        continuation or prefix-cache hit). ``False`` for brand-new prefills,
+        in which case the gathered recurrent state is treated as zeros —
+        matching GPU's `initial_state[~has_initial_state, ...] = 0` in
+        `gdn_linear_attn._forward_core`.
       chunk_size: Chunk size for padding and processing.
       use_qk_norm_in_gdn: Whether to use QK normalization.
       compute_dtype: Dtype for computation.
@@ -244,7 +299,10 @@ def ragged_gated_delta_rule_mixed_prefill(
     """
     initial_dtype = query.dtype
 
-    beta = jax.nn.sigmoid(b_reshaped)
+    # Cast b to fp32 before sigmoid to match GPU's
+    # `fused_gdn_gating_kernel`. Bundled with the l2norm fp32 fix
+    # above; see the module docstring for the joint ablation.
+    beta = jax.nn.sigmoid(b_reshaped.astype(jnp.float32))
     g = -jnp.exp(A_log.astype(jnp.float32)) * jax.nn.softplus(
         a_reshaped.astype(jnp.float32) + dt_bias.astype(jnp.float32))
 
@@ -370,6 +428,14 @@ def ragged_gated_delta_rule_mixed_prefill(
                                  dtype=recurrent_state.dtype)
     start_chunk_indices = new_query_start_loc[:-1] // chunk_size
     init_states_for_seqs = recurrent_state[state_indices]
+    # For brand-new prefills (no prior context), use zero initial state
+    # rather than whatever a reused mamba slot still held. Matches GPU's
+    # `initial_state[~has_initial_state, ...] = 0`.
+    init_states_for_seqs = jnp.where(
+        has_initial_state[:, None, None, None],
+        init_states_for_seqs,
+        jnp.zeros_like(init_states_for_seqs),
+    )
     init_h_per_chunk = init_h_per_chunk.at[start_chunk_indices].set(
         init_states_for_seqs)
 
@@ -463,24 +529,52 @@ def recurrent_gated_delta_rule_step(
     beta: jnp.ndarray,
     state: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Single-step recurrent update for decode."""
+    """Single-step recurrent update for decode.
+
+    Computes the gated-delta-rule step in float32 to match GPU FLA's
+    ``fused_sigmoid_gating_delta_rule_update`` kernel
+    (`vllm/model_executor/layers/fla/ops/fused_sigmoid_gating.py`),
+    which loads q/k/v/state as fp32 and keeps the entire recurrent
+    update in registers as fp32. Without this, the einsums below
+    default to TPU's ``Precision.DEFAULT`` (bf16 multiply with fp32
+    accumulate); the bf16 multiply error of order
+    ``sqrt(d_k) * bf16_ULP`` propagates through the recurrent state on
+    every decode step, and over the long generation budgets used here
+    (``max_gen_toks=32768``) it contributes to the GPQA-Diamond gap
+    vs. GPU. See the module docstring for the full ablation; we did
+    not isolate this fix's individual contribution.
+    """
     B, H, d_k = query.shape
     d_v = value.shape[-1]
 
+    orig_dtype = query.dtype
+    query = query.astype(jnp.float32)
+    key = key.astype(jnp.float32)
+    value = value.astype(jnp.float32)
+    beta = beta.astype(jnp.float32)
+    g = g.astype(jnp.float32)
     if state is None:
-        state = jnp.zeros((B, H, d_k, d_v), dtype=query.dtype)
+        state = jnp.zeros((B, H, d_k, d_v), dtype=jnp.float32)
+    else:
+        state = state.astype(jnp.float32)
 
     scale = d_k**-0.5
     query = query * scale
 
     exp_g = jnp.exp(g)
 
-    k_state = jnp.einsum("bhd, bhdm -> bhm", key, state)
+    k_state = jnp.einsum("bhd, bhdm -> bhm",
+                         key,
+                         state,
+                         precision=jax.lax.Precision.HIGHEST)
     v_diff = value - exp_g[..., None] * k_state
 
     v_new = beta[..., None] * v_diff
 
-    q_state = jnp.einsum("bhd, bhdm -> bhm", query, state)
+    q_state = jnp.einsum("bhd, bhdm -> bhm",
+                         query,
+                         state,
+                         precision=jax.lax.Precision.HIGHEST)
     q_k = jnp.sum(query * key, axis=-1, keepdims=True)
 
     out = exp_g[..., None] * q_state + q_k * v_new
@@ -489,7 +583,7 @@ def recurrent_gated_delta_rule_step(
     k_v_new = key[..., :, None] * v_new[..., None, :]
     new_state = state * exp_g[..., None, None] + k_v_new
 
-    return out, new_state
+    return out.astype(orig_dtype), new_state
 
 
 def ragged_gated_delta_rule_decode_only(
@@ -538,7 +632,10 @@ def ragged_gated_delta_rule_decode_only(
     req_indices = jnp.clip(token_idx, 0, max_reqs - 1)
     valid_mask = token_idx < distribution[2]
 
-    beta = jax.nn.sigmoid(b_reshaped)
+    # See comment on the same expression in
+    # `ragged_gated_delta_rule_mixed_prefill` for why sigmoid runs in
+    # fp32.
+    beta = jax.nn.sigmoid(b_reshaped.astype(jnp.float32))
     g = -jnp.exp(A_log.astype(jnp.float32)) * jax.nn.softplus(
         a_reshaped.astype(jnp.float32) + dt_bias.astype(jnp.float32))
 
@@ -597,6 +694,7 @@ def ragged_gated_delta_rule(
     query_start_loc: jnp.ndarray,
     state_indices: jnp.ndarray,
     distribution: jnp.ndarray,
+    has_initial_state: jnp.ndarray,
     *,
     n_kq: int,
     n_v: int,
@@ -624,6 +722,10 @@ def ragged_gated_delta_rule(
       state_indices: Indices mapping sequences to recurrent state slots.
       distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end,
         mixed_end)`.
+      has_initial_state: Boolean tensor of shape `(max_reqs,)` indicating
+        which sequences have a valid prior recurrent state in their slot.
+        Forwarded to the prefill branch; the decode branch ignores it
+        because decodes always continue from the running state.
       n_kq: Number of key/query heads.
       n_v: Number of value heads.
       d_k: Key/query dimension.
@@ -684,6 +786,7 @@ def ragged_gated_delta_rule(
             recurrent_state=recurrent_state,
             state_indices=state_indices,
             distribution=distribution,
+            has_initial_state=has_initial_state,
             chunk_size=chunk_size,
             use_qk_norm_in_gdn=use_qk_norm_in_gdn,
         )
