@@ -66,26 +66,9 @@ jobs:
           PUBLISHED_EPOCH=$(date -u -d "$PUBLISHED_AT" +%s)
           AGE=$((NOW - PUBLISHED_EPOCH))
 
-          bash .github/scripts/marin_release.sh download-release-assets \
-            "$GITHUB_REPOSITORY" \
-            "$LATEST_PRIMARY_TAG" \
-            latest-primary \
-            "marin-release-pair.json"
-
           if [[ "$AGE" -lt 259200 ]]; then
             echo "eligible=false" >> "$GITHUB_OUTPUT"
             echo "reason=Last immutable primary release is younger than 72 hours." >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          CURRENT_VLLM_SHA=$(jq -r '.vllm_sha' source-nightly/marin-release-pair.json)
-          CURRENT_TPU_SHA=$(jq -r '.tpu_inference_sha' source-nightly/marin-release-pair.json)
-          LAST_VLLM_SHA=$(jq -r '.vllm_sha' latest-primary/marin-release-pair.json)
-          LAST_TPU_SHA=$(jq -r '.tpu_inference_sha' latest-primary/marin-release-pair.json)
-
-          if [[ "$CURRENT_VLLM_SHA" == "$LAST_VLLM_SHA" && "$CURRENT_TPU_SHA" == "$LAST_TPU_SHA" ]]; then
-            echo "eligible=false" >> "$GITHUB_OUTPUT"
-            echo "reason=Latest nightly pair is already the current primary pair." >> "$GITHUB_OUTPUT"
             exit 0
           fi
 

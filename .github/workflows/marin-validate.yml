@@ -10,6 +10,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -76,14 +77,49 @@ jobs:
       - name: Syntax-check TPU runner
         run: python -m py_compile tpu_inference/runner/tpu_runner.py
 
-      - name: Download paired vLLM nightly assets
+      - name: Resolve paired vLLM source
+        id: paired_vllm
         run: |
-          bash .github/scripts/marin_release.sh download-release-assets \
+          if gh release view marin-nightly -R marin-community/vllm >/dev/null 2>&1; then
+            {
+              echo "SOURCE_KIND=release"
+              echo "SOURCE_REF=marin-nightly"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          RUN_ID=$(bash .github/scripts/marin_release.sh resolve-validate-run \
             "marin-community/vllm" \
-            "marin-nightly" \
-            paired-vllm \
-            "*.whl" \
-            "marin-build.json"
+            "marin-validate.yml" \
+            "main" || true)
+
+          if [[ -n "$RUN_ID" ]]; then
+            {
+              echo "SOURCE_KIND=validate"
+              echo "SOURCE_REF=${RUN_ID}"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Unable to resolve paired vLLM source. No marin-nightly release or successful marin-validate run found in marin-community/vllm." >&2
+          exit 1
+
+      - name: Download paired vLLM assets
+        run: |
+          if [[ "${{ steps.paired_vllm.outputs.SOURCE_KIND }}" == "release" ]]; then
+            bash .github/scripts/marin_release.sh download-release-assets \
+              "marin-community/vllm" \
+              "${{ steps.paired_vllm.outputs.SOURCE_REF }}" \
+              paired-vllm \
+              "*.whl" \
+              "marin-build.json"
+          else
+            bash .github/scripts/marin_release.sh download-validate-artifact \
+              "marin-community/vllm" \
+              "${{ steps.paired_vllm.outputs.SOURCE_REF }}" \
+              "marin-validate-dist" \
+              paired-vllm
+          fi
 
       - name: Extract vLLM wheel requirements
         run: |
