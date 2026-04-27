@@ -64,6 +64,7 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("USE_MOE_EP_KERNEL", "0")
     monkeypatch.setenv("LAYOUT_Q_PROJ_AS_NDH", "0")
     monkeypatch.setenv("USE_BATCHED_RPA_KERNEL", "0")
+    monkeypatch.setenv("DISABLE_WEIGHT_REQUANTIZATION", "0")
 
     # Test SKIP_JAX_PRECOMPILE (default False)
     assert envs.SKIP_JAX_PRECOMPILE is False
@@ -71,6 +72,13 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert envs.SKIP_JAX_PRECOMPILE is True
     monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "0")
     assert envs.SKIP_JAX_PRECOMPILE is False
+
+    # Test DISABLE_WEIGHT_REQUANTIZATION (default False)
+    assert envs.DISABLE_WEIGHT_REQUANTIZATION is False
+    monkeypatch.setenv("DISABLE_WEIGHT_REQUANTIZATION", "1")
+    assert envs.DISABLE_WEIGHT_REQUANTIZATION is True
+    monkeypatch.setenv("DISABLE_WEIGHT_REQUANTIZATION", "0")
+    assert envs.DISABLE_WEIGHT_REQUANTIZATION is False
 
     # Test VLLM_XLA_CHECK_RECOMPILATION (default False)
     assert envs.VLLM_XLA_CHECK_RECOMPILATION is False

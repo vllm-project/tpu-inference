@@ -383,7 +383,6 @@ def inner_kernel(
 
                 for start_n in range(0, rhs_tile_n, mxu_size):
                     end_n = min(rhs_tile_n, start_n + mxu_size)
-                    col_size = end_n - start_n
                     acc_n = jnp.matmul(
                         tiled_lhs,
                         tiled_rhs[:, start_n:end_n],
@@ -977,7 +976,8 @@ def validate_inputs(
     if rhs_scale is not None:
         num_quant_blocks = rhs_scale.shape[1]
         assert rhs_scale.shape == (size_group, num_quant_blocks, 1, size_n)
-        assert size_k % num_quant_blocks == 0, f"{size_k=} but received {num_quant_blocks=}"
+        assert (size_k % num_quant_blocks == 0
+                ), f"{size_k=} should be divisible by {num_quant_blocks=}"
 
     assert group_offset.shape == (1, )
 

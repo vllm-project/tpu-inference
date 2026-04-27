@@ -240,6 +240,61 @@ class GmmTest(jtu.JaxTestCase):
         batch_size=[128],
         in_size=[1024],
         out_size=[512],
+        num_groups=[8],
+        weight_dtype=[jnp.int8, jnp.float8_e4m3fn],
+        block_size=[64],  # Small block size < 128 (mxu_size)
+        group_offset=[0],
+    )
+    def test_gmm_weight_quantized_small_block(
+        self,
+        batch_size,
+        in_size,
+        out_size,
+        num_groups,
+        weight_dtype,
+        block_size,
+        group_offset,
+    ):
+        """Test that block_size < mxu_size (128) is handled correctly (VMEM dequant)."""
+        num_local_groups = num_groups - group_offset
+        key = jax.random.key(0)
+
+        lhs = jax.random.uniform(key, (batch_size, in_size), jnp.bfloat16, -1,
+                                 1)
+        rhs = jax.random.uniform(key, (num_local_groups, in_size, out_size),
+                                 jnp.bfloat16, -1, 1)
+        rhs_q, rhs_scale = quantize_tensor(rhs,
+                                           weight_dtype,
+                                           axis=1,
+                                           block_size=block_size)
+        rhs_scale = jnp.expand_dims(rhs_scale, axis=2)
+
+        group_sizes = get_group_sizes(batch_size, num_groups)
+        group_offset = jnp.array(group_offset, dtype=jnp.int32)
+
+        expected = reference_gmm(
+            lhs,
+            rhs_q,
+            group_sizes,
+            rhs_scale=rhs_scale,
+            group_offset=group_offset,
+        )
+
+        actual = gmm_v2(
+            lhs,
+            rhs_q,
+            group_sizes,
+            rhs_scale=rhs_scale,
+            group_offset=group_offset,
+            maybe_quantize_lhs=False,
+        ).astype(lhs.dtype)
+
+        self.assertArraysAllClose(actual, expected, atol=3e-1, rtol=3e-1)
+
+    @parameterized.product(
+        batch_size=[128],
+        in_size=[1024],
+        out_size=[512],
         num_groups=[16],
         weight_dtype=[jnp.int8, jnp.float8_e4m3fn, jnp.float4_e2m1fn],
         block_size=[1024],
