@@ -148,10 +148,6 @@ def static_validate_inputs(
             raise ValueError(
                 f"batch_size mismatch: {ql_nope.shape[1]=} * {ql_nope.shape[2]=} vs {q_pe.shape[0]=}"
             )
-        if ql_nope.shape[1] % decode_batch_size != 0:
-            raise ValueError(
-                f"max_num_tokens ({ql_nope.shape[1]=}) must be divisible by"
-                f" {decode_batch_size=} so every decode batch is full.")
     else:
         # ql_nope: [T, N, L],  q_pe: [T, N, r]
         if ql_nope.shape[:2] != q_pe.shape[:2]:
@@ -324,7 +320,7 @@ def _mla_ragged_paged_attention_kernel(
 
     q_packing = get_dtype_packing(ql_nope_hbm_ref.dtype)
     if is_full_batch_decode:
-        # ql_nope_hbm_ref: [N, T//q_packing, q_packing, L]
+        # ql_nope_hbm_ref: [N, T//batch_size, batch_size, L]
         num_q_heads, _, _, lkv_dim = ql_nope_hbm_ref.shape
     else:
         # ql_nope_hbm_ref: [T, N, L]
@@ -974,12 +970,12 @@ def _mla_ragged_paged_attention_kernel(
                           bq_sem_idx,
                           *,
                           wait=False):
-        # Slices [N, q_packing, L] from HBM.
+        # Slices [N, batch_size, L] from HBM.
         sem = sems.at[1, 0, bq_sem_idx]
         _async_copy(
             hbm_ref.at[(slice(None), pl.program_id(0), slice(None),
-                        slice(None))],  # [N, q_packing, L]
-            x2_ref.at[(bq_sem_idx, slice(None), 0, 0)],  # [N, q_packing, L]
+                        slice(None))],  # [N, batch_size, L]
+            x2_ref.at[(bq_sem_idx, slice(None), 0)],  # [N, batch_size, L]
             sem,
             wait,
         )
@@ -1034,10 +1030,10 @@ def _mla_ragged_paged_attention_kernel(
                          bo_sem_idx,
                          *,
                          wait=False):
-        # Slices and writes [N, q_packing, L]
+        # Slices and writes [N, batch_size, L]
         sem = sems.at[2, 0, bo_sem_idx]
         _async_copy(
-            bo_x2_ref.at[(bo_sem_idx, slice(None), 0, 0)],
+            bo_x2_ref.at[(bo_sem_idx, slice(None), 0)],
             o_hbm_ref.at[(slice(None), pl.program_id(0))],
             sem,
             wait,
@@ -1177,7 +1173,7 @@ def _mla_ragged_paged_attention_kernel(
                                  wait=True)
 
     def load_bq_batched(bq_sem_idx, *, actual_bq_sz=bq_sz):
-        # [2, num_q_heads, bq_sz, batch_size // q_packing, q_packing, lkv_dim]
+        # [2, num_q_heads, bq_sz, batch_size, lkv_dim]
         q_nope_ref = (bq_nope_x2_ref.at[bq_sem_idx].bitcast(
             jnp.uint32).reshape(num_q_heads * bq_sz, batch_size_per_q_packing,
                                 lkv_dim))
@@ -1395,7 +1391,7 @@ def _mla_ragged_paged_attention_kernel(
             if is_full_batch_decode:
                 out = out.reshape(batch_size, bq_sz, num_q_heads,
                                   lkv_dim).transpose(2, 1, 0, 3)
-                # bo_x2_ref [2, num_q_heads, bq_sz, batch_size // q_packing, q_packing, lkv_dim]
+                # bo_x2_ref [2, num_q_heads, bq_sz, batch_size, lkv_dim]
                 bo_x2_ref.at[bo_sem_idx].bitcast(jnp.int32).reshape(
                     num_q_heads,
                     bq_sz,
@@ -1450,15 +1446,18 @@ def _mla_ragged_paged_attention_kernel(
 def prepare_q_inputs(
     q: jax.Array,
     is_batched: bool = False,
+    batch_size: int | None = None,
 ):
     q_packing = get_dtype_packing(q.dtype)
     # q input: [N, B, L]
     if is_batched:
+        assert batch_size is not None
         actual_num_q_heads, max_num_tokens, actual_head_dim = q.shape
         num_q_heads = align_to(actual_num_q_heads, q_packing)
         head_dim = align_to(actual_head_dim, 128)
-        q = q.reshape(actual_num_q_heads, max_num_tokens // q_packing,
-                      q_packing, actual_head_dim)
+        # Use batch_size as the sublane dimension
+        q = q.reshape(actual_num_q_heads, max_num_tokens // batch_size,
+                      batch_size, actual_head_dim)
         q = jnp.pad(
             q,
             (
@@ -1663,14 +1662,16 @@ def mla_ragged_paged_attention(
         debug_mode=debug_mode,
     )
 
-    is_batched = is_full_batch_decode
+    # When T < decode_batch_size (e.g. during pre-compilation with small dummy T),
+    # fall back to the non-batched path.
+    is_batched = is_full_batch_decode and (ql_nope.shape[1] >= decode_batch_size)
     # Input is always head-major (N, T, L) from shard_map; prepare_q_inputs
     # transposes to token-major when is_batched=False.
     actual_num_q_heads, _, actual_lkv_dim = ql_nope.shape  # [N, T, L]
 
     # batched-decode (no transpose): [N_pad, B//q, q, L_pad]
     # non batched-decode (transpose): [T, N_pad, L_pad]
-    ql_nope = prepare_q_inputs(ql_nope, is_batched)
+    ql_nope = prepare_q_inputs(ql_nope, is_batched, batch_size=decode_batch_size)
 
     # q_pe is always token-major [T, N, r].
     actual_r_dim = q_pe.shape[-1]
@@ -1764,10 +1765,8 @@ def mla_ragged_paged_attention(
             cache_kv.dtype,
         )
         if is_batched:
-            q_packing = get_dtype_packing(ql_nope.dtype)
             bq_nope_double_buf = pltpu.VMEM(
-                (2, num_q_heads, bq_sz, batch_size // q_packing, q_packing,
-                 lkv_dim),
+                (2, num_q_heads, bq_sz, batch_size, lkv_dim),
                 ql_nope.dtype,
             )
         else:
