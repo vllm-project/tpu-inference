@@ -88,6 +88,8 @@ class TestTPUJaxRunnerDPInputsLightweight:
             self.runner)
         self.runner._prepare_async_token_substitution_indices_dp = TPUModelRunner._prepare_async_token_substitution_indices_dp.__get__(
             self.runner)
+        self.runner._define_device_buffer_layout_dp = TPUModelRunner._define_device_buffer_layout_dp.__get__(
+            self.runner)
 
     def _create_mock_scheduler_output(self,
                                       num_scheduled_tokens_dict,
@@ -1320,6 +1322,8 @@ class TestSamplingMetadataPassthrough:
         runner._prepare_dp_input_metadata = TPUModelRunner._prepare_dp_input_metadata.__get__(
             runner)
         runner._prepare_async_token_substitution_indices_dp = TPUModelRunner._prepare_async_token_substitution_indices_dp.__get__(
+            runner)
+        runner._define_device_buffer_layout_dp = TPUModelRunner._define_device_buffer_layout_dp.__get__(
             runner)
 
         mock_runner_utils.get_padded_token_len.side_effect = lambda paddings, val: 8
