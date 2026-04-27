@@ -15,6 +15,7 @@
 import itertools
 import os
 import time
+from typing import Optional
 
 import pytest
 from vllm import LLM, SamplingParams
@@ -33,8 +34,7 @@ def parse_outputs(outputs):
     return generated_texts, output_token_ids
 
 
-@pytest.fixture
-def sampling_config():
+def get_sampling_config():
     """deterministic sampling config"""
     return SamplingParams(temperature=0.0,
                           max_tokens=20,
@@ -42,8 +42,7 @@ def sampling_config():
                           ignore_eos=True)
 
 
-@pytest.fixture
-def kv_transfer_config():
+def get_kv_transfer_config():
     """use TPUOffloadConnector"""
     return KVTransferConfig(
         kv_connector="TPUOffloadConnector",
@@ -54,14 +53,18 @@ def kv_transfer_config():
 
 def _test_kv_cache_cpu_offloading_accuracy(
     monkeypatch: pytest.MonkeyPatch,
-    sampling_config: SamplingParams,
-    kv_transfer_config: KVTransferConfig,
     skip_precompile: str,
     decode_save: str,
     batched_save: str,
     cpu_chunks: str,
     prompts: list,
+    max_output_len: Optional[int] = None,
 ):
+    sampling_config = get_sampling_config()
+    if max_output_len is not None:
+        sampling_config.max_tokens = max_output_len
+    kv_transfer_config = get_kv_transfer_config()
+
     num_requests = len(prompts)
     with monkeypatch.context():
         os.environ['SKIP_JAX_PRECOMPILE'] = '0'
@@ -139,10 +142,7 @@ def _test_kv_cache_cpu_offloading_accuracy(
 #   3. re-calculates tokens for input prompt
 #   4. verifies tokens generated for 1. and 3. are identical when KV cache<CPU RAM
 def test_kv_cache_cpu_offloading_accuracy_smaller_then_cpu_ram(
-    monkeypatch: pytest.MonkeyPatch,
-    sampling_config: SamplingParams,
-    kv_transfer_config: KVTransferConfig,
-):
+    monkeypatch: pytest.MonkeyPatch, ):
     decode_saves = ["0"]
     skip_precompile = ["0"]
     batched_saves = ["0"]
@@ -151,8 +151,6 @@ def test_kv_cache_cpu_offloading_accuracy_smaller_then_cpu_ram(
             decode_saves, skip_precompile, batched_saves):
         _test_kv_cache_cpu_offloading_accuracy(
             monkeypatch,
-            sampling_config,
-            kv_transfer_config,
             _skip_precompile,
             decode_save,
             batched_save,
@@ -172,10 +170,7 @@ def test_kv_cache_cpu_offloading_accuracy_smaller_then_cpu_ram(
 #   3. re-calculates tokens for input prompt, since teh KV cache size > CPU RAM, it loads any available tokens from CPU RAM and re-calculates remaining tokens lost due to spillover
 #   4. verifies tokens generated for 1. and 3. are identical when KV cache>CPU RAM
 def test_kv_cache_cpu_offloading_accuracy_larger_than_cpu_ram(
-    monkeypatch: pytest.MonkeyPatch,
-    sampling_config: SamplingParams,
-    kv_transfer_config: KVTransferConfig,
-):
+    monkeypatch: pytest.MonkeyPatch, ):
     decode_saves = ["0"]
     skip_precompile = ["0"]
     batched_saves = ["0"]
@@ -184,8 +179,6 @@ def test_kv_cache_cpu_offloading_accuracy_larger_than_cpu_ram(
             decode_saves, skip_precompile, batched_saves):
         _test_kv_cache_cpu_offloading_accuracy(
             monkeypatch,
-            sampling_config,
-            kv_transfer_config,
             _skip_precompile,
             decode_save,
             batched_save,
