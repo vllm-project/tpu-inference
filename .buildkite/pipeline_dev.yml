@@ -111,3 +111,35 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_mmmu_accuracy.sh
+
+  # -----------------------------------------------------------------
+  # Original accuracy test (lm_eval/GSM8K) for Qwen2.5-VL-7B
+  # Testing tp=2 on v7x (currently always tp=1 in CI)
+  # -----------------------------------------------------------------
+  - label: "tpu7x Accuracy for Qwen2.5-VL-7B (tp=2)"
+    key: tpu7x_accuracy_qwen_vl
+    depends_on: tpu7x_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+      TEST_MODEL: "Qwen/Qwen2.5-VL-7B-Instruct"
+      TENSOR_PARALLEL_SIZE: "2"
+      MINIMUM_ACCURACY_THRESHOLD: "0.72"
+    agents:
+      queue: tpu_v7x_2_queue
+    commands:
+      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
+
+  - label: "tpu6e Accuracy for Qwen2.5-VL-7B (tp=1)"
+    key: tpu6e_accuracy_qwen_vl
+    depends_on: tpu6e_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu6e"
+      TEST_MODEL: "Qwen/Qwen2.5-VL-7B-Instruct"
+      TENSOR_PARALLEL_SIZE: "1"
+      MINIMUM_ACCURACY_THRESHOLD: "0.72"
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
