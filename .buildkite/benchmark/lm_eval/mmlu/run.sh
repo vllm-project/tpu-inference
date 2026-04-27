@@ -33,7 +33,7 @@ export ACCURACY_JSON_PATH=$LOG_DIR/mmlu_accuracy.json
 echo "Running lm_eval for task: $TASK_NAME"
 echo "Output will be timestamped in: $LOG_DIR"
 
-unset MODEL_IMPL_TYPE
+unset VLLM_XLA_CHECK_RECOMPILATION
 
 mkdir -p "$LOG_DIR"
 
