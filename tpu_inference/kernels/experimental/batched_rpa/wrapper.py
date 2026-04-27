@@ -305,7 +305,7 @@ def calculate_block_sizes(
     n_buffer = 3
     # Fixed value based on experimental results.
     decode_batch_size = 8
-    prefill_batch_size = 2
+    prefill_batch_size = 3
 
     decode_block_sizes = find_best_block_sizes(decode_batch_size, n_buffer, 1)
     prefill_block_sizes = find_best_block_sizes(prefill_batch_size, n_buffer)
