@@ -17,8 +17,7 @@ from typing import TYPE_CHECKING
 import jax
 import jax.numpy as jnp
 import numpy as np
-import torch
-import torchax
+from torchax.ops.mappings import t2j
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_and_batch_mm_kwargs
@@ -160,15 +159,8 @@ class MultiModalManager:
                 if k in ("image_grid_thw", "video_grid_thw", "grid_thw"):
                     mm_kwargs_group[k] = GridTHW(v.tolist())
                 else:
-
-                    def move_to_jax(x):
-                        if isinstance(x, torch.Tensor):
-                            with torchax.default_env():
-                                return torchax.interop.jax_view(
-                                    x.to(device="jax"))
-                        return x
-
-                    mm_kwargs_group[k] = jax.tree.map(move_to_jax, v)
+                    mm_kwargs_group[k] = jax.tree.map(
+                        lambda t: t2j(t, use_dlpack=False), v)
 
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
