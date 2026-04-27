@@ -13,43 +13,10 @@
 # limitations under the License.
 """Ragged gated delta rule packed JAX implementation.
 
-Precision discipline (Qwen3.5 397B GPQA fix, 2026-04-26)
---------------------------------------------------------
-The original implementation ran the entire decode-side recurrent step
-at TPU's default precision (bf16 multiply, fp32 accumulate). On long
-CoT generations (``max_gen_toks=32768``) the per-token bf16 multiply
-error compounds through the recurrent state, contributing to a
-GPQA-Diamond gap vs. GPU (TPU 0.7929 vs. GPU 0.8343, full N=198). The
-fix mirrors GPU FLA's fp32 precision discipline across five kernel
-sites (see commit body for the full ablation table):
-
-  ALL load-bearing — do not revert without re-running the full eval:
-    - ``recurrent_gated_delta_rule_step``: fp32 inputs + HIGHEST matmul.
-    - ``ragged_conv1d_jax``: fp32 conv accumulation.
-    - ``l2norm`` (chunked + ref): fp32 sum-of-squares reduction.
-    - ``sigmoid(b)`` for the beta gate (chunked + ref): fp32 input.
-    - ``has_initial_state`` plumbing in mixed-prefill init carry.
-
-What we ablated (full GPQA-Diamond, N=198, flexible-extract):
-    no fixes:                0.7929
-    fixes (1)+(2)+(3):       0.8232    (+0.030 over baseline)
-    all 5 fixes:             0.8485    (+0.056 over baseline,
-                                        +0.025 over (1)+(2)+(3))
-    GPU reference:           0.8343
-
-We did NOT ablate (1) vs (2) vs (3) individually, so the ranking
-inside that group is unproven. We can say that (1)+(2)+(3) is
-necessary but not sufficient on its own, and (4)+(5) close the
-remaining gap.
-
-The TPU perf cost of the full fp32 set is ~0% throughput on a
-30-prompt × 512-token decode bench (957.55 → 956.47 tokens/sec). The
-decode path is HBM-bandwidth-bound and these are tiny per-token ops.
-
-If you change the recurrent matmul precision OR remove any of the
-fp32 promotions above, re-run
-``gpqa_diamond_cot_zeroshot`` (full N=198, no ``--limit``) against
-``Qwen/Qwen3.5-397B-A17B-FP8`` before merging.
+Several call sites here run in fp32 to match GPU FLA's precision
+(``vllm/model_executor/layers/fla/ops/{fused_sigmoid_gating,l2norm}.py``
+and ``vllm/model_executor/layers/mamba/gdn_linear_attn.py``). See PR
+#2408 for the ablation that ties this to Qwen3.5-397B GPQA-Diamond.
 """
 
 import jax
@@ -62,13 +29,9 @@ import tpu_inference.kernels.gdn.triangle_solver as triangle_solver
 def l2norm(x: jnp.ndarray, dim: int = -1, eps: float = 1e-6) -> jnp.ndarray:
     """Normalizes x along the specified dimension using L2 norm.
 
-  Computes the sum-of-squares and rsqrt in float32 even when the input
-  is bf16, matching GPU FLA's ``l2norm_fwd``
-  (`vllm/model_executor/layers/fla/ops/l2norm.py`). This fix is part
-  of the bundle that closes the GPQA-Diamond gap; we did not ablate
-  l2norm individually but joint removal of l2norm + sigmoid below
-  drops full-Diamond score from 0.8485 to 0.8232. See the module
-  docstring for the full ablation.
+  Sum-of-squares and rsqrt run in fp32 even when ``x`` is bf16, to
+  match GPU FLA's ``l2norm_fwd``
+  (`vllm/model_executor/layers/fla/ops/l2norm.py`).
 
   Args:
     x: Input array.
@@ -300,8 +263,8 @@ def ragged_gated_delta_rule_mixed_prefill(
     initial_dtype = query.dtype
 
     # Cast b to fp32 before sigmoid to match GPU's
-    # `fused_gdn_gating_kernel`. Bundled with the l2norm fp32 fix
-    # above; see the module docstring for the joint ablation.
+    # `fused_gdn_gating_kernel`
+    # (`vllm/model_executor/layers/mamba/gdn_linear_attn.py`).
     beta = jax.nn.sigmoid(b_reshaped.astype(jnp.float32))
     g = -jnp.exp(A_log.astype(jnp.float32)) * jax.nn.softplus(
         a_reshaped.astype(jnp.float32) + dt_bias.astype(jnp.float32))
@@ -531,18 +494,10 @@ def recurrent_gated_delta_rule_step(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Single-step recurrent update for decode.
 
-    Computes the gated-delta-rule step in float32 to match GPU FLA's
-    ``fused_sigmoid_gating_delta_rule_update`` kernel
-    (`vllm/model_executor/layers/fla/ops/fused_sigmoid_gating.py`),
-    which loads q/k/v/state as fp32 and keeps the entire recurrent
-    update in registers as fp32. Without this, the einsums below
-    default to TPU's ``Precision.DEFAULT`` (bf16 multiply with fp32
-    accumulate); the bf16 multiply error of order
-    ``sqrt(d_k) * bf16_ULP`` propagates through the recurrent state on
-    every decode step, and over the long generation budgets used here
-    (``max_gen_toks=32768``) it contributes to the GPQA-Diamond gap
-    vs. GPU. See the module docstring for the full ablation; we did
-    not isolate this fix's individual contribution.
+    Runs in fp32 to match GPU FLA's
+    ``fused_sigmoid_gating_delta_rule_update`` kernel, which loads
+    q/k/v/state as fp32 and keeps the recurrent update in fp32
+    registers.
     """
     B, H, d_k = query.shape
     d_v = value.shape[-1]
@@ -563,6 +518,8 @@ def recurrent_gated_delta_rule_step(
 
     exp_g = jnp.exp(g)
 
+    # `Precision.HIGHEST` is required even with fp32 inputs: TPU MXU's
+    # default mode downconverts fp32 operands to bf16 before multiply.
     k_state = jnp.einsum("bhd, bhdm -> bhm",
                          key,
                          state,

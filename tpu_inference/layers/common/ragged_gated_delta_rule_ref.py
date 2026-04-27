@@ -22,9 +22,8 @@ import jax.numpy as jnp
 def _l2_normalize(x: jnp.ndarray, eps: float = 1e-6) -> jnp.ndarray:
     """L2 normalize along last dimension.
 
-    See module docstring of `ragged_gated_delta_rule_chunked.py` for the
-    full precision-discipline rationale; the fp32 reduction matches GPU
-    FLA's `l2norm_fwd`.
+    Sum-of-squares and rsqrt run in fp32 even when ``x`` is bf16, to
+    match GPU FLA's ``l2norm_fwd``.
 
     Args:
         x: input to normalize
@@ -214,8 +213,8 @@ def ragged_gated_delta_rule(
         value_reshaped = curr_v.reshape(B, T, n_v, d_v)
 
         # Cast b to fp32 before sigmoid to match GPU's
-        # `fused_gdn_gating_kernel`. See module docstring of
-        # `ragged_gated_delta_rule_chunked.py` for context.
+        # `fused_gdn_gating_kernel`
+        # (`vllm/model_executor/layers/mamba/gdn_linear_attn.py`).
         beta = jax.nn.sigmoid(curr_b.astype(jnp.float32))
         g = -jnp.exp(A_log.astype(jnp.float32)) * jax.nn.softplus(
             curr_a.astype(jnp.float32) + dt_bias.astype(jnp.float32))

@@ -83,15 +83,9 @@ def ragged_conv1d(
     lengths = effective_query_start_loc[1:] - effective_query_start_loc[:-1]
 
     # 1. Compute Convolution.
-    #
-    # Accumulate in fp32 to match GPU's `causal_conv1d_fn` (FLA), which
+    # Accumulate in fp32 to match GPU's `causal_conv1d_fn`
+    # (`vllm/model_executor/layers/mamba/ops/causal_conv1d.py`), which
     # loads x and weights as fp32 before the kernel-size-element sum.
-    # bf16 accumulation gives ~1-2% per-channel relative error on every
-    # GDN layer's conv output. We did not isolate this fix's individual
-    # contribution; it's part of the bundle that closes the
-    # GPQA-Diamond gap — see
-    # `ragged_gated_delta_rule_chunked.py` module docstring for the
-    # full ablation.
     orig_dtype = x.dtype
     x_f32 = x.astype(jnp.float32)
     w = conv_weight[:, 0, :].T.astype(jnp.float32)  # (K, C)
