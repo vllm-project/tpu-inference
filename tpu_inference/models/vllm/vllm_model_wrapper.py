@@ -366,6 +366,7 @@ class VllmModelWrapper:
                 NamedSharding(self.mesh,
                               PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
                 None,  # list of aux hidden states
+                None,  # expert ids
             ),
             compiler_options={
                 "xla_tpu_all_gather_collective_matmul_mode":
@@ -382,7 +383,8 @@ class VllmModelWrapper:
             hidden_states: jax.Array,
             attn_metadata: AttentionMetadata,
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
-        ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
+        ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array],
+                   Optional[jax.Array]]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
@@ -407,7 +409,7 @@ class VllmModelWrapper:
             hidden_states, hidden_prenorm = output_from_torch
             hidden_states = jax_view(hidden_states)
             hidden_prenorm = jax_view(hidden_prenorm)
-            return new_kv_caches, hidden_states, [hidden_prenorm]
+            return new_kv_caches, hidden_states, [hidden_prenorm], None
 
         return draft_step_fun if self.is_draft_model else step_fun
 

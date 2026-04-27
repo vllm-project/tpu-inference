@@ -231,8 +231,9 @@ def test_propose(method, num_speculative_tokens):
             residual_hidden_states = residual_hidden_states.at[:, 0].set(
                 next_token_ids_encoded)
 
-        # Return (kv_caches, hidden_states, residual_tuple)
-        return kv_caches, hidden_states_for_logits, (residual_hidden_states, )
+        # Return (kv_caches, hidden_states, residual_tuple, None)
+        return kv_caches, hidden_states_for_logits, (
+            residual_hidden_states, ), None
 
     def mock_compute_logits_fn(state, hidden_states, lora_metadata):
         # Create deterministic logits from hidden_states.
