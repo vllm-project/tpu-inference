@@ -593,7 +593,7 @@ class VllmModelWrapper:
             torch_states: torch.Tensor = torch_view(hidden_states)
             with torchax.default_env():
                 torch_states = torch_states.to('cpu', non_blocking=True)
-                
+
                 # Ensure correct alignment for chunked prefill
                 pooling_metadata.build_pooling_cursor(
                     num_scheduled_tokens,
@@ -604,11 +604,11 @@ class VllmModelWrapper:
                     torch_states,
                     pooling_metadata,
                 )
-                
+
                 # Qwen3-Embedding requires L2 normalization.
                 # In vLLM V1, this is handled by PoolerNormalize in the head.
                 # We assume self._pooler (TokenPooler) executes the full pipeline.
-                
+
                 return outputs
 
         return compute_pooler_output

@@ -263,9 +263,10 @@ def _get_nnx_model(
                     model_weights = vllm_config.model_config.model_weights
                 weights_iterator = loader._get_weights_iterator(
                     model_weights, vllm_config.model_config.revision)
-                
+
                 # Quick Extraction Pass for Pooler weights
                 pooler_weights = {}
+
                 def intercepted_iterator():
                     for name, weight in weights_iterator:
                         if name.startswith("pooler."):
@@ -274,18 +275,21 @@ def _get_nnx_model(
                             pooler_weights[name[13:]] = weight
                         else:
                             yield name, weight
-                            
+
                 # We set the weights iterator at runtime, to prevent having to change
                 # every model's load_weights signature. This also prevents us from hitting
                 # a TypeError at runtime if you use the RunaiModelStreamerLoader with any
                 # flax_nnx model whose load_weights function does not accept the
                 # weights_iterator keyword argument.
-                vllm_config.model_config.runai_model_weights_iterator = intercepted_iterator()
+                vllm_config.model_config.runai_model_weights_iterator = intercepted_iterator(
+                )
                 model.load_weights(rng)
                 del vllm_config.model_config.runai_model_weights_iterator
-                
+
                 if pooler is not None and pooler_weights:
-                    logger.info(f"Loading {len(pooler_weights)} weights into CPU Pooler")
+                    logger.info(
+                        f"Loading {len(pooler_weights)} weights into CPU Pooler"
+                    )
                     pooler.load_state_dict(pooler_weights, strict=False)
             else:
                 model.load_weights(rng)
@@ -323,17 +327,22 @@ def get_flax_model(
     else:
         model_class = _get_model_architecture(
             vllm_config.model_config.hf_config)
-            
+
     # Instantiate pooler if needed for Hybrid Path
     is_pooling = vllm_config.model_config.runner_type == "pooling"
     pooler = None
     if is_pooling:
         from vllm.model_executor.layers.pooler import DispatchPooler
-        pooler_config = getattr(vllm_config.model_config, "pooler_config", None)
+        pooler_config = getattr(vllm_config.model_config, "pooler_config",
+                                None)
         if pooler_config is not None:
             pooler = DispatchPooler.for_embedding(pooler_config)
-            
-    jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh, pooler=pooler)
+
+    jit_model = _get_nnx_model(model_class,
+                               vllm_config,
+                               rng,
+                               mesh,
+                               pooler=pooler)
     vllm_config.model_config.dtype = original_dtype
     kv_cache_sharding = NamedSharding(
         mesh,
@@ -435,7 +444,7 @@ def get_flax_model(
         import torchax
         from torchax.interop import torch_view
         from vllm.v1.pool.metadata import PoolingMetadata
-        
+
         def compute_pooler_output(
             hidden_states: jax.Array,
             pooling_metadata: PoolingMetadata,
@@ -446,21 +455,21 @@ def get_flax_model(
             torch_states = torch_view(hidden_states)
             with torchax.default_env():
                 torch_states = torch_states.to('cpu', non_blocking=True)
-                
+
                 if num_scheduled_tokens is None:
                     num_scheduled_tokens = seq_lens
-                    
+
                 # Align with our StepPool logic
                 pooling_metadata.build_pooling_cursor(
                     num_scheduled_tokens,
                     torch.tensor(seq_lens),
                     device=torch_states.device,
                 )
-                
+
                 # Execute pooling on CPU
                 outputs = pooler(torch_states, pooling_metadata)
                 return outputs
-                
+
         pooler_fn = compute_pooler_output
     else:
         pooler_fn = _not_support

@@ -177,11 +177,14 @@ class InputBatch:
 
         # Extract prompt token IDs from token_ids_cpu
         # Shape of token_ids_cpu is (max_num_reqs, max_model_len)
-        max_prompt_len = int(self.num_prompt_tokens[:self.num_reqs].max()) if self.num_reqs > 0 else 0
-        prompt_token_ids_tensor = torch.zeros((self.num_reqs, max_prompt_len), dtype=torch.int32)
+        max_prompt_len = int(self.num_prompt_tokens[:self.num_reqs].max()
+                             ) if self.num_reqs > 0 else 0
+        prompt_token_ids_tensor = torch.zeros((self.num_reqs, max_prompt_len),
+                                              dtype=torch.int32)
         for i in range(self.num_reqs):
             num_prompt = self.num_prompt_tokens[i]
-            prompt_token_ids_tensor[i, :num_prompt] = torch.from_numpy(self.token_ids_cpu[i, :num_prompt]).to(torch.int32)
+            prompt_token_ids_tensor[i, :num_prompt] = torch.from_numpy(
+                self.token_ids_cpu[i, :num_prompt]).to(torch.int32)
 
         return PoolingMetadata(
             prompt_lens=torch.from_numpy(
@@ -288,7 +291,9 @@ class InputBatch:
 
         if pooling_params := request.pooling_params:
             self.pooling_params[req_id] = pooling_params
-            self.pooling_states[req_id] = request.pooling_states if request.pooling_states is not None else PoolingStates()
+            self.pooling_states[
+                req_id] = request.pooling_states if request.pooling_states is not None else PoolingStates(
+                )
 
         # Add request lora ID
         if request.lora_request:

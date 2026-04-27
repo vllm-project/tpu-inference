@@ -16,7 +16,6 @@
 import functools
 import glob
 import math
-import numpy as np
 import os
 import re
 import time
@@ -28,6 +27,7 @@ from typing import Any, Iterable, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import torch
 import torchax
 from flax import nnx
@@ -823,9 +823,16 @@ def load_nnx_param_from_reshaped_torch(
         ) from e
 
     if jax_weight.shape != jax_param.value.shape:
-        if all(w <= p for w, p in zip(jax_weight.shape, jax_param.value.shape)) and any(w < p for w, p in zip(jax_weight.shape, jax_param.value.shape)):
-            pad_width = tuple((0, p - w) for w, p in zip(jax_weight.shape, jax_param.value.shape))
-            logger.info(f"Padding weight '{param_name}' from {jax_weight.shape} to {jax_param.value.shape}")
+        if all(w <= p for w, p in zip(
+                jax_weight.shape, jax_param.value.shape)) and any(
+                    w < p
+                    for w, p in zip(jax_weight.shape, jax_param.value.shape)):
+            pad_width = tuple(
+                (0, p - w)
+                for w, p in zip(jax_weight.shape, jax_param.value.shape))
+            logger.info(
+                f"Padding weight '{param_name}' from {jax_weight.shape} to {jax_param.value.shape}"
+            )
             # Use NumPy to keep it on Host
             jax_weight_np = np.pad(np.asarray(jax_weight), pad_width)
             with cpu_mesh_context():
@@ -840,7 +847,10 @@ def load_nnx_param_from_reshaped_torch(
 class JaxAutoWeightsLoader(AutoWeightsLoader):
     """A weights loader for JAX models."""
 
-    def __init__(self, model, pytorch_pooler: Optional[torch.nn.Module] = None, **kwargs):
+    def __init__(self,
+                 model,
+                 pytorch_pooler: Optional[torch.nn.Module] = None,
+                 **kwargs):
         assert isinstance(model, JaxModule)
         self.pytorch_pooler = pytorch_pooler
         self.pooler_weights = {}
@@ -913,15 +923,20 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                         self.pooler_weights[name[13:]] = weight
                         continue
 
-                if should_prepend and not name.startswith("model.") and not name.startswith("lm_head") and not name.startswith("visual"):
+                if should_prepend and not name.startswith(
+                        "model.") and not name.startswith(
+                            "lm_head") and not name.startswith("visual"):
                     name = "model." + name
                 yield name, weight
 
-        yield from super()._load_module(base_prefix, module, _map_weights(weights))
-        
+        yield from super()._load_module(base_prefix, module,
+                                        _map_weights(weights))
+
         if base_prefix == "" and self.pytorch_pooler is not None and self.pooler_weights:
-            logger.info(f"Loading {len(self.pooler_weights)} weights into CPU Pooler")
-            self.pytorch_pooler.load_state_dict(self.pooler_weights, strict=False)
+            logger.info(
+                f"Loading {len(self.pooler_weights)} weights into CPU Pooler")
+            self.pytorch_pooler.load_state_dict(self.pooler_weights,
+                                                strict=False)
         # Post-process module after loading weights. Unlike vLLM post-process
         # weights after loading all weights, we do it per-module here to
         # avoid OOM.
@@ -948,7 +963,8 @@ class LoadableWithIterator:
             # Use next parent class in MRO.
             return super().load_weights(weights)
 
-        pytorch_pooler = getattr(getattr(self, "vllm_config", None), "pytorch_pooler", None)
+        pytorch_pooler = getattr(getattr(self, "vllm_config", None),
+                                 "pytorch_pooler", None)
         loader = JaxAutoWeightsLoader(
             self,
             pytorch_pooler=pytorch_pooler,
