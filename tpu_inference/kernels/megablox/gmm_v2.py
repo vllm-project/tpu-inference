@@ -635,7 +635,10 @@ def fill_metadata(
     # ensure at least one tile is generated to zero out the output, we should
     # ensure curr_num_gm is at least 1 when should_process is True.
     curr_num_gm = jnp.where(
-        jnp.logical_and(curr_num_gm == 0, jnp.logical_and(process_empty_groups, group_id>=0)),
+        jnp.logical_and(
+            curr_num_gm == 0,
+            jnp.logical_and(process_empty_groups, group_id >= 0),
+        ),
         1,
         curr_num_gm,
     )
