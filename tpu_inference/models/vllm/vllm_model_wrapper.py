@@ -458,7 +458,8 @@ class VllmModelWrapper:
                     assert is_multimodal is not None
                     # Truncate mm_embeds to match the number of expected multimodal tokens.
                     # This handles cases where mm_embeds may contain trailing padding.
-                    torch_mm_embeds = torch_mm_embeds[is_multimodal]
+                    num_expected = is_multimodal.sum().item()
+                    torch_mm_embeds = torch_mm_embeds[:num_expected]
 
                     # Qwen3-VL expects a list of tensors for multimodal embeddings.
                     torch_mm_embeds = maybe_wrap_mm_embed_to_list(
