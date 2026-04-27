@@ -27,6 +27,7 @@ import jax
         "seq_lens",
         "query_start_loc",
         "request_distribution",
+        "mamba_state_indices",
     ],
     meta_fields=[],
     drop_fields=["query_start_loc_cpu", "seq_lens_cpu"],
@@ -44,6 +45,10 @@ class AttentionMetadata(object):
     query_start_loc: jax.Array = None
     # (3,)
     request_distribution: jax.Array = None
+    # (max_num_seqs,) int32 — per-request physical mamba slot id; stable
+    # across condense moves. Only consumed by hybrid attn+mamba models
+    # (e.g. Qwen3.5); None for pure-attention models.
+    mamba_state_indices: jax.Array | None = None
 
     query_start_loc_cpu: Any = field(init=False)
     seq_lens_cpu: Any = field(init=False)

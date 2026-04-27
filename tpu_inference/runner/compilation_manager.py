@@ -197,6 +197,13 @@ class CompilationManager:
         request_distribution = device_array(self.runner.mesh,
                                             request_distribution,
                                             sharding=dp_sharding)
+        # Dummy mamba_state_indices for compile-cache pre-tracing. Shape
+        # must match what `_prepare_inputs_*` produces at runtime so the
+        # JAX cache hits when the GDN op pulls this from `attn_metadata`.
+        mamba_state_indices = device_array(self.runner.mesh,
+                                           np.zeros(self.runner.max_num_reqs,
+                                                    dtype=np.int32),
+                                           sharding=dp_sharding)
 
         def build_block_table(kv_cache_gid: int) -> jax.Array:
             block_table_obj = self.runner.input_batch.block_table[kv_cache_gid]
@@ -216,6 +223,7 @@ class CompilationManager:
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
+                mamba_state_indices=mamba_state_indices,
             )
             return attention_metadata_gid
 
@@ -764,6 +772,10 @@ class CompilationManager:
         request_distribution = np.array([0, 0, 0], dtype=np.int32)
         request_distribution = device_array(self.runner.mesh,
                                             request_distribution)
+        # Dummy mamba_state_indices for spec-decode compile-cache pre-tracing.
+        eagle3_mamba_state_indices = device_array(
+            self.runner.mesh, np.zeros(self.runner.max_num_reqs,
+                                       dtype=np.int32))
 
         for num_reqs_padding in self.runner.num_reqs_paddings:
             for i in range(1, self.runner.drafter.num_speculative_tokens + 1):
@@ -818,6 +830,7 @@ class CompilationManager:
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
+                mamba_state_indices=eagle3_mamba_state_indices,
             )
 
             def filter_token_and_prepare_initial_inputs_wrapper(

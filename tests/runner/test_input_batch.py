@@ -246,6 +246,81 @@ def test_swap_states_only_swaps_active_tokens(input_batch: InputBatch):
     assert input_batch.num_tokens_no_spec[1] == 6
 
 
+def test_mamba_state_indices_unique_per_request(input_batch: InputBatch):
+    """Each request must get its own mamba state slot id."""
+    reqs = [create_dummy_request(f"req-{i}") for i in range(4)]
+    for req in reqs:
+        input_batch.add_request(req)
+
+    slots = input_batch.mamba_state_indices_cpu[:input_batch.num_reqs].tolist()
+    assert len(set(slots)) == len(slots), \
+        f"Mamba slots should be unique per request, got: {slots}"
+    # Slot 0 is reserved as the null block.
+    assert all(s >= 1 for s in slots), f"Slot 0 must be reserved: {slots}"
+
+
+def test_mamba_state_indices_freed_on_remove(input_batch: InputBatch):
+    """Removing a request must return its slot id to the free pool so the
+    next add reuses it (rather than running the pool dry)."""
+    req = create_dummy_request("req-0")
+    input_batch.add_request(req)
+    slot_first = int(input_batch.mamba_state_indices_cpu[0])
+
+    input_batch.remove_request("req-0")
+    # condense() with empty_indices=[0] would early-return because num_reqs==0,
+    # so we just verify the slot is back in the pool.
+    assert slot_first in input_batch._free_mamba_slots
+
+    new_req = create_dummy_request("req-new")
+    input_batch.add_request(new_req)
+    # The most-recently-freed slot is at the end of the free list — pop()
+    # returns it, so the new request gets the same id back.
+    assert int(input_batch.mamba_state_indices_cpu[0]) == slot_first
+
+
+def test_mamba_state_indices_follow_condense(input_batch: InputBatch):
+    """When condense moves a request to a different persistent-batch slot,
+    its mamba state id must follow it — otherwise the GDN op reads stale
+    state from the recurrent_state cache. This is the bug that broke gsm8k
+    accuracy on Qwen3.5-397B (only triggered when requests finish out of
+    order, which `--ignore-eos` benchmarks suppress)."""
+    reqs = [create_dummy_request(f"req-{i}") for i in range(4)]
+    for req in reqs:
+        input_batch.add_request(req)
+
+    # Snapshot the slot id assigned to each request before any churn.
+    slot_for_req = {
+        rid: int(input_batch.mamba_state_indices_cpu[idx])
+        for rid, idx in input_batch.req_id_to_index.items()
+    }
+
+    # Remove the lower-indexed requests so condense has to move the higher
+    # ones down: [req-0, req-1, req-2, req-3] → [req-3, req-2, _, _].
+    input_batch.remove_request("req-0")
+    input_batch.remove_request("req-1")
+    input_batch.condense(sorted([0, 1], reverse=True))
+
+    # After condense, indexing-by-persistent-slot must yield the same slot
+    # id each request had before the move.
+    assert input_batch.req_id_to_index["req-3"] == 0
+    assert input_batch.req_id_to_index["req-2"] == 1
+    assert int(input_batch.mamba_state_indices_cpu[0]) == slot_for_req["req-3"]
+    assert int(input_batch.mamba_state_indices_cpu[1]) == slot_for_req["req-2"]
+
+
+def test_mamba_state_indices_swap(input_batch: InputBatch):
+    """swap_states swaps the request mappings, so the slot ids must swap too."""
+    input_batch.add_request(create_dummy_request("req-0"))
+    input_batch.add_request(create_dummy_request("req-1"))
+    slot0 = int(input_batch.mamba_state_indices_cpu[0])
+    slot1 = int(input_batch.mamba_state_indices_cpu[1])
+
+    input_batch.swap_states(0, 1)
+
+    assert int(input_batch.mamba_state_indices_cpu[0]) == slot1
+    assert int(input_batch.mamba_state_indices_cpu[1]) == slot0
+
+
 def test_all_greedy_property(input_batch: InputBatch):
     """Tests the `all_greedy` property."""
     # Initially true
