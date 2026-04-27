@@ -326,7 +326,10 @@ class JaxMoE(JaxModule):
                 with cpu_mesh_context():
                     weights = jnp.concatenate(param._weights_to_load, axis=0)
                 try:
-                    param.value = shard_put(weights, param.sharding)
+                    from tpu_inference.layers.jax.quantization.fp8 import Fp8FusedMoEMethod
+
+                    if not isinstance(self.quant_method, Fp8FusedMoEMethod):
+                        param.value = shard_put(weights, param.sharding)
                     loaded_names.add(param_name)
                 except Exception as e:
                     raise RuntimeError(
