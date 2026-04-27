@@ -160,9 +160,14 @@ def shard_linear_weights(
 
     weight_sharding = NamedSharding(mesh, weight_p_spec)
     bias_sharding = NamedSharding(mesh, bias_p_spec)
-    if isinstance(weights.weight_scale, (jax.Array, Tensor)) and len(
-            weights.weight_scale.shape) == 3:
-        num_blocks = weights.weight_scale.shape[0]
+    # If weight_scale is a list (split weights), we check the first element.
+    sample_scale = weights.weight_scale[0] if isinstance(
+        weights.weight_scale,
+        list) and weights.weight_scale else weights.weight_scale
+
+    if isinstance(sample_scale,
+                  (jax.Array, Tensor)) and len(sample_scale.shape) == 3:
+        num_blocks = sample_scale.shape[0]
         if len(weight_p_spec) != 2:
             raise ValueError(
                 F"The weight sharding shape length should be 2, but given {len(weight_p_spec)}."
@@ -172,6 +177,11 @@ def shard_linear_weights(
         out_axis = weight_p_spec[0]
         weight_scale_p_spec = P(in_axis, None, out_axis)
         weight_scale_sharding = NamedSharding(mesh, weight_scale_p_spec)
+    elif isinstance(sample_scale, (jax.Array, Tensor)) and len(
+            sample_scale.shape) == 2 and not per_tensor:
+        # In case of 2D block-wise quantization scales [out_blocks, in_blocks],
+        # we should follow the weight sharding (also 2D)
+        weight_scale_sharding = NamedSharding(mesh, weight_p_spec)
     else:
         weight_scale_sharding = NamedSharding(
             mesh, P()) if per_tensor else bias_sharding
