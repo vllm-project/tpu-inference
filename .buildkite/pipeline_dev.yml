@@ -41,6 +41,8 @@ steps:
         .buildkite/scripts/run_in_docker.sh bash -c '
           MODEL=nvidia/Qwen3-30B-A3B-NVFP4
 
+          SERVER_LOG=/tmp/vllm_server.log
+
           echo "--- Starting vllm serve with NVFP4 model"
           MODEL_IMPL_TYPE=vllm vllm serve ${MODEL} \
             --port 8000 \
@@ -51,7 +53,8 @@ steps:
             --tensor-parallel-size 8 \
             --kv-cache-dtype fp8 \
             --gpu-memory-utilization 0.90 \
-            --no-enable-prefix-caching &
+            --no-enable-prefix-caching \
+            > ${SERVER_LOG} 2>&1 &
           SERVER_PID=$!
 
           echo "--- Waiting for server to start (up to 30 min)"
@@ -61,7 +64,8 @@ steps:
               break
             fi
             if ! kill -0 $SERVER_PID 2>/dev/null; then
-              echo "ERROR: Server process died"
+              echo "ERROR: Server process died. Last 200 lines of log:"
+              tail -200 ${SERVER_LOG}
               exit 1
             fi
             sleep 10

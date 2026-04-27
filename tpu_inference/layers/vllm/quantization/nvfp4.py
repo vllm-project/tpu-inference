@@ -18,7 +18,7 @@ dequantizes to float32, then re-quantizes to FP8 blockwise format to reuse
 the existing TPU FP8 kernel path.
 """
 
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -32,10 +32,8 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
-from vllm.model_executor.layers.quantization.base_config import \
-    QuantizeMethodBase
-from vllm.model_executor.layers.quantization.modelopt import \
-    ModelOptNvFp4Config as UpstreamNvFp4Config
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
@@ -72,21 +70,27 @@ NVFP4_GROUP_SIZE = 16
 REQUANT_BLOCK_SIZE = 128
 
 
-def _monkeypatch_nvfp4_kernel_init():
-    """Prevent GPU-specific NVFP4 kernel initialization."""
-    try:
-        from vllm.model_executor.layers.quantization import modelopt
-        if hasattr(modelopt, 'init_nvfp4_linear_kernel'):
-            modelopt.init_nvfp4_linear_kernel = lambda *a, **kw: None
-    except (ImportError, AttributeError):
-        pass
-
-
-_monkeypatch_nvfp4_kernel_init()
-
-
 @register_quantization_config(NVFP4)
-class VllmNvfp4Config(UpstreamNvFp4Config, VllmQuantConfig):
+class VllmNvfp4Config(QuantizationConfig, VllmQuantConfig):
+    """NVFP4 quantization config for TPU.
+
+    Standalone implementation that avoids importing from
+    vllm.model_executor.layers.quantization.modelopt (which pulls in
+    GPU-specific kernel modules that crash on TPU).
+    """
+
+    def __init__(
+        self,
+        is_checkpoint_nvfp4_serialized: bool = True,
+        kv_cache_quant_algo: Optional[str] = None,
+        exclude_modules: Optional[list[str]] = None,
+        group_size: int = 16,
+    ):
+        super().__init__()
+        self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
+        self.group_size = group_size
+        self.kv_cache_quant_algo = kv_cache_quant_algo
+        self.ignored_layers = exclude_modules or []
 
     @classmethod
     def get_name(cls):
@@ -94,6 +98,41 @@ class VllmNvfp4Config(UpstreamNvFp4Config, VllmQuantConfig):
 
     def get_supported_act_dtypes(self):
         return [torch.bfloat16]
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 75
+
+    @classmethod
+    def override_quantization_method(cls,
+                                     hf_quant_cfg,
+                                     user_quant,
+                                     hf_config=None) -> Optional[str]:
+        quant_method = hf_quant_cfg.get("quant_method", "").lower()
+        if quant_method != "modelopt":
+            return None
+        quant_algo = hf_quant_cfg.get("quant_algo", "")
+        if "NVFP4" in quant_algo or "FP4" in quant_algo:
+            return NVFP4
+        return None
+
+    @classmethod
+    def _from_config(
+        cls,
+        *,
+        quant_method: str,
+        kv_cache_quant_method: Optional[str] = None,
+        exclude_modules: Optional[list[str]] = None,
+        original_config: Optional[dict[str, Any]] = None,
+        group_size: Optional[int] = None,
+        **kwargs: Any,
+    ) -> "VllmNvfp4Config":
+        return cls(
+            is_checkpoint_nvfp4_serialized="NVFP4" in quant_method,
+            kv_cache_quant_algo=kv_cache_quant_method,
+            exclude_modules=exclude_modules or [],
+            group_size=group_size or NVFP4_GROUP_SIZE,
+        )
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional[Union[QuantizeMethodBase]]:
