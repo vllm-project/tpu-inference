@@ -388,6 +388,8 @@ class PhasedBasedProfiler:
         1. Prefill heavy
         2. Decode heavy
         3. Balanced
+        4. Prefill Only
+        5. Decode  Only
 
     A phase is determined based on the ratio of prefill tokens to total scheduled
     tokens for the given batch (see `determine_phase_from_batch_composition_stats`).
