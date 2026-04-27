@@ -200,7 +200,7 @@ if [ "$COMMAND_TYPE" = "lm_eval" ]; then
   {
     ".buildkite/benchmark/lm_eval/$DATASET/run.sh" "$LOG_FOLDER"
     printf "AccuracyMetrics: "
-    tr -d '\n' < "${LOG_DIR}/${DATASET}_accuracy.json"
+    tr -d '\n' < "${LOG_FOLDER}/${DATASET}_accuracy.json"
     echo ""
   } >> "$BM_LOG"
   echo "Finished running $DATASET benchmark."
