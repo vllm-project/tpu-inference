@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 # pipeline-name: {FEATURE_NAME}
 # pipeline-type: {CATEGORY}
 steps:
@@ -21,7 +20,7 @@ steps:
     key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Single_Host"
     soft_fail: true
     agents:
-      queue: "${{TPU_QUEUE_SINGLE:-tpu_v6e_queue}}"
+      queue: "{QUEUE}"
     commands:
       - echo "placeholder" # TODO : replace with your single-host correctness test command
 
@@ -44,7 +43,7 @@ steps:
     depends_on: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Single_Host"
     soft_fail: true
     agents:
-      queue: "${{TPU_QUEUE_SINGLE:-tpu_v6e_queue}}"
+      queue: "{QUEUE}"
     commands:
       - echo "placeholder" # TODO : replace with your single-host performance test command
 
@@ -67,7 +66,7 @@ steps:
     key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Multi_Host"
     soft_fail: true
     agents:
-      queue: "${{TPU_QUEUE_SINGLE:-tpu_v6e_queue}}"
+      queue: "{QUEUE}"
     commands:
       - echo "placeholder" # TODO : replace with your multi-host correctness test command
 
@@ -90,7 +89,7 @@ steps:
     depends_on: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Multi_Host"
     soft_fail: true
     agents:
-      queue: "${{TPU_QUEUE_SINGLE:-tpu_v6e_queue}}"
+      queue: "{QUEUE}"
     commands:
       - echo "placeholder" # TODO : replace with your multi-host performance test command
 

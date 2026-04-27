@@ -69,7 +69,7 @@ if [ ${#VALIDATE_ARGS[@]} -gt 0 ]; then
         echo "Result: FAIL (Please fix the YAML syntax errors above)"
         exit 1
     else
-        echo "+++ ✅ YAML syntax validation passed."
+        echo "✅ YAML syntax validation passed."
         echo "Result: SUCCESS"
         exit 0
     fi

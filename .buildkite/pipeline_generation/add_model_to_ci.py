@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,8 +17,19 @@ import sys
 from enum import Enum
 from pathlib import Path
 
+# ANSI colors for better terminal readability
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+CYAN = "\033[96m"
+DIM = "\033[2m"
+
 SCRIPT_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = SCRIPT_DIR.parent / "models"
+PROJECT_ROOT = SCRIPT_DIR.parent.parent
+OUTPUT_DIR_REL = Path(".buildkite/models")
+OUTPUT_DIR = PROJECT_ROOT / OUTPUT_DIR_REL
 
 
 class ModelType(str, Enum):
@@ -41,56 +52,127 @@ MODEL_TYPE_TO_TEMPLATE = {
     ModelType.VLLM_NATIVE.value: "vllm_native_model_template.yml",
 }
 
+# User Correction: Use double curly braces for shell variables to avoid Python format conflicts
 HOST_SCALE_TO_SETTINGS = {
     HostScale.SINGLE.value: {
-        "queue": "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}",
-        "tp_size": "${TENSOR_PARALLEL_SIZE_SINGLE:-1}",
+        "queue": "${{TPU_QUEUE_SINGLE:-tpu_v6e_queue}}",
+        "tp_size": "${{TENSOR_PARALLEL_SIZE_SINGLE:-1}}",
     },
     HostScale.MULTI.value: {
-        "queue": "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}",
-        "tp_size": "${TENSOR_PARALLEL_SIZE_MULTI:-8}",
+        "queue": "${{TPU_QUEUE_MULTI:-tpu_v6e_8_queue}}",
+        "tp_size": "${{TENSOR_PARALLEL_SIZE_MULTI:-8}}",
     },
 }
 
 
+def get_interactive_input():
+    """
+    Provides a guided, step-by-step configuration flow in the terminal.
+    Validates user input and provides immediate feedback on the consequences of choices.
+    """
+    header_width = 60
+    title = "Model CI Configuration Wizard"
+    print(f"\n{BOLD}{'=' * header_width}{RESET}")
+    print(f"{BOLD}{title.center(header_width)}{RESET}")
+    print(f"{BOLD}{'=' * header_width}{RESET}")
+    print(f"Target Directory: {YELLOW}{OUTPUT_DIR_REL}{RESET}")
+
+    # --- STEP 1: HuggingFace Model ID ---
+    print(
+        f"\n{BOLD}[Step 1/4]{RESET} {CYAN}What is the full model name on HuggingFace?{RESET}"
+    )
+    print(
+        f"   {YELLOW}Hint: Please ensure to use the full name (e.g., meta-llama/Llama-3.1-8B)\n"
+    )
+    while True:
+        name = input(f"{BOLD}>> {RESET}").strip()
+        if name:
+            print(f"{GREEN}✓ Model ID recorded.{RESET}")
+            break
+        print(f"{RED}❌ Error: Model name cannot be empty.{RESET}\n")
+
+    # --- STEP 2: Model Type ---
+    print(f"\n{BOLD}[Step 2/4]{RESET} {CYAN}What is the model type?{RESET}\n")
+    print(
+        f"   [1] {BOLD}tpu-optimized{RESET} : TPU-specific optimizations (Optimizations for TPU. Includes unit, accuracy, and perf tests.)"
+    )
+    print(
+        f"   [2] {BOLD}vllm-native{RESET}   : Upstream vLLM definition (Upstream vLLM definition. Includes unit and accuracy tests.)\n"
+    )
+    while True:
+        choice = input(f"{BOLD}Select (1-2): {RESET}").strip()
+        if choice == '1':
+            m_type = ModelType.TPU_OPTIMIZED.value
+            print(f"{GREEN}✓ Mode: {BOLD}tpu-optimized{RESET}{RESET}")
+            break
+        elif choice == '2':
+            m_type = ModelType.VLLM_NATIVE.value
+            print(f"{GREEN}✓ Mode: {BOLD}vllm-native{RESET}{RESET}")
+            break
+        print(f"{RED}❌ Invalid entry. Please enter 1 or 2.{RESET}\n")
+
+    # --- STEP 3: Model Category ---
+    print(
+        f"\n{BOLD}[Step 3/4]{RESET} {CYAN}What category is this model?{RESET}")
+    print(
+        f"   {YELLOW}Note: This sets the 'Type' column in the support matrix.{RESET}\n"
+    )
+    print(f"   [1] {BOLD}text-only{RESET}")
+    print(f"   [2] {BOLD}multimodal{RESET}\n")
+    while True:
+        choice = input(f"{BOLD}Select (1-2): {RESET}").strip()
+        if choice == '1':
+            m_cat = ModelCategory.TEXT_ONLY.value
+            print(f"{GREEN}✓ Category: {BOLD}text-only{RESET}")
+            break
+        elif choice == '2':
+            m_cat = ModelCategory.MULTIMODAL.value
+            print(f"{GREEN}✓ Category: {BOLD}multimodal{RESET}")
+            break
+        print(f"{RED}❌ Invalid entry. Please enter 1 or 2.{RESET}\n")
+
+    # --- STEP 4: Host Scale ---
+    print(
+        f"\n{BOLD}[Step 4/4]{RESET} {CYAN}Specify the host scale for running tests:{RESET}"
+    )
+    print(
+        f"   {YELLOW}Hint: Choose the hardware scale based on your model's requirements{RESET}\n"
+    )
+    print(
+        f"   [1] {BOLD}single{RESET} : Runs tests on a single TPU host. (v6e: tpu_v6e_queue, v7x: tpu_v7x_2_queue)"
+    )
+    print(
+        f"   [2] {BOLD}multi{RESET}  : Runs tests on multiple TPU hosts. (v6e: tpu_v6e_8_queue, v7x: tpu_v7x_8_queue)\n"
+    )
+    while True:
+        choice = input(f"{BOLD}Select (1-2): {RESET}").strip()
+        if choice == '1':
+            m_scale = HostScale.SINGLE.value
+            print(f"{GREEN}✓ Scale: {BOLD}single host{RESET}")
+            break
+        elif choice == '2':
+            m_scale = HostScale.MULTI.value
+            print(f"{GREEN}✓ Scale: {BOLD}multi host{RESET}")
+            break
+        print(f"{RED}❌ Invalid entry. Please enter 1 or 2.{RESET}\n")
+
+    return name, m_type, m_cat, m_scale
+
+
 def generate_from_template(model_name: str, model_type: str,
                            model_category: str, host_scale: str) -> None:
-    """
-    Generates a buildkite yml file from model template.
-    Args:
-        model_name (str): The full name of the model on Hugging Face.
-        model_type (str): The type of model (tpu-optimized or vllm-native).
-        model_category (str): The category of the model.
-        host_scale (str): The host scale to run on (single or multi).
-    """
-    print(f"Starting to generate for model '{model_name}'")
-
-    # Check if the template file exists.
     template_path = SCRIPT_DIR / MODEL_TYPE_TO_TEMPLATE[model_type]
     if not template_path.is_file():
-        print(
-            f"Error: Template path '{template_path}' invalid. Did you remove it by accident?"
-        )
+        print(f"{RED}Error: Template path '{template_path}' invalid.{RESET}")
         sys.exit(1)
 
-    # Ensure the output directory exists. If not, create it.
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    with open(template_path, 'r', encoding='utf-8') as f:
+        template_content = f.read()
 
-    # Read the content of the template file.
-    try:
-        with open(template_path, 'r', encoding='utf-8') as f:
-            template_content = f.read()
-        print("Read template file successfully.")
-    except Exception as e:
-        print(f"Error reading template file: {e}")
-        sys.exit(1)
-
-    # replace characters to satisfy filename and buildkite step key naming restrictions
     sanitized_model_name = model_name.replace("/", "_").replace(".", "_")
-
     host_scale_settings = HOST_SCALE_TO_SETTINGS[host_scale]
 
-    # Substitute the placeholders with the provided arguments.
     try:
         generated_content = template_content.format(
             MODEL_NAME=model_name,
@@ -99,69 +181,56 @@ def generate_from_template(model_name: str, model_type: str,
             QUEUE=host_scale_settings["queue"],
             TP_SIZE=host_scale_settings["tp_size"],
         )
-        print("File content generated.")
     except KeyError as e:
-        print(
-            f"Error: A placeholder key {e} was not found in the provided arguments."
-        )
-        print(
-            "Please check for mismatches between your template file and script."
-        )
+        print(f"{RED}Error: Missing placeholder {e} in template.{RESET}")
         sys.exit(1)
 
     generated_filepath = OUTPUT_DIR / f"{sanitized_model_name}.yml"
+    with open(generated_filepath, 'w', encoding='utf-8') as f:
+        f.write(generated_content)
 
-    print("Writing output file")
-    try:
-        with open(generated_filepath, 'w', encoding='utf-8') as f:
-            f.write(generated_content)
-        print(f"✅ Success! Config file generated at: '{generated_filepath}'")
-    except Exception as e:
-        print(f"Error writing output file to {generated_filepath}: {e}")
-        sys.exit(1)
+    # Final success and instruction block
+    print(
+        f"\n{GREEN}✅ Success!{RESET} Config file generated at: {YELLOW}{OUTPUT_DIR_REL}/{sanitized_model_name}.yml{RESET}"
+    )
+
+    print(f"\n{BOLD}📋 FINAL STEPS:{RESET}")
+    print(" Please open the generated file and complete these TODOs:")
+    print("  1. Set the unit test command for your model.")
+    print(
+        f"  2. Define the accuracy target ({CYAN}MINIMUM_ACCURACY_THRESHOLD{RESET})."
+    )
+
+    # Conditional step: Performance is only for tpu-optimized models
+    if model_type == ModelType.TPU_OPTIMIZED.value:
+        print(
+            f"  3. Define the performance target ({CYAN}MINIMUM_THROUGHPUT_THRESHOLD{RESET})."
+        )
+
+    print("")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Add Buildkite yml config file for new model.")
-
-    parser.add_argument(
-        "--model-name",
-        type=str,
-        required=True,
-        help=
-        "The full name of the model on Hugging Face (ex: 'meta-llama/Llama-3.1-8B')."
-    )
-    parser.add_argument(
-        '--type',
-        choices=[ModelType.TPU_OPTIMIZED.value, ModelType.VLLM_NATIVE.value],
-        default=ModelType.TPU_OPTIMIZED.value,
-        help=
-        '[OPTIONAL] Type of model. Must be tpu-optimized or vllm-native. (Default: tpu-optimized)'
-    )
-    parser.add_argument(
-        '--category',
-        choices=[
-            ModelCategory.TEXT_ONLY.value, ModelCategory.MULTIMODAL.value
-        ],
-        default=ModelCategory.TEXT_ONLY.value,
-        help=
-        '[OPTIONAL] Category of model. Must be "text-only" or "multimodal". (Default: text-only)'
-    )
-
-    parser.add_argument(
-        '--host-scale',
-        choices=[HostScale.SINGLE.value, HostScale.MULTI.value],
-        default=HostScale.SINGLE.value,
-        help=
-        '[OPTIONAL] Host scale to run on. Must be "single" or "multi". (Default: single)'
-    )
+        description="Add Buildkite yml config file.")
+    parser.add_argument("--model-name", type=str)
+    parser.add_argument('--type', choices=[t.value for t in ModelType])
+    parser.add_argument('--category', choices=[c.value for c in ModelCategory])
+    parser.add_argument('--host-scale', choices=[s.value for s in HostScale])
 
     args = parser.parse_args()
-    generate_from_template(model_name=args.model_name,
-                           model_type=args.type,
-                           model_category=args.category,
-                           host_scale=args.host_scale)
+
+    if not args.model_name:
+        model_name, model_type, model_category, host_scale = get_interactive_input(
+        )
+    else:
+        # Fallback to defaults if partial CLI args provided
+        model_name = args.model_name
+        model_type = args.type or ModelType.TPU_OPTIMIZED.value
+        model_category = args.category or ModelCategory.TEXT_ONLY.value
+        host_scale = args.host_scale or HostScale.SINGLE.value
+
+    generate_from_template(model_name, model_type, model_category, host_scale)
 
 
 if __name__ == "__main__":
