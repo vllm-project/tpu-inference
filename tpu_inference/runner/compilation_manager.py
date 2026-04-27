@@ -144,7 +144,7 @@ class CompilationManager:
         compilation_start_time = time.perf_counter()
 
         workers = envs.JAX_PRECOMPILE_NUM_THREADS
-        if not vllm_envs.VLLM_DISABLE_COMPILE_CACHE and workers > 1:
+        if workers > 1:
             self._executor = ThreadPoolExecutor(
                 max_workers=workers,
                 thread_name_prefix="precompile",
