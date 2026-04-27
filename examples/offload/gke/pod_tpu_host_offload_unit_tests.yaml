@@ -30,8 +30,15 @@ spec:
     imagePullPolicy: Always
     command:
     - /bin/bash
-    - -c
-    - "pytest -sv tests/offload/ --ignore=tests/offload/tpu_offload_multi_request_accuracy_test.py"
+    - -c  
+    - |
+      # 1. Run general tests while ignoring accuracy and performance scripts
+      pytest -sv tests/offload/ \
+        --ignore=tests/offload/tpu_offload_multi_request_accuracy_test.py \
+        --ignore=tests/offload/tpu_offload_performance_test.py && \
+      
+      # 2. Execute the performance test in isolation; running it concurrently with the main suite causes initialization hangs.
+      pytest -sv tests/offload/tpu_offload_performance_test.py
     env:
     - name: HUGGING_FACE_HUB_TOKEN
       valueFrom:
