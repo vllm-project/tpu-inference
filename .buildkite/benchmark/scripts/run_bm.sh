@@ -126,7 +126,7 @@ mkdir -p "$VLLM_TORCH_PROFILER_DIR"
 PYTHON_PARSER="$SCRIPT_DIR/parser_case.py"
 # Evaluate the Python output to set variables in the current shell context
 eval "$(python3 "$PYTHON_PARSER" "$CASE_FILE" "$TARGET_CASE_NAME")"
-printf "[DEBUG] %s %s %s" "$MAX_NUM_SEQS" "$MAX_NUM_BATCHED_TOKENS" "$MAX_MODEL_LEN"
+printf "[DEBUG] Check export %s %s %s" "$MAX_NUM_SEQS" "$MAX_NUM_BATCHED_TOKENS" "$MAX_MODEL_LEN \n"
 
 VLLM_LOG="$LOG_FOLDER/vllm_log.txt"
 BM_LOG="$LOG_FOLDER/bm_log.txt"
