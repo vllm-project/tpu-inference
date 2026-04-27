@@ -33,67 +33,10 @@ steps:
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu7x"
+      TEST_MODEL: "nvidia/Qwen3-30B-A3B-NVFP4"
+      TENSOR_PARALLEL_SIZE: "8"
     agents:
       queue: tpu_v7x_8_queue
     timeout_in_minutes: 60
     commands:
-      - |
-        .buildkite/scripts/run_in_docker.sh bash -c '
-          MODEL=nvidia/Qwen3-30B-A3B-NVFP4
-
-          echo "--- Starting vllm serve with NVFP4 model"
-          MODEL_IMPL_TYPE=vllm vllm serve ${MODEL} \
-            --port 8000 \
-            --seed 42 \
-            --max-model-len 4096 \
-            --max-num-batched-tokens 4096 \
-            --max-num-seqs 64 \
-            --tensor-parallel-size 8 \
-            --kv-cache-dtype fp8 \
-            --gpu-memory-utilization 0.90 \
-            --no-enable-prefix-caching \
-            > /tmp/vllm_server.log 2>&1 &
-          SERVER_PID=$!
-
-          echo "--- Waiting for server to start (up to 30 min)"
-          for i in $(seq 1 360); do
-            if curl -s http://localhost:8000/health > /dev/null 2>&1; then
-              echo "Server is up after ${i}0 seconds"
-              break
-            fi
-            if ! kill -0 $SERVER_PID 2>/dev/null; then
-              echo "ERROR: Server process died. Last 200 lines of log:"
-              tail -200 /tmp/vllm_server.log
-              exit 1
-            fi
-            sleep 10
-          done
-
-          if ! curl -s http://localhost:8000/health > /dev/null 2>&1; then
-            echo "ERROR: Server did not start within 60 minutes"
-            kill $SERVER_PID 2>/dev/null || true
-            exit 1
-          fi
-
-          echo "--- Running smoke test"
-          RESPONSE=$(curl -s http://localhost:8000/v1/completions \
-            -X POST \
-            -H "Content-Type: application/json" \
-            -d "{\"model\": \"${MODEL}\", \"prompt\": \"The capital of France is\", \"max_tokens\": 20, \"temperature\": 0}")
-          echo "Response: ${RESPONSE}"
-
-          # Check that we got a valid response with choices
-          echo "${RESPONSE}" | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          assert \"choices\" in data, f\"No choices in response: {data}\"
-          text = data[\"choices\"][0][\"text\"]
-          assert len(text) > 0, \"Empty response text\"
-          print(f\"Generated text: {text}\")
-          print(\"NVFP4 smoke test PASSED\")
-          "
-
-          echo "--- Cleaning up"
-          kill $SERVER_PID 2>/dev/null || true
-          wait $SERVER_PID 2>/dev/null || true
-        '
+      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/.buildkite/scripts/test_nvfp4_serve.sh
