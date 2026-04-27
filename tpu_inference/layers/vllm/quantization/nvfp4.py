@@ -104,6 +104,10 @@ class VllmNvfp4Config(QuantizationConfig, VllmQuantConfig):
         return 75
 
     @classmethod
+    def get_config_filenames(cls) -> list[str]:
+        return []
+
+    @classmethod
     def override_quantization_method(cls,
                                      hf_quant_cfg,
                                      user_quant,
