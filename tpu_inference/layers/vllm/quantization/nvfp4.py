@@ -263,8 +263,8 @@ class VllmNvfp4LinearMethod(Fp8LinearMethod):
                 f"NVFP4 group size {group_size}")
 
         # Packed FP4 weight: 2 values per uint8 byte
-        from vllm.model_executor.parameter import (ModelWeightParameter,
-                                                   PerTensorScaleParameter)
+        from vllm.model_executor.parameter import ModelWeightParameter
+        from vllm.model_executor.utils import set_weight_attrs
 
         weight = ModelWeightParameter(
             data=torch.empty(
@@ -278,19 +278,26 @@ class VllmNvfp4LinearMethod(Fp8LinearMethod):
         )
         layer.register_parameter("weight", weight)
 
-        # Per-tensor input activation scale
-        input_scale = PerTensorScaleParameter(
-            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
-            weight_loader=weight_loader,
-        )
+        # Per-tensor input activation scale — shape [1] so QKV weight_loader
+        # fallback path (shape assertion) works. Each Q/K/V shard overwrites
+        # with its scalar; we take max() in process_weights_after_loading.
+        input_scale = torch.nn.Parameter(torch.empty(1, dtype=torch.float32),
+                                         requires_grad=False)
         layer.register_parameter("input_scale", input_scale)
+        set_weight_attrs(input_scale, {
+            "weight_loader": weight_loader,
+            "ignore_warning": True
+        })
 
-        # Per-tensor weight global scale
-        weight_scale_2 = PerTensorScaleParameter(
-            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
-            weight_loader=weight_loader,
-        )
+        # Per-tensor weight global scale — same approach as input_scale
+        weight_scale_2 = torch.nn.Parameter(torch.empty(1,
+                                                        dtype=torch.float32),
+                                            requires_grad=False)
         layer.register_parameter("weight_scale_2", weight_scale_2)
+        set_weight_attrs(weight_scale_2, {
+            "weight_loader": weight_loader,
+            "ignore_warning": True
+        })
 
         # Per-block weight scale (E4M3)
         weight_scale = ModelWeightParameter(
