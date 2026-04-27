@@ -21,6 +21,9 @@ from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensor
     VllmCompressedTensorsW8A8Fp8MoEMethod
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedFusedMoEMethod
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class VllmCompressedTensorsMoEMethod(CompressedTensorsMoEMethod):
@@ -61,6 +64,14 @@ class VllmCompressedTensorsMoEMethod(CompressedTensorsMoEMethod):
         if quant_config._is_fp8_w8a8(weight_quant, input_quant):
             return VllmCompressedTensorsW8A8Fp8MoEMethod(
                 weight_quant, input_quant, layer.moe_config, quant_config.mesh)
+        # Uses fp8 or int8 activations depending on the TPU generation.
+        elif weight_quant.num_bits == 4:
+            from .compressed_tensors_moe_w4a8 import \
+                VllmCompressedTensorsW4A8MoEMethod
+            return VllmCompressedTensorsW4A8MoEMethod(weight_quant,
+                                                      input_quant,
+                                                      layer.moe_config,
+                                                      quant_config.mesh)
         else:
             raise RuntimeError(
                 f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}")

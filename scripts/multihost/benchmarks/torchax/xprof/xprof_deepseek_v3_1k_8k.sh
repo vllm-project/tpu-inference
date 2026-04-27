@@ -26,12 +26,11 @@ bash "${NIGHTLY_SCRIPT}" \
   --new-model-design "1" \
   --gpu-memory-utilization "0.95" \
   --enable-expert-parallel \
-  --additional-config '{"sharding": {"compilation_sizes": [2560], "sharding_strategy": {"enable_dp_attention": true}}}' \
+  --additional-config '{"compilation_sizes": [2560], "sharding": {"sharding_strategy": {"enable_dp_attention": true}}}' \
   --disable-shared-experts-stream "0" \
   --generation-config "gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1" \
   --vllm-mla-disable "0" \
   --moe-requantize-block-size "512" \
   --moe-requantize-weight-dtype "fp4" \
-  --moe-all-gather-activation-dtype "fp8" \
   --phased-profiling-dir "gs://tpu-commons-ci/xprof/deepseek-r1/torchax/1k-8k" \
   --skip-db-upload

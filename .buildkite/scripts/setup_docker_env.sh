@@ -137,6 +137,7 @@ setup_environment() {
   docker build \
       --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" \
       --build-arg IS_TEST="true" \
+      --build-arg BM_INFRA="${BM_INFRA:-false}" \
       --no-cache -f docker/"${DOCKERFILE_NAME}" \
       -t "${IMAGE_NAME}:${TPU_INFERENCE_HASH}" \
       -t "${IMAGE_NAME}:latest" \

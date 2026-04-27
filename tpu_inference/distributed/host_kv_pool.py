@@ -18,6 +18,7 @@ from typing import List, Tuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from tpu_inference.logger import init_logger
 
@@ -46,17 +47,16 @@ class HostKVPool:
         # e.g., (1024, 16, 128) -> (max_blocks, num_heads, head_size)
         layer_buffer_shape = (max_blocks_per_req, ) + cache_inner_shape
 
-        def _allocate():
-            return jnp.zeros(shape=layer_buffer_shape, dtype=dtype)
-
-        self.sharded_allocate = jax.jit(_allocate, out_shardings=host_sharding)
-
         logger.info(f"Allocating {pool_size} Host DRAM buffers for KV pool.")
         start_time = time.perf_counter()
+
+        host_zeros = np.zeros(shape=layer_buffer_shape, dtype=dtype)
+
         for i in range(pool_size):
             # Each item in the pool is a list of JAX arrays (one for each transformer layer)
             layer_buffers = [
-                self.sharded_allocate() for _ in range(num_layers)
+                jax.device_put(host_zeros, host_sharding)
+                for _ in range(num_layers)
             ]
             self.buffers.append(layer_buffers)
 

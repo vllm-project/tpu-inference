@@ -242,6 +242,8 @@ class TpuPlatform(Platform):
                             min_page_size,
                         )
                         cache_config.block_size = min_page_size  # type: ignore[assignment]
+            if envs.USE_BATCHED_RPA_KERNEL and cache_config.block_size < 256:
+                cache_config.block_size = 256
             logger.info(
                 f"Using KV cache block size: {cache_config.block_size}")
 
