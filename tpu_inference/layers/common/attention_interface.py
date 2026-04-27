@@ -513,13 +513,15 @@ def mla_attention(
         P(ShardingAxisName.ATTN_DATA),  # md.query_start_loc
         P(ShardingAxisName.ATTN_DATA),  # md.distribution
     )
+    # When is_full_batch_decode=True, output is head-major (N, T, L).
+    # When is_full_batch_decode=False, token-major (T_local, N, L).
+    if md.is_full_batch_decode:
+        default_attn_out_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
+    else:
+        default_attn_out_spec = P(ShardingAxisName.MLP_TENSOR, None, None)
     out_specs = (
-        # _mla_ragged_paged_attention returns (new_cache, out), so out_specs[0]
-        # applies to new_cache (shard pages on axis 0) and out_specs[1] applies
-        # to the attention output (head-major [N, B//qp, qp, L] or [N, T, L]).
         P(ShardingAxisName.MLP_TENSOR),  # kv cache (first return value)
-        attn_o_tnh_sharding
-        or P(None, ShardingAxisName.MLP_TENSOR, None),  # attn output: shard batch dim (dim 1)
+        attn_o_tnh_sharding or default_attn_out_spec,
     )
 
     def _mla_ragged_paged_attention(q, q_rope, k, k_rope, cache, *args):

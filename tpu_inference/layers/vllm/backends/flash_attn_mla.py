@@ -197,12 +197,21 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             sm_scale=self.scale,
         )
 
-        outputs = outputs.reshape(self.num_heads, -1, self.kv_lora_rank)
-        outputs = (jnp.einsum("nbl,nlv->bnv",
-                              outputs,
-                              jax_view(layer.W_UV),
-                              preferred_element_type=jnp.float32) *
-                   jax_view(layer.W_UV_scale)).astype(input_dtype)
+        if attn_metadata.is_full_batch_decode:
+            # head-major output (N, T, L)
+            outputs = outputs.reshape(self.num_heads, -1, self.kv_lora_rank)
+            outputs = (jnp.einsum("nbl,nlv->bnv",
+                                  outputs,
+                                  jax_view(layer.W_UV),
+                                  preferred_element_type=jnp.float32) *
+                       jax_view(layer.W_UV_scale)).astype(input_dtype)
+        else:
+            # token-major output (T, N, L) logical; head-major physical layout.
+            outputs = (jnp.einsum("bnl,nlv->bnv",
+                                  outputs,
+                                  jax_view(layer.W_UV),
+                                  preferred_element_type=jnp.float32) *
+                       jax_view(layer.W_UV_scale)).astype(input_dtype)
         outputs = outputs.reshape(-1, self.num_heads * self.v_head_dim)
 
         out_torch = torch_view(outputs)

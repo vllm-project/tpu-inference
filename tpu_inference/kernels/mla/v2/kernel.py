@@ -312,6 +312,7 @@ def _mla_ragged_paged_attention_kernel(
     bkv_p,
     bq_sz,
     batch_size: int = 1,
+    is_full_batch_decode: bool = False,
     debug_mode: bool = False,
 ):
     # TODO:
@@ -322,12 +323,12 @@ def _mla_ragged_paged_attention_kernel(
     assert nope_dim + pe_dim == cache_kv_hbm_ref.shape[-1]
 
     q_packing = get_dtype_packing(ql_nope_hbm_ref.dtype)
-    if batch_size == 1:
-        # ql_nope_hbm_ref: [T, N, L]
-        _, num_q_heads, lkv_dim = ql_nope_hbm_ref.shape
-    else:
+    if is_full_batch_decode:
         # ql_nope_hbm_ref: [N, T//q_packing, q_packing, L]
         num_q_heads, _, _, lkv_dim = ql_nope_hbm_ref.shape
+    else:
+        # ql_nope_hbm_ref: [T, N, L]
+        _, num_q_heads, lkv_dim = ql_nope_hbm_ref.shape
 
     num_q_heads_per_q_packing = num_q_heads // q_packing
     r_dim = q_pe_hbm_ref.shape[-1]
@@ -1081,7 +1082,7 @@ def _mla_ragged_paged_attention_kernel(
     def wait_fetch_bkv(batch_start_seq_idx, bkv_idx, bkv_sem_idx):
         return _fetch_bkv(batch_start_seq_idx, bkv_idx, bkv_sem_idx, wait=True)
 
-    if batch_size > 1:
+    if is_full_batch_decode:
 
         def start_fetch_bq(batch_start_seq_idx, bq_idx, bq_sem_idx):
             _fetch_bq_batched(ql_nope_hbm_ref, bq_nope_x2_ref,
@@ -1123,7 +1124,7 @@ def _mla_ragged_paged_attention_kernel(
                       bq_sem_idx,
                       wait=True)
 
-    send_bo_func = _send_bo_batched if batch_size > 1 else _send_bo
+    send_bo_func = _send_bo_batched if is_full_batch_decode else _send_bo
 
     def start_send_bo(batch_start_seq_idx, bo_idx, bo_sem_idx):
         bo_ids_ref[bo_sem_idx] = batch_start_seq_idx
@@ -1344,7 +1345,7 @@ def _mla_ragged_paged_attention_kernel(
                 # (as long as they are not NaN or inf) won't affect to the output.
                 bkvc, bkpe = load_bkv(bkv_sem_idx, )
 
-                load_bq_fun = load_bq_batched if batch_size > 1 else load_bq
+                load_bq_fun = load_bq_batched if is_full_batch_decode else load_bq
                 bq_nope_vec, bq_pe_vec = load_bq_fun(bq_sem_idx,
                                                      actual_bq_sz=actual_bq_sz)
 
@@ -1391,7 +1392,7 @@ def _mla_ragged_paged_attention_kernel(
 
             # Store output from acc to bo.
             # out [batch_size, num_q_heads * bq_sz, lkv_dim]
-            if batch_size > 1:
+            if is_full_batch_decode:
                 out = out.reshape(batch_size, bq_sz, num_q_heads,
                                   lkv_dim).transpose(2, 1, 0, 3)
                 # bo_x2_ref [2, num_q_heads, bq_sz, batch_size // q_packing, q_packing, lkv_dim]
@@ -1662,11 +1663,10 @@ def mla_ragged_paged_attention(
         debug_mode=debug_mode,
     )
 
-    is_batched = decode_batch_size > 1
-    if is_batched:
-        actual_num_q_heads, _, actual_lkv_dim = ql_nope.shape  # [N, B, L]
-    else:
-        _, actual_num_q_heads, actual_lkv_dim = ql_nope.shape  # [T, N, L]
+    is_batched = is_full_batch_decode
+    # Input is always head-major (N, T, L) from shard_map; prepare_q_inputs
+    # transposes to token-major when is_batched=False.
+    actual_num_q_heads, _, actual_lkv_dim = ql_nope.shape  # [N, T, L]
 
     # batched-decode (no transpose): [N_pad, B//q, q, L_pad]
     # non batched-decode (transpose): [T, N_pad, L_pad]
@@ -1686,10 +1686,10 @@ def mla_ragged_paged_attention(
 
     _, page_size_per_kv_packing, kv_packing, _ = cache_kv.shape
     page_size = page_size_per_kv_packing * kv_packing
-    if decode_batch_size == 1:
-        _, num_q_heads, _ = ql_nope.shape
-    else:
+    if is_batched:
         num_q_heads, _, _, _ = ql_nope.shape
+    else:
+        _, num_q_heads, _ = ql_nope.shape
 
     max_num_seqs = kv_lens.shape[0]
     num_page_indices = page_indices.shape[0]
@@ -1763,26 +1763,22 @@ def mla_ragged_paged_attention(
             (2, batch_size, bkv_buf_sz_per_kv_packing, kv_packing, r_dim),
             cache_kv.dtype,
         )
-        if batch_size == 1:
-            bq_nope_double_buf = pltpu.VMEM(
-                (2, batch_size, bq_sz, num_q_heads, lkv_dim),
-                ql_nope.dtype,
-            )
-            bq_rope_double_buf = pltpu.VMEM(
-                (2, batch_size, bq_sz, num_q_heads, r_dim),
-                q_pe.dtype,
-            )
-        else:
+        if is_batched:
             q_packing = get_dtype_packing(ql_nope.dtype)
             bq_nope_double_buf = pltpu.VMEM(
                 (2, num_q_heads, bq_sz, batch_size // q_packing, q_packing,
                  lkv_dim),
                 ql_nope.dtype,
             )
-            bq_rope_double_buf = pltpu.VMEM(
-                (2, batch_size, bq_sz, num_q_heads, r_dim),
-                q_pe.dtype,
+        else:
+            bq_nope_double_buf = pltpu.VMEM(
+                (2, batch_size, bq_sz, num_q_heads, lkv_dim),
+                ql_nope.dtype,
             )
+        bq_rope_double_buf = pltpu.VMEM(
+            (2, batch_size, bq_sz, num_q_heads, r_dim),
+            q_pe.dtype,
+        )
 
         bo_double_buf = bq_nope_double_buf
 
@@ -1840,6 +1836,7 @@ def mla_ragged_paged_attention(
                     bq_sz=bq_sz,
                     bkv_p=bkv_p,
                     batch_size=batch_size,
+                    is_full_batch_decode=is_batched,
                     s_dtype=s_dtype,
                     debug_mode=debug_mode,
                 ),
