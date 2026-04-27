@@ -20,18 +20,9 @@ from tests.offload.tpu_offload_accuracy_test import (
     _test_kv_cache_cpu_offloading_accuracy, read_prompt_from_file)
 
 
-@pytest.fixture
-def sampling_config(accuracy_sampling_config):
-    """deterministic sampling config with max_tokens=1 for performance"""
-    accuracy_sampling_config.max_tokens = 1
-    return accuracy_sampling_config
-
-
 def test_kv_cache_cpu_offloading_performance(
-    monkeypatch: pytest.MonkeyPatch,
-    sampling_config,
-    kv_transfer_config,
-):
+    monkeypatch: pytest.MonkeyPatch, ):
+
     decode_saves = ["0"]
     skip_precompile = ["0"]
     batched_saves = ["0"]
@@ -46,13 +37,12 @@ def test_kv_cache_cpu_offloading_performance(
             decode_saves, skip_precompile, batched_saves):
         pass1_time, pass2_time = _test_kv_cache_cpu_offloading_accuracy(
             monkeypatch,
-            sampling_config,
-            kv_transfer_config,
             _skip_precompile,
             decode_save,
             batched_save,
             "10",  # TPU_OFFLOAD_NUM_CPU_CHUNKS
             prompts,
+            max_output_len=1,
         )
 
         print("\nPerformance Results:")
