@@ -7,7 +7,8 @@
     "EXPECTED_ETEL": 3600000,
     "INPUT_LEN": 1800,
     "OUTPUT_LEN": 128,
-    "JAX_TRACEBACK_FILTERING": "off"
+    "JAX_TRACEBACK_FILTERING": "off",
+    "RUN_TYPE": "JAX_ACCURACY"
   },
   "ci_queue": [
     "tpu_v6e_8_queue"
