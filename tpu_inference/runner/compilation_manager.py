@@ -123,9 +123,42 @@ class CompilationManager:
             self._precompile_structured_decoding()
             if self.runner.speculative_config:
                 self._precompile_speculative_decoding()
+            self._precompile_unpack_arrays()
 
         elapsed = time.perf_counter() - compilation_start_time
         self.runner.vllm_config.compilation_config.compilation_time += elapsed
+
+    def _precompile_unpack_arrays(self) -> None:
+        logger.info("Compiling unpack_arrays with different input shapes.")
+
+        needs_logprobs_options = [False]
+        if self.runner.vllm_config.model_config.max_logprobs and self.runner.vllm_config.model_config.max_logprobs > 0:
+            needs_logprobs_options.append(True)
+
+        for num_tokens in self.runner.num_tokens_paddings_per_dp:
+            for num_reqs in self.runner.num_reqs_paddings_per_dp:
+                for needs_logprobs in needs_logprobs_options:
+                    if self.runner.speculative_config:
+                        for padded_logits_length in self.runner.num_logits_paddings:
+                            self.runner._define_device_buffer_layout_dp(
+                                num_tokens, num_reqs, (padded_logits_length, ),
+                                num_reqs)
+                            self._compile_unpack_arrays_helper(
+                                self.runner.dp_size)
+                    else:
+                        self.runner._define_device_buffer_layout_dp(
+                            num_tokens, num_reqs, (num_reqs, ), num_reqs)
+                        self._compile_unpack_arrays_helper(self.runner.dp_size)
+
+    def _compile_unpack_arrays_helper(self, dp_size: int) -> None:
+        from tpu_inference.utils import DeviceBuffer
+        _, metadata_layout = self.runner.device_buffer.build()
+
+        total_size = sum(metadata_layout.sizes)
+        leading_shape = (dp_size, ) if dp_size > 1 else ()
+        dummy_blob = jnp.zeros(leading_shape + (total_size, ), dtype=jnp.int32)
+
+        DeviceBuffer.unpack_arrays(dummy_blob, metadata_layout, shape=(-1, ))
 
     def _precompile_input_embeddings_merger(self) -> None:
         for num_tokens in self.runner.num_tokens_paddings:
@@ -291,14 +324,16 @@ class CompilationManager:
                 padded_token_in_tpu_cur_input_indices = np.zeros(
                     (num_tokens, ), dtype=np.int32)
                 padded_token_in_tpu_pre_next_tokens_indices = np.zeros(
-                    (num_tokens, ), dtype=jnp.int32)
-                (padded_token_in_tpu_cur_input_indices,
-                 padded_token_in_tpu_pre_next_tokens_indices) = device_array(
-                     self.runner.mesh,
-                     (padded_token_in_tpu_cur_input_indices,
-                      padded_token_in_tpu_pre_next_tokens_indices),
-                     sharding=NamedSharding(self.runner.mesh,
-                                            PartitionSpec(None)))
+                    (num_tokens, ), dtype=np.int32)
+
+                combined_indices = np.concatenate([
+                    padded_token_in_tpu_cur_input_indices,
+                    padded_token_in_tpu_pre_next_tokens_indices
+                ])
+
+                combined_indices = jax.device_put(
+                    combined_indices,
+                    NamedSharding(self.runner.mesh, PartitionSpec()))
 
                 input_ids = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32, dp_sharding)
@@ -312,8 +347,7 @@ class CompilationManager:
                     "_substitute_placeholder_token_fn",
                     self.runner._substitute_placeholder_token_fn,
                     input_ids,
-                    padded_token_in_tpu_cur_input_indices,
-                    padded_token_in_tpu_pre_next_tokens_indices,
+                    combined_indices,
                     next_tokens,
                     placeholder_num,
                     num_tokens=num_tokens,
@@ -582,12 +616,15 @@ class CompilationManager:
 
                     # Use a dummy tensor with a unique shape for each logprobs config.
                     # This avoids persistent cache collisions.
-                    dummy_shape = (1 if logprobs else 2, )
+                    dummy_len = 1 if logprobs else 2
+                    dummy_shape = (self.runner.dp_size * dummy_len, )
                     _cache_collision_dummy = jnp.zeros(dummy_shape,
                                                        dtype=jnp.int32)
                     _cache_collision_dummy = jax.device_put(
                         _cache_collision_dummy,
-                        NamedSharding(self.runner.mesh, PartitionSpec(None)))
+                        NamedSharding(
+                            self.runner.mesh,
+                            PartitionSpec(ShardingAxisName.ATTN_DATA)))
 
                     sampling_metadata = TPUSupportedSamplingMetadata(
                         temperature=temperature,
@@ -690,12 +727,15 @@ class CompilationManager:
                     # Use a dummy tensor with a unique shape for each logprobs config.
                     # Currently logprobs=False for rejection_sampler.
                     logprobs_dummy = False
-                    dummy_shape = (1 if logprobs_dummy else 2, )
+                    dummy_len = 1 if logprobs_dummy else 2
+                    dummy_shape = (self.runner.dp_size * dummy_len, )
                     _cache_collision_dummy = jnp.zeros(dummy_shape,
                                                        dtype=jnp.int32)
                     _cache_collision_dummy = jax.device_put(
                         _cache_collision_dummy,
-                        NamedSharding(self.runner.mesh, PartitionSpec(None)))
+                        NamedSharding(
+                            self.runner.mesh,
+                            PartitionSpec(ShardingAxisName.ATTN_DATA)))
 
                     if do_sampling:
                         compilation_name = "random_rejection_sampler"
