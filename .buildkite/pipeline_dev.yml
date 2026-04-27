@@ -59,7 +59,7 @@ steps:
       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
   # -----------------------------------------------------------------
-  # Multimodal test on v7x and v6e
+  # Multimodal correctness test on v7x and v6e
   # -----------------------------------------------------------------
   - label: "tpu7x Correctness tests for Multimodal Inputs"
     key: tpu7x_multimodal_test
@@ -82,3 +82,32 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_multi_modal_inference.py
+
+  # -----------------------------------------------------------------
+  # MMMU-Pro accuracy test for Qwen2.5-VL-3B on v7x and v6e
+  # -----------------------------------------------------------------
+  - label: "tpu7x MMMU-Pro accuracy for Qwen2.5-VL-3B"
+    key: tpu7x_mmmu_accuracy
+    depends_on: tpu7x_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+      TEST_MODEL: "Qwen/Qwen2.5-VL-3B-Instruct"
+      TENSOR_PARALLEL_SIZE: "2"
+    agents:
+      queue: tpu_v7x_2_queue
+    commands:
+      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_mmmu_accuracy.sh
+
+  - label: "tpu6e MMMU-Pro accuracy for Qwen2.5-VL-3B"
+    key: tpu6e_mmmu_accuracy
+    depends_on: tpu6e_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu6e"
+      TEST_MODEL: "Qwen/Qwen2.5-VL-3B-Instruct"
+      TENSOR_PARALLEL_SIZE: "1"
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_mmmu_accuracy.sh
