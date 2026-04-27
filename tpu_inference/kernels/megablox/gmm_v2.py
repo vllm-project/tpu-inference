@@ -438,6 +438,12 @@ def inner_kernel(
                     # Convert lhs into quantized dtype.
                     block_lhs_q = (block_lhs *
                                    block_scale_inv).astype(lhs_q_dtype)
+                    # Some mixed precision matmuls are not supported. In that case,
+                    # convert rhs into the same dtype as lhs. We generally expect that
+                    # this will be an upcast, e.g. int4 -> fp8 or int8.
+                    if not pltpu.get_tpu_info().is_matmul_supported(
+                            lhs_q_dtype, block_rhs.dtype):
+                        block_rhs = block_rhs.astype(lhs_q_dtype)
 
                     block_acc = jnp.matmul(
                         block_lhs_q,
@@ -1048,13 +1054,17 @@ def make_gmm_configs(
     if maybe_quantize_lhs and rhs_quant_dtype is not None:
         # Choose lhs quantization dtype based on TPU hardware support.
         is_rhs_float = jnp.issubdtype(rhs_quant_dtype, jnp.floating)
+        is_rhs_4bits = jax.dtypes.itemsize_bits(rhs_quant_dtype) == 4
         tpu_info = pltpu.get_tpu_info()
         # Check if there is hardware compute support for rhs dtype group.
-        if is_rhs_float:
-            if tpu_info.fp8_ops_per_second > 0:
+        # If the rhs is quantized to int4 or uint4 bits, these can be upcast to
+        # e4m3 without loss, so we consider both fp8 and int8.
+        # Does not consider int8 x fp4 since fp4 does not cleanly map to int8.
+        if tpu_info.fp8_ops_per_second > 0:
+            if is_rhs_float or is_rhs_4bits:
                 lhs_q_dtype = jnp.float8_e4m3fn.dtype
-        else:
-            if tpu_info.int8_ops_per_second > 0:
+        if tpu_info.int8_ops_per_second > 0:
+            if not is_rhs_float:
                 lhs_q_dtype = jnp.int8.dtype
 
     lhs_cfgs = InputConfigs(
