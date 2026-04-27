@@ -411,6 +411,7 @@ def test_aggregated_stats_logger_log_single_entry(
 
     stats = {"batch_id": 1, "tokens": 100}
     logger.log(stats)
+    logger.flush()
 
     expected_json = '{"batch_id": 1, "tokens": 100}\n'
     local_file_path = Path(logger.local_temp_file)
