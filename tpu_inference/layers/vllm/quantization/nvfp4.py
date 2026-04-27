@@ -454,6 +454,100 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
     def is_monolithic(self) -> bool:
         return True
 
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        """Register NVFP4 MoE weight parameters."""
+        from vllm.model_executor.layers.fused_moe.layer import set_weight_attrs
+
+        layer.num_experts = num_experts
+        layer.orig_dtype = params_dtype
+        group_size = getattr(self.quant_config, 'group_size', NVFP4_GROUP_SIZE)
+
+        # Packed FP4 weights: 2 values per uint8 byte
+        w13_weight = torch.nn.Parameter(
+            torch.empty(num_experts,
+                        2 * intermediate_size_per_partition,
+                        hidden_size // 2,
+                        dtype=torch.uint8),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        w2_weight = torch.nn.Parameter(
+            torch.empty(num_experts,
+                        hidden_size,
+                        intermediate_size_per_partition // 2,
+                        dtype=torch.uint8),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        # Per-block weight scales (E4M3)
+        w13_weight_scale = torch.nn.Parameter(
+            torch.empty(num_experts,
+                        2 * intermediate_size_per_partition,
+                        hidden_size // group_size,
+                        dtype=torch.float8_e4m3fn),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+
+        w2_weight_scale = torch.nn.Parameter(
+            torch.empty(num_experts,
+                        hidden_size,
+                        intermediate_size_per_partition // group_size,
+                        dtype=torch.float8_e4m3fn),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+
+        # Per-tensor global scales
+        w13_weight_scale_2 = torch.nn.Parameter(
+            torch.ones(num_experts, 2, dtype=torch.float32),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_scale_2", w13_weight_scale_2)
+        set_weight_attrs(w13_weight_scale_2, extra_weight_attrs)
+
+        w2_weight_scale_2 = torch.nn.Parameter(
+            torch.ones(num_experts, dtype=torch.float32),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_scale_2", w2_weight_scale_2)
+        set_weight_attrs(w2_weight_scale_2, extra_weight_attrs)
+
+        # Bias (optional)
+        if self.moe.has_bias:
+            w13_bias = torch.nn.Parameter(
+                torch.zeros(num_experts,
+                            2 * intermediate_size_per_partition,
+                            dtype=params_dtype),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_bias", w13_bias)
+            set_weight_attrs(w13_bias, extra_weight_attrs)
+
+            w2_bias = torch.nn.Parameter(
+                torch.zeros(num_experts, hidden_size, dtype=params_dtype),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_bias", w2_bias)
+            set_weight_attrs(w2_bias, extra_weight_attrs)
+
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> None:
+        return None
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Dequant NVFP4 MoE weights → requant for TPU MoE kernel."""
         assert isinstance(layer, FusedMoE)
