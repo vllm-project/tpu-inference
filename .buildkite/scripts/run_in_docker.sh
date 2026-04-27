@@ -25,6 +25,14 @@ if [ "$#" -eq 0 ]; then
   exit 1
 fi
 
+declare -a BENCHMARK_DOCKER_ARGS=()
+
+# Check if the serialized string exists and is not empty.
+if [ -n "${BENCHMARK_DOCKER_ARGS_STR:-}" ]; then
+  mapfile -t BENCHMARK_DOCKER_ARGS <<< "${BENCHMARK_DOCKER_ARGS_STR}"
+fi
+printf "[INFO] %s = %s\n" "BENCHMARK_DOCKER_ARGS" "${BENCHMARK_DOCKER_ARGS[*]}"
+
 # TODO(Qiliang Cui): This is temp solution to mitigate the docker image
 #     not cleaned issue when migrating benchmark to buildkite.
 docker rm -f vllm-tpu || true
@@ -35,6 +43,7 @@ ENV_VARS=(
   -e MINIMUM_ACCURACY_THRESHOLD="${MINIMUM_ACCURACY_THRESHOLD:-}"
   -e MINIMUM_THROUGHPUT_THRESHOLD="${MINIMUM_THROUGHPUT_THRESHOLD:-}"
   -e TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-}"
+  -e TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-}"
   -e INPUT_LEN="${INPUT_LEN:-}"
   -e OUTPUT_LEN="${OUTPUT_LEN:-}"
   -e PREFIX_LEN="${PREFIX_LEN:-}"
@@ -48,6 +57,7 @@ if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
 fi
 
 IMAGE_NAME='vllm-tpu'
+FULL_IMAGE_TAG="${IMAGE_NAME}:${BUILDKITE_COMMIT}"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 # Source the environment setup script
 # shellcheck disable=SC1091
@@ -99,5 +109,6 @@ exec docker run \
   ${TPU_VERSION:+-e TPU_VERSION="$TPU_VERSION"} \
   ${SKIP_ACCURACY_TESTS:+-e SKIP_ACCURACY_TESTS="$SKIP_ACCURACY_TESTS"} \
   ${VLLM_MLA_DISABLE:+-e VLLM_MLA_DISABLE="$VLLM_MLA_DISABLE"} \
-  "${IMAGE_NAME}:${BUILDKITE_COMMIT}" \
+  "${BENCHMARK_DOCKER_ARGS[@]}" \
+  "$FULL_IMAGE_TAG" \
   "$@" # Pass all script arguments as the command to run in the container

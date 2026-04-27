@@ -109,7 +109,7 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
         pass
 
     def forward(self,
-                q: torch.Tensor,
+                q: tuple[torch.Tensor, torch.Tensor],
                 kv_c_normed: torch.Tensor,
                 k_pe: torch.Tensor,
                 kv_cache: jnp.ndarray,
@@ -126,7 +126,7 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
         below anyways.
 
         Args:
-            q: torch.Tensor
+            q: q_nope, q_pe tuple of torch.Tensor
             kv_c_normed: torch.Tensor
             k_pe: torch.Tensor
             kv_cache: jnp.ndarray
@@ -139,13 +139,12 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             Tuple[jnp.ndarray, jnp.ndarray]: (new_kv_cache, outputs)
         """
 
-        q = jax_view(q)
+        q_nope, q_pe = q
+        q_nope = jax_view(q_nope)
+        q_pe = jax_view(q_pe)
         kv_c_normed = jax_view(kv_c_normed)
         k_pe = jax_view(k_pe)
-        input_dtype = q.dtype
-
-        # Prepare inputs
-        q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=2)
+        input_dtype = q_nope.dtype
 
         # (B, N, P) x (N, P, L) -> (B, N, L)
         # torch nn param
