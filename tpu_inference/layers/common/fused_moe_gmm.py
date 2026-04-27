@@ -172,77 +172,80 @@ def moe_gmm_local(
         w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
     gmm1_res = gmm1_res[:, :w2.shape[1]]  # trim to hidden size if padded
 
+    use_sc_gather_reduce = gather_reduce_sc.is_supported_by_sc_gather_reduce(
+        gmm1_res.shape[0], sc_kernel_threshold)
     local_group_size = w1.shape[0]
-    if local_group_size < group_sizes.size:
+    is_output_ragged = local_group_size < group_sizes.size
+
+    gmm2_res = gmm_wrapper(
+        gmm1_res,
+        w2,
+        w2_scale,
+        w2_bias,
+        group_sizes,
+        group_offset,
+        preferred_element_type=jnp.float32 if use_sc_gather_reduce else None,
+    )
+
+    if is_output_ragged:
         mask = valid_rows_mask(
             gmm1_res.shape[0],
             group_sizes,
             group_offset,
             group_offset + local_group_size,
-        )[topk_argsort_revert_indices]
-
-    if gather_reduce_sc.is_supported_by_sc_gather_reduce(
-            gmm1_res.shape[0], sc_kernel_threshold):
-        gmm2_res = gmm_wrapper(gmm1_res,
-                               w2,
-                               w2_scale,
-                               w2_bias,
-                               group_sizes,
-                               group_offset,
-                               preferred_element_type=jnp.float32.dtype)
-
-        if local_group_size < group_sizes.size:
-            mask = mask.reshape(-1, topk)
-            topk_weights = jnp.where(mask, topk_weights, 0)
-
-        inds = topk_argsort_revert_indices
-        topk_weights = topk_weights.flatten().reshape(-1, 128)
-
-        token_hidden = gather_reduce_sc.sc_gather_reduce(
-            op=gmm2_res,
-            idx=inds,
-            reduce_group_size=topk,
-            topk_weights=topk_weights,
-            col_chunk_size=sc_kernel_col_chunk_size,
-        )
+        )[topk_argsort_revert_indices].reshape(-1, topk, 1)
     else:
-        gmm2_res = gmm_wrapper(gmm1_res,
-                               w2,
-                               w2_scale,
-                               w2_bias,
-                               group_sizes,
-                               group_offset,
-                               preferred_element_type=x.dtype)
+        mask = jnp.full((gmm1_res.shape[0], ), True).reshape(-1, topk, 1)
 
-        if local_group_size < group_sizes.size:
-            group_offsets = jnp.cumulative_sum(group_sizes,
-                                               include_initial=True)
-            experts_start = group_offset[0]
-            experts_end = group_offset[0] + local_group_size
-            shard_output_start = group_offsets[experts_start]
-            shard_output_end = group_offsets[experts_end]
-            token_hidden = ragged_scatter(gmm2_res,
-                                          topk_argsort_revert_indices,
-                                          shard_output_start, shard_output_end)
+    chunk_size = 2048
+    out_list = []
+    for start in range(0, topk_weights.shape[0], chunk_size):
+        end = min(topk_weights.shape[0], start + chunk_size)
+        start_batch = start * topk
+        end_batch = end * topk
+
+        cur_indices = topk_argsort_revert_indices[start_batch:end_batch]
+        cur_topk_weights = topk_weights[start:end]
+        cur_mask = mask[start:end]
+
+        if use_sc_gather_reduce:
+            cur_mask = cur_mask.reshape(-1, topk)
+            cur_topk_weights = jnp.where(cur_mask, cur_topk_weights, 0)
+
+            cur_topk_weights = cur_topk_weights.flatten().reshape(-1, 128)
+
+            token_hidden = gather_reduce_sc.sc_gather_reduce(
+                op=gmm2_res,
+                idx=cur_indices,
+                reduce_group_size=topk,
+                topk_weights=cur_topk_weights,
+                col_chunk_size=sc_kernel_col_chunk_size,
+            )
         else:
-            token_hidden = gmm2_res[topk_argsort_revert_indices]
+            if is_output_ragged:
+                group_offsets = jnp.cumulative_sum(group_sizes,
+                                                   include_initial=True)
+                experts_start = group_offset[0]
+                experts_end = group_offset[0] + local_group_size
+                shard_output_start = group_offsets[experts_start]
+                shard_output_end = group_offsets[experts_end]
+                token_hidden = ragged_scatter(gmm2_res, cur_indices,
+                                              shard_output_start,
+                                              shard_output_end)
+            else:
+                token_hidden = gmm2_res[topk_argsort_revert_indices]
 
-        # First run local reduction on topk experts owned by the rank for all tokens
-        token_topk_hidden = token_hidden.reshape(
-            (-1, topk, gmm2_res.shape[-1]))
-        token_topk_hidden = token_topk_hidden * jnp.expand_dims(topk_weights,
-                                                                axis=-1)
+            cur_sorted = token_hidden.reshape(-1, topk, gmm2_res.shape[-1])
+            cur_topk_weights = jnp.expand_dims(cur_topk_weights, axis=-1)
+            cur_weighted = cur_sorted * cur_topk_weights
+            cur_masked = jnp.where(cur_mask, cur_weighted, 0.0)
+            cur_reduced = cur_masked.sum(axis=-2)
 
-        if local_group_size < group_sizes.size:
-            mask = mask.reshape(-1, topk, 1)
-            token_topk_hidden = jnp.where(mask, token_topk_hidden, 0.0)
-
-        token_hidden = token_topk_hidden.sum(axis=-2)
-
-    reduction_axis = (ShardingAxisName.MLP_TENSOR
-                      if parallelism == "tp" else ShardingAxisName.EXPERT)
-    # Then global reduction on all ranks for all tokens and all experts
-    return jax.lax.psum(token_hidden, axis_name=reduction_axis).astype(x.dtype)
+        reduction_axis = (ShardingAxisName.MLP_TENSOR
+                          if parallelism == "tp" else ShardingAxisName.EXPERT)
+        out = jax.lax.psum(cur_reduced, axis_name=reduction_axis)
+        out_list.append(out)
+    return jnp.concat(out_list, axis=0)
 
 
 def tensor_parallel_gmm(
