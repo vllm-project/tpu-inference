@@ -1497,7 +1497,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                         dtype=np.int32).ravel()
 
         # True when every DP rank has decode-only seqs (dist[0] == dist[2]: no mixed/prefill).
-        # The divisibility-by-decode_batch_size invariant is asserted in static_validate_inputs.
         is_full_batch_decode = all(d[0] == d[2] for d in _request_distribution)
 
         use_spec_decode = len(

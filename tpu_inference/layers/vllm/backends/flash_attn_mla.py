@@ -156,7 +156,6 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
                              jax_view(layer.W_UK_T),
                              preferred_element_type=jnp.float32) *
                   scale).astype(input_dtype)
-        # Result: [N, B, L] — XLA's dot_general gives this layout physically; no copy inserted
 
         q_scale = k_scale = v_scale = None
         if layer.kv_cache_quantized_dtype:

@@ -499,24 +499,9 @@ def mla_attention(
         v_scale: scale to apply to v (if quantized)
         sm_scale: softmax scale
     """
-    # q_nope is head-major; batched decode packs it into 4D [N, B//qp, qp, L] for
-    # tile-alignment (qp = q_packing). Use a 4D spec to match the tensor rank so the
-    # shard_map correctly shards the batch dimension (dim 1) without an all-to-all.
-    is_4d_qnope = len(q_TNA.shape) == 4
-    default_q_nope_spec = (
-        P(None, ShardingAxisName.MLP_TENSOR, None,
-          None)  # [N, B//qp, qp, L]: shard B//qp
-        if is_4d_qnope else P(None, ShardingAxisName.MLP_TENSOR,
-                              None)  # [N, T, L]: shard T
-    )
-    default_attn_out_spec = (
-        P(None, ShardingAxisName.MLP_TENSOR, None, None)  # 4D output
-        if is_4d_qnope else P(None, ShardingAxisName.MLP_TENSOR,
-                              None)  # 3D output
-    )
     in_specs = (
         query_tnh_sharding
-        or default_q_nope_spec,  # q_nope: shard batch dim (dim 1)
+        or P(None, ShardingAxisName.MLP_TENSOR, None),  # [N, T, L]: shard T
         query_tnh_sharding or P(ShardingAxisName.MLP_TENSOR, None,
                                 None),  # q_rope: [B, N, r] — shard B (dim 0)
         keyvalue_skh_sharding or P(ShardingAxisName.MLP_TENSOR, None),  # k
@@ -534,7 +519,7 @@ def mla_attention(
         # to the attention output (head-major [N, B//qp, qp, L] or [N, T, L]).
         P(ShardingAxisName.MLP_TENSOR),  # kv cache (first return value)
         attn_o_tnh_sharding
-        or default_attn_out_spec,  # attn output: shard batch dim (dim 1)
+        or P(None, ShardingAxisName.MLP_TENSOR, None),  # attn output: shard batch dim (dim 1)
     )
 
     def _mla_ragged_paged_attention(q, q_rope, k, k_rope, cache, *args):
