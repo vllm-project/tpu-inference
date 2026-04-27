@@ -1,0 +1,88 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Dev pipeline for tpu-inference-dev.
+# Demo/sample steps showing how to run custom tests on tpu7x.
+# Copy and adapt any step for your own experiments.
+#
+# HOW TO TRIGGER THIS PIPELINE
+# ─────────────────────────────
+# Option A — Buildkite UI:
+#   Go to https://buildkite.com/tpu-commons/tpu-inference-dev
+#   Click "New Build", set branch to your branch, click "Create Build".
+#
+# Option B — Buildkite API (requires BUILDKITE_API_TOKEN in your env):
+#   curl -s -X POST \
+#     -H "Authorization: Bearer $BUILDKITE_API_TOKEN" \
+#     -H "Content-Type: application/json" \
+#     "https://api.buildkite.com/v2/organizations/tpu-commons/pipelines/tpu-inference-dev/builds" \
+#     -d "{\"commit\": \"$(git rev-parse HEAD)\", \"branch\": \"$(git rev-parse --abbrev-ref HEAD)\", \"message\": \"my test\"}"
+#
+# HOW TO CUSTOMIZE
+# ─────────────────
+# 1. On your branch, edit this file — use any demo step below as a starting point.
+# 2. Change the command, model, env vars, or queue as needed.
+# 3. Trigger the pipeline — only your branch's file is used.
+
+steps:
+
+  # -----------------------------------------------------------------
+  # Build Step (required by all demo steps below)
+  # -----------------------------------------------------------------
+  - label: ":docker: Build and Push Base Image (tpu6e)"
+    key: tpu6e_build_docker
+    agents:
+      # queue: tpu_v6e_queue
+      queue: tpu_v6e_8_queue
+    env:
+      TPU_VERSION: "tpu6e"
+    commands:
+      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+
+  # -----------------------------------------------------------------
+  # -----------------------------------------------------------------
+  - label: ":docker: Tuning Cases Generation and Pipeline Upload"
+    key: generate_tuning_cases_and_yml
+    depends_on: tpu6e_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu6e"
+    agents:
+      # queue: tpu_v6e_queue
+      queue: tpu_v6e_8_queue
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh bash -c "
+          if [ -z \"\${KERNEL_TUNING_RUN_ID}\" ] || [ -z \"\${KERNEL_TUNING_CASE_SET_ID}\" ]; then
+            echo \"Error: KERNEL_TUNING_RUN_ID or KERNEL_TUNING_CASE_SET_ID not set\"
+            exit 1
+          fi && \
+          pip install --upgrade google-cloud-spanner && \
+          pip install --upgrade google-api-core && \
+          pip install --upgrade google-auth && \
+          echo \"tuning_kernel_name = \${KERNEL_TUNING_KERNEL_NAME}\" && \
+          echo \"case_set_desc = \${KERNEL_TUNING_CASE_SET_DESC}\" && \
+          echo \"case_set_id = \${KERNEL_TUNING_CASE_SET_ID}\" && \
+          echo \"run_id = \${KERNEL_TUNING_RUN_ID}\" && \
+          python -m tools.kernel.tuner.v1.kernel_tuner_runner \
+          --kernel_tuner_name=\${KERNEL_TUNING_KERNEL_NAME} \
+          --case_set_desc=\${KERNEL_TUNING_CASE_SET_DESC} \
+          --generate_buildkite_pipeline=True \
+          --case_set_id=\${KERNEL_TUNING_CASE_SET_ID} \
+          --run_id=\${KERNEL_TUNING_RUN_ID} "
+      - |
+        # Upload the generated YAML as a Buildkite artifact for the next step to consume.
+        buildkite-agent artifact upload "/mnt/disks/persist/models/generated_tuning_cases.yml"
+        buildkite-agent pipeline upload "/mnt/disks/persist/models/generated_tuning_cases.yml"
+    artifact_paths: "/mnt/disks/persist/models/generated_tuning_cases.yml"
