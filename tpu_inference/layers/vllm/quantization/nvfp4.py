@@ -29,6 +29,8 @@ from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.layer import \
+    FusedMoeWeightScaleSupported
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
@@ -512,6 +514,14 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
+        # Tell FusedMoE.weight_loader how to load block scales
+        set_weight_attrs(
+            w13_weight_scale,
+            {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value})
+        set_weight_attrs(
+            w2_weight_scale,
+            {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value})
+
         # Per-tensor global scales
         w13_weight_scale_2 = torch.nn.Parameter(
             torch.ones(num_experts, 2, dtype=torch.float32),
@@ -526,6 +536,14 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_weight_scale_2", w2_weight_scale_2)
         set_weight_attrs(w2_weight_scale_2, extra_weight_attrs)
+
+        # Tell FusedMoE.weight_loader how to load global scales
+        set_weight_attrs(
+            w13_weight_scale_2,
+            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
+        set_weight_attrs(
+            w2_weight_scale_2,
+            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
 
         # Bias (optional)
         if self.moe.has_bias:
