@@ -117,18 +117,40 @@ class VllmNvfp4Config(QuantizationConfig, VllmQuantConfig):
         return None
 
     @classmethod
-    def _from_config(
-        cls,
-        *,
-        quant_method: str,
-        kv_cache_quant_method: Optional[str] = None,
-        exclude_modules: Optional[list[str]] = None,
-        original_config: Optional[dict[str, Any]] = None,
-        group_size: Optional[int] = None,
-        **kwargs: Any,
-    ) -> "VllmNvfp4Config":
+    def from_config(cls, config: dict[str, Any]) -> "VllmNvfp4Config":
+        """Parse HF quantization_config dict into VllmNvfp4Config."""
+        if "quantization" in config:
+            quant_config = config["quantization"]
+            quant_algo = quant_config.get("quant_algo", "")
+            kv_cache_quant_method = quant_config.get("kv_cache_quant_algo")
+            exclude_modules = quant_config.get("exclude_modules", [])
+            group_size = quant_config.get("group_size")
+        else:
+            quant_algo = config.get("quant_algo", "")
+            kv_cache_scheme = config.get("kv_cache_scheme")
+            if (isinstance(kv_cache_scheme, dict)
+                    and kv_cache_scheme.get("type") == "float"
+                    and kv_cache_scheme.get("num_bits") == 8):
+                kv_cache_quant_method = "FP8"
+            else:
+                kv_cache_quant_method = None
+            exclude_modules = config.get("ignore", [])
+            group_size = config.get("group_size")
+
+        if isinstance(group_size, str):
+            group_size = int(group_size)
+
+        # Also check config_groups for group_size
+        if group_size is None:
+            config_groups = config.get("config_groups", {})
+            for group in config_groups.values():
+                weights = group.get("weights", {})
+                if "group_size" in weights:
+                    group_size = weights["group_size"]
+                    break
+
         return cls(
-            is_checkpoint_nvfp4_serialized="NVFP4" in quant_method,
+            is_checkpoint_nvfp4_serialized="NVFP4" in str(quant_algo).upper(),
             kv_cache_quant_algo=kv_cache_quant_method,
             exclude_modules=exclude_modules or [],
             group_size=group_size or NVFP4_GROUP_SIZE,
