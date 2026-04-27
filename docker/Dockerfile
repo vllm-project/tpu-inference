@@ -76,6 +76,9 @@ RUN  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/pip pip install -e .
 
+# Pin transformers and huggingface_hub to v4 versions to verify if v5 upgrade causes output drift
+RUN --mount=type=cache,target=/root/.cache/pip pip install "transformers==4.57.6" "huggingface_hub==0.36.2"
+
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
