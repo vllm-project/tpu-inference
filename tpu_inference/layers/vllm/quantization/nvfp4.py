@@ -278,25 +278,25 @@ class VllmNvfp4LinearMethod(Fp8LinearMethod):
         )
         layer.register_parameter("weight", weight)
 
-        # Per-tensor input activation scale — scalar shape () to match
-        # checkpoint format. QKV weight_loader fallback asserts shape match.
+        # Simple weight_loader for scalar per-tensor scales that bypasses
+        # the layer's weight_loader (which differs per linear subclass).
+        def scalar_weight_loader(param, loaded_weight, *args, **kwargs):
+            param.data.fill_(loaded_weight.item() if loaded_weight.numel() ==
+                             1 else loaded_weight.max().item())
+
+        # Per-tensor input activation scale
         input_scale = torch.nn.Parameter(torch.empty((), dtype=torch.float32),
                                          requires_grad=False)
         layer.register_parameter("input_scale", input_scale)
-        set_weight_attrs(input_scale, {
-            "weight_loader": weight_loader,
-            "ignore_warning": True
-        })
+        set_weight_attrs(input_scale, {"weight_loader": scalar_weight_loader})
 
-        # Per-tensor weight global scale — scalar shape ()
+        # Per-tensor weight global scale
         weight_scale_2 = torch.nn.Parameter(torch.empty((),
                                                         dtype=torch.float32),
                                             requires_grad=False)
         layer.register_parameter("weight_scale_2", weight_scale_2)
-        set_weight_attrs(weight_scale_2, {
-            "weight_loader": weight_loader,
-            "ignore_warning": True
-        })
+        set_weight_attrs(weight_scale_2,
+                         {"weight_loader": scalar_weight_loader})
 
         # Per-block weight scale (E4M3)
         weight_scale = ModelWeightParameter(
