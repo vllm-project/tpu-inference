@@ -1,3 +1,17 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 name: Marin Nightly Release
 
 on:
@@ -87,10 +101,22 @@ jobs:
             "*.whl" \
             "marin-build.json"
 
+      - name: Resolve paired vLLM wheel
+        id: paired_wheel
+        run: |
+          shopt -s nullglob
+          wheels=(paired-vllm/*.whl)
+          if [[ "${#wheels[@]}" -ne 1 ]]; then
+            echo "Expected exactly one paired vLLM wheel, found ${#wheels[@]}." >&2
+            printf '  %s\n' "${wheels[@]}" >&2
+            exit 1
+          fi
+          echo "WHEEL_PATH=${wheels[0]}" >> "$GITHUB_OUTPUT"
+
       - name: Pair-validate exact nightly wheels
         run: |
           python .github/scripts/wheel_metadata.py \
-            --wheel paired-vllm/*.whl \
+            --wheel "${{ steps.paired_wheel.outputs.WHEEL_PATH }}" \
             --requirements-out /tmp/vllm-wheel-reqs.txt \
             --forbid-prefix tpu-inference \
             --forbid-prefix tpu_inference \
@@ -99,7 +125,7 @@ jobs:
           uv venv .marin-nightly
           . .marin-nightly/bin/activate
           uv pip install -r /tmp/vllm-wheel-reqs.txt validated/*.whl
-          uv pip install --no-deps paired-vllm/*.whl
+          uv pip install --no-deps "${{ steps.paired_wheel.outputs.WHEEL_PATH }}"
           python -c "import tpu_inference; from tpu_inference.runner.tpu_runner import TPUModelRunner"
 
       - name: Publish immutable nightly release
