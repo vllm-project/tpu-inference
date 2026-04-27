@@ -616,9 +616,9 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
                 half_scale_n = w13_weight_scale.shape[1] // 2
 
                 w1_scale_eff = w13_weight_scale[:, :half_scale_n].astype(
-                    jnp.float32) * w13_global_scale[:, 0:1].reshape(-1, 1)
+                    jnp.float32) * w13_global_scale[:, 0:1].reshape(-1, 1, 1)
                 w3_scale_eff = w13_weight_scale[:, half_scale_n:].astype(
-                    jnp.float32) * w13_global_scale[:, 1:2].reshape(-1, 1)
+                    jnp.float32) * w13_global_scale[:, 1:2].reshape(-1, 1, 1)
                 w13_scale_eff = jnp.concatenate([w1_scale_eff, w3_scale_eff],
                                                 axis=1)
 
