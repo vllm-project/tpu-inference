@@ -464,7 +464,7 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
         **extra_weight_attrs,
     ):
         """Register NVFP4 MoE weight parameters."""
-        from vllm.model_executor.layers.fused_moe.layer import set_weight_attrs
+        from vllm.model_executor.utils import set_weight_attrs
 
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
