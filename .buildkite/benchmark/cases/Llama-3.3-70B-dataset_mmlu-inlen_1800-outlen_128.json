@@ -6,8 +6,7 @@
     "GCP_DATABASE_ID": "vllm-bm-bk-runs",
     "EXPECTED_ETEL": 3600000,
     "INPUT_LEN": 1800,
-    "OUTPUT_LEN": 128,
-    "JAX_TRACEBACK_FILTERING": "off"
+    "OUTPUT_LEN": 128
   },
   "ci_queue": [
     "tpu_v6e_8_queue"
@@ -15,7 +14,6 @@
   "client_command_options": {
     "command_type": "lm_eval",
     "env": {
-      "NEW_MODEL_DESIGN": 1,
       "TPU_BACKEND_TYPE": "jax"
     },
     "args": {
