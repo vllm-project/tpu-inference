@@ -177,7 +177,8 @@ class RpaV3KernelTuner(KernelTunerBase):
         self.num_q_heads = 8
         self.num_kv_heads = 4
         self.head_dim = 256
-        self.total_num_pages = 1000,
+        self.total_num_pages = 1000
+        self.sliding_window = [512, 1024]
 
     def generate_cases(self) -> list[TuningCase]:
         # tuning keys
@@ -397,7 +398,7 @@ class RpaV3KernelTuner(KernelTunerBase):
             logger.info(
                 f"[Debug] Failed with ({page_size=}, {tunable_params.bkv_p=},"
                 f" {tunable_params.bq_sz=}), got error: {err=}")
-            return TuningStatus.FAILURE, float("inf"), float("inf")
+            return TuningStatus.UNKNOWN_ERROR, float("inf"), float("inf")
 
         vmem_estimate = get_vmem_estimate_bytes(
             tuning_key.num_q_heads,
@@ -412,7 +413,7 @@ class RpaV3KernelTuner(KernelTunerBase):
             logger.info(f"[Debug] Skip ({page_size=}, {tunable_params.bkv_p=},"
                         f" {tunable_params.bq_sz=}) because {vmem_estimate=} >"
                         f" {VMEM_LIMIT_BYTES=}")
-            return TuningStatus.FAILURE, float("inf"), float("inf")
+            return TuningStatus.SKIPPED, float("inf"), float("inf")
 
         smem_estimate = get_smem_estimate_bytes(
             self.max_num_seqs,
@@ -422,7 +423,7 @@ class RpaV3KernelTuner(KernelTunerBase):
             logger.info(f"[Debug] Skip ({page_size=}, {tunable_params.bkv_p=},"
                         f" {tunable_params.bq_sz=}) because {smem_estimate=} >"
                         f" {SMEM_LIMIT_BYTES=}")
-            return TuningStatus.FAILURE, float("inf"), float("inf")
+            return TuningStatus.SKIPPED, float("inf"), float("inf")
 
         try:
             start_ns = time.perf_counter_ns()
@@ -437,4 +438,4 @@ class RpaV3KernelTuner(KernelTunerBase):
             logger.info(
                 f"[Debug] Failed with ({page_size=}, {tunable_params.bkv_p=},"
                 f" {tunable_params.bq_sz=}), got error: {err=}")
-            return TuningStatus.FAILURE, float("inf"), float("inf")
+            return TuningStatus.UNKNOWN_ERROR, float("inf"), float("inf")

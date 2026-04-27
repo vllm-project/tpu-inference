@@ -191,29 +191,27 @@ def _get_spanner_db(project, instance_id, database_id):
 
 
 def spanner_list_case_sets(db, filter_kw=None):
-    from google.cloud import \
-        spanner as gspanner  # pylint: disable=import-outside-toplevel
+    query = """
+        SELECT cs.ID, cs.Description, cs.Status, cs.ScanSpace,
+               COUNT(DISTINCT wb.RunId) AS num_runs
+        FROM CaseSet cs
+        LEFT JOIN WorkBuckets wb ON cs.ID = wb.ID
+        GROUP BY cs.ID, cs.Description, cs.Status, cs.ScanSpace
+        ORDER BY cs.ID
+    """
     rows = []
     with db.snapshot() as snap:
-        for cs_id, desc, status, scan_space in snap.execute_sql(
-                "SELECT ID, Description, Status, ScanSpace FROM CaseSet ORDER BY ID"
-        ):
+        for cs_id, desc, status, scan_space, num_runs in snap.execute_sql(
+                query):
             if filter_kw and filter_kw.lower() not in cs_id.lower() and \
                     filter_kw.lower() not in (desc or '').lower():
                 continue
-            with db.snapshot() as snap2:
-                num_runs = list(
-                    snap2.execute_sql(
-                        "SELECT COUNT(DISTINCT RunId) FROM WorkBuckets WHERE ID = @id",
-                        params={'id': cs_id},
-                        param_types={'id': gspanner.param_types.STRING},
-                    ))[0][0]
             rows.append({
                 'case_set_id': cs_id,
                 'description': desc,
                 'status': status,
                 'scan_space': scan_space,
-                'num_runs': num_runs
+                'num_runs': num_runs,
             })
     return rows
 

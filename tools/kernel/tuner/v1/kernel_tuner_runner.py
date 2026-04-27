@@ -14,10 +14,10 @@
 
 import datetime
 import logging
+import os
 
 from absl import app, flags
 
-from tools.kernel.tuner.v1.common.utils import get_host_ip
 from tools.kernel.tuner.v1.rpa_v3_kernel_tuner import RpaV3KernelTuner
 from tools.kernel.tuner.v1.storage_management.local_db_manager import \
     LocalDbManager
@@ -66,7 +66,9 @@ _SPANNER_INSTANCE_ID = flags.DEFINE_string(
 _SPANNER_DATABASE_ID = flags.DEFINE_string(
     'spanner_database_id', 'tune-gmm',
     'The Spanner database ID to use. Only used when --run_locally is false.')
-_WORKER_ID = flags.DEFINE_string('worker_id', get_host_ip(), 'The worker id')
+_WORKER_ID = flags.DEFINE_string('worker_id',
+                                 os.getenv('HOST_NAME',
+                                           'unknown'), 'The worker id')
 
 # Note: For simplicity, we are directly referencing the kernel tuner class
 # here. In the future, we can consider a more flexible plugin-based system

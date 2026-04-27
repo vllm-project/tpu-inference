@@ -14,8 +14,8 @@
 
 import json
 import logging
-import os
 import time
+from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from enum import Enum
@@ -49,6 +49,7 @@ class TuningStatus(Enum):
     SUCCESS = 'SUCCESS'
     FAILED_OOM = 'FAILED_OOM'
     UNKNOWN_ERROR = 'UNKNOWN_ERROR'
+    SKIPPED = 'SKIPPED'
 
 
 class TuningCase:
@@ -64,14 +65,15 @@ class TuningCase:
         })
 
     @classmethod
-    def from_string(self, string, tuning_key_class, tunable_params_class):
+    def from_string(cls, string, tuning_key_class, tunable_params_class):
         data = json.loads(string)
-        self.tuning_key = tuning_key_class(**data['tuning_key'])
-        self.tunable_params = tunable_params_class(**data['tunable_params'])
-        return self.tuning_key, self.tunable_params
+        tuning_key = tuning_key_class(**data['tuning_key'])
+        tunable_params = tunable_params_class(**data['tunable_params'])
+        case = TuningCase(tuning_key, tunable_params)
+        return case.tuning_key, case.tunable_params
 
 
-class KernelTunerBase:
+class KernelTunerBase(ABC):
     """
     Base class for kernel tuner runner. The kernel tuner runner is responsible for generating the tuning cases, partitioning the cases into buckets, generating the Buildkite pipeline, and measuring the latency of the cases. The specific kernel tuner runner should inherit from this base class and implement the generate_cases, generate_inputs, and run methods.
     Subclass should also define the TuningKey and TunableParams dataclasses according to the kernel's tuning space.
@@ -142,6 +144,7 @@ class KernelTunerBase:
             return True
         return False
 
+    @abstractmethod
     def generate_cases(self) -> list[TuningCase]:
         """Generate the cases for the given case_set_id. This will be called when the caseset_id is new or the caseset_id is not specified.
         This should not raise any exception, all exceptions should be caught and handled internally. The generated cases will be persisted in local file or database using storage_management module, where each case is represented as a TuningCase object and stored as a string. The case_id is the index of the case in the generated case list.
@@ -253,14 +256,9 @@ class KernelTunerBase:
             'steps': pipeline['steps']
         }]
 
-        output_path = "/tmp/hf_home/generated_tuning_cases.yml"
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        with open(output_path, "w") as f:
-            yaml.dump(pipeline, f, default_flow_style=False, sort_keys=False)
-        logger.info(
-            f"Generated Buildkite pipeline YAML saved to {output_path}")
         return yaml.dump(pipeline, default_flow_style=False, sort_keys=False)
 
+    @abstractmethod
     def generate_inputs(self, tuning_key: TuningKey) -> dict:
         """Generates the kernel inputs for the given tuning key with caching.
 
@@ -276,6 +274,7 @@ class KernelTunerBase:
             "Specific kernel should implement this to generate the inputs to kernel based on the tuning key with caching."
         )
 
+    @abstractmethod
     def run(self, tuning_key: TuningKey, tunable_params: TunableParams,
             iters: int) -> list[TuningStatus, int, int]:
         """Executes the kernel and measures its latency.
@@ -376,7 +375,7 @@ class KernelTunerBase:
             if status != TuningStatus.SUCCESS:
                 results_buffer.append(
                     (caseset_id, run_id, cid, status.value, FLAGS.worker_id, 0,
-                     0, get_timestamp_sec()))
+                     0, 0, get_timestamp_sec()))
                 logger.warning(
                     f"Case {cid} failed during warmup with status: {status}. Skipping to next case."
                 )
@@ -391,7 +390,7 @@ class KernelTunerBase:
             if status != TuningStatus.SUCCESS:
                 results_buffer.append(
                     (caseset_id, run_id, cid, status.value, FLAGS.worker_id,
-                     warmup_us, 0, get_timestamp_sec()))
+                     warmup_us, 0, 0, get_timestamp_sec()))
                 logger.warning(
                     f"Case {cid} failed during main run with status: {status}. Total time spent: {total_time/1e9:.2f}s."
                 )
