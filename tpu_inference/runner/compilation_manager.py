@@ -131,30 +131,24 @@ class CompilationManager:
     def _precompile_unpack_arrays(self) -> None:
         logger.info("Compiling unpack_arrays with different input shapes.")
 
-        dp_size = self.runner.dp_size
-        original_buffer = self.runner.device_buffer
-
         needs_logprobs_options = [False]
         if self.runner.vllm_config.model_config.max_logprobs and self.runner.vllm_config.model_config.max_logprobs > 0:
             needs_logprobs_options.append(True)
 
-        try:
-            for num_tokens in self.runner.num_tokens_paddings_per_dp:
-                for num_reqs in self.runner.num_reqs_paddings_per_dp:
-                    for needs_logprobs in needs_logprobs_options:
-                        if self.runner.speculative_config:
-                            for padded_logits_length in self.runner.num_logits_paddings:
-                                self.runner._define_device_buffer_layout_dp(
-                                    num_tokens, num_reqs,
-                                    (padded_logits_length, ), num_reqs)
-                                self._compile_unpack_arrays_helper(dp_size)
-                        else:
+        for num_tokens in self.runner.num_tokens_paddings_per_dp:
+            for num_reqs in self.runner.num_reqs_paddings_per_dp:
+                for needs_logprobs in needs_logprobs_options:
+                    if self.runner.speculative_config:
+                        for padded_logits_length in self.runner.num_logits_paddings:
                             self.runner._define_device_buffer_layout_dp(
-                                num_tokens, num_reqs, (num_reqs, ), num_reqs)
-                            self._compile_unpack_arrays_helper(dp_size)
-
-        finally:
-            self.runner.device_buffer = original_buffer
+                                num_tokens, num_reqs, (padded_logits_length, ),
+                                num_reqs)
+                            self._compile_unpack_arrays_helper(
+                                self.runner.dp_size)
+                    else:
+                        self.runner._define_device_buffer_layout_dp(
+                            num_tokens, num_reqs, (num_reqs, ), num_reqs)
+                        self._compile_unpack_arrays_helper(self.runner.dp_size)
 
     def _compile_unpack_arrays_helper(self, dp_size: int) -> None:
         from tpu_inference.utils import DeviceBuffer
