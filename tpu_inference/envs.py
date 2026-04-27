@@ -37,8 +37,7 @@ if TYPE_CHECKING:
     JAX_PROFILER_SERVER_PORT: int = 9999
     USE_BATCHED_RPA_KERNEL: bool = False
     FORCE_MOE_RANDOM_ROUTING: bool = False
-    SC_KERNEL_THRESHOLD: int = 16777216
-    SC_KERNEL_COL_CHUNK_SIZE: int = 1024
+    SC_KERNEL_COL_CHUNK_SIZE: int = 3072
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
     RAGGED_GATED_DELTA_RULE_IMPL: str = "ragged_gated_delta_rule_chunked"
@@ -237,8 +236,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Force random expert routing in MoE layers (for testing purposes only)
     "FORCE_MOE_RANDOM_ROUTING":
     env_bool("FORCE_MOE_RANDOM_ROUTING", default=False),
-    "SC_KERNEL_THRESHOLD":
-    lambda: int(os.getenv("SC_KERNEL_THRESHOLD") or "16777216"),
     "SC_KERNEL_COL_CHUNK_SIZE":
     lambda: int(os.getenv("SC_KERNEL_COL_CHUNK_SIZE") or "3072"),
     "JITTED_MM_MODULE_KEYS":
