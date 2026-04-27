@@ -649,8 +649,9 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
             w13_reorder_size = get_mesh_shape_product(
                 self.mesh, ShardingAxisName.MLP_TENSOR)
 
-            # Re-quantize to FP4 with larger block size for kernel efficiency
-            requant_block_size = 512
+            # Re-quantize to FP4. Block size must produce enough scale blocks
+            # for TP sharding (at least tp_size blocks per contracting dim).
+            requant_block_size = 128
             weights = quantize_moe_weights(
                 FusedMoEWeights(
                     w13_weight=w13_dequant,
