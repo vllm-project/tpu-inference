@@ -278,10 +278,9 @@ class VllmNvfp4LinearMethod(Fp8LinearMethod):
         )
         layer.register_parameter("weight", weight)
 
-        # Per-tensor input activation scale — shape [1] so QKV weight_loader
-        # fallback path (shape assertion) works. Each Q/K/V shard overwrites
-        # with its scalar; we take max() in process_weights_after_loading.
-        input_scale = torch.nn.Parameter(torch.empty(1, dtype=torch.float32),
+        # Per-tensor input activation scale — scalar shape () to match
+        # checkpoint format. QKV weight_loader fallback asserts shape match.
+        input_scale = torch.nn.Parameter(torch.empty((), dtype=torch.float32),
                                          requires_grad=False)
         layer.register_parameter("input_scale", input_scale)
         set_weight_attrs(input_scale, {
@@ -289,8 +288,8 @@ class VllmNvfp4LinearMethod(Fp8LinearMethod):
             "ignore_warning": True
         })
 
-        # Per-tensor weight global scale — same approach as input_scale
-        weight_scale_2 = torch.nn.Parameter(torch.empty(1,
+        # Per-tensor weight global scale — scalar shape ()
+        weight_scale_2 = torch.nn.Parameter(torch.empty((),
                                                         dtype=torch.float32),
                                             requires_grad=False)
         layer.register_parameter("weight_scale_2", weight_scale_2)
