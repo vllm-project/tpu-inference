@@ -36,7 +36,7 @@ echo "Output will be timestamped in: $LOG_DIR"
 mkdir -p "$LOG_DIR"
 
 # Default model arguments
-MODEL_ARGS="pretrained=$MODEL_NAME,tensor_parallel_size=${TP_SIZE:-8},dtype=auto,gpu_memory_utilization=0.98"
+MODEL_ARGS="pretrained=$MODEL_NAME,tensor_parallel_size=${TP_SIZE:-8},dtype=auto,gpu_memory_utilization=0.98,enable-prefix-caching=False"
 
 # Check if running on tpu7x-8 hardware
 if [[ "$DEVICE" == tpu7x-8 ]]; then
@@ -50,7 +50,6 @@ CMD=(
     lm_eval
     --model vllm
     --model_args "$MODEL_ARGS"
-    --enable-prefix-caching false
     --tasks mmlu_llama
     --num_fewshot 0
     --apply_chat_template
