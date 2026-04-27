@@ -155,10 +155,12 @@ jobs:
             validated/*.whl \
             validated/marin-build.json
 
-          echo "TAG=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "SHA=${SHA}" >> "$GITHUB_OUTPUT"
-          echo "DATE=${DATE}" >> "$GITHUB_OUTPUT"
-          echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          {
+            echo "TAG=${TAG}"
+            echo "SHA=${SHA}"
+            echo "DATE=${DATE}"
+            echo "SHORT_SHA=${SHORT_SHA}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Update nightly alias
         run: |
