@@ -492,16 +492,14 @@ def recurrent_gated_delta_rule_step(
     beta: jnp.ndarray,
     state: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Single-step recurrent update for decode.
-
-    Runs in fp32 to match GPU FLA's
-    ``fused_sigmoid_gating_delta_rule_update`` kernel, which loads
-    q/k/v/state as fp32 and keeps the recurrent update in fp32
-    registers.
-    """
+    """Single-step recurrent update for decode."""
     B, H, d_k = query.shape
     d_v = value.shape[-1]
 
+    # Run in fp32 to match GPU FLA's
+    # `fused_sigmoid_gating_delta_rule_update` kernel, which loads
+    # q/k/v/state as fp32 and keeps the recurrent update in fp32
+    # registers.
     orig_dtype = query.dtype
     query = query.astype(jnp.float32)
     key = key.astype(jnp.float32)
