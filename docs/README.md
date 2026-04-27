@@ -18,6 +18,42 @@ vLLM TPU is now powered by `tpu-inference`, an expressive and powerful new hardw
 - Provide more flexibility to JAX and PyTorch users by running PyTorch model definitions performantly on TPU without any additional code changes, while also extending native support to JAX.
 - Retain vLLM standardization: keep the same user experience, telemetry, and interface.
 
+--cmd-gen<--
+- v7x (Ironwood),Gemma4:
+  gcloud container node-pools create ${NODEPOOL_NAME} \
+    --project=${PROJECT_ID} \
+    --location=${REGION} \
+    --node-locations=${ZONE} \
+    --num-nodes=1 \
+    --machine-type=tpu7x-standard-4t \
+    --cluster=${CLUSTER_NAME}
+    ...
+- v7x (Ironwood),GPT-OSS:
+  gcloud container node-pools create ${NODEPOOL_NAME} \
+    --project=${PROJECT_ID} \
+    --location=${REGION} \
+    --node-locations=${ZONE} \
+    --num-nodes=1 \
+    --reservation=${RESERVATION_NAME} \
+    --reservation-affinity=specific \
+    --machine-type=tpu7x-standard-4t \
+    --cluster=${CLUSTER_NAME}
+
+    ... --model=openai/gpt-oss-120b
+- v6e (Trillium),Llama3.x:
+  gcloud alpha compute tpus tpu-vm create $TPU_NAME \
+    --type v6e --topology 2x4 \
+    --project $PROJECT --zone $ZONE --version v2-alpha-tpuv6e
+
+  vllm serve meta-llama/Llama-3.3-70B-Instruct
+- v6e (Trillium),Gemma4:
+  gcloud alpha compute tpus tpu-vm create $TPU_NAME \
+    --type v6e --topology 2x4 \
+    --project $PROJECT --zone $ZONE --version v2-alpha-tpuv6e
+
+  vllm serve google/gemma-4-31B-it --max-model-len $MAX_MODEL_LEN --tensor-parallel-size $TP --disable_chunked_mm_input --enable-auto-tool-choice --tool-call-parser gemma4
+-->cmd-gen--
+
 ## Recommended models and features
 
 Although vLLM TPU’s new unified backend makes out-of-the-box high performance serving possible with any model supported in vLLM, the reality is that we're still in the process of implementing a few core components.
