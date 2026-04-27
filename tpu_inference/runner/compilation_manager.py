@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 
 import jax
@@ -48,6 +49,9 @@ class CompilationManager:
         self.runner = runner
         self._sampling_precompiled = False
         self._gather_logprobs_precompiled = False
+        self._executor: Optional[ThreadPoolExecutor] = None
+        self._pending: List[Tuple[str, dict, float, "Future"]] = []
+        self._aot_compiled_functions = []
         if not vllm_envs.VLLM_DISABLE_COMPILE_CACHE:
             logger.info("Enabling JAX compile cache.")
             jax.config.update("jax_compilation_cache_dir",
@@ -82,6 +86,25 @@ class CompilationManager:
                          *args,
                          call_kwargs=dict(),
                          **kwargs) -> None:
+
+        if hasattr(fn, 'trace') and self._executor is not None:
+            # Trace in the calling thread (fast, GIL-bound), since some tracing
+            # logic assume single-threaded execution and may not be thread-safe.
+            # Then compile in the thread pool for parallelism, the compiled result
+            # are cached by JAX compile cache and can be reused in actual inference.
+            traced = fn.trace(*args, **call_kwargs)
+            lowered = traced.lower()
+
+            def _do_aot():
+                return lowered.compile()
+
+            submit_t = time.perf_counter()
+            logger.info(f"Submit precompile {name} --> {kwargs}")
+            fut = self._executor.submit(_do_aot)
+            self._pending.append(
+                (f"{name} --> {kwargs}", kwargs, submit_t, fut))
+            return
+
         logger.info(f"Precompile {name} --> {kwargs}")
         start = time.perf_counter()
         result = fn(*args, **call_kwargs)
@@ -89,42 +112,83 @@ class CompilationManager:
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
 
+    def _wait_inflight_compilation_done(self) -> None:
+        """Wait for all in-flight compilations and log their timings in
+        submission order. Re-raises the first failure encountered."""
+        if not self._pending:
+            return
+        pending = self._pending
+        self._pending = []
+        first_exc: Optional[BaseException] = None
+        for name, kwargs, submit_t, fut in pending:
+            try:
+                compiled = fut.result()
+            except BaseException as e:
+                if first_exc is None:
+                    first_exc = e
+                logger.exception("Compilation failed [%s] --> %s", name,
+                                 kwargs)
+                continue
+            # Keep references to the compiled functions for in memory caching.
+            self._aot_compiled_functions.append(compiled)
+            elapsed = time.perf_counter() - submit_t
+            logger.info("Compilation finished in %.2f [secs] [%s].", elapsed,
+                        name)
+        if first_exc is not None:
+            raise first_exc
+
     def capture_model(self) -> None:
         if envs.SKIP_JAX_PRECOMPILE or self.runner.model_config.enforce_eager:
             return
         logger.info("Precompile all the subgraphs with possible input shapes.")
         compilation_start_time = time.perf_counter()
 
-        with self.runner.maybe_setup_dummy_loras(
-                self.runner.lora_config), jax.set_mesh(self.runner.mesh):
-            self._precompile_backbone_text_only()
-            if self.runner.is_multimodal_model:
-                if self.runner.precompile_vision_encoder_fn is not None:
-                    self.runner.precompile_vision_encoder_fn(
-                        self._run_compilation, )
-                self._precompile_input_embeddings_merger()
-                self._precompile_backbone_with_inputs_embeds()
-            if self.runner.scheduler_config.async_scheduling:
-                self._precompile_substitute_placeholder_token()
-            if not self.runner.is_last_rank:
-                return
-            self._precompile_select_from_array()
-            if not self.runner.is_pooling_model:
-                self._precompile_compute_logits()
-            else:
-                self._precompile_compute_pooling()
-            # Skip sampling if already precompiled before KV cache allocation
-            if not self._sampling_precompiled:
-                self._precompile_sampling()
-            self._precompile_disagg_utils()
-            # Skip gather_logprobs if already precompiled before KV cache allocation
-            if not self._gather_logprobs_precompiled:
-                self._precompile_gather_logprobs()
-            self._precompile_structured_decoding()
-            if self.runner.speculative_config:
-                self._precompile_speculative_decoding()
+        workers = envs.JAX_PRECOMPILE_NUM_THREADS
+        if not vllm_envs.VLLM_DISABLE_COMPILE_CACHE and workers > 1:
+            self._executor = ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="precompile",
+            )
+            logger.info("Parallel precompile enabled with %d workers.",
+                        workers)
+        try:
+            with self.runner.maybe_setup_dummy_loras(
+                    self.runner.lora_config), jax.set_mesh(self.runner.mesh):
+                self._precompile_backbone_text_only()
+                if self.runner.is_multimodal_model:
+                    if self.runner.precompile_vision_encoder_fn is not None:
+                        self.runner.precompile_vision_encoder_fn(
+                            self._run_compilation, )
+                    self._precompile_input_embeddings_merger()
+                    self._precompile_backbone_with_inputs_embeds()
+                if self.runner.scheduler_config.async_scheduling:
+                    self._precompile_substitute_placeholder_token()
+                if not self.runner.is_last_rank:
+                    self._wait_inflight_compilation_done()
+                    return
+                self._precompile_select_from_array()
+                if not self.runner.is_pooling_model:
+                    self._precompile_compute_logits()
+                else:
+                    self._precompile_compute_pooling()
+                # Skip sampling if already precompiled before KV cache allocation
+                if not self._sampling_precompiled:
+                    self._precompile_sampling()
+                self._precompile_disagg_utils()
+                # Skip gather_logprobs if already precompiled before KV cache allocation
+                if not self._gather_logprobs_precompiled:
+                    self._precompile_gather_logprobs()
+                self._precompile_structured_decoding()
+                if self.runner.speculative_config:
+                    self._precompile_speculative_decoding()
+                self._wait_inflight_compilation_done()
+        finally:
+            if self._executor is not None:
+                self._executor.shutdown(wait=True)
+                self._executor = None
 
         elapsed = time.perf_counter() - compilation_start_time
+        logger.info("Total compilation time: %.2f [secs].", elapsed)
         self.runner.vllm_config.compilation_config.compilation_time += elapsed
 
     def _precompile_input_embeddings_merger(self) -> None:
@@ -233,39 +297,19 @@ class CompilationManager:
                 for name in kv_cache_group.layer_names
             }
 
-        def model_fn_wrapper(
-            state,
-            kv_caches,
-            input_ids,
-            attention_metadata,
-            positions,
-            inputs_embeds,
-            layer_name_to_kvcache_index,
-            lora_metadata,
-            intermediate_tensors,
-            is_first_rank,
-            is_last_rank,
-        ):
-            kv_caches, hidden_states, _ = self.runner.model_fn(
-                state, kv_caches, input_ids, attention_metadata, inputs_embeds,
-                positions, layer_name_to_kvcache_index, lora_metadata,
-                intermediate_tensors, is_first_rank, is_last_rank)
-            self.runner.kv_caches = kv_caches
-            return hidden_states
-
         with self.runner.maybe_select_dummy_loras(
                 self.runner.lora_config, np.array([num_tokens],
                                                   dtype=np.int32)):
             lora_metadata = self.runner.lora_utils.extract_lora_metadata()
             self._run_compilation(
                 name,
-                model_fn_wrapper,
+                self.runner.model_fn,
                 self.runner.state,
                 self.runner.kv_caches,
                 input_ids,
                 attention_metadata,
-                positions,
                 inputs_embeds,
+                positions,
                 tuple(self.runner.layer_name_to_kvcache_index.items()),
                 lora_metadata,
                 intermediate_tensors,
@@ -877,20 +921,6 @@ class CompilationManager:
                     num_tokens=num_tokens,
                 )
 
-            def draft_model_fn_wrapper(
-                state,
-                kv_caches,
-                input_ids,
-                draft_hidden_states,
-                attention_metadata,
-                layer_name_to_kvcache_index,
-            ):
-                kv_caches, hidden_states, _ = self.runner.drafter.model_fn(
-                    state, kv_caches, input_ids, draft_hidden_states,
-                    attention_metadata, layer_name_to_kvcache_index)
-                self.runner.kv_caches = kv_caches
-                return hidden_states
-
             draft_hidden_states = self._create_dummy_tensor(
                 (num_tokens, draft_hidden_size), dtype,
                 NamedSharding(
@@ -902,7 +932,7 @@ class CompilationManager:
                 NamedSharding(self.runner.mesh, PartitionSpec()))
             self._run_compilation(
                 "eagle3_draft_model_fn",
-                draft_model_fn_wrapper,
+                self.runner.drafter.model_fn,
                 self.runner.drafter.state,
                 self.runner.kv_caches,
                 input_ids,
@@ -936,7 +966,7 @@ class CompilationManager:
                 (self.runner.max_num_reqs, ), jnp.int32)
             self._run_compilation(
                 "draft_model_fn in a loop",
-                draft_model_fn_wrapper,
+                self.runner.drafter.model_fn,
                 self.runner.drafter.state,
                 self.runner.kv_caches,
                 input_ids_loop,

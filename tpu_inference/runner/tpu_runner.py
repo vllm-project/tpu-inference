@@ -295,6 +295,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self._pre_async_results: AsyncPreResults | None = None
         self._substitute_placeholder_token_fn = _substitute_placeholder_token
+        self._select_from_array_fn = self._make_select_from_array_fn()
         self.execute_model_state: ExecuteModelState | None = None
         self.batch_counter = 0
 
@@ -1132,21 +1133,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
         return model_runner_output
 
-    @jax.jit(static_argnums=(0, ))
-    def _select_from_array_fn(self, array, indices_to_select):
+    def _make_select_from_array_fn(self):
+        mesh = self.mesh
 
-        def select_local_fn(local_array, local_indices):
-            return local_array[local_indices]
+        @jax.jit
+        def _select_from_array_fn(array, indices_to_select):
 
-        ret = jax.shard_map(
-            select_local_fn,
-            mesh=self.mesh,
-            in_specs=(PartitionSpec(ShardingAxisName.ATTN_DATA),
-                      PartitionSpec(ShardingAxisName.ATTN_DATA)),
-            out_specs=PartitionSpec(ShardingAxisName.ATTN_DATA))(
-                array, indices_to_select)
+            def select_local_fn(local_array, local_indices):
+                return local_array[local_indices]
 
-        return ret
+            return jax.shard_map(
+                select_local_fn,
+                mesh=mesh,
+                in_specs=(PartitionSpec(ShardingAxisName.ATTN_DATA),
+                          PartitionSpec(ShardingAxisName.ATTN_DATA)),
+                out_specs=PartitionSpec(ShardingAxisName.ATTN_DATA))(
+                    array, indices_to_select)
+
+        return _select_from_array_fn
 
     @staticmethod
     @jax.jit(static_argnames=("max_logprobs", ))
