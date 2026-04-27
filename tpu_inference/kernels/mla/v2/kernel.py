@@ -1820,7 +1820,8 @@ def mla_ragged_paged_attention(
             jnp.full((batch_size, 6), -1, jnp.int32),
         )
 
-        scope_name = f"MLA-{case.symbol}-bq_{bq_sz}-bkvp_{bkv_p}-p_{page_size}-bsz_{batch_size}"
+        fbd_tag = "fbd" if is_batched else "no_fbd"
+        scope_name = f"MLA-{case.symbol}-bq_{bq_sz}-bkvp_{bkv_p}-p_{page_size}-bsz_{batch_size}-{fbd_tag}"
         kernel = jax.named_scope(scope_name)(
             pl.pallas_call(
                 functools.partial(
@@ -1897,49 +1898,8 @@ def mla_ragged_paged_attention(
     )
 
     if is_batched:
-        if not is_full_batch_decode:
-            # Non batched-decode DMA needs 3D token-major input (transpose required).
-            ql_3d = ql_nope.reshape(num_q_heads, -1,
-                                    lkv_dim).transpose(1, 0,
-                                                       2)  # [T, N_pad, L_pad]
-            ql_3d, updated_kv = run_mla_kernel(
-                ql_3d,
-                q_pe,
-                new_kv_c,
-                new_k_pe,
-                updated_kv,
-                kv_lens,
-                page_indices,
-                cu_q_lens,
-                num_kv_pages_per_block=num_kv_pages_per_blocks[0],
-                num_queries_per_block=num_queries_per_blocks[0],
-                start_seq_idx=batch_distribution,
-                end_seq_idx=distribution[0],
-                static_q_len=1,
-                batch_size=1,
-                s_dtype=s_dtype,
-                case=MlaCase.DECODE,
-            )
-            # TODO: evaluate if chunk-prefill-only branch is needed
-            ql_3d, updated_kv = run_mla_kernel(
-                ql_3d,
-                q_pe,
-                new_kv_c,
-                new_k_pe,
-                updated_kv,
-                kv_lens,
-                page_indices,
-                cu_q_lens,
-                num_kv_pages_per_block=num_kv_pages_per_blocks[2],
-                num_queries_per_block=num_queries_per_blocks[2],
-                start_seq_idx=distribution[1],
-                end_seq_idx=distribution[2],
-                static_q_len=None,
-                batch_size=1,
-                s_dtype=s_dtype,
-                case=MlaCase.MIXED,
-            )
-            ql_nope = ql_3d.transpose(1, 0, 2).reshape(ql_nope.shape)
+        # is_batched == is_full_batch_decode: BATCHED_DECODE wrote head-major output,
+        # DECODE/MIXED not needed. Slice padding off.
         output = ql_nope.reshape(
             num_q_heads, -1, lkv_dim)[:actual_num_q_heads, :, :actual_lkv_dim]
     else:
