@@ -7,7 +7,9 @@
     "EXPECTED_ETEL": 3600000,
     "INPUT_LEN": 1800,
     "OUTPUT_LEN": 128,
-    "JAX_TRACEBACK_FILTERING": "off",
+    "MAX_NUM_SEQS": 128,
+    "MAX_NUM_BATCHED_TOKENS": 1024,
+    "MAX_MODEL_LEN": 2048,
     "RUN_TYPE": "JAX_ACCURACY"
   },
   "ci_queue": [

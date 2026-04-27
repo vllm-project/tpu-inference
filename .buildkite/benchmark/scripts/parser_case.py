@@ -23,6 +23,11 @@ CMD_MAP = {
     "lm_eval": "lm_eval"
 }
 
+# Helper to safely extract value and return empty string if missing or None
+def get_env_args_val(opts_dict, key):
+    val = opts_dict.get("args", {}).get(key)
+    return val if val is not None else ""
+
 def get_current_machine_type():
     """
     Returns the current machine type string (e.g., 'v6e-8', 'v7x-2') 
@@ -157,21 +162,21 @@ def main():
     cli_opts = case_data.get("client_command_options", {})
 
     # Export specific environment for insert to db
-    dataset = cli_opts.get("args", {}).get("dataset-name", {})
+    dataset = get_env_args_val(cli_opts, "dataset-name")
     print(f"export DATASET=\"{dataset}\"")
-    num_prompts = cli_opts.get("args", {}).get("num-prompts", {})
+    num_prompts = get_env_args_val(cli_opts, "num-prompts")
     print(f"export NUM_PROMPTS=\"{num_prompts}\"")
-    additional_config = srv_opts.get("args", {}).get("additional-config", {})
+    additional_config = get_env_args_val(srv_opts, "additional-config")
     print(f"export ADDITIONAL_CONFIG={shlex.quote(str(additional_config))}")
     model = srv_opts.get("args", {}).get("model")
     if not model:
         model = cli_opts.get("args", {}).get("model", {})
     print(f"export MODEL=\"{model}\"")
-    max_num_seqs = srv_opts.get("args", {}).get("max-num-seqs", {})
+    max_num_seqs = get_env_args_val(srv_opts, "max-num-seqs")
     print(f"export MAX_NUM_SEQS=\"{max_num_seqs}\"")
-    max_num_batched_tokens = srv_opts.get("args", {}).get("max-num-batched-tokens", {})
+    max_num_batched_tokens = get_env_args_val(srv_opts, "max-num-batched-tokens")
     print(f"export MAX_NUM_BATCHED_TOKENS=\"{max_num_batched_tokens}\"")
-    max_model_len = srv_opts.get("args", {}).get("max-model-len", {})
+    max_model_len = get_env_args_val(srv_opts, "max-model-len")
     print(f"export MAX_MODEL_LEN=\"{max_model_len}\"")
     cli_env = cli_opts.get("env", {})
     cli_env_parts = [f"{k}={v}" for k, v in cli_env.items()]
