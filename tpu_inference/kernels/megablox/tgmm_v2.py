@@ -81,7 +81,16 @@ def calculate_tgmm_tiling(
     lhs_bytes = jax.dtypes.itemsize_bits(lhs_cfgs.dtype) // 8
     rhs_bytes = jax.dtypes.itemsize_bits(rhs_cfgs.dtype) // 8
     num_buffers = 2
-    budget = tile_k * tile_n * (acc_bytes + num_buffers * out_bytes) + num_buffers * (tile_m*tile_k*lhs_bytes + tile_m*tile_n*rhs_bytes)
+    # For lhs, we use (num_buffers+1). +1 is needed because we are doing
+    # lhs.T @ rhs, lhs cannot be fed directly into MXU and has to go through
+    # XLU's transpose. in order to reduce redundant XLU computation, instead
+    # of performing XLU's transpose every time lhs is pushed into XLU, it
+    # caches the transposed value into VMEM. this increases VMEM requirement.
+    budget = (
+        tile_k * tile_n * (acc_bytes + num_buffers * out_bytes)
+        + (num_buffers + 1) * (tile_m * tile_k * lhs_bytes)
+        + num_buffers * (tile_m * tile_n * rhs_bytes)
+    )
     return budget <= vmem_limit_bytes
 
   prev_tile_n = tile_n
