@@ -13,11 +13,25 @@ from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.multimodal.image import convert_image_mode
 
-# Expected partial text output from the model. This is based on a query to
-# vllm 0.17.0 on A100. The test is considered passed if the
-# generated output match with this text.
-EXPECTED_TEXT = (
-    "The image depicts a stunning view of the Tokyo Skytree, a tall tower located in Tokyo, Japan. The sky is clear and blue, providing a beautiful backdrop for the tower. In the foreground, there are cherry blossom trees in full bloom, with pink flowers covering the branches. The cherry blossoms are in full bloom"
+# Expected partial text output from the model.
+# Separate expected texts for static vs dynamic image sizes because the image
+# processing pipeline produces different vision tokens for each mode.
+# Updated for transformers v5 which fixed temporal RoPE scaling for still
+# images (time_interval=1 instead of tokens_per_second * second_per_grid_ts).
+EXPECTED_TEXT_STATIC = (
+    "The image depicts a stunning view of the Tokyo Skytree, a tall"
+    " broadcasting tower located in the Odaiba district of Tokyo, Japan."
+    " The skytree is surrounded by cherry blossom trees in full bloom,"
+    " creating a picturesque and vibrant scene. The cherry blossoms are"
+    " in various stages of bloom, with some branches densely covered"
+)
+
+EXPECTED_TEXT_DYNAMIC = (
+    "The image depicts a tall, cylindrical tower with a lattice-like"
+    " structure, surrounded by cherry blossom trees in full bloom."
+    " The cherry blossoms are in various stages of opening, with pink"
+    " petals covering the branches. The sky is clear and blue, providing"
+    " a vibrant backdrop to t"
 )
 
 
@@ -111,10 +125,12 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes):
     print("-" * 50)
 
     # Check output
+    expected_text = (EXPECTED_TEXT_DYNAMIC
+                     if enable_dynamic_image_sizes else EXPECTED_TEXT_STATIC)
     similarity_score = difflib.SequenceMatcher(None, generated_text,
-                                               EXPECTED_TEXT).ratio()
+                                               expected_text).ratio()
     print(f"Similarity Score: {similarity_score:.4f}")
     assert similarity_score >= 0.85, (
         f"Text similarity too low ({similarity_score:.2f}).\n"
-        f"Expected: {EXPECTED_TEXT}\n"
+        f"Expected: {expected_text}\n"
         f"Actual:   {generated_text}")
