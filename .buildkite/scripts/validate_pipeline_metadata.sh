@@ -163,5 +163,5 @@ while IFS= read -r file; do
 
 done < <(echo "$YAML_FILES_TO_CHECK")
 
-echo "+++ ✅ Metadata verification passed."
+echo "✅ Metadata verification passed."
 exit 0

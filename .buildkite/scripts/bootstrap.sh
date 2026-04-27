@@ -108,9 +108,16 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
       exit 1
     fi
 
-    # Run generation test if add_model_to_ci.py or its templates were modified
-    if echo "$FILES_CHANGED" | grep -qE "add_model_to_ci.py|tpu_optimized_model_template.yml|vllm_native_model_template.yml"; then
-      .buildkite/pipeline_generation/test_generation.sh
+
+    MODEL_FILES="add_model_to_ci\.py|tpu_optimized_model_template\.yml|vllm_native_model_template\.yml"
+    FEATURE_FILES="add_feature_to_ci\.py|feature_template\.yml|parallelism_template\.yml"
+
+    if echo "$FILES_CHANGED" | grep -qE "$MODEL_FILES"; then
+      .buildkite/pipeline_generation/test_generation.sh --models
+    fi
+
+    if echo "$FILES_CHANGED" | grep -qE "$FEATURE_FILES"; then
+      .buildkite/pipeline_generation/test_generation.sh --features
     fi
 else
     echo "Non-PR build. Bypassing file change check."
