@@ -31,6 +31,7 @@ bash "${NIGHTLY_SCRIPT}" \
   --vllm-mla-disable "0" \
   --moe-requantize-block-size "512" \
   --moe-requantize-weight-dtype "fp4" \
+  --moe-all-gather-activation-dtype "fp8" \
   --api-server-count 3 \
   --force-moe-random-routing "1" \
   --run-accuracy "mmlu"
