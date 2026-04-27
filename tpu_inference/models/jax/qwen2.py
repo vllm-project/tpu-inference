@@ -114,7 +114,8 @@ class Qwen2Attention(JaxModule):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
-        self.rope_theta = config.rope_parameters["rope_theta"]
+        # self.rope_theta = config.rope_theta
+        self.rope_theta = getattr(config, "rope_theta", 1000000)
         self.rope_scaling = getattr(config, "rope_scaling", None)
 
         self.head_dim_original = getattr(config, "head_dim",
@@ -254,6 +255,7 @@ class Qwen2DecoderLayer(JaxModule):
                                         kv_cache_dtype=kv_cache_dtype,
                                         quant_config=quant_config,
                                         prefix=prefix + ".self_attn")
+        
         self.post_attention_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
