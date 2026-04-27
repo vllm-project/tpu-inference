@@ -410,6 +410,8 @@ def process_moe_weights(
 
             if w13_weight_scale is not None:
                 scale_ratio = w13_weight.shape[2] // w13_weight_scale.shape[3]
+                if not envs.DISABLE_WEIGHT_REQUANTIZATION:
+                    assert scale_ratio == 1, "If not requantizing, scale_ratio should be 1!"
                 w13_weight_scale = process_w13_tp(tensor=w13_weight_scale,
                                                   concat_dim=3,
                                                   name="w13_weight_scale",
