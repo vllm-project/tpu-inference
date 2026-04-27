@@ -57,8 +57,8 @@ from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.vllm.experimental.model_patcher import patch_mm_model
-from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
-    maybe_apply_qwen3_vl_patches
+from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import (
+    maybe_apply_qwen3_vl_patches, maybe_wrap_mm_embed_to_list)
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_inference.runner.lora_utils import replace_lora_metadata
@@ -456,7 +456,15 @@ class VllmModelWrapper:
                     else:
                         torch_mm_embeds = torch_view(mm_embeds)
                     assert is_multimodal is not None
-                    torch_mm_embeds = torch_mm_embeds[is_multimodal]
+                    # Truncate mm_embeds to match the number of expected multimodal tokens.
+                    # This handles cases where mm_embeds may contain trailing padding.
+                    num_expected = is_multimodal.sum().item()
+                    torch_mm_embeds = torch_mm_embeds[:num_expected]
+
+                    # Qwen3-VL expects a list of tensors for multimodal embeddings.
+                    torch_mm_embeds = maybe_wrap_mm_embed_to_list(
+                        self.model.vllm_model, torch_mm_embeds)
+
                     call_args = (torch_view(input_ids), torch_mm_embeds)
                 else:
                     call_args = (torch_view(input_ids), )
