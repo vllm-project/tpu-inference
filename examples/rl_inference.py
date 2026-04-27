@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import json
 import os
 
 from vllm import LLM, EngineArgs
@@ -27,15 +26,6 @@ def create_parser():
     sampling_group.add_argument("--top-p", type=float)
     sampling_group.add_argument("--top-k", type=int)
 
-    # chat params
-    chat_group = parser.add_argument_group("Chat parameters")
-    chat_group.add_argument("--use-chat-template", action="store_true")
-    # NOTE: a few models (like Qwen3.5) can use this to disable thinking,
-    # e.g. --chat-template-kwargs='{"enable_thinking": false}'
-    chat_group.add_argument('--chat-template-kwargs',
-                            type=json.loads,
-                            default={})
-
     return parser
 
 
@@ -45,11 +35,6 @@ def main(args: dict):
     temperature = args.pop("temperature")
     top_p = args.pop("top_p")
     top_k = args.pop("top_k")
-    use_chat_template = args.pop("use_chat_template")
-    chat_template_kwargs = args.pop('chat_template_kwargs')
-    # Safeguard in case the user doesn't provide use_chat_template
-    if chat_template_kwargs != {}:
-        use_chat_template = True
 
     # Create an LLM
     if "additional_config" not in args or args["additional_config"] is None:
@@ -112,20 +97,7 @@ def main(args: dict):
     if profiler_config.profiler == "torch":
         llm.start_profile()
 
-    if use_chat_template:
-        logger.info(
-            f"Using LLM chat API for inference with extra chat kwargs: {chat_template_kwargs}"
-        )
-        conversations = [[{
-            "role": "user",
-            "content": prompt
-        }] for prompt in prompts]
-        outputs = llm.chat(messages=conversations,
-                           sampling_params=sampling_params,
-                           chat_template_kwargs=chat_template_kwargs)
-    else:
-        logger.info("Using LLM generate API for inference")
-        outputs = llm.generate(prompts, sampling_params)
+    outputs = llm.generate(prompts, sampling_params)
 
     if profiler_config.profiler == "torch":
         llm.stop_profile()
