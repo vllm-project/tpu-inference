@@ -718,10 +718,13 @@ def ragged_gated_delta_rule(
     a_reshaped = a.reshape(num_tokens, n_v)
 
     def decode_only_branch(_):
+        q_silu = q_reshaped * jax.nn.sigmoid(q_reshaped)
+        k_silu = k_reshaped * jax.nn.sigmoid(k_reshaped)
+        v_silu = v_reshaped * jax.nn.sigmoid(v_reshaped)
         new_state, output = ragged_gated_delta_rule_decode_only(
-            query=q_reshaped,
-            key=k_reshaped,
-            value=v_reshaped,
+            query=q_silu,
+            key=k_silu,
+            value=v_silu,
             b_reshaped=b_reshaped,
             a_reshaped=a_reshaped,
             recurrent_state=recurrent_state,

@@ -248,7 +248,7 @@ def inner_kernel(
                 curr_g = -jnp.exp(a_log_ref[...].astype(
                     jnp.float32)) * jax.nn.softplus(
                         a_raw_new + dt_bias_ref[...].astype(jnp.float32))
-
+                curr_g = jnp.maximum(curr_g, -100.0)
                 decay = jnp.exp(curr_g)
 
                 current_state = decode_state_scratch[0]
@@ -268,7 +268,11 @@ def inner_kernel(
                         k_h, state_h,
                         precision=jax.lax.Precision.HIGHEST)  # (1, d_v)
 
-                    v_diff_h = v_h - decay[h].astype(jnp.float32) * k_state_h
+                    # v_diff_h = v_h - decay[h].astype(jnp.float32) * k_state_h
+                    decay_k_state = jnp.where(
+                        jnp.isinf(k_state_h), 0.0,
+                        decay[h].astype(jnp.float32) * k_state_h)
+                    v_diff_h = v_h - decay_k_state
                     v_new_h = curr_beta[h].astype(jnp.float32) * v_diff_h
 
                     q_state_h = pl.dot(
@@ -278,7 +282,10 @@ def inner_kernel(
                     q_k_h = jnp.sum(q_h * k_h, axis=-1,
                                     keepdims=True)  # (1, 1)
 
-                    out_h = decay[h] * q_state_h + q_k_h * v_new_h  # (1, d_v)
+                    # out_h = decay[h] * q_state_h + q_k_h * v_new_h  # (1, d_v)
+                    decay_q_state = jnp.where(jnp.isinf(q_state_h), 0.0,
+                                              decay[h] * q_state_h)
+                    out_h = decay_q_state + q_k_h * v_new_h
                     out_list.append(out_h)
 
                     k_v_new_h = pl.dot(k_h,
@@ -286,7 +293,10 @@ def inner_kernel(
                                        trans_a=True,
                                        precision=jax.lax.Precision.HIGHEST
                                        )  # (d_k, 1) @ (1, d_v) -> (d_k, d_v)
-                    new_state_h = state_h * decay[h] + k_v_new_h
+                    # new_state_h = state_h * decay[h] + k_v_new_h
+                    decay_state = jnp.where(jnp.isinf(state_h), 0.0,
+                                            state_h * decay[h])
+                    new_state_h = decay_state + k_v_new_h
                     new_state_list.append(new_state_h)
 
                 out = jnp.concatenate(out_list, axis=0)  # (n_v, d_v)
@@ -398,7 +408,7 @@ def inner_kernel(
             g = -jnp.exp(a_log_ref[...][:, None].astype(
                 jnp.float32)) * jax.nn.softplus(a_raw_processed + dt_bias_ref[
                     ...][:, None].astype(jnp.float32))
-
+            g = jnp.maximum(g, -100.0)
             prefill_count = schedule_table[step, 3][...]
             mask_float = (jnp.arange(C) < prefill_count).astype(q.dtype)
 
@@ -449,9 +459,11 @@ def inner_kernel(
             mask_float = (i > j).astype(jnp.float32)
 
             g_diff_safe = jnp.minimum(g_diff, 0.0)
-            g_diff_S = g_diff_safe * mask_float + (1.0 - mask_float) * (-1e30)
-            S = S * jnp.exp(g_diff_S)
-            S = S * mask_float
+            S = jnp.where(mask_float[None, :, :] > 0, S * jnp.exp(g_diff_safe),
+                          0.0)
+            # g_diff_S = g_diff_safe * mask_float + (1.0 - mask_float) * (-1e30)
+            # S = S * jnp.exp(g_diff_S)
+            # S = S * mask_float
 
             S_q = jnp.matmul(
                 q.astype(jnp.float32),
@@ -565,7 +577,7 @@ def inner_kernel(
             g_chunk = -jnp.exp(a_log_ref[...][:, None].astype(
                 jnp.float32)) * jax.nn.softplus(a_raw_processed + dt_bias_ref[
                     ...][:, None].astype(jnp.float32))
-
+            g_chunk = jnp.maximum(g_chunk, -100.0)
             q = q.reshape(C_trans, n_kq, d_k)
             k = k.reshape(C_trans, n_kq, d_k)
             v = v.reshape(C_trans, n_v, d_v)
@@ -1190,20 +1202,25 @@ def recurrent_scan(
             BT,
             alignment=sublanesize,
         ))
-    jax.debug.print("prefill_tokens={}", prefill_tokens)
-    jax.debug.print("decode_tokens={}", decode_tokens)
-    jax.debug.print("total_blocks={}", total_blocks)
+    # jax.debug.print("prefill_tokens={}", prefill_tokens)
+    # jax.debug.print("decode_tokens={}", decode_tokens)
+    # jax.debug.print("total_blocks={}", total_blocks)
 
     # sublane,128
     decode_tokens_arr = jnp.expand_dims(decode_tokens, 0)
     prefill_tokens_arr = jnp.expand_dims(prefill_tokens, 0)
     total_blocks_arr = jnp.expand_dims(total_blocks, 0)
-    valid_schedule = schedule_table[:total_blocks]
-    has_nan = jnp.isnan(valid_schedule.astype(jnp.float32)).any()
-    jax.lax.cond(
-        has_nan,
-        lambda: jax.debug.print("ERROR: Schedule table contains NaN!"),
-        lambda: None)
+
+    # DEBUG: Check for NaNs in schedule table for valid blocks
+    # b_idx = jnp.arange(schedule_table.shape[0])
+    # valid_mask = b_idx < total_blocks
+    # has_nan = jnp.isnan(schedule_table.astype(jnp.float32)).any(axis=-1)
+    # has_nan_valid = (has_nan & valid_mask).any()
+    # jax.lax.cond(
+    #     has_nan_valid,
+    #     lambda: jax.debug.print("ERROR: Schedule table contains NaN!"),
+    #     lambda: None)
+
     grid_spec = pl.GridSpec(
         grid=(1, ),
         in_specs=[
