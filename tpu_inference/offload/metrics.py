@@ -27,7 +27,7 @@ logger = init_logger(__name__)
 LATENCY_BUCKETS = (0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0,
                    2.0, 5.0, 10.0, 20, 30, float("inf"))
 
-# Custom buckets defined in Gbps
+# Custom buckets defined in GBps
 # Adjust these based on your hardware (e.g., PCIe 4.0/5.0 limits)
 GBPS_BUCKETS = (1.0, 10.0, 25.0, 50.0, 100.0, 200.0, 400.0, 500.0,
                 float("inf"))
@@ -251,9 +251,9 @@ class PrometheusLogger:
         ).labels(**labels)
         self.d2h_transfer_bw = self._histogram_cls(
             "tpu_inference:prefix_cache_d2h_transfer_bw",
-            "Bandwidth of transfer KV cache from device to host memory in gbps",
+            "Bandwidth of transfer KV cache from device to host memory in GBps",
             labelnames=labelnames,
-            unit="gbps",
+            unit="GBps",
             buckets=GBPS_BUCKETS,
         ).labels(**labels)
         self.d2h_bytes = self._histogram_cls(
@@ -274,9 +274,9 @@ class PrometheusLogger:
         ).labels(**labels)
         self.h2d_transfer_bw = self._histogram_cls(
             "tpu_inference:prefix_cache_h2d_transfer_bw",
-            "Bandwidth of transfer KV cache from host memory to device in gbps",
+            "Bandwidth of transfer KV cache from host memory to device in GBps",
             labelnames=labelnames,
-            unit="gbps",
+            unit="GBps",
             buckets=GBPS_BUCKETS,
         ).labels(**labels)
         self.h2d_bytes = self._histogram_cls(
