@@ -131,6 +131,22 @@ class CompilationManager:
         for num_tokens in self.runner.num_tokens_paddings:
             hidden_size = self.runner.vllm_config.model_config.get_hidden_size(
             )
+            hf_conf = self.runner.vllm_config.model_config.hf_config
+
+            # Identify multimodal embedding size
+            mm_hidden_size = hidden_size
+            vision_config = getattr(hf_conf, "vision_config", None)
+
+            if vision_config:
+                visual_dim = getattr(vision_config, "out_hidden_size", None)
+                deepstack_indexes = getattr(vision_config,
+                                            "deepstack_visual_indexes", None)
+
+                # If both exist, we apply the deepstack concat logic
+                if visual_dim is not None and deepstack_indexes is not None:
+                    deepstack_levels = len(deepstack_indexes)
+                    mm_hidden_size = visual_dim * (1 + deepstack_levels)
+
             sharding = NamedSharding(
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.ATTN_DATA, None))
@@ -138,13 +154,13 @@ class CompilationManager:
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
 
             dummy_multimodal_embeddings = self._create_dummy_tensor(
-                (num_tokens, hidden_size),
+                (num_tokens, mm_hidden_size),
                 self.runner.vllm_config.model_config.dtype,
                 sharding=sharding)
             dummy_input_ids = self._create_dummy_tensor(
                 (num_tokens, ), jnp.int32, sharding=input_sharding)
             dummy_is_multimodal = self._create_dummy_tensor(
-                (num_tokens, ), jnp.int32, sharding=input_sharding)
+                (num_tokens, ), jnp.bool_, sharding=input_sharding)
 
             self._run_compilation(
                 "input_embeddings_merger",
