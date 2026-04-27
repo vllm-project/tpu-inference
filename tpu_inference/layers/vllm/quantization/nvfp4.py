@@ -261,8 +261,8 @@ class VllmNvfp4LinearMethod(Fp8LinearMethod):
                 f"NVFP4 group size {group_size}")
 
         # Packed FP4 weight: 2 values per uint8 byte
-        from vllm.model_executor.layers.quantization.utils.quant_utils import (
-            ModelWeightParameter, PerTensorScaleParameter)
+        from vllm.model_executor.parameter import (ModelWeightParameter,
+                                                   PerTensorScaleParameter)
 
         weight = ModelWeightParameter(
             data=torch.empty(
@@ -291,8 +291,6 @@ class VllmNvfp4LinearMethod(Fp8LinearMethod):
         layer.register_parameter("weight_scale_2", weight_scale_2)
 
         # Per-block weight scale (E4M3)
-        from vllm.model_executor.layers.quantization.utils.quant_utils import \
-            ModelWeightParameter
         weight_scale = ModelWeightParameter(
             data=torch.empty(
                 output_size_per_partition,
