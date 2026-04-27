@@ -174,8 +174,8 @@ def run_jax_gdn_attention_local(
                 n_v=n_v,
                 d_k=d_k,
                 d_v=d_v,
-                chunk_size=128,
-                BT=128,
+                chunk_size=64,
+                BT=64,
                 use_qk_norm_in_gdn=True,
             )
     elif config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.COMBINED:

@@ -19,6 +19,7 @@ import jax.numpy as jnp
 def compute_schedule_table_v2(
     query_start_loc: jax.Array,
     decode_tokens: int | jax.Array,
+    num_valid_seqs: int | jax.Array,
     num_tokens: int,
     chunk_size: int,
     BT: int | None = None,
@@ -76,7 +77,13 @@ def compute_schedule_table_v2(
     needs_transition = ((seq_end % alignment != 0) & (~is_last_seq) &
                         (~is_swallowed))
 
-    needs_start_transition = (prev_seq_end % alignment != 0) & (~is_swallowed)
+    is_decode_boundary = prev_seq_end == decode_tokens
+    # SUS:
+    #   Why (~is_swallowed) ,
+    # .   if first prefill seq is short (starts and ends in sublane)
+    # .  individual prefill seqs head expected to be handled by tails of previous seqs
+    needs_start_transition = ((prev_seq_end % alignment != 0) & (~is_swallowed)
+                              & is_decode_boundary)
 
     effective_end = jnp.where(needs_transition, next_aligned_start, seq_end)
     effective_end = jnp.maximum(effective_start, effective_end)
@@ -126,8 +133,8 @@ def compute_schedule_table_v2(
     reg_offset = effective_start[r_for_block] + adj_local_b * chunk_size
     reg_count = jnp.minimum(chunk_size,
                             effective_end[r_for_block] - reg_offset)
-    # reg_is_last = reg_offset + reg_count >= seq_end[r_for_block]
-    # reg_is_first = reg_offset == seq_start[r_for_block]
+    #   reg_is_last = reg_offset + reg_count >= seq_end[r_for_block]
+    #   reg_is_first = reg_offset == seq_start[r_for_block]
 
     trans_offset = next_aligned_start[r_for_block]
 
@@ -138,20 +145,32 @@ def compute_schedule_table_v2(
         jnp.where(is_end_trans, trans_offset, reg_offset),
     )
 
-    block_count = jnp.where(is_start_trans, alignment,
-                            jnp.where(is_end_trans, alignment, reg_count))
+    block_count = jnp.where(
+        is_start_trans,
+        effective_start[r_for_block] - seq_start[r_for_block],
+        jnp.where(is_end_trans, alignment, reg_count),
+    )
 
     is_trans_block = is_start_trans | is_end_trans
 
     # =========================================================================
     # 3. Metadata for shared sublane tiles
     # =========================================================================
+    last_valid_loc = query_start_loc[num_valid_seqs]
+    valid_loc_mask = jnp.arange(query_start_loc.shape[0]) <= num_valid_seqs
+    fixed_query_start_loc = jnp.where(valid_loc_mask, query_start_loc,
+                                      last_valid_loc)
     glob_idxs = block_offset[:, None] + jnp.arange(alignment)[None, :]
 
     # [safe_max_blocks, sublane size, num_seqs]
     valid_mask = glob_idxs < num_tokens
-    t_reqs = (jnp.sum(glob_idxs[:, :, None] >= query_start_loc[None, None, :],
-                      axis=-1) - 1)
+    # t_reqs = (
+    #     jnp.sum(glob_idxs[:, :, None] >= query_start_loc[None, None, :], axis=-1)
+    #     - 1
+    # )
+    t_reqs = (
+        jnp.sum(glob_idxs[:, :, None] >= fixed_query_start_loc[None, None, :],
+                axis=-1) - 1)
     # there could be padding in query_start_loc
     last_valid_seq = jnp.max(
         jnp.where(total_blocks_per_seq > 0, jnp.arange(num_seqs), -1))
@@ -215,5 +234,8 @@ def compute_schedule_table_v2(
 
     final_table = jnp.stack(cols, axis=1)
     total_blocks = jnp.maximum(total_prefill_blocks, num_decode_batches)
+
+    #   jax.debug.print("--- schedule_table ---")
+    #   jax.debug.print("{}", final_table[:10, :])
 
     return final_table, total_blocks
