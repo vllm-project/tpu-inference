@@ -50,6 +50,7 @@ CMD=(
     lm_eval
     --model vllm
     --model_args "$MODEL_ARGS"
+    --enable-prefix-caching false
     --tasks mmlu_llama
     --num_fewshot 0
     --apply_chat_template
