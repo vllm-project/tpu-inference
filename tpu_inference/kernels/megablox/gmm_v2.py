@@ -553,7 +553,6 @@ def fill_metadata(
     metadata_ref: MetadataRef,
     *,
     cfgs: GmmConfigs,
-    process_empty_groups: bool = False,
 ) -> jax.Array:
   """Fills the metadata for the given lhs group sizes and group offset.
 
@@ -568,9 +567,6 @@ def fill_metadata(
     metadata_ref: Metadata that is used to determine the group id and m offsets
       for each gmm tile.
     cfgs: GmmConfigs.
-    process_empty_groups: Whether to process empty groups. If True, do not
-          squeeze tiles for empty groups out of the metadata. This is necessary
-          for tgmm, where we at least need to zero the output for each group.
 
   Returns:
       The number of gm tiles to process lhs with given group offset.
@@ -624,25 +620,8 @@ def fill_metadata(
     # We need to handle cases where we should not process the group.
     # 1. Even if group_size is 0, if local_offset is not 0, cdiv will return 1.
     # 2. If group comes before the group_offset, we should not process it.
-    should_process = jnp.logical_and(
-        jnp.logical_or(group_size > 0, process_empty_groups), group_id >= 0
-    )
+    should_process = jnp.logical_and(group_size > 0, group_id >= 0)
     curr_num_gm = jnp.where(should_process, curr_num_gm, 0)
-
-    # When process_empty_group is True, if group_size is 0 and
-    # local_offset is 0 or aligned (e.g., for the first group if it's empty),
-    # curr_num_gm will be 0. Since the intention of process_empty_groups is to
-    # ensure at least one tile is generated to zero out the output, we should
-    # ensure curr_num_gm is at least 1 when should_process is True.
-    curr_num_gm = jnp.where(
-        jnp.logical_and(
-            curr_num_gm == 0,
-            jnp.logical_and(process_empty_groups, group_id >= 0),
-        ),
-        1,
-        curr_num_gm,
-    )
-
     next_num_gm = num_gm + curr_num_gm
 
     tm_loop_fn = functools.partial(

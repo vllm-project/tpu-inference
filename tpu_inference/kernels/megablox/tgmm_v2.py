@@ -345,18 +345,93 @@ def generate_tgmm_block_specs(
 
   return (lhs_block_spec, rhs_block_spec), out_block_spec
 
+def zero_out_start(
+    lhs_group_sizes_ref,  # int32[size_lhs_group]
+    group_offset_ref,  # int32[1]
+    out_ref,  # [num_actual_groups, k, n]
+    zero_ref,  # [tile_zero_k, num_lanes]
+    semaphore_ref,  # [1]
+):
+  """
+  If group_sizes[i]==0, we want to zero out drhs[i].
+  We issue DMAs unconditionally to avoid lax.cond, but with size 0 if should_zero is False.
+  """
+  zero_ref[...] = jnp.zeros_like(zero_ref)
+  num_actual_groups = out_ref.shape[0]
+  tile_zero_k = zero_ref.shape[0]
+  num_lanes = pltpu.get_tpu_info().num_lanes
+  assert out_ref.shape[2] % num_lanes == 0
+
+  def fill_zero(local_group_id):
+    for i in range(pl.cdiv(out_ref.shape[1], tile_zero_k)):
+      for j in range(out_ref.shape[2]//num_lanes):
+        size_k_to_copy = min(tile_zero_k, out_ref.shape[1] - i*tile_zero_k)
+        dma = pltpu.make_async_copy(
+            src_ref=zero_ref.at[pl.ds(0, size_k_to_copy)],
+            dst_ref=out_ref.at[local_group_id, pl.ds(i*tile_zero_k, size_k_to_copy), pl.ds(j*num_lanes, num_lanes)],
+            sem=semaphore_ref.at[0],
+        )
+        dma.start(priority=1)
+
+  for i in range(len(lhs_group_sizes_ref)):
+    local_group_id = i - group_offset_ref[0]
+    should_zero = jnp.logical_and(
+        jnp.logical_and(i >= group_offset_ref[0], i < group_offset_ref[0] + num_actual_groups),
+        lhs_group_sizes_ref[i] == 0,
+    )
+    lax.cond(should_zero, fill_zero, lambda local_group_id: None, local_group_id)
+
+
+def zero_out_end(
+    lhs_group_sizes_ref,  # int32[size_lhs_group]
+    group_offset_ref,  # int32[1]
+    out_ref,  # [num_actual_groups, k, n]
+    zero_ref,  # [tile_zero_k, num_lanes]
+    semaphore_ref,  # [1]
+):
+  num_actual_groups = out_ref.shape[0]
+  tile_zero_k = zero_ref.shape[0]
+  num_lanes = pltpu.get_tpu_info().num_lanes
+  assert out_ref.shape[2] % num_lanes == 0
+  def fill_zero(local_group_id):
+    for i in range(pl.cdiv(out_ref.shape[1], tile_zero_k)):
+      for j in range(out_ref.shape[2]//num_lanes):
+        size_k_to_copy = min(tile_zero_k, out_ref.shape[1] - i*tile_zero_k)
+        pltpu.make_async_copy(
+            src_ref=out_ref.at[local_group_id, pl.ds(i*tile_zero_k, size_k_to_copy), pl.ds(j*num_lanes, num_lanes)],
+            dst_ref=out_ref.at[local_group_id, pl.ds(i*tile_zero_k, size_k_to_copy), pl.ds(j*num_lanes, num_lanes)],
+            sem=semaphore_ref.at[0],
+        ).wait()
+
+  for i in range(len(lhs_group_sizes_ref)):
+    local_group_id = i - group_offset_ref[0]
+    should_zero = jnp.logical_and(
+        jnp.logical_and(i >= group_offset_ref[0], i < group_offset_ref[0] + num_actual_groups),
+        lhs_group_sizes_ref[i] == 0,
+    )
+    lax.cond(should_zero, fill_zero, lambda local_group_id: None, local_group_id)
+
 
 def tgmm_kernel_main(
     lhs_group_sizes_ref,  # int32[size_lhs_group]
     group_offset_ref,  # int32[1]
     lhs_ref,  # [m, k]
     rhs_ref,  # [m, n]
-    out_ref,  # [num_groups, k, n]
+    out_ref,  # [num_actual_groups, k, n]
     # scratch memory
     acc_ref: jax.Array,  # [tile_k, tile_n]
     metadata_ref: MetadataRef, # contains gm_id_to_group_id and gm_id_to_m_offset in SMEM.
+    zero_ref: jax.Array,  # [tile_zero_k, num_lanes]
+    semaphore_ref: jax.Array,  # [1]
     *, cfgs,
 ):
+  zero_out_start(
+      lhs_group_sizes_ref,
+      group_offset_ref,
+      out_ref,
+      zero_ref,
+      semaphore_ref,
+  )
   num_k = pl.cdiv(cfgs.dims.size_k, cfgs.tiles.tile_k)
   num_n = pl.cdiv(cfgs.dims.size_n, cfgs.tiles.tile_n)
   num_gm = fill_metadata(
@@ -364,7 +439,6 @@ def tgmm_kernel_main(
       group_offset_ref,
       metadata_ref,
       cfgs=cfgs,
-      process_empty_groups=True,
   )
 
   in_specs, out_specs = generate_tgmm_block_specs(metadata_ref, cfgs)
@@ -378,6 +452,13 @@ def tgmm_kernel_main(
   rhs_in = rhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, rhs_ref.shape[-1])
   scratches = [acc_ref, metadata_ref]
   pipeline_fn(lhs_in, rhs_in, out_ref, scratches=scratches)
+  zero_out_end(
+      lhs_group_sizes_ref,
+      group_offset_ref,
+      out_ref,
+      zero_ref,
+      semaphore_ref,
+  )
 
 @jax.jit(
     static_argnames=[
@@ -445,6 +526,19 @@ def tgmm_v2(
           gm_id_to_group_id=pltpu.SMEM((max_num_gm,), jnp.int32),
           gm_id_to_m_offset=pltpu.SMEM((max_num_gm + 1,), jnp.int32),
       ),
+  ]
+
+  # Prepare zero initializing the drhs[i, :, :] where the group_size[i] is 0.
+  target_zero_ref_bytes = 2 * 1024 * 1024
+  out_bytes = jnp.dtype(cfgs.out_dtype).itemsize
+  tile_zero_k = target_zero_ref_bytes // num_lanes // out_bytes
+  tile_zero_k = min(tile_zero_k, dims.size_k)
+  size_out_sublane = pltpu.get_tpu_info().get_sublane_tiling(cfgs.out_dtype)
+  tile_zero_k = (tile_zero_k // size_out_sublane) * size_out_sublane
+  assert tile_zero_k > 0
+  scratch_shapes += [
+      pltpu.VMEM((tile_zero_k, num_lanes), cfgs.out_dtype),
+      pltpu.SemaphoreType.DMA((1,)),
   ]
 
   return pl.pallas_call(
