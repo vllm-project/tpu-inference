@@ -413,6 +413,12 @@ class VllmNvfp4LinearMethod(Fp8LinearMethod):
             x_jax = jax_view(x)
             bias_jax = jax_view(
                 bias) if bias is not None and not layer.skip_bias_add else None
+            logger.info(
+                "NVFP4 linear apply: layer=%s x=%s weight=%s fused=%s",
+                layer._get_name(), x.shape,
+                layer.weight.shape if hasattr(layer.weight, 'shape') else
+                [p.shape
+                 for p in layer.weight], self.linear_config.fuse_matmuls)
             if self.linear_config.fuse_matmuls:
                 weight_jax = jax_view(layer.weight)
                 weight_scale_jax = jax_view(layer.weight_scale)
