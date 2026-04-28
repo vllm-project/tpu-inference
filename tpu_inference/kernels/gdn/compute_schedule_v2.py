@@ -70,7 +70,8 @@ def compute_schedule_table_v2(
     )
 
     # if seq_len < sublane size
-    is_swallowed = effective_start >= seq_end
+    is_decode_boundary = prev_seq_end == decode_tokens
+    is_swallowed = (effective_start >= seq_end) & (~is_decode_boundary)
 
     # compute the effective end of the rounded up to nearest sublane
     next_aligned_start = (seq_end // alignment) * alignment
@@ -78,10 +79,7 @@ def compute_schedule_table_v2(
                         (~is_swallowed))
 
     is_decode_boundary = prev_seq_end == decode_tokens
-    # SUS:
-    #   Why (~is_swallowed) ,
-    # .   if first prefill seq is short (starts and ends in sublane)
-    # .  individual prefill seqs head expected to be handled by tails of previous seqs
+
     needs_start_transition = ((prev_seq_end % alignment != 0) & (~is_swallowed)
                               & is_decode_boundary)
 
@@ -234,8 +232,5 @@ def compute_schedule_table_v2(
 
     final_table = jnp.stack(cols, axis=1)
     total_blocks = jnp.maximum(total_prefill_blocks, num_decode_batches)
-
-    #   jax.debug.print("--- schedule_table ---")
-    #   jax.debug.print("{}", final_table[:10, :])
 
     return final_table, total_blocks

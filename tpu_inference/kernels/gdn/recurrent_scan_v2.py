@@ -1008,100 +1008,6 @@ def fused_kernel(
     )
 
 
-def compute_schedule_table(
-    query_start_loc: jax.Array,
-    decode_tokens: int | jax.Array,
-    num_tokens: int,
-    chunk_size: int,
-    BT: int | None = None,
-) -> tuple[jax.Array, jax.Array]:
-    """Computes the schedule table for the recurrent scan kernel."""
-    if BT is None:
-        BT = chunk_size
-    num_decode_batches = (decode_tokens + BT - 1) // BT
-    num_seqs = query_start_loc.shape[0] - 1
-    all_req_lens = query_start_loc[1:] - query_start_loc[:-1]
-    req_indices = jnp.arange(all_req_lens.shape[0])
-    is_prefill_req = req_indices >= decode_tokens
-
-    # chunks_per_req: shape [num_requests], range [1,
-    # ceil(max_seq_len/chunk_size)]
-    chunks_per_req = (all_req_lens + chunk_size - 1) // chunk_size
-    # prefill_chunks: shape [num_requests], range [0,
-    # ceil(max_seq_len/chunk_size)]
-    prefill_chunks = jnp.where(is_prefill_req, chunks_per_req, 0)
-
-    # num_prefill_chunks: scalar, sum of chunks for all prefill requests
-    num_prefill_chunks = jnp.sum(prefill_chunks)
-    # total_blocks: scalar, max of decode and prefill chunks
-    total_blocks = jnp.maximum(num_decode_batches,
-                               num_prefill_chunks).astype(jnp.int32)
-
-    max_blocks = (num_tokens + chunk_size - 1) // chunk_size
-
-    def build_paired_table(i, carry):
-        table, r, current_prefill_offset = carry
-
-        decode_valid = i < num_decode_batches
-        decode_offset = i * BT
-        decode_count = jnp.where(
-            decode_valid, jnp.minimum(BT, decode_tokens - decode_offset), 0)
-        decode_req_id = jnp.where(decode_valid, i * BT, 0)
-
-        prefill_valid = i < num_prefill_chunks
-        prefill_offset = current_prefill_offset
-
-        def cond_fun(r_val):
-            return (prefill_offset
-                    >= query_start_loc[r_val + 1]) & (r_val < num_seqs - 1)
-
-        def body_fun(r_val):
-            return r_val + 1
-
-        r_new = jax.lax.while_loop(cond_fun, body_fun, r)
-        prefill_req_id = r_new
-
-        safe_next_req = jnp.minimum(prefill_req_id + 1, num_seqs)
-        prefill_count = jnp.where(
-            prefill_valid,
-            jnp.minimum(chunk_size,
-                        query_start_loc[safe_next_req] - prefill_offset),
-            0,
-        )
-        next_prefill_offset = prefill_offset + prefill_count
-
-        is_last_chunk = prefill_valid & (
-            (prefill_offset + prefill_count) >= query_start_loc[safe_next_req])
-        is_first_chunk = prefill_valid & (prefill_offset
-                                          == query_start_loc[prefill_req_id])
-
-        table = table.at[i, 0].set(prefill_valid.astype(jnp.int32))
-        table = table.at[i, 1].set(jnp.where(prefill_valid, prefill_offset, 0))
-        table = table.at[i, 2].set(prefill_req_id)
-        table = table.at[i, 3].set(prefill_count)
-
-        table = table.at[i, 4].set(decode_valid.astype(jnp.int32))
-        table = table.at[i, 5].set(jnp.where(decode_valid, decode_offset, 0))
-        table = table.at[i, 6].set(decode_req_id)
-        table = table.at[i, 7].set(decode_count)
-        table = table.at[i, 8].set(is_last_chunk.astype(jnp.int32))
-        table = table.at[i, 9].set(is_first_chunk.astype(jnp.int32))
-
-        return table, r_new, next_prefill_offset
-
-    initial_r = decode_tokens
-    initial_prefill_offset = query_start_loc[decode_tokens]
-    safe_max_blocks = max_blocks + num_seqs
-    table_init = jnp.zeros((safe_max_blocks, 10), dtype=jnp.int32)
-    schedule_table, _, _ = jax.lax.fori_loop(
-        0,
-        total_blocks,
-        build_paired_table,
-        (table_init, initial_r, initial_prefill_offset),
-    )
-    return schedule_table, total_blocks
-
-
 @functools.partial(
     jax.jit,
     static_argnames=[
@@ -1210,16 +1116,6 @@ def recurrent_scan(
     decode_tokens_arr = jnp.expand_dims(decode_tokens, 0)
     prefill_tokens_arr = jnp.expand_dims(prefill_tokens, 0)
     total_blocks_arr = jnp.expand_dims(total_blocks, 0)
-
-    # DEBUG: Check for NaNs in schedule table for valid blocks
-    # b_idx = jnp.arange(schedule_table.shape[0])
-    # valid_mask = b_idx < total_blocks
-    # has_nan = jnp.isnan(schedule_table.astype(jnp.float32)).any(axis=-1)
-    # has_nan_valid = (has_nan & valid_mask).any()
-    # jax.lax.cond(
-    #     has_nan_valid,
-    #     lambda: jax.debug.print("ERROR: Schedule table contains NaN!"),
-    #     lambda: None)
 
     grid_spec = pl.GridSpec(
         grid=(1, ),
