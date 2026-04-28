@@ -1,0 +1,1 @@
+ALTER TABLE RunRecord ADD COLUMN Config JSON;

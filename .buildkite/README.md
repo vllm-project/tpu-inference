@@ -28,63 +28,19 @@ To support this requirement, each model and feature will go through a series of 
 # Adding a new model to CI
 To add a new model to CI, model owners can use the prepared [add_model_to_ci.py](pipeline_generation/add_model_to_ci.py) script. The script will populate a buildkite yaml config file in the `.buildkite/models` directory; config files under this directory will be integrated to our pipeline automatically.
 
-The python script takes the following arguments:
-- **--model-name**: this is the **full name** of your model on Hugging Face. Please ensure to use the **full name** (ex: `meta-llama/Llama-3.1-8B` instead of `Llama-3.1-8B`) or else we won't be able to find your model.
-- **--category**: this parameter allows you to set the model category, which determines the **Type** field in the `model_support_matrix.csv` under the `support_matrices/` directory. Options: "text-only" or "multimodal". (default: "text-only")
-- **--type**: [OPTIONAL] Specify the model type. Defaults to a `tpu-optimized` model.
-  - `tpu-optimized`: A model with specific optimizations for TPU. Includes unit tests, accuracy tests, and performance benchmark tests.
-  - `vllm-native`: A model using the upstream vLLM definition. Includes unit tests and accuracy tests. These models will not go through performance benchmarks on our pipeline.
-- **--host-scale**: [OPTIONAL] Specify the host scale for running tests. Options: "single" or "multi". (default: "single")
-  - `single`: Runs tests on a single TPU host.
-    - For **v6e**: uses `tpu_v6e_queue` (v6e-1).
-    - For **v7x**: uses `tpu_v7x_2_queue` (v7x-2).
-  - `multi`: Runs tests on multiple TPU hosts.
-    - For **v6e**: uses `tpu_v6e_8_queue` (v6e-8 slice).
-    - For **v7x**: uses `tpu_v7x_8_queue` (v7x-8 slice).
+## Interactive Mode
+The script will prompt you for inputs and generate a YAML in the appropriate directory based on your inputs.
 
 ```bash
-# For a TPU-optimized model (default type, includes performance benchmarks)
-python .buildkite/pipeline_generation/add_model_to_ci.py --model-name <MODEL_NAME> --category <CATEGORY>
-
-# For a vLLM-native model (no performance benchmarks)
-python .buildkite/pipeline_generation/add_model_to_ci.py --model-name <MODEL_NAME> --category <CATEGORY> --type vllm-native
-
-# For a multi-host model test
-python .buildkite/pipeline_generation/add_model_to_ci.py --model-name <MODEL_NAME> --host-scale multi
+python .buildkite/pipeline_generation/add_model_to_ci.py
 ```
-
-In the generated yml file, there are three TODOs that will need your input:
-1. The test command for the unit tests of your model
-2. The accuracy target for your model
-3. The performance benchmark target for your model (This is only required for `tpu-optimized` models)
 
 # Adding a new feature to CI
 To add a new feature to CI, feature owners can use the prepared [`add_feature_to_ci.py`](pipeline_generation/add_feature_to_ci.py) script. The script will populate a buildkite yaml config file in the appropriate subdirectory (e.g., `.buildkite/features`, `.buildkite/parallelism`, etc.). These files will be integrated into our pipeline automatically.
 
-The python script takes the following arguments:
-- **--feature-name**: this is the name of your feature
-- **--category**: This parameter sets the feature category and determines where the generated YAML file is placed. Available options:
-  - `"feature support matrix"` (default)
-  - `"kernel support matrix"`
-  - `"parallelism support matrix"`
-  - `"quantization support matrix"`
-  - `"kernel support matrix microbenchmarks"`
-  - `"rl support matrix"`
-- **--group**: [OPTIONAL] This argument is **required** only when the category is `"kernel support matrix microbenchmarks"`. The group name should be the name of the kernel you are testing (e.g., `all_gather_matmul`). Its purpose is to organize all related microbenchmark tests for that specific kernel into a single directory.
-
-  For example, if you are adding multiple tests for the `all_gather_matmul` kernel (e.g., one for `w4a4` quantization and another for `w8a8`), you would use `--group "all_gather_matmul"` for all of them. The script will then create a directory at `.buildkite/kernel_microbenchmarks/all_gather_matmul/` and place the generated YAML test files inside. In this scenario, the `--feature-name` would describe the specific configuration being tested, like `'w4a4'` or `'w8a8'`.
+## Interactive Mode
+The script will prompt you for inputs and generate a YAML in the appropriate directory based on your inputs.
 
 ```bash
-# General feature example
-python .buildkite/pipeline_generation/add_feature_to_ci.py --feature-name <FEATURE_NAME> --category <CATEGORY_NAME>
-
-# If your feature name contains spaces, please wrap it in quotes
-# ex: python .buildkite/pipeline_generation/add_feature_to_ci.py --feature-name 'my feature name' --category "feature support matrix"
-
-# Example for kernel microbenchmarks
-python .buildkite/pipeline_generation/add_feature_to_ci.py --feature-name 'w4a4' --category "kernel support matrix microbenchmarks" --group "all_gather_matmul"
+python .buildkite/pipeline_generation/add_feature_to_ci.py
 ```
-
-In the generated yml file, there are two TODOs that will need your input:
-1. The test command for the correctness tests of your feature
-2. The test command for the performance tests of your feature

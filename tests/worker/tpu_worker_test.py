@@ -414,7 +414,9 @@ class TestTPUWorker:
         mock_runner_method = getattr(worker.model_runner, runner_method_name)
         mock_runner_method.assert_called_once_with(*method_args)
 
-    def test_initialize_from_config(self, mock_vllm_config):
+    @patch('tpu_inference.worker.tpu_worker.ensure_kv_transfer_initialized')
+    def test_initialize_from_config(self, mock_ensure_kv_transfer_initialized,
+                                    mock_vllm_config):
         """Tests the special case pass-through for initialize_from_config."""
         worker = TPUWorker(vllm_config=mock_vllm_config,
                            local_rank=0,
@@ -429,7 +431,9 @@ class TestTPUWorker:
         worker.model_runner.initialize_kv_cache.assert_called_once_with(
             mock_input_config, 0)
 
-    def test_initialize_from_config_kv_cache_config(self, mock_vllm_config):
+    @patch('tpu_inference.worker.tpu_worker.ensure_kv_transfer_initialized')
+    def test_initialize_from_config_kv_cache_config(
+            self, mock_ensure_kv_transfer_initialized, mock_vllm_config):
         """Tests the special case pass-through for initialize_from_config."""
         worker = TPUWorker(vllm_config=mock_vllm_config,
                            local_rank=0,

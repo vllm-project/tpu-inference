@@ -304,6 +304,7 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
         weights = FusedMoEWeights(
