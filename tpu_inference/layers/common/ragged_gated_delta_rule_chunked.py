@@ -767,9 +767,9 @@ def ragged_gated_delta_rule(
 
         def use_original(_):
             return ragged_gated_delta_rule_mixed_prefill(
-                query=jax.nn.silu(q_reshaped),
-                key=jax.nn.silu(k_reshaped),
-                value=jax.nn.silu(v_reshaped),
+                query=q_reshaped,
+                key=k_reshaped,
+                value=v_reshaped,
                 b_reshaped=b_reshaped,
                 a_reshaped=a_reshaped,
                 A_log=A_log,
