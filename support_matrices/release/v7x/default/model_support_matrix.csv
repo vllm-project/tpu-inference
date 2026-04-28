@@ -22,3 +22,4 @@ Model,Type,UnitTest,Accuracy/Correctness,Benchmark
 "openai/gpt-oss-120b",Text,❓ Untested,❓ Untested,❓ Untested
 "openai/gpt-oss-20b",Text,❓ Untested,❓ Untested,❓ Untested
 "zai-org/GLM-5",Text,❓ Untested,❓ Untested,❓ Untested
+"Qwen/Qwen3-Embedding-8B",Embedding,✅,✅,✅

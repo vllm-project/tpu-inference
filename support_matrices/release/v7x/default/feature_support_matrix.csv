@@ -16,3 +16,4 @@ Feature,CorrectnessTest,PerformanceTest
 "runai_model_streamer_loader",✅ Passing,❓ Untested
 "sampling_params",✅ Passing,❓ Untested
 "structured_decoding",✅ Passing,❓ Untested
+"Step Pooling (Embedding)",✅,✅
