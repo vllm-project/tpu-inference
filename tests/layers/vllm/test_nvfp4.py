@@ -92,14 +92,21 @@ def quantize_to_nvfp4(weight: torch.Tensor,
 
     effective_scale = effective_scale.reshape(out_size, num_blocks)
 
-    return (j2t(w_packed), j2t(effective_scale), j2t(global_scale))
+    # Convert via numpy to avoid j2t FP8 dtype issues.
+    w_packed_t = torch.from_numpy(np.asarray(w_packed))
+    scale_t = torch.from_numpy(np.asarray(effective_scale).view(
+        np.uint8)).view(torch.float8_e4m3fn)
+    global_t = torch.tensor(float(global_scale), dtype=torch.float32)
+    return (w_packed_t, scale_t, global_t)
 
 
 def ref_dequant_nvfp4(weight_packed, weight_scale, global_scale, group_size):
     """Reference dequantization: unpack → float32 using block_scale * global."""
-    w_jax = t2j(weight_packed)
-    s_jax = t2j(weight_scale)
-    g_jax = t2j(global_scale)
+    w_jax = jnp.array(weight_packed.numpy())
+    # FP8 scale: go through uint8 view to avoid dtype conversion issues.
+    s_np = weight_scale.view(torch.uint8).numpy()
+    s_jax = jax.lax.bitcast_convert_type(jnp.array(s_np), jnp.float8_e4m3fn)
+    g_jax = jnp.float32(global_scale.item())
 
     # Unpack uint8 → float4_e2m1fn.
     e2m1 = jax.lax.bitcast_convert_type(w_jax, jnp.float4_e2m1fn)
@@ -115,7 +122,7 @@ def ref_dequant_nvfp4(weight_packed, weight_scale, global_scale, group_size):
     scale_expanded = eff_scale.reshape(out_size, num_blocks, 1)
     deq = (fp4_blocked.astype(jnp.float32) * scale_expanded).reshape(
         out_size, in_size)
-    return j2t(deq)
+    return torch.from_numpy(np.asarray(deq))
 
 
 def create_nvfp4_config(mesh):
