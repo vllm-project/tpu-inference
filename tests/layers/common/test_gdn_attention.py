@@ -221,6 +221,11 @@ class GDNAttentionTest(parameterized.TestCase):
             test_config=GdnAttentionConfig(
                 ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.REF),
         ),
+        dict(
+            testcase_name="fused",
+            test_config=GdnAttentionConfig(
+                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.FUSED),
+        ),
     )
     def test_has_initial_state_zeros_stale_slot(self, test_config):
         """A new prefill landing on a slot whose previous tenant left
@@ -350,6 +355,11 @@ class GDNAttentionTest(parameterized.TestCase):
             testcase_name="ref",
             test_config=GdnAttentionConfig(
                 ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.REF),
+        ),
+        dict(
+            testcase_name="fused",
+            test_config=GdnAttentionConfig(
+                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.FUSED),
         ),
     )
     def test_has_initial_state_preserves_continuation(self, test_config):
