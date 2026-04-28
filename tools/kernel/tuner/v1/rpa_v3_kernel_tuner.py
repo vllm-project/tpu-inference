@@ -211,8 +211,8 @@ class RpaV3KernelTuner(KernelTunerBase):
 
             tuning_key = TuningKey(
                 page_size=page_size,
-                q_dtype=q_dtype.name,
-                kv_dtype=kv_dtype.name,
+                q_dtype=jnp.dtype(q_dtype).name,
+                kv_dtype=jnp.dtype(kv_dtype).name,
                 num_q_heads=num_q_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
