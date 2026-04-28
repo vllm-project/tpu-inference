@@ -459,7 +459,7 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
             layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
             layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
 
-    def apply_monolithic(self, layer, x, router_logits):
+    def apply_monolithic(self, layer, x, router_logits, **kwargs):
         weights = FusedMoEWeights(
             w13_weight=jax_view(layer.w13_weight),
             w13_weight_scale=jax_view(layer.w13_weight_scale),
