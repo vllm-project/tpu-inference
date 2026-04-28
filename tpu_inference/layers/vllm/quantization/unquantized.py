@@ -372,6 +372,7 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
         weights = FusedMoEWeights(

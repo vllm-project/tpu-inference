@@ -1,0 +1,53 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tpu-job-offline-inference
+  # This pod verifies the correctness of the TPUOffloadConnector implementation.
+  # It runs a script that internally performs two text generations:
+  # 1. A baseline run with a standard vLLM engine.
+  # 2. A test run with the TPUOffloadConnector enabled.
+  # The pod succeeds only if the outputs from both runs are identical,
+  # ensuring that the connector does not alter the model's output.
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    cloud.google.com/gke-tpu-accelerator: tpu7x
+    cloud.google.com/gke-tpu-topology: 2x2x1 # Specify the physical topology for the TPU slice.
+  containers:
+  - name: tpu-job
+    image: <your-tpu-inference-image>
+    imagePullPolicy: Always
+    command:
+    - python
+    - /workspace/tpu_inference/examples/offload/offline_inference_kv_cache_verification.py
+    - --model=meta-llama/Llama-3.1-8B
+    - --tensor_parallel_size=8
+    - --max_model_len=1024
+    - --seed=42
+    - --kv-transfer-config
+    - '{"kv_connector":"TPUOffloadConnector","kv_connector_module_path":"tpu_inference.offload.tpu_offload_connector","kv_role":"kv_both"}'
+    env:
+    - name: HUGGING_FACE_HUB_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: hf-token-secret
+          key: token
+    resources:
+      requests:
+        google.com/tpu: 4
+      limits:
+        google.com/tpu: 4

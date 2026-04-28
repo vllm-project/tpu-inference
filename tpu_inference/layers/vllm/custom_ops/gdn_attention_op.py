@@ -104,6 +104,8 @@ def gdn_attention_core_tpu(
     # Map tokens to their respective requests
     q_loc = jax_view(attn_metadata.query_start_loc)
     distribution = jax_view(attn_metadata.request_distribution)
+    j_seq_lens = jax_view(attn_metadata.seq_lens)
+
     config = GdnAttentionConfig(
         ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl(
             envs.RAGGED_GATED_DELTA_RULE_IMPL))
@@ -121,6 +123,7 @@ def gdn_attention_core_tpu(
                                                             state_indices,
                                                             q_loc,
                                                             distribution,
+                                                            j_seq_lens,
                                                             n_kq,
                                                             n_v,
                                                             d_k,

@@ -1,18 +1,72 @@
 Feature,CorrectnessTest,PerformanceTest
+"CP",❓ Untested,❓ Untested
 "Chunked Prefill",✅ Passing,✅ Passing
-"DCN-based P/D disaggregation",✅ Passing,✅ Passing
-"KV cache host offloading",❓ Untested,❓ Untested
-"LoRA_Torch",✅ Passing,✅ Passing
-"Multimodal Inputs",❌ Failing,❓ Untested
-"Out-of-tree model support",✅ Passing,✅ Passing
+"Collective Communication Matmul",❓ Untested,❓ Untested
+"DCN-based P/D disaggregation",❓ Untested,❓ Untested
+"DP",❓ Untested,❓ Untested
+"EP",❓ Untested,❓ Untested
+"FP4 W4A16",❓ Untested,❓ Untested
+"FP8 W8A8",❓ Untested,❓ Untested
+"FP8 W8A16",❓ Untested,❓ Untested
+"INT4 W4A16",❓ Untested,❓ Untested
+"INT8 W8A8",❓ Untested,❓ Untested
+"KV Cache Offload",❓ Untested,❓ Untested
+"LoRA_Torch",❓ Untested,❓ Untested
+"MLA",❓ Untested,❓ Untested
+"MoE",❓ Untested,❓ Untested
+"Multimodal Inputs",❓ Untested,❓ Untested
+"Out-of-tree model support",❓ Untested,❓ Untested
+"PP",❓ Untested,❓ Untested
 "Prefix Caching",✅ Passing,✅ Passing
+"Quantized Attention",❓ Untested,❓ Untested
+"Quantized KV Cache",❓ Untested,❓ Untested
+"Quantized Matmul",❓ Untested,❓ Untested
+"SP",❓ Untested,❓ Untested
 "Single Program Multi Data",✅ Passing,✅ Passing
-"Single-Host-P-D-disaggregation",✅ Passing,❓ Untested
-"Speculative Decoding: Eagle3",✅ Passing,✅ Passing
-"Speculative Decoding: Ngram",✅ Passing,✅ Passing
-"async scheduler",✅ Passing,✅ Passing
-"hybrid kv cache",✅ Passing,❓ Untested
+"Single-Host-P-D-disaggregation",❓ Untested,❓ Untested
+"Speculative Decoding: Eagle3",❓ Untested,❓ Untested
+"Speculative Decoding: Ngram",❓ Untested,❓ Untested
+"TP",❓ Untested,❓ Untested
+"all-gather-matmul-w4a4",❓ Untested,❓ Untested
+"all-gather-matmul-w4a8",❓ Untested,❓ Untested
+"all-gather-matmul-w4a16",❓ Untested,❓ Untested
+"all-gather-matmul-w8a8",❓ Untested,❓ Untested
+"all-gather-matmul-w8a16",❓ Untested,❓ Untested
+"all-gather-matmul-w16a16",❓ Untested,❓ Untested
+"async scheduler",❓ Untested,❓ Untested
+"fused moe-w4a4",❓ Untested,❓ Untested
+"fused moe-w4a8",❓ Untested,❓ Untested
+"fused moe-w4a16",❓ Untested,❓ Untested
+"fused moe-w8a8",❓ Untested,❓ Untested
+"fused moe-w8a16",❓ Untested,❓ Untested
+"fused moe-w16a16",❓ Untested,❓ Untested
+"generic ragged paged attention v3-w4a4",❓ Untested,❓ Untested
+"generic ragged paged attention v3-w4a8",❓ Untested,❓ Untested
+"generic ragged paged attention v3-w4a16",❓ Untested,❓ Untested
+"generic ragged paged attention v3-w8a8",❓ Untested,❓ Untested
+"generic ragged paged attention v3-w8a16",❓ Untested,❓ Untested
+"generic ragged paged attention v3-w16a16",❓ Untested,❓ Untested
+"gmm-w4a4",❓ Untested,❓ Untested
+"gmm-w4a8",❓ Untested,❓ Untested
+"gmm-w4a16",❓ Untested,❓ Untested
+"gmm-w8a8",❓ Untested,❓ Untested
+"gmm-w8a16",❓ Untested,❓ Untested
+"gmm-w16a16",❓ Untested,❓ Untested
+"hybrid kv cache",❓ Untested,❓ Untested
+"mla-w4a4",❓ Untested,❓ Untested
+"mla-w4a8",❓ Untested,❓ Untested
+"mla-w4a16",❓ Untested,❓ Untested
+"mla-w8a8",❓ Untested,❓ Untested
+"mla-w8a16",❓ Untested,❓ Untested
+"mla-w16a16",❓ Untested,❓ Untested
 "multi-host",❓ Untested,❓ Untested
-"runai_model_streamer_loader",✅ Passing,❓ Untested
-"sampling_params",✅ Passing,❓ Untested
-"structured_decoding",❌ Failing,❓ Untested
+"ragged paged attention v3 head_dim 64-w4a4",❓ Untested,❓ Untested
+"ragged paged attention v3 head_dim 64-w4a8",❓ Untested,❓ Untested
+"ragged paged attention v3 head_dim 64-w4a16",❓ Untested,❓ Untested
+"ragged paged attention v3 head_dim 64-w8a8",❓ Untested,❓ Untested
+"ragged paged attention v3 head_dim 64-w8a16",❓ Untested,❓ Untested
+"ragged paged attention v3 head_dim 64-w16a16",❓ Untested,❓ Untested
+"rl_integration",❓ Untested,❓ Untested
+"runai_model_streamer_loader",❓ Untested,❓ Untested
+"sampling_params",❓ Untested,❓ Untested
+"structured_decoding",❓ Untested,❓ Untested

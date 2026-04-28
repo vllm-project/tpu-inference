@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, VllmConfig)
+                         SchedulerConfig, VllmConfig, set_current_vllm_config)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.sampling_params import SamplingType
@@ -86,8 +86,11 @@ class TestKVCacheManager:
                                          devices=self.mock_devices)
             self.runner.mesh = self.mock_mesh
 
-    def setup_method(self):
+    @pytest.fixture(autouse=True)
+    def setup_runner_fixture(self):
         self._setup_runner(use_mla=False)
+        with set_current_vllm_config(self.runner.vllm_config):
+            yield
 
     def test_insert_request_with_kv_cache(self):
         # This test refines the insertion test by first extracting a KV cache

@@ -126,7 +126,6 @@ class VllmModelWrapper:
 
         self.vllm_config.quant_config = get_tpu_quantization_config(
             self.vllm_config, self.mesh)
-        self.model_config = vllm_config.speculative_config.draft_model_config if is_draft_model else vllm_config.model_config
         self._apply_pp_patch()
 
     def _apply_pp_patch(self):
@@ -215,9 +214,9 @@ class VllmModelWrapper:
 
         with load_context, jax_context, set_current_vllm_config(
                 self.vllm_config):
+            model_config_for_load = vllm_config_for_load.speculative_config.draft_model_config if self.is_draft_model else vllm_config_for_load.model_config
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load,
-                                        model_config=self.model_config)
-
+                                        model_config=model_config_for_load)
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:
             # Replace layers in the model with LoRA layers.

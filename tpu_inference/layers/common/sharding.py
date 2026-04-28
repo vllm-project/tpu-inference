@@ -194,8 +194,23 @@ class ShardingConfigManager:
                 int(tensor_parallelism // num_kv_heads_per_device_in_kv_cache),
                 1)
             tensor_parallelism = tensor_parallelism // attn_dp
-            attn_dp_expert = expert_parallelism
-            expert_parallelism = 1
+
+            # If Attention DP is active or TP perfectly saturates the KV heads limit,
+            # prioritize TP for KV heads and shift all expert parallelism to attn_dp_expert.
+            is_kv_fully_sharded_by_tp = (attn_dp > 1) or (
+                tensor_parallelism == num_kv_heads_per_device_in_kv_cache)
+
+            if is_kv_fully_sharded_by_tp:
+                attn_dp_expert = expert_parallelism
+                expert_parallelism = 1
+            else:
+                # Otherwise, shard KV heads over the expert axis.
+                # Use the remaining KV heads per device as the divisor.
+                shard_divisor = num_kv_heads_per_device_in_kv_cache // tensor_parallelism
+                attn_dp_expert = max(1,
+                                     int(expert_parallelism // shard_divisor))
+                expert_parallelism //= attn_dp_expert
+
         else:
             attn_dp = 1
             attn_dp_expert = 1

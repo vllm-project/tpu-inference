@@ -25,6 +25,8 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mla import MLAAttention
 from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backends.utils import (get_kv_cache_layout,
+                                              set_kv_cache_layout)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, MambaSpec,
                                         MLAAttentionSpec, SlidingWindowSpec)
@@ -33,6 +35,7 @@ from tpu_inference import utils
 from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
+from tpu_inference.offload.utils import get_kv_connector_cache_layout
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.runner.kv_cache import (KVCacheMetadata, create_kv_caches,
@@ -44,6 +47,10 @@ if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
+
+# default layout (order) used by kv cache manager
+# N=num_blocks, H=num_heads and D=head_size
+DEFAULT_KV_CACHE_LAYOUT = "NHD"
 
 
 class KVCacheManager:
@@ -349,12 +356,13 @@ class KVCacheManager:
         # Use FullAttentionSpec for each layer
         # TODO(pooyam): Is it possible to merge the logic for vllm and non-vllm models?
         model_config = self.runner.model_config
+        text_config = getattr(model_config, "hf_text_config",
+                              getattr(model_config, "hf_config", None))
         if self.use_mla:
             # Individually pad the RopE and latents
-            qk_rope_head_dim = getattr(model_config.hf_text_config,
-                                       "qk_rope_head_dim", 0)
+            qk_rope_head_dim = getattr(text_config, "qk_rope_head_dim", 0)
             padded_kv_lora_rank = common_utils.align_to(
-                model_config.hf_text_config.kv_lora_rank, 128)
+                text_config.kv_lora_rank, 128)
             padded_qk_rope_head_dim = common_utils.align_to(
                 qk_rope_head_dim, 128)
             mla_head_size = padded_kv_lora_rank + padded_qk_rope_head_dim
@@ -362,8 +370,6 @@ class KVCacheManager:
         if len(self.runner.vllm_config.compilation_config.
                static_forward_context) == 0:
             parallel_config = self.runner.parallel_config
-            text_config = getattr(model_config, "hf_text_config",
-                                  getattr(model_config, "hf_config", None))
             base_num_kv_heads = model_config.get_total_num_kv_heads()
             base_head_size = model_config.get_head_size()
 
@@ -513,6 +519,10 @@ class KVCacheManager:
 
         return kv_cache_spec
 
+    def get_kv_cache_layout(self):
+        # return the layout (mostly "NHD" or "HND") of kv cache
+        return get_kv_cache_layout()
+
     def maybe_reinitialize_input_batch(self,
                                        kv_cache_config: KVCacheConfig) -> None:
         block_sizes = [
@@ -552,6 +562,18 @@ class KVCacheManager:
             else:
                 for layer_name in group.layer_names:
                     layer_name_to_spec[layer_name] = group.kv_cache_spec
+
+        # set the kv cache layout which is needed by kv connectors
+        # NOTE(jcgu): please update the default value when the order changes
+        set_kv_cache_layout(DEFAULT_KV_CACHE_LAYOUT)
+        # verify kv cache layout is matched between the cache manager and
+        # the kv connector (if configured)
+        _required_kv_layout = get_kv_connector_cache_layout()
+        if (_required_kv_layout
+                and _required_kv_layout != DEFAULT_KV_CACHE_LAYOUT):
+            raise ValueError(
+                f"KV cache layout ({DEFAULT_KV_CACHE_LAYOUT}) does not match with the "
+                f"kv_connector's required layout ({_required_kv_layout})")
 
         kv_caches = self.runner.kv_caches
         num_blocks_list = []
@@ -681,11 +703,16 @@ class KVCacheManager:
                     # We should only init a new kv cache for the first layer in shared_by
                     # if duplicate_shared_layers is False.  Otherwise, if duplicate_shared_layers
                     # is True, we should init a new kv cache for each layer in shared_by
+                    model_config = self.runner.model_config
+                    text_config = getattr(
+                        model_config, "hf_text_config",
+                        getattr(model_config, "hf_config", None))
                     if j == 0 or duplicate_shared_layers:
                         # NOTE: we'll multiply the num_kv_heads by 2 in the function
                         if self.use_mla:
-                            head_size = self.runner.model_config.hf_config.kv_lora_rank + \
-                                self.runner.model_config.hf_config.qk_rope_head_dim
+
+                            head_size = text_config.kv_lora_rank + \
+                                text_config.qk_rope_head_dim
                         else:
                             head_size = layer_spec.head_size
                         kv_cache = create_kv_caches(

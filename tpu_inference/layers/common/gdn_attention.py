@@ -67,6 +67,7 @@ def run_jax_gdn_attention_local(
     query_start_loc: jnp.ndarray,
     state_indices: jnp.ndarray,
     distribution: jnp.ndarray,
+    seq_lens: jnp.ndarray,
     n_kq: int,
     n_v: int,
     d_k: int,
@@ -96,6 +97,12 @@ def run_jax_gdn_attention_local(
           state index.
         distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end,
           mixed_end)`.
+        seq_lens: Tensor of shape `(max_reqs,)` with the total sequence length
+          per request (computed + scheduled). Used to derive
+          ``has_initial_state`` so brand-new prefills don't read stale state
+          from a reused mamba slot, mirroring GPU's
+          ``initial_state[~has_initial_state, ...] = 0`` in
+          ``gdn_linear_attn._forward_core``.
         n_kq: Number of key/query heads.
         n_v: Number of value heads.
         d_k: Dimension of key.
@@ -108,6 +115,14 @@ def run_jax_gdn_attention_local(
         - A tuple of (new_conv_state, new_recurrent_state).
         - The output tensor of shape `(num_tokens, n_v * d_v)`.
     """
+    # has_initial_state[i] = True iff request i already has computed
+    # tokens in its mamba slot (chunked-prefill continuation, prefix-cache
+    # hit, or running decode). False for brand-new prefills, whose
+    # gathered conv/recurrent state is then masked to zero by the
+    # ragged kernels. context_len = seq_len - query_len.
+    max_reqs = seq_lens.shape[0]
+    query_lens = query_start_loc[1:max_reqs + 1] - query_start_loc[:max_reqs]
+    has_initial_state = (seq_lens - query_lens) > 0
 
     # TODO: Switch conv implementaion based on config once we have more than 1 impl
     conv_impl = ragged_conv1d_jax
@@ -120,6 +135,7 @@ def run_jax_gdn_attention_local(
         query_start_loc,
         state_indices,
         distribution,
+        has_initial_state,
         kernel_size=kernel_size,
     )
 
@@ -151,17 +167,34 @@ def run_jax_gdn_attention_local(
             use_qk_norm_in_gdn=True,
         )
 
-    new_recurrent_state, output = ragged_gdn_impl(
-        out_mixed_qkv,
-        b,
-        a,
-        recurrent_state,
-        A_log,
-        dt_bias,
-        query_start_loc,
-        state_indices,
-        distribution,
-    )
+    if config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.FUSED:
+        # The fused kernel does not yet honor `has_initial_state`. Fall
+        # through with the existing call signature; the chunked/ref paths
+        # used in production already mask via the new argument below.
+        new_recurrent_state, output = ragged_gdn_impl(
+            out_mixed_qkv,
+            b,
+            a,
+            recurrent_state,
+            A_log,
+            dt_bias,
+            query_start_loc,
+            state_indices,
+            distribution,
+        )
+    else:
+        new_recurrent_state, output = ragged_gdn_impl(
+            out_mixed_qkv,
+            b,
+            a,
+            recurrent_state,
+            A_log,
+            dt_bias,
+            query_start_loc,
+            state_indices,
+            distribution,
+            has_initial_state,
+        )
 
     return (new_conv_state, new_recurrent_state), output
 
@@ -179,6 +212,7 @@ def run_jax_gdn_attention(
     state_indices: jnp.ndarray,
     query_start_loc: jnp.ndarray,
     distribution: jnp.ndarray,
+    seq_lens: jnp.ndarray,
     n_kq: int,
     n_v: int,
     d_k: int,
@@ -210,6 +244,9 @@ def run_jax_gdn_attention(
           each sequence.
         distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end,
           mixed_end)`.
+        seq_lens: Tensor of shape `(max_reqs,)` with the total sequence length
+          per request (computed + scheduled). Used inside the local function
+          to derive ``has_initial_state``.
         n_kq: Number of key/query heads.
         n_v: Number of value heads.
         d_k: Dimension of key.
@@ -242,6 +279,7 @@ def run_jax_gdn_attention(
         P(ShardingAxisName.ATTN_DATA),  # query_start_loc
         P(ShardingAxisName.ATTN_DATA),  # state_indices
         P(ShardingAxisName.ATTN_DATA),  # distribution
+        P(ShardingAxisName.ATTN_DATA),  # seq_lens
     )
 
     out_specs = (
@@ -287,6 +325,7 @@ def run_jax_gdn_attention(
         query_start_loc,
         state_indices,
         distribution,
+        seq_lens,
     )
 
     return (new_conv_state, new_recurrent_state), output
