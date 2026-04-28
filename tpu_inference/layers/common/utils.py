@@ -122,6 +122,9 @@ def general_device_put(tensor: jax.Array,
         if multihost_backend != "ray" or (isinstance(t, jax.Array)
                                           and not t.is_fully_addressable):
             if layout is not None:
+                # Move to device first to avoid "Received incompatible devices"
+                # error when using Format with host-resident JAX arrays.
+                t = jax.device_put(t, sharding)
                 return jax.device_put(t, Format(layout, sharding))
             else:
                 return jax.device_put(t, sharding)

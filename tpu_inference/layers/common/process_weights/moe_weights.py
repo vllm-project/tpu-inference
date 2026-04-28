@@ -279,6 +279,11 @@ def process_moe_weights(
     w2_bias = weights.w2_bias
 
     num_experts, hidden_size, intermediate_size = w2_weight.shape
+    # For some quantization methods (like ModelOpt NVFP4), w13 and w2 might
+    # be packed differently in the intermediate dimension.
+    # We use w13_weight to determine the actual intermediate size for w13.
+    # Note that w13_weight has not been swapped yet, so intermediate dim is at index 1.
+    intermediate_size_w13 = w13_weight.shape[1] // 2
 
     if w13_interleave:
         w1_weight = w13_weight[:, ::2, :]
@@ -337,20 +342,22 @@ def process_moe_weights(
                 num_experts,
                 hidden_size,
                 2,
-                intermediate_size,
+                intermediate_size_w13,
             )
             w13_weight = jnp.swapaxes(w13_weight, 1, 2)
             w13_weight = with_layout_constraint(w13_weight, Layout(
                 (0, 1, 2, 3)))
 
             # Fused moe kernel expects dims to be multiple of 256.
+            pad_width_intermediate_size_w13 = (
+                align_to(intermediate_size_w13, 256) - intermediate_size_w13)
             pad_width_intermediate_size = (align_to(intermediate_size, 256) -
                                            intermediate_size)
             pad_width_hidden_size = align_to(hidden_size, 256) - hidden_size
 
             w13_weight = jnp.pad(w13_weight,
                                  ((0, 0), (0, 0), (0, pad_width_hidden_size),
-                                  (0, pad_width_intermediate_size)))
+                                  (0, pad_width_intermediate_size_w13)))
 
             w2_weight = jnp.pad(
                 w2_weight,
@@ -360,12 +367,12 @@ def process_moe_weights(
 
             if w13_weight_scale is not None:
                 w13_weight_scale = w13_weight_scale.reshape(
-                    num_experts, -1, 2, 1, intermediate_size)
+                    num_experts, -1, 2, 1, intermediate_size_w13)
                 w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
                 w13_weight_scale = jnp.pad(
                     w13_weight_scale,
                     ((0, 0), (0, 0), (0, pad_width_hidden_size), (0, 0),
-                     (0, pad_width_intermediate_size)),
+                     (0, pad_width_intermediate_size_w13)),
                 )
             if w2_weight_scale is not None:
                 w2_weight_scale = jnp.pad(
@@ -376,10 +383,11 @@ def process_moe_weights(
 
             if w13_bias is not None:
                 w13_bias = w13_bias.reshape(num_experts, 2, 1,
-                                            intermediate_size)
+                                            intermediate_size_w13)
                 w13_bias = jnp.pad(
                     w13_bias,
-                    ((0, 0), (0, 0), (0, 0), (0, pad_width_intermediate_size)),
+                    ((0, 0), (0, 0), (0, 0),
+                     (0, pad_width_intermediate_size_w13)),
                 )
             if w2_bias is not None:
                 w2_bias = jnp.pad(
@@ -389,9 +397,9 @@ def process_moe_weights(
 
         case MoEBackend.GMM_TP:
             assert w13_reorder_size is not None
-            assert intermediate_size % w13_reorder_size == 0
+            assert intermediate_size_w13 % w13_reorder_size == 0
 
-            pad_config = get_w13_padding_config(intermediate_size,
+            pad_config = get_w13_padding_config(intermediate_size_w13,
                                                 w13_reorder_size,
                                                 align=128)
 
@@ -433,7 +441,7 @@ def process_moe_weights(
                                                  axis=3)
 
         case MoEBackend.GMM_EP:
-            pad_config = get_w13_padding_config(intermediate_size,
+            pad_config = get_w13_padding_config(intermediate_size_w13,
                                                 reorder_size=1,
                                                 align=128)
 
