@@ -314,6 +314,10 @@ class VllmNvfp4LinearMethod(Fp8LinearMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Dequant NVFP4 → requant to FP8 blockwise for TPU kernel."""
         assert isinstance(layer, LinearBase)
+        logger.info(
+            "NVFP4 linear process_weights: layer=%s weight=%s scale=%s",
+            layer._get_name(), layer.weight.shape, layer.weight_scale.shape
+            if hasattr(layer, 'weight_scale') else 'N/A')
 
         # Convert torch tensors to JAX
         weight_packed = t2j(layer.weight, use_dlpack=False)
@@ -403,6 +407,10 @@ class VllmNvfp4LinearMethod(Fp8LinearMethod):
             layer.weight_scale = to_parameter_list(weights.weight_scale)
             if bias is not None:
                 layer.bias = to_parameter_list(weights.bias)
+        logger.info(
+            "NVFP4 linear process_weights DONE: layer=%s weight=%s",
+            layer._get_name(), layer.weight.shape if hasattr(
+                layer.weight, 'shape') else [p.shape for p in layer.weight])
 
     def apply(self,
               layer: torch.nn.Module,
