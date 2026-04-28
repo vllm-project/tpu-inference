@@ -75,6 +75,8 @@ steps:
           --generate_buildkite_pipeline=True \
           --case_set_id=\${KERNEL_TUNING_CASE_SET_ID} \
           --run_id=\${KERNEL_TUNING_RUN_ID} \
+          --tpu_version=\${TPU_VERSION} \
+          --tpu_queue_multi=\${TPU_QUEUE_MULTI} \
           > /tmp/kernel_tuning/generated_pipeline.yml"
       - |
         # Upload the generated pipeline YAML from the temp dir on the host.

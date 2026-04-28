@@ -208,7 +208,8 @@ class KernelTunerBase(ABC):
             raise e
 
     def generate_buildkite_pipeline(self, case_set_id: str, run_id: str,
-                                    desc: str) -> str:
+                                    desc: str, tpu_version: str,
+                                    tpu_queue_multi: str) -> str:
         """Generate the Buildkite pipeline for the given tuning jobs. Each tuning job will be represented as a Buildkite step that calls the measure_latency function with the corresponding case_id range.
 
         Args:
@@ -233,13 +234,13 @@ class KernelTunerBase(ABC):
                 "label":
                 f"cs_id={case_set_id} rid={run_id} Bucket([{case_id_start}, {case_id_end}))",
                 "depends_on":
-                "tpu6e_build_docker",  # Adjust to your Buildkite step dependency
+                f"tpu{tpu_version}_build_docker",  # Adjust to your Buildkite step dependency
                 "agents": {
-                    "queue": "tpu_v6e_8_queue"
+                    "queue": tpu_queue_multi
                 },  # Adjust to your TPU queue
                 "env": {
                     "USE_PREBUILT_IMAGE": "1",
-                    "TPU_VERSION": "tpu6e"
+                    "TPU_VERSION": tpu_version
                 },
                 "commands": [
                     f".buildkite/scripts/run_in_docker.sh bash -c \"pip install --upgrade google-cloud-spanner && pip install --upgrade google-api-core && pip install --upgrade google-auth && python -m tools.kernel.tuner.v1.kernel_tuner_runner --kernel_tuner_name={self.kernel_tuner_name} --case_set_id={case_set_id} --run_id={run_id} --begin_case_id={case_id_start} --end_case_id={case_id_end}\""

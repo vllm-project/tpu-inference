@@ -69,6 +69,11 @@ _SPANNER_DATABASE_ID = flags.DEFINE_string(
 _WORKER_ID = flags.DEFINE_string('worker_id',
                                  os.getenv('HOST_NAME',
                                            'unknown'), 'The worker id')
+_TPU_VERSION = flags.DEFINE_string(
+    'tpu_version', 'v6',
+    'The TPU version to use for tuning. Supported values are "v6" and "v7".')
+_TPU_QUEUE_MULTI = flags.DEFINE_string('tpu_queue_multi', 'tpu_v6e_8_queue',
+                                       'The TPU queue to use for tuning.')
 
 # Note: For simplicity, we are directly referencing the kernel tuner class
 # here. In the future, we can consider a more flexible plugin-based system
@@ -114,6 +119,9 @@ def main(argv):
 
     kernel_tuner = kernel_tuner_cls(storage_manager)
 
+    tpu_version = _TPU_VERSION.value
+    tpu_queue_multi = _TPU_QUEUE_MULTI.value
+
     if _RUN_LOCALLY.value:
         logger.info(
             'Running in locally mode. Skipping Buildkite pipeline generation and running tuning jobs directly.'
@@ -133,8 +141,13 @@ def main(argv):
                 'Generating Buildkite pipeline YAML. No tuning jobs will be run.'
             )
             pipeline_yaml = kernel_tuner.generate_buildkite_pipeline(
-                case_set_id=case_set_id, run_id=run_id, desc=case_set_desc)
-            logger.info('Generated Buildkite pipeline YAML (printing to stdout).')
+                case_set_id=case_set_id,
+                run_id=run_id,
+                desc=case_set_desc,
+                tpu_version=tpu_version,
+                tpu_queue_multi=tpu_queue_multi)
+            logger.info(
+                'Generated Buildkite pipeline YAML (printing to stdout).')
             print(pipeline_yaml)
             return pipeline_yaml
         else:
