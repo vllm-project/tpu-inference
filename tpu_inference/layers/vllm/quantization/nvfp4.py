@@ -345,9 +345,9 @@ class VllmNvfp4LinearMethod(QuantizeMethodBase, Fp8LinearMethod):
         dequantized = _dequantize_nvfp4_weights(weight_packed, weight_scale,
                                                 weight_global_scale)
 
-        # Re-quantize to FP8 blockwise
+        # Re-quantize to FP8 per-channel (1D scale compatible with XLA matmul)
         requant_dtype = jnp.float8_e4m3fn
-        requant_block_size = REQUANT_BLOCK_SIZE
+        requant_block_size = None
 
         # Process per output partition (for QKV parallel etc.)
         output_sizes = tuple(self.linear_config.output_sizes)
