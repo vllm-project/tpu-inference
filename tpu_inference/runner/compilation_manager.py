@@ -197,13 +197,18 @@ class CompilationManager:
         request_distribution = device_array(self.runner.mesh,
                                             request_distribution,
                                             sharding=dp_sharding)
-        # Dummy mamba_state_indices for compile-cache pre-tracing. Shape
-        # must match what `_prepare_inputs_*` produces at runtime so the
-        # JAX cache hits when the GDN op pulls this from `attn_metadata`.
-        mamba_state_indices = device_array(self.runner.mesh,
-                                           np.zeros(self.runner.max_num_reqs,
-                                                    dtype=np.int32),
-                                           sharding=dp_sharding)
+        # Dummy mamba_state_indices for compile-cache pre-tracing. Only
+        # populate for hybrid attn+mamba models — for pure-attention models we
+        # pass None at runtime (see `_prepare_inputs_*`), and the precompile
+        # primer must match that shape so the cached HLO is reused.
+        if self.runner.kv_cache_config.has_mamba_layers:
+            mamba_state_indices = device_array(self.runner.mesh,
+                                               np.zeros(
+                                                   self.runner.max_num_reqs,
+                                                   dtype=np.int32),
+                                               sharding=dp_sharding)
+        else:
+            mamba_state_indices = None
 
         def build_block_table(kv_cache_gid: int) -> jax.Array:
             block_table_obj = self.runner.input_batch.block_table[kv_cache_gid]
@@ -775,14 +780,18 @@ class CompilationManager:
         # Dummy mamba_state_indices for spec-decode compile-cache pre-tracing.
         # Must match the ATTN_DATA sharding `_prepare_inputs_*` produces at
         # runtime — otherwise the draft model_fn cache misses and the
-        # ForbidCompile guard inside `Eagle3Proposer.propose` raises.
-        dp_sharding = NamedSharding(
-            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
-        eagle3_mamba_state_indices = device_array(self.runner.mesh,
-                                                  np.zeros(
-                                                      self.runner.max_num_reqs,
-                                                      dtype=np.int32),
-                                                  sharding=dp_sharding)
+        # ForbidCompile guard inside `Eagle3Proposer.propose` raises. None for
+        # pure-attention models (the common eagle3 case) so the field stays
+        # absent end-to-end.
+        if self.runner.kv_cache_config.has_mamba_layers:
+            dp_sharding = NamedSharding(
+                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
+            eagle3_mamba_state_indices = device_array(
+                self.runner.mesh,
+                np.zeros(self.runner.max_num_reqs, dtype=np.int32),
+                sharding=dp_sharding)
+        else:
+            eagle3_mamba_state_indices = None
 
         for num_reqs_padding in self.runner.num_reqs_paddings:
             for i in range(1, self.runner.drafter.num_speculative_tokens + 1):
