@@ -169,37 +169,18 @@ def run_jax_gdn_attention_local(
             use_qk_norm_in_gdn=True,
         )
 
-    if config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.FUSED:
-        # All three impls (fused / chunked / ref) honor `has_initial_state`
-        # — the fused recurrent kernel zeros h0 in VMEM for slots whose
-        # flag is 0. The branch is preserved (rather than unified into a
-        # single call) so each path stays explicitly visible in the
-        # dispatch in case one impl ever needs a different call shape.
-        new_recurrent_state, output = ragged_gdn_impl(
-            out_mixed_qkv,
-            b,
-            a,
-            recurrent_state,
-            A_log,
-            dt_bias,
-            query_start_loc,
-            state_indices,
-            distribution,
-            has_initial_state,
-        )
-    else:
-        new_recurrent_state, output = ragged_gdn_impl(
-            out_mixed_qkv,
-            b,
-            a,
-            recurrent_state,
-            A_log,
-            dt_bias,
-            query_start_loc,
-            state_indices,
-            distribution,
-            has_initial_state,
-        )
+    new_recurrent_state, output = ragged_gdn_impl(
+        out_mixed_qkv,
+        b,
+        a,
+        recurrent_state,
+        A_log,
+        dt_bias,
+        query_start_loc,
+        state_indices,
+        distribution,
+        has_initial_state,
+    )
 
     return (new_conv_state, new_recurrent_state), output
 
