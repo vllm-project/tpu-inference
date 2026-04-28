@@ -1,0 +1,21 @@
+# Dev pipeline: tpu6e multimodal test scan
+steps:
+  - label: ":docker: Build and Push Base Image (tpu6e)"
+    key: tpu6e_build_docker
+    agents:
+      queue: cpu_64_core
+    env:
+      TPU_VERSION: "tpu6e"
+    commands:
+      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+
+  - label: "tpu6e Correctness tests for Multimodal Inputs"
+    key: tpu6e_multimodal_test
+    depends_on: tpu6e_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu6e"
+    agents:
+      queue: tpu_v6e_queue
+    commands:
+      - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_multi_modal_inference.py
