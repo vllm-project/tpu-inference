@@ -317,10 +317,6 @@ class VllmNvfp4LinearMethod(QuantizeMethodBase, Fp8LinearMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Dequant NVFP4 → requant to FP8 blockwise for TPU kernel."""
         assert isinstance(layer, LinearBase)
-        logger.info(
-            "NVFP4 linear process_weights: layer=%s weight=%s scale=%s",
-            layer._get_name(), layer.weight.shape, layer.weight_scale.shape
-            if hasattr(layer, 'weight_scale') else 'N/A')
 
         # Convert torch tensors to JAX
         weight_packed = t2j(layer.weight, use_dlpack=False)
@@ -384,11 +380,10 @@ class VllmNvfp4LinearMethod(QuantizeMethodBase, Fp8LinearMethod):
             reorder_size=self.linear_config.n_shards,
         )
 
-        # Reshape scale for blockwise kernel: [out, in/block] → [in/block, 1, out]
-        if self.linear_config.enable_quantized_matmul_kernel:
-            weights.weight_scale = jnp.expand_dims(jnp.transpose(
-                weights.weight_scale),
-                                                   axis=1)
+        # Keep scale 2D [out, in/block] — use XLA quantized matmul path
+        # rather than Pallas kernel. The Pallas kernel expects [in/block, 1, out]
+        # but the 3D format causes broadcast issues with the current sharding.
+        # TODO: enable Pallas kernel once scale sharding is verified.
 
         # Shard to TPU mesh
         weights = torch_view(
@@ -410,10 +405,6 @@ class VllmNvfp4LinearMethod(QuantizeMethodBase, Fp8LinearMethod):
             layer.weight_scale = to_parameter_list(weights.weight_scale)
             if bias is not None:
                 layer.bias = to_parameter_list(weights.bias)
-        logger.info(
-            "NVFP4 linear process_weights DONE: layer=%s weight=%s",
-            layer._get_name(), layer.weight.shape if hasattr(
-                layer.weight, 'shape') else [p.shape for p in layer.weight])
 
     def apply(self,
               layer: torch.nn.Module,
@@ -424,12 +415,6 @@ class VllmNvfp4LinearMethod(QuantizeMethodBase, Fp8LinearMethod):
             x_jax = jax_view(x)
             bias_jax = jax_view(
                 bias) if bias is not None and not layer.skip_bias_add else None
-            logger.info(
-                "NVFP4 linear apply: layer=%s x=%s weight=%s fused=%s",
-                layer._get_name(), x.shape,
-                layer.weight.shape if hasattr(layer.weight, 'shape') else
-                [p.shape
-                 for p in layer.weight], self.linear_config.fuse_matmuls)
             if self.linear_config.fuse_matmuls:
                 weight_jax = jax_view(layer.weight)
                 weight_scale_jax = jax_view(layer.weight_scale)
