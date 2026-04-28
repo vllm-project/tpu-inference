@@ -791,3 +791,83 @@ def ragged_gated_delta_rule(
                         decode_only_branch,
                         mixed_prefill_branch,
                         operand=None)
+
+
+@jax.jit(
+    donate_argnames=('recurrent_state', ),
+    static_argnames=(
+        'n_kq',
+        'n_v',
+        'd_k',
+        'd_v',
+        'chunk_size',
+    ),
+)
+@jax.named_scope('ragged_gated_delta_rule_routed_fused_v2')
+def ragged_gated_delta_rule_routed_fused_v2(
+    mixed_qkv,
+    b,
+    a,
+    recurrent_state,
+    A_log,
+    dt_bias,
+    query_start_loc,
+    state_indices,
+    distribution,
+    *,
+    n_kq,
+    n_v,
+    d_k,
+    d_v,
+    chunk_size=64,
+):
+    """Routes between FUSED (decode-only) and V2 (prefill/mixed) implementations."""
+    from tpu_inference.kernels.gdn.fused_gdn_kernel_wrapper import \
+        ragged_gated_delta_rule as ragged_gated_delta_rule_fused
+
+    is_decode_only = distribution[0] == distribution[2]
+
+    def decode_only_branch(_):
+        # FUSED expects post-conv/silu input
+        mixed_qkv_silu = jax.nn.silu(mixed_qkv)
+        return ragged_gated_delta_rule_fused(
+            mixed_qkv=mixed_qkv_silu,
+            b=b,
+            a=a,
+            recurrent_state=recurrent_state,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            query_start_loc=query_start_loc,
+            state_indices=state_indices,
+            distribution=distribution,
+            n_kq=n_kq,
+            n_v=n_v,
+            d_k=d_k,
+            d_v=d_v,
+        )
+
+    def mixed_prefill_branch(_):
+        # V2 fuses SiLU, so we pass raw mixed_qkv
+        return recurrent_scan(
+            mixed_qkv=mixed_qkv,
+            b=b,
+            a=a,
+            recurrent_state=recurrent_state,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            query_start_loc=query_start_loc,
+            state_indices=state_indices,
+            distribution=distribution,
+            n_kq=n_kq,
+            n_v=n_v,
+            d_k=d_k,
+            d_v=d_v,
+            chunk_size=chunk_size,
+            BT=chunk_size,
+            use_qk_norm_in_gdn=True,
+        )
+
+    return jax.lax.cond(is_decode_only,
+                        decode_only_branch,
+                        mixed_prefill_branch,
+                        operand=None)

@@ -254,7 +254,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_with_choices(
         "RAGGED_GATED_DELTA_RULE_IMPL", "ragged_gated_delta_rule_chunked", [
             "ragged_gated_delta_rule_ref", "ragged_gated_delta_rule_chunked",
-            "fused_gdn_kernel", "ragged_recurrent_scan_v2",
+            "fused_gdn_kernel", "ragged_recurrent_scan_v2", "routed_fused_v2",
             "ragged_gated_delta_rule_chunked_scan"
         ]),
     "MOE_ALL_GATHER_ACTIVATION_DTYPE":

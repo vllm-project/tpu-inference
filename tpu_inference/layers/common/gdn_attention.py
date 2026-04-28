@@ -31,6 +31,8 @@ from tpu_inference.layers.common.ragged_conv1d_jax import \
     ragged_conv1d as ragged_conv1d_jax
 from tpu_inference.layers.common.ragged_gated_delta_rule_chunked import \
     ragged_gated_delta_rule as ragged_gated_delta_rule_chunked
+from tpu_inference.layers.common.ragged_gated_delta_rule_chunked import \
+    ragged_gated_delta_rule_routed_fused_v2
 from tpu_inference.layers.common.ragged_gated_delta_rule_ref import \
     ragged_gated_delta_rule as ragged_gated_delta_rule_ref
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -48,6 +50,7 @@ class RaggedGatedDeltaRuleImpl(enum.Enum):
     V2 = "ragged_recurrent_scan_v2"
     COMBINED = "ragged_gated_delta_rule_chunked_scan"
     FUSED = "fused_gdn_kernel"
+    ROUTED_FUSED_V2 = "routed_fused_v2"
 
 
 @jax.tree_util.register_dataclass
@@ -158,6 +161,7 @@ def run_jax_gdn_attention_local(
     elif config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.REF:
         ragged_gdn_impl = functools.partial(
             ragged_gated_delta_rule_ref,
+            has_initial_state=has_initial_state,
             n_kq=n_kq,
             n_v=n_v,
             d_k=d_k,
@@ -167,6 +171,7 @@ def run_jax_gdn_attention_local(
         out_mixed_qkv = jax.nn.silu(out_mixed_qkv)
         ragged_gdn_impl = functools.partial(
             ragged_gated_delta_rule_chunked,
+            has_initial_state=has_initial_state,
             n_kq=n_kq,
             n_v=n_v,
             d_k=d_k,
@@ -219,6 +224,15 @@ def run_jax_gdn_attention_local(
             chunk_size=64,
             # triangle_solver_impl=config.triangle_solver_impl,
             use_v2_in_chunked=True,
+        )
+    elif config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.ROUTED_FUSED_V2:
+        ragged_gdn_impl = functools.partial(
+            ragged_gated_delta_rule_routed_fused_v2,
+            n_kq=n_kq,
+            n_v=n_v,
+            d_k=d_k,
+            d_v=d_v,
+            chunk_size=64,
         )
     else:
         raise ValueError(
