@@ -134,7 +134,9 @@ def main(argv):
             )
             pipeline_yaml = kernel_tuner.generate_buildkite_pipeline(
                 case_set_id=case_set_id, run_id=run_id, desc=case_set_desc)
-            logger.info(f'Generated Buildkite pipeline YAML:\n{pipeline_yaml}')
+            logger.info('Generated Buildkite pipeline YAML (printing to stdout).')
+            print(pipeline_yaml)
+            return pipeline_yaml
         else:
             begin_case_id = _BEGIN_CASE_ID.value
             end_case_id = _END_CASE_ID.value

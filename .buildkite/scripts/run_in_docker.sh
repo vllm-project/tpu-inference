@@ -94,6 +94,10 @@ else
   exit 1
 fi
 
+# Temporary directory for kernel tuning outputs (not persisted)
+KERNEL_TUNING_TMP_DIR="/tmp/kernel_tuning"
+mkdir -p "$KERNEL_TUNING_TMP_DIR"
+
 # Some test scripts set tp=2 on TPU_VERSION=tpu7x to mitigate test failures.
 # TODO (Qiliang Cui) Investigate why tensor-parallel-size=1 breaks in tpu7x.
 
@@ -103,6 +107,7 @@ exec docker run \
   --shm-size=16G \
   --rm \
   -v "$LOCAL_HF_HOME":"$DOCKER_HF_HOME" \
+  -v "$KERNEL_TUNING_TMP_DIR":"$KERNEL_TUNING_TMP_DIR" \
   "${ENV_VARS[@]}" \
   "${TEST_SUITE_VARS[@]}" \
   -e HF_HOME="$DOCKER_HF_HOME" \
