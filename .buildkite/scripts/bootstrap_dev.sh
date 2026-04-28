@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2026 Google LLC
+# Copyright 2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,29 +14,10 @@
 # limitations under the License.
 
 # Bootstrap for the tpu-inference-dev (dev/experimental) pipeline.
-# Sets VLLM_COMMIT_HASH from vllm_lkg.version and uploads pipeline_kernel_tuning.yml.
+# Sets VLLM_COMMIT_HASH from vllm_lkg.version and uploads pipeline_dev.yml.
 # Configure the Buildkite pipeline's "Steps" to run this script.
 
 set -euo pipefail
-
-# Handles the environment state for different TPU generations.
-set_jax_envs() {
-    case $1 in
-        v6)
-            export TPU_VERSION="tpu6e"
-            export TPU_QUEUE_SINGLE="tpu_v6e_queue"
-            export TPU_QUEUE_MULTI="tpu_v6e_8_queue"
-            ;;
-        v7)
-            export TPU_VERSION="tpu7x"
-            export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
-            export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
-            ;;
-        unset)
-            unset TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI
-            ;;
-    esac
-}
 
 echo "--- :git: Setting VLLM_COMMIT_HASH from vllm_lkg.version"
 
@@ -57,13 +38,7 @@ fi
 buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
 echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
 
-# Check whether the KERNEL_TUNING_KERNEL_NAME flag is set in the environment variables.
-# If it is, upload the pipeline_kernel_tuning.yml pipeline, which
-# includes steps for generating kernel tuning cases and running kernel tuning jobs. 
-# If it is not set, upload the regular pipeline_kernel_tuner.yml pipeline. 
-echo "--- :pipeline: Uploading pipeline_kernel_tuning.yml"
-set_jax_envs "${KERNEL_TUNING_TPU_VERSION:-v6}"
-buildkite-agent pipeline upload .buildkite/pipeline_kernel_tuning.yml
-set_jax_envs unset
+echo "--- :pipeline: Uploading pipeline_dev.yml"
+buildkite-agent pipeline upload .buildkite/pipeline_dev.yml
 
-echo "--- Buildkite Kernel Tuning Bootstrap Finished"
+echo "--- Buildkite Dev Bootstrap Finished"
