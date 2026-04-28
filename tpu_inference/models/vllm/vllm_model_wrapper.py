@@ -18,6 +18,7 @@ from collections.abc import Sequence
 from contextlib import nullcontext
 from typing import Any, List, Optional, Tuple
 from unittest.mock import patch
+import jax.numpy as jnp
 
 import jax
 import numpy as np
@@ -409,10 +410,24 @@ class VllmModelWrapper:
         ) -> Any:
 
             with torchax.default_env(), enable_torch_wrap(False):
-                # In the commit approach, we don't use the 'move' function here
-                # because the inputs are already tensors or HashableTensors,
-                # and we rely on JAX to trace them.
-                call_kwargs = kwargs
+                def move(v: Any) -> Any:
+                    if isinstance(v, list):
+                        return [move(x) for x in v]
+                    if isinstance(v, tuple):
+                        return tuple(move(x) for x in v)
+                    if not isinstance(v, torch.Tensor):
+                        
+                        return v
+                    
+                    return v.to(device="jax")
+
+                # Ensure all tensors are moved into accelerator so the
+                # computation with weights can work properly.
+                # Skip moving HashableTensor to preserve its custom __hash__
+                call_kwargs = {
+                    k: jax.tree.map(move, v) if k not in ('image_grid_thw', 'video_grid_thw') else v
+                    for k, v in kwargs.items()
+                }
 
                 output_from_torch = torch.func.functional_call(
                     self.model,
@@ -428,7 +443,21 @@ class VllmModelWrapper:
                 return jax_view(output_from_torch)
 
         def embed_multimodal_func(params_and_buffers: Any, **kwargs):
-            return embed_multimodal_func_jax(params_and_buffers, **kwargs)
+            # Convert PyTorch tensors to JAX arrays on the host side to avoid abstract array errors in JIT
+            def _host_torch_to_jax(v):
+                if isinstance(v, torch.Tensor):
+                    if v.dtype == torch.bfloat16:
+                        return jax.device_put(v.detach().cpu().float().numpy()).astype(jnp.bfloat16)
+                    return jax.device_put(v.detach().cpu().numpy())
+                if isinstance(v, (list, tuple)):
+                    return [_host_torch_to_jax(x) for x in v]
+                return v
+
+            call_kwargs = {
+                k: jax.tree.map(_host_torch_to_jax, v) if k not in ('image_grid_thw', 'video_grid_thw') else v
+                for k, v in kwargs.items()
+            }
+            return embed_multimodal_func_jax(params_and_buffers, **call_kwargs)
 
         return embed_multimodal_func
 
