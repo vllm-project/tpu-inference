@@ -15,8 +15,8 @@
 # pipeline-name: KV Cache Offload
 # pipeline-type: feature support matrix
 steps:
-  - label: "Correctness tests for KV Cache Offload"
-    key: "KV_Cache_Offload_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for KV Cache Offload"
+    key: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_CorrectnessTest"
     soft_fail: true
     env:
       USE_V6E8_QUEUE: "True"
@@ -27,9 +27,9 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v /workspace/tpu_inference/tests/offload/tpu_offload_accuracy_test.py
-  - label: "Record correctness test result for KV Cache Offload"
-    key: "record_KV_Cache_Offload_CorrectnessTest"
-    depends_on: "KV_Cache_Offload_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for KV Cache Offload"
+    key: "${TPU_VERSION:-tpu6e}record_KV_Cache_Offload_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_CorrectnessTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "KV Cache Offload"
@@ -39,11 +39,11 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh KV_Cache_Offload_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}KV_Cache_Offload_CorrectnessTest
 
-  - label: "Performance tests for KV Cache Offload"
-    key: "KV_Cache_Offload_PerformanceTest"
-    depends_on: "record_KV_Cache_Offload_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for KV Cache Offload"
+    key: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}record_KV_Cache_Offload_CorrectnessTest"
     soft_fail: true
     agents:
       queue: tpu_v6e_8_queue
@@ -51,9 +51,9 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v /workspace/tpu_inference/tests/offload/tpu_offload_performance_test.py
-  - label: "Record performance test result for KV Cache Offload"
-    key: "record_KV_Cache_Offload_PerformanceTest"
-    depends_on: "KV_Cache_Offload_PerformanceTest"
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for KV Cache Offload"
+    key: "${TPU_VERSION:-tpu6e}record_KV_Cache_Offload_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_PerformanceTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "KV Cache Offload"
@@ -63,4 +63,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh KV_Cache_Offload_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}KV_Cache_Offload_PerformanceTest

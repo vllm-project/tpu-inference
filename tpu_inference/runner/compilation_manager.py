@@ -585,9 +585,8 @@ class CompilationManager:
                     dummy_shape = (1 if logprobs else 2, )
                     _cache_collision_dummy = jnp.zeros(dummy_shape,
                                                        dtype=jnp.int32)
-                    _cache_collision_dummy = jax.device_put(
-                        _cache_collision_dummy,
-                        NamedSharding(self.runner.mesh, PartitionSpec(None)))
+                    _cache_collision_dummy = device_array(
+                        self.runner.mesh, _cache_collision_dummy)
 
                     sampling_metadata = TPUSupportedSamplingMetadata(
                         temperature=temperature,
@@ -693,9 +692,8 @@ class CompilationManager:
                     dummy_shape = (1 if logprobs_dummy else 2, )
                     _cache_collision_dummy = jnp.zeros(dummy_shape,
                                                        dtype=jnp.int32)
-                    _cache_collision_dummy = jax.device_put(
-                        _cache_collision_dummy,
-                        NamedSharding(self.runner.mesh, PartitionSpec(None)))
+                    _cache_collision_dummy = device_array(
+                        self.runner.mesh, _cache_collision_dummy)
 
                     if do_sampling:
                         compilation_name = "random_rejection_sampler"
@@ -744,9 +742,9 @@ class CompilationManager:
         draft_kv_cache_group_id = num_kv_cache_groups - 1
         block_tables = self.runner.input_batch.block_table[
             draft_kv_cache_group_id].get_cpu_tensor().reshape(-1)
-        block_tables = jax.device_put(
-            block_tables, NamedSharding(self.runner.mesh,
-                                        PartitionSpec(None, )))
+        block_tables = device_array(self.runner.mesh,
+                                    block_tables,
+                                    sharding=PartitionSpec(None, ))
 
         selected_positions = self._create_dummy_tensor(
             (self.runner.max_num_reqs, ), jnp.int32)
@@ -929,9 +927,10 @@ class CompilationManager:
                 num_tokens=num_tokens,
             )
 
-            attention_metadata.query_start_loc = jax.device_put(
+            attention_metadata.query_start_loc = device_array(
+                self.runner.mesh,
                 attention_metadata.query_start_loc,
-                NamedSharding(self.runner.mesh, PartitionSpec()))
+                sharding=PartitionSpec())
             attention_metadata.input_positions = self._create_dummy_tensor(
                 (self.runner.max_num_reqs, ), jnp.int32)
             self._run_compilation(
