@@ -23,7 +23,7 @@ steps:
     commands:
       - |
         if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
-          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_nvidia_Qwen3-30B-A3B-NVFP4_UnitTest" "not enough HBM"
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_nvidia_Qwen3-30B-A3B-NVFP4_UnitTest" "FP8xFP4 matmul not supported on v6e"
         else
           .buildkite/scripts/run_in_docker.sh \
             bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_qwen3.py'
@@ -56,7 +56,7 @@ steps:
     commands:
       - |
         if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
-          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_nvidia_Qwen3-30B-A3B-NVFP4_Accuracy" "not enough HBM"
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_nvidia_Qwen3-30B-A3B-NVFP4_Accuracy" "FP8xFP4 matmul not supported on v6e"
         else
           .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
         fi
@@ -94,7 +94,7 @@ steps:
     commands:
       - |
         if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
-          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_nvidia_Qwen3-30B-A3B-NVFP4_Benchmark" "not enough HBM"
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_nvidia_Qwen3-30B-A3B-NVFP4_Benchmark" "FP8xFP4 matmul not supported on v6e"
         else
           .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
         fi
