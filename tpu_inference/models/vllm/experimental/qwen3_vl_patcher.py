@@ -230,12 +230,15 @@ def apply_qwen3_vl_patches(vllm_model):
         vllm_model, orig_forward, *args, **kwargs)
 
 
-def maybe_apply_qwen3_vl_patches(vllm_model):
+def _is_qwen3_vl(vllm_model):
+    config = getattr(vllm_model, "config", None)
+    architectures = getattr(config, "architectures", []) if config else []
+    return "Qwen3VLForConditionalGeneration" in architectures
 
-    if hasattr(vllm_model, "config") and hasattr(vllm_model.config,
-                                                 "architectures"):
-        if "Qwen3VLForConditionalGeneration" in vllm_model.config.architectures:
-            apply_qwen3_vl_patches(vllm_model)
+
+def maybe_apply_qwen3_vl_patches(vllm_model):
+    if _is_qwen3_vl(vllm_model):
+        apply_qwen3_vl_patches(vllm_model)
 
 
 def maybe_wrap_mm_embed_to_list(vllm_model, mm_embeds):
@@ -244,8 +247,6 @@ def maybe_wrap_mm_embed_to_list(vllm_model, mm_embeds):
     Wrapping the combined tensor in a list is functionally equivalent to passing a list of
     separate tensors because `_merge_multimodal_embeddings` (https://github.com/vllm-project/vllm/blob/978a4462bbc529ff204647543526e4caa08ed974/vllm/model_executor/models/utils.py#L474) flattens the list of tensors anyway.
     """
-    if type(vllm_model
-            ).__name__ == "Qwen3VLForConditionalGeneration" and not isinstance(
-                mm_embeds, list):
+    if _is_qwen3_vl(vllm_model) and not isinstance(mm_embeds, list):
         return [mm_embeds]
     return mm_embeds
