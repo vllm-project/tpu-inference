@@ -462,6 +462,7 @@ class VllmModelWrapper:
                     torch_mm_embeds = torch_mm_embeds[:num_expected]
 
                     # Qwen3-VL expects a list of tensors for multimodal embeddings.
+                    # TODO(muskansh): Remove when the padding logic for mm_embeds is handled in a generic way
                     torch_mm_embeds = maybe_wrap_mm_embed_to_list(
                         self.model.vllm_model, torch_mm_embeds)
 
