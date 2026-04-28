@@ -718,9 +718,15 @@ def ragged_gated_delta_rule(
     a_reshaped = a.reshape(num_tokens, n_v)
 
     def decode_only_branch(_):
-        q_silu = q_reshaped * jax.nn.sigmoid(q_reshaped)
-        k_silu = k_reshaped * jax.nn.sigmoid(k_reshaped)
-        v_silu = v_reshaped * jax.nn.sigmoid(v_reshaped)
+        if use_v2_in_chunked:
+            q_silu = jax.nn.silu(q_reshaped)
+            k_silu = jax.nn.silu(k_reshaped)
+            v_silu = jax.nn.silu(v_reshaped)
+        else:
+            q_silu = q_reshaped
+            k_silu = k_reshaped
+            v_silu = v_reshaped
+
         new_state, output = ragged_gated_delta_rule_decode_only(
             query=q_silu,
             key=k_silu,
@@ -761,9 +767,9 @@ def ragged_gated_delta_rule(
 
         def use_original(_):
             return ragged_gated_delta_rule_mixed_prefill(
-                query=q_reshaped,
-                key=k_reshaped,
-                value=v_reshaped,
+                query=jax.nn.silu(q_reshaped),
+                key=jax.nn.silu(k_reshaped),
+                value=jax.nn.silu(v_reshaped),
                 b_reshaped=b_reshaped,
                 a_reshaped=a_reshaped,
                 A_log=A_log,
@@ -828,7 +834,6 @@ def ragged_gated_delta_rule_routed_fused_v2(
     is_decode_only = distribution[0] == distribution[2]
 
     def decode_only_branch(_):
-        # FUSED expects post-conv/silu input
         mixed_qkv_silu = jax.nn.silu(mixed_qkv)
         return ragged_gated_delta_rule_fused(
             mixed_qkv=mixed_qkv_silu,
