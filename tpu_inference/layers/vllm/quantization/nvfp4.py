@@ -37,8 +37,6 @@ from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
 from vllm.model_executor.layers.quantization.modelopt import \
     ModelOptNvFp4Config
-from vllm.model_executor.layers.quantization.utils.quant_utils import \
-    is_layer_skipped
 from vllm.model_executor.parameter import ModelWeightParameter
 from vllm.model_executor.utils import set_weight_attrs
 
@@ -83,32 +81,21 @@ class VllmNvfp4Config(ModelOptNvFp4Config, VllmQuantConfig):
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional[Union[QuantizeMethodBase]]:
-        match layer:
-            case LinearBase():
-                linear_config = self.get_linear_config(layer)
-                if is_layer_skipped(
-                        prefix=prefix,
-                        ignored_layers=self.ignored_layers,
-                        fused_mapping=self.packed_modules_mapping,
-                ):
-                    return VllmUnquantizedLinearMethod(linear_config)
-                return VllmNvfp4LinearMethod(self, linear_config)
-            case FusedMoE():
-                if is_layer_skipped(
-                        prefix=prefix,
-                        ignored_layers=self.ignored_layers,
-                        fused_mapping=self.packed_modules_mapping,
-                ):
-                    return VllmUnquantizedFusedMoEMethod(layer.moe_config)
-                layer.moe_config = self.get_moe_config(layer)
-                return VllmNvfp4MoEMethod(self, layer, self.mesh)
-            case Attention():
-                logger.warning_once(
-                    "NVFP4 attention quantization is not implemented. "
-                    "Skipping quantization for this layer.")
-                return None
-            case _:
-                return None
+        if isinstance(layer, LinearBase):
+            linear_config = self.get_linear_config(layer)
+            if self.is_layer_excluded(prefix):
+                return VllmUnquantizedLinearMethod(linear_config)
+            return VllmNvfp4LinearMethod(self, linear_config)
+        elif isinstance(layer, FusedMoE):
+            if self.is_layer_excluded(prefix):
+                return VllmUnquantizedFusedMoEMethod(layer.moe_config)
+            layer.moe_config = self.get_moe_config(layer)
+            return VllmNvfp4MoEMethod(self, layer, self.mesh)
+        elif isinstance(layer, Attention):
+            logger.warning_once(
+                "NVFP4 attention quantization is not implemented. "
+                "Skipping quantization for this layer.")
+        return None
 
 
 # ---------------------------------------------------------------------------
