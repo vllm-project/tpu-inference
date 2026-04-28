@@ -92,7 +92,8 @@ class TpuPlatform(Platform):
     simple_compile_backend: str = "openxla"
 
     supported_quantization: list[str] = [
-        "tpu_int8", "compressed-tensors", "awq", "fp8", "gpt_oss_mxfp4"
+        "tpu_int8", "compressed-tensors", "awq", "fp8", "gpt_oss_mxfp4",
+        "modelopt_fp4"
     ]
 
     additional_env_vars: list[str] = [
@@ -285,8 +286,7 @@ class TpuPlatform(Platform):
 
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
-            allowed = ("TPUConnector", "TPUConnectorHMA",
-                       "TPUOffloadConnector")
+            allowed = ("TPUConnector", "TPUConnectorHMA")
             if kv_transfer_config.kv_connector not in allowed:
                 raise ValueError(
                     f"Unsupported kv_connector "
