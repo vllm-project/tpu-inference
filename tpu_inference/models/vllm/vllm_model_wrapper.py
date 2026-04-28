@@ -403,25 +403,18 @@ class VllmModelWrapper:
             return None
 
         # The function cannot be JITted directly due to its dynamic implementation
-        def embed_multimodal_func(
+        @jax.jit(static_argnames=('image_grid_thw', ))
+        def embed_multimodal_func_jax(
             params_and_buffers: Any,
             **kwargs,
         ) -> Any:
 
             with torchax.default_env(), enable_torch_wrap(False):
+                # In the commit approach, we don't use the 'move' function here
+                # because the inputs are already tensors or HashableTensors,
+                # and we rely on JAX to trace them.
+                call_kwargs = kwargs
 
-                def move(v: torch.Tensor) -> torch.Tensor:
-                    if not isinstance(v, torch.Tensor):
-                        logger.warning(f"Expect torch.Tensor, got {type(v)}")
-                        return v
-                    return v.to(device="jax")
-
-                # Ensure all tensors are moved into accelerator so the
-                # computation with weights can work properly.
-                call_kwargs = {
-                    k: jax.tree.map(move, v)
-                    for k, v in kwargs.items()
-                }
                 output_from_torch = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
@@ -434,6 +427,9 @@ class VllmModelWrapper:
                 )
 
                 return jax_view(output_from_torch)
+
+        def embed_multimodal_func(params_and_buffers: Any, **kwargs):
+            return embed_multimodal_func_jax(params_and_buffers, **kwargs)
 
         return embed_multimodal_func
 
