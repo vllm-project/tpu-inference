@@ -68,9 +68,12 @@ logger = init_logger(__name__)
 
 class _VllmRunner(torch.nn.Module):
 
-    def __init__(self, vllm_model: torch.nn.Module):
+    def __init__(self, vllm_model: torch.nn.Module, vllm_config: VllmConfig,
+                 is_draft_model: bool):
         super().__init__()
         self.vllm_model = vllm_model
+        self.vllm_config = vllm_config
+        self.is_draft_model = is_draft_model
 
         has_pooler = is_pooling_model(vllm_model)
         self.pooler = vllm_model.pooler if has_pooler else None
@@ -86,10 +89,12 @@ class _VllmRunner(torch.nn.Module):
             return method(*call_args, **call_kwargs)
         else:
             return self.compute_hidden_state(
-                kwargs["input_ids"],
-                kwargs["positions"],
-                kwargs["intermediate_tensors"],
-                kwargs["inputs_embeds"],
+                input_ids=kwargs["input_ids"],
+                positions=kwargs["positions"],
+                intermediate_tensors=kwargs.get("intermediate_tensors"),
+                inputs_embeds=kwargs["inputs_embeds"],
+                spec_step_idx=kwargs.get("spec_step_idx", 0),
+                hidden_states=kwargs.get("hidden_states"),
             )
 
     def compute_hidden_state(
@@ -98,9 +103,32 @@ class _VllmRunner(torch.nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor],
+        spec_step_idx: int = 0,
+        hidden_states: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_state = self.vllm_model(input_ids, positions,
-                                       intermediate_tensors, inputs_embeds)
+        if self.is_draft_model:
+            if self.vllm_config.speculative_config and self.vllm_config.speculative_config.method == "mtp":
+                hidden_state = self.vllm_model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    inputs_embeds=inputs_embeds,
+                    spec_step_idx=spec_step_idx,
+                )
+            else:
+                hidden_state = self.vllm_model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    inputs_embeds=inputs_embeds,
+                )
+        else:
+            hidden_state = self.vllm_model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+            )
         return hidden_state
 
     def compute_logits(self, hidden_state: torch.Tensor) -> torch.Tensor:
@@ -143,7 +171,8 @@ class VllmModelWrapper:
                 if hasattr(module, "get_pp_group"):
                     setattr(module, "get_pp_group", jax_get_pp_group)
 
-    def load_weights(self):
+    def load_weights(self,
+                     shared_params: Optional[dict[str, jax.Array]] = None):
         loading_start = time.time()
         # Set up to load the model into CPU first.
         # Cache device slice config since device config cannot be deepcopied
@@ -233,11 +262,22 @@ class VllmModelWrapper:
         self.vllm_config.compilation_config.static_all_moe_layers.extend(
             vllm_config_for_load.compilation_config.static_all_moe_layers)
 
+        if shared_params:
+            logger.info("Applying weight sharing with target model.")
+            for name, param in vllm_model.named_parameters():
+                full_name = f"vllm_model.{name}"
+                if full_name in shared_params:
+                    logger.info(f"Sharing parameter: {full_name}")
+                    # torch_view creates a torchax tensor sharing memory with the JAX array
+                    param.data = torchax.interop.torch_view(
+                        shared_params[full_name])
+
         if self.vllm_config.speculative_config and self.vllm_config.speculative_config.method == "eagle3" and not self.is_draft_model:
             set_eagle3_aux_hidden_state_layers(
                 vllm_model, self.vllm_config.speculative_config)
 
-        self.model = _VllmRunner(vllm_model)
+        self.model = _VllmRunner(vllm_model, self.vllm_config,
+                                 self.is_draft_model)
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
 
         self._pooler: Pooler | None = self.model.pooler
@@ -359,7 +399,7 @@ class VllmModelWrapper:
                 "xla_tpu_reduce_scatter_collective_matmul_mode":
                 "post_spmd_conservative"
             },
-            static_argnames=("layer_name_to_kvcache_index", ),
+            static_argnames=("layer_name_to_kvcache_index", "spec_step_idx"),
         )
         def draft_step_fun(
             params_and_buffers,
@@ -368,6 +408,7 @@ class VllmModelWrapper:
             hidden_states: jax.Array,
             attn_metadata: AttentionMetadata,
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
+            spec_step_idx: int = 0,
         ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
             with torchax.default_env(), set_vllm_model_wrapper_context(
@@ -382,17 +423,21 @@ class VllmModelWrapper:
                     kwargs={
                         "input_ids": torch_view(input_ids),
                         "positions": torch_view(attn_metadata.input_positions),
-                        "intermediate_tensors": torch_view(hidden_states),
+                        "hidden_states": torch_view(hidden_states),
                         "inputs_embeds": None,
+                        "spec_step_idx": spec_step_idx,
                     },
                     tie_weights=False,
                 )
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
 
-            hidden_states, hidden_prenorm = output_from_torch
-            hidden_states = jax_view(hidden_states)
-            hidden_prenorm = jax_view(hidden_prenorm)
+            if self.vllm_config.speculative_config.method == "mtp":
+                hidden_states = jax_view(output_from_torch)
+                hidden_prenorm = hidden_states
+            else:
+                hidden_states, hidden_prenorm = jax_view(output_from_torch)
+
             return new_kv_caches, hidden_states, [hidden_prenorm]
 
         return draft_step_fun if self.is_draft_model else step_fun

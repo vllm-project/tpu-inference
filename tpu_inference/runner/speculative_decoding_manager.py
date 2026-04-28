@@ -67,6 +67,7 @@ class SpeculativeDecodingManager:
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         scheduler_output: Optional[VllmSchedulerOutput] = None,
         input_ids: Optional[jnp.ndarray] = None,
+        hidden_states: Optional[jnp.ndarray] = None,
     ) -> None:
         if self.runner.speculative_config.method == "ngram":
             assert isinstance(self.runner.drafter, NgramProposer)
@@ -74,7 +75,7 @@ class SpeculativeDecodingManager:
                 sampled_token_ids[:self.runner.input_batch.num_reqs],
                 self.runner.input_batch.num_tokens_no_spec,
                 self.runner.input_batch.token_ids_cpu)
-        elif self.runner.speculative_config.method == "eagle3":
+        elif self.runner.speculative_config.use_eagle():
             self._draft_token_ids = self.propose_eagle3_draft_token_ids(
                 sampled_token_ids,
                 aux_hidden_states,
@@ -82,6 +83,7 @@ class SpeculativeDecodingManager:
                 spec_decode_metadata,
                 scheduler_output,
                 input_ids,
+                hidden_states,
             )
         else:
             raise NotImplementedError(
@@ -92,12 +94,29 @@ class SpeculativeDecodingManager:
         self,
         sampled_token_ids: list[list[int]],
         aux_hidden_states: Optional[tuple[jnp.ndarray, ...]],
-        attn_metadata: AttentionMetadata,
+        attn_metadata: AttentionMetadata | dict[str, AttentionMetadata],
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         scheduler_output: VllmSchedulerOutput,
         input_ids: jnp.ndarray,
+        hidden_states: jnp.ndarray,
     ) -> list[list[int]]:
         assert isinstance(self.runner.drafter, Eagle3Proposer)
+
+        if isinstance(attn_metadata, dict):
+            # When multiple KV cache groups are used (e.g., in hybrid models),
+            # attn_metadata becomes a dict mapping layer names to AttentionMetadata.
+            # Since all groups share the same seq_lens and input_positions, any would work for those.
+            # However, we specifically look for an attention layer key to get the correct
+            # block_tables structure, just in case the draft model (which is all attention) needs it.
+            attn_key = None
+            for key in attn_metadata.keys():
+                if ".self_attn." in key:
+                    attn_key = key
+                    break
+            if attn_key is not None:
+                attn_metadata = attn_metadata[attn_key]
+            else:
+                attn_metadata = next(iter(attn_metadata.values()))
 
         # TODO(woosuk): Refactor the loop.
         req_ids = self.runner.input_batch.req_ids
@@ -139,10 +158,15 @@ class SpeculativeDecodingManager:
                 self.runner.mesh, np.array(num_rejected_tokens,
                                            dtype=jnp.int32))
 
+        if self.runner.speculative_config.method == "mtp":
+            aux_hidden_states_for_drafter = (hidden_states, )
+        else:
+            aux_hidden_states_for_drafter = aux_hidden_states
+
         target_hidden_states, input_ids, last_token_indices, attn_metadata = self.runner.drafter.prepare_inputs(
             attn_metadata,
             input_ids,
-            aux_hidden_states,
+            aux_hidden_states_for_drafter,
             next_token_ids,
             num_rejected_tokens,
         )

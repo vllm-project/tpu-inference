@@ -232,7 +232,8 @@ def apply_qwen3_vl_patches(vllm_model):
 
 def maybe_apply_qwen3_vl_patches(vllm_model):
 
-    if hasattr(vllm_model, "config") and hasattr(vllm_model.config,
-                                                 "architectures"):
+    if hasattr(vllm_model, "config") and hasattr(
+            vllm_model.config,
+            "architectures") and vllm_model.config.architectures is not None:
         if "Qwen3VLForConditionalGeneration" in vllm_model.config.architectures:
             apply_qwen3_vl_patches(vllm_model)

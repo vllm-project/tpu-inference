@@ -414,6 +414,7 @@ def get_vllm_model(
     rng: jax.Array,
     mesh: Mesh,
     is_draft_model: bool = False,
+    shared_params: Optional[dict[str, jax.Array]] = None,
 ) -> ModelInterface:
     model_dtype = to_torch_dtype(vllm_config.model_config.dtype)
     vllm_config.model_config.dtype = model_dtype
@@ -425,7 +426,7 @@ def get_vllm_model(
         mesh=mesh,
         is_draft_model=is_draft_model,
     )
-    params, lora_manager = model.load_weights()
+    params, lora_manager = model.load_weights(shared_params=shared_params)
 
     jit_model = model.jit_step_func()
     compute_logits_fn = model.jit_compute_logits_func()
@@ -465,6 +466,7 @@ def get_model(
     rng: jax.Array,
     mesh: Mesh,
     is_draft_model: bool = False,
+    shared_params: Optional[dict[str, jax.Array]] = None,
 ) -> ModelInterface:
     if is_draft_model:
         impl = envs.DRAFT_MODEL_IMPL_TYPE
@@ -485,7 +487,7 @@ def get_model(
                         "PP is not fully supported on Jax flax_nnx %s models yet, fallback to vllm models.",
                         arch)
                     return get_vllm_model(vllm_config, rng, mesh,
-                                          is_draft_model)
+                                          is_draft_model, shared_params)
                 try:
                     # Try to load the flax model first
                     return get_flax_model(vllm_config, rng, mesh,
@@ -498,9 +500,10 @@ def get_model(
 
                     # Fall back to the vLLM model and updating the dtype accordingly
                     return get_vllm_model(vllm_config, rng, mesh,
-                                          is_draft_model)
+                                          is_draft_model, shared_params)
         case "vllm":
-            return get_vllm_model(vllm_config, rng, mesh, is_draft_model)
+            return get_vllm_model(vllm_config, rng, mesh, is_draft_model,
+                                  shared_params)
         case _:
             raise NotImplementedError(f"Unsupported MODEL_IMPL_TYPE: {impl}")
 

@@ -69,11 +69,18 @@ class Eagle3Proposer:
 
     def load_model(self, target_model: Any) -> None:
         """Loads the draft model."""
+        shared_names = ["vllm_model.language_model.model.embed_tokens.weight"]
+        shared_params = {
+            k: v
+            for k, v in self.runner.state.items() if k in shared_names
+        }
+
         model = get_model(
             self.vllm_config,
             self.rng_key,
             self.mesh,
             is_draft_model=True,
+            shared_params=shared_params,
         )
 
         self.model_fn = model.model_fn
@@ -115,6 +122,7 @@ class Eagle3Proposer:
             else:
                 logger.info("Draft model has its own embed_tokens.")
         else:
+            return
             EMBED_TOKENS_KEY = 'vllm_model.model.embed_tokens.weight'
             if hasattr(self.model.model.vllm_model, 'has_own_embed_tokens'
                        ) and self.model.model.vllm_model.has_own_embed_tokens:
@@ -171,11 +179,18 @@ class Eagle3Proposer:
 
         positions += 1
         exceeds_max_model_len = positions >= self.runner.max_model_len
+        if exceeds_max_model_len.ndim == 2:
+            exceeds_max_model_len_reduced = jnp.any(exceeds_max_model_len,
+                                                    axis=0)
+        else:
+            exceeds_max_model_len_reduced = exceeds_max_model_len
+
         clamped_positions = jnp.where(exceeds_max_model_len, 0, positions)
 
         new_seq_lens = seq_lens + 1
         new_seq_lens = jnp.minimum(new_seq_lens, self.runner.max_model_len)
-        new_seq_lens = jnp.where(exceeds_max_model_len, 1, new_seq_lens)
+        new_seq_lens = jnp.where(exceeds_max_model_len_reduced, 1,
+                                 new_seq_lens)
 
         num_reqs = seq_lens.shape[0]
         query_start_loc = jnp.arange(num_reqs + 1)
@@ -188,7 +203,7 @@ class Eagle3Proposer:
         # out-of-range access during the model execution. The draft tokens
         # generated with this adjustment should be ignored.
         max_num_blocks_per_req = block_tables.shape[0] // num_reqs
-        expanded_exceeds_mask = jnp.repeat(exceeds_max_model_len,
+        expanded_exceeds_mask = jnp.repeat(exceeds_max_model_len_reduced,
                                            max_num_blocks_per_req)
         new_block_tables = jnp.where(expanded_exceeds_mask, -1, block_tables)
 
@@ -221,9 +236,12 @@ class Eagle3Proposer:
         next_token_ids: jax.Array,
         num_reqs: jax.Array,
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
-        target_hidden_states = jnp.concatenate(aux_hidden_states, axis=-1)
-        target_hidden_states = self.combine_hidden_states_fn(
-            state, target_hidden_states)
+        if self.method == "mtp":
+            target_hidden_states = aux_hidden_states[0]
+        else:
+            target_hidden_states = jnp.concatenate(aux_hidden_states, axis=-1)
+            target_hidden_states = self.combine_hidden_states_fn(
+                state, target_hidden_states)
 
         input_ids, last_token_indices = self._prepare_input_ids(
             query_start_loc, target_token_ids, next_token_ids, num_reqs)
@@ -252,7 +270,8 @@ class Eagle3Proposer:
         and the selected `target_token_ids` and `target_hidden_states`.
         """
         assert aux_hidden_states is not None and len(aux_hidden_states) > 0, (
-            "EAGLE3 requires auxiliary hidden states from the target model.")
+            f"{self.method} requires auxiliary hidden states from the target model."
+        )
 
         # The last KV cache group is for the draft model.
         num_kv_cache_groups = len(self.runner.kv_cache_config.kv_cache_groups)
@@ -368,9 +387,11 @@ class Eagle3Proposer:
             request_distribution=attn_metadata.request_distribution,
         )
 
+        aux_states_processed = [h[token_indices] for h in aux_hidden_states]
+
         target_hidden_states, input_ids, last_token_indices = self._prepare_hidden_states_and_input_ids(
-            state, [h[token_indices] for h in aux_hidden_states],
-            query_start_loc, target_token_ids, next_token_ids, num_reqs)
+            state, aux_states_processed, query_start_loc, target_token_ids,
+            next_token_ids, num_reqs)
 
         return target_hidden_states, input_ids, last_token_indices, attn_metadata
 
@@ -428,7 +449,6 @@ class Eagle3Proposer:
             A tuple containing the updated KV caches and a tensor of proposed
             draft token IDs.
         """
-
         # input_ids and target_hidden_states for the first speculation have been prepared in prepare_inputs() to improve performance.
         kv_caches, hidden_states, residual = self.model_fn(
             self.state,
@@ -437,19 +457,26 @@ class Eagle3Proposer:
             target_hidden_states,
             attn_metadata,
             tuple(self.runner.layer_name_to_kvcache_index.items()),
+            spec_step_idx=0,
         )
 
         if self.num_speculative_tokens == 1:
             return kv_caches, self._select_draft_token_ids(
                 self.state, hidden_states, last_token_indices)
 
-        positions, hidden_states, draft_token_ids = self._select_inputs_for_loop_speculation(
-            self.state, attn_metadata.input_positions, residual[0],
-            hidden_states, last_token_indices)
+        if self.method == "mtp":
+            draft_token_ids = self._select_draft_token_ids(
+                self.state, hidden_states, last_token_indices)
+            draft_token_ids_list = [draft_token_ids]
+            positions = attn_metadata.input_positions[:, last_token_indices]
+            hidden_states = hidden_states[last_token_indices]
+        else:
+            positions, hidden_states, draft_token_ids = self._select_inputs_for_loop_speculation(
+                self.state, attn_metadata.input_positions, residual[0],
+                hidden_states, last_token_indices)
+            draft_token_ids_list = [draft_token_ids]
 
-        draft_token_ids_list = [draft_token_ids]
-
-        for _ in range(self.num_speculative_tokens - 1):
+        for i in range(self.num_speculative_tokens - 1):
             input_ids_loop = draft_token_ids_list[-1]
 
             positions, clamped_positions, new_seq_lens, query_start_loc, new_block_tables = self._update_inputs_for_loop_speculation(
@@ -469,8 +496,10 @@ class Eagle3Proposer:
                 hidden_states,  # This should be the hidden_states from previous step
                 attn_metadata,
                 tuple(self.runner.layer_name_to_kvcache_index.items()),
+                spec_step_idx=i + 1,
             )
-            hidden_states = residual[0]
+            hidden_states = new_hidden_states if self.method == "mtp" else residual[
+                0]
             draft_token_ids = self._get_draft_token_ids(
                 self.state, new_hidden_states)
             draft_token_ids_list.append(draft_token_ids)
