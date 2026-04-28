@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import unittest
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -109,12 +111,11 @@ def sub_channel_quantize(x, quant_dtype, wsz=256):
 
 
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
+@unittest.skipUnless(jtu.is_device_tpu_at_least(version=7), "Expected TPUv7+")
 class MoEKernelTest(jtu.JaxTestCase):
 
     def setUp(self):
         super().setUp()
-        if not jtu.is_device_tpu_at_least(version=7):
-            self.skipTest("Expect TPUv7+")
         self.mesh_devices = sorted(
             jax.devices(),
             key=lambda x: (
