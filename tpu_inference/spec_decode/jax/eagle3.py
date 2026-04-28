@@ -366,6 +366,7 @@ class Eagle3Proposer:
             seq_lens=seq_lens,
             query_start_loc=query_start_loc,
             request_distribution=attn_metadata.request_distribution,
+            mamba_state_indices=attn_metadata.mamba_state_indices,
         )
 
         target_hidden_states, input_ids, last_token_indices = self._prepare_hidden_states_and_input_ids(

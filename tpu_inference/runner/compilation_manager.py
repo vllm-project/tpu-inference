@@ -773,9 +773,16 @@ class CompilationManager:
         request_distribution = device_array(self.runner.mesh,
                                             request_distribution)
         # Dummy mamba_state_indices for spec-decode compile-cache pre-tracing.
-        eagle3_mamba_state_indices = device_array(
-            self.runner.mesh, np.zeros(self.runner.max_num_reqs,
-                                       dtype=np.int32))
+        # Must match the ATTN_DATA sharding `_prepare_inputs_*` produces at
+        # runtime — otherwise the draft model_fn cache misses and the
+        # ForbidCompile guard inside `Eagle3Proposer.propose` raises.
+        dp_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
+        eagle3_mamba_state_indices = device_array(self.runner.mesh,
+                                                  np.zeros(
+                                                      self.runner.max_num_reqs,
+                                                      dtype=np.int32),
+                                                  sharding=dp_sharding)
 
         for num_reqs_padding in self.runner.num_reqs_paddings:
             for i in range(1, self.runner.drafter.num_speculative_tokens + 1):
