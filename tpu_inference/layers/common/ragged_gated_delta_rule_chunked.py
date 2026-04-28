@@ -24,6 +24,7 @@ import jax.numpy as jnp
 from jax import lax
 
 import tpu_inference.kernels.gdn.triangle_solver as triangle_solver
+from tpu_inference.kernels.gdn.recurrent_scan_v2 import recurrent_scan
 
 
 def l2norm(x: jnp.ndarray, dim: int = -1, eps: float = 1e-6) -> jnp.ndarray:
@@ -636,9 +637,11 @@ def ragged_gated_delta_rule_decode_only(
         'd_v',
         'chunk_size',
         'use_qk_norm_in_gdn',
+        'triangle_solver_impl',
+        'use_v2_in_chunked',
     ),
 )
-@jax.named_scope("ragged_gated_delta_rule_chunked")
+@jax.named_scope('ragged_gated_delta_rule_chunked')
 def ragged_gated_delta_rule(
     mixed_qkv: jnp.ndarray,
     b: jnp.ndarray,
@@ -657,6 +660,9 @@ def ragged_gated_delta_rule(
     d_v: int,
     chunk_size: int = 64,
     use_qk_norm_in_gdn: bool = True,
+    triangle_solver_impl: triangle_solver.TriangleSolverImpl = triangle_solver.
+    TriangleSolverImpl.GAUSSIAN,
+    use_v2_in_chunked: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Applies the gated delta rule over ragged seq lengths
 
@@ -688,12 +694,12 @@ def ragged_gated_delta_rule(
       chunk_size: Chunk size for padding in mixed prefill.
       use_qk_norm_in_gdn: Whether to use QK normalization.
 
-    Returns:
-      A tuple containing:
-        - updated_recurrent_state: Updated recurrent state tensor of shape
-          `(num_blocks, n_v, d_k, d_v)`.
-        - output: Output tensor.
-    """
+  Returns:
+    A tuple containing:
+      - updated_recurrent_state: Updated recurrent state tensor of shape
+        `(num_blocks, n_v, d_k, d_v)`.
+      - output: Output tensor.
+  """
     num_tokens = mixed_qkv.shape[0]
     key_dim = n_kq * d_k
     query = mixed_qkv[..., :key_dim]
@@ -729,22 +735,50 @@ def ragged_gated_delta_rule(
         return new_state, output.astype(mixed_qkv.dtype)
 
     def mixed_prefill_branch(_):
-        return ragged_gated_delta_rule_mixed_prefill(
-            query=q_reshaped,
-            key=k_reshaped,
-            value=v_reshaped,
-            b_reshaped=b_reshaped,
-            a_reshaped=a_reshaped,
-            A_log=A_log,
-            dt_bias=dt_bias,
-            query_start_loc=query_start_loc,
-            recurrent_state=recurrent_state,
-            state_indices=state_indices,
-            distribution=distribution,
-            has_initial_state=has_initial_state,
-            chunk_size=chunk_size,
-            use_qk_norm_in_gdn=use_qk_norm_in_gdn,
-        )
+
+        def use_v2(_):
+            return recurrent_scan(
+                mixed_qkv=mixed_qkv,
+                b=b,
+                a=a,
+                recurrent_state=recurrent_state,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                query_start_loc=query_start_loc,
+                state_indices=state_indices,
+                distribution=distribution,
+                n_kq=n_kq,
+                n_v=n_v,
+                d_k=d_k,
+                d_v=d_v,
+                chunk_size=chunk_size,
+                BT=chunk_size,
+                use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+            )
+
+        def use_original(_):
+            return ragged_gated_delta_rule_mixed_prefill(
+                query=q_reshaped,
+                key=k_reshaped,
+                value=v_reshaped,
+                b_reshaped=b_reshaped,
+                a_reshaped=a_reshaped,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                query_start_loc=query_start_loc,
+                recurrent_state=recurrent_state,
+                state_indices=state_indices,
+                distribution=distribution,
+                has_initial_state=has_initial_state,
+                chunk_size=chunk_size,
+                use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+                triangle_solver_impl=triangle_solver_impl,
+            )
+
+        if use_v2_in_chunked:
+            return use_v2(None)
+        else:
+            return use_original(None)
 
     # distribution[0] is decode_end, distribution[2] is mixed_end.
     # If decode_end == mixed_end, all sequences are decode requests.
