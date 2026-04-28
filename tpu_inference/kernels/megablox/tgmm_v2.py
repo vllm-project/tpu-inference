@@ -345,6 +345,60 @@ def generate_tgmm_block_specs(
 
   return (lhs_block_spec, rhs_block_spec), out_block_spec
 
+def _zero_out_empty_groups(
+    lhs_group_sizes_ref,  # int32[size_lhs_group]
+    group_offset_ref,  # int32[1]
+    out_ref,  # [num_actual_groups, k, n]
+    zero_ref,  # [tile_zero_k, num_lanes]
+    semaphore_ref,  # [1]
+    *,
+    is_start: bool,
+):
+  """Zero out drhs[i] when group_sizes[i] == 0.
+
+  When is_start=True, kicks off async DMAs from zero_ref into out_ref.
+  When is_start=False, waits on the matching self-copy DMAs to drain.
+  """
+  num_actual_groups = out_ref.shape[0]
+  tile_zero_k = zero_ref.shape[0]
+  num_lanes = pltpu.get_tpu_info().num_lanes
+  assert out_ref.shape[2] % num_lanes == 0
+
+  if is_start:
+    zero_ref[...] = jnp.zeros_like(zero_ref)
+
+  def fill_zero(local_group_id):
+    for i in range(pl.cdiv(out_ref.shape[1], tile_zero_k)):
+      for j in range(out_ref.shape[2] // num_lanes):
+        size_k_to_copy = min(tile_zero_k, out_ref.shape[1] - i * tile_zero_k)
+        dst = out_ref.at[
+            local_group_id,
+            pl.ds(i * tile_zero_k, size_k_to_copy),
+            pl.ds(j * num_lanes, num_lanes),
+        ]
+        src = zero_ref.at[pl.ds(0, size_k_to_copy)] if is_start else dst
+        dma = pltpu.make_async_copy(
+            src_ref=src,
+            dst_ref=dst,
+            sem=semaphore_ref.at[0],
+        )
+        if is_start:
+          dma.start(priority=1)
+        else:
+          dma.wait()
+
+  for i in range(len(lhs_group_sizes_ref)):
+    local_group_id = i - group_offset_ref[0]
+    should_zero = jnp.logical_and(
+        jnp.logical_and(
+            i >= group_offset_ref[0],
+            i < group_offset_ref[0] + num_actual_groups,
+        ),
+        lhs_group_sizes_ref[i] == 0,
+    )
+    lax.cond(should_zero, fill_zero, lambda local_group_id: None, local_group_id)
+
+
 def zero_out_start(
     lhs_group_sizes_ref,  # int32[size_lhs_group]
     group_offset_ref,  # int32[1]
@@ -352,34 +406,15 @@ def zero_out_start(
     zero_ref,  # [tile_zero_k, num_lanes]
     semaphore_ref,  # [1]
 ):
-  """
-  If group_sizes[i]==0, we want to zero out drhs[i].
-  We issue DMAs unconditionally to avoid lax.cond, but with size 0 if should_zero is False.
-  """
-  zero_ref[...] = jnp.zeros_like(zero_ref)
-  num_actual_groups = out_ref.shape[0]
-  tile_zero_k = zero_ref.shape[0]
-  num_lanes = pltpu.get_tpu_info().num_lanes
-  assert out_ref.shape[2] % num_lanes == 0
-
-  def fill_zero(local_group_id):
-    for i in range(pl.cdiv(out_ref.shape[1], tile_zero_k)):
-      for j in range(out_ref.shape[2]//num_lanes):
-        size_k_to_copy = min(tile_zero_k, out_ref.shape[1] - i*tile_zero_k)
-        dma = pltpu.make_async_copy(
-            src_ref=zero_ref.at[pl.ds(0, size_k_to_copy)],
-            dst_ref=out_ref.at[local_group_id, pl.ds(i*tile_zero_k, size_k_to_copy), pl.ds(j*num_lanes, num_lanes)],
-            sem=semaphore_ref.at[0],
-        )
-        dma.start(priority=1)
-
-  for i in range(len(lhs_group_sizes_ref)):
-    local_group_id = i - group_offset_ref[0]
-    should_zero = jnp.logical_and(
-        jnp.logical_and(i >= group_offset_ref[0], i < group_offset_ref[0] + num_actual_groups),
-        lhs_group_sizes_ref[i] == 0,
-    )
-    lax.cond(should_zero, fill_zero, lambda local_group_id: None, local_group_id)
+  """If group_sizes[i]==0, kick off async DMAs to zero out drhs[i]."""
+  _zero_out_empty_groups(
+      lhs_group_sizes_ref,
+      group_offset_ref,
+      out_ref,
+      zero_ref,
+      semaphore_ref,
+      is_start=True,
+  )
 
 
 def zero_out_end(
@@ -389,27 +424,15 @@ def zero_out_end(
     zero_ref,  # [tile_zero_k, num_lanes]
     semaphore_ref,  # [1]
 ):
-  num_actual_groups = out_ref.shape[0]
-  tile_zero_k = zero_ref.shape[0]
-  num_lanes = pltpu.get_tpu_info().num_lanes
-  assert out_ref.shape[2] % num_lanes == 0
-  def fill_zero(local_group_id):
-    for i in range(pl.cdiv(out_ref.shape[1], tile_zero_k)):
-      for j in range(out_ref.shape[2]//num_lanes):
-        size_k_to_copy = min(tile_zero_k, out_ref.shape[1] - i*tile_zero_k)
-        pltpu.make_async_copy(
-            src_ref=out_ref.at[local_group_id, pl.ds(i*tile_zero_k, size_k_to_copy), pl.ds(j*num_lanes, num_lanes)],
-            dst_ref=out_ref.at[local_group_id, pl.ds(i*tile_zero_k, size_k_to_copy), pl.ds(j*num_lanes, num_lanes)],
-            sem=semaphore_ref.at[0],
-        ).wait()
-
-  for i in range(len(lhs_group_sizes_ref)):
-    local_group_id = i - group_offset_ref[0]
-    should_zero = jnp.logical_and(
-        jnp.logical_and(i >= group_offset_ref[0], i < group_offset_ref[0] + num_actual_groups),
-        lhs_group_sizes_ref[i] == 0,
-    )
-    lax.cond(should_zero, fill_zero, lambda local_group_id: None, local_group_id)
+  """Drain the DMAs started by zero_out_start."""
+  _zero_out_empty_groups(
+      lhs_group_sizes_ref,
+      group_offset_ref,
+      out_ref,
+      zero_ref,
+      semaphore_ref,
+      is_start=False,
+  )
 
 
 def tgmm_kernel_main(
