@@ -37,14 +37,12 @@ unset MODEL_IMPL_TYPE VLLM_XLA_CHECK_RECOMPILATION
 mkdir -p "$LOG_DIR"
 
 # Default model arguments
-MODEL_ARGS="pretrained=$MODEL_NAME,tensor_parallel_size=${TENSOR_PARALLEL_SIZE:-8},dtype=auto,max_model_len=${MAX_MODEL_LEN},gpu_memory_utilization=0.98"
+MODEL_ARGS="pretrained=$MODEL_NAME,tensor_parallel_size=${TENSOR_PARALLEL_SIZE:-8},dtype=auto,max_model_len=$MAX_MODEL_LEN,gpu_memory_utilization=0.98"
 
 # Check if running on tpu7x-8 hardware
 if [[ "$DEVICE" == tpu7x-8 ]]; then
     echo "Running on v7x hardware, adjusting model arguments for DeepSeek-R1."
-    MODEL_ARGS="pretrained=$MODEL_NAME,tensor_parallel_size=${TENSOR_PARALLEL_SIZE:-8},dtype=auto,max_model_len=${MAX_MODEL_LEN},max_num_seqs=${MAX_NUM_SEQS},max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS},gpu_memory_utilization=0.95"
-    # MODEL_ARGS="pretrained=$MODEL_NAME,tensor_parallel_size=8,dtype=auto,max_model_len=2048,max_num_seqs=128,max_num_batched_tokens=128,gpu_memory_utilization=0.95,additional_config={\"sharding\":{\"sharding_strategy\":{\"enable_dp_attention\":true}}}"
-    # MODEL_ARGS="{\"pretrained\": \"${MODEL_NAME}\", \"tensor_parallel_size\": 8, \"dtype\": \"auto\", \"max_model_len\": 2048, \"max_num_seqs\": 128, \"max_num_batched_tokens\": 128, \"gpu_memory_utilization\": 0.95, \"additional_config\": {\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}}"
+    MODEL_ARGS="pretrained=$MODEL_NAME,tensor_parallel_size=${TENSOR_PARALLEL_SIZE:-8},dtype=auto,max_model_len=$MAX_MODEL_LEN,max_num_seqs=$MAX_NUM_SEQS,max_num_batched_tokens=$MAX_NUM_BATCHED_TOKENS,gpu_memory_utilization=0.95"
 fi
 
 CMD=(
