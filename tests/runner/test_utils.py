@@ -346,6 +346,7 @@ def aggregated_stats_logger_fixture(tmp_path):
     with patch(f"{target_module}.datetime") as mock_datetime, \
          patch(f"{target_module}.atexit") as mock_atexit, \
          patch(f"{target_module}.subprocess.run") as mock_subprocess_run, \
+         patch(f"{target_module}.subprocess.Popen") as mock_subprocess_popen, \
          patch(f"{target_module}.tempfile.gettempdir", return_value=str(tmp_path)):
 
         mock_now = MagicMock()
@@ -356,6 +357,7 @@ def aggregated_stats_logger_fixture(tmp_path):
             "mock_datetime": mock_datetime,
             "mock_atexit": mock_atexit,
             "mock_subprocess_run": mock_subprocess_run,
+            "mock_subprocess_popen": mock_subprocess_popen,
             "tmp_path": tmp_path,
         }
 
@@ -426,13 +428,17 @@ def test_aggregated_stats_logger_auto_flush(aggregated_stats_logger_fixture):
                                    flush_interval=flush_interval)
     mock_subprocess_run = aggregated_stats_logger_fixture[
         "mock_subprocess_run"]
+    mock_subprocess_popen = aggregated_stats_logger_fixture[
+        "mock_subprocess_popen"]
 
     for i in range(flush_interval - 1):
         logger.log({"step": i})
     mock_subprocess_run.assert_not_called()
+    mock_subprocess_popen.assert_not_called()
 
     logger.log({"step": flush_interval - 1})
-    mock_subprocess_run.assert_called_once()
+    mock_subprocess_run.assert_not_called()
+    mock_subprocess_popen.assert_called_once()
 
 
 def test_aggregated_stats_logger_close_flushes_and_cleans_up_gcs(
@@ -445,10 +451,11 @@ def test_aggregated_stats_logger_close_flushes_and_cleans_up_gcs(
     logger.log({"step": 1})
     local_file_path = Path(logger.local_temp_file)
 
-    with patch("os.remove") as mock_os_remove:
-        logger.close()
-        mock_subprocess_run.assert_called_once()
-        mock_os_remove.assert_called_once_with(str(local_file_path))
+    assert local_file_path.exists()
+
+    logger.close()
+    mock_subprocess_run.assert_called_once()
+    assert not local_file_path.exists()
 
 
 @pytest.fixture
@@ -504,7 +511,12 @@ def test_phased_profiler_step_calls_aggregated_stats_logger(profiler_fixture):
     """Tests that profiler.step() calls aggregated_stats_logger.log()."""
     profiler = profiler_fixture["profiler"]
     profiler.aggregated_stats_logger = MagicMock()
-    stats = {"batch_id": 1, "tokens": 100}
+    stats = {
+        "batch_id": 1,
+        "tokens": 100,
+        "num_reqs": 2,
+        "total_num_scheduled_tokens": 100
+    }
     profiler.step(stats)
     profiler.aggregated_stats_logger.log.assert_called_once_with(stats)
 
