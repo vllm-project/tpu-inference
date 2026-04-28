@@ -22,15 +22,19 @@ import jax.numpy as jnp
 def _l2_normalize(x: jnp.ndarray, eps: float = 1e-6) -> jnp.ndarray:
     """L2 normalize along last dimension.
 
+    Sum-of-squares and rsqrt run in fp32 even when ``x`` is bf16, to
+    match GPU FLA's ``l2norm_fwd``.
+
     Args:
         x: input to normalize
         eps: epsilon for numerical stability
 
     Returns:
-        normalized x
+        normalized x, in the same dtype as `x`.
     """
-    norm = jnp.sqrt(jnp.sum(x * x, axis=-1, keepdims=True) + eps)
-    return x / norm
+    x_f32 = x.astype(jnp.float32)
+    norm = jnp.sqrt(jnp.sum(x_f32 * x_f32, axis=-1, keepdims=True) + eps)
+    return (x_f32 / norm).astype(x.dtype)
 
 
 def _recurrent_gated_delta_rule_step(
@@ -103,6 +107,7 @@ def ragged_gated_delta_rule(
     query_start_loc,
     state_indices,
     distribution,
+    has_initial_state,
     *,
     n_kq,
     n_v,
@@ -128,6 +133,13 @@ def ragged_gated_delta_rule(
         index.
       distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end,
         mixed_end)`.
+      has_initial_state: Boolean tensor of shape `(max_reqs,)`. ``True`` when
+        the request's slot already holds a valid recurrent state (chunked-
+        prefill continuation, prefix-cache hit, or running decode);
+        ``False`` for brand-new prefills, which must start from zero
+        regardless of the slot's contents. Mirrors GPU's
+        `initial_state[~has_initial_state, ...] = 0` in
+        `gdn_linear_attn._forward_core`.
       n_kq: Number of key/query heads.
       n_v: Number of value heads.
       d_k: Dimension of key.
@@ -159,6 +171,21 @@ def ragged_gated_delta_rule(
     req_indices = jnp.clip(req_indices, 0, max_reqs - 1)
     valid_mask = token_idx < last_valid_loc
 
+    # Zero the carry's recurrent state for slots whose request has no prior
+    # context. We do this once up front so the scan can keep its simple
+    # token-by-token shape: each step reads `recurrent_state_all[state_index]`,
+    # which now holds zeros for new prefills regardless of what stale data
+    # the slot may have held from a previous request. Mirrors GPU's
+    # `initial_state[~has_initial_state, ...] = 0`.
+    gathered_states = recurrent_state[state_indices]
+    masked_initial_states = jnp.where(
+        has_initial_state[:, None, None, None],
+        gathered_states,
+        jnp.zeros_like(gathered_states),
+    )
+    recurrent_state = recurrent_state.at[state_indices].set(
+        masked_initial_states)
+
     def scan_fn(carry, xs):
         recurrent_state_all = carry
         (
@@ -185,7 +212,10 @@ def ragged_gated_delta_rule(
         key_reshaped = curr_k.reshape(B, T, n_kq, d_k)
         value_reshaped = curr_v.reshape(B, T, n_v, d_v)
 
-        beta = jax.nn.sigmoid(curr_b)
+        # Cast b to fp32 before sigmoid to match GPU's
+        # `fused_gdn_gating_kernel`
+        # (`vllm/model_executor/layers/mamba/gdn_linear_attn.py`).
+        beta = jax.nn.sigmoid(curr_b.astype(jnp.float32))
         g = -jnp.exp(A_log.astype(jnp.float32)) * jax.nn.softplus(
             curr_a.astype(jnp.float32) + dt_bias.astype(jnp.float32))
 

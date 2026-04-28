@@ -242,6 +242,8 @@ class TpuPlatform(Platform):
                             min_page_size,
                         )
                         cache_config.block_size = min_page_size  # type: ignore[assignment]
+            if envs.USE_BATCHED_RPA_KERNEL and cache_config.block_size < 256:
+                cache_config.block_size = 256
             logger.info(
                 f"Using KV cache block size: {cache_config.block_size}")
 
@@ -283,7 +285,8 @@ class TpuPlatform(Platform):
 
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
-            allowed = ("TPUConnector", "TPUConnectorHMA")
+            allowed = ("TPUConnector", "TPUConnectorHMA",
+                       "TPUOffloadConnector")
             if kv_transfer_config.kv_connector not in allowed:
                 raise ValueError(
                     f"Unsupported kv_connector "

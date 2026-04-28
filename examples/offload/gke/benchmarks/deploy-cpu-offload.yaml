@@ -1,0 +1,119 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tpu-offline-inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tpu-offline-inference
+  template:
+    metadata:
+      labels:
+        app: tpu-offline-inference
+      #  Uncomment we you need profiler. Export profiler reports to your GCS bucket
+      # annotations:
+      #   gke-gcsfuse/volumes: "true"
+      #   gke-gcsfuse/memory-limit: "50Gi"
+      #   gke-gcsfuse/cpu-limit: "2"
+      #   gke-gcsfuse/ephemeral-storage-limit: "200Gi"
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu7x
+        cloud.google.com/gke-tpu-topology: 2x2x1 # Specify the physical topology for the TPU slice.
+      initContainers:
+        - name: tpu-node-setup
+          image: busybox
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              # WARNING: This changes the HOST memory settings, not just the container.
+              # Required to prevent vLLM crashes due to memory mapping limits.
+              sysctl -w vm.max_map_count=33554432
+
+              # Check if the VFIO IOMMU module parameter exists, and if so, increase the
+              # limit on DMA mappings. This allows the TPU driver to pin and map a
+              # larger number of memory pages for direct hardware access.
+              if [ -f /sys/module/vfio_iommu_type1/parameters/dma_entry_limit ]; then
+                echo 8000000 > /sys/module/vfio_iommu_type1/parameters/dma_entry_limit
+                echo "Successfully increased dma_entry_limit to 8000000"
+              else
+                echo "Warning: vfio_iommu_type1 module parameter not found. Ensure the module is loaded."
+              fi
+
+              echo "Final vm.max_map_count: $(cat /proc/sys/vm.max_map_count)"
+          securityContext:
+            privileged: true
+      containers:
+      - name: tpu-job
+        image: <your-tpu-inference-container-image>
+        imagePullPolicy: Always
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+
+          mkdir -p /tmp/prometheus_multiproc
+          
+          # # Setup profiler directory dynamically
+          # profiler_dir="/mnt/gcs/benchmark_trace/${PROFILER_DIR_NAME}"
+          # mkdir -p "${profiler_dir}"
+          # PROFILER_CONFIG_JSON='{"profiler": "torch", "torch_profiler_dir": "'"${profiler_dir}"'"}'
+          
+          # Run vLLM. Add --profiler-config "${PROFILER_CONFIG_JSON}" to the command to use profiler
+          vllm serve Qwen/Qwen3-235B-A22B-Instruct-2507-FP8 \
+            --kv-transfer-config '{"kv_connector":"TPUOffloadConnector","kv_connector_module_path":"tpu_inference.offload.tpu_offload_connector","kv_role":"kv_both"}' \
+            --port 8000 \
+            --enable-chunked-prefill \
+            --tensor-parallel-size 8 \
+            --seed 42 \
+            --enable_prefix_caching \
+            --gpu-memory-utilization 0.9 
+        env:
+        # ADDED: Variable to control the profiler output directory
+        # - name: PROFILER_DIR_NAME
+        #   value: <your-profiler-dir>
+        - name: PROMETHEUS_MULTIPROC_DIR
+          value: "/tmp/prometheus_multiproc"
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token-secret
+              key: token
+        - name: SKIP_JAX_PRECOMPILE
+          value: "0"
+        - name: TPU_OFFLOAD_NUM_CPU_CHUNKS
+          value: "3268"
+        - name: TPU_OFFLOAD_NUM_STAGING_BLOCKS
+          value: "640"
+        ports:
+        - containerPort: 8000
+        resources:
+          requests:
+            google.com/tpu: 4
+          limits:
+            google.com/tpu: 4
+      #   volumeMounts:
+      #   - name: gcs-bucket
+      #     mountPath: /mnt/gcs
+      # serviceAccountName: kvcache-sa # Ensure this KSA is bound to your Workload Identity
+      # volumes:
+      # - name: gcs-bucket
+      #   csi:
+      #     driver: gcsfuse.csi.storage.gke.io
+      #     volumeAttributes:
+      #       bucketName: <your-gcs-bucket-name>
+      #       mountOptions: "implicit-dirs"

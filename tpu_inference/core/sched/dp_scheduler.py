@@ -132,6 +132,7 @@ def _scheduler_worker_process(
     kv_cache_config: Any,
     structured_output_manager: Any,
     block_size: int,
+    hash_block_size: int,
     mm_registry: Any,
     include_finished_set: bool,
     log_stats: bool,
@@ -144,6 +145,7 @@ def _scheduler_worker_process(
         kv_cache_config=kv_cache_config,
         structured_output_manager=structured_output_manager,
         block_size=block_size,
+        hash_block_size=hash_block_size,
         mm_registry=mm_registry,
         include_finished_set=include_finished_set,
         log_stats=log_stats,
@@ -192,12 +194,9 @@ def _scheduler_worker_process(
                     _send_result(result)
 
                 case SchedulerCommand.GET_GRAMMAR_BITMASK:
-                    if _cached_scheduler_outputs:
-                        cached_output = _cached_scheduler_outputs[-1]
-                    else:
-                        cached_output = None
-                    result = (scheduler.get_grammar_bitmask(cached_output)
-                              if cached_output is not None else None)
+                    assert _cached_scheduler_outputs is not None
+                    cached_output = _cached_scheduler_outputs[-1]
+                    result = scheduler.get_grammar_bitmask(cached_output)
                     _send_result(result)
 
                 case SchedulerCommand.MAKE_STATS:
@@ -301,20 +300,17 @@ class DPSchedulerOutput(SchedulerOutput):
     # (padded_max * dp_size), ensuring consistent shapes across pipeline stages.
     max_num_scheduled_tokens_per_dp_rank: int = 0
     req_ids_per_rank: Optional[Dict[int, List[str]]] = None
-    scheduled_tokens_per_rank: Optional[Dict[int, List[int]]] = None
 
     def __init__(self,
                  *args,
                  assigned_dp_rank=None,
                  max_num_scheduled_tokens_per_dp_rank=0,
                  req_ids_per_rank=None,
-                 scheduled_tokens_per_rank=None,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.assigned_dp_rank = assigned_dp_rank or {}
         self.max_num_scheduled_tokens_per_dp_rank = max_num_scheduled_tokens_per_dp_rank
         self.req_ids_per_rank = req_ids_per_rank or {}
-        self.scheduled_tokens_per_rank = scheduled_tokens_per_rank or {}
 
 
 class DPScheduler(SchedulerInterface):
@@ -343,12 +339,14 @@ class DPScheduler(SchedulerInterface):
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
         block_size: int,
+        hash_block_size: int = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
     ) -> None:
         self.vllm_config = vllm_config
         self.block_size = block_size
+        self.hash_block_size = hash_block_size if hash_block_size is not None else block_size
         self.log_stats = log_stats
         self.connector = None
         self.structured_output_manager = structured_output_manager
@@ -405,6 +403,7 @@ class DPScheduler(SchedulerInterface):
                     self.per_rank_kv_cache_configs[rank],
                     structured_output_manager,
                     block_size,
+                    self.hash_block_size,
                     mm_registry,
                     include_finished_set,
                     log_stats,
@@ -490,8 +489,6 @@ class DPScheduler(SchedulerInterface):
 
             if gc_was_enabled:
                 gc.enable()
-
-            deserialize_time = time()
 
             end_time = time()
             total_time = end_time - start_time
@@ -673,11 +670,8 @@ class DPScheduler(SchedulerInterface):
             assigned_dp_rank[req_id] = self.assigned_dp_rank[req_id]
 
         req_ids_per_rank: Dict[int, List[str]] = {}
-        scheduled_tokens_per_rank: Dict[int, List[int]] = {}
         for rank, output in enumerate(rank_outputs):
             req_ids_per_rank[rank] = list(output.num_scheduled_tokens.keys())
-            scheduled_tokens_per_rank[rank] = list(
-                output.num_scheduled_tokens.values())
 
         return DPSchedulerOutput(
             scheduled_new_reqs=all_new_reqs,
@@ -692,7 +686,6 @@ class DPScheduler(SchedulerInterface):
             assigned_dp_rank=assigned_dp_rank,
             max_num_scheduled_tokens_per_dp_rank=max_scheduled_tokens_per_rank,
             req_ids_per_rank=req_ids_per_rank,
-            scheduled_tokens_per_rank=scheduled_tokens_per_rank,
         )
 
     def _combine_cached_request_data(

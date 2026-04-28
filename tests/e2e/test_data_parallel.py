@@ -61,7 +61,7 @@ def generate_test_prompts(num_prompts: int = 256) -> list[str]:
         "of understanding context, recognizing patterns, and making decisions "
         "with remarkable accuracy. ")
     return [
-        f"Prompt {i}: {base_text} What are your thoughts on this topic?"
+        f"Prompt {i}: {base_text} Write an essay on this topic."
         for i in range(num_prompts)
     ]
 
@@ -207,7 +207,7 @@ def _check_correctness(test_name: str, baseline_outputs: list,
 
     # Validate thresholds
     text_match_rate = text_matches / len(baseline_outputs)
-    assert text_match_rate >= 0.6, f"Text match rate {text_match_rate:.2%} is too low"
+    assert text_match_rate >= 0.7, f"Text match rate {text_match_rate:.2%} is too low"
 
     if total_compared_logprobs > 0:
         assert logprob_match_rate >= 0.9, f"Logprob match rate {logprob_match_rate:.2%} is too low"

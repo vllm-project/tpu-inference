@@ -19,20 +19,30 @@ set -euo pipefail
 # Assign the first argument to a local variable
 RAW_FILES_TO_CHECK="${1:-}"
 
-# Pre-filter: Only include .yml or .yaml files located within the .buildkite/ directory
-# Using '|| true' to prevent the script from exiting if no matches are found
-# This automatically ignores .github/, root level yamls, etc.
-YAML_FILES_TO_CHECK=$(echo "$RAW_FILES_TO_CHECK" | grep -E "^\.buildkite/.*\.ya?ml$" || true)
+# Define directories relative to the repo root for exact matching
+EXCLUDED_FOLDERS=(
+    "\.buildkite/kubernetes/"
+    "\.buildkite/benchmark/lm_eval/"
+)
+
+# Convert the array into a pipe-separated string for regex
+EXCLUDE_PATTERN=$(printf "|%s" "${EXCLUDED_FOLDERS[@]}")
+EXCLUDE_PATTERN=${EXCLUDE_PATTERN:1}
+
+# Filter: Include YAML files in .buildkite/ while skipping excluded patterns
+YAML_FILES_TO_CHECK=$(echo "$RAW_FILES_TO_CHECK" | \
+    grep -E "^\.buildkite/.*\.ya?ml$" | \
+    grep -Ev "^($EXCLUDE_PATTERN)" || true)
 
 # Early exit: If no YAML files were modified, skip validation
 if [ -z "$YAML_FILES_TO_CHECK" ]; then
-    echo "--- :crossed_fingers: No YAML changes detected. Skipping validation."
+    echo "--- :fast_forward: No applicable YAML changes found (none detected or all excluded). Skipping validation."
     exit 0
 fi
 
 VALIDATE_ARGS=()
 
-echo "--- 📂 Preparing files for validation"
+echo "--- 📂 Preparing all files for validation"
 
 # Iterate through the list to build the arguments array and check file existence
 while IFS= read -r file; do
@@ -50,7 +60,7 @@ while IFS= read -r file; do
 
 done < <(echo "$YAML_FILES_TO_CHECK")
 
-echo "--- 🔍 Validating changed YAML files"
+echo "--- 🔍 Executing Buildkite syntax validation..."
 if [ ${#VALIDATE_ARGS[@]} -gt 0 ]; then
     # TODO: Currently using standard 'bk pipeline validate' for syntax checking.
     # In the future, this could be extended to include more complex validation logic.
@@ -59,7 +69,7 @@ if [ ${#VALIDATE_ARGS[@]} -gt 0 ]; then
         echo "Result: FAIL (Please fix the YAML syntax errors above)"
         exit 1
     else
-        echo "+++ ✅ Validation Successful"
+        echo "✅ YAML syntax validation passed."
         echo "Result: SUCCESS"
         exit 0
     fi

@@ -1,0 +1,120 @@
+{
+  "global_env": {
+    "GCP_PROJECT_ID": "cloud-tpu-inference-test",
+    "GCS_BUCKET": "vllm-cb-storage2",
+    "GCP_INSTANCE_ID": "vllm-bm-inst",
+    "GCP_DATABASE_ID": "vllm-bm-bk-runs"
+  },
+  "benchmark_cases": [
+    {
+      "case_name": "Qwen3-4B-dataset_custom-inlen_4096-outlen_1024-C1",
+      "ci_queue": [
+        "tpu_v6e_queue"
+      ],
+      "env": {
+        "MODELTAG": "NEW",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 4096,
+        "OUTPUT_LEN": 1024,
+        "PREFIX_LEN": 3600
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "MODEL_IMPL_TYPE": "vllm",
+          "NEW_MODEL_DESIGN": "1"
+        },
+        "args": {
+          "model": "Qwen/Qwen3-4B",
+          "seed": 42,
+          "max-num-seqs": 512,
+          "max-num-batched-tokens": 4096,
+          "tensor-parallel-size": {
+            "v6e-1": 1,
+            "v6e-8": 8,
+            "v7x-2": 2,
+            "v7x-8": 8,
+            "default": 1
+          },
+          "no-enable-prefix-caching": true,
+          "max-model-len": 5120,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.98,
+          "async-scheduling": true,
+          "additional-config": "{\"quantization\": { \"qwix\": { \"rules\": [{ \"module_path\": \".*\", \"weight_qtype\": \"float8_e4m3fn\", \"act_qtype\": \"float8_e4m3fn\"}]}}}"
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "Qwen/Qwen3-4B",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "custom",
+          "dataset-path": "/workspace/tpu_inference/artifacts/dataset/Qwen3-4B/inlen4096_outlen1024_prefixlen3600.jsonl",
+          "num-prompts": 1000,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true,
+          "custom-output-len": 1024,
+          "skip-chat-template": true
+        }
+      }
+    },
+    {
+      "case_name": "Qwen3-4B-dataset_custom-inlen_4096-outlen_1024-C2",
+      "ci_queue": [
+        "tpu_v7x_2_queue"
+      ],
+      "env": {
+        "MODELTAG": "NEW",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 4096,
+        "OUTPUT_LEN": 1024,
+        "PREFIX_LEN": 3600
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "MODEL_IMPL_TYPE": "vllm",
+          "NEW_MODEL_DESIGN": "1"
+        },
+        "args": {
+          "model": "Qwen/Qwen3-4B",
+          "seed": 42,
+          "max-num-seqs": 512,
+          "max-num-batched-tokens": 4096,
+          "tensor-parallel-size": {
+            "v6e-1": 1,
+            "v6e-8": 8,
+            "v7x-2": 2,
+            "v7x-8": 8,
+            "default": 1
+          },
+          "no-enable-prefix-caching": true,
+          "max-model-len": 5120,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.98,
+          "async-scheduling": true,
+          "additional-config": "{\"quantization\": { \"qwix\": { \"rules\": [{ \"module_path\": \".*\", \"weight_qtype\": \"float8_e4m3fn\", \"act_qtype\": \"float8_e4m3fn\"}]}}}"
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "Qwen/Qwen3-4B",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "custom",
+          "dataset-path": "/workspace/tpu_inference/artifacts/dataset/Qwen3-4B/inlen4096_outlen1024_prefixlen3600.jsonl",
+          "num-prompts": 1000,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true,
+          "custom-output-len": 1024,
+          "skip-chat-template": true
+        }
+      }
+    }
+  ]
+}
