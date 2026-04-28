@@ -222,11 +222,14 @@ def _dequantize_nvfp4_weights(
     )
 
 
-class VllmNvfp4LinearMethod(Fp8LinearMethod):
+class VllmNvfp4LinearMethod(QuantizeMethodBase, Fp8LinearMethod):
     """NVFP4 linear method for TPU.
 
     Loads NVFP4 weights, dequantizes, re-quantizes to FP8 blockwise,
     then uses the existing FP8 kernel path for inference.
+
+    Inherits QuantizeMethodBase so vLLM's process_weights_after_loading
+    discovery (isinstance check) finds this method on linear modules.
     """
 
     def __init__(
