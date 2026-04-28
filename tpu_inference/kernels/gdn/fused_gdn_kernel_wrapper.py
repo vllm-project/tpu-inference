@@ -120,7 +120,7 @@ def fused_gdn(
     state_indices: jax.Array,  # [max_num_req] int32
     distribution: jax.Array,  # [2] int32
     b: jax.Array | None = None,  # [T, H_v] or None
-    has_initial_state: jax.Array | None = None,  # [max_num_req] bool/int
+    has_initial_state: jax.Array | None = None,  # [max_num_req] bool
     scale: float | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     use_gate_in_kernel: bool = False,
@@ -145,8 +145,8 @@ def fused_gdn(
         distribution: ``i32[2]`` — ``(decode_end, total)``.
         b: Raw betas ``[T, H_v]`` (sigmoid applied inside kernel).
             ``None`` means beta=1 (no beta gating).
-        has_initial_state: Boolean / int32 ``[max_num_req]``. ``True`` /
-            non-zero when the request's recurrent slot already holds a
+        has_initial_state: Boolean tensor of shape ``[max_num_req]``.
+            ``True`` when the request's recurrent slot already holds a
             valid prior state (chunked-prefill continuation, prefix-cache
             hit, or running decode). ``False`` for brand-new prefills,
             whose slot is zeroed inside the recurrent kernel before the
@@ -202,9 +202,10 @@ def fused_gdn(
         A_log = jnp.broadcast_to(A_log[:, None], (H_v, num_lanes)).astype(
             jnp.float32)  # [H_v, num_lanes]
 
-    # Default to all-True (no masking), matching the pre-fix behaviour.
-    # Cast to int32 for SMEM compatibility — the recurrent kernel checks
-    # `has_init == 0` to decide whether to zero h0.
+    # Public contract is Boolean (matching the chunked / ref impls);
+    # cast to int32 here for SMEM compatibility — the recurrent kernel
+    # checks `has_init == 0` to decide whether to zero h0. Default to
+    # all-True (no masking), matching the pre-fix behaviour.
     max_num_req = state_indices.shape[0]
     if has_initial_state is None:
         has_initial_state = jnp.ones((max_num_req, ), dtype=jnp.int32)
@@ -264,14 +265,14 @@ def ragged_gated_delta_rule(
         query_start_loc: ``(num_seqs+1,)`` int32.
         state_indices: ``(num_seqs,)`` int32.
         distribution: ``(3,)`` int32 — ``(decode_end, prefill_end, mixed_end)``.
-        has_initial_state: Optional ``(max_reqs,)`` bool / int32. ``True``
-            / non-zero when the request's slot already holds a valid
-            prior recurrent state; ``False`` for brand-new prefills (the
-            recurrent kernel zeros h0 for those slots so stale data from
-            a reused mamba slot doesn't leak). ``None`` (default) is
-            treated as all-True, preserving the pre-PR-#2408 behaviour.
-            Pass it when you want the same stale-slot guard the chunked
-            and ref impls already enforce.
+        has_initial_state: Optional Boolean tensor of shape
+            ``(max_reqs,)``. ``True`` when the request's slot already
+            holds a valid prior recurrent state; ``False`` for brand-new
+            prefills (the recurrent kernel zeros h0 for those slots so
+            stale data from a reused mamba slot doesn't leak). ``None``
+            (default) is treated as all-True, preserving the
+            pre-PR-#2408 behaviour. Pass it when you want the same
+            stale-slot guard the chunked and ref impls already enforce.
         n_kq: Number of key/query heads.
         n_v: Number of value heads.
         d_k: Key dimension.

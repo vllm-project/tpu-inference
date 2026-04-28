@@ -314,15 +314,18 @@ class FusedGdnKernelTest(jtu.JaxTestCase):
                             check_dtypes=False)
 
     @parameterized.named_parameters(
-        # `all_true` covers the True-preserves-loaded-state path;
-        # `alternating` exercises the per-slot SMEM lookup (catches
-        # off-by-one or uniformly-applied conditional). The all-False
-        # case is covered by `test_has_initial_state_zeros_stale_slot`
-        # (which is a stronger test — fused-with-stale vs
-        # fused-with-fresh, directly validating the kernel's zeroing
-        # rather than just matching ref). Extra positional patterns
-        # (first-only / last-only / etc.) add CI time without new
-        # coverage given the kernel's per-seq SMEM-indexed conditional.
+        # Two patterns chosen for orthogonal coverage:
+        #   * `all_true` — every slot uses its loaded h0 (no
+        #     zeroing); the continuation case.
+        #   * `alternating` — has_initial_state varies by slot, so
+        #     the kernel must look up the right SMEM entry per
+        #     seq; catches off-by-one or uniformly-applied
+        #     conditional bugs.
+        # The all-False case is covered by
+        # `test_has_initial_state_zeros_stale_slot`, which directly
+        # compares fused-with-stale vs fused-with-fresh rather than
+        # matching the ref. Extra patterns (first-only, last-only,
+        # ...) add CI time without new coverage.
         dict(testcase_name="all_true", pattern=[True, True, True, True]),
         dict(testcase_name="alternating", pattern=[True, False, True, False]),
     )
