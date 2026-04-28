@@ -62,6 +62,13 @@ echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH"
 # includes steps for generating kernel tuning cases and running kernel tuning jobs. 
 # If it is not set, upload the regular pipeline_kernel_tuner.yml pipeline. 
 echo "--- :pipeline: Uploading pipeline_kernel_tuning.yml"
+echo "Pipeline env vars:"
+echo "  KERNEL_TUNING_CASE_SET_ID=${KERNEL_TUNING_CASE_SET_ID:-}"
+echo "  KERNEL_TUNING_RUN_ID=${KERNEL_TUNING_RUN_ID:-}"
+echo "  KERNEL_TUNING_KERNEL_NAME=${KERNEL_TUNING_KERNEL_NAME:-}"
+echo "  KERNEL_TUNING_CASE_SET_DESC=${KERNEL_TUNING_CASE_SET_DESC:-}"
+echo "  KERNEL_TUNING_TPU_VERSION=${KERNEL_TUNING_TPU_VERSION:-}"
+echo "  HOST_NAME=${HOST_NAME:-}"
 set_jax_envs "${KERNEL_TUNING_TPU_VERSION:-v6}"
 buildkite-agent pipeline upload .buildkite/pipeline_kernel_tuning.yml
 set_jax_envs unset
