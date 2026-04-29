@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     LORA_MODULE_PATH: str = ""
     SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
     SLICE_ROPE_CACHE: bool = False
+    KIMI_QUANTIZE_ATTN_TO_FP8: bool = False
 
 
 def env_with_choices(
@@ -424,6 +425,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("SLICE_ROPE_CACHE", default=False),
     "MLA_TRANSPOSE_KV_CACHE":
     env_bool("MLA_TRANSPOSE_KV_CACHE", default=False),
+    "KIMI_QUANTIZE_ATTN_TO_FP8":
+    env_bool("KIMI_QUANTIZE_ATTN_TO_FP8", default=False),
 }
 
 
