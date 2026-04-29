@@ -116,7 +116,7 @@ cleanup_instances() {
   pkill -9 -f "vllm" || true
   pkill -9 -f "toy_proxy_server" || true
   pkill -9 -f "multiprocess" || true
-  sudo fuser -k "/dev/accel*" || true
+  fuser -k "/dev/accel*" || true
   sleep 10
 }
 
