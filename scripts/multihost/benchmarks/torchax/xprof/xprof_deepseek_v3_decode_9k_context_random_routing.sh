@@ -36,5 +36,5 @@ bash "${NIGHTLY_SCRIPT}" \
   --moe-all-gather-activation-dtype "fp8" \
   --force-moe-random-routing "1" \
   --phased-profiling-dir "gs://tpu-commons-ci/xprof/deepseek-r1/torchax/decoode-9k-context-random-routing" \
-  --phased-profiler-decode-only-kv-len-threshold 9200 \
+  --phased-profiler-decode-only-kv-len-threshold 9100 \
   --skip-db-upload
