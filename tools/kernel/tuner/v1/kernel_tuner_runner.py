@@ -118,7 +118,8 @@ def main(argv):
     kernel_tuner = kernel_tuner_cls(storage_manager)
 
     tpu_version = _TPU_VERSION.value
-    tpu_queue_multi = 'tpu_v6e_8_queue' if tpu_version == 'v6' else 'tpu_v7x_8_queue'
+    assert tpu_version in ['v6e', 'v7x'], f'Unsupported TPU version: {tpu_version}. Supported versions are "v6e" and "v7x".'
+    tpu_queue_multi = 'tpu_v6e_8_queue' if tpu_version == 'v6e' else 'tpu_v7x_8_queue'
 
     if _RUN_LOCALLY.value:
         logger.info(
