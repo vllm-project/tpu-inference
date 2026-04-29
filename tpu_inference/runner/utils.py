@@ -583,19 +583,21 @@ class PhasedBasedProfiler:
                     num_reqs: The number of requests in the batch.
                     phase: The phase of the inference the batch is in.
         """
-        if self.aggregated_stats_logger is not None:
-            self.aggregated_stats_logger.log(batch_composition_stats)
 
-        have_seen_all_phases = all(self.inference_phase_seen.values())
         # We want to start profiling only after the first trial request
         is_past_initial_request = batch_composition_stats[
             "num_reqs"] > 1 and batch_composition_stats[
                 "total_num_scheduled_tokens"] > 1
-        if is_past_initial_request and (not have_seen_all_phases
-                                        or self.current_phase != ""):
-            # We haven't started profiling yet
-            if self.profiling_n_steps_left <= 0:
-                self._start_profiling(batch_composition_stats)
-            # We are in the middle of profiling a given phase
-            else:
-                self._step_or_stop_profiling(batch_composition_stats)
+
+        if is_past_initial_request:
+            if self.aggregated_stats_logger is not None:
+                self.aggregated_stats_logger.log(batch_composition_stats)
+
+            have_seen_all_phases = all(self.inference_phase_seen.values())
+            if (not have_seen_all_phases or self.current_phase != ""):
+                # We haven't started profiling yet
+                if self.profiling_n_steps_left <= 0:
+                    self._start_profiling(batch_composition_stats)
+                # We are in the middle of profiling a given phase
+                else:
+                    self._step_or_stop_profiling(batch_composition_stats)
