@@ -234,7 +234,7 @@ class KernelTunerBase(ABC):
                 "label":
                 f"cs_id={case_set_id} rid={run_id} Bucket([{case_id_start}, {case_id_end}))",
                 "depends_on":
-                f"tpu{tpu_version}_build_docker",  # Adjust to your Buildkite step dependency
+                f"{tpu_version}_build_docker",  # Adjust to your Buildkite step dependency
                 "agents": {
                     "queue": tpu_queue_multi
                 },  # Adjust to your TPU queue
