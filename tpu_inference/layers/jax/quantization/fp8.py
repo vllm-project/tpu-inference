@@ -70,11 +70,23 @@ def load_fp8_weight(jax_param: nnx.Param, torch_weight: torch.Tensor,
 
     jax_weight = t2j(torch_weight, use_dlpack=False)
 
+    # Handle transposes if PyTorch and JAX shapes are reversed (e.g. [out, in] vs [in, out])
+    val = jax_param.get_value()
+    jax_shape = getattr(val, "shape", None)
+    if jax_shape and jax_weight.ndim == 2 and jax_weight.shape != jax_shape:
+        if jax_weight.shape == jax_shape[::-1]:
+            logger.info(
+                f"Transposing {param_name} during load: {jax_weight.shape} -> {jax_shape}"
+            )
+            jax_weight = jax_weight.T
+
     if jax_weight.dtype != jnp.float8_e4m3fn:
+        # Avoid indexing into ShapeDtypeStruct during abstract loading
+        target_dtype = getattr(val, "dtype", getattr(val, "qtype", None))
         logger.warning(
-            f"Loading {param_name}: casting from {jax_weight.dtype} to {jax_param[...].dtype}"
+            f"Loading {param_name}: casting from {jax_weight.dtype} to {target_dtype}"
         )
-        jax_weight = jax_weight.astype(jax_param[...].dtype)
+        jax_weight = jax_weight.astype(target_dtype)
 
     jax_param.set_raw_value(shard_put(jax_weight, spec, mesh=mesh))
 
@@ -155,11 +167,23 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
                 out += bias
             return out
 
+        original_shape = x.shape
+        num_in_dims = len(self.linear_config.in_features)
+
+        if len(x.shape) > 2:
+            x = x.reshape(-1, self.in_features)
+
         out = self._apply_fused(x,
                                 layer.weight[...],
                                 layer.weight_scale[...],
                                 bias=bias)
-        out = out.reshape(out.shape[:-1] + self.output_shape)
+
+        if len(original_shape) > 2:
+            out = out.reshape(original_shape[:-num_in_dims] +
+                              self.output_shape)
+        else:
+            out = out.reshape(out.shape[:-1] + self.output_shape)
+
         return out
 
 

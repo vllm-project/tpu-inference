@@ -840,12 +840,12 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                 print(f"DEBUG: JaxAutoWeightsLoader found param: {name}")
                 reshape_dims = None
                 permute_dims = None
-                if any(substr in name
-                       for substr in ["k_proj.weight", "v_proj.weight"]):
+                if name.endswith("k_proj.weight") or name.endswith(
+                        "v_proj.weight"):
                     D, N, H = param.value.shape
                     reshape_dims = (N, H, D)
                     permute_dims = (2, 0, 1)
-                if any(substr in name for substr in ["q_proj.weight"]):
+                if name.endswith("q_proj.weight"):
                     if envs.LAYOUT_Q_PROJ_AS_NDH:
                         N, D, H = param.value.shape
                         reshape_dims = (N, H, D)
@@ -854,18 +854,18 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                         D, N, H = param.value.shape
                         reshape_dims = (N, H, D)
                         permute_dims = (2, 0, 1)
-                elif any(substr in name for substr in
-                         ["q_proj.bias", "k_proj.bias", "v_proj.bias"]):
+                elif name.endswith("q_proj.bias") or name.endswith(
+                        "k_proj.bias") or name.endswith("v_proj.bias"):
                     N, H = param.value.shape
                     reshape_dims = (N, H)
                     permute_dims = (0, 1)
-                elif "o_proj.weight" in name:
+                elif name.endswith("o_proj.weight"):
                     N, H, D = param.value.shape
                     reshape_dims = (D, N, H)
                     permute_dims = (1, 2, 0)
-                elif "embed_tokens.weight" in name:
+                elif name.endswith("embed_tokens.weight"):
                     permute_dims = (0, 1)
-                elif "lm_head" in name:
+                elif name.endswith("lm_head"):
                     permute_dims = (1, 0)
 
                 param.set_metadata(

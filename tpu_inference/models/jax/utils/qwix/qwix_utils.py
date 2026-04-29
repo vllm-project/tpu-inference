@@ -215,6 +215,38 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
     }
     model = qwix.quantize_model(model, qwix.PtqProvider(qwix_rules),
                                 **model_input)
+
+    # Display model structure after quantization while QArray objects are still intact
+    # (JAX JIT will flatten them later).
+    logger.info(
+        "Model structure after qwix.quantize_model (Layer-skipped printout):")
+    num_layers_to_display = 2
+    should_skip_layer_display = False
+    for path, node in nnx.iter_graph(model):
+        if not isinstance(node, (nnx.Variable, QArray)):
+            continue
+
+        name = ".".join(str(p) for p in path)
+        if f"layers.{num_layers_to_display}." in name and "vision_tower" not in name:
+            should_skip_layer_display = True
+        if should_skip_layer_display and "layers." in name and "vision_tower" not in name:
+            continue
+
+        v = node.value if isinstance(node, nnx.Variable) else node
+        prefix = "[Q]" if isinstance(v, QArray) else "[P]"
+
+        # Check for Qwix QArray or similar custom array types
+        q_info = ""
+        if hasattr(v, "qtype"):
+            q_info = f" {v.qtype}"
+        elif hasattr(v, "qdata"):
+            q_info = f" qdata_dtype={getattr(v.qdata, 'dtype', 'unknown')}"
+
+        if hasattr(v, "shape") and hasattr(v, "dtype"):
+            logger.info(f"  {prefix} {name} : {v.dtype}{v.shape}{q_info}")
+        else:
+            logger.info(f"  {prefix} {name} : {type(v)}{q_info}")
+
     return model
 
 
@@ -630,7 +662,7 @@ def manually_quantize_qwix_weight(name: str, weight: jax.Array,
                                   qtype: jnp.dtype,
                                   channelwise_axes: List[int],
                                   tiled_axes: dict,
-                                  calibration_method: str) -> QArray:
+                                  calibration_method: str) -> ptq.WithAux:
     """
     Manually quantizes a weight tensor using Qwix.  Only needed for the SparseMatmul DeepSeek case right now, since
     otherwise, Qwix will handle this automatically (through our application of `qwix.quantize_model`).
@@ -642,7 +674,27 @@ def manually_quantize_qwix_weight(name: str, weight: jax.Array,
         tiled_axes=tiled_axes,
         calibration_method=calibration_method)
 
-    return ptq.create_quantized_param(name, weight, how_to_quantize)
+    unboxed = ptq.WithAux(ptq.qarray.quantize(weight, how_to_quantize),
+                          how_to_quantize)
+
+    # The following code is about replacing the saved param with WithAux, with
+    # correct metadata. This part is copied from ptq.create_quantized_param
+    # but made safer for cases where the attribute does not exist yet (e.g. Gemma4 MoE fusion).
+    try:
+        from qwix._src import flax_util
+        module = flax_util.get_current_module()
+        if isinstance(module, nnx.Module) and hasattr(module, name):
+            param = getattr(module, name)
+            boxed = jax.tree.map(
+                lambda value: flax_util.update_boxed(param, value=value),
+                unboxed)
+            setattr(module, name, boxed)
+    except Exception:
+        # If we can't find the module or the attribute, just return the unboxed quantized weight.
+        # This happens during Gemma4 MoE weight loading where we are fusing weights.
+        pass
+
+    return unboxed
 
 
 def manually_quantize_qwix_activation(inputs: jax.Array, rule_name: str,

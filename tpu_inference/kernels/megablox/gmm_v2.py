@@ -937,7 +937,10 @@ def validate_inputs(
         assert rhs_bias.shape == (size_group, 1, size_n)
     if rhs_scale is not None:
         num_quant_blocks = rhs_scale.shape[1]
-        assert rhs_scale.shape == (size_group, num_quant_blocks, 1, size_n)
+        if rhs_scale.shape != (size_group, num_quant_blocks, 1, size_n):
+            raise ValueError(
+                f"rhs_scale shape {rhs_scale.shape} does not match expected ({size_group}, {num_quant_blocks}, 1, {size_n})"
+            )
         assert size_k % num_quant_blocks == 0
 
     assert group_offset.shape == (1, )

@@ -632,6 +632,9 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             if "model.lm_head" in name:
                 name = name.replace("model.lm_head", "lm_head")
 
+            if "weight_scale_inv" in name and "experts" not in name:
+                name = name.replace("weight_scale_inv", "weight_scale")
+
             return name
 
         def process_tensor(mapped_name, tensor):
@@ -676,13 +679,49 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                             was_loaded = True
 
                 if not was_loaded:
+                    # Force rename of weight_scale_inv just to be absolutely sure
+                    if "weight_scale_inv" in mapped_name and "experts" not in mapped_name:
+                        mapped_name = mapped_name.replace(
+                            "weight_scale_inv", "weight_scale")
                     yield mapped_name, process_tensor(mapped_name, weight)
 
                 loaded_original_names.add(name)
 
         mapped_weights = list(mapped_weights_generator())
         mapped_weights.sort(key=lambda x: x[0])
+
+        # DEBUG: Check if weight_scale_inv is still in mapped_weights
+        for m_name, _ in mapped_weights:
+            if "weight_scale_inv" in m_name and "experts" not in m_name:
+                logger.error(
+                    f"FATAL: mapped_weights STILL contains weight_scale_inv: {m_name}"
+                )
+
         loaded_weights = loader.load_weights(mapped_weights)
+
+        # Display model arch
+        logger.info("Model architecture and parameter dtypes:")
+        num_layers_to_display = 2
+        should_skip_layer_display = False
+        try:
+            for path, param in nnx.iter_graph(self):
+                if not isinstance(param, nnx.Param):
+                    continue
+                name = ".".join([str(x) for x in path])
+
+                # Skip layers past our limit
+                if f"layers.{num_layers_to_display}." in name:
+                    should_skip_layer_display = True
+
+                # Keep printing if it's not a 'layers' item (e.g., norm, head)
+                if should_skip_layer_display and "layers." in name:
+                    continue
+
+                v: jax.Array = param.value
+                logger.info(f"{name} : {v.dtype}{v.shape}")
+        except Exception as e:
+            logger.info(f"Failed to print debug structure: {e}")
+
         return loaded_weights
 
     def embed_input_ids(self,

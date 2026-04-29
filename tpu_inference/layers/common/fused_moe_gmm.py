@@ -252,12 +252,17 @@ def tensor_parallel_gmm(
 
     w1_scale_spec = (None if w1_scale is None else P(
         None, None, None, ShardingAxisName.MLP_TENSOR))
-    w1_bias_spec = (None if w1_bias is None else P(
-        None, None, ShardingAxisName.MLP_TENSOR))
 
-    num_blocks = 1 if w2_scale is None else w2_scale.shape[1]
-    w2_scale_spec = (None if num_blocks == 1 else P(
-        None, ShardingAxisName.MLP_TENSOR, None, None))
+    w1_bias_spec = None if w1_bias is None else P(None, None, None)
+
+    # Determine num_blocks for W2 scale if it's not None.
+    # W2 scale shape is (E, num_blocks, 1, D). If num_blocks is 1, don't shard on it.
+    w2_scale_spec = None
+    if w2_scale is not None:
+        num_blocks = w2_scale.shape[1]
+        w2_scale_spec = P(None, ShardingAxisName.MLP_TENSOR, None,
+                          None) if num_blocks > 1 else P(
+                              None, None, None, None)
     w2_bias_spec = None if w2_bias is None else P(None, None, None)
 
     return jax.shard_map(

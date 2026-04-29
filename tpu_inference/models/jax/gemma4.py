@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import gc
+import os
 from functools import partial
 from itertools import islice
 from typing import Any, Iterable, List, Optional, Tuple
@@ -22,6 +23,7 @@ import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from qwix._src.core.qarray import QArray
 
 try:
     from transformers import Gemma4TextConfig
@@ -68,12 +70,68 @@ init_fn = nnx.initializers.uniform()
 
 
 class Gemma4MoEMethod(UnquantizedFusedMoEMethod):
-    """Custom MoE method for Gemma4 to prevent generic re-processing."""
+    """Custom MoE method for Gemma4 to handle manual fusion and Qwix."""
 
     def process_weights_after_loading(self, layer: "Gemma4MoE") -> bool:
         # We handle weight processing manually in Gemma4MoE.load_weights
         # to ensure correct sharding and avoid the generic axis-swap bugs.
         return True
+
+    def apply_jax(
+        self,
+        layer: JaxModule,
+        x_TD: jax.Array,
+        router_logits: jax.Array,
+    ) -> jax.Array:
+        from tpu_inference.layers.common.moe import moe_apply
+        from tpu_inference.layers.common.process_weights.moe_weights import \
+            FusedMoEWeights
+
+        def unwrap(x):
+            # Robust check for QArray to handle different import paths or abstract objects
+            if hasattr(x, "qvalue") and hasattr(x, "scale"):
+                s = x.scale
+                # If scale is an NNX Variable, extract its value
+                if hasattr(s, "value"):
+                    s = s.value
+                return x.qvalue, s
+            return x, None
+
+        if hasattr(layer, "kernel_gating_upproj_EDF"):
+            # Path for Concrete model (after weights are loaded and fused)
+            w13_val, w13_scale = unwrap(layer.kernel_gating_upproj_EDF.value)
+            if w13_scale is None and hasattr(
+                    layer, "kernel_gating_upproj_EDF_weight_scale"):
+                w13_scale = layer.kernel_gating_upproj_EDF_weight_scale.value
+            w2_val, w2_scale = unwrap(layer.kernel_down_proj_EFD.value)
+            if w2_scale is None and hasattr(
+                    layer, "kernel_down_proj_EFD_weight_scale"):
+                w2_scale = layer.kernel_down_proj_EFD_weight_scale.value
+            jax.debug.print("w13_scale is {}, shape {}", w13_scale is None,
+                            w13_scale.shape if w13_scale is not None else None)
+        else:
+            # Path for Abstract model (during Qwix tracing)
+            # FusedMoEWeights expects fused W1/W3 (W13)
+            w1 = layer.kernel_gating_EDF.value
+            w3 = layer.kernel_up_proj_EDF.value
+            w2 = layer.kernel_down_proj_EFD.value
+
+            # Concatenate W1 and W3. Qwix intercepts this and preserves QArray if needed.
+            w13 = jnp.concatenate([w1, w3], axis=-1)
+            w13_val, w13_scale = unwrap(w13)
+            w2_val, w2_scale = unwrap(w2)
+
+        weights = FusedMoEWeights(
+            w13_weight=w13_val,
+            w13_weight_scale=w13_scale,
+            w13_bias=None,
+            w2_weight=w2_val,
+            w2_weight_scale=w2_scale,
+            w2_bias=None,
+        )
+        return moe_apply(layer, x_TD, router_logits, weights,
+                         layer.moe_backend, layer.mesh,
+                         self.extra_backend_kwargs)
 
 
 # MLP arch is the same as Gemma3
@@ -193,8 +251,10 @@ class Gemma4MoE(JaxMoE):
         mesh,
         rngs: nnx.Rngs,
         quant_config,
+        vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
+        self.vllm_config = vllm_config
         noop_router = JaxModule()
         noop_router.num_experts_per_tok = config.top_k_experts
 
@@ -222,19 +282,13 @@ class Gemma4MoE(JaxMoE):
             moe_backend=MoEBackend.GMM_TP,
             scoring_func="softmax",
             renormalize=True,
-            quant_config=quant_config,
+            quant_config=None,  # Handled manually via Gemma4MoEMethod
             prefix=prefix)
 
-        # Override generic method to prevent re-processing
-        if self.quant_method is None:
-            self.quant_method = Gemma4MoEMethod()
-        else:
-            # If Qwix or another quantizer is active, it will try to run the generic
-            # FusedMoE process_weights_after_loading which crashes looking for unfused params.
-            # Gemma4MoE already handles fusion manually, so we disable it.
-            import types
-            self.quant_method.process_weights_after_loading = types.MethodType(
-                lambda self, layer: True, self.quant_method)
+        # Force use of Gemma4MoEMethod to handle its unique fused-in-model weight layout
+        # and to handle Qwix QArray unwrapping during both abstract and concrete passes.
+        old_kwargs = getattr(self.quant_method, "extra_backend_kwargs", {})
+        self.quant_method = Gemma4MoEMethod(**old_kwargs)
 
     def load_weights(self, weights: Iterable):
         """Load, fuse, and shard weights for Gemma4 MoE layer.
@@ -245,42 +299,97 @@ class Gemma4MoE(JaxMoE):
         w_gate = None
         w_up = None
         w_down = None
+        w13_scale = None
+        w2_scale = None
 
         for name, tensor in weights:
-            if name.endswith("down_proj"):
-                # HF tensor is (E, D, F). Put it on TPU mesh with shard_put.
+            if name.endswith("down_proj") or name.endswith("down_proj.weight"):
                 w_down = shard_put(jax_array_from_reshaped_torch(tensor),
-                                   shardings=NamedSharding(self.mesh, P()),
+                                   shardings=NamedSharding(
+                                       self.mesh,
+                                       P(None, None,
+                                         ShardingAxisName.MLP_TENSOR)),
                                    mesh=self.mesh)
-            elif name.endswith("gate_up_proj"):
+            elif name.endswith("down_proj.weight_scale_inv"):
+                # Expand dims to (E, F, 1) to satisfy process_moe_weights axis swapping expectations
+                w2_scale = jnp.expand_dims(
+                    jax_array_from_reshaped_torch(
+                        tensor,
+                        permute_dims=(0, 1) if tensor.ndim == 2 else None), -1)
+            elif name.endswith("gate_up_proj") or name.endswith(
+                    "gate_up_proj.weight"):
                 F = tensor.shape[1] // 2
-                # HF tensor is (E, 2*F, D). Put it on TPU mesh with shard_put.
                 w_gate_up = shard_put(jax_array_from_reshaped_torch(tensor),
-                                      shardings=NamedSharding(self.mesh, P()),
+                                      shardings=NamedSharding(
+                                          self.mesh,
+                                          P(None, ShardingAxisName.MLP_TENSOR,
+                                            None)),
                                       mesh=self.mesh)
-                w_gate = w_gate_up[:, :F, :].swapaxes(1, 2)  # (E, D, F)
-                w_up = w_gate_up[:, F:, :].swapaxes(1, 2)  # (E, D, F)
+                w_gate = w_gate_up[:, :F, :].swapaxes(1, 2)
+                w_up = w_gate_up[:, F:, :].swapaxes(1, 2)
                 del w_gate_up
+            elif name.endswith("gate_up_proj.weight_scale_inv"):
+                # Expand dims to (E, 2F, 1) to satisfy process_moe_weights axis swapping expectations
+                w13_scale_raw = jnp.expand_dims(
+                    jax_array_from_reshaped_torch(
+                        tensor,
+                        permute_dims=(0, 1) if tensor.ndim == 2 else None), -1)
+                w13_scale = w13_scale_raw
 
         loaded_keys = set()
 
         if w_gate is not None and w_up is not None and w_down is not None:
+            # Detect Qwix config to see if we should manually quantize these experts
+            from tpu_inference.models.jax.utils.qwix.qwix_utils import (
+                get_quant_dtype_from_qwix_config,
+                manually_quantize_qwix_weight)
+            _, quant_dtype = get_quant_dtype_from_qwix_config(self.vllm_config)
+
             # 1. Fuse gate and up: (E, 2*F, D)
             # Generic process_moe_weights expects F to be concatenated on axis 1.
             w13_val = jnp.concatenate(
                 [w_gate.swapaxes(1, 2),
                  w_up.swapaxes(1, 2)], axis=1)
 
-            # 2. Call process_moe_weights with correct shapes
+            # 2. Apply manual quantization if Qwix is active.
+            # We only do this if quant_dtype is not None (meaning online quantization is requested).
+            if quant_dtype is not None:
+                logger.info(
+                    f"Manually quantizing Gemma4 MoE experts to {quant_dtype}")
+                # contraction is on axis 2 (D) for w13 (E, 2F, D) and axis 2 (F) for w_down (E, D, F)
+                # Qwix manually_quantize_qwix_weight returns a WithAux object.
+                q_w13 = manually_quantize_qwix_weight(
+                    "kernel_gating_upproj_EDF",
+                    w13_val,
+                    quant_dtype,
+                    channelwise_axes=[0, 1],
+                    tiled_axes={},
+                    calibration_method="absmax")
+                q_w2 = manually_quantize_qwix_weight(
+                    "kernel_down_proj_EFD",
+                    w_down,
+                    quant_dtype,
+                    channelwise_axes=[0, 1],
+                    tiled_axes={},
+                    calibration_method="absmax")
+                # Extract raw float8 values and scales for the fuser
+                w13_val = q_w13.array.qvalue
+                w13_scale = q_w13.array.scale.value if isinstance(
+                    q_w13.array.scale, nnx.Variable) else q_w13.array.scale
+                w_down = q_w2.array.qvalue
+                w2_scale = q_w2.array.scale.value if isinstance(
+                    q_w2.array.scale, nnx.Variable) else q_w2.array.scale
+
+            # 3. Call process_moe_weights with correct shapes
             # w13: (E, 2*F, D), w2: (E, D, F)
             # It will perform swaps and padding to reach (E, D, 2*F) and (E, F, D).
             processed = process_moe_weights(
                 weights=FusedMoEWeights(
                     w13_weight=w13_val,
                     w2_weight=w_down,
-                    w13_weight_scale=None,
+                    w13_weight_scale=w13_scale,
                     w13_bias=None,
-                    w2_weight_scale=None,
+                    w2_weight_scale=w2_scale,
                     w2_bias=None,
                 ),
                 moe_backend=self.moe_backend,
@@ -288,23 +397,37 @@ class Gemma4MoE(JaxMoE):
                     self.mesh, ShardingAxisName.MLP_TENSOR),
             )
 
-            # 3. Apply final sharding and set as NNX parameters
-            # process_moe_weights returns sharded arrays with the right layouts.
+            # 4. Apply final sharding and set as NNX parameters
+            from tpu_inference.layers.common.process_weights.moe_weights import \
+                shard_moe_weights
+            processed = shard_moe_weights(processed, self.moe_backend,
+                                          self.mesh)
 
-            # Explicitly create fresh PartitionSpecs. We ONLY shard the Expert (E) dimension.
-            # Using both EXPERT and MLP_TENSOR causes DuplicateSpecError on 1D meshes because
-            # both map to the "model" axis.
-            edf_spec = P(ShardingAxisName.EXPERT, None, None)
-            efd_spec = P(ShardingAxisName.EXPERT, None, None)
+            # NOTE: We use qarray_from_components to reconstruct the QArray for the model
+            # if we are in quantized mode, so that logs and logic see it as a QArray.
+            if quant_dtype is not None:
+                from qwix._src.core.qarray import QArray
 
-            self.kernel_gating_upproj_EDF = nnx.Param(
-                shard_put(processed.w13_weight,
-                          NamedSharding(self.mesh, edf_spec)))
-            self.kernel_gating_upproj_EDF.set_metadata("_is_loaded", True)
-            self.kernel_down_proj_EFD = nnx.Param(
-                shard_put(processed.w2_weight,
-                          NamedSharding(self.mesh, efd_spec)))
-            self.kernel_down_proj_EFD.set_metadata("_is_loaded", True)
+                # Re-wrap processed results into QArray objects
+                self.kernel_gating_upproj_EDF = nnx.Param(
+                    QArray(qvalue=processed.w13_weight,
+                           scale=processed.w13_weight_scale,
+                           zero_point=None,
+                           qtype=quant_dtype))
+                self.kernel_down_proj_EFD = nnx.Param(
+                    QArray(qvalue=processed.w2_weight,
+                           scale=processed.w2_weight_scale,
+                           zero_point=None,
+                           qtype=quant_dtype))
+            else:
+                self.kernel_gating_upproj_EDF = nnx.Param(processed.w13_weight)
+                self.kernel_down_proj_EFD = nnx.Param(processed.w2_weight)
+                if processed.w13_weight_scale is not None:
+                    self.kernel_gating_upproj_EDF_weight_scale = nnx.Param(
+                        processed.w13_weight_scale)
+                if processed.w2_weight_scale is not None:
+                    self.kernel_down_proj_EFD_weight_scale = nnx.Param(
+                        processed.w2_weight_scale)
 
             # These were created by JaxMoE but are now redundant (fused).
             # We must delete them so Qwix doesn't try to trace over their ShapeDtypeStructs.
@@ -318,6 +441,11 @@ class Gemma4MoE(JaxMoE):
                 "kernel_gating_upproj_EDF", "kernel_down_proj_EFD",
                 "kernel_gating_EDF", "kernel_up_proj_EDF"
             })
+            for suffix in ["", ".weight", ".weight_scale_inv"]:
+                loaded_keys.update({
+                    f"experts.down_proj{suffix}",
+                    f"experts.gate_up_proj{suffix}"
+                })
 
             # Clean up temporary arrays
             del w_gate, w_up, w_down, w13_val, processed
@@ -571,6 +699,8 @@ class Gemma4DecoderLayer(JaxModule):
                  mesh: Mesh,
                  kv_cache_dtype: str,
                  quant_config: VllmQuantConfig,
+                 vllm_config: VllmConfig,
+                 qwix_quantized_weight_dtype: Optional[jnp.dtype] = None,
                  prefix: str = ""):
         text_config: Gemma4TextConfig = config.hf_config.text_config
         rms_norm_eps = text_config.rms_norm_eps
@@ -656,7 +786,11 @@ class Gemma4DecoderLayer(JaxModule):
                                      mesh=mesh,
                                      rngs=rng,
                                      quant_config=quant_config,
+                                     vllm_config=vllm_config,
                                      prefix=prefix + ".experts")
+            # Set the Qwix quantized weight dtype for the experts
+            self.experts.qwix_quantized_weight_dtype = qwix_quantized_weight_dtype
+
             self.post_feedforward_layernorm_1 = JaxRmsNorm(
                 text_config.hidden_size,
                 epsilon=text_config.rms_norm_eps,
@@ -731,6 +865,8 @@ class Gemma4DecoderLayer(JaxModule):
         outputs = residual + mlp_output
 
         outputs = outputs * self.layer_scalar.value
+        jax.debug.print("layer_scalar max {}",
+                        jnp.max(self.layer_scalar.value))
 
         return kv_cache, outputs
 
@@ -770,6 +906,18 @@ class Gemma4Model(JaxModule):
         else:
             self.embed_tokens = PPMissingLayer()
 
+        # Determine if Qwix quantization is enabled for MoE
+        qwix_quantized_weight_dtype = None
+        if additional_config := vllm_config.additional_config:
+            if quantization_config := additional_config.get("quantization"):
+                if qwix_config := quantization_config.get("qwix"):
+                    for rule in qwix_config.get("rules", []):
+                        if rule.get("module_path") == ".*" and rule.get(
+                                "weight_qtype"):
+                            qwix_quantized_weight_dtype = getattr(
+                                jnp, rule.get("weight_qtype"))
+                            break
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             text_config.num_hidden_layers,
             lambda layer_index: Gemma4DecoderLayer(
@@ -780,6 +928,8 @@ class Gemma4Model(JaxModule):
                 mesh=mesh,
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 quant_config=vllm_config.quant_config,
+                vllm_config=vllm_config,
+                qwix_quantized_weight_dtype=qwix_quantized_weight_dtype,
                 prefix=f"{prefix}.layers.{layer_index}",
             ))
 
@@ -886,11 +1036,33 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
                     continue
                 if "vision" in clean_name:
                     continue
+                if "weight_scale_inv" in clean_name and "experts" not in clean_name:
+                    clean_name = clean_name.replace("weight_scale_inv",
+                                                    "weight_scale")
                 yield clean_name, tensor
 
         mapped_weights = list(mapped_weights_generator())
         mapped_weights.sort(key=lambda x: x[0])
         loaded_weights = loader.load_weights(mapped_weights)
+
+        # Display model arch
+        if os.environ.get("VLLM_LOGGING_LEVEL", "").upper() == "DEBUG":
+            logger.debug("Model architecture and parameter dtypes:")
+            num_layers_to_display = 5
+            should_skip_layer_display = False
+            for path, node in self.iter_graph():
+                if not isinstance(node, (nnx.Variable, QArray)):
+                    continue
+                name = ".".join(str(p) for p in path)
+                if f"layers.{num_layers_to_display}." in name:
+                    should_skip_layer_display = True
+                if should_skip_layer_display and "layers." in name:
+                    continue
+                v = node.value if isinstance(node, nnx.Variable) else node
+                logger.debug(
+                    f"{name} : {v.dtype}{v.shape} on {getattr(v, 'device', getattr(v, 'devices', 'unknown'))}"
+                )
+
         return loaded_weights
 
     def __call__(

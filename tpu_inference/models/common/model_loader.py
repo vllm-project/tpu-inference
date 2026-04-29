@@ -172,6 +172,7 @@ def _get_nnx_model(
             with mesh:
                 jit_model = create_jit_model(model,
                                              use_qwix_on_abstract_model=True)
+            print("This is the jit_model: ", jit_model)
             return jit_model
 
         if getattr(model_class, '_self_manages_sharding', False):
@@ -193,6 +194,7 @@ def _get_nnx_model(
                     apply_to_abstract_model=False)
                 if hasattr(jit_model, 'initialize_cache'):
                     jit_model.initialize_cache()
+            print("This is the jit_model: ", jit_model)
             return jit_model
 
         @jax.jit
@@ -272,7 +274,8 @@ def _get_nnx_model(
             jit_model = create_jit_model(
                 model,
                 use_qwix_on_abstract_model=should_apply_qwix_on_abstract_model)
-    return jit_model
+            print("This is the jit_model: ", jit_model)
+            return jit_model
 
 
 def _not_support(*args, **kwargs):

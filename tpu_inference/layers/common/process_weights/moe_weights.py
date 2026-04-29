@@ -311,19 +311,28 @@ def process_moe_weights(
             )
 
             if w13_weight_scale is not None:
+                # Only pad the intermediate and output dimensions, not the unit contracting dimensions
+                pad_w13_scale = list(((0, 0), (0, 0), (0, 0), (0, 0),
+                                      (0, pad_width_intermediate_size)))
+                if w13_weight_scale.shape[2] > 1:
+                    pad_w13_scale[2] = (0, pad_width_hidden_size)
+
                 w13_weight_scale = w13_weight_scale.reshape(
                     num_experts, -1, 2, 1, intermediate_size)
                 w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
                 w13_weight_scale = jnp.pad(
                     w13_weight_scale,
-                    ((0, 0), (0, 0), (0, pad_width_hidden_size), (0, 0),
-                     (0, pad_width_intermediate_size)),
+                    tuple(pad_w13_scale),
                 )
             if w2_weight_scale is not None:
+                pad_w2_scale = list(
+                    ((0, 0), (0, 0), (0, 0), (0, pad_width_hidden_size)))
+                if w2_weight_scale.shape[1] > 1:
+                    pad_w2_scale[1] = (0, pad_width_intermediate_size)
+
                 w2_weight_scale = jnp.pad(
                     w2_weight_scale,
-                    ((0, 0), (0, pad_width_intermediate_size), (0, 0),
-                     (0, pad_width_hidden_size)),
+                    tuple(pad_w2_scale),
                 )
 
             if w13_bias is not None:
