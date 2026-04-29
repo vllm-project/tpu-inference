@@ -532,7 +532,8 @@ def test_phased_profiler_skip_only_affects_decode_heavy(profiler_fixture):
     assert profiler.decode_steps_skipped == 1
 
 
-def test_phased_profiler_skips_decode_only_steps_based_on_kv_len(profiler_fixture):
+def test_phased_profiler_skips_decode_only_steps_based_on_kv_len(
+        profiler_fixture):
     """Tests that the profiler skips DECODE_ONLY steps until min KV len exceeds threshold."""
     profiler = profiler_fixture["profiler"]
     mock_start = profiler_fixture["mock_start"]
@@ -569,4 +570,3 @@ def test_phased_profiler_skips_decode_only_steps_based_on_kv_len(profiler_fixtur
         profiler.step(stats)
     mock_stop.assert_called_once()
     assert profiler.current_phase == ""
-

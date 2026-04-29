@@ -348,9 +348,8 @@ class PhasedBasedProfiler:
                 "Will skip %d decode-heavy steps before profiling decode_heavy phase.",
                 self.num_decode_steps_to_skip)
         if self.decode_kv_len_threshold >= 0:
-            logger.info(
-                "Will skip decode-only steps until min KV len > %d.",
-                self.decode_kv_len_threshold)
+            logger.info("Will skip decode-only steps until min KV len > %d.",
+                        self.decode_kv_len_threshold)
 
     def _write_batch_composition_stats_to_file_helper(
             self, batch_composition_stats: dict) -> None:
