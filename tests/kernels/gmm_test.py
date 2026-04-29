@@ -306,6 +306,49 @@ class GmmTest(jtu.JaxTestCase):
     self.assertArraysAllClose(actual, expected)
 
   @parameterized.product(
+      batch_size=[256, 1024],
+      in_size=[1024],
+      out_size=[1024],
+      num_groups=[16],
+      group_offset=[0, 2],
+      tile_k=[256, 512],
+      tile_n=[256, 512],
+  )
+  def test_tgmm_with_tile_info(
+      self, batch_size, in_size, out_size, num_groups, group_offset,
+      tile_k, tile_n,
+  ):
+    """Verify TGMM with a user-provided TileSizes that splits k and n.
+
+    'calculate_tgmm_tiling' typically picks num_k_tiles=num_n_tiles=1 for
+    these dims, so the default-tiling tests don't exercise the multi-tile
+    grid path. Here we force tile_k<size_k and tile_n<size_n so num_k>1
+    and num_n>1 in the pipeline grid.
+    """
+    num_local_groups = num_groups - group_offset
+    key = jax.random.key(0)
+    key1, key2 = jax.random.split(key, 2)
+    lhs = jax.random.normal(key1, (batch_size, in_size), dtype=jnp.bfloat16)
+    grad = jax.random.normal(key2, (batch_size, out_size), dtype=jnp.bfloat16)
+    group_sizes = get_group_sizes(batch_size, num_groups)
+    group_offset = jnp.array(group_offset, dtype=jnp.int32)
+
+    lhs_t = lhs.swapaxes(0, 1)
+    expected = reference_tgmm(
+        lhs_t, grad, group_sizes, num_local_groups, group_offset=group_offset
+    )
+
+    tile_info = TileSizes(tile_m=256, tile_k=tile_k, tile_n=tile_n)
+    actual = tgmm_v2(
+        lhs, grad, group_sizes, num_local_groups,
+        group_offset=group_offset,
+        preferred_element_type=jnp.bfloat16,
+        tile_info=tile_info,
+    )
+    self.assertEqual(actual.shape, (num_local_groups, in_size, out_size))
+    self.assertArraysAllClose(actual, expected)
+
+  @parameterized.product(
       batch_size=[128],
       in_size=[512],
       out_size=[512],
