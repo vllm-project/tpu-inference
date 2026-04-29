@@ -199,8 +199,112 @@ def _patched_forward(vllm_model,
                         **kwargs)
 
 
+def _patched_process_image_input(vllm_model, image_input):
+    """Patches _process_image_input to pass grid_thw as a tuple to the vision encoder."""
+    grid_thw = image_input["image_grid_thw"]
+
+    # Ensure we have both a tensor (for local calcs) and a tuple (for JIT)
+    if isinstance(grid_thw, (list, tuple)):
+        import torch
+        grid_thw_tensor = torch.as_tensor(grid_thw)
+
+        def _to_tuple(t):
+            if isinstance(t, (list, tuple)):
+                return tuple(_to_tuple(i) for i in t)
+            return t
+
+        grid_thw_tuple = _to_tuple(grid_thw)
+    else:
+        grid_thw_tensor = grid_thw
+        grid_thw_tuple = tuple(tuple(i) for i in grid_thw.tolist())
+
+    if image_input["type"] == "image_embeds":
+        image_embeds = image_input["image_embeds"].type(
+            vllm_model.visual.dtype)
+    else:
+        pixel_values = image_input["pixel_values"].type(
+            vllm_model.visual.dtype)
+        # Pass the TUPLE to visual (which is a JittableModule)
+        image_embeds = vllm_model.visual(pixel_values, grid_thw=grid_thw_tuple)
+
+    if getattr(vllm_model, "is_multimodal_pruning_enabled", False):
+        image_embeds = vllm_model._postprocess_image_embeds_evs(
+            image_embeds, image_input)
+
+    # Split concatenated embeddings for each image item.
+    merge_size = vllm_model.visual.spatial_merge_size
+    sizes = (grid_thw_tensor.prod(-1) // merge_size // merge_size).tolist()
+    return image_embeds.split(sizes)
+
+
+def _patched_process_video_input(vllm_model, video_input):
+    """Patches _process_video_input to pass grid_thw as a tuple to the vision encoder."""
+    grid_thw = video_input["video_grid_thw"]
+
+    # Ensure we have both a tensor (for local calcs) and a tuple (for JIT)
+    if isinstance(grid_thw, (list, tuple)):
+        import torch
+        grid_thw_tensor = torch.as_tensor(grid_thw)
+
+        def _to_tuple(t):
+            if isinstance(t, (list, tuple)):
+                return tuple(_to_tuple(i) for i in t)
+            return t
+
+        grid_thw_tuple = _to_tuple(grid_thw)
+    else:
+        grid_thw_tensor = grid_thw
+        grid_thw_tuple = tuple(tuple(i) for i in grid_thw.tolist())
+
+    if video_input["type"] == "video_embeds":
+        video_embeds = video_input["video_embeds"].type(
+            vllm_model.visual.dtype)
+    else:
+        pixel_values = video_input["pixel_values"].type(
+            vllm_model.visual.dtype)
+        # Pass the TUPLE to visual (which is a JittableModule)
+        video_embeds = vllm_model.visual(pixel_values, grid_thw=grid_thw_tuple)
+
+    if getattr(vllm_model, "is_multimodal_pruning_enabled", False):
+        video_embeds = vllm_model._postprocess_image_embeds_evs(
+            video_embeds, video_input)
+
+    # Split concatenated embeddings for each video item.
+    merge_size = vllm_model.visual.spatial_merge_size
+    sizes = (grid_thw_tensor.prod(-1) // merge_size // merge_size).tolist()
+    return video_embeds.split(sizes)
+
+
+def _patched_vision_forward(vllm_vision, orig_forward, x, grid_thw, **kwargs):
+    """Patches vision transformer forward to handle grid_thw as a tuple."""
+    if isinstance(grid_thw, tuple):
+        # Recursively convert tuple of tuples to list of lists
+        def _to_list(t):
+            if isinstance(t, (list, tuple)):
+                return [_to_list(i) for i in t]
+            return t
+
+        grid_thw = _to_list(grid_thw)
+
+    return orig_forward(x, grid_thw, **kwargs)
+
+
 def apply_qwen3_vl_patches(vllm_model):
-    """Apply Qwen3-VL specific patches for stateless Deepstack support."""
+    """Apply Qwen3-VL specific patches for stateless Deepstack support and grid tuple handling."""
+    print("!!! APPLYING QWEN3-VL PATCHES !!!")
+
+    # 1. Patch vision encoder to handle grid_thw tuples
+    if hasattr(vllm_model, "visual"):
+        orig_vision_forward = vllm_model.visual.forward
+        vllm_model.visual.forward = lambda x, grid_thw, **kwargs: _patched_vision_forward(
+            vllm_model.visual, orig_vision_forward, x, grid_thw, **kwargs)
+
+    # 2. Patch model's processing methods to pass grid_thw as tuples to visual
+    vllm_model._process_image_input = lambda image_input: _patched_process_image_input(
+        vllm_model, image_input)
+    vllm_model._process_video_input = lambda video_input: _patched_process_video_input(
+        vllm_model, video_input)
+
     if not getattr(vllm_model, "use_deepstack", False):
         return
 

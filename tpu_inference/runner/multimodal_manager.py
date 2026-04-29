@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-import torch
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_and_batch_mm_kwargs
@@ -25,23 +24,6 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     flatten_embeddings, sanity_check_mm_encoder_outputs)
-
-class HashableTensor(torch.Tensor):
-    def totuple(self):
-        def _nested_to_tuple(maybe_list):
-            if isinstance(maybe_list, Iterable):
-                return tuple(_nested_to_tuple(e) for e in maybe_list)
-            return maybe_list
-        return _nested_to_tuple(self.tolist())
-
-    def __hash__(self):
-        return hash(self.totuple())
-
-    def jax(self):
-        print(
-            f"clkbp calling jax() on HashableTensor, returning {self.totuple()=}"
-        )
-        return self.totuple()
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -129,12 +111,6 @@ class MultiModalManager:
         encoder_outputs = []
         for _, num_items, mm_kwargs_group in group_and_batch_mm_kwargs(
                 mm_kwargs):
-            
-            # Convert image_grid_thw to HashableTensor to satisfy JAX JIT static args
-            for k, v in mm_kwargs_group.items():
-                if k in ("image_grid_thw", ):
-                    mm_kwargs_group[k] = HashableTensor(v)
-                    
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
             # 1. A tensor of shape (num_items, feature_size, hidden_size)
