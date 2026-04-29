@@ -13,9 +13,12 @@ from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.multimodal.image import convert_image_mode
 
-# Expected partial text output from the model. This is based on a query to
-# vllm 0.17.0 on A100. The test is considered passed if the
+# Expected partial text output from the model. This is based on a previous
+# run and is used for verification. The test is considered passed if the
 # generated output match with this text.
+# NOTE: this reverts PR #1947 — the "Tokyo Skytree" caption it introduced
+# (captured on vllm 0.17.0 on A100) no longer matches TPU output after
+# upstream changes; restoring the prior expected text.
 EXPECTED_TEXT = (
     "The image depicts a tall, cylindrical tower with a lattice-like structure, surrounded by cherry blossom trees in full bloom. The cherry blossoms are in various stages of opening, with pink petals covering the branches. The sky is clear and blue, providing a vibrant backdrop to the scene. The tower appears to be a significant landmark"
 )
