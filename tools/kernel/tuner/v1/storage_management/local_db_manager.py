@@ -17,7 +17,6 @@ import logging
 import os
 from datetime import datetime
 
-from tools.kernel.tuner.v1.common.utils import get_host_ip
 from tools.kernel.tuner.v1.storage_management.storage_manager import \
     StorageManager
 
@@ -42,7 +41,7 @@ class LocalDbManager(StorageManager):
         self.current_case_id = 0
         self.invalid_count = 0
         self.buffer = []
-        self.worker_id = worker_id or get_host_ip()
+        self.worker_id = worker_id
         self.dry_run = dry_run
         if db_path is None:
             date_str = datetime.now().strftime('%Y_%m_%d_%H_%M_%S')

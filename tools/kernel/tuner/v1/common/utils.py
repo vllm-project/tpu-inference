@@ -21,20 +21,6 @@ from google.cloud import spanner
 
 FLAGS = flags.FLAGS
 
-
-def get_host_ip():
-    is_docker = os.path.exists('/.dockerenv')
-    if not is_docker:
-        # Not running in Docker, return local IP
-        return socket.gethostbyname(socket.gethostname())
-    try:
-        host_ip = socket.gethostbyname('host.docker.internal')
-        return host_ip
-    except socket.gaierror:
-        print("Could not resolve host.docker.internal")
-        return None
-
-
 def get_timestamp_sec():
     return int(
         time.time()

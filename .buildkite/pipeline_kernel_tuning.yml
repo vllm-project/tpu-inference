@@ -76,7 +76,7 @@ steps:
           --case_set_id=\${KERNEL_TUNING_CASE_SET_ID} \
           --run_id=\${KERNEL_TUNING_RUN_ID} \
           --tpu_version=\${TPU_VERSION} \
-          2>&1 | tee /tmp/kernel_tuning/generated_pipeline.yml"
+          > /tmp/kernel_tuning/generated_pipeline.yml"
       - |
         # Upload the generated pipeline YAML from the temp dir on the host.
         buildkite-agent pipeline upload "/tmp/kernel_tuning/generated_pipeline.yml"

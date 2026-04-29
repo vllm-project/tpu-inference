@@ -16,7 +16,6 @@ from absl import flags
 from google.api_core import retry
 from google.cloud import spanner
 
-from tools.kernel.tuner.v1.common.utils import get_host_ip
 from tools.kernel.tuner.v1.storage_management.storage_manager import \
     StorageManager
 
@@ -36,7 +35,7 @@ class SpannerStorageManager(StorageManager):
         self.current_case_id = 0
         self.invalid_count = 0
         self.buffer = []
-        self.worker_id = worker_id or get_host_ip()
+        self.worker_id = worker_id
         self.dry_run = dry_run
         if not self.dry_run:
             self.client = spanner.Client(project=gcp_project_id,
