@@ -82,7 +82,7 @@ def create_benchmark_group(case_data,
             case_parameter = f"{file_path}"
         else:
             step_env["TARGET_CASE_NAME"] = case_name
-            step_label = f"{agent} {case_name}"
+            step_label = f"{agent} {file_basename} {case_name}"
             case_parameter = f"{file_path} {case_name}"
 
         # Define step key
