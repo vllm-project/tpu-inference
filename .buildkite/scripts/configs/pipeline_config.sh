@@ -21,6 +21,7 @@ export PRIORITY_INTEGRATION=3
 export PRIORITY_BENCHMARK=2
 export PRIORITY_DEFAULT=1
 export PRIORITY_NIGHTLY=0
+export PRIORITY_KERNEL_TUNING=-1
 
 # Implemented dynamic job prioritization by injecting integers during upload
 upload_with_priority() {
