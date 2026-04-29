@@ -18,12 +18,12 @@ import os
 
 from absl import app, flags
 
+from tools.kernel.tuner.v1.example_kernel_tuner import ExampleKernelTuner
 from tools.kernel.tuner.v1.rpa_v3_kernel_tuner import RpaV3KernelTuner
 from tools.kernel.tuner.v1.storage_management.local_db_manager import \
     LocalDbManager
 from tools.kernel.tuner.v1.storage_management.spanner_database_manager import \
     SpannerStorageManager
-from tools.kernel.tuner.v1.example_kernel_tuner import ExampleKernelTuner
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -118,7 +118,9 @@ def main(argv):
     kernel_tuner = kernel_tuner_cls(storage_manager)
 
     tpu_version = _TPU_VERSION.value
-    assert tpu_version in ['tpu6e', 'tpu7x'], f'Unsupported TPU version: {tpu_version}. Supported versions are "tpu6e" and "tpu7x".'
+    assert tpu_version in [
+        'tpu6e', 'tpu7x'
+    ], f'Unsupported TPU version: {tpu_version}. Supported versions are "tpu6e" and "tpu7x".'
     tpu_queue_multi = 'tpu_v6e_8_queue' if tpu_version == 'tpu6e' else 'tpu_v7x_8_queue'
 
     if _RUN_LOCALLY.value:

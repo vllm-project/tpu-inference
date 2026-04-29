@@ -126,6 +126,7 @@ KERNEL_TUNER_REGISTRY = {
 ### Step 5 — Run it
 
 Locally:
+
 ```bash
 python -m tools.kernel.tuner.v1.kernel_tuner_runner \
   --kernel_tuner_name=my_kernel_tuner \
@@ -249,15 +250,18 @@ Once connected, the prompt shows your current session context (e.g. `inspect|cs=
 ### Session commands
 
 #### Set session defaults
+
 ```
 set_case_set_id ID    # avoids typing --case_set_id on every command
 set_run_id ID         # avoids typing --run_id on every command
 ```
 
 #### List case sets
+
 ```
 list_case_sets [--filter KEYWORD]
 ```
+
 Shows `case_set_id`, description, status, scan space size, and number of runs. Use `--filter` to narrow by keyword in ID or description.
 
 ```
@@ -269,21 +273,27 @@ gmm_v2_tuning_1          GMMv2 Cover All Tuned Blocks COMPLETED  873600      1
 ```
 
 #### List runs
+
 ```
 list_runs [--case_set_id ID] [--filter KEYWORD]
 ```
+
 Shows `run_id`, `case_set_id`, description, and number of buckets.
 
 #### Count buckets
+
 ```
 count_buckets [--case_set_id ID] [--run_id ID]
 ```
+
 Total number of work buckets for a given run.
 
 #### List bucket status
+
 ```
 list_bucket_status [--case_set_id ID] [--run_id ID]
 ```
+
 Shows how many buckets are `COMPLETED` vs pending — useful for monitoring progress.
 
 ```
@@ -292,9 +302,11 @@ inspect|cs=testing_tuning_infra_11|run=001> list_bucket_status
 ```
 
 #### Query run status
+
 ```
 query_run_status [--case_set_id ID] [--run_id ID]
 ```
+
 Shows timing info: start time, last completed time, and total wall time.
 
 ```
@@ -308,9 +320,11 @@ inspect|cs=testing_tuning_infra_11|run=001> query_run_status
 ```
 
 #### Query minimum latency results
+
 ```
 query_min_latency [--case_set_id ID] [--run_id ID]
 ```
+
 For each unique `TuningKey`, shows the best measured latency and the corresponding `TunableParam` configuration.
 
 ```
@@ -322,6 +336,7 @@ inspect|cs=testing_tuning_infra_11|run=001> query_min_latency
 ```
 
 #### Other
+
 ```
 help         Print command reference
 exit / quit  Exit the CLI

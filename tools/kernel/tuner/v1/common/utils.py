@@ -12,14 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import socket
 import time
 
 from absl import flags
 from google.cloud import spanner
 
 FLAGS = flags.FLAGS
+
 
 def get_timestamp_sec():
     return int(
