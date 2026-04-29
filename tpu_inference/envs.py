@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     DP_SCHED_BATCH_PREFILL: bool = False
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
     ONEHOT_MOE_PERMUTE_THRESHOLD: int = 0
+    KIMI_QUANTIZE_ATTN_TO_FP8: bool = False
 
 
 def env_with_choices(
@@ -376,6 +377,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # is effectively disabled.
     "ONEHOT_MOE_PERMUTE_THRESHOLD":
     lambda: int(os.getenv("ONEHOT_MOE_PERMUTE_THRESHOLD", "0")),
+    "KIMI_QUANTIZE_ATTN_TO_FP8":
+    env_bool("KIMI_QUANTIZE_ATTN_TO_FP8", default=False),
 }
 
 
