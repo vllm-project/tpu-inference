@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     PROFILE_SINGLE_DEVICE: bool = False
     LORA_MODULE_PATH: str = ""
     SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
+    KIMI_QUANTIZE_ATTN_TO_FP8: bool = False
 
 
 def env_with_choices(
@@ -395,6 +396,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # use VMEM size as the threshold.
     "SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES":
     lambda: os.getenv("SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES", "auto"),
+    "KIMI_QUANTIZE_ATTN_TO_FP8":
+    env_bool("KIMI_QUANTIZE_ATTN_TO_FP8", default=False),
 }
 
 
