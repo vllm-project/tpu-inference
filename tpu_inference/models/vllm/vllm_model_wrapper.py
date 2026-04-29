@@ -619,6 +619,17 @@ class VllmModelWrapper:
         return compute_pooler_output
 
 
+class TPULRUCacheWorkerLoRAManager(LRUCacheWorkerLoRAManager):
+    """
+    TPU-specific wrapper to ensure dummy LoRA creation happens 
+    within the torchax environment.
+    """
+
+    def add_dummy_lora(self, lora_request, rank: int) -> bool:
+        with torchax.default_env():
+            return super().add_dummy_lora(lora_request, rank)
+
+
 def load_lora_model(model: torch.nn.Module, vllm_config: VllmConfig,
                     device: str) -> torch.nn.Module:
     if not supports_lora(model):
@@ -637,7 +648,7 @@ def load_lora_model(model: torch.nn.Module, vllm_config: VllmConfig,
         )
 
     # Add LoRA Manager to the Model Runner
-    lora_manager = LRUCacheWorkerLoRAManager(
+    lora_manager = TPULRUCacheWorkerLoRAManager(
         vllm_config,
         device,
         model.embedding_modules,
