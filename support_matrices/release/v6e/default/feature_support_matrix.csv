@@ -15,5 +15,5 @@ Feature,CorrectnessTest,PerformanceTest
 "multi-host",❓ Untested,❓ Untested
 "runai_model_streamer_loader",✅ Passing,❓ Untested
 "sampling_params",✅ Passing,❓ Untested
+"Step Pooling (Embedding)",✅ Passing,❓ Untested
 "structured_decoding",✅ Passing,❓ Untested
-"Step Pooling (Embedding)",✅,✅

@@ -6,4 +6,4 @@ Feature,CorrectnessTest,PerformanceTest
 "Quantized KV Cache",❓ Untested,❓ Untested
 "Quantized Matmul",❓ Untested,❓ Untested
 "Ragged Paged Attention V3",✅ Passing,✅ Passing
-"StepPool (CPU Hybrid)",✅,✅
+"StepPool (Embedding CPU)",✅ Passing,❓ Untested
