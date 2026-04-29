@@ -247,16 +247,18 @@ def test_swap_states_only_swaps_active_tokens(input_batch: InputBatch):
 
 
 def test_mamba_state_indices_unique_per_request(input_batch: InputBatch):
-    """Each request must get its own mamba state slot id."""
-    reqs = [create_dummy_request(f"req-{i}") for i in range(4)]
-    for req in reqs:
-        input_batch.add_request(req)
+    """Two concurrent requests must never receive the same mamba slot id —
+    if they did, the GDN op would write both requests' recurrent state
+    into the same physical cache slot and corrupt one of them. Also
+    verifies slot 0 is reserved (vLLM's null block convention)."""
+    for i in range(4):
+        input_batch.add_request(create_dummy_request(f"req-{i}"))
 
     slots = input_batch.mamba_state_indices_cpu[:input_batch.num_reqs].tolist()
     assert len(set(slots)) == len(slots), \
-        f"Mamba slots should be unique per request, got: {slots}"
-    # Slot 0 is reserved as the null block.
-    assert all(s >= 1 for s in slots), f"Slot 0 must be reserved: {slots}"
+        f"Slots not unique across concurrent requests: {slots}"
+    assert all(s >= 1 for s in slots), \
+        f"Slot 0 is the null block and must not be assigned: {slots}"
 
 
 def test_mamba_state_indices_freed_on_remove(input_batch: InputBatch):

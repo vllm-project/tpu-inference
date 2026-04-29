@@ -50,7 +50,6 @@ if TYPE_CHECKING:
     TPU_OFFLOAD_SAVE_THREADS: int = 1
     TPU_OFFLOAD_BATCHED_SAVE: bool = False
     TPU_OFFLOAD_METRICS_LOG_INTERVAL: int = 5
-    COMPACT_MAMBA_KV_CACHE: bool = True
 
 
 def env_with_choices(
@@ -282,14 +281,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # kv offload to dram: prometheus metrics log interval in seconds
     "TPU_OFFLOAD_METRICS_LOG_INTERVAL":
     lambda: int(os.getenv("TPU_OFFLOAD_METRICS_LOG_INTERVAL", "10")),
-    # Cap mamba layer allocation at `max_num_seqs+1` slots and redirect freed
-    # HBM into more attention blocks. Mamba state is recurrent (one slot per
-    # active request), so allocating num_blocks slots wastes most of them.
-    # Big throughput win on hybrid attn+mamba models like Qwen3.5. Disable
-    # only if you hit a regression that traces back to this.
-    "COMPACT_MAMBA_KV_CACHE":
-    lambda: os.getenv("COMPACT_MAMBA_KV_CACHE", "1") not in
-    ("0", "false", "False"),
 }
 
 

@@ -134,17 +134,20 @@ class InputBatch:
 
         self.request_distribution: list[int] = [0, 0, 0]
 
-        # Mamba slot tracking for hybrid attn+mamba models. Each request gets
-        # a unique mamba state slot id when it enters the batch and keeps it
-        # for the request's lifetime. The mapping `req_idx -> mamba_slot_id`
-        # is stored in `mamba_state_indices_cpu`. Why: vLLM's `condense` moves
-        # a request's persistent-batch slot, but the mamba recurrent state in
-        # the kv cache stays at its physical slot id. Indexing the cache by
-        # the (moving) persistent-batch slot reads stale data; indexing by the
-        # (stable) mamba_slot_id reads the right state. The pool size matches
-        # the compact-mamba allocation in `_maybe_set_compact_mamba_num_blocks_override`
-        # (`max_num_reqs + 1`); slot 0 is the null block, real slots are
-        # [1, max_num_reqs].
+        # Per-request physical slot id in the mamba kv-cache. Each request
+        # gets a unique slot at `add_request` and keeps it for its lifetime
+        # (slot ids follow the request through `condense` and `swap_states`,
+        # see those methods below). Real slots are [1, max_num_reqs]; slot 0
+        # is reserved as the null block. Why we track slot ids separately
+        # from the persistent-batch position `req_idx`: `condense`
+        # (https://github.com/vllm-project/vllm/blob/de3da0b/vllm/v1/worker/gpu_input_batch.py#L662)
+        # moves requests into lower `req_idx` slots when earlier requests
+        # finish, but the mamba recurrent state stays at its allocated
+        # physical slot. Indexing the cache by the moving `req_idx` would
+        # read stale state; indexing by `mamba_state_indices_cpu[req_idx]`
+        # reads the slot that actually holds this request's state.
+        # Pool size matches `_maybe_set_compact_mamba_num_blocks_override`'s
+        # cap of `max_num_reqs + 1`.
         self.mamba_state_indices_cpu = np.zeros(max_num_reqs, dtype=np.int32)
         self._free_mamba_slots: list[int] = list(range(
             max_num_reqs, 0, -1))  # pop from end → low slots first

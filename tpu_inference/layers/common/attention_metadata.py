@@ -45,9 +45,13 @@ class AttentionMetadata(object):
     query_start_loc: jax.Array = None
     # (3,)
     request_distribution: jax.Array = None
-    # (max_num_seqs,) int32 — per-request physical mamba slot id; stable
-    # across condense moves. Only consumed by hybrid attn+mamba models
-    # (e.g. Qwen3.5); None for pure-attention models.
+    # (max_num_seqs,) int32 — physical slot id (∈ [0, _mamba_num_blocks))
+    # in the mamba kv-cache for the request currently in each persistent-
+    # batch position. Used by mamba/GDN ops to read/write recurrent state
+    # without going through `block_tables`, since the mamba pool is
+    # smaller than the attention pool under compact-mamba sizing.
+    # None for models without mamba layers; pure-mamba models would also
+    # use this field, only hybrid models exercise it today.
     mamba_state_indices: jax.Array | None = None
 
     query_start_loc_cpu: Any = field(init=False)

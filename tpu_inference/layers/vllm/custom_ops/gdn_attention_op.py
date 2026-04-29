@@ -93,17 +93,19 @@ def gdn_attention_core_tpu(
     layer_idx = vllm_context.layer_name_to_kvcache_index[layer_name]
     conv_state, recurrent_state = vllm_context.kv_caches[layer_idx]
 
-    # Index mamba state by the per-request slot id maintained by
-    # `InputBatch.mamba_state_indices_cpu`, **not** by the persistent-batch
-    # position. The two diverge whenever `condense` shuffles requests
-    # between persistent-batch slots: the slot id stays with the request
-    # so the kernel still reads/writes its real state, while the
-    # persistent-batch position is reused by some other (or no) request.
+    # Index mamba state by the per-request slot id from
+    # `InputBatch.mamba_state_indices_cpu`, not by `block_tables[:, 0]`
+    # (vLLM's GPU convention). Two reasons:
     #
-    # We can't use `block_tables[:, 0]` (vLLM's GPU convention) because
-    # `_maybe_set_compact_mamba_num_blocks_override` caps the mamba pool
-    # at `max_num_seqs + 1` while the attention pool is much larger, so
-    # vLLM-allocated block IDs would walk off the end of the mamba arrays.
+    #  1. `_maybe_set_compact_mamba_num_blocks_override` caps the mamba
+    #     pool at `max_num_seqs + 1` while the attention pool is much
+    #     larger; using `block_tables[:, 0]` (a value in the attention
+    #     range) would walk off the end of the mamba arrays.
+    #  2. When vLLM's input batch runs `condense` to compact the persistent
+    #     batch (https://github.com/vllm-project/vllm/blob/de3da0b/vllm/v1/worker/gpu_input_batch.py#L662 — moves
+    #     requests into lower-index slots after earlier ones finish), the
+    #     slot id moves with the request so the kernel still reads/writes
+    #     the slot that holds this request's real state.
     state_indices = jax_view(attn_metadata.mamba_state_indices).astype(
         jnp.int32)
 
