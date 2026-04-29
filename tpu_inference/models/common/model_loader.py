@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import functools
-from typing import Any, Optional
+from typing import Any
 
 import jax
 import numpy as np
@@ -112,7 +112,7 @@ def _get_nnx_model(
     vllm_config: VllmConfig,
     rng: jax.Array,
     mesh: Mesh,
-    pooler: Optional[Any] = None,
+    pooler: Any | None = None,
 ) -> nnx.Module:
 
     def create_abstract_model() -> nnx.Module:
@@ -264,33 +264,14 @@ def _get_nnx_model(
                 weights_iterator = loader._get_weights_iterator(
                     model_weights, vllm_config.model_config.revision)
 
-                # Quick Extraction Pass for Pooler weights
-                pooler_weights = {}
-
-                def intercepted_iterator():
-                    for name, weight in weights_iterator:
-                        if name.startswith("pooler."):
-                            pooler_weights[name[7:]] = weight
-                        elif name.startswith("model.pooler."):
-                            pooler_weights[name[13:]] = weight
-                        else:
-                            yield name, weight
-
                 # We set the weights iterator at runtime, to prevent having to change
                 # every model's load_weights signature. This also prevents us from hitting
                 # a TypeError at runtime if you use the RunaiModelStreamerLoader with any
                 # flax_nnx model whose load_weights function does not accept the
                 # weights_iterator keyword argument.
-                vllm_config.model_config.runai_model_weights_iterator = intercepted_iterator(
-                )
+                vllm_config.model_config.runai_model_weights_iterator = weights_iterator
                 model.load_weights(rng)
                 del vllm_config.model_config.runai_model_weights_iterator
-
-                if pooler is not None and pooler_weights:
-                    logger.info(
-                        f"Loading {len(pooler_weights)} weights into CPU Pooler"
-                    )
-                    pooler.load_state_dict(pooler_weights, strict=False)
             else:
                 model.load_weights(rng)
             if hasattr(vllm_config, "pytorch_pooler"):
@@ -449,7 +430,7 @@ def get_flax_model(
             hidden_states: jax.Array,
             pooling_metadata: PoolingMetadata,
             seq_lens: np.ndarray,
-            num_scheduled_tokens: Optional[np.ndarray] = None,
+            num_scheduled_tokens: np.ndarray | None = None,
         ):
             # Performance optimization: use torch_view and move to CPU non-blocking
             torch_states = torch_view(hidden_states)
@@ -717,8 +698,8 @@ def register_model(arch: str, model: Any) -> None:
         self,
         input_ids: "torch.Tensor",
         positions: "torch.Tensor",
-        intermediate_tensors: Optional[Any] = None,
-        inputs_embeds: Optional["torch.Tensor"] = None,
+        intermediate_tensors: Any | None = None,
+        inputs_embeds: "torch.Tensor" | None = None,
     ) -> None:
         raise NotImplementedError(
             "This is a JAX model and does not implement the PyTorch forward method."
@@ -729,7 +710,7 @@ def register_model(arch: str, model: Any) -> None:
         self,
         input_ids: "torch.Tensor",
         positions: "torch.Tensor",
-        inputs_embeds: Optional["torch.Tensor"] = None,
+        inputs_embeds: "torch.Tensor" | None = None,
     ) -> "torch.Tensor":
         raise NotImplementedError(
             "This is a JAX model and does not implement the PyTorch embed_input_ids method."

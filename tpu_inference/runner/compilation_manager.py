@@ -65,7 +65,7 @@ class CompilationManager:
                              sharding: Optional[NamedSharding] = None) -> Any:
         """Helper to create dummy tensors for precompilation."""
         if len(shape) > 1:
-            tp_size = self.runner.mesh.shape.get("model", 1)
+            tp_size = self.runner.mesh.shape.get(ShardingAxisName.MODEL, 1)
             if tp_size == 1 and self.runner.vllm_config.parallel_config is not None:
                 tp_size = self.runner.vllm_config.parallel_config.tensor_parallel_size
             assert shape[

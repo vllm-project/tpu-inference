@@ -916,11 +916,10 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
             should_prepend = (base_prefix == "" and hasattr(module, "model"))
             for name, weight in w_iter:
                 if self.pytorch_pooler is not None:
-                    if name.startswith("pooler."):
-                        self.pooler_weights[name[7:]] = weight
-                        continue
-                    elif name.startswith("model.pooler."):
-                        self.pooler_weights[name[13:]] = weight
+                    match = re.match(r"^(?:model\.)?pooler\.(.*)$", name)
+                    if match:
+                        pooler_key = match.group(1)
+                        self.pooler_weights[pooler_key] = weight
                         continue
 
                 if should_prepend and not name.startswith(

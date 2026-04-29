@@ -605,10 +605,6 @@ class VllmModelWrapper:
                     pooling_metadata,
                 )
 
-                # Qwen3-Embedding requires L2 normalization.
-                # In vLLM V1, this is handled by PoolerNormalize in the head.
-                # We assume self._pooler (TokenPooler) executes the full pipeline.
-
                 return outputs
 
         return compute_pooler_output

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Datastructures defining an input batch
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional, cast
 
 import jax
@@ -29,7 +29,7 @@ class CachedRequestState(NewRequestData):
     generator: Optional[Any] = None
     mrope_positions: Optional[jax.Array] = None
     mrope_position_delta: Optional[int] = None
-    pooling_states: Optional[PoolingStates] = None
+    pooling_states: PoolingStates = field(default_factory=PoolingStates)
 
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
@@ -289,11 +289,8 @@ class InputBatch:
         if sampling_params := request.sampling_params:
             collect_sampling(sampling_params)
 
-        if pooling_params := request.pooling_params:
-            self.pooling_params[req_id] = pooling_params
-            self.pooling_states[
-                req_id] = request.pooling_states if request.pooling_states is not None else PoolingStates(
-                )
+        self.pooling_params[req_id] = request.pooling_params
+        self.pooling_states[req_id] = request.pooling_states
 
         # Add request lora ID
         if request.lora_request:

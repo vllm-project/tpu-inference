@@ -9,6 +9,7 @@ Model,Type,UnitTest,Accuracy/Correctness,Benchmark
 "Qwen/Qwen3-30B-A3B",Text,✅ Passing,✅ Passing,✅ Passing
 "Qwen/Qwen3-32B",Text,✅ Passing,✅ Passing,✅ Passing
 "Qwen/Qwen3-4B",Text,✅ Passing,✅ Passing,✅ Passing
+"Qwen/Qwen3-Embedding-8B",Embedding,✅ Passing,✅ Passing,❓ Untested
 "Qwen/Qwen3-Coder-480B-A35B-Instruct",Text,✅ Passing,✅ Passing,✅ Passing
 "deepseek-ai/DeepSeek-Math-V2",Text,❓ Untested,❓ Untested,❓ Untested
 "deepseek-ai/DeepSeek-R1",Text,❓ Untested,❓ Untested,❓ Untested
@@ -22,4 +23,3 @@ Model,Type,UnitTest,Accuracy/Correctness,Benchmark
 "openai/gpt-oss-120b",Text,❓ Untested,❓ Untested,❓ Untested
 "openai/gpt-oss-20b",Text,❓ Untested,❓ Untested,❓ Untested
 "zai-org/GLM-5",Text,❓ Untested,❓ Untested,❓ Untested
-"Qwen/Qwen3-Embedding-8B",Embedding,✅,✅,✅

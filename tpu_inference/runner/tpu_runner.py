@@ -497,9 +497,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, jax.Array] = {}
 
-        tp_size = self.mesh.shape.get("model", 1)
-        if tp_size == 1 and self.vllm_config.parallel_config is not None:
-            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        tp_size = self.mesh.shape.get(ShardingAxisName.MODEL, 1)
 
         self.vocab_size = common_utils.align_to(model_config.get_vocab_size(),
                                                 tp_size)
