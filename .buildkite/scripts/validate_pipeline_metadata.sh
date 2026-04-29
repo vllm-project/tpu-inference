@@ -85,6 +85,7 @@ validate_field() {
     if [[ -z "$exists" ]]; then
         echo "+++ ❌ Error: Missing mandatory field '$label' in $file"
         echo "💡 Tip: $tip"
+        echo ""
         ERRORS_FOUND=1
     else
         # Ensure that for all steps where it IS defined, it is not an empty string
@@ -94,6 +95,7 @@ validate_field() {
             echo "+++ ❌ Error: Detected empty value for '$label' in $file"
             echo "   Problematic steps: $(echo "$empty_steps" | xargs | tr ' ' ',')"
             echo "💡 Tip: $tip"
+            echo ""
             ERRORS_FOUND=1
         fi
     fi
@@ -103,7 +105,7 @@ validate_field() {
 ERRORS_FOUND=0
 
 # --- GLOBAL UNIQUENESS VALIDATION ---
-# Ensure that pipeline-name and CI_TARGET are unique across all spec directories
+# Ensure that CI_TARGET is unique across all spec directories
 declare -a SPEC_DIRS=("quantization" "parallelism" "models" "features" "rl")
 KERNEL_PARENT_DIR="$BUILDKITE_DIR/kernel_microbenchmarks"
 
@@ -131,6 +133,7 @@ for folder in "${SPEC_DIRS[@]}"; do
             echo "+++ ❌ Error: Multiple different 'CI_TARGET' values detected within $file"
             echo "Found: $(echo "$UNIQUE_TARGETS" | xargs | tr ' ' ',')"
             echo "💡 Tip: All steps within a single configuration file must share the same 'CI_TARGET'."
+            echo ""
             ERRORS_FOUND=1
         fi
 
@@ -142,6 +145,7 @@ for folder in "${SPEC_DIRS[@]}"; do
                 echo "+++ ❌ Error: Global duplicate 'CI_TARGET: $t_val' detected!"
                 echo "Conflict: $file and ${CI_TARGETS[$t_val]}"
                 echo "💡 Tip: 'CI_TARGET' is a unique identifier for support matrices and cannot be shared across files."
+                echo ""
                 ERRORS_FOUND=1
             fi
             CI_TARGETS["$t_val"]="$file"
@@ -177,6 +181,7 @@ while IFS= read -r file; do
             echo "+++ ❌ Error: Multiple 'CI_CATEGORY' values in $file"
             echo "Found: $(echo "$UNIQUE_CATEGORIES" | xargs | tr ' ' ',')"
             echo "💡 Tip: All steps in a file must share the same 'CI_CATEGORY'."
+            echo ""
             ERRORS_FOUND=1
         fi
 
@@ -185,6 +190,7 @@ while IFS= read -r file; do
             if [[ ! "$C_CAT" =~ ^(text-only|multimodal|embedding|diffusion)$ ]]; then
                 echo "+++ ❌ Error: Invalid CI_CATEGORY '$C_CAT' for models/ in $file"
                 echo "💡 Tip: Files in 'models/' should use 'text-only', 'multimodal', 'embedding' or 'diffusion' as their CI_CATEGORY."
+                echo ""
                 ERRORS_FOUND=1
             fi
         elif [[ "$file" =~ ^\.buildkite/features/ ]]; then
@@ -192,30 +198,35 @@ while IFS= read -r file; do
             if [[ ! "$C_CAT" =~ $FEATURE_RE ]]; then
                 echo "+++ ❌ Error: Invalid CI_CATEGORY '$C_CAT' for features/ in $file"
                 echo "💡 Tip: Files in 'features/' should use 'feature support matrix' or 'kernel support matrix' as their CI_CATEGORY."
+                echo ""
                 ERRORS_FOUND=1
             fi
         elif [[ "$file" =~ ^\.buildkite/parallelism/ ]]; then
             if [[ "$C_CAT" != "parallelism support matrix" ]]; then
                 echo "+++ ❌ Error: Invalid CI_CATEGORY '$C_CAT' for parallelism/ in $file"
                 echo "💡 Tip: Files in 'parallelism/' must use 'parallelism support matrix' as their CI_CATEGORY."
+                echo ""
                 ERRORS_FOUND=1
             fi
         elif [[ "$file" =~ ^\.buildkite/quantization/ ]]; then
             if [[ "$C_CAT" != "quantization support matrix" ]]; then
                 echo "+++ ❌ Error: Invalid CI_CATEGORY '$C_CAT' for quantization/ in $file"
                 echo "💡 Tip: Files in 'quantization/' must use 'quantization support matrix' as their CI_CATEGORY."
+                echo ""
                 ERRORS_FOUND=1
             fi
         elif [[ "$file" =~ ^\.buildkite/rl/ ]]; then
             if [[ "$C_CAT" != "rl support matrix" ]]; then
                 echo "+++ ❌ Error: Invalid CI_CATEGORY '$C_CAT' for rl/ in $file"
                 echo "💡 Tip: Files in 'rl/' must use 'rl support matrix' as their CI_CATEGORY."
+                echo ""
                 ERRORS_FOUND=1
             fi
         elif [[ "$file" =~ ^\.buildkite/kernel_microbenchmarks/ ]]; then
             if [[ "$C_CAT" != "kernel support matrix microbenchmarks" ]]; then
                 echo "+++ ❌ Error: Invalid CI_CATEGORY '$C_CAT' for kernel_microbenchmarks/ in $file"
                 echo "💡 Tip: Files in 'kernel_microbenchmarks/' must use 'kernel support matrix microbenchmarks' as their CI_CATEGORY."
+                echo ""
                 ERRORS_FOUND=1
             fi
         fi
@@ -227,6 +238,7 @@ while IFS= read -r file; do
             if ! contains "${ALLOWED_STAGES[@]}" "$stage"; then
                 echo "+++ ❌ Error: Invalid CI_STAGE '$stage' in $file"
                 echo "💡 Tip: Use approved stage names: ${ALLOWED_STAGES[*]}."
+                echo ""
                 ERRORS_FOUND=1
             fi
         done < <(echo "$ALL_FILE_STAGES")
@@ -237,6 +249,7 @@ while IFS= read -r file; do
             echo "+++ ❌ Error: Invalid key format in $file"
             echo "Found keys: $INVALID_KEYS"
             echo "💡 Tip: All step keys must start with '\${TPU_VERSION}'."
+            echo ""
             ERRORS_FOUND=1
         fi
 
@@ -245,6 +258,7 @@ while IFS= read -r file; do
             echo "+++ ❌ Error: Invalid label format in $file"
             echo "Found labels: $INVALID_LABELS"
             echo "💡 Tip: All step labels must start with '\${TPU_VERSION}'."
+            echo ""
             ERRORS_FOUND=1
         fi
 
@@ -261,11 +275,13 @@ while IFS= read -r file; do
                 if [[ "$S_DEP" == "null" ]]; then
                     echo "+++ ❌ Error: Recording step '$S_KEY' in $file has no 'depends_on' field."
                     echo "💡 Tip: Every recording step must depend on the test step it is recording."
+                    echo ""
                     ERRORS_FOUND=1
                 elif [[ "$S_ARG" != "$S_DEP" ]]; then
                     echo "+++ ❌ Error: record_step_result.sh argument mismatch in $file"
                     echo "Step '$S_KEY' depends on '$S_DEP' but tries to record '$S_ARG'."
                     echo "💡 Tip: The argument to record_step_result.sh must match the 'depends_on' key."
+                    echo ""
                     ERRORS_FOUND=1
                 fi
 
@@ -275,6 +291,7 @@ while IFS= read -r file; do
                     if [[ "$meta_val" == "null" ]]; then
                         echo "+++ ❌ Error: Recording step '$S_KEY' in $file missing metadata 'env.$meta_field'."
                         echo "💡 Tip: All recording steps must contain full metadata for result tracking."
+                        echo ""
                         ERRORS_FOUND=1
                     fi
                 done
@@ -287,6 +304,7 @@ while IFS= read -r file; do
             echo "+++ ❌ Error: Missing agents.queue in $file"
             echo "Problematic steps: $STEPS_MISSING_QUEUE"
             echo "💡 Tip: Every execution step must define an 'agents.queue'."
+            echo ""
             ERRORS_FOUND=1
         fi
 
@@ -308,6 +326,7 @@ while IFS= read -r file; do
             echo "Found:"
             echo -e "$INVALID_QUEUES"
             echo "💡 Tip: Use 'cpu', '\${TPU_QUEUE_SINGLE}', '\${TPU_QUEUE_MULTI}', or hardware queues like 'tpu_v6e_queue'."
+            echo ""
             ERRORS_FOUND=1
         fi
 
@@ -343,6 +362,7 @@ while IFS= read -r file; do
                 echo "Problematic steps:"
                 echo -e "$TP_QUEUE_ERRORS"
                 echo "💡 Tip: 'TENSOR_PARALLEL_SIZE' 1 or 2 requires a small scale queue (e.g. '\${TPU_QUEUE_SINGLE}'). 'TENSOR_PARALLEL_SIZE' 8 requires a large scale queue (e.g. '\${TPU_QUEUE_MULTI}')."
+                echo ""
                 ERRORS_FOUND=1
             fi
         fi
