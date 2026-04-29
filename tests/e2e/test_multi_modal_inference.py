@@ -17,7 +17,7 @@ from vllm.multimodal.image import convert_image_mode
 # vllm 0.17.0 on A100. The test is considered passed if the
 # generated output match with this text.
 EXPECTED_TEXT = (
-    "The image depicts a stunning view of the Tokyo Skytree, a tall tower located in Tokyo, Japan. The sky is clear and blue, providing a beautiful backdrop for the tower. In the foreground, there are cherry blossom trees in full bloom, with pink flowers covering the branches. The cherry blossoms are in full bloom"
+    "The image depicts a tall, cylindrical tower with a lattice-like structure, surrounded by cherry blossom trees in full bloom. The cherry blossoms are in various stages of opening, with pink petals covering the branches. The sky is clear and blue, providing a vibrant backdrop to the scene. The tower appears to be a significant landmark"
 )
 
 
@@ -35,7 +35,8 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes):
 
     # --- Configuration ---
     model = "Qwen/Qwen2.5-VL-3B-Instruct"
-    tensor_parallel_size = 1
+    # tp=2 for tpu7x, tp=1 for tpu6e (matches accuracy test convention)
+    tensor_parallel_size = 2 if os.environ.get('TPU_VERSION') == 'tpu7x' else 1
     temperature = 0.0
     max_tokens = 64
     max_model_len = 4096
