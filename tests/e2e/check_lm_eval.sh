@@ -112,8 +112,6 @@ lm_eval_args=(
     --batch_size auto
     --apply_chat_template
     --num_fewshot 8
-    # --log_samples
-    # --output_path /mnt/disks/kunjanp-dev-disk-2/lm_eval_output
 )
 
 # Append --limit if provided

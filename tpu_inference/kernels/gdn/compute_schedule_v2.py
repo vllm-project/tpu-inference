@@ -20,7 +20,7 @@ def compute_schedule_table_v2(
     query_start_loc: jax.Array,
     decode_tokens: int | jax.Array,
     num_valid_seqs: int | jax.Array,
-    num_tokens: int,
+    max_tokens: int,
     chunk_size: int,
     BT: int | None = None,
     alignment: int = 8,
@@ -59,7 +59,7 @@ def compute_schedule_table_v2(
     num_decode_batches = (decode_tokens + BT - 1) // BT
     num_seqs = query_start_loc.shape[0] - 1
 
-    max_blocks = (num_tokens + chunk_size - 1) // chunk_size
+    max_blocks = (max_tokens + chunk_size - 1) // chunk_size
     safe_max_blocks = int(max_blocks + num_seqs * 2)
 
     # =========================================================================
@@ -69,6 +69,7 @@ def compute_schedule_table_v2(
     is_last_seq = r_idx == num_seqs - 1
     seq_start = query_start_loc[:-1]
     seq_end = query_start_loc[1:]
+    num_tokens = query_start_loc[num_valid_seqs]
 
     # create vector of sequence ends
     prev_seq_end = jnp.pad(seq_end[:-1], (1, 0), constant_values=0)
@@ -171,10 +172,6 @@ def compute_schedule_table_v2(
 
     # [safe_max_blocks, sublane size, num_seqs]
     valid_mask = glob_idxs < num_tokens
-    # t_reqs = (
-    #     jnp.sum(glob_idxs[:, :, None] >= query_start_loc[None, None, :], axis=-1)
-    #     - 1
-    # )
     t_reqs = (
         jnp.sum(glob_idxs[:, :, None] >= fixed_query_start_loc[None, None, :],
                 axis=-1) - 1)

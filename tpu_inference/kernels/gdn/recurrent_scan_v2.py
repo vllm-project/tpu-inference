@@ -415,12 +415,11 @@ def inner_kernel(
             g = jnp.maximum(g, -100.0)
             prefill_count = schedule_table[step, 3][...]
             mask_float = (jnp.arange(C) < prefill_count).astype(q.dtype)
-
-            q = q * mask_float[:, None]
-            k = k * mask_float[:, None]
-            g = g * mask_float[None, :]
-            v = v * mask_float[:, None]
-            beta = beta * mask_float[None, :]
+            q = jnp.where(mask_float[:, None] > 0, q, 0.0)
+            k = jnp.where(mask_float[:, None] > 0, k, 0.0)
+            g = jnp.where(mask_float[None, :] > 0, g, 0.0)
+            v = jnp.where(mask_float[:, None] > 0, v, 0.0)
+            beta = jnp.where(mask_float[None, :] > 0, beta, 0.0)
 
             q = q.reshape(C, n_kq, d_k)
             k = k.reshape(C, n_kq, d_k)
@@ -476,10 +475,10 @@ def inner_kernel(
                 precision=jax.lax.Precision.HIGHEST,
             )
             mask_float_q = (i >= j).astype(jnp.float32)
-            g_diff_Sq = g_diff_safe * mask_float_q + (1.0 -
-                                                      mask_float_q) * (-1e30)
+            g_diff_Sq = g_diff_safe * mask_float_q[None, ...] + (
+                1.0 - mask_float_q[None, ...]) * (-1e30)
             S_q = S_q * jnp.exp(g_diff_Sq)
-            S_q = S_q * mask_float_q
+            S_q = S_q * mask_float_q[None, ...]
 
             I_plus_S = jnp.eye(C, dtype=jnp.float32)[None, ...] + S
             # TODO: call the function in kernels file
@@ -1037,7 +1036,6 @@ def recurrent_scan(
       - Updated recurrent state of shape [max_reqs, n_v, d_k, d_v].
       - The mixed_qkv array of shape [num_tokens, 2 * n_kq * d_k + n_v * d_v].
   """
-    print("CLEANUP 2")
     # Pad raw a and b to (num_tokens, 128) for sublanes
     a_padded = jnp.pad(a, ((0, 0), (0, 128 - n_v)))
     b_padded = jnp.pad(b, ((0, 0), (0, 128 - n_v)))
@@ -1054,7 +1052,7 @@ def recurrent_scan(
             query_start_loc,
             decode_tokens,
             distribution[2],
-            mixed_qkv.shape[0] - chunk_size,
+            mixed_qkv.shape[0],
             chunk_size,
             BT,
             alignment=sublanesize,
