@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import copy
+import os
+import re
 import time
 from collections.abc import Sequence
 from contextlib import nullcontext
@@ -616,6 +618,13 @@ def load_lora_model(model: torch.nn.Module, vllm_config: VllmConfig,
         logger.warning("Regarding multimodal models, vLLM currently "
                        "only supports adding LoRA to language model.")
 
+    env_modules = _parse_lora_module_path_env()
+    if env_modules is not None and vllm_config.lora_config:
+        vllm_config.lora_config.target_modules = env_modules
+        logger.info(
+            f"Overriding vLLM Engine LoRA target_modules with LORA_MODULE_PATH: {env_modules}"
+        )
+
     # Add LoRA Manager to the Model Runner
     lora_manager = LRUCacheWorkerLoRAManager(
         vllm_config,
@@ -649,3 +658,45 @@ def replace_set_lora(model):
             module.set_lora = _tpu_set_lora.__get__(module, module.__class__)
             module.reset_lora = _tpu_reset_lora.__get__(
                 module, module.__class__)
+
+
+def _parse_lora_module_path_env():
+    """Parses LORA_MODULE_PATH env var into vLLM canonical target_modules list."""
+    env_val = os.environ.get("LORA_MODULE_PATH")
+    if not env_val:
+        return None
+    # Map Google/MaxText Pax-style names to canonical HF/vLLM names
+    name_mapping = {
+        "query": "q_proj",
+        "key": "k_proj",
+        "value": "v_proj",
+        "out": "o_proj",
+        "wi_0": "gate_proj",
+        "wi_1": "up_proj",
+        "wo": "down_proj",
+        "embed": "embed_tokens",
+        "lm_head": "lm_head"
+    }
+    target_modules = set()
+
+    # Extract regex groups like (query|key|value|out)
+    if '(' in env_val or ')' in env_val:
+        matches = re.findall(r'\(([^)]+)\)', env_val)
+        for group in matches:
+            for module in group.split('|'):
+                if module in name_mapping:
+                    target_modules.add(name_mapping[module])
+                else:
+                    target_modules.add(module)
+    else:
+        # No parentheses found, assume standard list
+        # Split by comma or pipe
+        parts = re.split(r'[,|]', env_val)
+        for part in parts:
+            part = part.strip()
+            if part:
+                if part in name_mapping:
+                    target_modules.add(name_mapping[part])
+                else:
+                    target_modules.add(part)
+    return list(target_modules) if target_modules else None
