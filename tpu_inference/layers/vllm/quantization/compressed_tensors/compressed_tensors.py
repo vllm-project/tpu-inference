@@ -74,16 +74,21 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, VllmQuantConfig):
         # Will be empty for models with only sparsity
         weight_quant = input_quant = None
         if self.target_scheme_map:
-            matched_target = find_matched_target(
-                layer_name=layer_name,
-                module=layer,
-                targets=self.target_scheme_map.keys(),
-                fused_mapping=self.packed_modules_mapping,
-            )
+            try:
+                matched_target = find_matched_target(
+                    layer_name=layer_name,
+                    module=layer,
+                    targets=self.target_scheme_map.keys(),
+                    fused_mapping=self.packed_modules_mapping,
+                )
 
-            scheme_dict = self.target_scheme_map[matched_target]
-            weight_quant = scheme_dict.get("weights")
-            input_quant = scheme_dict.get("input_activations")
+                scheme_dict = self.target_scheme_map[matched_target]
+                weight_quant = scheme_dict.get("weights")
+                input_quant = scheme_dict.get("input_activations")
+            except ValueError:
+                # find_matched_target raises ValueError if no match is found.
+                # In this case, we fall back to UnquantizedLinearMethod.
+                return None
 
         if weight_quant is None:
             logger.warning_once("Acceleration for non-quantized schemes is "
@@ -110,13 +115,18 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, VllmQuantConfig):
                 is_static_input_scheme=is_static_input_scheme,
                 linear_config=linear_config,
             )
-        if self._is_dynamic_token_w8a8(weight_quant, input_quant):
+        if input_quant is not None and self._is_dynamic_token_w8a8(
+                weight_quant, input_quant):
             return VllmCompressedTensorsW8A8Int8(
                 strategy=weight_quant.strategy,
                 is_static_input_scheme=False,
                 input_symmetric=input_quant.symmetric,
                 linear_config=linear_config,
             )
+        logger.warning_once(
+            f"No compressed-tensors compatible scheme was found for {layer_name}. "
+            "Falling back to UnquantizedLinearMethod or forced FP8.")
+        return None
         raise NotImplementedError(
             "No compressed-tensors compatible scheme was found for layer "
             f"{layer_name}.")
@@ -126,17 +136,54 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, VllmQuantConfig):
         layer: torch.nn.Module,
         prefix: str,
     ) -> Optional[QuantizeMethodBase]:
-        if should_ignore_layer(prefix,
-                               ignore=self.ignore,
-                               fused_mapping=self.packed_modules_mapping):
+        is_ignored = should_ignore_layer(
+            prefix,
+            ignore=self.ignore,
+            fused_mapping=self.packed_modules_mapping)
+
+        # Force FP8 quantization for attention layers in Kimi models,
+        # even if they are in the ignore list.
+        force_fp8 = False
+        if (is_ignored and self.vllm_config.model_config.hf_config.model_type
+                in ["kimi_k2", "kimi_k25"]):
+            if "self_attn" in prefix:
+                force_fp8 = True
+                logger.info_once(f"Force FP8 for attention layer: {prefix}")
+
+        if is_ignored and not force_fp8:
             return VllmUnquantizedConfig.get_quant_method(self, layer, prefix)
 
         match layer:
             case LinearBase():
                 scheme = self.get_scheme(layer=layer, layer_name=prefix)
                 if scheme is None:
-                    return VllmUnquantizedConfig.get_quant_method(
-                        self, layer, prefix)
+                    if force_fp8:
+                        from compressed_tensors.quantization import (
+                            QuantizationArgs, QuantizationStrategy)
+
+                        # Force FP8 W8A8 for attention layers
+                        weight_quant = QuantizationArgs(
+                            num_bits=8,
+                            type="float",
+                            strategy=QuantizationStrategy.TENSOR,
+                            dynamic=False,
+                            symmetric=True)
+                        input_quant = QuantizationArgs(
+                            num_bits=8,
+                            type="float",
+                            strategy=QuantizationStrategy.TENSOR,
+                            dynamic=True,
+                            symmetric=True)
+                        scheme = VllmCompressedTensorsW8A8Fp8(
+                            weight_quant=weight_quant,
+                            is_static_input_scheme=False,
+                            linear_config=self.get_linear_config(layer),
+                            is_forced=True,
+                        )
+                    else:
+                        return VllmUnquantizedConfig.get_quant_method(
+                            self, layer, prefix)
+                print(f"Using scheme: {scheme}")
                 layer.scheme = scheme
                 return CompressedTensorsLinearMethod(self)
             case FusedMoE():

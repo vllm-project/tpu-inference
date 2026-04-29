@@ -292,6 +292,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # kv offload to dram: Whether to use unpinned_host for KV cache tensors on host dram.
     "TPU_OFFLOAD_USE_UNPINNED_HOST":
     lambda: bool(int(os.getenv("TPU_OFFLOAD_USE_UNPINNED_HOST", "0"))),
+    "DISABLE_MLA_Q_ACTIVATION_QUANTIZATION":
+    env_bool("DISABLE_MLA_Q_ACTIVATION_QUANTIZATION", default=False),
 }
 
 

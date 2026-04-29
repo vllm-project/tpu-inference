@@ -24,10 +24,14 @@ from vllm.v1.attention.backend import (AttentionBackend, AttentionLayer,
 from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
                                                  register_backend)
 
+import tpu_inference.envs as envs
 from tpu_inference.layers.common.attention_interface import mla_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import (
     quantize_kv, static_per_tensor_quantize_tensor)
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 @register_backend(AttentionBackendEnum.FLASH_ATTN_MLA)
@@ -160,10 +164,16 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             k_scale = layer._k_scale_float
             v_scale = layer._v_scale_float
 
-            q_nope = static_per_tensor_quantize_tensor(
-                layer.kv_cache_quantized_dtype, q_nope, q_scale)
-            q_pe = static_per_tensor_quantize_tensor(
-                layer.kv_cache_quantized_dtype, q_pe, q_scale)
+            if not envs.DISABLE_MLA_Q_ACTIVATION_QUANTIZATION:
+                q_nope = static_per_tensor_quantize_tensor(
+                    layer.kv_cache_quantized_dtype, q_nope, q_scale)
+                q_pe = static_per_tensor_quantize_tensor(
+                    layer.kv_cache_quantized_dtype, q_pe, q_scale)
+            else:
+                # Needed because q_pe comes in as FP32, so we cast down to BF16
+                logger.info_once(
+                    "MLA q_pe is not quantized, but q_nope is quantized. ")
+                q_pe = q_pe.astype(input_dtype)
 
             kv_c_normed, _ = quantize_kv(layer.kv_cache_quantized_dtype,
                                          kv_c_normed,
