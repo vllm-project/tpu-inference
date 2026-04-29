@@ -167,7 +167,8 @@ def maybe_precompile_vision_encoder_fn(
 def maybe_prepare_for_jit(kwargs: dict, vllm_model) -> dict:
     """Convert certain kwargs to JIT-friendly formats, if needed.
     
-    Specifically, convert "image_grid_thw", "video_grid_thw", and "grid_thw" to GridTHW instances, which are tuple subclasses that can be hashed in jax.jit.
+    Specifically, convert "image_grid_thw", "video_grid_thw", and "grid_thw" to
+    GridTHW instances, which are tuple subclasses that can be hashed in jax.jit.
     """
     if not is_jittable_architecture(vllm_model):
         return kwargs

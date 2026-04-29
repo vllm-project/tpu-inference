@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import copy
-import functools
 import time
 from collections.abc import Sequence
 from contextlib import nullcontext
@@ -414,7 +413,6 @@ class VllmModelWrapper:
                                                   self.model.vllm_model,
                                                   self.vllm_config)
 
-    @functools.cache
     def wrap_embed_multimodal_func(self):
         if not self.vllm_config.model_config.is_multimodal_model:
             return None
