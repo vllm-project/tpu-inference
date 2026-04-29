@@ -34,7 +34,9 @@ DECODE_HEAVY_RATIO_THRESHOLD = 0.2
 BALANCED_RATIO_THRESHOLD = (0.4, 0.6)
 PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR = 15
 PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP = 0
-PHASED_PROFILER_DECODE_KV_LEN_THRESHOLD = -1
+# For decode only batches, start capturing traces after all requests in the
+# batch has KV caches that have reached this length threshold
+PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD = -1
 
 logger = init_logger(__name__)
 
@@ -322,8 +324,8 @@ class PhasedBasedProfiler:
                       PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP))
         self.decode_steps_skipped: int = 0
         self.decode_kv_len_threshold: int = int(
-            os.getenv("PHASED_PROFILER_DECODE_KV_LEN_THRESHOLD",
-                      PHASED_PROFILER_DECODE_KV_LEN_THRESHOLD))
+            os.getenv("PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD",
+                      PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD))
         self.profile_dir: str = profile_dir
         # NOTE: we purposely don't have AMBIGUOUS here
         self.inference_phase_seen: dict = {
