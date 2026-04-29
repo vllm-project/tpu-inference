@@ -164,6 +164,9 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     PREFILL_HOSTS+=("localhost")
     PREFILL_PORTS+=($PORT)
     PREFILL_PIDS+=($!)
+
+    # Pause between starting each instance to relieve host memory pressure
+    sleep 30
 done
 
 
@@ -200,6 +203,9 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     DECODE_HOSTS+=("localhost")
     DECODE_PORTS+=($PORT)
     DECODE_PIDS+=($!)
+
+    # Pause between starting each instance to relieve host memory pressure
+    sleep 30
 done
 
 # Wait for all instances to start

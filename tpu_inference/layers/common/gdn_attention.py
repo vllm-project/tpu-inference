@@ -117,9 +117,11 @@ def run_jax_gdn_attention_local(
     """
     # has_initial_state[i] = True iff request i already has computed
     # tokens in its mamba slot (chunked-prefill continuation, prefix-cache
-    # hit, or running decode). False for brand-new prefills, whose
-    # gathered conv/recurrent state is then masked to zero by the
-    # ragged kernels. context_len = seq_len - query_len.
+    # hit, or running decode). False for brand-new prefills, in which
+    # case the conv1d, the chunked / ref delta-rule impls, and the fused
+    # Pallas recurrent kernel all zero the slot's prior state before
+    # the update so a freshly-allocated mamba slot can't leak its
+    # previous tenant's state. context_len = seq_len - query_len.
     max_reqs = seq_lens.shape[0]
     query_lens = query_start_loc[1:max_reqs + 1] - query_start_loc[:max_reqs]
     has_initial_state = (seq_lens - query_lens) > 0
@@ -167,34 +169,18 @@ def run_jax_gdn_attention_local(
             use_qk_norm_in_gdn=True,
         )
 
-    if config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.FUSED:
-        # The fused kernel does not yet honor `has_initial_state`. Fall
-        # through with the existing call signature; the chunked/ref paths
-        # used in production already mask via the new argument below.
-        new_recurrent_state, output = ragged_gdn_impl(
-            out_mixed_qkv,
-            b,
-            a,
-            recurrent_state,
-            A_log,
-            dt_bias,
-            query_start_loc,
-            state_indices,
-            distribution,
-        )
-    else:
-        new_recurrent_state, output = ragged_gdn_impl(
-            out_mixed_qkv,
-            b,
-            a,
-            recurrent_state,
-            A_log,
-            dt_bias,
-            query_start_loc,
-            state_indices,
-            distribution,
-            has_initial_state,
-        )
+    new_recurrent_state, output = ragged_gdn_impl(
+        out_mixed_qkv,
+        b,
+        a,
+        recurrent_state,
+        A_log,
+        dt_bias,
+        query_start_loc,
+        state_indices,
+        distribution,
+        has_initial_state,
+    )
 
     return (new_conv_state, new_recurrent_state), output
 
