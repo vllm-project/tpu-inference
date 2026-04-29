@@ -71,6 +71,5 @@ echo "  KERNEL_TUNING_TPU_VERSION=${KERNEL_TUNING_TPU_VERSION:-}"
 echo "  HOST_NAME=${HOST_NAME:-}"
 set_jax_envs "${KERNEL_TUNING_TPU_VERSION:-v6}"
 buildkite-agent pipeline upload .buildkite/pipeline_kernel_tuning.yml
-set_jax_envs unset
 
 echo "--- Buildkite Kernel Tuning Bootstrap Finished"

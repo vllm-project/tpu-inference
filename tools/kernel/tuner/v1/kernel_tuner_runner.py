@@ -72,8 +72,6 @@ _WORKER_ID = flags.DEFINE_string('worker_id',
 _TPU_VERSION = flags.DEFINE_string(
     'tpu_version', 'v6',
     'The TPU version to use for tuning. Supported values are "v6" and "v7".')
-_TPU_QUEUE_MULTI = flags.DEFINE_string('tpu_queue_multi', 'tpu_v6e_8_queue',
-                                       'The TPU queue to use for tuning.')
 
 # Note: For simplicity, we are directly referencing the kernel tuner class
 # here. In the future, we can consider a more flexible plugin-based system
@@ -120,7 +118,7 @@ def main(argv):
     kernel_tuner = kernel_tuner_cls(storage_manager)
 
     tpu_version = _TPU_VERSION.value
-    tpu_queue_multi = _TPU_QUEUE_MULTI.value
+    tpu_queue_multi = 'tpu_v6e_8_queue' if tpu_version == 'v6' else 'tpu_v7x_8_queue'
 
     if _RUN_LOCALLY.value:
         logger.info(
