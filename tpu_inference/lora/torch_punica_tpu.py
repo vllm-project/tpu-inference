@@ -52,6 +52,9 @@ class PunicaWrapperTPU(PunicaWrapperBase):
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.IntTensor:
         return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
 
+    def _get_sampler_indices(self, x: torch.Tensor) -> torch.IntTensor:
+        return torch.narrow(self._sampler_indices, 0, 0, x.size(0))
+
     @property
     def embeddings_indices(self) -> torch.Tensor:
         """
@@ -148,8 +151,18 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             lora_b_stacked (torch.Tensor): lora_b's weights.
             add_inputs (bool): Default to True.
         """
-        raise NotImplementedError(
-            "NYI: torch_punica_tpu.PunicaWrapperTPU.add_lora_embedding.")
+        y_orig = y
+        y = y.view(-1, y.shape[-1])
+        x = x.view(-1, x.shape[-1])
+        
+        add_input = kwargs.get('add_input', add_inputs)
+        
+        # Embedding layer only needs the expand operation as lookup in LoRA A is done beforehand.
+        y = bgmv_expand_slice(x, lora_b_stacked, y,
+                              self._get_token_lora_indices(x),
+                              0, y.shape[-1],
+                              add_input)
+        return y.view(y_orig.shape)
 
     def add_lora_linear(self,
                         y: torch.Tensor,
@@ -226,8 +239,20 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             buffer (Optional[torch.Tensor]):Default to None.
         """
-        raise NotImplementedError(
-            "NYI: torch_punica_tpu.PunicaWrapperTPU.add_lora_logits.")
+
+        # Step 1: Shrink operation
+        buffer = bgmv_shrink(x, lora_a_stacked, self._get_sampler_indices(x), scale)
+        
+        y_orig = y
+        y = y.view(-1, y.shape[-1])
+        
+        # Step 2: Expand operation
+        y = bgmv_expand_slice(buffer, lora_b_stacked, y,
+                              self._get_sampler_indices(x),
+                              0, y.shape[-1],
+                              True)
+        
+        return y.view(y_orig.shape)
 
     @property
     def token_lora_indices(self) -> torch.Tensor:
