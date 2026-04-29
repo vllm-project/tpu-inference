@@ -90,8 +90,6 @@ def inner_kernel(
     a_log_ref,
     # VMEM: (n_v,). dt_bias for gate computation
     dt_bias_ref,
-    # VMEM: (C, C). Identity matrix for Newton-Schulz (currently unused)
-    identity_ref,
     # VMEM: (C, n_v * d_v). Scanned outputs for prefill
     prefill_output_ref,
     # VMEM: (BT, n_v * d_v). Scanned outputs for decode
@@ -121,12 +119,12 @@ def inner_kernel(
     # VMEM scratchpad: (2, n_v, d_k, d_v). To carry state across chunks
     # (double buffered)
     prefill_scratch,
-    # VMEM scratchpad: (2, 2, n_v, d_k, d_v). To hold decode states (double
-    # buffered, loop double buffered)
+    # VMEM scratchpad: (1, 2, n_v, d_k, d_v). TODO: double
+    # buffer or x buffer to to loop over BT in decode without overwriting state and using async copy for state load/store)
     decode_state_scratch,
+    # VMEM scratchpad: (1, n_v, d_k, d_v). dtype = recurrent_state dtype
+    # TODO: if output dtype of state is always f32 then this can be removed.
     state_commit_scratch,
-    # VMEM scratchpad: (C, n_v * d_v). To hold prefill outputs before DMA
-    o_c_flat_scratch,
     # VMEM scratchpad: (BT, n_v * d_v). To hold decode outputs before DMA
     decode_output_scratch,
     # Array of C semaphores for decode state loads
@@ -160,8 +158,6 @@ def inner_kernel(
 
     is_last_chunk = schedule_table[step, 8][...]
     is_first_chunk = schedule_table[step, 9][...]
-
-    #   jax.debug.print("inner_kernel step: {} | prefill_valid: {} | prefill_offset: {} | decode_valid: {} | decode_offset: {} | decode_count: {}", step, prefill_valid, prefill_offset, decode_valid, decode_offset, decode_count)
 
     def l2_normalize(x, eps=1e-6):
         norm = jnp.sqrt(jnp.sum(x * x, axis=-1, keepdims=True) + eps)
@@ -202,8 +198,7 @@ def inner_kernel(
                     qkv_block_data.dtype)[:, None]
                 qkv_row = jnp.sum(qkv_block_data * mask, axis=0, keepdims=True)
                 # Fused SiLU
-                qkv_row = qkv_row * jax.nn.sigmoid(qkv_row)
-
+                qkv_row = jax.nn.silu(qkv_row)
                 q = qkv_row[:, :key_dim].reshape(n_kq, d_k)
                 k = qkv_row[:, key_dim:2 * key_dim].reshape(n_kq, d_k)
                 v = qkv_row[:, 2 * key_dim:].reshape(n_v, d_v)
@@ -282,7 +277,10 @@ def inner_kernel(
                     q_k_h = jnp.sum(q_h * k_h, axis=-1,
                                     keepdims=True)  # (1, 1)
 
-                    # out_h = decay[h] * q_state_h + q_k_h * v_new_h  # (1, d_v)
+                    # Defensive code to handle NaNs and infs in state,
+                    # Saw similar issue while trying newton schulz
+                    # which can happen due to large decay or long sequences.
+                    # TODO: analyze perf impact and risk of removing this.
                     decay_q_state = jnp.where(jnp.isinf(q_state_h), 0.0,
                                               decay[h] * q_state_h)
                     out_h = decay_q_state + q_k_h * v_new_h
@@ -293,7 +291,10 @@ def inner_kernel(
                                        trans_a=True,
                                        precision=jax.lax.Precision.HIGHEST
                                        )  # (d_k, 1) @ (1, d_v) -> (d_k, d_v)
-                    # new_state_h = state_h * decay[h] + k_v_new_h
+                    # Defensive code to handle NaNs and infs in state,
+                    # which can happen due to large decay or long sequences.
+                    # In such cases, we reset the state contribution to zero and rely solely on the new value
+                    # TODO: analyze perf impact and risk of removing this.
                     decay_state = jnp.where(jnp.isinf(state_h), 0.0,
                                             state_h * decay[h])
                     new_state_h = decay_state + k_v_new_h
@@ -303,6 +304,7 @@ def inner_kernel(
                 new_state = jnp.stack(new_state_list,
                                       axis=0)  # (n_v, d_k, d_v)
 
+                #TODO: remove VPU path if MXU is certified path
                 # decay_exp = decay[..., None]  # (n_v, 1)
 
                 # k_state = jnp.sum(k[..., None] * current_state, axis=1)  # (n_v, d_v)
@@ -367,6 +369,8 @@ def inner_kernel(
 
     # Prefill Branch
     def process_prefill():
+        # TODO: eliminate k.transpose in matmuls by directly slicing in the right shape above
+
         # not used meaningfully, because dma is sync.
         # intention is to index into scratch for storing state and not overwrite each other
         prefill_slot = prefill_req_id % 2
@@ -389,7 +393,7 @@ def inner_kernel(
             # Workaround: Upcast to fp32 to avoid NaNs in long sequences
             qkv_chunk = prefill_qkv_ref[...].astype(jnp.float32)  # (C, d)
             # Fused SiLU
-            qkv_chunk = qkv_chunk * jax.nn.sigmoid(qkv_chunk)
+            qkv_chunk = jax.nn.silu(qkv_chunk)
             q = qkv_chunk[:, :key_dim]
             k = qkv_chunk[:, key_dim:2 * key_dim]
             v = qkv_chunk[:, 2 * key_dim:]
@@ -431,6 +435,7 @@ def inner_kernel(
                 q = jnp.repeat(q, repeat_factor, axis=1)
                 k = jnp.repeat(k, repeat_factor, axis=1)
 
+            # TODO: eliminate these transposes by directly slicing in the right shape above,
             q = q.transpose(1, 0, 2)
             k = k.transpose(1, 0, 2)
             v = v.transpose(1, 0, 2)
@@ -458,12 +463,12 @@ def inner_kernel(
             j = jnp.arange(C)[None, :]
             mask_float = (i > j).astype(jnp.float32)
 
+            # Defensive code to handle large positive g_diff which can cause overflow in exp,
+            # TODO: analyze if this is a common case and if we can remove this or do by other means
+            # (like clipping g values before cumsum or using a different data type for g/g_cumsum)
             g_diff_safe = jnp.minimum(g_diff, 0.0)
             S = jnp.where(mask_float[None, :, :] > 0, S * jnp.exp(g_diff_safe),
                           0.0)
-            # g_diff_S = g_diff_safe * mask_float + (1.0 - mask_float) * (-1e30)
-            # S = S * jnp.exp(g_diff_S)
-            # S = S * mask_float
 
             S_q = jnp.matmul(
                 q.astype(jnp.float32),
@@ -476,10 +481,8 @@ def inner_kernel(
             S_q = S_q * jnp.exp(g_diff_Sq)
             S_q = S_q * mask_float_q
 
-            # I_plus_S = identity_ref[...] + S
-            # maybe better to initialize in kernel instead of wasting bandwidth
             I_plus_S = jnp.eye(C, dtype=jnp.float32)[None, ...] + S
-            # TODO: cleanup its inligned, duplicated code
+            # TODO: call the function in kernels file
             A_inv = invert_triangular_matrix(I_plus_S, block_size=16)
 
             # UW
@@ -526,6 +529,8 @@ def inner_kernel(
             prefill_scratch[prefill_slot] = h_new.astype(prefill_scratch.dtype)
 
             def store_state():
+                # TODO: if dtype of state in HBM is always f32,
+                # then we can eliminate this copy and directly write from scratch to HBM
                 state_commit_scratch[0] = prefill_scratch[prefill_slot].astype(
                     state_commit_scratch.dtype)
                 state_idx = state_indices[prefill_req_id][...]
@@ -540,6 +545,7 @@ def inner_kernel(
 
             jax.lax.cond(is_last_chunk > 0, store_state, lambda: None)
 
+            # TODO: eliminate this transpose and reshape by directly writing in the right shape above
             o_c_tr = o_c.transpose(1, 0, 2)
             o_c_flat = o_c_tr.reshape(C, n_v * d_v)
 
@@ -557,8 +563,8 @@ def inner_kernel(
 
             # Workaround: Upcast to fp32 to avoid NaNs
             qkv_chunk = prefill_qkv_ref[:C_trans, :].astype(jnp.float32)
-            # Fused SiLU
-            qkv_chunk = qkv_chunk * jax.nn.sigmoid(qkv_chunk)
+            # Fused SiLU TODO: maybe 'SiLU' needs to be parametrized,
+            qkv_chunk = jax.nn.silu(qkv_chunk)
             q = qkv_chunk[:, :key_dim]
             k = qkv_chunk[:, key_dim:2 * key_dim]
             v = qkv_chunk[:, 2 * key_dim:]
@@ -591,6 +597,7 @@ def inner_kernel(
                 q = jnp.repeat(q, repeat_factor, axis=1)
                 k = jnp.repeat(k, repeat_factor, axis=1)
 
+            # TODO: eliminate these transposes by directly slicing in the right shape above,
             q = q.transpose(1, 0, 2)
             k = k.transpose(1, 0, 2)
             v = v.transpose(1, 0, 2)
@@ -601,7 +608,6 @@ def inner_kernel(
             # state indice for req
             first_req_id = schedule_table[step, 12][...]
             first_is_first = schedule_table[step, 12 + C_trans][...]
-            # NOTE: its wrong, this uses index instead of logical sequence id
             first_slot = first_req_id % 2
             h = prefill_scratch[first_slot]
             h = jnp.where(first_is_first > 0, jnp.zeros_like(h), h)
@@ -612,7 +618,6 @@ def inner_kernel(
             # loop over token by token
             for i in range(sublanesize):
                 # read transition token metadata
-                # NOTE: reads state index instead of sequence index
                 t_req = schedule_table[step, 12 + i][...]
                 # get sequence index for token i in sublane
                 t_is_first = schedule_table[step, 12 + C_trans + i][...]
@@ -770,7 +775,6 @@ def inner_kernel(
 def get_qkv_index_map_v2(
     step,
     schedule_table,
-    num_tokens,
     valid_col,
     offset_col,
     count_col,
@@ -783,7 +787,6 @@ def get_qkv_index_map_v2(
 
     safe_offset = jnp.where(valid > 0, offset, 0)
     safe_offset = pl.multiple_of(safe_offset, alignment)
-    #   jax.debug.print("get_qkv_index_map_v2: step={}, valid={}, offset={}, num_tokens={}, safe_offset={}", step, valid, offset, num_tokens, safe_offset)
 
     safe_count = pl.cdiv(count, alignment) * alignment
     return (pl.ds(safe_offset, safe_count), 0)
@@ -796,8 +799,6 @@ def create_block_specs(
     d,
     n_v,
     d_v,
-    recurrent_state_shape,
-    num_tokens,
     alignment=16,
 ):
     """Creates block specs for recurrent scan kernel."""
@@ -805,7 +806,6 @@ def create_block_specs(
     prefill_qkv_index_map = functools.partial(
         get_qkv_index_map_v2,
         schedule_table=schedule_table,
-        num_tokens=num_tokens,
         valid_col=0,
         offset_col=1,
         count_col=3,
@@ -815,7 +815,6 @@ def create_block_specs(
     decode_qkv_index_map = functools.partial(
         get_qkv_index_map_v2,
         schedule_table=schedule_table,
-        num_tokens=num_tokens,
         valid_col=4,
         offset_col=5,
         count_col=7,
@@ -831,11 +830,6 @@ def create_block_specs(
         index_map=decode_qkv_index_map,
     )
 
-    identity_spec = pl.BlockSpec(
-        block_shape=(chunk_size, chunk_size),
-        index_map=lambda step: (0, 0),
-    )
-
     prefill_output_spec = pl.BlockSpec(
         block_shape=(pl.BoundedSlice(chunk_size), n_v * d_v),
         index_map=prefill_qkv_index_map,
@@ -845,10 +839,8 @@ def create_block_specs(
         index_map=decode_qkv_index_map,
     )
 
-    a_log_spec = pl.BlockSpec(block_shape=(n_v, ),
-                              index_map=lambda step: (0, ))
-    dt_bias_spec = pl.BlockSpec(block_shape=(n_v, ),
-                                index_map=lambda step: (0, ))
+    a_log_spec = pl.BlockSpec(block_shape=(n_v, ), index_map=lambda _: (0, ))
+    dt_bias_spec = pl.BlockSpec(block_shape=(n_v, ), index_map=lambda _: (0, ))
     prefill_a_raw_spec = pl.BlockSpec(
         block_shape=(pl.BoundedSlice(chunk_size), 128),
         index_map=prefill_qkv_index_map,
@@ -875,23 +867,19 @@ def create_block_specs(
         decode_b_raw_spec,
         a_log_spec,
         dt_bias_spec,
-        identity_spec,
     ], [prefill_output_spec, decode_output_spec]
 
 
 def fused_kernel(
     mixed_qkv_ref,
-    query_start_loc_ref,
     aliased_recurrent_state_ref,
     state_indices_ref,
     a_raw_ref,
     b_raw_ref,
     a_log_ref,
     dt_bias_ref,
-    identity_ref,
     schedule_table_ref,
     decode_tokens_ref,
-    prefill_tokens_ref,
     total_blocks_ref,
     recurrent_state_ref,
     output_ref,
@@ -906,18 +894,8 @@ def fused_kernel(
     sublanesize: int,
 ):
     """Fused kernel for recurrent scan."""
-    print(f"Launching fused_kernel with chunk_size={C}")
-    print(f"fused_kernel: mixed_qkv_ref.shape={mixed_qkv_ref.shape}")
-    print(
-        f"fused_kernel: recurrent_state_ref.shape={recurrent_state_ref.shape}")
-    print(f"fused_kernel: state_indices_ref.shape={state_indices_ref.shape}")
-
     decode_tokens = decode_tokens_ref[0]
-    # prefill_tokens = prefill_tokens_ref[0]
     total_blocks = total_blocks_ref[0]
-
-    # num_decode_batches = (decode_tokens + BT - 1) // BT
-    #   print(f"fused_kernel: total_blocks={total_blocks}")
 
     d = mixed_qkv_ref.shape[-1]
 
@@ -928,20 +906,13 @@ def fused_kernel(
         d,
         n_v,
         d_v,
-        recurrent_state_ref.shape,
-        mixed_qkv_ref.shape[0],
+        alignment=sublanesize,
     )
-
-    #   print(
-    #       f"fused_kernel: len(in_specs)={len(in_specs)},"
-    #       f" len(out_specs)={len(out_specs)}"
-    #   )
 
     def _run_with_scratch(
         scratch_ref,
         decode_state_scratch_ref,
         state_commit_scratch_ref,
-        o_c_flat_scratch_ref,
         decode_output_scratch_ref,
         decode_read_sems,
         decode_write_sem,
@@ -961,7 +932,6 @@ def fused_kernel(
                 sublanesize=sublanesize,
                 prefill_scratch=scratch_ref,
                 decode_state_scratch=decode_state_scratch_ref,
-                o_c_flat_scratch=o_c_flat_scratch_ref,
                 decode_output_scratch=decode_output_scratch_ref,
                 state_commit_scratch=state_commit_scratch_ref,
                 decode_read_semaphores=decode_read_sems,
@@ -985,21 +955,19 @@ def fused_kernel(
             b_raw_ref,
             a_log_ref,
             dt_bias_ref,
-            identity_ref,
             output_ref,
             output_ref,
             scratches=[schedule_table_ref, state_indices_ref],
         )
 
     pl.run_scoped(
+        # TODO: Move this to outer pallas call and get rid of run_scoped
         _run_with_scratch,
         pltpu.VMEM((2, n_v, d_k, d_v),
                    jnp.float32),  # prefill_scratch (double buffered)
         pltpu.VMEM((1, n_v, d_k, d_v), jnp.float32),  # decode_state_scratch
         pltpu.VMEM((1, n_v, d_k, d_v),
                    recurrent_state_ref.dtype),  # state_commit_scratch
-        # TODO: Move this to outer pallas call and get rid of run_scoped
-        pltpu.VMEM((C, n_v * d_v), mixed_qkv_ref.dtype),  # o_c_flat_scratch
         pltpu.VMEM((BT, n_v * d_v),
                    mixed_qkv_ref.dtype),  # decode_output_scratch
         pltpu.SemaphoreType.DMA((1, )),  # decode_read_semaphores
@@ -1017,7 +985,6 @@ def fused_kernel(
         "d_v",
         "chunk_size",
         "BT",
-        "max_reqs",
         "use_qk_norm_in_gdn",
     ],
 )
@@ -1038,7 +1005,6 @@ def recurrent_scan(
     d_v: int,
     chunk_size: int = 128,
     BT: int = 128,
-    max_reqs: int = 3,
     use_qk_norm_in_gdn: bool = True,
 ) -> tuple[jax.Array, jax.Array]:
     """Fused recurrent scan kernel for GDN on TPU v7.
@@ -1064,7 +1030,6 @@ def recurrent_scan(
     d_v: Dimension of value features.
     chunk_size: Block size for processing (default 128).
     BT: Block size for decode requests (default 128).
-    max_reqs: Maximum number of requests supported by state buffer.
     use_qk_norm_in_gdn: Whether to use QK normalization.
 
   Returns:
@@ -1072,32 +1037,18 @@ def recurrent_scan(
       - Updated recurrent state of shape [max_reqs, n_v, d_k, d_v].
       - The mixed_qkv array of shape [num_tokens, 2 * n_kq * d_k + n_v * d_v].
   """
-    #   jax.debug.print("recurrent_scan: query_start_loc={}", query_start_loc)
-    #   jax.debug.print("recurrent_scan: state_indices={}", state_indices)
-    # TODO(kunjanp): Compute beta and g inside the kernel to save HBM bandwidth.
-    # We could pass raw a and b and compute sigmoid/softplus on the fly.
-    # beta = jax.nn.sigmoid(b)
-    # g = -jnp.exp(A_log[:, jnp.newaxis]) * jax.nn.softplus(
-    #     a + dt_bias[:, jnp.newaxis]
-    # )
-    # # Workaround: Clamp g to avoid underflow to -inf in g_cumsum
-    # g = jnp.maximum(g, -100.0)
-
+    print("CLEANUP 2")
     # Pad raw a and b to (num_tokens, 128) for sublanes
     a_padded = jnp.pad(a, ((0, 0), (0, 128 - n_v)))
     b_padded = jnp.pad(b, ((0, 0), (0, 128 - n_v)))
-
-    # TODO(kunjanp): Materialize identity matrix directly inside the kernel
-    identity = jnp.eye(chunk_size, dtype=jnp.float32)
 
     # decode_tokens: scalar, number of decode tokens.
     # Assuming length 1 per decode request, this is also the number of decode
     # requests.
     decode_tokens = distribution[0]
-    prefill_tokens = distribution[1] - distribution[0]
 
     # change to by dtype size
-    sublanesize = 8 if mixed_qkv.dtype == jnp.float32 else 16
+    sublanesize = 32 // mixed_qkv.itemsize
     schedule_table, total_blocks = (
         compute_schedule_table_v2.compute_schedule_table_v2(
             query_start_loc,
@@ -1108,13 +1059,9 @@ def recurrent_scan(
             BT,
             alignment=sublanesize,
         ))
-    # jax.debug.print("prefill_tokens={}", prefill_tokens)
-    # jax.debug.print("decode_tokens={}", decode_tokens)
-    # jax.debug.print("total_blocks={}", total_blocks)
 
     # sublane,128
     decode_tokens_arr = jnp.expand_dims(decode_tokens, 0)
-    prefill_tokens_arr = jnp.expand_dims(prefill_tokens, 0)
     total_blocks_arr = jnp.expand_dims(total_blocks, 0)
 
     grid_spec = pl.GridSpec(
@@ -1122,17 +1069,14 @@ def recurrent_scan(
         in_specs=[
             pl.BlockSpec(memory_space=pltpu.HBM),
             pl.BlockSpec(memory_space=pltpu.HBM),
-            pl.BlockSpec(memory_space=pltpu.HBM),
             pl.BlockSpec(memory_space=pltpu.SMEM),
             pl.BlockSpec(memory_space=pltpu.HBM),
             pl.BlockSpec(memory_space=pltpu.HBM),
             pl.BlockSpec(memory_space=pltpu.HBM),
             pl.BlockSpec(memory_space=pltpu.HBM),
-            pl.BlockSpec(memory_space=pltpu.HBM),
             pl.BlockSpec(memory_space=pltpu.SMEM),
-            pl.BlockSpec(block_shape=(1, ), index_map=lambda step: (0, )),
-            pl.BlockSpec(block_shape=(1, ), index_map=lambda step: (0, )),
-            pl.BlockSpec(block_shape=(1, ), index_map=lambda step: (0, )),
+            pl.BlockSpec(block_shape=(1, ), index_map=lambda _: (0, )),
+            pl.BlockSpec(block_shape=(1, ), index_map=lambda _: (0, )),
         ],
         out_specs=[
             pl.BlockSpec(memory_space=pltpu.HBM),
@@ -1158,21 +1102,18 @@ def recurrent_scan(
                                  mixed_qkv.dtype),
         ),
         grid_spec=grid_spec,
-        input_output_aliases={2: 0},
+        input_output_aliases={1: 0},
         compiler_params=pltpu.CompilerParams(disable_bounds_checks=True),
     )(
         mixed_qkv,
-        query_start_loc,
         recurrent_state,
         state_indices,
         a_padded,
         b_padded,
         A_log,
         dt_bias,
-        identity,
         schedule_table,
         decode_tokens_arr,
-        prefill_tokens_arr,
         total_blocks_arr,
     )
     return updated_recurrent_state, output

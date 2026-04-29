@@ -43,6 +43,15 @@ def compute_schedule_table_v2(
   So for this we have transition blocks at boundaries between prefill sequences,
   including first one with decode, token by token math is done here instead of
   chunk wise
+  
+  TODO: optimize table , 
+    remove metadata which can be derived from other metadata or loop indices, 
+    like 
+        block offset can be derived from block idx and sequence start, 
+        block count can be derived from block idx and sequence start/end.
+        also some metadata is only used for prefill or decode and can be stored in separate tables or encoded in same table with fewer bits.
+        dtype of some metadata can be reduced to save space, for example block_is_first and block_is_last can be stored in 2 bits together, 
+        Sublane token by token metadata can be optimized by only storing boundaries
   """
     if BT is None:
         BT = chunk_size
