@@ -359,7 +359,7 @@ def _zero_out_empty_groups(
   When is_start=True, kicks off async DMAs from zero_ref into out_ref.
   When is_start=False, waits on the matching self-copy DMAs to drain.
   """
-  num_actual_groups = out_ref.shape[0]
+  num_actual_groups, k, _ = out_ref.shape
   tile_zero_k = zero_ref.shape[0]
   num_lanes = pltpu.get_tpu_info().num_lanes
   assert out_ref.shape[2] % num_lanes == 0
@@ -368,9 +368,9 @@ def _zero_out_empty_groups(
     zero_ref[...] = jnp.zeros_like(zero_ref)
 
   def fill_zero(local_group_id):
-    for i in range(pl.cdiv(out_ref.shape[1], tile_zero_k)):
+    for i in range(pl.cdiv(k, tile_zero_k)):
       for j in range(out_ref.shape[2] // num_lanes):
-        size_k_to_copy = min(tile_zero_k, out_ref.shape[1] - i * tile_zero_k)
+        size_k_to_copy = min(tile_zero_k, k - i * tile_zero_k)
         dst = out_ref.at[
             local_group_id,
             pl.ds(i * tile_zero_k, size_k_to_copy),
@@ -387,15 +387,10 @@ def _zero_out_empty_groups(
         else:
           dma.wait()
 
-  for i in range(len(lhs_group_sizes_ref)):
-    local_group_id = i - group_offset_ref[0]
-    should_zero = jnp.logical_and(
-        jnp.logical_and(
-            i >= group_offset_ref[0],
-            i < group_offset_ref[0] + num_actual_groups,
-        ),
-        lhs_group_sizes_ref[i] == 0,
-    )
+  group_offset = group_offset_ref[0]
+  for local_group_id in range(num_actual_groups):
+    global_group_id = local_group_id + group_offset
+    should_zero = lhs_group_sizes_ref[global_group_id] == 0
     lax.cond(should_zero, fill_zero, lambda local_group_id: None, local_group_id)
 
 
@@ -539,7 +534,11 @@ def tgmm_v2(
   # 4. Form pl.pallas_call calling tgmm_kernel_main
   num_lanes = pltpu.get_tpu_info().num_lanes
   aligned_n = align_to(dims.size_n, num_lanes)
-  out_init = jax.ShapeDtypeStruct((num_actual_groups, dims.size_k, aligned_n), cfgs.out_dtype)
+  # Pad K up to a tile_k multiple so (a) every k-tile written by the matmul
+  # stays in-bounds, and (b) the zero-init path can slice in sublane-aligned
+  # chunks. tile_k is num_lanes-aligned, which is also sublane-tile-aligned.
+  aligned_k = align_to(dims.size_k, tiles.tile_k)
+  out_init = jax.ShapeDtypeStruct((num_actual_groups, aligned_k, aligned_n), cfgs.out_dtype)
   max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
   scratch_shapes = [
       # acc_ref
@@ -583,4 +582,4 @@ def tgmm_v2(
       name=get_scope_name(cfgs),
       # the metadata here is for profiling, debugging, and cost modeling. It does not affect the kernel's computation.
       metadata=get_metadata(cfgs),
-  )(group_sizes, group_offset, lhs, rhs)[:, :, :dims.size_n]
+  )(group_sizes, group_offset, lhs, rhs)[:, :dims.size_k, :dims.size_n]

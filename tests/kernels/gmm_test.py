@@ -273,6 +273,14 @@ class GmmTest(jtu.JaxTestCase):
   def test_tgmm_implicit_padding(
       self, batch_size, in_size, out_size, num_groups, group_offset
   ):
+    # Notice that tile_n and tile_k are aligned to the num_lanes in
+    # calculate_tgmm_tiling.
+    # The output shape is [num_groups, size_k, aligned_n] but there is implicit
+    # padding on the k-dim to a multiple of sublanes. So the kernel is able to
+    # write the full [i, aligned_tile_k, aligned_tile_n] to hbm with no problem
+    # at the last k block.
+    # Within the kernel, because k is not the contracting dim, so the padded k
+    # is also not a problem.
     num_local_groups = num_groups - group_offset
     key = jax.random.key(0)
     key1, key2 = jax.random.split(key, 2)
