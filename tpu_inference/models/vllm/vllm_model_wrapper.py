@@ -61,7 +61,8 @@ from tpu_inference.models.vllm.experimental.model_patcher import patch_mm_model
 from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
     maybe_apply_qwen3_vl_patches
 from tpu_inference.models.vllm.experimental.vision_tower_jit import (
-    maybe_jit_embed_multimodal_func, maybe_precompile_vision_encoder_fn)
+    maybe_jit_embed_multimodal_func, maybe_precompile_vision_encoder_fn,
+    maybe_prepare_for_jit)
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_inference.runner.lora_utils import replace_lora_metadata
@@ -108,49 +109,6 @@ class _VllmRunner(torch.nn.Module):
 
     def compute_logits(self, hidden_state: torch.Tensor) -> torch.Tensor:
         return self.vllm_model.compute_logits(hidden_state)
-
-
-class GridTHW(tuple):
-    """Tensor-like wrapper for image/video grid_thw arguments.
-
-    - tuple subclass so isinstance(x, tuple) is True — passes vLLM's
-    tensor_schema type check (e.g. https://github.com/vllm-project/vllm/blob/9744b699bafed423909ed10da96b80eb0542424b/vllm/model_executor/models/qwen3_vl.py#L2026). 
-    - Implements a minimal tensor-like API (ndim, shape, tolist, prod) expected by vLLM's
-    _process_image_input (https://github.com/vllm-project/vllm/blob/9744b699bafed423909ed10da96b80eb0542424b/vllm/model_executor/models/qwen3_vl.py#L2072)
-
-    We cannot use torch.Tensor[tuple] because jax.jit would complain.
-    """
-
-    def __new__(cls, values):
-
-        def _nested_to_tuple(v):
-            if isinstance(v, (list, tuple)):
-                return tuple(_nested_to_tuple(x) for x in v)
-            return int(v)
-
-        flat: tuple = _nested_to_tuple(values)
-        return super().__new__(cls, flat)
-
-    # ---- tensor-like API expected by _process_image_input ----
-
-    @property
-    def ndim(self):
-        return 2
-
-    @property
-    def shape(self):
-        return (len(self), 3)
-
-    def tolist(self):
-        return [list(row) for row in self]
-
-    def prod(self, dim=-1):
-        if dim in (-1, 1):
-            return np.array([row[0] * row[1] * row[2] for row in self])
-        raise NotImplementedError(f"GridTHW.prod({dim}) not supported")
-
-    def __repr__(self):
-        return f"GridTHW({tuple(self)})"
 
 
 class VllmModelWrapper:
@@ -453,6 +411,7 @@ class VllmModelWrapper:
             return None
         embed_multimodal_fn = self.wrap_embed_multimodal_func()
         return maybe_precompile_vision_encoder_fn(params, embed_multimodal_fn,
+                                                  self.model.vllm_model,
                                                   self.vllm_config)
 
     @functools.cache
@@ -488,16 +447,23 @@ class VllmModelWrapper:
             # Here we move_to_jax, then call (maybe jit'ed) embed_multimodal_func_jax.
             with torchax.default_env(), enable_torch_wrap(False):
 
+                kwargs = maybe_prepare_for_jit(kwargs, self.model.vllm_model)
+
+                def move(v: torch.Tensor) -> torch.Tensor:
+                    if not isinstance(v, torch.Tensor):
+                        logger.warning(f"Expect torch.Tensor, got {type(v)}")
+                        return v
+                    return t2j(v, use_dlpack=False)
+
+                # Ensure all tensors are moved into accelerator so the
+                # computation with weights can work properly.
                 call_kwargs = {
-                    k:
-                    GridTHW(v.tolist()) if k in ("image_grid_thw",
-                                                 "video_grid_thw", "grid_thw")
-                    else jax.tree.map(lambda t: t2j(t, use_dlpack=False), v)
+                    k: jax.tree.map(move, v)
                     for k, v in kwargs.items()
                 }
                 return maybe_jit_embed_multimodal_func(
                     embed_multimodal_func_jax,
-                    self.vllm_config)(params_and_buffers, **call_kwargs)
+                    self.model.vllm_model)(params_and_buffers, **call_kwargs)
 
         return embed_multimodal_func_torch
 
