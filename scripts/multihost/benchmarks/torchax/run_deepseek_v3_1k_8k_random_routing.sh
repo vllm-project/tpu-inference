@@ -34,4 +34,5 @@ bash "${NIGHTLY_SCRIPT}" \
   --moe-all-gather-activation-dtype "fp8" \
   --api-server-count 3 \
   --force-moe-random-routing "1" \
-  --run-accuracy "mmlu"
+  --run-accuracy "mmlu" \
+  --mmlu-output-len "4"
