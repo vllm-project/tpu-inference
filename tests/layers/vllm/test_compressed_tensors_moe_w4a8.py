@@ -15,12 +15,14 @@
 import tempfile
 from unittest.mock import MagicMock, patch
 
+import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
 import torchax
 from compressed_tensors.quantization import QuantizationArgs
 from jax.sharding import PartitionSpec
+from torchax.interop import jax_view
 from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
@@ -245,3 +247,7 @@ def test_loading_model():
         assert isinstance(layer.quant_config, VllmCompressedTensorsConfig)
         assert isinstance(layer.quant_method,
                           VllmCompressedTensorsW4A8MoEMethod)
+        # Verify the weights are loaded and quantized to int4.
+        # The torch tensors are int8, but the JAX views are int4.
+        assert jax_view(layer.w13_weight).dtype == jnp.int4
+        assert jax_view(layer.w2_weight).dtype == jnp.int4
