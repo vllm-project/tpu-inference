@@ -116,7 +116,14 @@ cleanup_instances() {
   pkill -9 -f "vllm" || true
   pkill -9 -f "toy_proxy_server" || true
   pkill -9 -f "multiprocess" || true
-  fuser -k "/dev/accel*" || true
+  # Check if any accel devices exist before trying to kill processes on them
+  for dev in /dev/accel*; do
+    if [ -e "$dev" ]; then
+      fuser -k "$dev" || true
+    fi
+  done
+
+  rm -f /dev/shm/vllm_* || true
   sleep 10
 }
 
