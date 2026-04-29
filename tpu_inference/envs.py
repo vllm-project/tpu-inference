@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
     VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
     ENABLE_RS_KERNEL: bool = False
+    KIMI_QUANTIZE_ATTN_TO_FP8: bool = False
 
 
 def env_with_choices(
@@ -307,6 +308,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable hierarchical reduce-scatter kernel for MoE
     "ENABLE_RS_KERNEL":
     env_bool("ENABLE_RS_KERNEL", default=False),
+    "KIMI_QUANTIZE_ATTN_TO_FP8":
+    env_bool("KIMI_QUANTIZE_ATTN_TO_FP8", default=False),
 }
 
 
