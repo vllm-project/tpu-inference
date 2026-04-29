@@ -44,7 +44,7 @@ class TunableParams:
     param2: int
 
 
-class TestKernelTuner(KernelTunerBase):
+class ExampleKernelTuner(KernelTunerBase):
     # This is a reference implementation of a KernelTuner for testing purposes.
     # It defines a simple tuning key and tunable parameters, and simulates running
     # a kernel by sleeping for a random short duration. The latency returned is
@@ -56,7 +56,7 @@ class TestKernelTuner(KernelTunerBase):
                          tunable_params_class=TunableParams,
                          storage_manager=storage_manager,
                          job_bucket_size=2,
-                         kernel_tuner_name="test_kernel_tuner"
+                         kernel_tuner_name="example_kernel_tuner"
                          )  # Use a small bucket size for testing
 
     def generate_cases(self) -> list[TuningCase]:

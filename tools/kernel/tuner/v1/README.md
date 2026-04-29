@@ -117,7 +117,7 @@ Add your class to `KERNEL_TUNER_REGISTRY` in [kernel_tuner_runner.py](kernel_tun
 from tools.kernel.tuner.v1.my_kernel_tuner import MyKernelTuner
 
 KERNEL_TUNER_REGISTRY = {
-    'test_kernel_tuner':    TestKernelTuner,
+    'example_kernel_tuner':    ExampleKernelTuner,
     'rpa_v3_kernel_tuner':  RpaV3KernelTuner,
     'my_kernel_tuner':      MyKernelTuner,   # <-- add this
 }
@@ -150,7 +150,7 @@ We recomend run the tuner with local storage first to make sure the customized k
 
 ```bash
 python -m tools.kernel.tuner.v1.kernel_tuner_runner \
-  --kernel_tuner_name=test_kernel_tuner \
+  --kernel_tuner_name=example_kernel_tuner \
   --run_locally=True \
   --case_set_id=my_local_run \
   --case_set_desc="My local tuning run"
@@ -160,7 +160,7 @@ python -m tools.kernel.tuner.v1.kernel_tuner_runner \
 
 | Flag | Default | Description |
 |---|---|---|
-| `--kernel_tuner_name` | `test_kernel_tuner` | Which tuner to run. Available: `test_kernel_tuner` and refer to Section 4 to implement your own tuner. |
+| `--kernel_tuner_name` | `example_kernel_tuner` | Which tuner to run. Available: `example_kernel_tuner` and refer to Section 4 to implement your own tuner. |
 | `--run_locally` | `False` | Use local JSON storage instead of Spanner. |
 | `--case_set_id` | _(timestamp)_ as str | Identifier for this set of tuning cases. Auto-generated if omitted. Required when run in distributed tuning mode.|
 | `--case_set_desc` | `""` | Human-readable description. |

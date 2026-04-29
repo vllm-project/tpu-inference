@@ -23,7 +23,7 @@ from tools.kernel.tuner.v1.storage_management.local_db_manager import \
     LocalDbManager
 from tools.kernel.tuner.v1.storage_management.spanner_database_manager import \
     SpannerStorageManager
-from tools.kernel.tuner.v1.test_kernel_tuner import TestKernelTuner
+from tools.kernel.tuner.v1.example_kernel_tuner import ExampleKernelTuner
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -34,7 +34,7 @@ _RUN_LOCALLY = flags.DEFINE_bool(
     'run_locally', False,
     'If true, uses local storage instead of cloud storage.')
 _KERNEL_TUNER_NAME = flags.DEFINE_string('kernel_tuner_name',
-                                         'test_kernel_tuner',
+                                         'example_kernel_tuner',
                                          'Name of the kernel tuner to run.')
 _CASE_SET_ID = flags.DEFINE_string('case_set_id', '',
                                    'The case set ID to use for this run.')
@@ -81,7 +81,7 @@ _TPU_VERSION = flags.DEFINE_string(
 # without modifying this runner code. For now, after we implement more kernel
 # tuners, we can simply add them to the KERNEL_TUNER_REGISTRY dictionary below.
 KERNEL_TUNER_REGISTRY = {
-    'test_kernel_tuner': TestKernelTuner,
+    'example_kernel_tuner': ExampleKernelTuner,
     'rpa_v3_kernel_tuner': RpaV3KernelTuner,
 }
 
