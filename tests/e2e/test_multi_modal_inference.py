@@ -35,7 +35,7 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes):
 
     # --- Configuration ---
     model = "Qwen/Qwen2.5-VL-3B-Instruct"
-    tensor_parallel_size = 1
+    tensor_parallel_size = 2
     temperature = 0.0
     max_tokens = 64
     max_model_len = 4096
