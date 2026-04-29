@@ -155,7 +155,7 @@ upload_pipeline() {
     fi
 
     upload_with_priority .buildkite/nightly_verify.yml
-    upload_with_priority .buildkite/pipeline_pypi.yml
+    # upload_with_priority .buildkite/pipeline_pypi.yml
 }
 
 echo "--- Starting Buildkite Bootstrap"
