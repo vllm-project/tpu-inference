@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     PROFILE_SINGLE_DEVICE: bool = False
     LORA_MODULE_PATH: str = ""
     SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
+    KIMI_QUANTIZE_ATTN_TO_FP8: bool = False
 
 
 def env_with_choices(
