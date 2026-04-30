@@ -651,7 +651,12 @@ def _console_loop(source, db_path, spanner_db, global_args):
             if len(tokens) < 2:
                 print('Usage: set_case_set_id ID')
             else:
-                session_case_set_id = tokens[1]
+                new_case_set_id = tokens[1]
+                if new_case_set_id != session_case_set_id:
+                    session_run_id = None
+                    if session_run_id is not None:
+                        print(f'  run_id cleared')
+                session_case_set_id = new_case_set_id
                 print(f'  case_set_id set to: {session_case_set_id}')
             continue
         if tokens[0] == 'set_run_id':
@@ -662,10 +667,22 @@ def _console_loop(source, db_path, spanner_db, global_args):
                 print(f'  run_id set to: {session_run_id}')
             continue
 
-        # Inject session defaults for --case_set_id / --run_id when not explicitly given
-        if '--case_set_id' not in line and session_case_set_id is not None:
+        # Inject session defaults for --case_set_id / --run_id only for commands
+        # that actually accept those flags.
+        _cmds_with_case_set_id = {
+            'list_runs', 'count_buckets', 'list_bucket_status',
+            'query_run_status', 'query_min_latency'
+        }
+        _cmds_with_run_id = {
+            'count_buckets', 'list_bucket_status', 'query_run_status',
+            'query_min_latency'
+        }
+        cmd = tokens[0]
+        if '--case_set_id' not in line and session_case_set_id is not None \
+                and cmd in _cmds_with_case_set_id:
             tokens += ['--case_set_id', session_case_set_id]
-        if '--run_id' not in line and session_run_id is not None:
+        if '--run_id' not in line and session_run_id is not None \
+                and cmd in _cmds_with_run_id:
             tokens += ['--run_id', session_run_id]
 
         # Inject global source/db flags so the sub-parser sees them
