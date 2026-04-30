@@ -53,7 +53,7 @@ steps:
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-      TMP_YAML_PATH: "/tmp/kernel_tuning/generated_pipeline.yml"
+      TEMP_YAML_PATH: "/tmp/kernel_tuning/generated_pipeline.yml"
     agents:
       queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
     commands:
@@ -86,7 +86,7 @@ steps:
             echo 'Error: generated pipeline YAML is empty' >&2
             exit 1
           fi && \
-          echo \$PIPELINE_YAML > $TEMP_YAML_PATH"
+          echo \$PIPELINE_YAML > \$TEMP_YAML_PATH"
       - |
         # Upload the generated pipeline YAML from the temp dir on the host.
         buildkite-agent pipeline upload "$TEMP_YAML_PATH"
