@@ -179,6 +179,20 @@ class InputConfigs:
         bits = jax.dtypes.itemsize_bits(self.dtype)
         return bits < 8
 
+    @property
+    def should_dequantize_before_matmul(self) -> bool:
+        """Whether to dequantize before matmul.
+
+        Dequantization is required when the quant block size is smaller than the
+        MXU column size. This allows for the dequantized values to be computed
+        within VMEM, which may need to higher performance for small block sizes,
+        e.g. 64 or 32.
+        """
+        if not self.has_scale or self.quant_block_size is None:
+            return False
+        mxu_size = pltpu.get_tpu_info().mxu_column_size
+        return self.quant_block_size < mxu_size
+
 
 @dataclasses.dataclass(frozen=True)
 class GmmConfigs:
@@ -356,6 +370,19 @@ def inner_kernel(
             tiled_rhs = pltpu.bitcast(tiled_rhs, cfgs.rhs_cfgs.dtype)
         rhs_tile_n = tiled_rhs.shape[1]
 
+        # This should only be taken in the case where we don't requantize
+        # the scales and thus we need to dequantize inside VMEM to avoid small
+        # contracting dimmensions
+        if cfgs.rhs_cfgs.should_dequantize_before_matmul:
+            rhs_qbs = cfgs.rhs_cfgs.quant_block_size
+            tiled_rhs_scale = tiled_rhs_ref.get_scale().astype(acc_ref.dtype)
+            num_blocks = cfgs.num_quant_blocks_per_tile_k
+            tiled_rhs_dequant = tiled_rhs.astype(acc_ref.dtype).reshape(
+                num_blocks, rhs_qbs, rhs_tile_n)
+            tiled_rhs_dequant = tiled_rhs_dequant * tiled_rhs_scale
+            tiled_rhs = tiled_rhs_dequant.reshape(cfgs.tiles.tile_k,
+                                                  rhs_tile_n)
+
         valid_k = cfgs.dims.size_k % cfgs.tiles.tile_k
         if is_last_k_step and valid_k != 0:
             mask_rhs = lax.broadcasted_iota(jnp.int32, tiled_rhs.shape,
@@ -368,52 +395,30 @@ def inner_kernel(
             mxu_size = pltpu.get_tpu_info().mxu_column_size
             rhs_qbs = cfgs.rhs_cfgs.quant_block_size
 
-            # This should only be taken in the case where we don't requantize
-            # the scales and thus we need to dequantize inside VMEM to avoid small contracting
-            # dimmensions
-            if cfgs.rhs_cfgs.has_scale and rhs_qbs < mxu_size:
-                tiled_rhs_scale = tiled_rhs_ref.get_scale().astype(
-                    acc_ref.dtype)
-                num_blocks = cfgs.num_quant_blocks_per_tile_k
-                tiled_rhs_dequant = tiled_rhs.astype(acc_ref.dtype).reshape(
-                    num_blocks, rhs_qbs, rhs_tile_n)
-                tiled_rhs_dequant = tiled_rhs_dequant * tiled_rhs_scale
-                tiled_rhs = tiled_rhs_dequant.reshape(cfgs.tiles.tile_k,
-                                                      rhs_tile_n)
+            for start_n in range(0, rhs_tile_n, mxu_size):
+                end_n = min(rhs_tile_n, start_n + mxu_size)
+                col_size = end_n - start_n
 
-                for start_n in range(0, rhs_tile_n, mxu_size):
-                    end_n = min(rhs_tile_n, start_n + mxu_size)
-                    acc_n = jnp.matmul(
-                        tiled_lhs,
-                        tiled_rhs[:, start_n:end_n],
+                acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size),
+                                  dtype=acc_ref.dtype)
+                for b_id in range(cfgs.num_quant_blocks_per_tile_k):
+                    k_start = b_id * rhs_qbs
+                    k_end = k_start + rhs_qbs
+
+                    block_acc = jnp.matmul(
+                        tiled_lhs[:, k_start:k_end],
+                        tiled_rhs[k_start:k_end, start_n:end_n],
                         preferred_element_type=jnp.float32,
                     ).astype(acc_ref.dtype)
-                    acc_list.append(acc_n)
-            else:
-                for start_n in range(0, rhs_tile_n, mxu_size):
-                    end_n = min(rhs_tile_n, start_n + mxu_size)
-                    col_size = end_n - start_n
 
-                    acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size),
-                                      dtype=acc_ref.dtype)
-                    for b_id in range(cfgs.num_quant_blocks_per_tile_k):
-                        k_start = b_id * rhs_qbs
-                        k_end = k_start + rhs_qbs
+                    if not cfgs.rhs_cfgs.should_dequantize_before_matmul:
+                        tiled_rhs_scale = tiled_rhs_ref.get_scale()
+                        block_acc *= tiled_rhs_scale[b_id, :,
+                                                     start_n:end_n].astype(
+                                                         acc_ref.dtype)
 
-                        block_acc = jnp.matmul(
-                            tiled_lhs[:, k_start:k_end],
-                            tiled_rhs[k_start:k_end, start_n:end_n],
-                            preferred_element_type=jnp.float32,
-                        ).astype(acc_ref.dtype)
-
-                        if cfgs.rhs_cfgs.has_scale:
-                            tiled_rhs_scale = tiled_rhs_ref.get_scale()
-                            block_acc *= tiled_rhs_scale[b_id, :,
-                                                         start_n:end_n].astype(
-                                                             acc_ref.dtype)
-
-                        acc_n += block_acc
-                    acc_list.append(acc_n)
+                    acc_n += block_acc
+                acc_list.append(acc_n)
         else:
             # Quantized matmul path.
             lhs_q_dtype = cfgs.lhs_cfgs.quant_dtype
@@ -433,20 +438,6 @@ def inner_kernel(
             # inner loop which can be used to pipeline subsequent VPU or VST ops with
             # MXU ops for the next [tile_m, mxu_size].
             mxu_size = pltpu.get_tpu_info().mxu_column_size
-
-            # Same as the unquantized matmul path -- this is where we don't requantize
-            # the scales and thus we need to dequantize inside VMEM to avoid small contracting
-            # dimmensions
-            rhs_qbs = cfgs.rhs_cfgs.quant_block_size
-            if cfgs.rhs_cfgs.has_scale and rhs_qbs < mxu_size:
-                tiled_rhs_scale = tiled_rhs_ref.get_scale().astype(
-                    acc_ref.dtype)
-                num_blocks = cfgs.num_quant_blocks_per_tile_k
-                tiled_rhs_dequant = tiled_rhs.astype(acc_ref.dtype).reshape(
-                    num_blocks, rhs_qbs, rhs_tile_n)
-                tiled_rhs_dequant = tiled_rhs_dequant * tiled_rhs_scale
-                tiled_rhs = tiled_rhs_dequant.reshape(cfgs.tiles.tile_k,
-                                                      rhs_tile_n)
 
             for start_n in range(0, rhs_tile_n, mxu_size):
                 end_n = min(rhs_tile_n, start_n + mxu_size)
@@ -491,8 +482,12 @@ def inner_kernel(
 
                     block_acc *= block_scale.astype(acc_ref.dtype)
 
-                    # Apply rhs subchannel scale per quant block if it was not dequantized earlier.
-                    if cfgs.rhs_cfgs.has_scale and not (rhs_qbs < mxu_size):
+                    # Apply rhs subchannel scale per quant block if it was
+                    # not dequantized earlier.
+                    if cfgs.rhs_cfgs.has_scale:
+                        assert not cfgs.rhs_cfgs.should_dequantize_before_matmul, (
+                            "rhs scale should not be applied if dequantization is done "
+                            "before matmul.")
                         b_id = start_k // cfgs.rhs_cfgs.quant_block_size
                         rhs_scale_slice = tiled_rhs_ref.get_scale()
                         block_acc *= rhs_scale_slice[b_id, :,
@@ -1090,7 +1085,7 @@ def make_gmm_configs(
     )
 
     lhs_q_dtype = None
-    if maybe_quantize_lhs and rhs_quant_dtype is not None:
+    if maybe_quantize_lhs and rhs_quant_dtype is not None and not rhs_cfgs.should_dequantize_before_matmul:
         # Choose lhs quantization dtype based on TPU hardware support.
         is_rhs_float = jnp.issubdtype(rhs_quant_dtype, jnp.floating)
         is_rhs_4bits = jax.dtypes.itemsize_bits(rhs_quant_dtype) == 4
