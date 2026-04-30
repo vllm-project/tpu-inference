@@ -43,7 +43,9 @@ def run_test(model_name, expected_value, more_args=None):
     if more_args is not None:
         model_args = "{},{}".format(model_args, more_args)
 
-    model_args = "{},{}".format(model_args,"model_loader_extra_config={\"enable_weights_track\": False}")
+    model_args = "{},{}".format(
+        model_args,
+        "model_loader_extra_config={\"enable_weights_track\": False}")
 
     results = lm_eval.simple_evaluate(
         model="vllm",
