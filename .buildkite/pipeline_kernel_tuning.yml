@@ -65,6 +65,7 @@ steps:
           pip install --upgrade google-cloud-spanner && \
           pip install --upgrade google-api-core && \
           pip install --upgrade google-auth && \
+          pip install absl-py && \
           echo \"tuning_kernel_name = \${KERNEL_TUNING_KERNEL_NAME}\" && \
           echo \"case_set_desc = \${KERNEL_TUNING_CASE_SET_DESC}\" && \
           echo \"case_set_id = \${KERNEL_TUNING_CASE_SET_ID}\" && \
