@@ -86,4 +86,7 @@ steps:
         # Upload the generated pipeline YAML from the temp dir on the host.
         buildkite-agent artifact upload "/tmp/kernel_tuning/generated_pipeline.yml"
         echo "Upload generated pipeline YAML to Buildkite artifacts with priority ${PRIORITY_KERNEL_TUNING}"
-        upload_with_priority "/tmp/kernel_tuning/generated_pipeline.yml" "$PRIORITY_KERNEL_TUNING"
+        { 
+          echo "priority: ${PRIORITY_KERNEL_TUNING}"; 
+          cat "/tmp/kernel_tuning/generated_pipeline.yml"; 
+        } | buildkite-agent pipeline upload
