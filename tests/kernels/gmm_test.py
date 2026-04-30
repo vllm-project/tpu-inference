@@ -954,6 +954,53 @@ class GmmTest(jtu.JaxTestCase):
     )
     grad_rhs.block_until_ready()
 
+  def test_gmm_benchmark_small(self):
+    num_groups = 16
+    m = 512
+    k = 1024
+    n = 512
+    lhs_dtype = jnp.bfloat16
+
+    key = jax.random.key(0)
+    k1, k2 = jax.random.split(key)
+    lhs = jax.random.normal(k1, (m, k), dtype=lhs_dtype)
+    rhs = jax.random.normal(
+        key, (num_groups, k, n), dtype=jnp.bfloat16
+    )
+    cotangent = jax.random.normal(k2, (m, n), dtype=lhs_dtype)
+    group_sizes = get_group_sizes(m, num_groups)
+
+    # xprof_sess = xprof_session.XprofSession()
+    # xprof_sess.start_session(trace_mode="TRACE_COMPUTE_AND_SYNC")
+    actual = gmm_v2(
+        lhs,
+        rhs,
+        group_sizes,
+    )
+    actual.block_until_ready()
+
+    print(
+        f"xw32 test_gmm_benchmark_small tgmm inputs: {lhs.shape=}, {cotangent.shape=},"
+        f" {group_sizes=}, {num_groups=}"
+    )
+    grad_rhs = tgmm_v2(
+        lhs,
+        cotangent,
+        group_sizes,
+        num_groups,
+        preferred_element_type=jnp.bfloat16,
+    )
+    grad_rhs.block_until_ready()
+
+    # url = xprof_sess.end_session_and_get_url()
+    # print(f"XProf URL: {url}")
+
+    lhs_t = lhs.swapaxes(0, 1)  # [k, m]
+    expected = reference_tgmm(
+        lhs_t, cotangent, group_sizes, num_groups
+    )
+    self.assertArraysAllClose(grad_rhs, expected)
+
 
 if __name__ == "__main__":
   absltest.main(testLoader=jtu.JaxTestLoader())
