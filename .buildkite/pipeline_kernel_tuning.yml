@@ -76,11 +76,11 @@ steps:
           --case_set_id=\${KERNEL_TUNING_CASE_SET_ID} \
           --run_id=\${KERNEL_TUNING_RUN_ID} \
           --tpu_version=\${TPU_VERSION}) && \
-          if [ -z \"\${PIPELINE_YAML}\" ]; then
+          if [ -z \$PIPELINE_YAML ]; then
             echo 'Error: generated pipeline YAML is empty' >&2
             exit 1
           fi && \
-          echo \"\${PIPELINE_YAML}\" > /tmp/kernel_tuning/generated_pipeline.yml"
+          echo \$PIPELINE_YAML > /tmp/kernel_tuning/generated_pipeline.yml"
       - |
         # Upload the generated pipeline YAML from the temp dir on the host.
         buildkite-agent pipeline upload "/tmp/kernel_tuning/generated_pipeline.yml"
