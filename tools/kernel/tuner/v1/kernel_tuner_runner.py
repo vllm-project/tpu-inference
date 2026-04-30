@@ -71,7 +71,8 @@ _WORKER_ID = flags.DEFINE_string('worker_id',
                                            'unknown'), 'The worker id')
 _TPU_VERSION = flags.DEFINE_string(
     'tpu_version', '',
-    'The TPU version to use for tuning. Supported values are "tpu6e" and "tpu7x".')
+    'The TPU version to use for tuning. Supported values are "tpu6e" and "tpu7x".'
+)
 
 # Note: For simplicity, we are directly referencing the kernel tuner class
 # here. In the future, we can consider a more flexible plugin-based system

@@ -14,8 +14,8 @@
 
 import json
 import logging
-import time
 import os
+import time
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -266,7 +266,8 @@ class KernelTunerBase(ABC):
         with open(output_path, "w") as f:
             yaml.dump(pipeline, f, default_flow_style=False, sort_keys=False)
         logger.info(
-            f"Generated Buildkite pipeline YAML saved to {output_path} in Docker")
+            f"Generated Buildkite pipeline YAML saved to {output_path} in Docker"
+        )
 
     @abstractmethod
     def generate_inputs(self, tuning_key: TuningKey) -> dict:
