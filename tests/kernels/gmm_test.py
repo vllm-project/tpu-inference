@@ -318,13 +318,6 @@ class GmmTest(jtu.JaxTestCase):
       self, batch_size, in_size, out_size, num_groups, group_offset,
       tile_k, tile_n,
   ):
-    """Verify TGMM with a user-provided TileSizes that splits k and n.
-
-    'calculate_tgmm_tiling' typically picks num_k_tiles=num_n_tiles=1 for
-    these dims, so the default-tiling tests don't exercise the multi-tile
-    grid path. Here we force tile_k<size_k and tile_n<size_n so num_k>1
-    and num_n>1 in the pipeline grid.
-    """
     num_local_groups = num_groups - group_offset
     key = jax.random.key(0)
     key1, key2 = jax.random.split(key, 2)

@@ -345,54 +345,6 @@ def generate_tgmm_block_specs(
 
   return (lhs_block_spec, rhs_block_spec), out_block_spec
 
-def _zero_out_empty_groups(
-    lhs_group_sizes_ref,  # int32[size_lhs_group]
-    group_offset_ref,  # int32[1]
-    out_ref,  # [num_actual_groups, k, n]
-    zero_ref,  # [tile_zero_k, num_lanes]
-    semaphore_ref,  # [1]
-    *,
-    is_start: bool,
-):
-  """Zero out drhs[i] when group_sizes[i] == 0.
-
-  When is_start=True, kicks off async DMAs from zero_ref into out_ref.
-  When is_start=False, waits on the matching self-copy DMAs to drain.
-  """
-  num_actual_groups, k, _ = out_ref.shape
-  tile_zero_k = zero_ref.shape[0]
-  num_lanes = pltpu.get_tpu_info().num_lanes
-  assert out_ref.shape[2] % num_lanes == 0
-
-  if is_start:
-    zero_ref[...] = jnp.zeros_like(zero_ref)
-
-  def fill_zero(local_group_id):
-    for i in range(pl.cdiv(k, tile_zero_k)):
-      for j in range(out_ref.shape[2] // num_lanes):
-        size_k_to_copy = min(tile_zero_k, k - i * tile_zero_k)
-        dst = out_ref.at[
-            local_group_id,
-            pl.ds(i * tile_zero_k, size_k_to_copy),
-            pl.ds(j * num_lanes, num_lanes),
-        ]
-        src = zero_ref.at[pl.ds(0, size_k_to_copy)] if is_start else dst
-        dma = pltpu.make_async_copy(
-            src_ref=src,
-            dst_ref=dst,
-            sem=semaphore_ref.at[0],
-        )
-        if is_start:
-          dma.start(priority=1)
-        else:
-          dma.wait()
-
-  group_offset = group_offset_ref[0]
-  for local_group_id in range(num_actual_groups):
-    global_group_id = local_group_id + group_offset
-    should_zero = lhs_group_sizes_ref[global_group_id] == 0
-    lax.cond(should_zero, fill_zero, lambda local_group_id: None, local_group_id)
-
 
 def zero_out_start(
     lhs_group_sizes_ref,  # int32[size_lhs_group]
@@ -402,32 +354,55 @@ def zero_out_start(
     semaphore_ref,  # [1]
 ):
   """If group_sizes[i]==0, kick off async DMAs to zero out drhs[i]."""
-  _zero_out_empty_groups(
-      lhs_group_sizes_ref,
-      group_offset_ref,
-      out_ref,
-      zero_ref,
-      semaphore_ref,
-      is_start=True,
-  )
+  num_actual_groups, k, _ = out_ref.shape
+  tile_zero_k = zero_ref.shape[0]
+  num_lanes = pltpu.get_tpu_info().num_lanes
+  assert out_ref.shape[2] % num_lanes == 0
+
+  zero_ref[...] = jnp.zeros_like(zero_ref)
+
+  def fill_zero(local_group_id):
+    for i in range(pl.cdiv(k, tile_zero_k)):
+      for j in range(out_ref.shape[2] // num_lanes):
+        size_k_to_copy = min(tile_zero_k, k - i * tile_zero_k)
+        src = zero_ref.at[pl.ds(0, size_k_to_copy)]
+        dst = out_ref.at[
+            local_group_id,
+            pl.ds(i * tile_zero_k, size_k_to_copy),
+            pl.ds(j * num_lanes, num_lanes),
+        ]
+        pltpu.make_async_copy(
+            src_ref=src,
+            dst_ref=dst,
+            sem=semaphore_ref.at[0],
+        ).start(priority=1)
+    return 1
+
+  num_groups_to_zero = 0
+  group_offset = group_offset_ref[0]
+  for local_group_id in range(num_actual_groups):
+    global_group_id = local_group_id + group_offset
+    should_zero = lhs_group_sizes_ref[global_group_id] == 0
+    num_groups_to_zero +=lax.cond(should_zero, fill_zero, lambda local_group_id: 0, local_group_id)
+
+  return num_groups_to_zero
 
 
 def zero_out_end(
-    lhs_group_sizes_ref,  # int32[size_lhs_group]
-    group_offset_ref,  # int32[1]
+    num_groups_to_zero,
     out_ref,  # [num_actual_groups, k, n]
-    zero_ref,  # [tile_zero_k, num_lanes]
     semaphore_ref,  # [1]
 ):
   """Drain the DMAs started by zero_out_start."""
-  _zero_out_empty_groups(
-      lhs_group_sizes_ref,
-      group_offset_ref,
-      out_ref,
-      zero_ref,
-      semaphore_ref,
-      is_start=False,
-  )
+  dst = out_ref.at[
+      pl.ds(0, num_groups_to_zero),
+  ]
+  src = dst
+  pltpu.make_async_copy(
+      src_ref=src,
+      dst_ref=dst,
+      sem=semaphore_ref.at[0],
+  ).wait()
 
 
 def tgmm_kernel_main(
@@ -443,7 +418,7 @@ def tgmm_kernel_main(
     semaphore_ref: jax.Array,  # [1]
     *, cfgs,
 ):
-  zero_out_start(
+  num_groups_to_zero = zero_out_start(
       lhs_group_sizes_ref,
       group_offset_ref,
       out_ref,
@@ -471,10 +446,8 @@ def tgmm_kernel_main(
   scratches = [acc_ref, metadata_ref]
   pipeline_fn(lhs_in, rhs_in, out_ref, scratches=scratches)
   zero_out_end(
-      lhs_group_sizes_ref,
-      group_offset_ref,
+      num_groups_to_zero,
       out_ref,
-      zero_ref,
       semaphore_ref,
   )
 
@@ -504,7 +477,6 @@ def tgmm_v2(
   # Compute grad_rhs=lhs[sizes[i-1]:sizes[i], :].T @ rhs[sizes[i-1]:sizes[i], :]
   # aka grad_rhs = lhs.T @ grad
 
-  # Step 1. delete precision, normalize group_offset, set vmem_limit_bytes
   del precision
   if group_offset is None:
     group_offset = jnp.array([0], dtype=jnp.int32)
@@ -514,10 +486,6 @@ def tgmm_v2(
   if vmem_limit_bytes is None:
     vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9)
 
-  # Step 2. Make gmm configs (create a 'Dimensions' and a 'GmmConfigs):
-  # - Dimensions( size_m=size_m, size_k=size_k, size_n=size_n, size_group=size_group, size_lhs_group=size_lhs_group, size_lhs_sublane=size_lhs_sublane,)
-  # - calculate_tiling
-  # - GmmConfigs( dims=dims, tiles=tiles, lhs_cfgs=lhs_cfgs, rhs_cfgs=rhs_cfgs, out_dtype=out_dtype, acc_dtype=acc_dtype, zero_init=zero_initialize,)
   cfgs = make_tgmm_configs(
       lhs,
       rhs,
@@ -531,7 +499,6 @@ def tgmm_v2(
   dims = cfgs.dims
   tiles = cfgs.tiles
 
-  # 4. Form pl.pallas_call calling tgmm_kernel_main
   num_lanes = pltpu.get_tpu_info().num_lanes
   aligned_n = align_to(dims.size_n, num_lanes)
   # Pad K up to a tile_k multiple so (a) every k-tile written by the matmul
