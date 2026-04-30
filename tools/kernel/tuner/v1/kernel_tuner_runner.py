@@ -70,8 +70,8 @@ _WORKER_ID = flags.DEFINE_string('worker_id',
                                  os.getenv('HOST_NAME',
                                            'unknown'), 'The worker id')
 _TPU_VERSION = flags.DEFINE_string(
-    'tpu_version', 'v6',
-    'The TPU version to use for tuning. Supported values are "v6" and "v7".')
+    'tpu_version', '',
+    'The TPU version to use for tuning. Supported values are "tpu6e" and "tpu7x".')
 
 # Note: For simplicity, we are directly referencing the kernel tuner class
 # here. In the future, we can consider a more flexible plugin-based system
@@ -117,12 +117,6 @@ def main(argv):
 
     kernel_tuner = kernel_tuner_cls(storage_manager)
 
-    tpu_version = _TPU_VERSION.value
-    assert tpu_version in [
-        'tpu6e', 'tpu7x'
-    ], f'Unsupported TPU version: {tpu_version}. Supported versions are "tpu6e" and "tpu7x".'
-    tpu_queue_multi = 'tpu_v6e_8_queue' if tpu_version == 'tpu6e' else 'tpu_v7x_8_queue'
-
     if _RUN_LOCALLY.value:
         logger.info(
             'Running in locally mode. Skipping Buildkite pipeline generation and running tuning jobs directly.'
@@ -141,6 +135,12 @@ def main(argv):
             logger.info(
                 'Generating Buildkite pipeline YAML. No tuning jobs will be run.'
             )
+            tpu_version = _TPU_VERSION.value
+            assert tpu_version in [
+                'tpu6e', 'tpu7x'
+            ], f'Unsupported TPU version: {tpu_version}. Supported versions are "tpu6e" and "tpu7x".'
+            tpu_queue_multi = 'tpu_v6e_8_queue' if tpu_version == 'tpu6e' else 'tpu_v7x_8_queue'
+
             pipeline_yaml = kernel_tuner.generate_buildkite_pipeline(
                 case_set_id=case_set_id,
                 run_id=run_id,
