@@ -37,6 +37,12 @@ TileTgmmFn = Callable[
     TileSizes,
 ]
 
+# Target VMEM size for the zero-init scratch buffer (zero_ref). The actual
+# allocation may be smaller after capping by size_k and rounding down to a
+# sublane multiple, so this also serves as an upper bound used by
+# calculate_tgmm_tiling when reserving VMEM for zero_ref.
+TARGET_ZERO_REF_BYTES = 2 * 1024 * 1024
+
 
 def get_scope_name(cfgs: GmmConfigs) -> str:
   dims = cfgs.dims
@@ -90,6 +96,10 @@ def calculate_tgmm_tiling(
         tile_k * tile_n * (acc_bytes + num_buffers * out_bytes)
         + (num_buffers + 1) * (tile_m * tile_k * lhs_bytes)
         + num_buffers * (tile_m * tile_n * rhs_bytes)
+        # Reserve VMEM for zero_ref. Use the upper bound TARGET_ZERO_REF_BYTES
+        # since the actual zero_ref size depends on out_dtype/size_k and is
+        # always <= this value.
+        + TARGET_ZERO_REF_BYTES
     )
     return budget <= vmem_limit_bytes
 
@@ -518,9 +528,8 @@ def tgmm_v2(
   ]
 
   # Prepare zero initializing the drhs[i, :, :] where the group_size[i] is 0.
-  target_zero_ref_bytes = 2 * 1024 * 1024
   out_bytes = jnp.dtype(cfgs.out_dtype).itemsize
-  tile_zero_k = target_zero_ref_bytes // num_lanes // out_bytes
+  tile_zero_k = TARGET_ZERO_REF_BYTES // num_lanes // out_bytes
   tile_zero_k = min(tile_zero_k, dims.size_k)
   size_out_sublane = pltpu.get_tpu_info().get_sublane_tiling(cfgs.out_dtype)
   tile_zero_k = (tile_zero_k // size_out_sublane) * size_out_sublane
