@@ -87,7 +87,7 @@ def get_enable_block_kv_transfer() -> bool:
 
 def get_p2p_wait_pull_timeout() -> int:
     """KV-cache transfer timeout in seconds."""
-    timeout_str = os.getenv("TPU_P2P_WAIT_PULL_TIMEOUT", "30")
+    timeout_str = os.getenv("TPU_P2P_WAIT_PULL_TIMEOUT", "180")
     return int(timeout_str)
 
 

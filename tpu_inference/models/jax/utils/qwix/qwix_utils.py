@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.kv_cache import (DEFAULT_KV_CACHE_DTYPE,
                                            create_kv_caches)
@@ -96,8 +97,8 @@ def parse_qwix_config_to_rules(
 def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
                             rng: jax.Array, mesh: Mesh, num_hidden_layers: int,
                             kv_cache_block_size: int,
-                            kv_cache_num_kv_heads: int,
-                            kv_cache_head_size: int,
+                            kv_cache_num_kv_heads: int | tuple[int, ...],
+                            kv_cache_head_size: int | tuple[int, ...],
                             kv_cache_dtype: str) -> nnx.Module:
     """
     Quantizes a Flax NNX model using Qwix.
@@ -139,16 +140,27 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
     else:
         kv_cache_jnp_dtype = DEFAULT_KV_CACHE_DTYPE
 
-    kv_caches = create_kv_caches(
-        num_blocks=DEFAULT_NUM_BLOCKS_FOR_JIT_KV_CACHE,
-        block_size=kv_cache_block_size,
-        num_kv_heads=kv_cache_num_kv_heads,
-        head_size=kv_cache_head_size,
-        mesh=mesh,
-        layer_names=[f"layer.{i}" for i in range(num_hidden_layers)],
-        cache_dtype=kv_cache_jnp_dtype,
-        use_mla=model.vllm_config.model_config.use_mla,
-    )
+    head_sizes = kv_cache_head_size
+    if isinstance(head_sizes, int):
+        head_sizes = (head_sizes, ) * num_hidden_layers
+
+    num_kv_heads_tuple = kv_cache_num_kv_heads
+    if isinstance(num_kv_heads_tuple, int):
+        num_kv_heads_tuple = (num_kv_heads_tuple, ) * num_hidden_layers
+
+    kv_caches = []
+    for i in range(num_hidden_layers):
+        layer_cache = create_kv_caches(
+            num_blocks=DEFAULT_NUM_BLOCKS_FOR_JIT_KV_CACHE,
+            block_size=kv_cache_block_size,
+            num_kv_heads=num_kv_heads_tuple[i],
+            head_size=head_sizes[i],
+            mesh=mesh,
+            layer_names=[f"layer.{i}"],
+            cache_dtype=kv_cache_jnp_dtype,
+            use_mla=model.vllm_config.model_config.use_mla,
+        )
+        kv_caches.extend(layer_cache)
 
     dp_size = model.vllm_config.sharding_config.total_dp_size
 
@@ -281,43 +293,18 @@ def apply_qwix_quantization(
     block_size = vllm_config.cache_config.block_size
     model_config = vllm_config.model_config
 
+    sharding_size = utils.get_mesh_shape_product(mesh,
+                                                 ShardingAxisName.ATTN_HEAD)
+
     # Pad num_kv_heads to multiple of TP size
     num_kv_heads = utils.get_padded_num_heads(
-        model_config.get_total_num_kv_heads(), mesh.shape["model"])
+        model_config.get_total_num_kv_heads(), sharding_size)
 
     # Pad head_dim to multiple of 128
     head_size = model_config.get_head_size()
     head_size = utils.get_padded_head_dim(head_size)
 
     kv_cache_dtype = vllm_config.cache_config.cache_dtype
-
-    if not apply_to_abstract_model:
-        assert isinstance(model_or_model_fn, nnx.Module)
-        qwix_quantize_nnx_model_with_config = functools.partial(
-            qwix_quantize_nnx_model, qwix_config=qwix_config)
-        # NOTE: it's REALLY important `qwix_quantize_nnx_model_with_config` is jitted
-        # or else you'll run into hanging
-        model_or_model_fn = jax.jit(
-            qwix_quantize_nnx_model_with_config,
-            donate_argnums=(0, ),
-            static_argnames=(
-                "mesh",
-                "num_hidden_layers",
-                "kv_cache_block_size",
-                "kv_cache_num_kv_heads",
-                "kv_cache_head_size",
-                "kv_cache_dtype",
-            ))(model=model_or_model_fn,
-               rng=rng,
-               mesh=mesh,
-               num_hidden_layers=vllm_config.model_config.hf_config.
-               num_hidden_layers,
-               kv_cache_block_size=block_size,
-               kv_cache_num_kv_heads=num_kv_heads,
-               kv_cache_head_size=head_size,
-               kv_cache_dtype=kv_cache_dtype)
-
-        return model_or_model_fn
 
     hf_config = vllm_config.model_config.hf_config
     if hasattr(hf_config, "text_config") and hasattr(hf_config.text_config,
@@ -326,6 +313,12 @@ def apply_qwix_quantization(
         logger.info(
             f"Using num_hidden_layers from hf_config.text_config: {num_hidden_layers}"
         )
+    elif hasattr(hf_config, "vision_config") and hasattr(
+            hf_config.vision_config, "num_hidden_layers"):
+        num_hidden_layers = hf_config.vision_config.num_hidden_layers
+        logger.info(
+            f"Using num_hidden_layers from hf_config.vision_config: {num_hidden_layers}"
+        )
     elif hasattr(hf_config, "num_hidden_layers"):
         num_hidden_layers = hf_config.num_hidden_layers
         logger.info(
@@ -333,8 +326,89 @@ def apply_qwix_quantization(
         )
     else:
         raise AttributeError(
-            "Could not find 'num_hidden_layers' in hf_config or hf_config.text_config."
+            "Could not find 'num_hidden_layers' in hf_config, hf_config.text_config, or hf_config.vision_config."
         )
+
+    # Determine per-layer kv_heads and head_size if applicable
+    num_kv_heads_list = []
+    head_size_list = []
+
+    text_config = getattr(hf_config, "text_config", hf_config)
+
+    # Some models (like Gemma 4) use mixed attention mechanisms across layers.
+    # The 'layer_types' list defines the attention type for each hidden layer.
+    # Example (Gemma 4):
+    # layer_types = [
+    #   "sliding_attention",
+    #   "sliding_attention",
+    #   "sliding_attention",
+    #   "sliding_attention",
+    #   "sliding_attention",
+    #   "full_attention",
+    #   ...
+    # ]
+    layer_types = getattr(text_config, "layer_types", None)
+    if layer_types:
+        if len(layer_types) != num_hidden_layers:
+            raise ValueError(
+                f"layer_types length ({len(layer_types)}) does not match "
+                f"num_hidden_layers ({num_hidden_layers})")
+
+        for i in range(num_hidden_layers):
+            layer_type = layer_types[i]
+            is_sliding = layer_type == "sliding_attention"
+
+            # Determine head_dim
+            if not is_sliding:
+                head_dim_original = getattr(
+                    text_config, "global_head_dim",
+                    getattr(text_config, "head_dim", 0))
+            else:
+                head_dim_original = getattr(text_config, "head_dim", 0)
+            head_size_list.append(utils.get_padded_head_dim(head_dim_original))
+
+            # Determine num_kv_heads
+            should_use_global_kv_heads = ((not is_sliding) and getattr(
+                text_config, "attention_k_eq_v", False))
+            if should_use_global_kv_heads:
+                kv_heads = getattr(
+                    text_config, "num_global_key_value_heads",
+                    getattr(text_config, "num_key_value_heads", 0))
+                if not kv_heads:
+                    kv_heads = getattr(text_config, "num_key_value_heads", 0)
+            else:
+                kv_heads = getattr(text_config, "num_key_value_heads", 0)
+            num_kv_heads_list.append(
+                utils.get_padded_num_heads(kv_heads, sharding_size))
+
+        head_size = tuple(head_size_list)
+        num_kv_heads = tuple(num_kv_heads_list)
+
+    if not apply_to_abstract_model:
+        assert isinstance(model_or_model_fn, nnx.Module)
+        qwix_quantize_nnx_model_with_config = functools.partial(
+            qwix_quantize_nnx_model, qwix_config=qwix_config)
+        # NOTE: it's REALLY important `qwix_quantize_nnx_model_with_config` is jitted
+        # or else you'll run into hanging
+        model_or_model_fn = jax.jit(qwix_quantize_nnx_model_with_config,
+                                    donate_argnums=(0, ),
+                                    static_argnames=(
+                                        "mesh",
+                                        "num_hidden_layers",
+                                        "kv_cache_block_size",
+                                        "kv_cache_num_kv_heads",
+                                        "kv_cache_head_size",
+                                        "kv_cache_dtype",
+                                    ))(model=model_or_model_fn,
+                                       rng=rng,
+                                       mesh=mesh,
+                                       num_hidden_layers=num_hidden_layers,
+                                       kv_cache_block_size=block_size,
+                                       kv_cache_num_kv_heads=num_kv_heads,
+                                       kv_cache_head_size=head_size,
+                                       kv_cache_dtype=kv_cache_dtype)
+
+        return model_or_model_fn
 
     qwix_quantize_fn_for_eval = functools.partial(
         qwix_quantize_nnx_model,

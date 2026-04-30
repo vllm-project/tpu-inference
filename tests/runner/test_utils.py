@@ -264,47 +264,51 @@ class MockSchedulerOutput:
 
 
 @pytest.mark.parametrize(
-    "scenario, num_reqs, req_ids, computed, scheduled, expected_prefill, expected_decode",
+    "scenario, num_reqs, req_ids, computed, scheduled, expected_prefill, expected_decode, expected_phase",
     [
         ("prefill_only", 2, [101, 102], [0, 0], {
             101: 50,
             102: 100
-        }, 150, 0),
+        }, 150, 0, "PREFILL_ONLY"),
         ("decode_only", 3, [201, 202, 203], [10, 20, 5], {
             201: 1,
             202: 1,
             203: 1
-        }, 0, 3),
+        }, 0, 3, "DECODE_ONLY"),
         ("mixed_batch", 4, [301, 302, 303, 304], [0, 10, 0, 20], {
             301: 100,
             302: 1,
             303: 50,
             304: 1
-        }, 150, 2),
+        }, 150, 2, "PREFILL_HEAVY"),
         ("chunked_prefill", 2, [401, 402], [50, 10], {
             401: 50,
             402: 1
-        }, 50, 1),
+        }, 50, 1, "PREFILL_HEAVY"),
     ])
 def test_get_batch_composition_stats(scenario, num_reqs, req_ids, computed,
                                      scheduled, expected_prefill,
-                                     expected_decode):
+                                     expected_decode, expected_phase):
     """Tests get_batch_composition_stats for various scenarios."""
     input_batch = MockInputBatch(req_ids, computed)
     scheduler_output = MockSchedulerOutput(scheduled)
     total_tokens = sum(scheduled.values())
+    batch_id = 42
 
     stats = get_batch_composition_stats(
+        batch_id=batch_id,
         input_batch=input_batch,
         total_num_scheduled_tokens=total_tokens,
         num_reqs=num_reqs,
         padded_total_num_scheduled_tokens=total_tokens + 8,
         scheduler_output=scheduler_output)
 
+    assert stats["batch_id"] == batch_id
     assert stats["num_prefill_tokens"] == expected_prefill
     assert stats["num_decode_tokens"] == expected_decode
     assert stats["num_reqs"] == num_reqs
     assert stats["total_num_scheduled_tokens"] == total_tokens
+    assert stats["phase"] == expected_phase
 
 
 @pytest.mark.parametrize("prefill_tokens, total_tokens, expected_phase", [
@@ -317,10 +321,10 @@ def test_get_batch_composition_stats(scenario, num_reqs, req_ids, computed,
     (40, 100, InferencePhase.BALANCED),
     (50, 100, InferencePhase.BALANCED),
     (60, 100, InferencePhase.BALANCED),
-    (100, 100, InferencePhase.PREFILL_HEAVY),
+    (100, 100, InferencePhase.PREFILL_ONLY),
     (20, 100, InferencePhase.DECODE_HEAVY),
     (21, 100, InferencePhase.AMBIGUOUS),
-    (0, 100, InferencePhase.DECODE_HEAVY),
+    (0, 100, InferencePhase.DECODE_ONLY),
 ])
 def test_determine_phase_from_batch_composition_stats(prefill_tokens,
                                                       total_tokens,
@@ -426,7 +430,8 @@ def test_phased_profiler_handles_all_phases(profiler_fixture):
 
     stats = {"num_reqs": 2, "total_num_scheduled_tokens": 100}
     phases_to_profile = [
-        InferencePhase.PREFILL_HEAVY, InferencePhase.DECODE_HEAVY,
+        InferencePhase.PREFILL_ONLY, InferencePhase.PREFILL_HEAVY,
+        InferencePhase.DECODE_ONLY, InferencePhase.DECODE_HEAVY,
         InferencePhase.BALANCED
     ]
 
@@ -449,3 +454,79 @@ def test_phased_profiler_handles_all_phases(profiler_fixture):
     mock_determine_phase.return_value = InferencePhase.PREFILL_HEAVY
     profiler.step(stats)
     assert mock_start.call_count == len(phases_to_profile)
+
+
+def test_phased_profiler_skips_decode_steps_before_profiling(profiler_fixture):
+    """Tests that the profiler skips N decode-heavy steps before profiling."""
+    profiler = profiler_fixture["profiler"]
+    mock_start = profiler_fixture["mock_start"]
+    mock_stop = profiler_fixture["mock_stop"]
+    mock_determine_phase = profiler_fixture["mock_determine_phase"]
+
+    num_steps_to_skip = 3
+    profiler.num_decode_steps_to_skip = num_steps_to_skip
+
+    stats = {"num_reqs": 2, "total_num_scheduled_tokens": 100}
+    mock_determine_phase.return_value = InferencePhase.DECODE_HEAVY
+
+    # Each of these steps should be skipped (no profiling started)
+    for i in range(num_steps_to_skip):
+        profiler.step(stats)
+        assert profiler.decode_steps_skipped == i + 1
+        mock_start.assert_not_called()
+        assert not profiler.inference_phase_seen[InferencePhase.DECODE_HEAVY]
+
+    # The next step should actually start profiling
+    profiler.step(stats)
+    mock_start.assert_called_once()
+    assert profiler.inference_phase_seen[InferencePhase.DECODE_HEAVY]
+    assert profiler.current_phase == "decode_heavy"
+    assert profiler.profiling_n_steps_left == PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
+
+    # Complete the profiling cycle
+    for _ in range(PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR):
+        profiler.step(stats)
+    mock_stop.assert_called_once()
+    assert profiler.current_phase == ""
+
+
+def test_phased_profiler_skip_only_affects_decode_heavy(profiler_fixture):
+    """Tests that the skip logic only applies to the DECODE_HEAVY phase."""
+    profiler = profiler_fixture["profiler"]
+    mock_start = profiler_fixture["mock_start"]
+    mock_stop = profiler_fixture["mock_stop"]
+    mock_determine_phase = profiler_fixture["mock_determine_phase"]
+
+    profiler.num_decode_steps_to_skip = 5  # Large skip count
+
+    stats = {"num_reqs": 2, "total_num_scheduled_tokens": 100}
+
+    # PREFILL_HEAVY should start profiling immediately (no skipping)
+    mock_determine_phase.return_value = InferencePhase.PREFILL_HEAVY
+    profiler.step(stats)
+    mock_start.assert_called_once()
+    assert profiler.inference_phase_seen[InferencePhase.PREFILL_HEAVY]
+    assert profiler.decode_steps_skipped == 0  # Not incremented
+
+    # Complete the PREFILL_HEAVY profiling cycle
+    for _ in range(PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR):
+        profiler.step(stats)
+    mock_stop.assert_called_once()
+
+    # BALANCED should also start immediately (no skipping)
+    mock_determine_phase.return_value = InferencePhase.BALANCED
+    profiler.step(stats)
+    assert mock_start.call_count == 2
+    assert profiler.inference_phase_seen[InferencePhase.BALANCED]
+    assert profiler.decode_steps_skipped == 0  # Still not incremented
+
+    # Complete the BALANCED profiling cycle
+    for _ in range(PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR):
+        profiler.step(stats)
+    assert mock_stop.call_count == 2
+
+    # DECODE_HEAVY should be skipped
+    mock_determine_phase.return_value = InferencePhase.DECODE_HEAVY
+    profiler.step(stats)
+    assert mock_start.call_count == 2  # Not started yet
+    assert profiler.decode_steps_skipped == 1

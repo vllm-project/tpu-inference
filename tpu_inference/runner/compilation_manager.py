@@ -76,11 +76,15 @@ class CompilationManager:
             return inner_val != outer_val
         return inner_val > outer_val
 
-    def _run_compilation(self, name: str, fn: Callable, *args,
+    def _run_compilation(self,
+                         name: str,
+                         fn: Callable,
+                         *args,
+                         call_kwargs=dict(),
                          **kwargs) -> None:
         logger.info(f"Precompile {name} --> {kwargs}")
         start = time.perf_counter()
-        result = fn(*args)
+        result = fn(*args, **call_kwargs)
         jax.tree.map(lambda r: r.block_until_ready(), result)
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
@@ -139,6 +143,8 @@ class CompilationManager:
                 sharding=sharding)
             dummy_input_ids = self._create_dummy_tensor(
                 (num_tokens, ), jnp.int32, sharding=input_sharding)
+            dummy_is_multimodal = self._create_dummy_tensor(
+                (num_tokens, ), jnp.int32, sharding=input_sharding)
 
             self._run_compilation(
                 "input_embeddings_merger",
@@ -146,6 +152,7 @@ class CompilationManager:
                 self.runner.state,
                 dummy_input_ids,
                 dummy_multimodal_embeddings,
+                call_kwargs={"is_multimodal": dummy_is_multimodal},
                 num_tokens=num_tokens,
             )
 
@@ -155,6 +162,7 @@ class CompilationManager:
                 self.runner.state,
                 dummy_input_ids,
                 None,
+                call_kwargs={"is_multimodal": None},
                 num_tokens=num_tokens,
             )
 
@@ -191,8 +199,10 @@ class CompilationManager:
                                             sharding=dp_sharding)
 
         def build_block_table(kv_cache_gid: int) -> jax.Array:
-            block_tables = self.runner.block_tables_cpu[
-                kv_cache_gid][:self.runner.max_num_reqs]
+            block_table_obj = self.runner.input_batch.block_table[kv_cache_gid]
+            shape = (self.runner.max_num_reqs,
+                     block_table_obj.max_num_blocks_per_req)
+            block_tables = np.zeros(shape, dtype=np.int32)
             block_tables = block_tables.reshape(-1)
             block_tables = device_array(self.runner.mesh,
                                         block_tables,
@@ -272,7 +282,6 @@ class CompilationManager:
         that the scheduler is expected to handle, ensuring a compiled version
         is ready for each combination.
         """
-        dp_size = self.runner.vllm_config.sharding_config.model_dp_size * self.runner.vllm_config.sharding_config.attn_dp_size
 
         for num_tokens in self.runner.num_tokens_paddings:
             dp_sharding = NamedSharding(
@@ -293,14 +302,10 @@ class CompilationManager:
 
                 input_ids = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32, dp_sharding)
-                # Need align to the sampling output sharding (sharded by ATTN_DATA in DP)
                 next_tokens = self._create_dummy_tensor(
                     (num_reqs, ),
                     jnp.int32,
-                    sharding=NamedSharding(
-                        self.runner.mesh,
-                        PartitionSpec(ShardingAxisName.ATTN_DATA)) if dp_size
-                    > 1 else NamedSharding(self.runner.mesh, PartitionSpec()))
+                    sharding=NamedSharding(self.runner.mesh, PartitionSpec()))
 
                 placeholder_num = jnp.asarray(1, dtype=jnp.int32)
                 self._run_compilation(
@@ -323,8 +328,11 @@ class CompilationManager:
             input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32,
                                                   dp_sharding)
             if self.runner.uses_mrope:
-                positions = self._create_dummy_tensor((3, num_tokens),
-                                                      jnp.int32, dp_sharding)
+                mrope_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+                positions = self._create_dummy_tensor(
+                    (3, num_tokens), jnp.int32, mrope_sharding)
             else:
                 positions = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32, dp_sharding)
@@ -368,9 +376,12 @@ class CompilationManager:
             inputs_embeds = self._create_dummy_tensor(
                 (num_tokens, hidden_size), dtype, sharding=sharding)
             if self.runner.uses_mrope:
+                mrope_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(None, ShardingAxisName.ATTN_DATA))
                 positions = self._create_dummy_tensor((3, num_tokens),
                                                       jnp.int32,
-                                                      sharding=sharding)
+                                                      sharding=mrope_sharding)
             else:
                 positions = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32,
@@ -502,11 +513,17 @@ class CompilationManager:
         logger.info("Compiling compute_logits with different input shapes.")
         hsize = self.runner.model_config.get_hidden_size()
         leading_shape = self.runner.num_reqs_paddings if not self.runner.speculative_config else self.runner.num_logits_paddings
-        dp_sharding = NamedSharding(self.runner.mesh,
-                                    PartitionSpec(ShardingAxisName.ATTN_DATA))
+        # Use PartitionSpec(ATTN_DATA, None) (2D explicit) to match the sharding
+        # that _select_from_array_fn produces at inference time. shard_map with
+        # out_specs=P('data') returns arrays with spec P('data', None); since
+        # compute_logits_fn has no in_shardings, JAX uses the actual input
+        # sharding as the jit cache key. P('data',) != P('data', None) as cache
+        # keys, causing a cache miss inside ForbidCompile → RuntimeError for VLMs.
+        hidden_states_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
         for num_reqs in leading_shape:
             hidden_states = self._create_dummy_tensor(
-                (num_reqs, hsize), jnp.bfloat16, dp_sharding)
+                (num_reqs, hsize), jnp.bfloat16, hidden_states_sharding)
             with self.runner.maybe_select_dummy_loras(
                     self.runner.lora_config,
                     np.array([num_reqs], dtype=np.int32)):
@@ -568,9 +585,8 @@ class CompilationManager:
                     dummy_shape = (1 if logprobs else 2, )
                     _cache_collision_dummy = jnp.zeros(dummy_shape,
                                                        dtype=jnp.int32)
-                    _cache_collision_dummy = jax.device_put(
-                        _cache_collision_dummy,
-                        NamedSharding(self.runner.mesh, PartitionSpec(None)))
+                    _cache_collision_dummy = device_array(
+                        self.runner.mesh, _cache_collision_dummy)
 
                     sampling_metadata = TPUSupportedSamplingMetadata(
                         temperature=temperature,
@@ -622,15 +638,12 @@ class CompilationManager:
         logger.info("Compiling gather_logprobs with different input shapes.")
         hsize = self.runner.model_config.get_vocab_size()
         for num_reqs in self.runner.num_reqs_paddings:
-            dp_size = self.runner.vllm_config.sharding_config.total_dp_size
             logits_sharding = NamedSharding(
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.MLP_DATA,
                               ShardingAxisName.MLP_TENSOR))
-            token_ids_sharding = NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.MLP_DATA, )
-            ) if dp_size > 1 else NamedSharding(self.runner.mesh,
-                                                PartitionSpec())
+            token_ids_sharding = NamedSharding(self.runner.mesh,
+                                               PartitionSpec())
             logits = self._create_dummy_tensor((num_reqs, hsize), jnp.float32,
                                                logits_sharding)
             token_ids = self._create_dummy_tensor((num_reqs, ), jnp.int32,
@@ -679,9 +692,8 @@ class CompilationManager:
                     dummy_shape = (1 if logprobs_dummy else 2, )
                     _cache_collision_dummy = jnp.zeros(dummy_shape,
                                                        dtype=jnp.int32)
-                    _cache_collision_dummy = jax.device_put(
-                        _cache_collision_dummy,
-                        NamedSharding(self.runner.mesh, PartitionSpec(None)))
+                    _cache_collision_dummy = device_array(
+                        self.runner.mesh, _cache_collision_dummy)
 
                     if do_sampling:
                         compilation_name = "random_rejection_sampler"
@@ -730,9 +742,9 @@ class CompilationManager:
         draft_kv_cache_group_id = num_kv_cache_groups - 1
         block_tables = self.runner.input_batch.block_table[
             draft_kv_cache_group_id].get_cpu_tensor().reshape(-1)
-        block_tables = jax.device_put(
-            block_tables, NamedSharding(self.runner.mesh,
-                                        PartitionSpec(None, )))
+        block_tables = device_array(self.runner.mesh,
+                                    block_tables,
+                                    sharding=PartitionSpec(None, ))
 
         selected_positions = self._create_dummy_tensor(
             (self.runner.max_num_reqs, ), jnp.int32)
@@ -915,9 +927,10 @@ class CompilationManager:
                 num_tokens=num_tokens,
             )
 
-            attention_metadata.query_start_loc = jax.device_put(
+            attention_metadata.query_start_loc = device_array(
+                self.runner.mesh,
                 attention_metadata.query_start_loc,
-                NamedSharding(self.runner.mesh, PartitionSpec()))
+                sharding=PartitionSpec())
             attention_metadata.input_positions = self._create_dummy_tensor(
                 (self.runner.max_num_reqs, ), jnp.int32)
             self._run_compilation(

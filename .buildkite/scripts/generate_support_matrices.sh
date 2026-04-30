@@ -38,7 +38,6 @@ get_tpu_generation() {
         "FP8 W8A8") echo "v7" ;;
         "FP8 W8A16") echo "v7" ;;
         "FP4 W4A16") echo "v7" ;;
-        "AWQ INT4") echo "\"v5, v6\"" ;;
         *) echo "N/A" ;;
     esac
 }
@@ -51,7 +50,6 @@ get_quantization_method() {
         "FP8 W8A8") echo "compressed-tensor" ;;
         "FP8 W8A16") echo "compressed-tensor" ;;
         "FP4 W4A16") echo "mxfp4" ;;
-        "AWQ INT4") echo "" ;;
         *) echo "N/A" ;;
     esac
 }

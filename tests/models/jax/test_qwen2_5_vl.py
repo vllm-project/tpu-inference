@@ -59,14 +59,18 @@ class MockModelConfig:
     def is_multimodal_model(self):
         return True
 
+    def _lang(self):
+        return getattr(self.hf_config, 'text_config', self.hf_config)
+
     def get_hidden_size(self):
-        return self.hf_config.hidden_size
+        return self._lang().hidden_size
 
     def get_head_size(self):
-        return self.hf_config.hidden_size // self.hf_config.num_attention_heads
+        lc = self._lang()
+        return lc.hidden_size // lc.num_attention_heads
 
     def get_vocab_size(self):
-        return self.hf_config.vocab_size
+        return self._lang().vocab_size
 
 
 class MockVllmConfig:
@@ -283,8 +287,10 @@ class TestQwen2_5_VisionBlock:
         mock_mlp_instance = MockMLP.return_value
         mock_mlp_instance.return_value = jnp.zeros((T, B, D), dtype=dtype)
 
+        norm_eps = getattr(config, "rms_norm_eps",
+                           config.text_config.rms_norm_eps)
         with jax.set_mesh(mesh):
-            block = Qwen2_5_VisionBlock(config, dtype, rngs, mesh)
+            block = Qwen2_5_VisionBlock(config, norm_eps, dtype, rngs, mesh)
         x = jax.random.normal(rng, (T, B, D))
         rotary_pos_emb = jax.random.normal(
             rng, (T, config.vision_config.hidden_size //
@@ -555,8 +561,9 @@ class TestQwen2_5_VLForConditionalGeneration:
                              model: Qwen2_5_VLForConditionalGeneration,
                              rng: PRNGKey):
         input_ids = jax.random.randint(rng, (1, 10), 0,
-                                       model.config.vocab_size)
-        mock_text_embeds = jnp.ones((1, 10, model.config.hidden_size))
+                                       model.config.text_config.vocab_size)
+        mock_text_embeds = jnp.ones(
+            (1, 10, model.config.text_config.hidden_size))
         model.model = MagicMock()
         model.model.embed_tokens = MagicMock(return_value=mock_text_embeds)
 
@@ -564,13 +571,13 @@ class TestQwen2_5_VLForConditionalGeneration:
         np.testing.assert_array_equal(embeds, mock_text_embeds)
         mock_merge_embeddings.assert_not_called()
 
-        empty_mm = jnp.ones((0, model.config.hidden_size), )
+        empty_mm = jnp.ones((0, model.config.text_config.hidden_size), )
         embeds_empty_mm = model.embed_input_ids(input_ids, empty_mm)
         np.testing.assert_array_equal(embeds_empty_mm, mock_text_embeds)
         mock_merge_embeddings.assert_not_called()
 
-        mm_embeds = jnp.ones((5, model.config.hidden_size))
-        mock_merged = jnp.ones((1, 15, model.config.hidden_size))
+        mm_embeds = jnp.ones((5, model.config.text_config.hidden_size))
+        mock_merged = jnp.ones((1, 15, model.config.text_config.hidden_size))
         mock_merge_embeddings.return_value = mock_merged
 
         embeds_mm = model.embed_input_ids(input_ids, mm_embeds)
@@ -583,10 +590,11 @@ class TestQwen2_5_VLForConditionalGeneration:
                   rng: PRNGKey):
         kv_caches = [MagicMock()]
         input_ids = jax.random.randint(rng, (1, 10), 0,
-                                       model.config.vocab_size)
+                                       model.config.text_config.vocab_size)
         attn_meta = MagicMock(spec=AttentionMetadata)
         mock_lm_output = ([MagicMock()],
-                          jnp.ones((1, 10, model.config.hidden_size)))
+                          jnp.ones(
+                              (1, 10, model.config.text_config.hidden_size)))
         model.model.return_value = mock_lm_output
 
         new_kvs, x, aux_hidden_states = model(kv_caches, input_ids, attn_meta)
@@ -595,13 +603,13 @@ class TestQwen2_5_VLForConditionalGeneration:
                                             attention_metadata=attn_meta,
                                             inputs_embeds=None)
         assert len(new_kvs) == 1
-        assert x.shape == (1, 10, model.config.hidden_size)
+        assert x.shape == (1, 10, model.config.text_config.hidden_size)
         assert len(aux_hidden_states) == 0
 
     def test_compute_logits(self, model: Qwen2_5_VLForConditionalGeneration,
                             rng: PRNGKey):
-        hidden_states = jnp.ones((1, 10, model.config.hidden_size))
-        mock_logits = jnp.ones((1, 10, model.config.vocab_size))
+        hidden_states = jnp.ones((1, 10, model.config.text_config.hidden_size))
+        mock_logits = jnp.ones((1, 10, model.config.text_config.vocab_size))
         model.compute_logits.return_value = mock_logits
 
         logits = model.compute_logits(hidden_states)

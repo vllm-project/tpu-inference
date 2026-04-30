@@ -19,7 +19,7 @@ steps:
     key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_UnitTest"
     soft_fail: true
     agents:
-      queue: {QUEUE}
+      queue: "{QUEUE}"
     commands:
       - echo "placeholder"  # TODO: replace with your unit test command
   - label: "${{TPU_VERSION:-tpu6e}} Record unit test result for {MODEL_NAME}"
@@ -41,10 +41,11 @@ steps:
     depends_on: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_MODEL_NAME}_UnitTest"
     soft_fail: true
     agents:
-      queue: {QUEUE}
+      queue: "{QUEUE}"
     env:
       TEST_MODEL: {MODEL_NAME}
-      TENSOR_PARALLEL_SIZE: {TENSOR_PARALLEL_SIZE}
+      # The default values are for tpu6e. For tpu7x, the CI procedure will export TENSOR_PARALLEL_SIZE_SINGLE=2, TENSOR_PARALLEL_SIZE_MULTI=8 automatically
+      TENSOR_PARALLEL_SIZE: "{TP_SIZE}"
       MINIMUM_ACCURACY_THRESHOLD: 0  # TODO : replace 0 with your accuracy threshold
     commands:
       - |
@@ -68,10 +69,11 @@ steps:
     depends_on: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_MODEL_NAME}_Accuracy"
     soft_fail: true
     agents:
-      queue: {QUEUE}
+      queue: "{QUEUE}"
     env:
       TEST_MODEL: {MODEL_NAME}
-      TENSOR_PARALLEL_SIZE: {TENSOR_PARALLEL_SIZE}
+      # The default values are for tpu6e. For tpu7x, the CI procedure will export TENSOR_PARALLEL_SIZE_SINGLE=2, TENSOR_PARALLEL_SIZE_MULTI=8 automatically
+      TENSOR_PARALLEL_SIZE: "{TP_SIZE}"
       MINIMUM_THROUGHPUT_THRESHOLD: 0  # TODO : replace 0 with your performance threshold
     commands:
       - |

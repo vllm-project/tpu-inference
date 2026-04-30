@@ -273,11 +273,10 @@ def test_get_flax_model(vllm_config, mesh, tie_word_embeddings):
                                     device=jax.devices()[0],
                                     need_pp=False)
     with jax.set_mesh(mesh), set_current_vllm_config(vllm_config):
-        model_fn, compute_logits_fn, *_ = model_loader.get_flax_model(
-            vllm_config, rng, mesh)
+        model = model_loader.get_flax_model(vllm_config, rng, mesh)
 
-    assert callable(model_fn)
-    assert callable(compute_logits_fn)
+    assert callable(model.model_fn)
+    assert callable(model.compute_logits_fn)
 
 
 def test_get_vllm_model(mock_get_pp_group, mesh):
@@ -306,11 +305,10 @@ def test_get_vllm_model(mock_get_pp_group, mesh):
             pipeline_model_parallel_size=1,
         )
 
-    model_fn, compute_logits_fn, *_ = model_loader.get_vllm_model(
-        vllm_config, rng, mesh)
+    model = model_loader.get_vllm_model(vllm_config, rng, mesh)
 
-    assert callable(model_fn)
-    assert callable(compute_logits_fn)
+    assert callable(model.model_fn)
+    assert callable(model.compute_logits_fn)
 
 
 def test_get_vllm_model_random_weights(mock_get_pp_group, mesh):
@@ -338,11 +336,10 @@ def test_get_vllm_model_random_weights(mock_get_pp_group, mesh):
     with patch(
             "vllm.model_executor.model_loader.dummy_loader.DummyModelLoader.load_weights"
     ) as mock_load:
-        model_fn, compute_logits_fn, *_ = model_loader.get_vllm_model(
-            vllm_config, rng, mesh)
+        model = model_loader.get_vllm_model(vllm_config, rng, mesh)
 
-    assert callable(model_fn)
-    assert callable(compute_logits_fn)
+    assert callable(model.model_fn)
+    assert callable(model.compute_logits_fn)
     mock_load.assert_called()
 
 

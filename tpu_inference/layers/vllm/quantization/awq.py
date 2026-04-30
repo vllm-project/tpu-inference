@@ -484,6 +484,7 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         weights = FusedMoEWeights(
             w13_weight=jax_view(layer.w13_weight),

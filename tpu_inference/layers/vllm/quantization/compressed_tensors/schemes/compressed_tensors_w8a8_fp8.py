@@ -22,12 +22,13 @@ from compressed_tensors.quantization import (QuantizationArgs,
 from jax.sharding import NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
+from vllm.model_executor.kernels.linear import (FP8ScaledMMLinearKernel,
+                                                register_linear_kernel)
+from vllm.model_executor.kernels.linear.scaled_mm import \
+    FP8ScaledMMLinearLayerConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
     CompressedTensorsW8A8Fp8
-from vllm.model_executor.layers.quantization.utils.fp8_utils import \
-    W8A8BlockFp8LinearOp
-from vllm.model_executor.layers.quantization.utils.quant_utils import \
-    GroupShape
+from vllm.platforms import PlatformEnum
 
 from tpu_inference.layers.common.linear import sharded_quantized_matmul
 from tpu_inference.layers.common.process_weights.linear_weights import (
@@ -47,6 +48,37 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
+class TpuFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+    """Stub FP8 kernel registered for TPU platform.
+
+    VllmCompressedTensorsW8A8Fp8 fully overrides apply_weights and
+    process_weights_after_loading, so apply_scaled_mm is never called.
+    This class exists solely so that init_fp8_linear_kernel (called by the
+    upstream create_weights) can select a kernel without raising a KeyError
+    for the TPU platform.
+    """
+
+    @classmethod
+    def is_supported(
+            cls,
+            compute_capability: int | None = None) -> tuple[bool, str | None]:
+        return True, None
+
+    @classmethod
+    def can_implement(
+            cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        return True, None
+
+    def apply_scaled_mm(self, *, A, B, out_dtype, As, Bs, bias,
+                        output_shape) -> torch.Tensor:
+        raise NotImplementedError(
+            "TpuFP8ScaledMMLinearKernel.apply_scaled_mm should never be called"
+        )
+
+
+register_linear_kernel(TpuFP8ScaledMMLinearKernel, PlatformEnum.TPU, "fp8")
+
+
 class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
 
     def __init__(
@@ -55,21 +87,10 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
         is_static_input_scheme: bool,
         linear_config: VllmQuantLinearConfig,
     ):
-        self.weight_quant = weight_quant
-        self.strategy = weight_quant.strategy
-        self.out_dtype = torch.get_default_dtype()
-        self.is_static_input_scheme = is_static_input_scheme
-        self.weight_block_size = self.weight_quant.block_structure
-
-        if self.weight_block_size is not None:
-            assert not self.is_static_input_scheme
-            self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
-            self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
-                weight_group_shape=GroupShape(*self.weight_block_size),
-                act_quant_group_shape=self.act_q_group_shape,
-                cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
-                use_aiter_and_is_supported=self.use_aiter_and_is_supported,
-            )
+        CompressedTensorsW8A8Fp8.__init__(
+            self,
+            weight_quant=weight_quant,
+            is_static_input_scheme=is_static_input_scheme)
 
         self.linear_config = linear_config
 

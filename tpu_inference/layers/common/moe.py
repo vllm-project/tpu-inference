@@ -24,6 +24,7 @@ from tpu_inference import envs
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
 from tpu_inference.layers.common.fused_moe_gmm import fused_moe_func
 from tpu_inference.logger import init_logger
+from tpu_inference.utils import to_jax_dtype
 
 if TYPE_CHECKING:
     from tpu_inference.layers.common.process_weights.moe_weights import (
@@ -122,6 +123,13 @@ def moe_apply(
                     **extra_backend_kwargs,
                 )[:, :actual_hidden_size]
             case MoEBackend.GMM_EP | MoEBackend.GMM_TP:
+                # Check if activation_dtype was passed via kwargs or as an environment variable
+                activation_dtype = extra_backend_kwargs.get(
+                    "activation_dtype", envs.MOE_ALL_GATHER_ACTIVATION_DTYPE)
+                all_gather_fp8 = (bool(activation_dtype)
+                                  and to_jax_dtype(activation_dtype)
+                                  == jnp.float8_e4m3fn)
+
                 output = fused_moe_func(
                     hidden_states=x,
                     w1=weights.w13_weight,
@@ -139,6 +147,7 @@ def moe_apply(
                     scoring_fn=layer.scoring_func,
                     sc_kernel_threshold=envs.SC_KERNEL_THRESHOLD,
                     sc_kernel_col_chunk_size=envs.SC_KERNEL_COL_CHUNK_SIZE,
+                    all_gather_fp8=all_gather_fp8,
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance

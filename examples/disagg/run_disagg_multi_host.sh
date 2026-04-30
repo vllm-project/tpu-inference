@@ -40,6 +40,13 @@ print_logs_on_exit() {
       echo "File not found."
     fi
 
+    echo "--- Contents of $LOG_DIR/correctness.txt ---"
+    if [ -f "$LOG_DIR/correctness.txt" ]; then
+      cat "$LOG_DIR/correctness.txt"
+    else
+      echo "File not found."
+    fi
+
     echo "--- Contents of $LOG_DIR/benchmark.txt ---"
     if [ -f "$LOG_DIR/benchmark.txt" ]; then
       cat "$LOG_DIR/benchmark.txt"
@@ -122,6 +129,25 @@ wait_for_server() {
   return 1
 }
 
+check_failed_requests() {
+  local log_file="$1"
+  local failed_requests
+  failed_requests=$(grep "Failed requests:" "$log_file" | awk '{print $3}' || true)
+
+  if [ -z "$failed_requests" ]; then
+    echo "Error: Could not find 'Failed requests:' in the benchmark output." >&2
+    return 1
+  fi
+
+  if [ "$failed_requests" -gt 0 ]; then
+    echo "Error: Benchmark reported $failed_requests failed requests." >&2
+    return 1
+  fi
+
+  echo "Success: Benchmark reported $failed_requests failed requests." >&2
+  return 0
+}
+
 # clear existing container if there is
 CONTAINERS=$(docker ps -a --filter "name=${CONTAINER_PREFIX}*" -q)
 if [ -n "$CONTAINERS" ]; then
@@ -140,6 +166,9 @@ fi
 LOG_DIR=$HOME/logs
 if [ ! -d $LOG_DIR ]; then
   mkdir -p $LOG_DIR
+else
+  # Delete old log files to avoid printing stale logs at the end
+  rm -f $LOG_DIR/prefill.txt $LOG_DIR/decode.txt $LOG_DIR/benchmark.txt $LOG_DIR/proxy.txt $LOG_DIR/correctness.txt
 fi
 
 # Define local mounts for non-Buildkite environments
@@ -233,10 +262,10 @@ docker exec -d ${CONTAINER_PREFIX}-0 /bin/bash -c \
     "vllm serve $MODEL \
     --port ${PREFILL_VLLM_PORT} \
     --gpu-memory-utilization 0.8 \
+    --no-enable-prefix-caching \
     --max-num-batched-tokens 1024 \
     --tensor-parallel-size 4 \
     --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}' \
-    --no-async-scheduling \
     > /root/logs/prefill.txt 2>&1"
 set +x
 
@@ -306,10 +335,10 @@ docker exec -d ${CONTAINER_PREFIX}-2-0 /bin/bash -c \
     "vllm serve $MODEL \
     --port ${DECODE_VLLM_PORT} \
     --gpu-memory-utilization 0.8 \
+    --no-enable-prefix-caching \
     --max-num-batched-tokens 1024 \
     --tensor-parallel-size 4 \
     --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}' \
-    --no-async-scheduling \
     > /root/logs/decode.txt 2>&1"
 set +x
 
@@ -347,7 +376,7 @@ set +x
 if [ "$TEST_MODE" = "1" ] || [ "$TEST_MODE" = "3" ]; then
     echo "Running benchmark test in container."
     set -x
-    docker exec ${CONTAINER_PREFIX}-proxy-benchmark /bin/bash -c "python3 /workspace/tpu_inference/scripts/vllm/benchmarking/benchmark_serving.py \
+    docker exec ${CONTAINER_PREFIX}-proxy-benchmark /bin/bash -c "vllm bench serve \
         --backend vllm \
         --host localhost \
         --port 8000 \
@@ -361,6 +390,8 @@ if [ "$TEST_MODE" = "1" ] || [ "$TEST_MODE" = "3" ]; then
         --trust-remote-code \
         --seed ${RANDOM_SEED} > /root/logs/benchmark.txt 2>&1"
     set +x
+
+    check_failed_requests "$LOG_DIR/benchmark.txt"
 fi
 
 # Run correctness test inside the proxy-benchmark-node container

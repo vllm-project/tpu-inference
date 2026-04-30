@@ -204,3 +204,49 @@ def test_get_attention_page_size_bytes_mla(mesh: Mesh):
         (32 // get_dtype_packing(jnp.bfloat16)) * np.prod(shape)) // 8
 
     assert page_size_bytes == expected_page_size
+
+
+def test_create_kv_caches_batch_equivalence(mesh: Mesh):
+    """
+    Tests that calling create_kv_caches once with N layer names is equivalent to
+    calling it N times with a single layer name and aggregating the results.
+    """
+    num_blocks = 16
+    block_size = 8
+    num_kv_heads = 4
+    head_size = 64
+    layer_names = ["layer.0", "layer.1", "layer.2"]
+
+    with patch("tpu_inference.logger.init_logger", return_value=MagicMock()), \
+         patch("tpu_inference.utils.hbm_usage_gb", return_value=[(0.0, 0.0)]):
+
+        # Single batch call
+        kv_caches_batch = create_kv_caches(
+            num_blocks=num_blocks,
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            mesh=mesh,
+            layer_names=layer_names,
+        )
+
+        # Multiple iterative calls
+        kv_caches_iterative = []
+        for name in layer_names:
+            layer_cache = create_kv_caches(
+                num_blocks=num_blocks,
+                block_size=block_size,
+                num_kv_heads=num_kv_heads,
+                head_size=head_size,
+                mesh=mesh,
+                layer_names=[name],
+            )
+            kv_caches_iterative.extend(layer_cache)
+
+        assert len(kv_caches_batch) == len(kv_caches_iterative)
+        for b_cache, i_cache in zip(kv_caches_batch, kv_caches_iterative):
+            assert b_cache.shape == i_cache.shape
+            assert b_cache.dtype == i_cache.dtype
+            assert b_cache.sharding == i_cache.sharding
+            # Note: Content is empty/uninitialized, so we don't compare values,
+            # just the metadata and allocation properties.
