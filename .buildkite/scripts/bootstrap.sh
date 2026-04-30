@@ -153,6 +153,21 @@ set_jax_envs() {
     esac
 }
 
+upload_one_bm_case() {
+    # set CODE_HASH metadata required for the bm script
+    VLLM_COMMIT=$(get_vllm_commit_hash)
+    TPU_INFERENCE_COMMIT="$BUILDKITE_COMMIT" 
+    CODE_HASH="${VLLM_COMMIT}-${TPU_INFERENCE_COMMIT}-"
+    buildkite-agent meta-data set "CODE_HASH" "${CODE_HASH}"
+
+    # set JOB_REFERENCE metadata required for the bm script
+    TIMEZONE="America/Los_Angeles"
+    JOB_REFERENCE="$(TZ="$TIMEZONE" date +%Y%m%d_%H%M%S)"
+    buildkite-agent meta-data set "JOB_REFERENCE" "${JOB_REFERENCE}"
+
+    upload_with_priority <(python3 "${SCRIPT_DIR}/../benchmark/scripts/generate_bk_pipeline.py" --input "${SCRIPT_DIR}/../benchmark/cases/sample/pre_commit_case.json") "$JOB_PRIORITY"
+}
+
 upload_pipeline() {
     if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
       # Upload JAX pipeline for v6 (default)
@@ -165,6 +180,7 @@ upload_pipeline() {
       upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
       set_jax_envs unset
 
+      upload_one_bm_case
       # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
       upload_with_priority .buildkite/nightly_releases.yml "$JOB_PRIORITY"
     fi
