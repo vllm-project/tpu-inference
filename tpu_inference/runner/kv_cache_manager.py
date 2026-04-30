@@ -19,7 +19,7 @@ import jax.numpy as jnp
 import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import t2j_dtype
-from vllm.config import get_layers_from_vllm_config
+from vllm.config import get_layers_from_vllm_config, set_current_vllm_config
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -838,7 +838,8 @@ class KVCacheManager:
             f"hbm_before="
             f"{utils.hbm_usage_gb(self.runner.mesh.devices.flatten())}Gb")
 
-        self.initialize_kv_cache(kv_cache_config)
+        with set_current_vllm_config(self.runner.vllm_config):
+            self.initialize_kv_cache(kv_cache_config)
 
     @staticmethod
     @jax.jit
