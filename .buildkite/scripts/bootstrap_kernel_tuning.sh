@@ -18,6 +18,12 @@
 # Configure the Buildkite pipeline's "Steps" to run this script.
 
 set -euo pipefail
+# Resolve the absolute directory path of the current script.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source the shared pipeline config file.
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/configs/pipeline_config.sh"
 
 # Handles the environment state for different TPU generations.
 set_jax_envs() {
