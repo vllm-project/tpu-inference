@@ -139,13 +139,12 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
                 w2_bias=None,
             )
 
-            sharded_weights = shard_moe_weights(
-                weights, 
-                moe_backend=layer.moe_backend, 
-                mesh=jax.sharding.get_mesh()
-            )
+            sharded_weights = shard_moe_weights(weights,
+                                                moe_backend=layer.moe_backend,
+                                                mesh=jax.sharding.get_mesh())
 
-            layer.kernel_gating_upproj_EDF = nnx.Param(sharded_weights.w13_weight)
+            layer.kernel_gating_upproj_EDF = nnx.Param(
+                sharded_weights.w13_weight)
             layer.kernel_down_proj_EFD = nnx.Param(sharded_weights.w2_weight)
 
             del weights
