@@ -53,10 +53,12 @@ steps:
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-      TEMP_YAML_PATH: "/tmp/kernel_tuning/generated_pipeline.yml"
     agents:
       queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
     commands:
+      - |
+        # remove the existing generated pipeline YAML in the temp dir on the host. 
+        rm -f "/tmp/kernel_tuning/generated_pipeline.yml"
       - |
         .buildkite/scripts/run_in_docker.sh bash -c "
           if [ -z \"\${KERNEL_TUNING_RUN_ID}\" ] || [ -z \"\${KERNEL_TUNING_CASE_SET_ID}\" ]; then
@@ -74,19 +76,14 @@ steps:
           echo "Python version: $(python --version)" && \
           python -m pip install --upgrade absl-py && \
           rm -f $TEMP_YAML_PATH && \
-          PIPELINE_YAML=\$(python -m tools.kernel.tuner.v1.kernel_tuner_runner \
+          python -m tools.kernel.tuner.v1.kernel_tuner_runner \
           --kernel_tuner_name=\${KERNEL_TUNING_KERNEL_NAME} \
           --case_set_desc=\${KERNEL_TUNING_CASE_SET_DESC} \
           --generate_buildkite_pipeline=True \
           --case_set_id=\${KERNEL_TUNING_CASE_SET_ID} \
           --run_id=\${KERNEL_TUNING_RUN_ID} \
-          --tpu_version=\${TPU_VERSION}) && \
-          echo \"Generated pipeline YAML: \$PIPELINE_YAML\" && \
-          if [ -z \$PIPELINE_YAML ]; then
-            echo 'Error: generated pipeline YAML is empty' >&2
-            exit 1
-          fi && \
-          echo \$PIPELINE_YAML > \$TEMP_YAML_PATH"
+          --tpu_version=\${TPU_VERSION}
       - |
         # Upload the generated pipeline YAML from the temp dir on the host.
-        buildkite-agent pipeline upload "$TEMP_YAML_PATH"
+        buildkite-agent artifact upload "/tmp/kernel_tuning/generated_pipeline.yml"
+        buildkite-agent pipeline upload "/tmp/kernel_tuning/generated_pipeline.yml"

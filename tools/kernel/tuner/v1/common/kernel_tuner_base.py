@@ -15,6 +15,7 @@
 import json
 import logging
 import time
+import os
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -222,6 +223,10 @@ class KernelTunerBase(ABC):
         Returns:
             A string representing the Buildkite pipeline configuration in YAML format.
         """
+        output_path = "/tmp/kernel_tuning/generated_pipeline.yml"
+        if os.path.exists(output_path):
+            # clean up the existing one
+            os.remove(output_path)
         buckets = self._generate_tuning_jobs(case_set_id, desc=desc)
         # The Buildkite pipeline YAML will be generated in the format of:
         # steps:
@@ -257,7 +262,11 @@ class KernelTunerBase(ABC):
             'steps': pipeline['steps']
         }]
 
-        return yaml.dump(pipeline, default_flow_style=False, sort_keys=False)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w") as f:
+            yaml.dump(pipeline, f, default_flow_style=False, sort_keys=False)
+        logger.info(
+            f"Generated Buildkite pipeline YAML saved to {output_path} in Docker")
 
     @abstractmethod
     def generate_inputs(self, tuning_key: TuningKey) -> dict:
