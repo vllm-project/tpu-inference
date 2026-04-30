@@ -399,7 +399,7 @@ class PhasedBasedProfiler:
             if phase == InferencePhase.DECODE_ONLY and \
                     self.decode_kv_len_threshold >= 0:
                 min_kv_len = batch_composition_stats.get("min_kv_len", 0)
-                if min_kv_len <= self.decode_kv_len_threshold:
+                if min_kv_len < self.decode_kv_len_threshold:
                     logger.debug(
                         "Skipping decode-only step as min KV len %d <= threshold %d.",
                         min_kv_len, self.decode_kv_len_threshold)
