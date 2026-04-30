@@ -76,6 +76,7 @@ steps:
           --case_set_id=\${KERNEL_TUNING_CASE_SET_ID} \
           --run_id=\${KERNEL_TUNING_RUN_ID} \
           --tpu_version=\${TPU_VERSION}) && \
+          echo \"Generated pipeline YAML: \$PIPELINE_YAML\" && \
           if [ -z \$PIPELINE_YAML ]; then
             echo 'Error: generated pipeline YAML is empty' >&2
             exit 1
