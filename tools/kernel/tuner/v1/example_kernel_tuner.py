@@ -51,12 +51,13 @@ class ExampleKernelTuner(KernelTunerBase):
     # not based on any real computation, but rather is just a placeholder to
     # demonstrate the tuning pipeline.
 
-    def __init__(self, storage_manager):
+    def __init__(self, storage_manager, tpu_queue_multi=None):
         super().__init__(tuning_key_class=TuningKey,
                          tunable_params_class=TunableParams,
                          storage_manager=storage_manager,
                          job_bucket_size=2,
-                         kernel_tuner_name="example_kernel_tuner"
+                         kernel_tuner_name="example_kernel_tuner",
+                         tpu_queue_multi=tpu_queue_multi
                          )  # Use a small bucket size for testing
 
     def generate_cases(self) -> list[TuningCase]:

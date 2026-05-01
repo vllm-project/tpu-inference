@@ -74,6 +74,16 @@ _TPU_VERSION = flags.DEFINE_string(
     'The TPU version to use for tuning. Supported values are "tpu6e" and "tpu7x".'
 )
 
+_TPU_CORES = flags.DEFINE_integer(
+    'tpu_cores', 0,
+    'The number of TPU cores to use for tuning. Default is 8. TPU v6e has 1 core per chip, TPU v7x has 2 cores per chip.'
+)
+
+_TPU_QUEUE_MULTI = flags.DEFINE_string(
+    'tpu_queue_multi', '',
+    'The TPU queue to use for tuning. This will be automatically determined based on the TPU version and cores if not specified. Supported values are "tpu_v6e_queue", "tpu_v6e_8_queue", "tpu_v7x_2_queue", "tpu_v7x_8_queue", and "tpu_v7x_16_queue".'
+)
+
 # Note: For simplicity, we are directly referencing the kernel tuner class
 # here. In the future, we can consider a more flexible plugin-based system
 # if we have more kernel tuners. For example, we can define an interface for
@@ -116,7 +126,33 @@ def main(argv):
     # Initialize kernel tuner
     kernel_tuner_cls = KERNEL_TUNER_REGISTRY.get(_KERNEL_TUNER_NAME.value)
 
-    kernel_tuner = kernel_tuner_cls(storage_manager)
+    tpu_version = _TPU_VERSION.value
+    tpu_cores = _TPU_CORES.value
+    tpu_queue_multi = _TPU_QUEUE_MULTI.value
+
+    assert tpu_version in [
+        'tpu6e', 'tpu7x'
+    ], f'Unsupported TPU version: {tpu_version}. Supported versions are "tpu6e" and "tpu7x".'
+    assert tpu_cores > 0 or tpu_queue_multi != '', f'TPU cores must be a positive integer or TPU queue must be specified. Got {tpu_cores=} and {tpu_queue_multi=}.'
+    if tpu_cores > 0:
+        assert tpu_cores in (
+            [1, 8] if tpu_version == 'tpu6e' else [2, 8, 16]
+        ), f'Unsupported TPU cores: {tpu_cores} for TPU version {tpu_version}.'
+        ensure_tpu_queue_multi = f'tpu_v{tpu_version.replace("tpu", "")}_{tpu_cores}_queue'
+        if tpu_queue_multi and tpu_queue_multi != ensure_tpu_queue_multi:
+            raise ValueError(
+                f'TPU queue {tpu_queue_multi} does not match the expected queue {ensure_tpu_queue_multi} for TPU version {tpu_version} and cores {tpu_cores}. Please check your flags.'
+            )
+        tpu_queue_multi = tpu_queue_multi or ensure_tpu_queue_multi
+
+    if tpu_queue_multi:
+        assert tpu_queue_multi in (
+            ['tpu_v6e_queue', 'tpu_v6e_8_queue'] if tpu_version == 'tpu6e' else
+            ['tpu_v7x_2_queue', 'tpu_v7x_8_queue', 'tpu_v7x_16_queue']
+        ), f'Unsupported TPU queue: {tpu_queue_multi} for TPU version {tpu_version}.'
+
+    kernel_tuner = kernel_tuner_cls(storage_manager,
+                                    tpu_queue_multi=tpu_queue_multi)
 
     if _RUN_LOCALLY.value:
         logger.info(
@@ -136,18 +172,11 @@ def main(argv):
             logger.info(
                 'Generating Buildkite pipeline YAML. No tuning jobs will be run.'
             )
-            tpu_version = _TPU_VERSION.value
-            assert tpu_version in [
-                'tpu6e', 'tpu7x'
-            ], f'Unsupported TPU version: {tpu_version}. Supported versions are "tpu6e" and "tpu7x".'
-            tpu_queue_multi = 'tpu_v6e_8_queue' if tpu_version == 'tpu6e' else 'tpu_v7x_8_queue'
 
-            kernel_tuner.generate_buildkite_pipeline(
-                case_set_id=case_set_id,
-                run_id=run_id,
-                desc=case_set_desc,
-                tpu_version=tpu_version,
-                tpu_queue_multi=tpu_queue_multi)
+            kernel_tuner.generate_buildkite_pipeline(case_set_id=case_set_id,
+                                                     run_id=run_id,
+                                                     desc=case_set_desc,
+                                                     tpu_version=tpu_version)
         else:
             begin_case_id = _BEGIN_CASE_ID.value
             end_case_id = _END_CASE_ID.value

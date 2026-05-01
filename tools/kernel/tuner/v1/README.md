@@ -209,7 +209,8 @@ curl -s -X POST \
       "KERNEL_TUNING_CASE_SET_ID":    "my_case_set_001",
       "KERNEL_TUNING_RUN_ID":         "001",
       "KERNEL_TUNING_CASE_SET_DESC":  "My tuning run description",
-      "KERNEL_TUNING_TPU_VERSION":    "v7"
+      "KERNEL_TUNING_TPU_VERSION":    "v7",
+      "KERNEL_TUNING_TPU_CORE":       "1"
     }
   }'
 ```
@@ -224,7 +225,8 @@ Set these in the Buildkite **New Build → Environment Variables** section:
 | `KERNEL_TUNING_CASE_SET_ID` | `gmm_v2_tuning_001` | Unique identifier for this case set. Used as the primary key in Spanner. |
 | `KERNEL_TUNING_RUN_ID` | `001` | Run ID within the case set. Increment for re-runs of the same case set. |
 | `KERNEL_TUNING_CASE_SET_DESC` | `"Your description about this case set"` | Human-readable description stored alongside results. |
-| `KERNEL_TUNING_TPU_VERSION` | `v6` or `v7` | TPU generation. Controls which agent queue and `TPU_VERSION` env var are used. |
+| `KERNEL_TUNING_TPU_VERSION` | `v6e` or `v7x` | TPU generation. Controls which agent queue and `TPU_VERSION` env var are used. |
+| `KERNEL_TUNING_TPU_CORES` | [1, 8] for `v6e` or [2, 8, 16] for `v7x` | Together with the TPU_VERSION, this will control the TPU config for tuning job. For example, `v6e` and 8 will make the tuning run on v6e tpu with 8 cores |
 
 ---
 
