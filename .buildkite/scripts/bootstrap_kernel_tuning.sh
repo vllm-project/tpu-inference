@@ -36,25 +36,28 @@ set_jax_envs() {
         v6)
             export TPU_VERSION="tpu6e"
             export TPU_QUEUE_SINGLE="tpu_v6e_queue"
-            if [ "$tpu_cores" == "1" ]; then
+            if [ $tpu_cores == "1" ]; then
                 export TPU_QUEUE_MULTI="tpu_v6e_queue"
             else
                 export TPU_QUEUE_MULTI="tpu_v6e_8_queue"
             fi
+            echo "Set TPU_VERSION=${TPU_VERSION}, TPU_QUEUE_SINGLE=${TPU_QUEUE_SINGLE}, TPU_QUEUE_MULTI=${TPU_QUEUE_MULTI}"
             ;;
         v7)
             export TPU_VERSION="tpu7x"
             export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
-            if [ "$tpu_cores" == "2" ]; then
+            if [ $tpu_cores == "2" ]; then
                 export TPU_QUEUE_MULTI="tpu_v7x_2_queue"
-            elif [ "$tpu_cores" == "8" ]; then
+            elif [ $tpu_cores == "8" ]; then
                 export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
             else
                 export TPU_QUEUE_MULTI="tpu_v7x_16_queue"
             fi
+            echo "Set TPU_VERSION=${TPU_VERSION}, TPU_QUEUE_SINGLE=${TPU_QUEUE_SINGLE}, TPU_QUEUE_MULTI=${TPU_QUEUE_MULTI}"
             ;;
         unset)
             unset TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI
+            echo "Unset TPU_VERSION, TPU_QUEUE_SINGLE, TPU_QUEUE_MULTI"
             ;;
     esac
 }
