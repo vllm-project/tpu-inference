@@ -23,6 +23,8 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference.kernels.custom_calls.kernel import xpose_full
+
 
 def cdiv_on_kv_packing(a, kv_packing):
     assert kv_packing == 1 or kv_packing == 2 or kv_packing == 4
@@ -134,12 +136,17 @@ def static_validate_inputs(
     if len(new_k_pe.shape) != 2:
         raise ValueError(f"Expected 2D array for {new_k_pe.shape=}")
 
-    if ql_nope.shape[:2] != q_pe.shape[:2]:
+    # ql_nope is (N, T, L) from "nbl" einsum; q_pe is (T, N, H) — check N and T match
+    if ql_nope.shape[0] != q_pe.shape[1]:
         raise ValueError(
-            f"Expected {ql_nope.shape[:2]=} to be equal to {q_pe.shape[:2]=}")
-    if ql_nope.shape[0] != new_kv_c.shape[0]:
+            f"Expected ql_nope num_heads {ql_nope.shape[0]=} to equal q_pe num_heads {q_pe.shape[1]=}")
+    if ql_nope.shape[1] != q_pe.shape[0]:
         raise ValueError(
-            f"Expected {ql_nope.shape[0]=} to be equal to {new_kv_c.shape[0]=}"
+            f"Expected ql_nope num_tokens {ql_nope.shape[1]=} to equal q_pe num_tokens {q_pe.shape[0]=}")
+    # ql_nope.shape[1] is T (tokens); new_kv_c.shape[0] is also T
+    if ql_nope.shape[1] != new_kv_c.shape[0]:
+        raise ValueError(
+            f"Expected {ql_nope.shape[1]=} to be equal to {new_kv_c.shape[0]=}"
         )
     if new_kv_c.shape[0] != new_k_pe.shape[0]:
         raise ValueError(
@@ -153,8 +160,8 @@ def static_validate_inputs(
         raise ValueError(
             f"Expected {q_pe.shape[2]=} to be equal to {new_k_pe.shape[1]=}")
 
-    actual_lkv_dim = ql_nope.shape[2]
-    actual_r_dim = q_pe.shape[2]
+    actual_lkv_dim = ql_nope.shape[-1]
+    actual_r_dim = q_pe.shape[-1]
     lkv_dim = align_to(actual_lkv_dim, 128)
     r_dim = align_to(actual_r_dim, 128)
 
@@ -1341,6 +1348,39 @@ def prepare_q_inputs(
     return q
 
 
+def prepare_q_nope_inputs(
+        q: jax.Array,  # [actual_num_q_heads, max_num_tokens, actual_head_dim]
+):
+    """Packs and physically transposes q_nope to the layout expected by the MLA kernel.
+
+    The `q_nope` einsum emits in head-major layout (N, T, L). It needs to be transposed
+    into (T, N // q_packing, q_packing, L) which uses the custom call kernel to absorb
+    the copy latency.
+
+    Returns: [max_num_tokens, num_q_heads // q_packing, q_packing, head_dim]
+    """
+    actual_num_q_heads, max_num_tokens, actual_head_dim = q.shape
+    q_packing = get_dtype_packing(q.dtype)
+    num_q_heads = align_to(actual_num_q_heads, q_packing)
+    head_dim = align_to(actual_head_dim, 128)
+    q = jnp.pad(
+        q,
+        (
+            (0, num_q_heads - actual_num_q_heads),
+            (0, 0),
+            (0, head_dim - actual_head_dim),
+        ),
+        constant_values=0,
+    ).reshape(
+        num_q_heads // q_packing,
+        q_packing,
+        max_num_tokens,
+        head_dim,
+    )
+    # Physical transpose: (N//p, p, T, D) -> (T, N//p, p, D)
+    return xpose_full(q, transpose_axes=(2, 0, 1, 3))[0]
+
+
 def prepare_kv_inputs(kv: jax.Array):
     max_num_tokens, actual_head_dim = kv.shape
     kv_packing = get_dtype_packing(kv.dtype)
@@ -1513,10 +1553,9 @@ def mla_ragged_paged_attention(
         decode_batch_size=decode_batch_size,
         debug_mode=debug_mode,
     )
+    actual_num_q_heads, _, actual_lkv_dim = ql_nope.shape
 
-    _, actual_num_q_heads, actual_lkv_dim = ql_nope.shape
-
-    ql_nope = prepare_q_inputs(
+    ql_nope = prepare_q_nope_inputs(
         ql_nope
     )  # [max_num_tokens, num_q_heads_per_q_packing, q_packing, lkv_dim]
     q_pe = prepare_q_inputs(

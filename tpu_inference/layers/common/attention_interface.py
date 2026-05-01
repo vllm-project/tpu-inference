@@ -461,7 +461,7 @@ def attention(
 
 
 def mla_attention(
-        q_TNA: jax.Array,
+        q_NTA: jax.Array,
         q_rope_TNH: jax.Array,
         k_SA: jax.Array,
         k_rope_SH: jax.Array,
@@ -470,6 +470,7 @@ def mla_attention(
         mesh: Mesh,
         num_attention_heads: int,
         qk_nope_head_dim: int,
+        q_nope_sharding: Sharding | None = None,
         query_tnh_sharding: Sharding | None = None,
         keyvalue_skh_sharding: Sharding | None = None,
         attn_o_tnh_sharding: Sharding | None = None,
@@ -482,7 +483,7 @@ def mla_attention(
     output and kv cache update.
 
     Args:
-        q_TNA: (tokens_query, num_query_heads, q_lora_rank)
+        q_NTA: (num_query_heads, tokens_query, q_lora_rank) — N-first from "nbl" einsum
         q_rope_TNH: (tokens_query, num_query_heads, head_dim)
         k_SA: (tokens_kv, q_lora_rank)
         k_rope_SH: (tokens_kv, head_dim)
@@ -491,7 +492,9 @@ def mla_attention(
         mesh: Mesh
         num_attention_heads: number of attention heads
         qk_nope_head_dim: head dim for QK without rope
-        query_tnh_sharding: sharding to use for q/q_rope for the shard map (MLA kernel)
+        q_nope_sharding: sharding for q_nope (N-first); defaults to P(None, MLP_TENSOR, None)
+                         to shard T (dim 1) consistently with q_rope
+        query_tnh_sharding: sharding to use for q_rope for the shard map (MLA kernel)
         keyvalue_skh_sharding: sharding to use for k/k_rope for the shard map (MLA kernel)
         attn_o_tnh_sharding: sharding to use for the attention output for the shard map (MLA kernel)
         q_scale: scale to apply to q (if quantized)
@@ -500,9 +503,9 @@ def mla_attention(
         sm_scale: softmax scale
     """
     in_specs = (
-        query_tnh_sharding or P(ShardingAxisName.MLP_TENSOR, None, None),  # q
+        q_nope_sharding or P(None, ShardingAxisName.MLP_TENSOR, None),  # q (head-major)
         query_tnh_sharding
-        or P(ShardingAxisName.MLP_TENSOR, None, None),  # q_rope
+        or P(ShardingAxisName.MLP_TENSOR, None, None),  # q_rope (token-major)
         keyvalue_skh_sharding or P(ShardingAxisName.MLP_TENSOR, None),  # k
         keyvalue_skh_sharding
         or P(ShardingAxisName.MLP_TENSOR, None),  # k_rope
@@ -546,7 +549,7 @@ def mla_attention(
                       mesh=mesh,
                       in_specs=in_specs,
                       out_specs=out_specs,
-                      check_vma=False))(q_TNA, q_rope_TNH, k_SA, k_rope_SH,
+                      check_vma=False))(q_NTA, q_rope_TNH, k_SA, k_rope_SH,
                                         kv_cache, md.seq_lens, md.block_tables,
                                         md.query_start_loc,
                                         md.request_distribution)
