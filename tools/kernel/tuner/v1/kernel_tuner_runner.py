@@ -131,11 +131,11 @@ def main(argv):
     assert tpu_version in [
         'tpu6e', 'tpu7x'
     ], f'Unsupported TPU version: {tpu_version}. Supported versions are "tpu6e" and "tpu7x".'
-    assert tpu_queue_multi in [
+    assert tpu_queue_multi in ([
         'tpu_v6e_queue', 'tpu_v6e_8_queue'
     ] if tpu_version == 'tpu6e' else [
         'tpu_v7x_2_queue', 'tpu_v7x_8_queue', 'tpu_v7x_16_queue'
-    ], f'Unsupported TPU queue: {tpu_queue_multi} for TPU version {tpu_version}.'
+    ]), f'Unsupported TPU queue: {tpu_queue_multi} for TPU version {tpu_version}.'
 
     kernel_tuner = kernel_tuner_cls(storage_manager,
                                     tpu_queue_multi=tpu_queue_multi)
