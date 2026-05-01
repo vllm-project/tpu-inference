@@ -83,7 +83,7 @@ class StorageManager:
             A dict with keys:
                 'tpu_inference_hash': git hash of the tpu-inference repo.
                 'bm_infra_hash': git hash of the bm-infra repo.
-                'kernel_runer': name of the KernelTunerRunner class used.
+                'kernel_runner': name of the KernelTunerRunner class used.
         """
         raise NotImplementedError(
             "Subclasses must implement get_case_set_metadata")
@@ -211,3 +211,14 @@ class StorageManager:
         """
         raise NotImplementedError(
             "Subclasses must implement get_total_cases_in_case_set")
+
+    def get_timestamp_sec(self):
+        """Returns the current timestamp in seconds since the epoch.
+
+        Used for logging the time of events.
+
+        Returns:
+            Current timestamp in seconds.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement get_timestamp_sec")

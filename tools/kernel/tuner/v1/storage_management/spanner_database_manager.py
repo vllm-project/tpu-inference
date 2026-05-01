@@ -267,7 +267,17 @@ class SpannerStorageManager(StorageManager):
         Returns:
             The total number of cases in the case set.
         """
-        query = "SELECT VALID FROM CaseSet WHERE ID = @id"
+        query = "SELECT Valid FROM CaseSet WHERE ID = @id"
         with self.database.snapshot() as snp:
             result = list(snp.execute_sql(query, params={'id': case_set_id}))
             return result[0][0] if result else 0
+
+    def get_timestamp_sec(self):
+        """Returns the current timestamp in seconds since the epoch.
+
+        Used for logging the time of events.
+
+        Returns:
+            Current timestamp in seconds.
+        """
+        return spanner.COMMIT_TIMESTAMP

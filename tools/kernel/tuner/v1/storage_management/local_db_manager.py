@@ -15,6 +15,7 @@
 import json
 import logging
 import os
+import time
 from datetime import datetime
 
 from tools.kernel.tuner.v1.storage_management.storage_manager import \
@@ -303,3 +304,13 @@ class LocalDbManager(StorageManager):
             if row['ID'] == case_set_id:
                 return row.get('Valid', 0)
         return 0
+
+    def get_timestamp_sec(self):
+        """Returns the current timestamp in seconds since the epoch.
+
+        Used for logging the time of events.
+
+        Returns:
+            Current timestamp in seconds.
+        """
+        return int(time.time())

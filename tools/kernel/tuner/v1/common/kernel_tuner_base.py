@@ -24,7 +24,6 @@ from enum import Enum
 import yaml
 from absl import flags
 
-from tools.kernel.tuner.v1.common.utils import get_timestamp_sec
 from tools.kernel.tuner.v1.storage_management.storage_manager import \
     StorageManager
 
@@ -201,7 +200,7 @@ class KernelTunerBase(ABC):
                 # If the case set already exists, we assume the cases have been generated and we just need to generate the buckets for tuning jobs.
                 total_cases = self.storage_manager.get_total_cases_in_case_set(
                     case_set_id)
-            buckets = [[i, min(i + self.job_bucket_size, total_cases)]
+            buckets = [(i, min(i + self.job_bucket_size, total_cases))
                        for i in range(0, total_cases, self.job_bucket_size)]
             return buckets
         except Exception as e:
@@ -239,10 +238,10 @@ class KernelTunerBase(ABC):
                 "label":
                 f"cs_id={case_set_id} rid={run_id} Bucket([{case_id_start}, {case_id_end}))",
                 "depends_on":
-                f"{tpu_version}_build_docker",  # Adjust to your Buildkite step dependency
+                f"{tpu_version}_build_docker",
                 "agents": {
                     "queue": tpu_queue_multi
-                },  # Adjust to your TPU queue
+                },
                 "env": {
                     "USE_PREBUILT_IMAGE": "1",
                     "TPU_VERSION": tpu_version
@@ -386,7 +385,7 @@ class KernelTunerBase(ABC):
             if status != TuningStatus.SUCCESS:
                 results_buffer.append(
                     (caseset_id, run_id, cid, status.value, FLAGS.worker_id, 0,
-                     0, 0, get_timestamp_sec()))
+                     0, 0, self.storage_manager.get_timestamp_sec()))
                 logger.warning(
                     f"Case {cid} failed during warmup with status: {status}. Skipping to next case."
                 )
@@ -400,8 +399,9 @@ class KernelTunerBase(ABC):
             total_time = end_time - begin_case_id_time
             if status != TuningStatus.SUCCESS:
                 results_buffer.append(
-                    (caseset_id, run_id, cid, status.value, FLAGS.worker_id,
-                     warmup_us, 0, 0, get_timestamp_sec()))
+                    (caseset_id, run_id, cid, status.value,
+                     FLAGS.worker_id, warmup_us, 0, 0,
+                     self.storage_manager.get_timestamp_sec()))
                 logger.warning(
                     f"Case {cid} failed during main run with status: {status}. Total time spent: {total_time/1e9:.2f}s."
                 )
@@ -412,7 +412,7 @@ class KernelTunerBase(ABC):
             results_buffer.append(
                 (caseset_id, run_id, cid, status.value, FLAGS.worker_id,
                  average_latency_us, warmup_us, total_time_us,
-                 get_timestamp_sec()))
+                 self.storage_manager.get_timestamp_sec()))
 
             if FLAGS.debug:
                 logger.info(

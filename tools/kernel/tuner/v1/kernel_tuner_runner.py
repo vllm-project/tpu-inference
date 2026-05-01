@@ -142,16 +142,12 @@ def main(argv):
             ], f'Unsupported TPU version: {tpu_version}. Supported versions are "tpu6e" and "tpu7x".'
             tpu_queue_multi = 'tpu_v6e_8_queue' if tpu_version == 'tpu6e' else 'tpu_v7x_8_queue'
 
-            pipeline_yaml = kernel_tuner.generate_buildkite_pipeline(
+            kernel_tuner.generate_buildkite_pipeline(
                 case_set_id=case_set_id,
                 run_id=run_id,
                 desc=case_set_desc,
                 tpu_version=tpu_version,
                 tpu_queue_multi=tpu_queue_multi)
-            logger.info(
-                'Generated Buildkite pipeline YAML (printing to stdout).')
-            print(pipeline_yaml)
-            return pipeline_yaml
         else:
             begin_case_id = _BEGIN_CASE_ID.value
             end_case_id = _END_CASE_ID.value
