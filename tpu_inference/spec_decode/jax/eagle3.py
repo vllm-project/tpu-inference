@@ -304,6 +304,7 @@ class Eagle3Proposer:
         total_num_tokens = int(new_query_start_loc_cpu[-1])
 
         # Pad to total_num_tokens.
+        # ... TODO: debug
         padded_total_num_tokens = runner_utils.get_padded_token_len(
             self.runner.num_tokens_paddings, total_num_tokens)
         pad_width = padded_total_num_tokens - total_num_tokens

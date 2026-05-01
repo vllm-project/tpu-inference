@@ -318,6 +318,9 @@ class PhasedBasedProfiler:
                       PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP))
         self.decode_steps_skipped: int = 0
         self.profile_dir: str = profile_dir
+        self.steps_skipped: int = 0
+        self.num_steps_to_skip: int = 10
+
         # NOTE: we purposely don't have AMBIGUOUS here
         self.inference_phase_seen: dict = {
             InferencePhase.PREFILL_ONLY: False,
@@ -375,12 +378,17 @@ class PhasedBasedProfiler:
                 continue
 
             # Skip a configurable number of decode-heavy steps before profiling
-            if phase == InferencePhase.DECODE_HEAVY and \
-                    self.decode_steps_skipped < self.num_decode_steps_to_skip:
-                self.decode_steps_skipped += 1
-                logger.debug(
-                    "Skipping decode-heavy step %d/%d before profiling.",
-                    self.decode_steps_skipped, self.num_decode_steps_to_skip)
+            # if phase == InferencePhase.DECODE_HEAVY and \
+            #         self.decode_steps_skipped < self.num_decode_steps_to_skip:
+            #     self.decode_steps_skipped += 1
+            #     logger.debug(
+            #         "Skipping decode-heavy step %d/%d before profiling.",
+            #         self.decode_steps_skipped, self.num_decode_steps_to_skip)
+            #     break
+            if self.steps_skipped < self.num_steps_to_skip:
+                self.steps_skipped += 1
+                print(" gxd Skipping step %d/%d before profiling.",
+                      self.steps_skipped, self.num_steps_to_skip)
                 break
 
             self.inference_phase_seen[phase] = True
@@ -447,8 +455,7 @@ class PhasedBasedProfiler:
         have_seen_all_phases = all(self.inference_phase_seen.values())
         # We want to start profiling only after the first trial request
         is_past_initial_request = batch_composition_stats[
-            "num_reqs"] > 1 and batch_composition_stats[
-                "total_num_scheduled_tokens"] > 1
+            "total_num_scheduled_tokens"] > 1
         if is_past_initial_request and (not have_seen_all_phases
                                         or self.current_phase != ""):
             # We haven't started profiling yet
