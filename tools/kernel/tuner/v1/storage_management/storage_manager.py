@@ -96,7 +96,11 @@ class StorageManager:
         """
         raise NotImplementedError("Subclasses must implement flush")
 
-    def add_tuner_case(self, caseset_id: str, case_id: int, case: str):
+    def add_tuner_case(self,
+                       caseset_id: str,
+                       case_id: int,
+                       case: str,
+                       tpu: str = None):
         """Buffers a single tuning case for storage.
 
         Implementations may batch writes internally and flush automatically when
@@ -106,11 +110,17 @@ class StorageManager:
             caseset_id: Unique string identifier for the case set.
             case_id: Integer index of this case within the case set.
             case: String encoding of the case in 'key:value' format.
+            tpu: TPU queue identifier where this case is generated (e.g. tpu_v6e_8_queue).
         """
         raise NotImplementedError("Subclasses must implement add_tuner_case")
 
-    def create_bucket_for_run(self, cs_id: str, r_id: int, bucket_id: int,
-                              start_case_id: int, end_case_id: int):
+    def create_bucket_for_run(self,
+                              cs_id: str,
+                              r_id: int,
+                              bucket_id: int,
+                              start_case_id: int,
+                              end_case_id: int,
+                              tpu: str = None):
         """Creates a new work bucket for a tuning run.
 
         Used by tuner agents to define discrete units of work (buckets) that can
@@ -122,6 +132,7 @@ class StorageManager:
             bucket_id: Unique integer identifier for the bucket within the run.
             start_case_id: Starting case ID (inclusive) for this bucket.
             end_case_id: Ending case ID (inclusive) for this bucket.
+            tpu: TPU queue identifier where this bucket will be executed.
         """
         raise NotImplementedError(
             "Subclasses must implement create_buckets_for_run")
@@ -178,7 +189,7 @@ class StorageManager:
         Args:
             results: A list of result tuples, each containing fields for
                 CaseResults (ID, RunId, CaseId, ProcessedStatus, WorkerID,
-                Latency, WarmupTime, TotalTime, ProcessedAt).
+                Latency, WarmupTime, TotalTime, ProcessedAt, TPU).
         """
         raise NotImplementedError(
             "Subclasses must implement save_results_batch")

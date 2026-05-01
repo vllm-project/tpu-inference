@@ -27,16 +27,29 @@ source "${SCRIPT_DIR}/configs/pipeline_config.sh"
 
 # Handles the environment state for different TPU generations.
 set_jax_envs() {
-    case $1 in
+    local tpu_version=$1
+    local tpu_cores=$2
+    
+    case $tpu_version in
         v6)
             export TPU_VERSION="tpu6e"
             export TPU_QUEUE_SINGLE="tpu_v6e_queue"
-            export TPU_QUEUE_MULTI="tpu_v6e_8_queue"
+            if [ "$tpu_cores" == "1" ]; then
+                export TPU_QUEUE_MULTI="tpu_v6e_queue"
+            else
+                export TPU_QUEUE_MULTI="tpu_v6e_8_queue"
+            fi
             ;;
         v7)
             export TPU_VERSION="tpu7x"
             export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
-            export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
+            if [ "$tpu_cores" == "2" ]; then
+                export TPU_QUEUE_MULTI="tpu_v7x_2_queue"
+            elif [ "$tpu_cores" == "8" ]; then
+                export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
+            else
+                export TPU_QUEUE_MULTI="tpu_v7x_16_queue"
+            fi
             ;;
         unset)
             unset TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI
@@ -74,8 +87,30 @@ echo "  KERNEL_TUNING_RUN_ID=${KERNEL_TUNING_RUN_ID:-}"
 echo "  KERNEL_TUNING_KERNEL_NAME=${KERNEL_TUNING_KERNEL_NAME:-}"
 echo "  KERNEL_TUNING_CASE_SET_DESC=${KERNEL_TUNING_CASE_SET_DESC:-}"
 echo "  KERNEL_TUNING_TPU_VERSION=${KERNEL_TUNING_TPU_VERSION:-}"
+echo "  KERNEL_TUNING_TPU_CORES=${KERNEL_TUNING_TPU_CORES:-}"
 echo "  HOST_NAME=${HOST_NAME:-}"
-set_jax_envs "${KERNEL_TUNING_TPU_VERSION:-v6}"
+
+# Validate KERNEL_TUNING_TPU_CORES based on KERNEL_TUNING_TPU_VERSION
+TPU_VERSION="${KERNEL_TUNING_TPU_VERSION:-v6}"
+TPU_CORES="${KERNEL_TUNING_TPU_CORES:-1}"
+
+case "${TPU_VERSION}" in
+    v6)
+        if [[ ! "${TPU_CORES}" =~ ^(1|8)$ ]]; then
+            echo "ERROR: For TPU version v6, KERNEL_TUNING_TPU_CORES must be 1 or 8, got: ${TPU_CORES}"
+            exit 1
+        fi
+        ;;
+    v7)
+        if [[ ! "${TPU_CORES}" =~ ^(2|8|16)$ ]]; then
+            echo "ERROR: For TPU version v7, KERNEL_TUNING_TPU_CORES must be 2, 8, or 16, got: ${TPU_CORES}"
+            exit 1
+        fi
+        ;;
+esac
+
+set_jax_envs "${TPU_VERSION}" "${TPU_CORES}"
 buildkite-agent pipeline upload .buildkite/pipeline_kernel_tuning.yml
+unset_jax_envs
 
 echo "--- Buildkite Kernel Tuning Bootstrap Finished"
