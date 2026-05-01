@@ -534,7 +534,7 @@ def test_phased_profiler_skip_only_affects_decode_heavy(profiler_fixture):
 
 def test_phased_profiler_skips_decode_only_steps_based_on_kv_len(
         profiler_fixture):
-    """Tests that the profiler skips DECODE_ONLY steps until min KV len exceeds threshold."""
+    """Tests that the profiler skips DECODE_ONLY steps until min KV len reaches threshold."""
     profiler = profiler_fixture["profiler"]
     mock_start = profiler_fixture["mock_start"]
     mock_stop = profiler_fixture["mock_stop"]
@@ -546,27 +546,26 @@ def test_phased_profiler_skips_decode_only_steps_based_on_kv_len(
     stats = {"num_reqs": 2, "total_num_scheduled_tokens": 100, "min_kv_len": 5}
     mock_determine_phase.return_value = InferencePhase.DECODE_ONLY
 
-    # Should be skipped as min_kv_len (5) <= threshold (10)
+    # Should be skipped as min_kv_len (5) < threshold (10)
     profiler.step(stats)
     mock_start.assert_not_called()
     assert not profiler.inference_phase_seen[InferencePhase.DECODE_ONLY]
 
-    # Should be skipped as min_kv_len (10) <= threshold (10)
+    # Should start profiling as min_kv_len (10) >= threshold (10)
     stats["min_kv_len"] = 10
-    profiler.step(stats)
-    mock_start.assert_not_called()
-    assert not profiler.inference_phase_seen[InferencePhase.DECODE_ONLY]
-
-    # Should start profiling as min_kv_len (11) > threshold (10)
-    stats["min_kv_len"] = 11
     profiler.step(stats)
     mock_start.assert_called_once()
     assert profiler.inference_phase_seen[InferencePhase.DECODE_ONLY]
     assert profiler.current_phase == "decode_only"
     assert profiler.profiling_n_steps_left == PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
 
-    # Complete the profiling cycle
-    for _ in range(PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR):
+    # Profiling continues
+    stats["min_kv_len"] = 11
+    profiler.step(stats)
+    mock_start.assert_called_once()
+
+    # Complete the profiling cycle (1 more step already done in the step above)
+    for _ in range(PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR - 1):
         profiler.step(stats)
     mock_stop.assert_called_once()
     assert profiler.current_phase == ""
