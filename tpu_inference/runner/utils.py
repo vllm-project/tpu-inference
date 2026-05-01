@@ -34,6 +34,9 @@ DECODE_HEAVY_RATIO_THRESHOLD = 0.2
 BALANCED_RATIO_THRESHOLD = (0.4, 0.6)
 PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR = 15
 PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP = 0
+# For decode only batches, start capturing traces after all requests in the
+# batch has KV caches that have reached this length threshold
+PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD = -1
 
 logger = init_logger(__name__)
 
@@ -215,6 +218,7 @@ def get_batch_composition_stats(
     num_computed_tokens_per_req = input_batch.num_computed_tokens_cpu[:
                                                                       num_reqs]
 
+    min_kv_len = float('inf') if num_reqs > 0 else 0
     for i, req_id in enumerate(input_batch.req_ids[:num_reqs]):
         assert req_id is not None
 
@@ -224,6 +228,7 @@ def get_batch_composition_stats(
 
         # This is the number of tokens already processed for this request (before this step)
         num_already_computed = num_computed_tokens_per_req[i]
+        min_kv_len = min(min_kv_len, num_already_computed)
 
         if num_already_computed == 0:
             # Prefill
@@ -243,7 +248,8 @@ def get_batch_composition_stats(
         "num_prefill_tokens": num_prefill_tokens,
         "num_decode_tokens": num_decode_tokens,
         "padded_total_num_scheduled_tokens": padded_total_num_scheduled_tokens,
-        "num_reqs": num_reqs
+        "num_reqs": num_reqs,
+        "min_kv_len": min_kv_len if min_kv_len != float('inf') else 0
     }
     stats["phase"] = determine_phase_from_batch_composition_stats(stats).name
     return stats
@@ -317,6 +323,9 @@ class PhasedBasedProfiler:
             os.getenv("PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP",
                       PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP))
         self.decode_steps_skipped: int = 0
+        self.decode_kv_len_threshold: int = int(
+            os.getenv("PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD",
+                      PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD))
         self.profile_dir: str = profile_dir
         # NOTE: we purposely don't have AMBIGUOUS here
         self.inference_phase_seen: dict = {
@@ -338,6 +347,9 @@ class PhasedBasedProfiler:
             logger.info(
                 "Will skip %d decode-heavy steps before profiling decode_heavy phase.",
                 self.num_decode_steps_to_skip)
+        if self.decode_kv_len_threshold >= 0:
+            logger.info("Will skip decode-only steps until min KV len >= %d.",
+                        self.decode_kv_len_threshold)
 
     def _write_batch_composition_stats_to_file_helper(
             self, batch_composition_stats: dict) -> None:
@@ -382,6 +394,16 @@ class PhasedBasedProfiler:
                     "Skipping decode-heavy step %d/%d before profiling.",
                     self.decode_steps_skipped, self.num_decode_steps_to_skip)
                 break
+
+            # Skip decode-only steps until min KV len reaches threshold
+            if phase == InferencePhase.DECODE_ONLY and \
+                    self.decode_kv_len_threshold >= 0:
+                min_kv_len = batch_composition_stats.get("min_kv_len", 0)
+                if min_kv_len < self.decode_kv_len_threshold:
+                    logger.debug(
+                        "Skipping decode-only step as min KV len %d < threshold %d.",
+                        min_kv_len, self.decode_kv_len_threshold)
+                    break
 
             self.inference_phase_seen[phase] = True
             self.profiling_n_steps_left = self.num_steps_to_profile_for
