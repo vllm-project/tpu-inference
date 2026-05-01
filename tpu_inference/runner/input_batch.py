@@ -310,11 +310,19 @@ class InputBatch:
         # has_initial_state guard when the next request takes this slot id.
         self._free_mamba_slots.append(
             int(self.mamba_state_indices_cpu[req_index]))
-        # Clear this position to slot 0 (the null block). The GDN op reads
-        # `mamba_state_indices_cpu` over its full length every step, so
-        # leaving the old slot id here would put a duplicate in the padded
-        # tail and the recurrent-state scatter would alias an active
-        # request's slot. See
+        # Clear this position to slot 0 (the null block) so the trailing
+        # tail of `mamba_state_indices_cpu` (which the GDN op reads over
+        # its full length every step) cannot alias an active slot.
+        # Concrete trace with max_num_reqs=4:
+        #
+        #   start (4 active):           [1, 2, 3, 4]  num_reqs=4
+        #   remove pos 0,1 (stale):     [1, 2, 3, 4]  num_reqs=2
+        #   condense w/o source clear:  [3, 4, 3, 4]  ← tail aliases active
+        #   condense w/  source clear:  [3, 4, 0, 0]  ← tail is null
+        #
+        # In the aliased case `recurrent_state.at[slots].set(...)` writes
+        # twice to slot 3 in the same scatter — undefined on XLA, silent
+        # state corruption. See
         # `test_mamba_state_indices_no_duplicate_in_padded_tail`.
         self.mamba_state_indices_cpu[req_index] = 0
 
@@ -445,10 +453,9 @@ class InputBatch:
             # the right physical slot in the mamba kv cache.
             self.mamba_state_indices_cpu[
                 empty_index] = self.mamba_state_indices_cpu[last_req_index]
-            # Clear `last_req_index` to slot 0 — same reason as
-            # `remove_request`: the slot id now lives at `empty_index`, so
-            # leaving it here too would alias an active slot in the padded
-            # tail of `mamba_state_indices_cpu`.
+            # Clear the source: the slot id now lives at `empty_index`, so
+            # leaving it here too would put a duplicate in the padded tail
+            # (see the trace in `remove_request`).
             self.mamba_state_indices_cpu[last_req_index] = 0
             self.temperature_cpu[empty_index] = self.temperature_cpu[
                 last_req_index]
