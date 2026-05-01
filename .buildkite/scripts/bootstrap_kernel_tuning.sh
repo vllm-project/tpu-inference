@@ -111,6 +111,6 @@ esac
 
 set_jax_envs "${TPU_VERSION}" "${TPU_CORES}"
 buildkite-agent pipeline upload .buildkite/pipeline_kernel_tuning.yml
-unset_jax_envs
+set_jax_envs "unset" ""
 
 echo "--- Buildkite Kernel Tuning Bootstrap Finished"
