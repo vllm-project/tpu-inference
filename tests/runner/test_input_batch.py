@@ -310,6 +310,57 @@ def test_mamba_state_indices_follow_condense(input_batch: InputBatch):
     assert int(input_batch.mamba_state_indices_cpu[1]) == slot_for_req["req-2"]
 
 
+def test_mamba_state_indices_no_duplicate_in_padded_tail(
+        input_batch: InputBatch):
+    """The padded tail `mamba_state_indices_cpu[num_reqs:]` must not contain
+    any slot id that is also used by an active request.
+
+    If it did, the GDN op's `recurrent_state.at[state_indices].set(...)`
+    scatter would have duplicate destination indices: the active position
+    writes the new state, the padded position writes back the stale
+    pre-update state, and JAX's scatter-with-duplicates is undefined on
+    XLA. The active request's freshly computed state silently loses the
+    race and the request decodes from corrupted recurrent state.
+
+    Reproduces the production symptom: outputs look fine on a fresh batch,
+    then turn to garbage as soon as the persistent batch starts churning
+    (out-of-order completions → `condense` → stale slot ids in the tail).
+    """
+    # Fill, then remove a mix of low and high indices so condense actually
+    # has to move requests downward (the case that left stale ids before
+    # the fix).
+    for i in range(MAX_NUM_REQS):
+        input_batch.add_request(create_dummy_request(f"req-{i}"))
+    for req_id in ("req-0", "req-2", "req-5"):
+        input_batch.remove_request(req_id)
+    input_batch.condense(sorted([0, 2, 5], reverse=True))
+
+    num_reqs = input_batch.num_reqs
+    active = set(input_batch.mamba_state_indices_cpu[:num_reqs].tolist())
+    tail = set(input_batch.mamba_state_indices_cpu[num_reqs:].tolist())
+    assert active.isdisjoint(tail), (
+        "Padded tail still references active slot ids "
+        f"(overlap={active & tail}); the GDN scatter will alias.")
+    # Tail should be the null slot (0) so the scatter folds harmlessly into
+    # the reserved null block.
+    assert tail <= {0}, f"Padded tail contains non-null slot ids: {tail}"
+
+
+def test_mamba_state_indices_remove_clears_position(input_batch: InputBatch):
+    """remove_request must clear the slot id at the vacated position so it
+    does not survive into the padded tail (the source of the scatter-alias
+    bug fixed alongside the trailing-tail invariant)."""
+    input_batch.add_request(create_dummy_request("req-0"))
+    input_batch.add_request(create_dummy_request("req-1"))
+
+    input_batch.remove_request("req-1")
+    # Without condense the position is still in the active range from
+    # `mamba_state_indices_cpu`'s perspective, but `req_id_to_index` no
+    # longer references it; the field at that index must read as null
+    # so the next add doesn't observe a leftover from a prior occupant.
+    assert int(input_batch.mamba_state_indices_cpu[1]) == 0
+
+
 def test_mamba_state_indices_swap(input_batch: InputBatch):
     """swap_states swaps the request mappings, so the slot ids must swap too."""
     input_batch.add_request(create_dummy_request("req-0"))
