@@ -139,7 +139,8 @@ def inner_kernel(
     """Inner kernel for recurrent scan processing both prefill and decode.
 
   This function is called for each step in the schedule table and dispatches
-  work to either `process_decode` or `process_regular_prefill`/`process_transition_prefill`.
+  work to either `process_decode` or
+  `process_regular_prefill`/`process_transition_prefill`.
   """
     step = pl.program_id(0)
 
@@ -154,7 +155,7 @@ def inner_kernel(
     decode_count = schedule_table[step, 7][...]
 
     prefill_offset = schedule_table[step, 1][...]
-    is_transition = schedule_table[step, 11][...]
+    is_transition = schedule_table[step, 10][...]
 
     is_last_chunk = schedule_table[step, 8][...]
     is_first_chunk = schedule_table[step, 9][...]
@@ -164,6 +165,8 @@ def inner_kernel(
         return x / norm
 
     # 2. Decode Branch
+    # check current iteration had decode work
+    @pl.when(decode_valid > 0)
     def decode_wrapper():
 
         def get_target_idx(b):
@@ -175,6 +178,7 @@ def inner_kernel(
             # token by token check if decode token or not
             is_valid = b < decode_count
 
+            @pl.when(is_valid)
             def do_work():
                 target_idx = get_target_idx(b)
 
@@ -265,8 +269,10 @@ def inner_kernel(
 
                     # v_diff_h = v_h - decay[h].astype(jnp.float32) * k_state_h
                     decay_k_state = jnp.where(
-                        jnp.isinf(k_state_h), 0.0,
-                        decay[h].astype(jnp.float32) * k_state_h)
+                        jnp.isinf(k_state_h),
+                        0.0,
+                        decay[h].astype(jnp.float32) * k_state_h,
+                    )
                     v_diff_h = v_h - decay_k_state
                     v_new_h = curr_beta[h].astype(jnp.float32) * v_diff_h
 
@@ -304,7 +310,7 @@ def inner_kernel(
                 new_state = jnp.stack(new_state_list,
                                       axis=0)  # (n_v, d_k, d_v)
 
-                #TODO: remove VPU path if MXU is certified path
+                # TODO: remove VPU path if MXU is certified path
                 # decay_exp = decay[..., None]  # (n_v, 1)
 
                 # k_state = jnp.sum(k[..., None] * current_state, axis=1)  # (n_v, d_v)
@@ -346,7 +352,6 @@ def inner_kernel(
 
                 return None
 
-            jax.lax.cond(is_valid, do_work, lambda: None)
             return None
 
         # loop over bt, could be for loop, BT is static anyway, unroll
@@ -360,14 +365,9 @@ def inner_kernel(
 
         return None
 
-    # check current iteration had decode work
-    jax.lax.cond(
-        decode_valid > 0,
-        decode_wrapper,
-        lambda: None,
-    )
-
     # Prefill Branch
+    # Process prefill if there is valid prefill work in this step
+    @pl.when(prefill_valid > 0)
     def process_prefill():
         # TODO: eliminate k.transpose in matmuls by directly slicing in the right shape above
 
@@ -377,13 +377,12 @@ def inner_kernel(
 
         def process_regular_prefill():
             # 1. Initialize state to zero if first chunk
+            # Initialize state only if it's the first chunk of the request
+            @pl.when(is_first_chunk > 0)
             def init_state():
                 prefill_scratch[prefill_slot] = jnp.zeros(
                     (n_v, d_k, d_v), dtype=prefill_scratch.dtype)
                 return None
-
-            # init only if first chunk
-            jax.lax.cond(is_first_chunk > 0, init_state, lambda: None)
 
             ### Preparataion for chunk wise math,
             ### this kernel design could be optimized lot by not doing this every chunk
@@ -412,6 +411,10 @@ def inner_kernel(
             g = -jnp.exp(a_log_ref[...][:, None].astype(
                 jnp.float32)) * jax.nn.softplus(a_raw_processed + dt_bias_ref[
                     ...][:, None].astype(jnp.float32))
+            # Workaround: Clamp g to avoid underflow to negative inf
+            # g is always negative, from above line
+            # for long prefill sequence this negative value will get more negative
+            # pow(e,-100) is close to 0.
             g = jnp.maximum(g, -100.0)
             prefill_count = schedule_table[step, 3][...]
             mask_float = (jnp.arange(C) < prefill_count).astype(q.dtype)
@@ -434,7 +437,8 @@ def inner_kernel(
                 q = jnp.repeat(q, repeat_factor, axis=1)
                 k = jnp.repeat(k, repeat_factor, axis=1)
 
-            # TODO: eliminate these transposes by directly slicing in the right shape above,
+            # TODO: eliminate these transposes by directly slicing in the right
+            # shape above,
             q = q.transpose(1, 0, 2)
             k = k.transpose(1, 0, 2)
             v = v.transpose(1, 0, 2)
@@ -462,9 +466,11 @@ def inner_kernel(
             j = jnp.arange(C)[None, :]
             mask_float = (i > j).astype(jnp.float32)
 
-            # Defensive code to handle large positive g_diff which can cause overflow in exp,
-            # TODO: analyze if this is a common case and if we can remove this or do by other means
-            # (like clipping g values before cumsum or using a different data type for g/g_cumsum)
+            # Defensive code to handle large positive g_diff which can cause
+            # overflow in exp,
+            # TODO: analyze if this is a common case and if we can remove this or do
+            # by other means (like clipping g values before cumsum or using a
+            # different data type for g/g_cumsum)
             g_diff_safe = jnp.minimum(g_diff, 0.0)
             S = jnp.where(mask_float[None, :, :] > 0, S * jnp.exp(g_diff_safe),
                           0.0)
@@ -527,6 +533,8 @@ def inner_kernel(
 
             prefill_scratch[prefill_slot] = h_new.astype(prefill_scratch.dtype)
 
+            # Store state only if it's the last chunk of the request
+            @pl.when(is_last_chunk > 0)
             def store_state():
                 # TODO: if dtype of state in HBM is always f32,
                 # then we can eliminate this copy and directly write from scratch to HBM
@@ -541,8 +549,6 @@ def inner_kernel(
                 copy_op.start()
                 copy_op.wait()
                 return None
-
-            jax.lax.cond(is_last_chunk > 0, store_state, lambda: None)
 
             # TODO: eliminate this transpose and reshape by directly writing in the right shape above
             o_c_tr = o_c.transpose(1, 0, 2)
@@ -605,8 +611,8 @@ def inner_kernel(
             q = q * scale
 
             # state indice for req
-            first_req_id = schedule_table[step, 12][...]
-            first_is_first = schedule_table[step, 12 + C_trans][...]
+            first_req_id = schedule_table[step, 11][...]
+            first_is_first = schedule_table[step, 11 + C_trans][...]
             first_slot = first_req_id % 2
             h = prefill_scratch[first_slot]
             h = jnp.where(first_is_first > 0, jnp.zeros_like(h), h)
@@ -617,10 +623,10 @@ def inner_kernel(
             # loop over token by token
             for i in range(sublanesize):
                 # read transition token metadata
-                t_req = schedule_table[step, 12 + i][...]
+                t_req = schedule_table[step, 11 + i][...]
                 # get sequence index for token i in sublane
-                t_is_first = schedule_table[step, 12 + C_trans + i][...]
-                t_is_last = schedule_table[step, 12 + 2 * C_trans + i][...]
+                t_is_first = schedule_table[step, 11 + C_trans + i][...]
+                t_is_last = schedule_table[step, 11 + 2 * C_trans + i][...]
 
                 is_new_seq = t_req != current_r
                 sequence_valid = jnp.where(is_new_seq, True, sequence_valid)
@@ -703,6 +709,10 @@ def inner_kernel(
             prefill_scratch[final_slot] = h
             state_commit_scratch[0] = h.astype(state_commit_scratch.dtype)
 
+            is_current_r_prefill = current_r >= decode_tokens
+
+            # Store state if the current request is a prefill
+            @pl.when(is_current_r_prefill)
             def do_final_write():
                 # TODO: make async
                 state_idx = state_indices[current_r][...]
@@ -715,12 +725,9 @@ def inner_kernel(
                 copy_op.wait()
                 return None
 
-            is_current_r_prefill = current_r >= decode_tokens
-            jax.lax.cond(is_current_r_prefill, do_final_write, lambda: None)
-
             return None
 
-        is_transition = schedule_table[step, 11][...]
+        is_transition = schedule_table[step, 10][...]
 
         def process_prefill_dispatch():
             return jax.lax.cond(
@@ -732,8 +739,6 @@ def inner_kernel(
 
         process_prefill_dispatch()
         return None
-
-    jax.lax.cond(prefill_valid > 0, process_prefill, lambda: None)
 
     # For transition block at boundary of decode and prefill we will have overlap
     # decode block BT contains prefill tokens
@@ -1045,8 +1050,8 @@ def recurrent_scan(
     # requests.
     decode_tokens = distribution[0]
 
-    # change to by dtype size
-    sublanesize = 32 // mixed_qkv.itemsize
+    tpu_info = pltpu.get_tpu_info()
+    sublanesize = 4 // mixed_qkv.itemsize * tpu_info.num_sublanes
     schedule_table, total_blocks = (
         compute_schedule_table_v2.compute_schedule_table_v2(
             query_start_loc,
@@ -1114,4 +1119,5 @@ def recurrent_scan(
         decode_tokens_arr,
         total_blocks_arr,
     )
+    print("updated")
     return updated_recurrent_state, output

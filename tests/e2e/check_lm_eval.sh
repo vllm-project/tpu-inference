@@ -119,7 +119,7 @@ if [ -n "$LIMIT" ]; then
     lm_eval_args+=(--limit "$LIMIT")
 fi
 
-output=$(VLLM_XLA_CHECK_RECOMPILATION=0 USE_MOE_EP_KERNEL=${USE_MOE_EP_KERNEL} HF_HOME="/mnt/disks/kunjanp-dev-disk-2/hf-cache" RAGGED_GATED_DELTA_RULE_IMPL="ragged_gated_delta_rule_chunked_scan" MODEL_IMPL_TYPE=vllm lm_eval "${lm_eval_args[@]}")
+output=$(VLLM_XLA_CHECK_RECOMPILATION=0 USE_MOE_EP_KERNEL=${USE_MOE_EP_KERNEL} HF_HOME="/mnt/disks/kunjanp-dev-disk-2/hf-cache" RAGGED_GATED_DELTA_RULE_IMPL=routed_fused_v2 MODEL_IMPL_TYPE=vllm lm_eval "${lm_eval_args[@]}")
 
 echo "Evaluation output:"
 echo "$output"
