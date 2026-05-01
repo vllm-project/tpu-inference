@@ -15,6 +15,7 @@
 from typing import Optional
 
 import jax
+import jax.numpy as jnp
 from flax import nnx
 
 from tpu_inference.layers.jax import JaxModule
@@ -36,6 +37,12 @@ class JaxRmsNorm(nnx.RMSNorm, JaxModule):
         if "dtype" in kwargs and "param_dtype" not in kwargs:
             kwargs["param_dtype"] = kwargs.pop("dtype")
         nnx.RMSNorm.__init__(self, *args, **kwargs)
+        # Root cause fix: force the scale (aliased to weight) to the requested
+        # param_dtype if it was coerced by a global quantization hook during init.
+        target_dtype = kwargs.get("param_dtype", jnp.float32)
+        if self.scale is not None and self.scale.value is not None:
+            if self.scale.value.dtype != target_dtype:
+                self.scale.set_raw_value(self.scale.value.astype(target_dtype))
         # For compatibility. HF model use 'weight' as name suffix, we alias `self.scale` to
         # `self.weight` such that `named_parameters()` can match the names in HF models. We also
         # apply transpose here to match HF weight layout.

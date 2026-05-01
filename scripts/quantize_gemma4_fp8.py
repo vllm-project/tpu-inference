@@ -67,7 +67,11 @@ def main():
             metadata = f.metadata()
             for key in f.keys():
                 tensor = f.get_tensor(key)
-                if ("proj" in key and "weight" in key) or "experts" in key:
+
+                is_vision_component = "vision_tower" in key or "embed_vision" in key
+
+                if not is_vision_component and (
+                    ("proj" in key and "weight" in key) or "experts" in key):
                     LOGGER.info(f"Quantizing {key} of shape {tensor.shape}")
                     q_weight, scale = quantize_absmax(tensor)
 

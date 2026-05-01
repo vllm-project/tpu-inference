@@ -21,7 +21,7 @@ import jax
 import jax.numpy as jnp
 import torch
 from flax import nnx
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 
@@ -572,16 +572,22 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             prefix="model",
         )
         model_config = vllm_config.model_config
-
         vision_config = model_config.hf_config.vision_config
         self.image_token_id = getattr(model_config.hf_config, "image_token_id",
                                       258880)
+
+        import copy
+
+        from tpu_inference.layers.vllm.quantization.unquantized import \
+            VllmUnquantizedConfig
+        v_vllm_config = copy.copy(vllm_config)
+        v_vllm_config.quant_config = VllmUnquantizedConfig()
 
         self.vision_tower = Gemma4VisionModel(
             config=vision_config,
             dtype=model_config.dtype,
             rng=rng,
-            quant_config=vllm_config.quant_config,
+            quant_config=v_vllm_config.quant_config,
             mesh=mesh)
 
         self.embed_vision = Gemma4MultimodalEmbedder(
@@ -589,7 +595,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             text_hidden_size=model_config.hf_config.text_config.hidden_size,
             dtype=model_config.dtype,
             rng=rng,
-            quant_config=vllm_config.quant_config,
+            quant_config=v_vllm_config.quant_config,
             prefix="embed_vision")
 
         self.final_logit_softcapping = getattr(
@@ -619,13 +625,14 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         loaded_original_names = set()
 
         def map_name(name: str) -> str:
+            original_name = name
             # Gemma 4 multimodal remappings
             name = name.replace("model.embed_vision.", "embed_vision.")
             name = name.replace("model.vision_tower.encoder.", "vision_tower.")
             name = name.replace("model.vision_tower.", "vision_tower.")
 
             if "vision_tower.layers." in name:
-                name = name.replace(".linear.weight", ".weight")
+                name = name.replace(".linear.", ".")
 
             # Text model remapping
             name = name.replace("model.language_model.", "model.")
@@ -634,6 +641,9 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
             if "weight_scale_inv" in name and "experts" not in name:
                 name = name.replace("weight_scale_inv", "weight_scale")
+
+            if "vision_tower" in name:
+                print(f"DEBUG: map_name: {original_name} -> {name}")
 
             return name
 
@@ -742,7 +752,6 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
         return inputs_embeds.astype(target_dtype)
 
-    @jax.jit
     def get_single_image_embedding(self, pixel_values: jax.Array,
                                    pixel_position_ids: jax.Array) -> jax.Array:
         input_mask = pixel_position_ids[..., 0] != -1
@@ -795,6 +804,15 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             pixel_values = jnp.expand_dims(pixel_values, axis=0)
         if pixel_position_ids.ndim == 2:
             pixel_position_ids = jnp.expand_dims(pixel_position_ids, axis=0)
+
+        # Ensure multi-modal inputs are on the device and sharded correctly before running the jitted embedding network
+        embed_sharding = NamedSharding(self.mesh, PartitionSpec(None))
+        pixel_values = jax.device_put(pixel_values, embed_sharding)
+
+        # Cast pixel_values to bfloat16 for vision tower activations.
+        pixel_values = pixel_values.astype(jnp.bfloat16)
+
+        pixel_position_ids = jax.device_put(pixel_position_ids, embed_sharding)
 
         per_image_features = []
         batch_size = pixel_values.shape[0]
@@ -869,14 +887,29 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         self,
         run_compilation_fn: Callable,
     ) -> None:
+        # Default MMMU-pro resolution seen in standard subsets
+        image_shapes = [[896, 896], [1344, 896], [896, 1344], [448, 448]]
 
-        image_shapes = []
         if hasattr(self.vllm_config,
                    'additional_config') and self.vllm_config.additional_config:
             warmup_config = self.vllm_config.additional_config.get(
                 "vision_warmup_config", {})
             if warmup_config:
-                image_shapes = warmup_config.get("image_shapes", [])
+                overridden_shapes = warmup_config.get("image_shapes", [])
+                if overridden_shapes:
+                    image_shapes = overridden_shapes
+
+        # For performance consideration, refer to:
+        # https://flax.readthedocs.io/en/latest/guides/performance.html
+        # Precompile requires a jitted function to be executed.
+        graphdef, state = nnx.split(self)
+
+        @jax.jit
+        def run_single_image_embedding(graphdef, state, pixel_values,
+                                       pixel_position_ids):
+            model = nnx.merge(graphdef, state)
+            return model.get_single_image_embedding(pixel_values,
+                                                    pixel_position_ids)
 
         for input_hw in image_shapes:
             if not isinstance(input_hw, list) or len(input_hw) != 2:
@@ -888,18 +921,28 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             dtype_str = str(self.vllm_config.model_config.dtype).split('.')[-1]
             jax_dtype = utils.get_jax_dtype_from_str_dtype(dtype_str)
 
+            p = self.vision_tower.config.patch_size
+            h_p, w_p = h_input // p, w_input // p
+            num_patches = h_p * w_p
+            patch_pixels = 3 * p**2
+
+            # Gemma 4 vision expects patchified input [B, L, D]
+            # where D = 3 * patch_size^2
+            # Use batch size 1 because get_single_image_embedding is called
+            # sequentially for each image in _process_image_input.
             dummy_pixel_values = jnp.ones(
-                (1, h_input, w_input, 3),
+                (1, num_patches, patch_pixels),
                 dtype=jax_dtype,
             )
 
-            p = self.vision_tower.patch_embedder.patch_size
-            h_p, w_p = h_input // p, w_input // p
-            dummy_pixel_position_ids = jnp.ones((1, h_p * w_p, 2),
+            # Gemma 4 vision expects [B, L, 2] for position IDs
+            dummy_pixel_position_ids = jnp.ones((1, num_patches, 2),
                                                 dtype=jnp.int32)
 
             run_compilation_fn("vision_encoder",
-                               self.get_single_image_embedding,
+                               run_single_image_embedding,
+                               graphdef,
+                               state,
                                dummy_pixel_values,
                                dummy_pixel_position_ids,
                                image_shape=input_hw)

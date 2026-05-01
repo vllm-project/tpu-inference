@@ -25,12 +25,12 @@ from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, UnfusedMoEWeights)
 from tpu_inference.layers.common.quantization import unquantized as jax_common
-from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
-from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
+from tpu_inference.layers.jax.quantization.configs import (QuantizationConfig,
+                                                           QuantLinearConfig)
 from tpu_inference.models.jax.utils.weight_utils import shard_put
 
 
@@ -41,13 +41,19 @@ class UnquantizedLinearMethod(QuantizeMethodBase,
 
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
         assert isinstance(layer, JaxEinsum)
+        jax.debug.print(
+            "UnquantizedLinearMethod.apply_jax: layer={p}, x.dtype={xd}, weight.dtype={wd}",
+            p=layer.prefix,
+            xd=x.dtype,
+            wd=layer.weight.value.dtype)
 
         with jax.named_scope(layer._get_name()):
             if self.linear_config.fuse_matmuls:
                 out = self._apply_fused(
-                    x,
+                    x.astype(layer.weight.value.dtype),
                     layer.weight.value,
-                    layer.bias.value if layer.bias else None,
+                    layer.bias.value.astype(layer.weight.value.dtype)
+                    if layer.bias else None,
                     einsum_str=layer.einsum_str)
             else:
                 raise NotImplementedError(
@@ -213,11 +219,10 @@ class UnquantizedConfig(QuantizationConfig):
             # Derive output's last dim from the einsum string.
             einsum_str = layer.einsum_str.replace(" ", "")
             _, w_axis = einsum_str.split("->")[0].split(",")
-            last_out_char = einsum_str.split("->")[1][-1]
-            out_size = layer.kernel_shape[w_axis.index(last_out_char)]
+            # last_out_char = einsum_str.split("->")[1][-1]
+            # out_size = layer.kernel_shape[w_axis.index(last_out_char)]
 
-            linear_config = QuantLinearConfig(enable_sp=False,
-                                              output_sizes=[out_size])
+            linear_config = QuantLinearConfig(layer, enable_sp=False)
             return UnquantizedLinearMethod(linear_config)
         if isinstance(layer, JaxMoE):
             return UnquantizedFusedMoEMethod()

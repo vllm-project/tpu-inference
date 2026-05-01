@@ -15,6 +15,7 @@
 from typing import Optional
 
 import jax
+import jax.numpy as jnp
 from flax import nnx
 
 from tpu_inference.layers.jax import JaxModule
@@ -63,6 +64,13 @@ class JaxEinsum(nnx.Einsum, JaxModule):
                             kernel_metadata=kernel_metadata,
                             bias_metadata=bias_metadata,
                             **kwargs)
+        # Root cause fix: force the weight/bias to the requested param_dtype
+        # if it was coerced by a global quantization hook during init.
+        target_dtype = kwargs.get("param_dtype", jnp.float32)
+        if self.kernel.value.dtype != target_dtype:
+            self.kernel.set_raw_value(self.kernel.value.astype(target_dtype))
+        if self.bias is not None and self.bias.value.dtype != target_dtype:
+            self.bias.set_raw_value(self.bias.value.astype(target_dtype))
         self.kernel_init = kwargs.get("kernel_init",
                                       jax.nn.initializers.lecun_normal())
         # For compatibility. HF model use 'weight' as name suffix, we alias `self.kernel` to
@@ -87,9 +95,18 @@ class JaxEinsum(nnx.Einsum, JaxModule):
         if self.quant_method is not None:
             return self.quant_method.apply_jax(self, inputs)
 
-        output = jax.numpy.einsum(self.einsum_str, inputs, self.weight.value)
+        # Safety cast for unquantized layers in mixed-precision models.
+        # This prevents TypePromotionErrors if weights were coerced to FP8.
+        weight = self.weight.value
+        if weight.dtype != inputs.dtype:
+            weight = weight.astype(inputs.dtype)
+
+        output = jax.numpy.einsum(self.einsum_str, inputs, weight)
         if self.bias is not None:
-            output += self.bias
+            bias = self.bias.value
+            if bias.dtype != output.dtype:
+                bias = bias.astype(output.dtype)
+            output += bias
         return output
 
 

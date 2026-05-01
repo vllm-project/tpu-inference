@@ -837,7 +837,6 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
             if not hasattr(param, "weight_loader"):
                 # Following are common patterns in standard transformers. To add pattern for modules
                 # beyond standard transformers, please consider setting weight_loader.
-                print(f"DEBUG: JaxAutoWeightsLoader found param: {name}")
                 reshape_dims = None
                 permute_dims = None
                 if name.endswith("k_proj.weight") or name.endswith(

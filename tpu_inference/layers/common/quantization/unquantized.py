@@ -57,6 +57,8 @@ class UnquantizedLinearMethod:
         Returns:
             Output array of shape [..., total_output_dim].
         """
+        # Ensure input and weight dtypes match to avoid JAX TypePromotionErrors.
+        x_jax = x_jax.astype(weight_jax.dtype)
         outs = jnp.einsum(einsum_str, x_jax, weight_jax)
         if bias_jax is not None:
             outs += bias_jax
