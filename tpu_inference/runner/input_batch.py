@@ -308,16 +308,14 @@ class InputBatch:
         # Return the mamba state slot back to the free pool. The slot's
         # contents in the kv cache are stale and will be zeroed by the
         # has_initial_state guard when the next request takes this slot id.
-        # Reset the slot id at this position to 0 (the reserved null block).
-        # The position becomes part of the padded tail until refilled by an
-        # add or compacted away by `condense`; if a stale slot id were left
-        # behind it could duplicate an active request's slot id (because
-        # `condense` does not clear the source it copies from either),
-        # which would make the GDN op's `recurrent_state.at[state_indices]
-        # .set(...)` scatter race between the active position's new state
-        # and the padded position's "write-back-old-state" no-op.
         self._free_mamba_slots.append(
             int(self.mamba_state_indices_cpu[req_index]))
+        # Clear this position to slot 0 (the null block). The GDN op reads
+        # `mamba_state_indices_cpu` over its full length every step, so
+        # leaving the old slot id here would put a duplicate in the padded
+        # tail and the recurrent-state scatter would alias an active
+        # request's slot. See
+        # `test_mamba_state_indices_no_duplicate_in_padded_tail`.
         self.mamba_state_indices_cpu[req_index] = 0
 
         self.greedy_reqs.discard(req_id)
@@ -444,14 +442,13 @@ class InputBatch:
             # The mamba state slot id is per-request: when the persistent
             # batch moves the request from `last_req_index` to `empty_index`,
             # the slot id must follow it so subsequent steps still index
-            # the right physical slot in the mamba kv cache. Clear the
-            # source position to the null slot (0) so the trailing padded
-            # tail of `mamba_state_indices_cpu[num_reqs:]` does not retain
-            # a duplicate of an active request's slot id — see the
-            # remove_request comment for why duplicates corrupt the GDN op's
-            # recurrent/conv state scatter.
+            # the right physical slot in the mamba kv cache.
             self.mamba_state_indices_cpu[
                 empty_index] = self.mamba_state_indices_cpu[last_req_index]
+            # Clear `last_req_index` to slot 0 — same reason as
+            # `remove_request`: the slot id now lives at `empty_index`, so
+            # leaving it here too would alias an active slot in the padded
+            # tail of `mamba_state_indices_cpu`.
             self.mamba_state_indices_cpu[last_req_index] = 0
             self.temperature_cpu[empty_index] = self.temperature_cpu[
                 last_req_index]
