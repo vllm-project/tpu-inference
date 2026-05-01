@@ -330,8 +330,15 @@ run_benchmark(){
   fi
 
   echo "[DEBUG] Executing client_cmd: ${CLIENT_CMD_ENVS[*]} ${CLIENT_CMD[*]} > $BM_LOG" >&2
+  set +e
   # Execute the array directly, preserving strict argument boundaries
   env "${CLIENT_CMD_ENVS[@]}" "${CLIENT_CMD[@]}" > "$BM_LOG" 2>&1
+  local client_exit_code=$?
+  set -e
+
+  if [ $client_exit_code -ne 0 ]; then
+      return $client_exit_code
+  fi
 
   throughput=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
   p99_e2el=$(grep "P99 E2EL (ms):" "$BM_LOG" | awk '{print $NF}')
@@ -348,13 +355,61 @@ printf "[DEBUG] Checking folder structure (Environment: %s)...\n" "$ENV_CONTEXT"
 printf "[DEBUG] pwd=%s\n\nls $ARTIFACT_FOLDER=\n%s\n" "$(pwd)" "$(ls "$ARTIFACT_FOLDER")" || true
 printf "[DEBUG] ls $ARTIFACT_FOLDER/temp_logs=\n%s\n" "$(ls "$ARTIFACT_FOLDER"/temp_logs)" || true
 
-# request_rate use default value (inf)
-read -r throughput p99_e2el < <(run_benchmark | tail -n 1)
+# ---------------------------------------------------------
+# Helper Function: Safely execute benchmark and validate metrics
+# ---------------------------------------------------------
+# Define global variables for the main workflow to read
+VALID_THROUGHPUT=""
+VALID_P99_E2EL=""
+
+execute_benchmark_safely() {
+    local rate_arg="${1:-}" # Accept the request_rate argument; default to empty string if not provided
+    local output
+    local bm_exit_code
+
+    # 1. Execute the benchmark and intercept the exit code from the subshell pipeline
+    set +e  
+    output=$(run_benchmark "$rate_arg" | tail -n 1)
+    bm_exit_code=$?
+    set -e
+    if [[ "$bm_exit_code" -ne 0 ]]; then
+        echo "[ERROR] Benchmark client crashed with exit code $bm_exit_code (rate=${rate_arg:-initial})!"
+        echo "--- Dumping BM_LOG for debugging ---"
+        cat "$BM_LOG"
+        report_and_exit 1
+    fi
+
+    # 2. Parse the extracted string into respective variables safely
+    local temp_throughput
+    local temp_p99
+    read -r temp_throughput temp_p99 <<< "$output"
+
+    # 3. Validate that the extracted variables are strictly numerical (float or int)
+    if ! [[ "$temp_throughput" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! [[ "$temp_p99" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "[ERROR] Failed to parse valid metrics (rate=${rate_arg:-initial})! Output was: '$output'"
+        report_and_exit 1
+    fi
+
+    # 4. Validation passed, assign to global variables
+    VALID_THROUGHPUT="$temp_throughput"
+    VALID_P99_E2EL="$temp_p99"
+}
+
+
+# =========================================================
+# Main Flow: Benchmark Starts
+# =========================================================
+
+# Step 1: Initial run
+echo "Starting initial run..."
+execute_benchmark_safely  # Call the helper without arguments
+throughput="$VALID_THROUGHPUT"
+p99_e2el="$VALID_P99_E2EL"
 
 echo "throughput:$throughput"
 echo "p99_e2el:$p99_e2el"
 
-# Step 1: check if initial run meets the E2EL requirement
+# Step 1.5: check if initial run meets the E2EL requirement
 p99_int=$(printf "%.0f" "$p99_e2el")
 goal_int=$(printf "%.0f" "$EXPECTED_ETEL")
 
@@ -366,7 +421,7 @@ fi
 echo "Initial run failed: P99 E2EL ($p99_e2el ms) > EXPECTED_ETEL ($EXPECTED_ETEL ms)"
 echo "Starting binary search to lower request rate..."
 
-# Step 2: Begin binary search
+# Step 2: Binary search
 low=0
 high=$(printf "%.0f" "$throughput")
 goal=$EXPECTED_ETEL
@@ -382,7 +437,10 @@ while (( high - low > 0 )); do
   mid=$(( (low + high + 1) / 2 ))
   echo "Trying request_rate=$mid"
 
-  read -r throughput p99_e2el < <(run_benchmark "$mid" | tail -n 1)
+  # Single function call with double-layer defense (exit code interception + regex validation)
+  execute_benchmark_safely "$mid"
+  throughput="$VALID_THROUGHPUT"
+  p99_e2el="$VALID_P99_E2EL"
 
   # Convert p99_e2el to integer
   p99_int=$(printf "%.0f" "$p99_e2el")
