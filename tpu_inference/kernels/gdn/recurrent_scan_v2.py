@@ -1119,5 +1119,4 @@ def recurrent_scan(
         decode_tokens_arr,
         total_blocks_arr,
     )
-    print("updated")
     return updated_recurrent_state, output
