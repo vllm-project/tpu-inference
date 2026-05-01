@@ -74,13 +74,8 @@ _TPU_VERSION = flags.DEFINE_string(
     'The TPU version to use for tuning. Supported values are "tpu6e" and "tpu7x".'
 )
 
-_TPU_QUEUE_MULTI = flags.DEFINE_string(
-    'tpu_queue_multi', '',
-    'The TPU queue to use for tuning. This should be in the format of "tpu_{version}_{cores}_queue". For example, "tpu_v7x_8_queue". The runner will validate that the queue is compatible with the specified TPU version and cores.'
-)
-
 _TPU_CORES = flags.DEFINE_integer(
-    'tpu_cores', 8,
+    'tpu_cores', 0,
     'The number of TPU cores to use for tuning. Default is 8. TPU v6e has 1 core per chip, TPU v7x has 2 cores per chip.'
 )
 
@@ -127,10 +122,15 @@ def main(argv):
     kernel_tuner_cls = KERNEL_TUNER_REGISTRY.get(_KERNEL_TUNER_NAME.value)
 
     tpu_version = _TPU_VERSION.value
-    tpu_queue_multi = _TPU_QUEUE_MULTI.value
+    tpu_cores = _TPU_CORES.value
     assert tpu_version in [
         'tpu6e', 'tpu7x'
     ], f'Unsupported TPU version: {tpu_version}. Supported versions are "tpu6e" and "tpu7x".'
+    assert tpu_cores in ([1, 8] if tpu_version == 'tpu6e' else [
+        2, 8, 16
+    ]), f'Unsupported TPU cores: {tpu_cores} for TPU version {tpu_version}.'
+    tpu_queue_multi = f'tpu_v{tpu_version.replace("tpu", "")}_{tpu_cores}_queue'.replace(
+        "_1", "")
     assert tpu_queue_multi in (
         ['tpu_v6e_queue', 'tpu_v6e_8_queue'] if tpu_version == 'tpu6e' else
         ['tpu_v7x_2_queue', 'tpu_v7x_8_queue', 'tpu_v7x_16_queue']
