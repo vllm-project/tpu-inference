@@ -256,7 +256,7 @@ class KernelTunerBase(ABC):
                     "TPU_VERSION": tpu_version
                 },
                 "commands": [
-                    f".buildkite/scripts/run_in_docker.sh bash -c \"pip install --upgrade google-cloud-spanner && pip install --upgrade google-api-core && pip install --upgrade google-auth && pip install --upgrade absl-py && python -m tools.kernel.tuner.v1.kernel_tuner_runner --kernel_tuner_name={self.kernel_tuner_name} --case_set_id={case_set_id} --run_id={run_id} --begin_case_id={case_id_start} --end_case_id={case_id_end}\""
+                    f".buildkite/scripts/run_in_docker.sh bash -c \"pip install --upgrade google-cloud-spanner && pip install --upgrade google-api-core && pip install --upgrade google-auth && pip install --upgrade absl-py && python -m tools.kernel.tuner.v1.kernel_tuner_runner --kernel_tuner_name={self.kernel_tuner_name} --case_set_id={case_set_id} --run_id={run_id} --tpu_version={tpu_version} --tpu_queue_multi={self.tpu_queue_multi} --begin_case_id={case_id_start} --end_case_id={case_id_end}\""
                 ]
             }
             pipeline["steps"].append(step)
