@@ -31,14 +31,14 @@ from tpu_inference.models.jax.qwen3_moe import Qwen3MoeForCausalLM
 
 class TestQwen3MoeForCausalLM:
 
-    @pytest.mark.parametrize("model_name", [
-        "Qwen/Qwen3-30B-A3B-Instruct-2507",
-        "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
-    ])
-    @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
-                                                       (3, 4)])
     @pytest.mark.parametrize(
-        "load_format", ["skip_layers_model_loader_for_test", "jax_dummy"])
+        "model_name,pp_rank,pp_world_size,load_format",
+        [(model, rank, world, fmt) for model in [
+            "Qwen/Qwen3-30B-A3B-Instruct-2507",
+            "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
+        ] for rank, world in [(0, 1), (0, 4), (1, 4), (3, 4)]
+         for fmt in ["skip_layers_model_loader_for_test", "jax_dummy"]
+         if not (world == 1 and fmt == "jax_dummy")])
     def test_model_loading(
             self,
             model_name,

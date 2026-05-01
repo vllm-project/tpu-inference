@@ -71,9 +71,14 @@ helpFunction()
    echo -e "\t-p The path to the processed MLPerf dataset (default: None, which will download the dataset)"
    echo -e "\t-m A space-separated list of HuggingFace model ids to use (default: Qwen/Qwen2.5-1.5B-Instruct, Qwen/Qwen2.5-0.5B-Instruct, meta-llama/Llama-3.1-8B-Instruct and meta-llama/Llama-4-Scout-17B-16E-Instruct)"
    echo -e "\t-n Number of prompts to use for the benchmark (default: 10)"
+   echo -e "\t-t The timeout in seconds to wait for the vLLM server to start (default: 1800)"
    echo -e "\t--use-dummy-weights Use dummy random weight (default: false)"
    exit 1
 }
+
+# print all sets environment variables
+echo "Environment variables:"
+printenv
 
 # Access shared benchmarking functionality
 # shellcheck disable=SC1091
@@ -106,6 +111,12 @@ while [[ "$#" -gt 0 ]]; do
             shift
             shift
             ;;
+        -t|--timeout)
+            TIMEOUT_SECONDS="$2"
+            export TIMEOUT_SECONDS
+            shift
+            shift
+            ;;
         --use-dummy-weights)
             use_dummy_weights=true
             shift
@@ -123,6 +134,8 @@ done
 
 echo "Using the root directory at $root_dir"
 echo "Using $num_prompts prompts"
+echo "Using server timeout of $TIMEOUT_SECONDS seconds"
+
 
 
 cd "$root_dir" || exit
@@ -149,7 +162,7 @@ if [ "$use_dummy_weights" = true ]; then
     extra_serve_args+=("--load-format=dummy")
 fi
 
-if [ "$USE_V6E8_QUEUE" == "True" ]; then
+if [ "$USE_V6E8_QUEUE" == "True" ] || [ "$USE_V7X8_QUEUE" == "True" ]; then
     # Set to 8 if job is in 8 chips queue.
     # TODO (Qiliang Cui) Rename USE_V6E8_QUEUE to USE_8_CHIPS_QUEUE
     DEVICE_COUNT=8
@@ -160,6 +173,7 @@ elif [ "$TPU_VERSION" == "tpu7x" ]; then
 else
     DEVICE_COUNT=1
 fi
+echo "device count: $DEVICE_COUNT"
 extra_serve_args+=(--tensor-parallel-size "${DEVICE_COUNT}")
 
 
@@ -287,12 +301,18 @@ for model_name in $model_list; do
             current_serve_args+=(--hf-overrides '{"architectures": ["Llama4ForCausalLM"]}')
         fi
     else
-        if [[ "${model_name,,}" == *"deepseek"* ]]; then
+        if [[ "${model_name,,}" == *"deepseek"* || "${model_name,,}" == *"kimi"* ]]; then
             max_batched_tokens=1024
-            served_name=deepseek-ai/DeepSeek-R1
-            current_serve_args+=(--served-model-name "${served_name}"  --load-format=runai_streamer   --trust-remote-code --kv-cache-dtype=fp8 )
-            current_serve_args+=(--hf_overrides '{"num_hidden_layers": 5}' )
-            current_serve_args+=(--additional_config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true, "expert_parallelism": '"${DEVICE_COUNT}"', "tensor_parallelism": 1}}, "replicate_attn_weights": "True", "sparse_matmul": "True"}')
+            if [[ "${model_name,,}" == *"kimi"* ]]; then
+                served_name=moonshotai/Kimi-K2.6
+                current_serve_args+=(--kv-cache-dtype=fp8 --gpu-memory-utilization 0.977 --limit-mm-per-prompt='{"image": 0, "video": 0, "vision_chunk": 0}' )
+                current_serve_args+=(--served-model-name "${served_name}"  --load-format=runai_streamer   --trust-remote-code --kv-cache-dtype=fp8 --additional-config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true, "tensor_parallelism": '"${DEVICE_COUNT}"'}}}')
+            else
+                served_name=deepseek-ai/DeepSeek-R1
+                current_serve_args+=(--served-model-name "${served_name}"  --load-format=runai_streamer   --trust-remote-code --kv-cache-dtype=fp8 )
+                current_serve_args+=(--hf_overrides '{"num_hidden_layers": 5}' )
+                current_serve_args+=(--additional_config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true, "expert_parallelism": '"${DEVICE_COUNT}"', "tensor_parallelism": 1}}, "replicate_attn_weights": "True", "sparse_matmul": "True"}')
+            fi
         fi
     fi
 
@@ -313,6 +333,7 @@ for model_name in $model_list; do
     --dataset-name "$dataset_name" \
     --dataset-path "$dataset_path" \
     --num-prompts "$num_prompts" \
+    --trust-remote-code \
     --run-eval 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
 
         # TODO (jacobplatin): probably want to add an option to skip this in the future

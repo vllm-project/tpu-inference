@@ -257,8 +257,8 @@ while (( ELAPSED <= MAX_WAIT_SECONDS )); do
     # 1. [Fail-Fast Check] Ask the OS if the process is still alive
     if ! kill -0 "$VLLM_PID" 2>/dev/null; then
         echo "[ERROR] vLLM process (PID=$VLLM_PID) has exited unexpectedly!"
-        echo "--- Last 20 lines of VLLM_LOG for debugging ---"
-        tail -n 20 "$VLLM_LOG"
+        echo "--- Dumping VLLM_LOG for debugging ---"
+        cat "$VLLM_LOG"
         exit 1
     fi
 

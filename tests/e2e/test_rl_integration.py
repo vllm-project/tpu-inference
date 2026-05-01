@@ -63,6 +63,7 @@ def llm():
         max_model_len=MAX_MODEL_LEN,
         max_num_seqs=MAX_NUM_SEQS,
         enable_prefix_caching=True,
+        model_loader_extra_config={"enable_weights_track": False},
     )
     yield engine
     del engine

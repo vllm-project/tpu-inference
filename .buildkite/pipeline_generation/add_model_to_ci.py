@@ -40,6 +40,8 @@ class ModelType(str, Enum):
 class ModelCategory(str, Enum):
     TEXT_ONLY = "text-only"
     MULTIMODAL = "multimodal"
+    EMBEDDING = "embedding"
+    DIFFUSION = "diffusion"
 
 
 class HostScale(str, Enum):
@@ -55,12 +57,12 @@ MODEL_TYPE_TO_TEMPLATE = {
 # User Correction: Use double curly braces for shell variables to avoid Python format conflicts
 HOST_SCALE_TO_SETTINGS = {
     HostScale.SINGLE.value: {
-        "queue": "${{TPU_QUEUE_SINGLE:-tpu_v6e_queue}}",
-        "tp_size": "${{TENSOR_PARALLEL_SIZE_SINGLE:-1}}",
+        "queue": "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}",
+        "tp_size": "${TENSOR_PARALLEL_SIZE_SINGLE:-1}",
     },
     HostScale.MULTI.value: {
-        "queue": "${{TPU_QUEUE_MULTI:-tpu_v6e_8_queue}}",
-        "tp_size": "${{TENSOR_PARALLEL_SIZE_MULTI:-8}}",
+        "queue": "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}",
+        "tp_size": "${TENSOR_PARALLEL_SIZE_MULTI:-8}",
     },
 }
 
@@ -118,7 +120,9 @@ def get_interactive_input():
         f"   {YELLOW}Note: This sets the 'Type' column in the support matrix.{RESET}\n"
     )
     print(f"   [1] {BOLD}text-only{RESET}")
-    print(f"   [2] {BOLD}multimodal{RESET}\n")
+    print(f"   [2] {BOLD}multimodal{RESET}")
+    print(f"   [3] {BOLD}embedding{RESET}")
+    print(f"   [4] {BOLD}diffusion{RESET}\n")
     while True:
         choice = input(f"{BOLD}Select (1-2): {RESET}").strip()
         if choice == '1':
@@ -128,6 +132,14 @@ def get_interactive_input():
         elif choice == '2':
             m_cat = ModelCategory.MULTIMODAL.value
             print(f"{GREEN}✓ Category: {BOLD}multimodal{RESET}")
+            break
+        elif choice == '3':
+            m_cat = ModelCategory.EMBEDDING.value
+            print(f"{GREEN}✓ Category: {BOLD}embedding{RESET}")
+            break
+        elif choice == '4':
+            m_cat = ModelCategory.DIFFUSION.value
+            print(f"{GREEN}✓ Category: {BOLD}diffusion{RESET}")
             break
         print(f"{RED}❌ Invalid entry. Please enter 1 or 2.{RESET}\n")
 

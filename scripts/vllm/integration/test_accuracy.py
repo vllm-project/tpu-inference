@@ -31,21 +31,37 @@ def run_test(model_name, expected_value, more_args=None):
     print(f"Running test for model: {model_name}")
 
     if model_name in ["Qwen/Qwen3-30B-A3B", "Qwen/Qwen2.5-VL-7B-Instruct"]:
-        model_args = f"pretrained={model_name},max_model_len=4096,max_num_batched_tokens=16384"
+        model_args_dict = {
+            "pretrained": model_name,
+            "max_model_len": 4096,
+            "max_num_batched_tokens": 16384
+        }
     elif model_name in [
             "meta-llama/Llama-3.1-8B-Instruct",
             "meta-llama/Llama-3.3-70B-Instruct"
     ]:
-        model_args = f"pretrained={model_name},max_model_len=4096,add_bos_token=False"
+        model_args_dict = {
+            "pretrained": model_name,
+            "max_model_len": 4096,
+            "add_bos_token": False,
+        }
     else:
-        model_args = f"pretrained={model_name},max_model_len=4096"
+        model_args_dict = {
+            "pretrained": model_name,
+            "max_model_len": 4096,
+        }
 
     if more_args is not None:
-        model_args = "{},{}".format(model_args, more_args)
+        for k, v in more_args.items():
+            model_args_dict[k] = v
+
+    model_args_dict["model_loader_extra_config"] = {
+        "enable_weights_track": False
+    }
 
     results = lm_eval.simple_evaluate(
         model="vllm",
-        model_args=model_args,
+        model_args=model_args_dict,
         tasks="gsm8k",
         batch_size="auto",
     )
@@ -79,9 +95,11 @@ def test_lm_eval_accuracy_v1_engine(monkeypatch: pytest.MonkeyPatch,
     with monkeypatch.context() as _:
         more_args = None
         if current_platform.is_tpu():
-            more_args = "max_model_len=2048,max_num_seqs=64"
-            tp_size_str = f"tensor_parallel_size={tp_size}"
-            more_args += ",{}".format(tp_size_str)
+            more_args = {
+                "max_model_len": 2048,
+                "max_num_seqs": 64,
+                "tensor_parallel_size": tp_size,
+            }
 
         print(f"common args: {more_args}")
 
@@ -112,9 +130,12 @@ def test_lm_eval_accuracy_v1_engine_fp8_kv_cache(
     with monkeypatch.context() as _:
         more_args = None
         if current_platform.is_tpu():
-            more_args = "max_model_len=2048,max_num_seqs=128,kv_cache_dtype=fp8"
-            tp_size_str = f"tensor_parallel_size={tp_size}"
-            more_args += ",{}".format(tp_size_str)
+            more_args = {
+                "max_model_len": 2048,
+                "max_num_seqs": 128,
+                "kv_cache_dtype": "fp8",
+                "tensor_parallel_size": tp_size,
+            }
 
         print(f"common args: {more_args}")
 

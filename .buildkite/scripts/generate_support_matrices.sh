@@ -115,7 +115,11 @@ process_models() {
             if [ "$stage" == "Type" ]; then
                 if [ "$category" == "multimodal" ]; then
                     result="Multimodal"
-                else
+                elif [ "$category" == "embedding" ]; then
+                    result="Embedding"
+                elif [ "$category" == "diffusion" ]; then
+                    result="Diffusion"
+                else 
                     result="Text"
                 fi
             else

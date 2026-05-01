@@ -5,12 +5,12 @@ Model,Type,UnitTest,Accuracy/Correctness,Benchmark
 "Qwen/Qwen3.5-9B",Multimodal,❓ Untested,❓ Untested,❓ Untested
 "deepseek-ai/DeepSeek-OCR",Multimodal,❓ Untested,❓ Untested,❓ Untested
 "google/gemma-4-26B-A4B-it",Multimodal,not enough HBM,not enough HBM,not enough HBM
-"google/gemma-4-31B-it",Multimodal,✅ Passing,✅ Passing,not enough HBM
+"google/gemma-4-31B-it",Multimodal,❌ Failing,❓ Untested,❓ Untested
 "moonshotai/Kimi-K2.5",Multimodal,❓ Untested,❓ Untested,❓ Untested
 "MiniMaxAI/MiniMax-M2.5",Text,❓ Untested,❓ Untested,❓ Untested
 "Qwen/Qwen3-30B-A3B",Text,✅ Passing,✅ Passing,✅ Passing
-"Qwen/Qwen3-32B",Text,✅ Passing,✅ Passing,✅ Passing
-"Qwen/Qwen3-4B",Text,✅ Passing,✅ Passing,✅ Passing
+"Qwen/Qwen3-32B",Text,✅ Passing,❌ Failing,❓ Untested
+"Qwen/Qwen3-4B",Text,✅ Passing,❌ Failing,❓ Untested
 "Qwen/Qwen3-Coder-480B-A35B-Instruct",Text,not enough HBM,not enough HBM,not enough HBM
 "Qwen/Qwen3.5-397B-A17B",Text,not enough HBM,not enough HBM,not enough HBM
 "deepseek-ai/DeepSeek-Math-V2",Text,❓ Untested,❓ Untested,❓ Untested

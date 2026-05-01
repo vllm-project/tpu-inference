@@ -153,6 +153,8 @@ def _run_server_and_bench(model_name: str, model_impl_type: str,
         "--no-enable-prefix-caching",
         "--gpu-memory-utilization",
         "0.90",
+        "--model-loader-extra-config",
+        '{"enable_weights_track": false}',
     ]
 
     print(f"Starting server ({model_impl_type}) on port {port}...")
