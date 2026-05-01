@@ -43,15 +43,18 @@ def compute_schedule_table_v2(
   So for this we have transition blocks at boundaries between prefill sequences,
   including first one with decode, token by token math is done here instead of
   chunk wise
-  
-  TODO: optimize table , 
-    remove metadata which can be derived from other metadata or loop indices, 
-    like 
-        block offset can be derived from block idx and sequence start, 
+
+  TODO: optimize table ,
+    remove metadata which can be derived from other metadata or loop indices,
+    like
+        block offset can be derived from block idx and sequence start,
         block count can be derived from block idx and sequence start/end.
-        also some metadata is only used for prefill or decode and can be stored in separate tables or encoded in same table with fewer bits.
-        dtype of some metadata can be reduced to save space, for example block_is_first and block_is_last can be stored in 2 bits together, 
-        Sublane token by token metadata can be optimized by only storing boundaries
+        also some metadata is only used for prefill or decode and can be stored
+        in separate tables or encoded in same table with fewer bits.
+        dtype of some metadata can be reduced to save space, for example
+        block_is_first and block_is_last can be stored in 2 bits together,
+        Sublane token by token metadata can be optimized by only storing
+        boundaries
   """
     if BT is None:
         BT = chunk_size
@@ -214,6 +217,20 @@ def compute_schedule_table_v2(
     # =========================================================================
     # 5. Merge all
     # =========================================================================
+    # Columns mapping:
+    # 0: prefill_valid_ints - 1 if this grid block has valid prefill work,
+    # .                  0 otherwise
+    # 1: block_offset - start index of prefill start in tile, usually 0
+    #                     but in shared sublane case its not
+    # 2: r_for_block - request ID (sequence index) this prefill block belongs to
+    # 3: block_count - number of valid tokens in this prefill block
+    # 4: decode_valid_mask - 1 if this step has valid decode work, 0 otherwise
+    # 5: decode_offsets - start index for the decode batch
+    # 6: decode_req_ids - starting request ID in decode batch
+    # 7: decode_counts - number of valid decode requests in this batch
+    # 8: block_is_last - 1 if this is the last block for the request, 0 otherwise
+    # 9: block_is_first - 1 if first block for request, 0 otherwise
+    # 10: is_trans_block - 1 if this is a transition block, 0 otherwise
     cols = [
         prefill_valid_ints,  # 0
         block_offset,  # 1
@@ -225,16 +242,18 @@ def compute_schedule_table_v2(
         decode_counts,  # 7
         block_is_last.astype(jnp.int32),  # 8
         block_is_first.astype(jnp.int32),  # 9
-        jnp.zeros(safe_max_blocks, dtype=jnp.int32),  # 10
-        is_trans_block.astype(jnp.int32),  # 11
+        is_trans_block.astype(jnp.int32),  # 10
     ]
 
+    # 11 to 11 + alignment - 1: Request ID for each token in the sublane tile
     for i in range(alignment):
-        cols.append(t_reqs[:, i])  # 12-19
+        cols.append(t_reqs[:, i])  # e.g., 11-18 if alignment=8
+    # 11 + alignment to 11 + 2*alignment - 1: 1 if token is first in request
     for i in range(alignment):
-        cols.append(is_first_tok[:, i])  # 20-27
+        cols.append(is_first_tok[:, i])  # e.g., 19-26
+    # 11 + 2*alignment to 11 + 3*alignment - 1: 1 if token is last in request
     for i in range(alignment):
-        cols.append(is_last_tok[:, i])  # 28-35
+        cols.append(is_last_tok[:, i])  # e.g., 27-34
 
     final_table = jnp.stack(cols, axis=1)
     total_blocks = jnp.maximum(total_prefill_blocks, num_decode_batches)
