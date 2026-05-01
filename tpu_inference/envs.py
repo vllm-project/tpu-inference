@@ -50,6 +50,10 @@ if TYPE_CHECKING:
     TPU_OFFLOAD_SAVE_THREADS: int = 1
     TPU_OFFLOAD_BATCHED_SAVE: bool = False
     TPU_OFFLOAD_METRICS_LOG_INTERVAL: int = 5
+    # RPA kernel block size overrides (format: "bq_sz,bkv_sz,bq_csz,bkv_csz")
+    RPA_D_BLOCK_SIZES: str | None = None
+    RPA_P_BLOCK_SIZES: str | None = None
+    RPA_M_BLOCK_SIZES: str | None = None
 
 
 def env_with_choices(
@@ -281,6 +285,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # kv offload to dram: prometheus metrics log interval in seconds
     "TPU_OFFLOAD_METRICS_LOG_INTERVAL":
     lambda: int(os.getenv("TPU_OFFLOAD_METRICS_LOG_INTERVAL", "10")),
+    # RPA kernel block size overrides (format: "bq_sz,bkv_sz,bq_csz,bkv_csz")
+    # e.g. RPA_D_BLOCK_SIZES="1,4096,1,256"
+    "RPA_D_BLOCK_SIZES":
+    lambda: os.getenv("RPA_D_BLOCK_SIZES", None),
+    # e.g. RPA_P_BLOCK_SIZES="32,4096,32,256"
+    "RPA_P_BLOCK_SIZES":
+    lambda: os.getenv("RPA_P_BLOCK_SIZES", None),
+    # e.g. RPA_M_BLOCK_SIZES="32,4096,32,256"
+    "RPA_M_BLOCK_SIZES":
+    lambda: os.getenv("RPA_M_BLOCK_SIZES", None),
 }
 
 
