@@ -66,8 +66,6 @@ class CompilationManager:
         """Helper to create dummy tensors for precompilation."""
         if len(shape) > 1:
             tp_size = self.runner.mesh.shape.get(ShardingAxisName.MODEL, 1)
-            if tp_size == 1 and self.runner.vllm_config.parallel_config is not None:
-                tp_size = self.runner.vllm_config.parallel_config.tensor_parallel_size
             assert shape[
                 1] % tp_size == 0, f"Dimension size {shape[1]} is not divisible by TP size {tp_size} for shape {shape}"
 
