@@ -34,4 +34,6 @@ bash "${NIGHTLY_SCRIPT}" \
   --model-impl-type "flax_nnx" \
   --use-unfused-megablocks "0" \
   --hf-config "deepseek-ai/DeepSeek-R1" \
-  --moe-all-gather-activation-dtype "fp8"
+  --moe-all-gather-activation-dtype "fp8" \
+  --run-accuracy "mmlu" \
+  --mmlu-output-len "4"
