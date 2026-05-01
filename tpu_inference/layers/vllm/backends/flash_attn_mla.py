@@ -12,12 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from typing import Tuple
+from functools import partial
 
+import jax
 import jax.numpy as jnp
 import torch
-from jax.sharding import Mesh
+from jax.sharding import (Mesh,
+                          PartitionSpec as P)
 from torchax.interop import jax_view, torch_view
 from vllm.config import VllmConfig
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.v1.attention.backend import (AttentionBackend, AttentionLayer,
                                        MLAAttentionImpl)
@@ -28,6 +32,9 @@ from tpu_inference.layers.common.attention_interface import mla_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import (
     quantize_kv, static_per_tensor_quantize_tensor)
+from tpu_inference.kernels.custom_calls.kernel import xpose_full
+
+
 
 
 @register_backend(AttentionBackendEnum.FLASH_ATTN_MLA)
@@ -148,11 +155,22 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
 
         # (B, N, P) x (N, P, L) -> (B, N, L)
         # torch nn param
-        q_nope = (jnp.einsum("bnp,npl->bnl",
+        q_nope = jnp.einsum("bnp,npl->nbl",
                              q_nope,
                              jax_view(layer.W_UK_T),
-                             preferred_element_type=jnp.float32) *
-                  jax_view(layer.W_UK_T_scale)).astype(input_dtype)
+                             preferred_element_type=jnp.float32)
+                            #  preferred_element_type=jnp.float32) *
+                #   jax_view(layer.W_UK_T_scale)).astype(input_dtype)
+        transpose_axes = (1, 0, 2)
+        q_nope = jax.shard_map(
+                partial(xpose_full, transpose_axes=transpose_axes),
+                mesh=mesh,
+                in_specs=(P(None, ShardingAxisName.MLP_TENSOR),),
+                out_specs=(P(ShardingAxisName.MLP_TENSOR, None),),
+                check_vma=False,
+        )(q_nope)[0]
+        q_nope = (q_nope  *
+                  jax_view(layer.W_UK_T_scale).astype(input_dtype))
 
         q_scale = k_scale = v_scale = None
         if layer.kv_cache_quantized_dtype:
