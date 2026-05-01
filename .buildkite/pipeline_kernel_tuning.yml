@@ -33,39 +33,27 @@
 steps:
 
   # -----------------------------------------------------------------
-  # Build docker image for tuning cases generation step.
-  # -----------------------------------------------------------------
-  # (TODO): Use cpu only queue to build the docker image instead
-  - label: ":docker: Build and Push Base Image"
-    key: cpu_build_docker
-    agents:
-      queue: cpu_64_core
-    commands:
-      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
-
-  # -----------------------------------------------------------------
-  # Build docker image for tuning step.
+  # Build Step
   # -----------------------------------------------------------------
   - label: ":docker: Build and Push Base Image (${TPU_VERSION:-tpu6e})"
     key: ${TPU_VERSION:-tpu6e}_build_docker
     agents:
-      queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
+      queue: cpu_64_core 
     env:
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
     commands:
       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
-  
+
   # -----------------------------------------------------------------
-  - label: ":docker: Tuning Cases Generation and Pipeline Upload"
+  # -----------------------------------------------------------------
+  - label: ":docker: Tuning Cases Generation and Pipeline Upload (${TPU_VERSION:-tpu6e})"
     key: generate_tuning_cases_and_yml
-    depends_on: cpu_build_docker
-    # TODO: Move the tpu_version into kernel_tuner so we can tune on different tpu versions at the same time using a single build
-    # At the same time, we should save the tpu_version/multi-queue info together with the tuning results for better analysis later.
+    depends_on: ${TPU_VERSION:-tpu6e}_build_docker
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
     agents:
-      queue: cpu_64_core
+      queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
     commands:
       - |
         # remove the existing generated pipeline YAML in the temp dir on the host. 
