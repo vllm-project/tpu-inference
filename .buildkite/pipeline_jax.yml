@@ -543,8 +543,8 @@ steps:
         commands:
           - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_torchax_ray_distributed_executor
 
-      - label: "${TPU_VERSION:-tpu6e} E2E lm_eval accuracy check Qwen3.5-397B-A17B with gmm kernel."
-        key: ${TPU_VERSION:-tpu6e}_test_30
+      - label: "${TPU_VERSION:-tpu6e} E2E lm_eval mmlu_pro Qwen3.5-397B-A17B with gmm kernel."
+        key: ${TPU_VERSION:-tpu6e}_test_mmlu_pro
         depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
         env:
@@ -552,15 +552,28 @@ steps:
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
-        # TODO (jacobplatin): we should remove the limit when perf improvements are made
-        # TODO (jacobplatin): the flex threshold is low, but the strict threshold should be
-        # high enough to still make this test useful and representative
         commands:
           - |
             if [[ "$$TPU_VERSION" == "tpu7x" ]]; then
-              .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "Qwen/Qwen3.5-397B-A17B-FP8" --use_moe_ep_kernel 0 --tensor_parallel_size 8 --max_model_len 4096 --max_num_batched_tokens 4096 --max_gen_toks 2048 --enable_expert_parallel 1 --flex_threshold 0.63 --strict_threshold 0.63 --limit_mm_per_prompt '{"image": 0, "video": 0}' --block_size 256 --limit 100 --enable_thinking false
+              .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh \
+                --model_name "Qwen/Qwen3.5-397B-A17B-FP8" \
+                --use_moe_ep_kernel 0 \
+                --tensor_parallel_size 8 \
+                --max_model_len 4096 \
+                --max_num_batched_tokens 4096 \
+                --enable_expert_parallel true \
+                --limit_mm_per_prompt '{"image": 0, "video": 0}' \
+                --block_size 256 \
+                --max_num_seqs 256 \
+                --enable_thinking false \
+                --gpu_memory_utilization 0.95 \
+                --kv_cache_dtype "fp8" \
+                --tasks "mmlu_pro" \
+                --seed 42 \
+                --limit 50 \
+                --exact_match_threshold 0.80
             else
-              echo "Skipping: Step requires TPU v7x and either a NIGHTLY build or kernel/requirements changes."
+              echo "Skipping: Step requires TPU v7x."
               exit 0
             fi
 
@@ -603,7 +616,7 @@ steps:
         key: ${TPU_VERSION:-tpu6e}_test_33
         depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         agents:
-          queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}          
+          queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         soft_fail: true
         env:
           TEST_MODEL: Qwen/Qwen2.5-VL-7B-Instruct
