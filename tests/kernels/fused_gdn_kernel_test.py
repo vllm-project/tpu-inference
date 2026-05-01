@@ -105,6 +105,7 @@ class FusedGdnKernelTest(jtu.JaxTestCase):
         use_dt_bias=False,
         lower_bound=None,
         atol=1e-2,
+        has_initial_state_active=None,
     ):
         rng = np.random.RandomState(42)
         q, k, v, a, b, A_log, h0, cu_seqlens, state_indices, N = _make_inputs(
@@ -121,6 +122,24 @@ class FusedGdnKernelTest(jtu.JaxTestCase):
 
         dt_bias = (jnp.array(rng.randn(H_v).astype(np.float32))
                    if use_dt_bias else jnp.zeros(H_v, dtype=jnp.float32))
+
+        # `has_initial_state_active` is a python list of bools for the
+        # ACTIVE sequences only (length N); we pad to `max_num_req` with
+        # True for the padded slots (their state isn't read by either
+        # impl, but the array shape must match `state_indices`). Default
+        # behaviour (None) is all-True, which matches the pre-fix path
+        # and keeps the existing baseline tests valid.
+        max_num_req_padded = state_indices.shape[0]
+        if has_initial_state_active is None:
+            has_initial_state = jnp.ones((max_num_req_padded, ),
+                                         dtype=jnp.bool_)
+        else:
+            assert len(has_initial_state_active) == N, (
+                f"has_initial_state_active must have length N={N}, got "
+                f"{len(has_initial_state_active)}")
+            full = np.ones(max_num_req_padded, dtype=np.bool_)
+            full[:N] = np.array(has_initial_state_active, dtype=np.bool_)
+            has_initial_state = jnp.array(full)
 
         # ── Reference (ragged_gated_delta_rule_ref) ──
         mixed_qkv = jnp.concatenate(
@@ -141,6 +160,7 @@ class FusedGdnKernelTest(jtu.JaxTestCase):
             cu_seqlens,
             state_indices,
             distribution_ref,
+            has_initial_state,
             n_kq=H_qk,
             n_v=H_v,
             d_k=K,
@@ -158,6 +178,7 @@ class FusedGdnKernelTest(jtu.JaxTestCase):
             h0,
             state_indices,
             b=b,
+            has_initial_state=has_initial_state,
             distribution=jnp.array([decode_N, N], dtype=jnp.int32),
             use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=True,
@@ -219,6 +240,142 @@ class FusedGdnKernelTest(jtu.JaxTestCase):
     )
     def test_gqa(self, decode_N, mixed_seqlens):
         self._test_fused_gdn(decode_N, mixed_seqlens, 2, 8, 128, 128)
+
+    # ── has_initial_state masking ──
+
+    def test_has_initial_state_zeros_stale_slot(self):
+        """When ``has_initial_state[i]`` is False, the recurrent kernel
+        must treat the slot's prior contents as zero — even though the
+        DMA-loaded h0 holds whatever a previous tenant left there.
+
+        Compares two runs over identical token inputs:
+          * fresh: h0 is zero everywhere (slot already cleared).
+          * stale: h0 is random nonzero at the active slots, with
+            has_initial_state=False so the kernel zeros h0 in VMEM.
+
+        The per-token outputs and the written-back state for active
+        slots must match — if they don't, stale state is leaking into
+        the recurrent update and a freshly-allocated mamba slot would
+        corrupt the new request's trajectory.
+        """
+        H_qk, H_v, K, V = 2, 8, 128, 128
+        # Two prefill sequences, no decodes.
+        decode_N = 0
+        mixed_seqlens = [9, 15]
+        rng = np.random.RandomState(123)
+        q, k, v, a, b, A_log, _h0_ignored, cu_seqlens, state_indices, N = (
+            _make_inputs(rng, decode_N, mixed_seqlens, H_qk, H_v, K, V))
+        max_num_req = state_indices.shape[0]
+
+        h0_fresh = jnp.zeros((max_num_req, H_v, K, V), dtype=jnp.float32)
+        # Stale h0: nonzero at every active slot. The kernel must
+        # ignore these values when has_initial_state is False.
+        h0_stale = jnp.array(
+            rng.randn(max_num_req, H_v, K, V).astype(np.float32))
+
+        has_initial_state = jnp.zeros((max_num_req, ), dtype=jnp.bool_)
+        distribution = jnp.array([decode_N, N], dtype=jnp.int32)
+
+        common_kwargs = dict(
+            cu_seqlens=cu_seqlens,
+            g=a,
+            state_indices=state_indices,
+            distribution=distribution,
+            b=b,
+            has_initial_state=has_initial_state,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=True,
+            A_log=A_log,
+        )
+
+        # Re-create q, k, v each call — fused_gdn donates `v` so we
+        # must hand it a fresh buffer per invocation.
+        o_fresh, state_fresh = fused_gdn(jnp.array(q),
+                                         jnp.array(k),
+                                         jnp.array(v),
+                                         initial_state=h0_fresh,
+                                         **common_kwargs)
+        o_stale, state_stale = fused_gdn(jnp.array(q),
+                                         jnp.array(k),
+                                         jnp.array(v),
+                                         initial_state=h0_stale,
+                                         **common_kwargs)
+
+        self.assertAllClose(o_stale,
+                            o_fresh,
+                            atol=1e-4,
+                            rtol=1e-4,
+                            check_dtypes=False)
+        # Compare the active slots; padding slots are not exercised.
+        self.assertAllClose(state_stale[:N],
+                            state_fresh[:N],
+                            atol=1e-4,
+                            rtol=1e-4,
+                            check_dtypes=False)
+
+    @parameterized.named_parameters(
+        # Two patterns chosen for orthogonal coverage:
+        #   * `all_true` — every slot uses its loaded h0 (no
+        #     zeroing); the continuation case.
+        #   * `alternating` — has_initial_state varies by slot, so
+        #     the kernel must look up the right SMEM entry per
+        #     seq; catches off-by-one or uniformly-applied
+        #     conditional bugs.
+        # The all-False case is covered by
+        # `test_has_initial_state_zeros_stale_slot`, which directly
+        # compares fused-with-stale vs fused-with-fresh rather than
+        # matching the ref. Extra patterns (first-only, last-only,
+        # ...) add CI time without new coverage.
+        dict(testcase_name="all_true", pattern=[True, True, True, True]),
+        dict(testcase_name="alternating", pattern=[True, False, True, False]),
+    )
+    def test_has_initial_state_pattern_matches_ref(self, pattern):
+        """fused_gdn vs ragged_gated_delta_rule_ref across per-slot
+        has_initial_state patterns. The ref impl's masking is well-
+        validated (PR #2408), so any mismatch points at the kernel.
+        """
+        self._test_fused_gdn(decode_N=0,
+                             mixed_seqlens=[9, 15, 33, 7],
+                             H_qk=2,
+                             H_v=8,
+                             K=128,
+                             V=128,
+                             has_initial_state_active=pattern)
+
+    def test_has_initial_state_long_sequence_multi_block(self):
+        """A single sequence of 2200 tokens spans 2 blocks (bt=2048 for
+        H_qk=2, H_v=8, K=V=128). The kernel must zero h0 only at the
+        first block (`is_new_seq`); subsequent blocks of the same seq
+        carry the running state in `h_bufs[buf_idx]` and must NOT
+        re-zero, otherwise the second-block tokens see zero state and
+        output diverges from ref. The continuation case (True) is
+        already covered by `pattern_matches_ref_all_true`.
+        """
+        self._test_fused_gdn(decode_N=0,
+                             mixed_seqlens=[2200],
+                             H_qk=2,
+                             H_v=8,
+                             K=128,
+                             V=128,
+                             has_initial_state_active=[False])
+
+    def test_has_initial_state_decode_plus_new_prefill(self):
+        """Decodes (always has_initial_state=True) interleaved with new
+        prefills (has_initial_state=False). The decode kernel writes
+        state for decode positions first; the recurrent kernel must
+        zero only the prefill slots, leaving decode slots' updated
+        state intact.
+        """
+        decode_N = 5
+        prefill_lens = [9, 15, 33]
+        pattern = [True] * decode_N + [False] * len(prefill_lens)
+        self._test_fused_gdn(decode_N=decode_N,
+                             mixed_seqlens=prefill_lens,
+                             H_qk=2,
+                             H_v=8,
+                             K=128,
+                             V=128,
+                             has_initial_state_active=pattern)
 
 
 if __name__ == "__main__":

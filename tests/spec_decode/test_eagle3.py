@@ -38,19 +38,20 @@ def _create_proposer(
         num_speculative_tokens=num_speculative_tokens,
     )
 
-    vllm_config = VllmConfig(model_config=model_config,
-                             cache_config=CacheConfig(block_size=16),
-                             speculative_config=speculative_config,
-                             device_config=DeviceConfig(device="tpu"),
-                             parallel_config=ParallelConfig(
-                                 pipeline_parallel_size=1,
-                                 tensor_parallel_size=1),
-                             load_config=LoadConfig(),
-                             scheduler_config=SchedulerConfig(
-                                 max_num_batched_tokens=8192,
-                                 max_num_seqs=128,
-                                 max_model_len=model_config.max_model_len,
-                                 is_encoder_decoder=False))
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        cache_config=CacheConfig(block_size=16),
+        speculative_config=speculative_config,
+        device_config=DeviceConfig(device="tpu"),
+        parallel_config=ParallelConfig(pipeline_parallel_size=1,
+                                       tensor_parallel_size=1),
+        load_config=LoadConfig(
+            model_loader_extra_config={"enable_weights_track": False}),
+        scheduler_config=SchedulerConfig(
+            max_num_batched_tokens=8192,
+            max_num_seqs=128,
+            max_model_len=model_config.max_model_len,
+            is_encoder_decoder=False))
 
     # Mock the runner, as the proposer needs it for initialization
     mock_runner = mock.MagicMock()
@@ -231,8 +232,9 @@ def test_propose(method, num_speculative_tokens):
             residual_hidden_states = residual_hidden_states.at[:, 0].set(
                 next_token_ids_encoded)
 
-        # Return (kv_caches, hidden_states, residual_tuple)
-        return kv_caches, hidden_states_for_logits, (residual_hidden_states, )
+        # Return (kv_caches, hidden_states, residual_tuple, None)
+        return kv_caches, hidden_states_for_logits, (
+            residual_hidden_states, ), None
 
     def mock_compute_logits_fn(state, hidden_states, lora_metadata):
         # Create deterministic logits from hidden_states.

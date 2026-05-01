@@ -285,7 +285,8 @@ class TpuPlatform(Platform):
 
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
-            allowed = ("TPUConnector", "TPUConnectorHMA")
+            allowed = ("TPUConnector", "TPUConnectorHMA",
+                       "TPUOffloadConnector")
             if kv_transfer_config.kv_connector not in allowed:
                 raise ValueError(
                     f"Unsupported kv_connector "
@@ -295,6 +296,10 @@ class TpuPlatform(Platform):
         from tpu_inference.core.sched.dp_scheduler import \
             update_vllm_config_for_dp_scheduler
         update_vllm_config_for_dp_scheduler(vllm_config)
+
+        from tpu_inference.core.sched.utils import \
+            update_vllm_scheduler_for_exporting_expert_ids
+        update_vllm_scheduler_for_exporting_expert_ids()
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:

@@ -366,6 +366,7 @@ class Eagle3Proposer:
             seq_lens=seq_lens,
             query_start_loc=query_start_loc,
             request_distribution=attn_metadata.request_distribution,
+            mamba_state_indices=attn_metadata.mamba_state_indices,
         )
 
         target_hidden_states, input_ids, last_token_indices = self._prepare_hidden_states_and_input_ids(
@@ -430,7 +431,7 @@ class Eagle3Proposer:
         """
 
         # input_ids and target_hidden_states for the first speculation have been prepared in prepare_inputs() to improve performance.
-        kv_caches, hidden_states, residual = self.model_fn(
+        kv_caches, hidden_states, residual, _ = self.model_fn(
             self.state,
             kv_caches,
             input_ids,
@@ -462,7 +463,7 @@ class Eagle3Proposer:
                 query_start_loc=query_start_loc,
                 block_tables=new_block_tables,
             )
-            kv_caches, new_hidden_states, residual = self.model_fn(
+            kv_caches, new_hidden_states, residual, _ = self.model_fn(
                 self.state,
                 kv_caches,
                 input_ids_loop,

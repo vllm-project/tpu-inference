@@ -177,7 +177,7 @@ class TestVllmTPUMLAAttention:
         mock_get_attention_context.return_value = (mock_attn_metadata, None,
                                                    None, None)
 
-        q = torch.rand(1, 10)
+        q = (torch.rand(1, 5), torch.rand(1, 5))
         kv_c_normed = torch.rand(1, 10)
         k_pe = torch.rand(1, 10)
 
@@ -238,7 +238,7 @@ class TestVllmTPUMLAAttention:
         mock_get_attention_context.return_value = (MagicMock(), None, None,
                                                    None)
 
-        q = torch.rand(1, 10)
+        q = (torch.rand(1, 5), torch.rand(1, 5))
         kv_c_normed = torch.rand(1, 10)
         k_pe = torch.rand(1, 10)
 

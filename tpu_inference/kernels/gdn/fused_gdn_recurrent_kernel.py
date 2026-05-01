@@ -198,6 +198,7 @@ def _recurrent_gdn_main(
     a_log_hbm,  # [H_v, num_lanes] or None
     dt_bias_hbm,  # [H_v, num_lanes] or None
     _state_init_ref,  # [num_states, H_v, K, V] aliased to state_hbm
+    has_initial_state_ref,  # [max_num_req] int32 (SMEM); 0 = zero out h0
     o_hbm,  # [T, H_v, V]
     state_hbm,  # [num_states, H_v, K, V]
     h_bufs,  # [2, H_v, K, V] VMEM scratch (double buffer)
@@ -253,6 +254,7 @@ def _recurrent_gdn_main(
             h_bufs_s,  # [2, H_v, K, V] VMEM scratch
             meta_s,  # GDNChunkIndices (SMEM)
             state_indices_s,  # [max_num_req] int32 (SMEM)
+            has_initial_state_s,  # [max_num_req] int32 (SMEM)
             h_load_sems_s,  # [2] DMA semaphores
             h_store_sems_s,  # [2] DMA semaphores
     ):
@@ -298,6 +300,19 @@ def _recurrent_gdn_main(
         @pl.when(is_new_seq)
         def _wait_h0():
             load_wait_cp.wait()
+
+        # If the request has no prior recurrent state (brand-new prefill
+        # landing on a freshly-allocated mamba slot), the DMA-loaded h0
+        # is stale data from a previous tenant. Overwrite with zeros so
+        # the recurrent update starts from zero, mirroring the chunked
+        # path's `init_states_for_seqs = jnp.where(has_initial_state,
+        # ..., 0)` and GPU's `initial_state[~has_initial_state, ...] = 0`
+        # in `gdn_linear_attn._forward_core`.
+        has_init = has_initial_state_s[seq_idx]
+
+        @pl.when(is_new_seq & (has_init == 0))
+        def _zero_h0():
+            h_bufs_s[buf_idx] = jnp.zeros((H_v, K, V), dtype=h_bufs_s.dtype)
 
         # ── Step 2: Compute ──
         h = h_bufs_s[buf_idx].astype(jnp.float32)
@@ -418,7 +433,10 @@ def _recurrent_gdn_main(
         a_log_hbm,
         dt_bias_hbm,
         o_hbm,
-        scratches=[h_bufs, meta, state_indices_ref, h_load_sems, h_store_sems],
+        scratches=[
+            h_bufs, meta, state_indices_ref, has_initial_state_ref,
+            h_load_sems, h_store_sems
+        ],
     )
 
     # ── Epilogue: wait for outstanding stores ──
@@ -455,6 +473,7 @@ def fused_recurrent_gdn(
         initial_state,  # [num_states, H_v, K, V] float32
         state_indices,  # [max_num_req] int32
         b,  # [T, H_v, num_lanes] or None
+        has_initial_state,  # [max_num_req] int32 (0/1)
         *,
         scale,  # float
         use_qk_l2norm,  # bool
@@ -465,6 +484,15 @@ def fused_recurrent_gdn(
         distribution,  # [2] int32
 ):
     """Run the pre-computed-metadata recurrent GDN pallas kernel.
+
+    ``has_initial_state[i]`` indicates whether request ``i``'s recurrent
+    slot already holds a valid prior state (continuation, prefix-cache
+    hit) or whether the slot is freshly allocated and its contents must
+    be treated as zeros for this call. Mirrors the chunked path's
+    `init_states_for_seqs = jnp.where(has_initial_state, ..., 0)` and
+    GPU's `initial_state[~has_initial_state, ...] = 0` in
+    ``gdn_linear_attn._forward_core``. Pass an all-ones array if the
+    caller wants the previous (no-op) behaviour.
     """
     T, H_qk, H_v, K, V, dtype, num_states, num_lanes, _ = (validate_gdn_inputs(
         q,
@@ -530,6 +558,7 @@ def fused_recurrent_gdn(
                 any_spec if A_log is not None else None,
                 any_spec if dt_bias is not None else None,
                 any_spec,  # state_init (= initial_state)
+                smem_spec,  # has_initial_state
             ],
             out_specs=[any_spec, any_spec],
             grid=(grid_dim, ),
@@ -540,6 +569,10 @@ def fused_recurrent_gdn(
                 pltpu.SemaphoreType.DMA((2, )),  # h_store_sems
             ],
         ),
+        # Aliases reference flat positional inputs. `meta` is a 3-leaf
+        # pytree, so the absolute index of `v` is 5 (3 meta leaves + q, k)
+        # and the absolute index of `initial_state` is 8 + n_b + n_gate.
+        # `has_initial_state` is appended to the end and is not aliased.
         input_output_aliases={
             5: 0,
             8 + n_b + n_gate: 1
@@ -561,6 +594,7 @@ def fused_recurrent_gdn(
         A_log,
         dt_bias,
         initial_state,
+        has_initial_state,
     )
 
     return o, state

@@ -100,6 +100,7 @@ class Qwen3MoeSparseMoeBlock(JaxModule):
             self.shared_expert = None
 
         # Experts (Routed)
+        self.enable_return_routed_experts = True
         self.experts = JaxMoE(
             dtype=dtype,
             num_local_experts=config.num_experts,
@@ -108,6 +109,7 @@ class Qwen3MoeSparseMoeBlock(JaxModule):
             hidden_act=config.hidden_act,
             rngs=rng,
             router=self.gate,
+            num_experts_per_tok=config.num_experts_per_tok,
             mesh=mesh,
             activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
             activation_ffw_ted=P(ShardingAxisName.MLP_DATA, None, None),
@@ -118,13 +120,17 @@ class Qwen3MoeSparseMoeBlock(JaxModule):
             num_expert_parallelism=num_expert_parallelism,
             moe_backend=moe_backend,
             quant_config=quant_config,
+            enable_return_routed_experts=self.enable_return_routed_experts,
             prefix=prefix + ".experts")
 
-    def __call__(self, x: jax.Array) -> jax.Array:
-        out = self.experts(x)
+    def __call__(self, x: jax.Array) -> Tuple[jax.Array, Optional[jax.Array]]:
+
+        out, expert_ids = self.experts(x)
+
         if self.shared_expert is not None:
             out += self.shared_expert(x)
-        return out
+
+        return out, expert_ids
 
 
 class Qwen3MoeDecoderLayer(JaxModule):
@@ -190,7 +196,7 @@ class Qwen3MoeDecoderLayer(JaxModule):
         kv_cache: jax.Array,
         x: jax.Array,
         attention_metadata: AttentionMetadata,
-    ) -> Tuple[jax.Array, jax.Array]:
+    ) -> Tuple[jax.Array, jax.Array, Optional[jax.Array]]:
         hidden_states = self.input_layernorm(x)
         kv_cache, attn_output = self.self_attn(
             kv_cache,
@@ -201,9 +207,15 @@ class Qwen3MoeDecoderLayer(JaxModule):
 
         residual = attn_output
         attn_output = self.post_attention_layernorm(attn_output)
-        outputs = self.mlp(attn_output)
-        outputs = residual + outputs
-        return kv_cache, outputs
+
+        expert_ids = None
+        mlp_output = self.mlp(attn_output)
+        if isinstance(mlp_output, tuple):
+            mlp_output, expert_ids = mlp_output
+
+        outputs = residual + mlp_output
+
+        return kv_cache, outputs, expert_ids
 
 
 class Qwen3MoeModel(JaxModule):
@@ -272,7 +284,8 @@ class Qwen3MoeModel(JaxModule):
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
-    ) -> Tuple[List[jax.Array], jax.Array]:
+    ) -> Tuple[List[jax.Array], jax.Array] | Tuple[List[jax.Array], jax.Array,
+                                                   jax.Array]:
         if self.is_first_rank:
             assert inputs_embeds is None
             inputs_embeds = self.embed_tokens(input_ids)
@@ -281,18 +294,23 @@ class Qwen3MoeModel(JaxModule):
 
         x = inputs_embeds
         new_kv_caches = []
+        all_expert_ids = []
         for i, layer in enumerate(self.layers):
             if isinstance(layer, PPMissingLayer):
                 new_kv_caches.append(kv_caches[i])
                 continue
             kv_cache = kv_caches[i]
-            kv_cache, x = layer(kv_cache, x, attention_metadata)
+            kv_cache, x, expert_ids = layer(kv_cache, x, attention_metadata)
+            if expert_ids is not None:
+                all_expert_ids.append(expert_ids)
             new_kv_caches.append(kv_cache)
 
         if self.is_last_rank:
             x = self.norm(x)
 
-        return new_kv_caches, x
+        stacked_expert_ids = jnp.stack(all_expert_ids,
+                                       axis=0) if all_expert_ids else None
+        return new_kv_caches, x, stacked_expert_ids
 
 
 class Qwen3MoeForCausalLM(JaxModule, LoadableWithIterator):
@@ -340,19 +358,21 @@ class Qwen3MoeForCausalLM(JaxModule, LoadableWithIterator):
         is_last_rank: bool = True,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
-               List[jax.Array]]:
+               List[jax.Array], Optional[jax.Array]]:
         if not is_first_rank:
             assert intermediate_tensors is not None
             inputs_embeds = intermediate_tensors["hidden_states"]
-        kv_caches, x = self.model(
+        kv_caches, x, expert_indices = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
             inputs_embeds,
         )
+
         if not is_last_rank:
             x = JaxIntermediateTensors(tensors={"hidden_states": x}, )
-        return kv_caches, x, []
+
+        return kv_caches, x, [], expert_indices
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if hasattr(self, 'lm_head'):

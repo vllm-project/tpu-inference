@@ -28,6 +28,7 @@ def ragged_conv1d(
     query_start_loc,
     state_indices,
     distribution,
+    has_initial_state,
     *,
     kernel_size,
 ):
@@ -48,6 +49,14 @@ def ragged_conv1d(
       kernel_size: The size of the convolution kernel.
       distribution: Distribution tensor containing number of valid sequences at
         index 2.
+      has_initial_state: Boolean tensor of shape `(max_reqs,)`. ``True`` when
+        the request has prior conv state to use (chunked-prefill continuation
+        or prefix-cache hit). ``False`` for brand-new prefills, in which case
+        the gathered conv state is treated as zeros — matching GPU's
+        ``causal_conv1d_fn(has_initial_state=...)`` semantics. Without this
+        masking the conv would consume whatever a reused mamba slot still
+        held from a prior request, silently corrupting the first
+        ``kernel_size - 1`` outputs of every new request.
 
     Returns:
       A tuple containing:
@@ -73,26 +82,41 @@ def ragged_conv1d(
 
     lengths = effective_query_start_loc[1:] - effective_query_start_loc[:-1]
 
-    # 1. Compute Convolution
-    out = jnp.zeros_like(x)
-    w = conv_weight[:, 0, :].T  # (K, C)
+    # 1. Compute Convolution.
+    # Accumulate in fp32 to match GPU's `causal_conv1d_fn`
+    # (`vllm/model_executor/layers/mamba/ops/causal_conv1d.py`), which
+    # loads x and weights as fp32 before the kernel-size-element sum.
+    orig_dtype = x.dtype
+    x_f32 = x.astype(jnp.float32)
+    w = conv_weight[:, 0, :].T.astype(jnp.float32)  # (K, C)
 
     gathered_state = conv_state[state_indices]  # (max_reqs, K-1, C)
+    # Mask the gathered conv state to zero for sequences without initial
+    # state, so brand-new prefills see zeros instead of whatever a reused
+    # slot still held. Mirrors GPU's `has_initial_state` plumbing.
+    gathered_state = jnp.where(
+        has_initial_state[:, None, None],
+        gathered_state,
+        jnp.zeros_like(gathered_state),
+    )
+    gathered_state_f32 = gathered_state.astype(jnp.float32)
 
+    out = jnp.zeros((num_tokens, x.shape[-1]), dtype=jnp.float32)
     for k in range(kernel_size):
         mask = local_indices >= k
 
         idx_x = jnp.clip(token_idx - k, 0, num_tokens - 1)
         idx_state_t = (kernel_size - 1) + (local_indices - k)
 
-        x_tokens = x[idx_x]
-        state_tokens = gathered_state[req_indices, idx_state_t]
+        x_tokens = x_f32[idx_x]
+        state_tokens = gathered_state_f32[req_indices, idx_state_t]
 
         token_k = jnp.where(mask[:, None], x_tokens, state_tokens)
         out = out + token_k * w[kernel_size - 1 - k]
 
     if conv_bias is not None:
-        out = out + conv_bias[jnp.newaxis, :]
+        out = out + conv_bias.astype(jnp.float32)[jnp.newaxis, :]
+    out = out.astype(orig_dtype)
 
     # 2. Update State
     padded_lengths = jnp.zeros(max_reqs, dtype=jnp.int32)
