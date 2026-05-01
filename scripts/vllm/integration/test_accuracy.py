@@ -52,10 +52,8 @@ def run_test(model_name, expected_value, more_args=None):
         }
 
     if more_args is not None:
-        for item in more_args.split(","):
-            if "=" in item:
-                k, v = item.split("=")
-                model_args_dict[k] = v
+        for k, v in more_args.items():
+            model_args_dict[k] = v
 
     model_args_dict["model_loader_extra_config"] = {
         "enable_weights_track": False
@@ -97,9 +95,11 @@ def test_lm_eval_accuracy_v1_engine(monkeypatch: pytest.MonkeyPatch,
     with monkeypatch.context() as _:
         more_args = None
         if current_platform.is_tpu():
-            more_args = "max_model_len=2048,max_num_seqs=64"
-            tp_size_str = f"tensor_parallel_size={tp_size}"
-            more_args += ",{}".format(tp_size_str)
+            more_args = {
+                "max_model_len": 2048,
+                "max_num_seqs": 64,
+                "tensor_parallel_size": tp_size,
+            }
 
         print(f"common args: {more_args}")
 
@@ -130,9 +130,12 @@ def test_lm_eval_accuracy_v1_engine_fp8_kv_cache(
     with monkeypatch.context() as _:
         more_args = None
         if current_platform.is_tpu():
-            more_args = "max_model_len=2048,max_num_seqs=128,kv_cache_dtype=fp8"
-            tp_size_str = f"tensor_parallel_size={tp_size}"
-            more_args += ",{}".format(tp_size_str)
+            more_args = {
+                "max_model_len": 2048,
+                "max_num_seqs": 128,
+                "kv_cache_dtype": "fp8",
+                "tensor_parallel_size": tp_size,
+            }
 
         print(f"common args: {more_args}")
 
