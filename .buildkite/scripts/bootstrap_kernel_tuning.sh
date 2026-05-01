@@ -29,6 +29,8 @@ source "${SCRIPT_DIR}/configs/pipeline_config.sh"
 set_jax_envs() {
     local tpu_version=$1
     local tpu_cores=$2
+
+    echo "Setting JAX environment variables for TPU version: ${tpu_version}, TPU cores: ${tpu_cores}"
     
     case $tpu_version in
         v6)
