@@ -146,13 +146,15 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
         k_pe = jax_view(k_pe)
         input_dtype = q_nope.dtype
 
-        # (B, N, P) x (N, P, L) -> (B, N, L)
-        # torch nn param
-        q_nope = (jnp.einsum("bnp,npl->bnl",
-                             q_nope,
-                             jax_view(layer.W_UK_T),
-                             preferred_element_type=jnp.float32) *
-                  jax_view(layer.W_UK_T_scale)).astype(input_dtype)
+        # Einsum selects 'n' as the batch axis and emits it as the major-most physical dimension.
+        q_nope = jnp.einsum("bnp,npl->nbl",
+                            q_nope,
+                            jax_view(layer.W_UK_T), # torch nn param
+                            preferred_element_type=jnp.float32)
+        scale = jax_view(layer.W_UK_T_scale) # torch nn param
+        # (1, N, L) -> (N, 1, L)
+        scale = scale.reshape(scale.shape[1], 1, scale.shape[-1])
+        q_nope = (q_nope * scale).astype(input_dtype)
 
         q_scale = k_scale = v_scale = None
         if layer.kv_cache_quantized_dtype:
@@ -173,7 +175,6 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
                                   k_pe,
                                   value=None,
                                   k_scale=k_scale)
-
         k_pe = k_pe.squeeze(1)
         new_kv_cache, outputs = mla_attention(
             q_nope,
@@ -185,6 +186,7 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             mesh,
             self.num_heads,
             self.qk_nope_head_dim,
+            query_nth_sharding=None,
             query_tnh_sharding=None,
             keyvalue_skh_sharding=None,
             attn_o_tnh_sharding=None,
@@ -193,9 +195,10 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             v_scale=v_scale,
             sm_scale=self.scale,
         )
-
-        outputs = outputs.reshape(-1, self.num_heads, self.kv_lora_rank)
-        outputs = (jnp.einsum("bnl,nlv->bnv",
+        
+        # einsum selects 'n' as the major-most physical dimension again.
+        outputs = outputs.reshape(self.num_heads, -1, self.kv_lora_rank)
+        outputs = (jnp.einsum("nbl,nlv->bnv",
                               outputs,
                               jax_view(layer.W_UV),
                               preferred_element_type=jnp.float32) *
