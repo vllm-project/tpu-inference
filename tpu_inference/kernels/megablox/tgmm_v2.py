@@ -364,20 +364,22 @@ def zero_out_start(
     semaphore_ref,  # [1]
 ):
   """If group_sizes[i]==0, kick off async DMAs to zero out drhs[i]."""
-  num_actual_groups, k, _ = out_ref.shape
+  num_actual_groups, aligned_k, aligned_n = out_ref.shape
   tile_zero_k = zero_ref.shape[0]
+  zero_ref = zero_ref.reshape(1, tile_zero_k, -1)
   num_lanes = pltpu.get_tpu_info().num_lanes
-  assert out_ref.shape[2] % num_lanes == 0
+  assert aligned_n % num_lanes == 0
 
   zero_ref[...] = jnp.zeros_like(zero_ref)
 
-  def fill_zero(local_group_id):
-    for i in range(pl.cdiv(k, tile_zero_k)):
-      for j in range(out_ref.shape[2] // num_lanes):
-        size_k_to_copy = min(tile_zero_k, k - i * tile_zero_k)
-        src = zero_ref.at[pl.ds(0, size_k_to_copy)]
+  def fill_zero(local_group_id, should_copy):
+    should_copy_int = should_copy.astype(int)
+    for i in range(pl.cdiv(aligned_k, tile_zero_k)):
+      size_k_to_copy = min(tile_zero_k, aligned_k - i * tile_zero_k)
+      for j in range(aligned_n // num_lanes):
+        src = zero_ref.at[pl.ds(0, should_copy_int), pl.ds(0, size_k_to_copy)]
         dst = out_ref.at[
-            local_group_id,
+            pl.ds(local_group_id, should_copy_int),
             pl.ds(i * tile_zero_k, size_k_to_copy),
             pl.ds(j * num_lanes, num_lanes),
         ]
@@ -392,8 +394,9 @@ def zero_out_start(
   group_offset = group_offset_ref[0]
   for local_group_id in range(num_actual_groups):
     global_group_id = local_group_id + group_offset
-    should_zero = lhs_group_sizes_ref[global_group_id] == 0
-    num_groups_to_zero +=lax.cond(should_zero, fill_zero, lambda local_group_id: 0, local_group_id)
+    should_copy = lhs_group_sizes_ref[global_group_id] == 0
+    num_groups_to_zero += should_copy.astype(int)
+    fill_zero(local_group_id, should_copy)
 
   return num_groups_to_zero
 
