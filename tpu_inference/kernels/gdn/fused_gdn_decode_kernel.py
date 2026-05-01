@@ -41,14 +41,16 @@ def get_default_block_sizes(
     use_gate_in_kernel: bool,
     has_dt_bias: bool,
     vmem_bytes_limit: int,
+    state_dtype=jnp.float32,
 ) -> int:
     """Choose bt to maximize VMEM utilization within vmem_bytes_limit.
 
-    Accounts for state scratch ``(bt, H_v, K, V)`` float32, optional
+    Accounts for state scratch ``(bt, H_v, K, V)`` of ``state_dtype``, optional
     a_log / dt_bias, and bt-proportional tiles that ``emit_pipeline``
     double-buffers (q, k, v, g, b, o).
     """
     ibits = dtypes.itemsize_bits(dtype)
+    sbits = dtypes.itemsize_bits(state_dtype)
 
     # Fixed (not bt-dependent), in bits
     num_lanes = pltpu.get_tpu_info().num_lanes
@@ -59,13 +61,13 @@ def get_default_block_sizes(
         fixed_bits += 2 * H_v * num_lanes * 32  # dt_bias: (H_v, num_lanes) f32
 
     # bt-proportional (in bits):
-    #   state scratch: (2*bt, H_v, K, V) float32 (double buffer)
+    #   state scratch: (2*bt, H_v, K, V) state_dtype (double buffer)
     #   pipeline tiles (×2 for emit_pipeline double buffering):
     #     q(bt,H_qk,K) + k(bt,H_qk,K)           -> 2·H_qk·K·ibits
     #     g(bt,H_v,K) float32                     -> H_v·K·32
     #     v(bt,H_v,V) + o(bt,H_v,V)              -> 2·H_v·V·ibits
     #     b(bt,H_v,num_lanes)                     -> H_v·num_lanes·ibits
-    per_bt_bits = 2 * H_v * K * V * 32 + 2 * (
+    per_bt_bits = 2 * H_v * K * V * sbits + 2 * (
         2 * H_qk * K * ibits + H_v * K * 32 + 2 * H_v * V * ibits +
         H_v * num_lanes * ibits)
 
@@ -412,6 +414,7 @@ def fused_decoding_gdn(
         use_gate_in_kernel,
         dt_bias is not None,
         vmem_bytes_limit,
+        state_dtype=initial_state.dtype,
     )
 
     any_spec = pl.BlockSpec(memory_space=pl.ANY)
@@ -452,8 +455,12 @@ def fused_decoding_gdn(
             out_specs=[any_spec, any_spec],
             grid=(grid_dim, ),
             scratch_shapes=[
+                # h_bufs match HBM dtype so the DMAs don't need conversion.
+                # The per-token compute path upcasts to fp32 on each load
+                # (see h0 = h_bufs_s[..., i_t].astype(fp32) above), so on-chip
+                # math is fp32 regardless of HBM storage dtype.
                 pltpu.VMEM((2, bt, H_v, K, V),
-                           jnp.float32),  # h_bufs (double buffer)
+                           initial_state.dtype),  # h_bufs (double buffer)
                 pltpu.SemaphoreType.DMA((2, )),  # h_load_sems
                 pltpu.SemaphoreType.DMA((2, )),  # h_store_sems
             ],
@@ -464,7 +471,7 @@ def fused_decoding_gdn(
         },
         out_shape=[
             jax.ShapeDtypeStruct((T, H_v, V), dtype),
-            jax.ShapeDtypeStruct((num_states, H_v, K, V), jnp.float32),
+            jax.ShapeDtypeStruct((num_states, H_v, K, V), initial_state.dtype),
         ],
         compiler_params=pltpu.CompilerParams(
             disable_bounds_checks=True,

@@ -247,6 +247,27 @@ class TpuPlatform(Platform):
             logger.info(
                 f"Using KV cache block size: {cache_config.block_size}")
 
+        # Override mamba_ssm_cache_dtype via env var. Defaults to "bfloat16"
+        # (see envs.py): halves SSM state HBM and ~2x's the attention KV
+        # pool on hybrid models. Set TPU_MAMBA_SSM_CACHE_DTYPE=float32 to
+        # opt out, or TPU_MAMBA_SSM_CACHE_DTYPE="" to defer to whatever
+        # vLLM/HF config decided. At the pinned vLLM LKG,
+        # --mamba-ssm-cache-dtype's MambaDType Literal does not include
+        # "bfloat16", but CacheConfig is a pydantic dataclass without
+        # validate_assignment, so programmatic assignment bypasses
+        # validation. The fused GDN kernels accept fp32/bf16/fp16
+        # initial_state and run on-chip math at fp32 regardless of HBM
+        # storage dtype.
+        if cache_config and envs.TPU_MAMBA_SSM_CACHE_DTYPE:
+            override = envs.TPU_MAMBA_SSM_CACHE_DTYPE
+            current = cache_config.mamba_ssm_cache_dtype
+            if current != override:
+                logger.info(
+                    "TPU_MAMBA_SSM_CACHE_DTYPE=%s overriding "
+                    "cache_config.mamba_ssm_cache_dtype (was %r)", override,
+                    current)
+                cache_config.mamba_ssm_cache_dtype = override
+
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         parallel_config.worker_cls = \
