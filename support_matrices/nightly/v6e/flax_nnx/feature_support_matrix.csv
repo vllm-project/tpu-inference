@@ -4,7 +4,7 @@ Feature,CorrectnessTest,PerformanceTest
 "KV Cache Offload",✅ Passing,✅ Passing
 "LoRA_Torch",✅ Passing,✅ Passing
 "Multimodal Inputs",✅ Passing,✅ Passing
-"Out-of-tree model support",✅ Passing,✅ Passing
+"Out-of-tree model support",✅ Passing,❌ Failing
 "Prefix Caching",✅ Passing,✅ Passing
 "Single Program Multi Data",✅ Passing,✅ Passing
 "Single-Host-P-D-disaggregation",✅ Passing,❓ Untested
