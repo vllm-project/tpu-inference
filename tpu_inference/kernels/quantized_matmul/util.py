@@ -85,9 +85,11 @@ def xla_quantized_matmul(
     Returns:
         Output of the quantized matmul.
     """
+    skip_scale = False
     if w_scale is not None and w_scale.ndim == 2:
         # If w_scale is 2D, we assume 2d-blockwise quantization and thus we
         # want to de-quantize first before the matmul.
+        skip_scale = True
         out_features, in_features = w_q.shape
         out_blocks, in_blocks = w_scale.shape
         block_size_out = out_features // out_blocks
@@ -95,29 +97,9 @@ def xla_quantized_matmul(
 
         w_q_reshaped = w_q.reshape(out_blocks, block_size_out, in_blocks,
                                    block_size_in)
-        w_q_reshaped = jnp.transpose(w_q_reshaped, (0, 2, 1, 3))
-        w_dequant = w_q_reshaped.astype(
-            jnp.float32) * w_scale[:, :, jnp.newaxis, jnp.newaxis]
-        w_q = w_dequant.transpose(0, 2, 1,
-                                  3).reshape(out_features,
-                                             in_features).astype(x.dtype)
-
-        if quantize_activation:
-            x_q, x_scale = quantize_tensor(x, w_q.dtype)
-            out = jax.lax.dot_general(
-                x_q,
-                w_q,
-                dimension_numbers=(((1, ), (1, )), ((), ())),
-                preferred_element_type=jnp.float32,
-            ).astype(jnp.float32)
-            return (out * x_scale).astype(x.dtype)
-        else:
-            return jax.lax.dot_general(
-                x,
-                w_q,
-                dimension_numbers=(((1, ), (1, )), ((), ())),
-                preferred_element_type=jnp.float32,
-            ).astype(x.dtype)
+        w_q = (w_q_reshaped.astype(jnp.float32) *
+               w_scale[:, jnp.newaxis, :, jnp.newaxis]).reshape(
+                   out_features, in_features).astype(x.dtype)
 
     if quantize_activation:
         acc_dtype = jnp.float32
@@ -139,7 +121,8 @@ def xla_quantized_matmul(
             dimension_numbers=(((1, ), (1, )), ((), ())),
             preferred_element_type=jnp.float32,
         )
-    out *= jnp.expand_dims(w_scale, 0)
+    if not skip_scale:
+        out *= jnp.expand_dims(w_scale, 0)
     return out.astype(x.dtype)
 
 

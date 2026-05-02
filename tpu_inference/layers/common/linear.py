@@ -79,7 +79,7 @@ def sharded_quantized_matmul(x: jax.Array,
             out_axis,
         )
     else:
-        # 2D-Blockwise case where (e.g. from skipped re-quantization)
+        # 2D-Blockwise case (e.g. from skipped re-quantization)
         if len(w_s.shape) == 2:
             scale_sharding = weight_spec
         else:

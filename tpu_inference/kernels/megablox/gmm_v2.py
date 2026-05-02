@@ -411,7 +411,8 @@ def inner_kernel(
                         preferred_element_type=jnp.float32,
                     ).astype(acc_ref.dtype)
 
-                    if not cfgs.rhs_cfgs.should_dequantize_before_matmul:
+                    if (cfgs.rhs_cfgs.has_scale and
+                            not cfgs.rhs_cfgs.should_dequantize_before_matmul):
                         tiled_rhs_scale = tiled_rhs_ref.get_scale()
                         block_acc *= tiled_rhs_scale[b_id, :,
                                                      start_n:end_n].astype(
@@ -486,8 +487,8 @@ def inner_kernel(
                     # not dequantized earlier.
                     if cfgs.rhs_cfgs.has_scale:
                         assert not cfgs.rhs_cfgs.should_dequantize_before_matmul, (
-                            "rhs scale should not be applied if dequantization is done "
-                            "before matmul.")
+                            "If rhs is dequantized before matmul, quantized matmul path "
+                            "should not be taken.")
                         b_id = start_k // cfgs.rhs_cfgs.quant_block_size
                         rhs_scale_slice = tiled_rhs_ref.get_scale()
                         block_acc *= rhs_scale_slice[b_id, :,
