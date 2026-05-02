@@ -986,6 +986,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         with self.maybe_forbid_compile:
 
             if tpu_sampling_metadata.logprobs:
+                # TODO: spec decode not support yet.
                 logits = processed_logits if self.model_config.logprobs_mode == "processed_logprobs" else logits
                 logprobs = self._compute_and_gather_logprobs(
                     logits, next_tokens, self.model_config.max_logprobs)

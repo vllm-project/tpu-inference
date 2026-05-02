@@ -70,6 +70,7 @@ class SpeculativeDecodingManager:
     ) -> None:
         if self.runner.speculative_config.method == "ngram":
             assert isinstance(self.runner.drafter, NgramProposer)
+            # TODO: need to update
             self._draft_token_ids = self.runner.drafter.propose(
                 sampled_token_ids[:self.runner.input_batch.num_reqs],
                 self.runner.input_batch.num_tokens_no_spec,
@@ -100,6 +101,8 @@ class SpeculativeDecodingManager:
         assert isinstance(self.runner.drafter, Eagle3Proposer)
 
         # TODO(woosuk): Refactor the loop.
+        # TODO: need to update the following due to
+        # sampled_token_ids is a jnp.array now
         req_ids = self.runner.input_batch.req_ids
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(sampled_token_ids):
@@ -139,6 +142,7 @@ class SpeculativeDecodingManager:
                 self.runner.mesh, np.array(num_rejected_tokens,
                                            dtype=jnp.int32))
 
+        # Q: can `prepare_inputs` convert` to a jit fn?
         target_hidden_states, input_ids, last_token_indices, attn_metadata = self.runner.drafter.prepare_inputs(
             attn_metadata,
             input_ids,
@@ -165,6 +169,7 @@ class SpeculativeDecodingManager:
         cu_num_scheduled_tokens: np.ndarray,
         padded_num_reqs: int,
         input_ids: np.ndarray,
+        num_speculative_tokens: int,
     ) -> SpecDecodeMetadata:
         # Inputs:
         # cu_num_scheduled_tokens:  [  4, 104, 107, 207, 209]
@@ -195,18 +200,28 @@ class SpeculativeDecodingManager:
 
         # Compute the draft logits indices.
         # arange: [0, 1, 2, 0, 1, 0]
-        arange = np.concatenate(
-            [self.runner.arange_cpu[:n] for n in num_draft_tokens])
-        # [0, 0, 0, 5, 5, 9]
-        target_logits_indices = np.repeat(
-            cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens)
-        # [0, 1, 2, 5, 6, 9]
-        target_logits_indices += arange
+        # [padded_num_reqs, num_speculative_tokens]
+        target_logits_indices = np.pad(
+            cu_num_sampled_tokens - num_sampled_tokens,
+            (0, padded_num_reqs - cu_num_sampled_tokens.shape[0]),
+            constant_values=0)[:, None]
+        target_logits_indices += np.broadcast_to(
+            np.arange(num_speculative_tokens)[None, :],
+            (padded_num_reqs, num_speculative_tokens))
+        # For the positions that outside `num_draft_tokens`, we don't care
+        # about the target logits indices, they won't be used. So it's safe
+        # to do modulo here to avoid out-of-bound error.
+        target_logits_indices = target_logits_indices % logits_indices.shape[0]
 
         # Compute the draft token ids.
         # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
         draft_token_ids = input_ids[logits_indices]
-        draft_token_ids = draft_token_ids[target_logits_indices + 1]
+        # draft_token_ids: [padded_num_reqs, num_speculative_tokens]
+        draft_token_ids = draft_token_ids[(target_logits_indices + 1) %
+                                          logits_indices.shape[0]]
+        padded_draft_token_ids = draft_token_ids
+        padded_target_logits_indices = target_logits_indices
+
         padded_logits_length = runner_utils.get_padded_token_len(
             self.runner.num_logits_paddings, logits_indices.shape[0])
         padded_logits_indices = np.concatenate([
@@ -229,16 +244,6 @@ class SpeculativeDecodingManager:
             np.zeros(padded_num_reqs - num_draft_tokens.shape[0],
                      dtype=np.int32)
         ])
-        padded_draft_token_ids = np.concatenate([
-            draft_token_ids,
-            np.zeros(padded_logits_length - draft_token_ids.shape[0],
-                     dtype=np.int32)
-        ])
-        padded_target_logits_indices = np.concatenate([
-            target_logits_indices,
-            np.zeros(padded_logits_length - target_logits_indices.shape[0],
-                     dtype=np.int32)
-        ])
 
         padded_num_draft_tokens_cpu = padded_num_draft_tokens
         # CPU -> TPU copy.
@@ -251,7 +256,7 @@ class SpeculativeDecodingManager:
               padded_bonus_logits_indices))
 
         metadata = SpecDecodeMetadata(
-            draft_token_ids=padded_draft_token_ids,
+            draft_token_ids=draft_token_ids,
             draft_lengths=padded_num_draft_tokens,
             draft_lengths_cpu=padded_num_draft_tokens_cpu,
             target_logits_indices=padded_target_logits_indices,

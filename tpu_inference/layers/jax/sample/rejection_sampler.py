@@ -46,13 +46,13 @@ class RejectionSampler:
 
     def __call__(
         self,
-        # [num_tokens] - flattened format
+        # [batch_size, max_num_draft_tokens] - padded draft token IDs
         draft_token_ids: jnp.ndarray,
         # [batch_size] - number of draft tokens per request
         num_draft_tokens: jnp.ndarray,
-        # [num_tokens, vocab_size] - flattened format
+        # [batch_size, max_num_draft_tokens, vocab_size] - flattened format
         draft_probs: Optional[jnp.ndarray],
-        # [num_tokens, vocab_size] - flattened format
+        # [batch_size, max_num_draft_tokens, vocab_size] - flattened format
         target_logits: jnp.ndarray,
         # [batch_size]
         bonus_token_ids: jnp.ndarray,
@@ -87,13 +87,13 @@ class RejectionSampler:
     @jax.jit(static_argnums=(0, ))
     def forward(
         self,
-        # [num_tokens] - flattened format
+        # [batch_size, max_num_draft_tokens]
         draft_token_ids: jnp.ndarray,
         # [batch_size] - number of draft tokens per request
         num_draft_tokens: jnp.ndarray,
-        # [num_tokens, vocab_size] - flattened format
+        # [batch_size, max_num_draft_tokens, vocab_size] - flattened format
         draft_probs: Optional[jnp.ndarray],
-        # [num_tokens, vocab_size] - flattened format
+        # [batch_size, max_num_draft_tokens, vocab_size] - flattened format
         target_logits: jnp.ndarray,
         # [batch_size]
         bonus_token_ids: jnp.ndarray,
@@ -104,10 +104,10 @@ class RejectionSampler:
         Perform rejection sampling on draft tokens with flattened inputs.
 
         Args:
-            draft_token_ids: Draft token IDs in flattened format [num_tokens].
+            draft_token_ids: Draft token IDs in flattened format [batch_size, max_num_draft_tokens].
             num_draft_tokens: Number of draft tokens per request [batch_size].
-            draft_probs: Draft probabilities in flattened format [num_tokens, vocab_size].
-            target_logits: Target logits in flattened format [num_tokens, vocab_size].
+            draft_probs: Draft probabilities in flattened format [batch_size, max_num_draft_tokens, vocab_size].
+            target_logits: Target logits in flattened format [batch_size, max_num_draft_tokens, vocab_size].
             bonus_token_ids: Bonus token IDs [batch_size].
             sampling_metadata: Additional metadata needed for sampling.
             key: JAX random key for non-greedy sampling.
@@ -287,13 +287,13 @@ def _sample_recovered_tokens(
 
 
 def rejection_sample(
-    # [num_tokens] - flattened format
+    # [batch_size, max_num_draft_tokens]
     draft_token_ids: jnp.ndarray,
     # [batch_size] - JAX array
     num_draft_tokens: jnp.ndarray,
-    # [num_tokens, vocab_size] - flattened format
+    # [batch_size, max_num_draft_tokens, vocab_size]
     draft_probs: Optional[jnp.ndarray],
-    # [num_tokens, vocab_size] - flattened format
+    # [batch_size, max_num_draft_tokens, vocab_size]
     target_probs: jnp.ndarray,
     # [batch_size]
     bonus_token_ids: jnp.ndarray,
@@ -304,16 +304,17 @@ def rejection_sample(
     Perform rejection sampling on draft tokens with flattened inputs.
 
     Args:
-        draft_token_ids: Draft token IDs in flattened format [num_tokens].
+        draft_token_ids: Draft token IDs in flattened format [batch_size, max_num_draft_tokens].
         num_draft_tokens: Number of draft tokens per request [batch_size].
-        draft_probs: Draft probabilities in flattened format [num_tokens, vocab_size].
-        target_probs: Target probabilities in flattened format [num_tokens, vocab_size].
+        draft_probs: Draft probabilities in flattened format [batch_size, max_num_draft_tokens, vocab_size].
+        target_probs: Target probabilities in flattened format [batch_size, max_num_draft_tokens, vocab_size].
         bonus_token_ids: Bonus token IDs [batch_size].
         sampling_metadata: Sampling metadata.
         key: JAX random key for non-greedy sampling.
 
     Returns:
-        output_token_ids: Output token IDs [num_tokens + batch_size].
+        output_token_ids: Output token IDs [batch_size, max_num_draft_tokens + 1],
+        num_valid_tokens: Number of valid tokens per sequence [batch_size].
     """
     if sampling_metadata.do_sampling is False:
         greedy_output = _greedy_rejection_sample_with_segment(
@@ -325,6 +326,7 @@ def rejection_sample(
         raise ValueError(
             "A random key must be provided for non-greedy sampling.")
 
+    # TODO:
     random_output = _random_rejection_sample_with_segment(
         draft_token_ids,
         draft_probs,
@@ -337,6 +339,7 @@ def rejection_sample(
     return random_output
 
 
+# TODO: change this one.
 def _random_rejection_sample_with_segment(
     draft_token_ids: jax.Array,
     draft_probs: Optional[jax.Array],
@@ -458,74 +461,36 @@ def _greedy_rejection_sample_with_segment(
     """
     # Get target argmax
     target_logits_argmax = jnp.argmax(target_probs, axis=-1)
+    batch_size = draft_token_ids.shape[0]
+    gamma = draft_token_ids.shape[1]
 
-    # --- Step 1: Create Segment IDs and Per-Segment Indices ---
-    total_tokens = draft_token_ids.shape[0]
-    batch_size = num_draft_tokens.shape[0]
-    segment_ids, group_indices = _get_segment_info(num_draft_tokens,
-                                                   total_tokens)
+    matches = (draft_token_ids == target_logits_argmax)
 
-    # --- Step 2: Find the First Mismatch in Each Segment ---
+    accepted_tokens_per_seq = jnp.sum(matches, axis=-1)
+    accepted_tokens_per_seq = jnp.where(num_draft_tokens > 0,
+                                        accepted_tokens_per_seq, 0)
 
-    # Find all mismatches between draft and target tokens.
-    mismatches = draft_token_ids != target_logits_argmax
+    output_tokens = jnp.full(shape=(batch_size, gamma + 1),
+                             fill_value=PLACEHOLDER_TOKEN_ID,
+                             dtype=jnp.int32)
+    output_tokens[:, :gamma] = jnp.where(
+        jnp.logical_and(
+            num_draft_tokens[:, None] > 0,
+            jax.lax.broadcasted_iota(jnp.int32, (batch_size, gamma),
+                                     dimension=1)
+            <= accepted_tokens_per_seq[:, None]), target_logits_argmax,
+        PLACEHOLDER_TOKEN_ID)
 
-    # To find the *first* mismatch, we use a trick with segment_min.
-    # We create an array where mismatched positions hold their `group_index`
-    # and matched positions hold a large value.
-    large_value = total_tokens
-    mismatch_indices = jnp.where(mismatches, group_indices, large_value)
-
-    # `segment_min` finds the minimum `mismatch_index` for each segment. This
-    # effectively gives us the `group_index` of the first mismatch.
-    # For sequences with no mismatches, the result will be `large_value`.
-    first_mismatch_idx_per_segment = jax.ops.segment_min(
-        data=mismatch_indices.astype(jnp.int32),
-        segment_ids=segment_ids,
-        num_segments=batch_size,
-        indices_are_sorted=True,
-    )
-
-    # Handle empty segments (where num_draft_tokens is 0). `segment_min` returns
-    # the dtype's max value for empty segments; we replace it with our large_value
-    # for consistency.
-    max_int = jnp.iinfo(jnp.int32).max
-    first_mismatch_idx_per_segment = jnp.where(
-        first_mismatch_idx_per_segment == max_int, large_value,
-        first_mismatch_idx_per_segment)
-
-    # --- Step 3: Broadcast Mismatch Info and Generate Main Token Output ---
-
-    # Broadcast the first mismatch index back to the original token dimension.
-    first_mismatch_idx_broadcast = jnp.repeat(first_mismatch_idx_per_segment,
-                                              num_draft_tokens,
-                                              total_repeat_length=total_tokens)
-
-    # The final logic for main tokens:
-    # A token is valid if its `group_index` is less than or equal to the
-    # index of the first mismatch in its segment.
-    # - If `group_index < first_mismatch_idx`, the draft was correct.
-    # - If `group_index == first_mismatch_idx`, this is the correction token.
-    # - If `group_index > first_mismatch_idx`, the token is invalid (-1).
-    main_tokens = jnp.where(group_indices <= first_mismatch_idx_broadcast,
-                            target_logits_argmax, PLACEHOLDER_TOKEN_ID)
-
-    # --- Step 4: Handle Bonus Tokens ---
-
-    # A sequence gets its bonus token if there were no mismatches
-    # (first_mismatch_idx_per_segment == large_value)
-    all_accepted = first_mismatch_idx_per_segment == large_value
-
+    all_accepted = (accepted_tokens_per_seq == gamma)
     # For sequences with no draft tokens, we should still give them the bonus token
     # since there's nothing to reject
     no_draft_tokens = num_draft_tokens == 0
     should_get_bonus = all_accepted | no_draft_tokens
-
     bonus_tokens = jnp.where(should_get_bonus, bonus_token_ids,
                              PLACEHOLDER_TOKEN_ID)
 
-    # --- Step 5: Concatenate Main Tokens and Bonus Tokens ---
+    output_tokens[jnp.arange(batch_size),
+                  jnp.where(num_draft_tokens > 0, gamma, 0)] = bonus_tokens
 
-    output = jnp.concatenate([main_tokens, bonus_tokens])
-
-    return output
+    # TODO: want to return accepted_tokens_per_seq?
+    return output_tokens

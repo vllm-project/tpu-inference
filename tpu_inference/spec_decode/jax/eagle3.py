@@ -289,7 +289,7 @@ class Eagle3Proposer:
 
         # query_start_loc_cpu and consequentaly query_len_per_req are padded
         # For padded requests, the query length should be 0.
-        query_len_per_req[num_reqs:] = 1
+        query_len_per_req[num_reqs:] = 1  # TODO: should this be 0?
         # num_tokens_per_req = [q1 - n1, q2 - n2, ...]
         num_tokens_per_req = (query_len_per_req - nrt_cpu)
         assert (num_tokens_per_req
@@ -424,6 +424,34 @@ class Eagle3Proposer:
         last_token_indices,
         target_hidden_states,
     ) -> tuple[list[jax.Array], jnp.ndarray]:
+        return self._propose(
+            state=self.state,
+            kv_caches=kv_caches,
+            input_ids=input_ids,
+            attn_metadata=attn_metadata,
+            last_token_indices=last_token_indices,
+            target_hidden_states=target_hidden_states,
+            num_speculative_tokens=self.num_speculative_tokens,
+            layer_name_to_kvcache_index=tuple(
+                self.runner.layer_name_to_kvcache_index.items()),
+        )
+
+    @jax.jit(static_argnums=(
+        0,
+        7,
+        8,
+    ))
+    def _propose(
+        self,
+        state: nnx.State,
+        kv_caches: list[jax.Array],
+        input_ids: jax.Array,
+        attn_metadata: AttentionMetadata,
+        last_token_indices,
+        target_hidden_states,
+        num_speculative_tokens: int,
+        layer_name_to_kvcache_index: tuple,
+    ) -> tuple[list[jax.Array], jnp.ndarray]:
         """Proposes draft tokens using the draft model.
         Returns:
             A tuple containing the updated KV caches and a tensor of proposed
@@ -432,25 +460,25 @@ class Eagle3Proposer:
 
         # input_ids and target_hidden_states for the first speculation have been prepared in prepare_inputs() to improve performance.
         kv_caches, hidden_states, residual = self.model_fn(
-            self.state,
+            state,
             kv_caches,
             input_ids,
             target_hidden_states,
             attn_metadata,
-            tuple(self.runner.layer_name_to_kvcache_index.items()),
+            layer_name_to_kvcache_index,
         )
 
-        if self.num_speculative_tokens == 1:
+        if num_speculative_tokens == 1:
             return kv_caches, self._select_draft_token_ids(
-                self.state, hidden_states, last_token_indices)
+                state, hidden_states, last_token_indices)
 
         positions, hidden_states, draft_token_ids = self._select_inputs_for_loop_speculation(
-            self.state, attn_metadata.input_positions, residual[0],
-            hidden_states, last_token_indices)
+            state, attn_metadata.input_positions, residual[0], hidden_states,
+            last_token_indices)
 
         draft_token_ids_list = [draft_token_ids]
 
-        for _ in range(self.num_speculative_tokens - 1):
+        for _ in range(num_speculative_tokens - 1):
             input_ids_loop = draft_token_ids_list[-1]
 
             positions, clamped_positions, new_seq_lens, query_start_loc, new_block_tables = self._update_inputs_for_loop_speculation(
@@ -464,16 +492,16 @@ class Eagle3Proposer:
                 block_tables=new_block_tables,
             )
             kv_caches, new_hidden_states, residual = self.model_fn(
-                self.state,
+                state,
                 kv_caches,
                 input_ids_loop,
                 hidden_states,  # This should be the hidden_states from previous step
                 attn_metadata,
-                tuple(self.runner.layer_name_to_kvcache_index.items()),
+                layer_name_to_kvcache_index,
             )
             hidden_states = residual[0]
             draft_token_ids = self._get_draft_token_ids(
-                self.state, new_hidden_states)
+                state, new_hidden_states)
             draft_token_ids_list.append(draft_token_ids)
 
         # [batch_size, num_speculative_tokens]
