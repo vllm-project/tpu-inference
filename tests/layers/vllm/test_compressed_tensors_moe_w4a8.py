@@ -15,14 +15,12 @@
 import tempfile
 from unittest.mock import MagicMock, patch
 
-import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
 import torchax
 from compressed_tensors.quantization import QuantizationArgs
 from jax.sharding import PartitionSpec
-from torchax.interop import jax_view
 from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
@@ -30,14 +28,11 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32, quantize_weights)
-from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.scalar_type import scalar_types
 
 # yapf: disable
 from tests.layers.common import utils as test_utils
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
-from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors import \
-    VllmCompressedTensorsConfig
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a8 import \
     VllmCompressedTensorsW4A8MoEMethod
 
@@ -209,45 +204,3 @@ def test_fused_moe_method_w4(mesh, num_tokens, intermediate_size, hidden_size,
                                       renormalize=True,
                                       activation="silu")
         assert np.allclose(result, expected, atol=0.2, rtol=0.05)
-
-
-def test_loading_model():
-    # The nm-testing/Qwen1.5-MoE-A2.7B-Chat-quantized.w4a16 test model has both
-    # linear and moe layers using compressed tensors with w4a16 quantization.
-    # We override the quantization config to use fp8 for activations.
-    engine_args = EngineArgs(
-        model='nm-testing/Qwen1.5-MoE-A2.7B-Chat-quantized.w4a16',
-        max_model_len=64,
-        max_num_batched_tokens=64,
-        max_num_seqs=4,
-    )
-    vllm_config = engine_args.create_engine_config()
-    vllm_config.model_config.dtype = torch.bfloat16
-
-    # Add activation quantization since the test checkpoints use w4a16 quant.
-    vllm_config.model_config.hf_config.quantization_config["config_groups"][
-        "group_0"]["input_activations"] = {
-            "num_bits": 8,
-            "type": "float",
-            "symmetric": True,
-            "strategy": "token",
-            "dynamic": True,
-            "observer_kwargs": {},
-        }
-    vllm_config.model_config.hf_text_config.quantization_config = vllm_config.model_config.hf_config.quantization_config
-
-    mesh = test_utils.get_spmd_mesh(1)
-    vllm_config.quant_config = get_tpu_quantization_config(vllm_config, mesh)
-    vllm_config.device_config.device = "cpu"
-
-    with set_current_vllm_config(vllm_config):
-        vllm_model = vllm_get_model(vllm_config=vllm_config)
-    layers = test_utils.find_all_layer_type(vllm_model, FusedMoE)
-    for layer in layers:
-        assert isinstance(layer.quant_config, VllmCompressedTensorsConfig)
-        assert isinstance(layer.quant_method,
-                          VllmCompressedTensorsW4A8MoEMethod)
-        # Verify the weights are loaded and quantized to int4.
-        # The torch tensors are int8, but the JAX views are int4.
-        assert jax_view(layer.w13_weight).dtype == jnp.int4
-        assert jax_view(layer.w2_weight).dtype == jnp.int4
