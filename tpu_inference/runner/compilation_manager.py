@@ -65,7 +65,13 @@ class CompilationManager:
                              sharding: Optional[NamedSharding] = None) -> Any:
         """Helper to create dummy tensors for precompilation."""
         if len(shape) > 1:
-            tp_size = self.runner.mesh.shape.get(ShardingAxisName.MODEL, 1)
+            # Use parallel_config as the primary source of truth during initialization
+            # to avoid AttributeError when self.runner.mesh is not yet assigned (common in unit tests).
+            tp_size = 1
+            if self.runner.vllm_config.parallel_config is not None:
+                tp_size = self.runner.vllm_config.parallel_config.tensor_parallel_size
+            elif hasattr(self.runner, 'mesh') and self.runner.mesh is not None:
+                tp_size = self.runner.mesh.shape.get(ShardingAxisName.MODEL, 1)
             assert shape[
                 1] % tp_size == 0, f"Dimension size {shape[1]} is not divisible by TP size {tp_size} for shape {shape}"
 

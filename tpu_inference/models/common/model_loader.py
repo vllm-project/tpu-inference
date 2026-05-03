@@ -11,9 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import functools
-from typing import Any
+from typing import Any, Optional
 
 import jax
 import numpy as np
@@ -112,8 +111,20 @@ def _get_nnx_model(
     vllm_config: VllmConfig,
     rng: jax.Array,
     mesh: Mesh,
-    pooler: Any | None = None,
+    pooler: Optional[Any] = None,
 ) -> nnx.Module:
+    """Instantiate the nnx JAX model and optionally pass the embedding/pooling layer.
+
+    Args:
+        model_class: The class of the model.
+        vllm_config: The current vLLM config.
+        rng: Array specifying random keys.
+        mesh: JAX device mesh for sharding.
+        pooler: The optional pooler for handling embedding path.
+
+    Returns:
+        nnx.Module: The instantiated JAX module.
+    """
 
     def create_abstract_model() -> nnx.Module:
         """
@@ -430,7 +441,7 @@ def get_flax_model(
             hidden_states: jax.Array,
             pooling_metadata: PoolingMetadata,
             seq_lens: np.ndarray,
-            num_scheduled_tokens: np.ndarray | None = None,
+            num_scheduled_tokens: Optional[np.ndarray] = None,
         ):
             # Performance optimization: use torch_view and move to CPU non-blocking
             torch_states = torch_view(hidden_states)
@@ -463,7 +474,7 @@ def get_flax_model(
         multimodal_fns=multimodal_fns,
         state=state,
         lora_manager=lora_manager,
-        model=model,
+        model=jit_model,
     )
 
 
@@ -698,8 +709,8 @@ def register_model(arch: str, model: Any) -> None:
         self,
         input_ids: "torch.Tensor",
         positions: "torch.Tensor",
-        intermediate_tensors: Any | None = None,
-        inputs_embeds: "torch.Tensor" | None = None,
+        intermediate_tensors: Optional[Any] = None,
+        inputs_embeds: Optional["torch.Tensor"] = None,
     ) -> None:
         raise NotImplementedError(
             "This is a JAX model and does not implement the PyTorch forward method."
@@ -710,7 +721,7 @@ def register_model(arch: str, model: Any) -> None:
         self,
         input_ids: "torch.Tensor",
         positions: "torch.Tensor",
-        inputs_embeds: "torch.Tensor" | None = None,
+        inputs_embeds: Optional["torch.Tensor"] = None,
     ) -> "torch.Tensor":
         raise NotImplementedError(
             "This is a JAX model and does not implement the PyTorch embed_input_ids method."

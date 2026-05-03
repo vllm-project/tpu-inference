@@ -383,7 +383,9 @@ class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
         return kv_caches, x, [], None
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        if hasattr(self, 'lm_head'):
+        # Only use lm_head if it's a real projection layer (not a PPMissingLayer placeholder)
+        if hasattr(self,
+                   'lm_head') and not isinstance(self.lm_head, PPMissingLayer):
             return self.lm_head(hidden_states)
 
         assert isinstance(self.model.embed_tokens, JaxEmbed)

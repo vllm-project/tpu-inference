@@ -128,6 +128,14 @@ class TestJaxAutoWeightsLoader:
                 self.model = MagicMock()  # Simulate having 'model' attribute
 
         model = MockModel()
+
+        def mock_named_children():
+            yield "model", model.model
+            yield "lm_head", MagicMock()
+            yield "visual", MagicMock()
+
+        model.named_children = mock_named_children
+
         loader = JaxAutoWeightsLoader(model)
 
         weights = [
@@ -235,3 +243,53 @@ class TestJaxAutoWeightsLoader:
             assert "pooler.weight" not in received_keys
             assert "model.pooler.bias" not in received_keys
             assert "embed_tokens.weight" in received_keys
+
+    def test_dynamic_weight_mapping(self):
+        """Test that weights are mapped dynamically based on root children."""
+        from unittest.mock import MagicMock, patch
+
+        from tpu_inference.models.jax.utils.weight_utils import \
+            JaxAutoWeightsLoader
+
+        class MockModel(JaxModule):
+
+            def __init__(self):
+                super().__init__()
+                self.model = MagicMock()
+                self.custom_head = MagicMock()
+
+        model = MockModel()
+        loader = JaxAutoWeightsLoader(model)
+
+        weights = [
+            ("custom_head.weight", torch.zeros((2, 2))),
+            ("layers.0.weight", torch.zeros((2, 2))),
+            ("model.layers.1.weight", torch.zeros((2, 2))),
+        ]
+
+        with patch(
+                'tpu_inference.models.jax.utils.weight_utils.AutoWeightsLoader._load_module'
+        ) as mock_super_load:
+            mock_super_load.return_value = iter([])
+
+            # We need to mock named_children to return the expected names
+            def mock_named_children():
+                yield "model", model.model
+                yield "custom_head", model.custom_head
+
+            model.named_children = mock_named_children
+
+            list(loader._load_module("", model, weights))
+
+            assert mock_super_load.called
+            args, kwargs = mock_super_load.call_args
+            modified_weights = list(args[2])
+
+            expected_keys = [
+                "custom_head.weight",  # Path A: root child, as-is
+                "model.layers.0.weight",  # Path B: not root child, root has 'model', prepended
+                "model.layers.1.weight",  # Path A: root child ('model'), as-is
+            ]
+
+            received_keys = [name for name, _ in modified_weights]
+            assert received_keys == expected_keys

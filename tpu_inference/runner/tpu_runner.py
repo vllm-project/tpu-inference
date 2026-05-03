@@ -492,12 +492,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # padded max value to pre-allocate data structures and pre-compile.
         self.max_num_tokens = self.num_tokens_paddings[-1]
 
-        # Request states.
         self.requests: dict[str, CachedRequestState] = {}
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, jax.Array] = {}
 
-        tp_size = self.mesh.shape.get(ShardingAxisName.MODEL, 1)
+        # Use parallel_config as the primary source of truth during initialization
+        # to avoid AttributeError when self.mesh is not yet assigned (common in unit tests).
+        tp_size = 1
+        if self.vllm_config.parallel_config is not None:
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        elif hasattr(self, 'mesh') and self.mesh is not None:
+            tp_size = self.mesh.shape.get(ShardingAxisName.MODEL, 1)
 
         self.vocab_size = common_utils.align_to(model_config.get_vocab_size(),
                                                 tp_size)

@@ -13,10 +13,10 @@
 # limitations under the License.
 
 import pytest
-from vllm import LLM
 
 
 def test_step_pooling_e2e():
+    from vllm import LLM
     model_name = "Qwen/Qwen3-Embedding-8B"
 
     # CI-optimized small-scale chunking configuration

@@ -278,6 +278,9 @@ def test_get_flax_model(vllm_config, mesh, tie_word_embeddings):
     assert callable(model.model_fn)
     assert callable(model.compute_logits_fn)
 
+    # Verify that JAX model instance possesses the named_modules attribute
+    assert hasattr(model.model, "named_modules")
+
 
 def test_get_flax_model_with_pooling(vllm_config, mesh, rng):
     """Tests that get_flax_model correctly instantiates a pooler when runner_type is 'pooling'."""

@@ -583,10 +583,12 @@ class VllmModelWrapper:
             hidden_states: jax.Array,
             pooling_metadata: PoolingMetadata,
             seq_lens: np.ndarray,
-            num_scheduled_tokens: Optional[np.ndarray] = None,
+            num_scheduled_tokens: np.ndarray | None = None,
         ) -> PoolerOutput:
             assert self._pooler is not None, "Model does not support pooling"
 
+            # Fallback assignment: for pooling-only models running outside chunked prefill pipelines,
+            # we ensure the pooler receives the complete set of hidden states by using seq_lens.
             if num_scheduled_tokens is None:
                 num_scheduled_tokens = seq_lens
 
