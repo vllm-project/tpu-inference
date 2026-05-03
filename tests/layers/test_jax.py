@@ -82,6 +82,57 @@ class TestJaxModule(unittest.TestCase):
                 "nested_module_b", "layers"
             })
 
+    def test_named_modules_yields_self_first(self):
+        """Top-level module is yielded with empty prefix before any children."""
+
+        module = NestedModule()
+        names = [name for name, _ in module.named_modules()]
+        self.assertEqual(names[0], "")
+        self.assertIn("inner", names)
+
+    def test_named_modules_in_nested_module(self):
+        """Walks self + descendants, including JaxModuleList and its items."""
+
+        class Depth3Module(JaxModule):
+
+            def __init__(self):
+                super().__init__()
+                self.my_module = MyModule()
+                self.nested_module = NestedModule()
+                self.layers = nnx.List([MyModule() for _ in range(3)])
+
+        module = Depth3Module()
+        names = set(name for name, _ in module.named_modules())
+        self.assertEqual(
+            names,
+            {
+                "",  # self
+                "my_module",
+                "nested_module",
+                "nested_module.inner",
+                "layers",  # JaxModuleList itself
+                "layers.0",
+                "layers.1",
+                "layers.2",
+            })
+
+    def test_named_modules_dedups_shared_submodule(self):
+        """Shared submodules are yielded only once (matches torch semantics)."""
+
+        shared = MyModule()
+
+        class SharedRefModule(JaxModule):
+
+            def __init__(self):
+                super().__init__()
+                self.a = shared
+                self.b = shared
+
+        module = SharedRefModule()
+        names = [name for name, _ in module.named_modules()]
+        # 'a' and 'b' point to the same module; only the first is yielded.
+        self.assertEqual(names.count("a") + names.count("b"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
