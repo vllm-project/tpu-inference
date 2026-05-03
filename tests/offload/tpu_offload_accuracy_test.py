@@ -76,7 +76,6 @@ def _test_kv_cache_cpu_offloading_accuracy(
                   max_model_len=8192,
                   async_scheduling=True,
                   tensor_parallel_size=8,
-                  model_loader_extra_config={"enable_weights_track": False},
                   kv_transfer_config=kv_transfer_config)
 
         # 1st generate
