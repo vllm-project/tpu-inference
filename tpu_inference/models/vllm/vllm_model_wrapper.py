@@ -370,12 +370,6 @@ class VllmModelWrapper:
                 None,  # list of aux hidden states
                 None,  # expert ids
             ),
-            compiler_options={
-                "xla_tpu_all_gather_collective_matmul_mode":
-                "post_spmd_conservative",
-                "xla_tpu_reduce_scatter_collective_matmul_mode":
-                "post_spmd_conservative"
-            },
             static_argnames=("layer_name_to_kvcache_index", ),
         )
         def draft_step_fun(
