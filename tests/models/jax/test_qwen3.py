@@ -183,7 +183,10 @@ class TestQwen3ForCausalLM:
 
         # Test model load
         with jax.set_mesh(mesh), set_current_vllm_config(mock_vllm_config):
-            loader = get_model_loader(LoadConfig(load_format="hf"))
+            loader = get_model_loader(
+                LoadConfig(
+                    load_format="hf",
+                    model_loader_extra_config={"enable_weights_track": False}))
             loader.load_weights(model, model_config)
 
         # Apply qwix quantization, no-op if rules are not given.
@@ -206,7 +209,7 @@ class TestQwen3ForCausalLM:
             jnp.bfloat16)
         # 1 seq with 16 tokens
         input_ids, attention_metadata, indices_do_sample = mock_model_inputs
-        kv_caches, hidden_states, aux_hidden_states = model(
+        kv_caches, hidden_states, aux_hidden_states, _ = model(
             kv_caches, input_ids, attention_metadata)
         assert hidden_states.shape == (8, hidden_size)
         assert len(aux_hidden_states) == 0

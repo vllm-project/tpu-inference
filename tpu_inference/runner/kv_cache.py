@@ -55,8 +55,8 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
                                  use_mla: bool = False):
     """Gets the KV cache shape based on the mesh configuration."""
 
-    axis_name = ShardingAxisName.ATTN_HEAD
-    model_cnt = utils.get_mesh_shape_product(mesh, axis_name)
+    model_cnt = utils.get_mesh_shape_product(mesh,
+                                             ShardingAxisName.KV_CACHE_HEAD)
 
     # NOTE(chengjiyao): Currently, the attention kernel is tailored to the
     # specific model, rather than being determined by the head_dim. If new
@@ -120,14 +120,18 @@ def create_kv_caches(
                                                num_kv_heads, head_size,
                                                cache_dtype, use_mla)
 
+    # num_blocks --> shard by data batch
+    # block_size --> shard by context
+    # head       --> shard by heads
     if use_mla:
-        sharding = NamedSharding(mesh,
-                                 PartitionSpec(ShardingAxisName.MLP_TENSOR))
+        sharding = NamedSharding(
+            mesh,
+            PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.CONTEXT))
     else:
         sharding = NamedSharding(
             mesh,
-            PartitionSpec(ShardingAxisName.ATTN_DATA, None,
-                          ShardingAxisName.ATTN_HEAD))
+            PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.CONTEXT,
+                          ShardingAxisName.KV_CACHE_HEAD))
 
     def _allocate() -> jax.Array:
         return jnp.empty(

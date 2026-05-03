@@ -49,12 +49,12 @@ class HostScale(str, Enum):
 # Maps host scale to Buildkite settings with shell defaults
 HOST_SCALE_TO_SETTINGS = {
     HostScale.SINGLE.value: {
-        "queue": "${{TPU_QUEUE_SINGLE:-tpu_v6e_queue}}",
-        "tp_size": "${{TENSOR_PARALLEL_SIZE_SINGLE:-1}}",
+        "queue": "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}",
+        "tp_size": "${TENSOR_PARALLEL_SIZE_SINGLE:-1}",
     },
     HostScale.MULTI.value: {
-        "queue": "${{TPU_QUEUE_MULTI:-tpu_v6e_8_queue}}",
-        "tp_size": "${{TENSOR_PARALLEL_SIZE_MULTI:-8}}",
+        "queue": "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}",
+        "tp_size": "${TENSOR_PARALLEL_SIZE_MULTI:-8}",
     },
 }
 

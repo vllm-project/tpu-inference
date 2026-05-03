@@ -101,11 +101,13 @@ def _test_correctness_helper(
     with monkeypatch.context():
         test_prompts = get_test_prompts(speculative_config)
 
-        ref_llm = LLM(model=model_name,
-                      max_model_len=1024,
-                      max_num_seqs=4,
-                      tensor_parallel_size=_get_tensor_parallel_size(),
-                      async_scheduling=0)
+        ref_llm = LLM(
+            model=model_name,
+            max_model_len=1024,
+            max_num_seqs=4,
+            tensor_parallel_size=_get_tensor_parallel_size(),
+            model_loader_extra_config={"enable_weights_track": False},
+            async_scheduling=0)
         ref_outputs = ref_llm.generate(test_prompts, sampling_config)
 
         del ref_llm
@@ -113,12 +115,14 @@ def _test_correctness_helper(
         # Waiting for TPUs to be released.
         time.sleep(10)
 
-        spec_llm = LLM(model=model_name,
-                       speculative_config=speculative_config,
-                       max_model_len=1024,
-                       max_num_seqs=4,
-                       tensor_parallel_size=_get_tensor_parallel_size(),
-                       async_scheduling=0)
+        spec_llm = LLM(
+            model=model_name,
+            speculative_config=speculative_config,
+            max_model_len=1024,
+            max_num_seqs=4,
+            tensor_parallel_size=_get_tensor_parallel_size(),
+            model_loader_extra_config={"enable_weights_track": False},
+            async_scheduling=0)
         spec_outputs = spec_llm.generate(test_prompts, sampling_config)
 
         matches = 0
@@ -196,12 +200,14 @@ def _test_performance_helper(
         test_prompts = get_test_prompts(speculative_config)
 
         # Test reference LLM timing
-        ref_llm = LLM(model=model_name,
-                      max_model_len=1024,
-                      max_num_seqs=1,
-                      enable_prefix_caching=False,
-                      tensor_parallel_size=_get_tensor_parallel_size(),
-                      async_scheduling=0)
+        ref_llm = LLM(
+            model=model_name,
+            max_model_len=1024,
+            max_num_seqs=1,
+            enable_prefix_caching=False,
+            tensor_parallel_size=_get_tensor_parallel_size(),
+            model_loader_extra_config={"enable_weights_track": False},
+            async_scheduling=0)
 
         start_time = time.time()
         _ = ref_llm.generate(test_prompts, sampling_config)
@@ -213,13 +219,15 @@ def _test_performance_helper(
         time.sleep(30)
 
         # Test speculative LLM timing with max_num_seqs=1
-        spec_llm = LLM(model=model_name,
-                       speculative_config=speculative_config,
-                       max_model_len=1024,
-                       max_num_seqs=1,
-                       tensor_parallel_size=_get_tensor_parallel_size(),
-                       enable_prefix_caching=False,
-                       async_scheduling=0)
+        spec_llm = LLM(
+            model=model_name,
+            speculative_config=speculative_config,
+            max_model_len=1024,
+            max_num_seqs=1,
+            tensor_parallel_size=_get_tensor_parallel_size(),
+            enable_prefix_caching=False,
+            model_loader_extra_config={"enable_weights_track": False},
+            async_scheduling=0)
 
         start_time = time.time()
         _ = spec_llm.generate(test_prompts, sampling_config)
@@ -288,6 +296,12 @@ def test_eagle3_correctness(
     '''
     model_name = 'meta-llama/Meta-Llama-3-8B-Instruct'
 
+    model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
+    if model_impl == "auto":
+        model_impl = "flax_nnx"
+    monkeypatch.setenv("MODEL_IMPL_TYPE", model_impl)
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
+
     _test_correctness_helper(
         monkeypatch, sampling_config, model_name, {
             'model': "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
@@ -306,6 +320,12 @@ def test_eagle3_performance(
     Compares timing between reference LLM and speculative LLM using Llama 3 8B.
     Expects spec_llm to be at least 1.8 faster than ref_llm.
     '''
+    model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
+    if model_impl == "auto":
+        model_impl = "flax_nnx"
+    monkeypatch.setenv("MODEL_IMPL_TYPE", model_impl)
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
+
     _test_performance_helper(
         monkeypatch, sampling_config, {
             "method": "eagle3",

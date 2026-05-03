@@ -95,7 +95,10 @@ class TestJaxAutoWeightsLoader:
                 model_config.revision = None
 
                 loader = get_model_loader(
-                    LoadConfig(load_format="safetensors"))
+                    LoadConfig(load_format="safetensors",
+                               model_loader_extra_config={
+                                   "enable_weights_track": False
+                               }))
                 loader.load_weights(jax_model, model_config)
 
         np.testing.assert_allclose(torch_model.w1.weight.T.detach().numpy(),

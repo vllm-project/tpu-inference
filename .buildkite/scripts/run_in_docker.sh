@@ -50,6 +50,13 @@ ENV_VARS=(
   -e MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
   -e MAX_NUM_SEQS="${MAX_NUM_SEQS:-}"
   -e MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
+  # For kernel tuning pipeline env vars
+  -e KERNEL_TUNING_CASE_SET_ID="${KERNEL_TUNING_CASE_SET_ID:-}"
+  -e KERNEL_TUNING_RUN_ID="${KERNEL_TUNING_RUN_ID:-}"
+  -e KERNEL_TUNING_KERNEL_NAME="${KERNEL_TUNING_KERNEL_NAME:-}"
+  -e KERNEL_TUNING_CASE_SET_DESC="${KERNEL_TUNING_CASE_SET_DESC:-}"
+  -e KERNEL_TUNING_TPU_VERSION="${KERNEL_TUNING_TPU_VERSION:-}"
+  -e HOST_NAME="${HOST_NAME:-}"
 )
 
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
@@ -87,6 +94,10 @@ else
   exit 1
 fi
 
+# Temporary directory for kernel tuning outputs (not persisted)
+KERNEL_TUNING_TMP_DIR="/tmp/kernel_tuning"
+mkdir -p "$KERNEL_TUNING_TMP_DIR"
+
 # Some test scripts set tp=2 on TPU_VERSION=tpu7x to mitigate test failures.
 # TODO (Qiliang Cui) Investigate why tensor-parallel-size=1 breaks in tpu7x.
 
@@ -96,6 +107,7 @@ exec docker run \
   --shm-size=16G \
   --rm \
   -v "$LOCAL_HF_HOME":"$DOCKER_HF_HOME" \
+  -v "$KERNEL_TUNING_TMP_DIR":"$KERNEL_TUNING_TMP_DIR" \
   "${ENV_VARS[@]}" \
   "${TEST_SUITE_VARS[@]}" \
   -e HF_HOME="$DOCKER_HF_HOME" \
@@ -109,6 +121,9 @@ exec docker run \
   ${TPU_VERSION:+-e TPU_VERSION="$TPU_VERSION"} \
   ${SKIP_ACCURACY_TESTS:+-e SKIP_ACCURACY_TESTS="$SKIP_ACCURACY_TESTS"} \
   ${VLLM_MLA_DISABLE:+-e VLLM_MLA_DISABLE="$VLLM_MLA_DISABLE"} \
-  "${BENCHMARK_DOCKER_ARGS[@]}" \
+  ${USE_V7X8_QUEUE:+-e USE_V7X8_QUEUE="$USE_V7X8_QUEUE"} \
+  ${MOE_REQUANTIZE_BLOCK_SIZE:+-e MOE_REQUANTIZE_BLOCK_SIZE="$MOE_REQUANTIZE_BLOCK_SIZE"} \
+  ${MOE_REQUANTIZE_WEIGHT_DTYPE:+-e MOE_REQUANTIZE_WEIGHT_DTYPE="$MOE_REQUANTIZE_WEIGHT_DTYPE"} \
+   "${BENCHMARK_DOCKER_ARGS[@]}" \
   "$FULL_IMAGE_TAG" \
   "$@" # Pass all script arguments as the command to run in the container

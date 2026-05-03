@@ -23,7 +23,7 @@ from jax.sharding import PartitionSpec as P
 
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, UnfusedMoEWeights)
+    FusedMoEWeights, UnfusedMoEWeights, shard_moe_weights)
 from tpu_inference.layers.common.quantization import unquantized as jax_common
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.jax import JaxModule
@@ -139,9 +139,13 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
                 w2_bias=None,
             )
 
-            # TODO (jacobplatin): we probably want to make the sharding configurable
-            layer.kernel_gating_upproj_EDF = nnx.Param(weights.w13_weight)
-            layer.kernel_down_proj_EFD = nnx.Param(weights.w2_weight)
+            sharded_weights = shard_moe_weights(weights,
+                                                moe_backend=layer.moe_backend,
+                                                mesh=jax.sharding.get_mesh())
+
+            layer.kernel_gating_upproj_EDF = nnx.Param(
+                sharded_weights.w13_weight)
+            layer.kernel_down_proj_EFD = nnx.Param(sharded_weights.w2_weight)
 
             del weights
             del w13_val

@@ -134,6 +134,24 @@ class InputBatch:
 
         self.request_distribution: list[int] = [0, 0, 0]
 
+        # Per-request physical slot id in the mamba kv-cache. Each request
+        # gets a unique slot at `add_request` and keeps it for its lifetime
+        # (slot ids follow the request through `condense` and `swap_states`,
+        # see those methods below). Real slots are [1, max_num_reqs]; slot 0
+        # is reserved as the null block. Why we track slot ids separately
+        # from the persistent-batch position `req_idx`: `condense`
+        # (https://github.com/vllm-project/vllm/blob/de3da0b/vllm/v1/worker/gpu_input_batch.py#L662)
+        # moves requests into lower `req_idx` slots when earlier requests
+        # finish, but the mamba recurrent state stays at its allocated
+        # physical slot. Indexing the cache by the moving `req_idx` would
+        # read stale state; indexing by `mamba_state_indices_cpu[req_idx]`
+        # reads the slot that actually holds this request's state.
+        # Pool size matches `_maybe_set_compact_mamba_num_blocks_override`'s
+        # cap of `max_num_reqs + 1`.
+        self.mamba_state_indices_cpu = np.zeros(max_num_reqs, dtype=np.int32)
+        self._free_mamba_slots: list[int] = list(range(
+            max_num_reqs, 0, -1))  # pop from end → low slots first
+
         # for pooling models
         self.pooling_params: dict[str, PoolingParams] = {}
         self.pooling_states: dict[str, PoolingStates] = {}
@@ -204,6 +222,10 @@ class InputBatch:
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
         self.block_table.add_row(request.block_ids, req_index)
+        # Allocate a fresh mamba state slot for this request. The slot stays
+        # with the request through the persistent batch's lifetime, even when
+        # condense moves the request to a different `req_index`.
+        self.mamba_state_indices_cpu[req_index] = self._free_mamba_slots.pop()
 
         # NOTE(woosuk): self.generators should not include the requests that
         # do not have their own generator.
@@ -283,6 +305,26 @@ class InputBatch:
             return None
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
+        # Return the mamba state slot back to the free pool. The slot's
+        # contents in the kv cache are stale and will be zeroed by the
+        # has_initial_state guard when the next request takes this slot id.
+        self._free_mamba_slots.append(
+            int(self.mamba_state_indices_cpu[req_index]))
+        # Clear this position to slot 0 (the null block) so the trailing
+        # tail of `mamba_state_indices_cpu` (which the GDN op reads over
+        # its full length every step) cannot alias an active slot.
+        # Concrete trace with max_num_reqs=4:
+        #
+        #   start (4 active):           [1, 2, 3, 4]  num_reqs=4
+        #   remove pos 0,1 (stale):     [1, 2, 3, 4]  num_reqs=2
+        #   condense w/o source clear:  [3, 4, 3, 4]  ← tail aliases active
+        #   condense w/  source clear:  [3, 4, 0, 0]  ← tail is null
+        #
+        # In the aliased case `recurrent_state.at[slots].set(...)` writes
+        # twice to slot 3 in the same scatter — undefined on XLA, silent
+        # state corruption. See
+        # `test_mamba_state_indices_no_duplicate_in_padded_tail`.
+        self.mamba_state_indices_cpu[req_index] = 0
 
         self.greedy_reqs.discard(req_id)
         self.random_reqs.discard(req_id)
@@ -357,6 +399,11 @@ class InputBatch:
                 self.allowed_token_ids_mask_cpu[i2], \
                     self.allowed_token_ids_mask_cpu[i1]
         self.block_table.swap_row(i1, i2)
+        # The mamba state slot id is per-request and must follow the swap.
+        self.mamba_state_indices_cpu[i1], self.mamba_state_indices_cpu[i2] = (
+            self.mamba_state_indices_cpu[i2],
+            self.mamba_state_indices_cpu[i1],
+        )
 
     def condense(self, empty_req_indices: list[int]) -> None:
         num_reqs = self.num_reqs
@@ -400,6 +447,16 @@ class InputBatch:
             self.num_computed_tokens_cpu[
                 empty_index] = self.num_computed_tokens_cpu[last_req_index]
             self.block_table.move_row(last_req_index, empty_index)
+            # The mamba state slot id is per-request: when the persistent
+            # batch moves the request from `last_req_index` to `empty_index`,
+            # the slot id must follow it so subsequent steps still index
+            # the right physical slot in the mamba kv cache.
+            self.mamba_state_indices_cpu[
+                empty_index] = self.mamba_state_indices_cpu[last_req_index]
+            # Clear the source: the slot id now lives at `empty_index`, so
+            # leaving it here too would put a duplicate in the padded tail
+            # (see the trace in `remove_request`).
+            self.mamba_state_indices_cpu[last_req_index] = 0
             self.temperature_cpu[empty_index] = self.temperature_cpu[
                 last_req_index]
             self.top_p_cpu[empty_index] = self.top_p_cpu[last_req_index]

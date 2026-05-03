@@ -51,6 +51,7 @@ _MODEL_REGISTRY = {}
 _VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset({
     "GptOssForCausalLM",
     "Qwen3MoeForCausalLM",
+    "KimiK25ForConditionalGeneration",
 })
 
 # List of architectures that don't have pipeline parallelism support in jax yet.
@@ -321,6 +322,7 @@ def get_flax_model(
             kv_cache_sharding,
             hidden_states_sharding,
             hidden_states_sharding,  # aux hidden states
+            None,  # expert ids
         ),
         donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
         static_argnums=(
@@ -336,6 +338,7 @@ def get_flax_model(
             kv_cache_sharding,
             hidden_states_sharding,
             hidden_states_sharding,  # residual
+            None,  # expert ids
         ),
         donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
         static_argnums=(6, ),  # 6 is layer_name_to_kvcache_index
@@ -436,7 +439,7 @@ def get_vllm_model(
         precompile_vision_encoder_fn=getattr(
             model.model.vllm_model,
             "precompile_vision_encoder",
-            None,
+            model.wrap_precompile_vision_encoder_fn(params),
         ),
         embed_multimodal_fn=model.wrap_embed_multimodal_func(),
         embed_input_ids_fn=model.wrap_embed_input_ids_func(),
