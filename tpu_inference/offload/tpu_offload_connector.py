@@ -1265,6 +1265,9 @@ class TPUOffloadConnectorWorker:
 
         self.metrics_collector = TPUKVCacheMetrics.get_or_create()
 
+        self.host_memory_kind = "unpinned_host" if envs.TPU_OFFLOAD_USE_UNPINNED_HOST else "pinned_host"
+        logger.info("Host memory kind : %s", self.host_memory_kind)
+
     def __del__(self):
         logger.info("TPUOffloadConnectorWorker: Entering __del__")
         self.save_executor.shutdown(wait=True)
@@ -1296,7 +1299,7 @@ class TPUOffloadConnectorWorker:
             self.host_sharding = jax.sharding.NamedSharding(
                 mesh=self.device_sharding.mesh,
                 spec=self.device_sharding.spec,
-                memory_kind="pinned_host")
+                memory_kind=self.host_memory_kind)
 
             flatten_spec = (None, ) + self.device_sharding.spec[2:] if len(
                 self.device_sharding.spec) >= 2 else (None, )
@@ -1308,7 +1311,7 @@ class TPUOffloadConnectorWorker:
             self.flatten_host_sharding = jax.sharding.NamedSharding(
                 mesh=self.device_sharding.mesh,
                 spec=jax.sharding.PartitionSpec(*flatten_spec),
-                memory_kind="pinned_host")
+                memory_kind=self.host_memory_kind)
 
             expanded_spec = (None,
                              None) + self.device_sharding.spec[1:] if len(
@@ -1318,7 +1321,7 @@ class TPUOffloadConnectorWorker:
             self.expanded_host_sharding = jax.sharding.NamedSharding(
                 mesh=self.device_sharding.mesh,
                 spec=jax.sharding.PartitionSpec(*expanded_spec),
-                memory_kind="pinned_host")
+                memory_kind=self.host_memory_kind)
             self.expanded_device_sharding = jax.sharding.NamedSharding(
                 mesh=self.device_sharding.mesh,
                 spec=jax.sharding.PartitionSpec(*expanded_spec),
