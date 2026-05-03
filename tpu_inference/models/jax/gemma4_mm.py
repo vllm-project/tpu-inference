@@ -24,6 +24,9 @@ from jax.sharding import Mesh
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
+
 try:
     from vllm.model_executor.models.gemma4_mm import \
         Gemma4ForConditionalGeneration as PtGemma4MM
@@ -774,11 +777,12 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         _input_positions=None,
         _layer_name_to_kv_cache=None,
         _lora_metadata=None,
-        intermediate_tensors: Any | None = None,
+        intermediate_tensors: JaxIntermediateTensors | None = None,
         is_first_rank: bool = True,
         is_last_rank: bool = True,
         *args,
-    ) -> Tuple[List[jax.Array], jax.Array | Any, List[jax.Array]]:
+    ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
+               List[jax.Array], Optional[jax.Array]]:
 
         multimodal_embeddings = getattr(attention_metadata,
                                         "multimodal_embeddings", None)
@@ -793,7 +797,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         layer_name_to_kv_cache = dict(
             _layer_name_to_kv_cache) if _layer_name_to_kv_cache else None
 
-        kv_caches, x = self.model(
+        kv_caches, x, expert_indices = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
@@ -806,7 +810,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                 JaxIntermediateTensors
             x = JaxIntermediateTensors(tensors={"hidden_states": x})
 
-        return kv_caches, x, []
+        return kv_caches, x, [], expert_indices
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if hasattr(self, 'lm_head'):
