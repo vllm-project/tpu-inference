@@ -225,6 +225,8 @@ else
     exit 1
 fi
 
+# Disable weight tracking
+extra_serve_args+=(--model-loader-extra-config '{"enable_weights_track": false}')
 
 # Spin up the vLLM server
 echo "Spinning up the vLLM server..."
