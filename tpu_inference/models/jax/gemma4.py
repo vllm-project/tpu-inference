@@ -828,7 +828,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
         is_last_rank: bool = True,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
-               List[jax.Array]]:
+               List[jax.Array], Optional[jax.Array]]:
 
         if not is_first_rank:
             assert intermediate_tensors is not None
