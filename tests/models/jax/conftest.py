@@ -69,9 +69,6 @@ def mock_vllm_config():
             self.model_config.dtype = jnp.bfloat16
             self.load_config = LoadConfig(load_format="auto")
             self.load_config.download_dir = None
-            self.load_config.model_loader_extra_config = {
-                "enable_weights_track": False
-            }
             self.cache_config = MagicMock(cache_dtype=kv_cache_dtype)
             self.quant_config = None
             self.additional_config = {}

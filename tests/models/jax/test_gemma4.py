@@ -56,6 +56,7 @@ class TestGemma4ForConditionalGeneration:
         vllm_config = mock_vllm_config(model_name, kv_cache_type)
         # No need to load full model.
         vllm_config.model_config.hf_config.text_config.num_hidden_layers = 4
+        vllm_config.model_config.hf_config.vision_config.num_hidden_layers = 4
         vllm_config.load_config.load_format = load_format
         vllm_config.load_config.num_layers_to_load_for_test = 4
         vllm_config.parallel_config = MagicMock()
