@@ -35,9 +35,7 @@ from jax.sharding import PartitionSpec as P
 from jax.sharding import SingleDeviceSharding, get_mesh
 from safetensors import safe_open
 from vllm.config import ModelConfig, VllmConfig
-from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import register_model_loader
-from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
@@ -932,11 +930,6 @@ class JaxDummyModelLoader(DummyModelLoader):
     The upstream DummyModelLoader relies on many torch-specific APIs, this
     implementation overrides the load_weights method to support flax_nnx models.
     """
-
-    def __init__(self, load_config: LoadConfig):
-        # Bypass DummyModelLoader.__init__ which rejects model_loader_extra_config.
-        # JaxDummyModelLoader does not use model_loader_extra_config.
-        BaseModelLoader.__init__(self, load_config)
 
     def load_weights(self, model: JaxModule,
                      model_config: ModelConfig) -> None:

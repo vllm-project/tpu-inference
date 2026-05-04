@@ -171,7 +171,6 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     --block-size 128 \
     --no-enable-prefix-caching \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
-    --model-loader-extra-config "{\"enable_weights_track\": false}" \
     --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}" \
     > $LOG_DIR/prefill_$i.txt 2>&1 &
 
@@ -216,7 +215,6 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     --max-num-batched-tokens 1024 \
     --tensor-parallel-size $DECODER_TP_SIZE \
     --kv-transfer-config "{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}" \
-    --model-loader-extra-config "{\"enable_weights_track\": false}" \
     > $LOG_DIR/decode_$i.txt 2>&1 &
 
     DECODE_HOSTS+=("localhost")

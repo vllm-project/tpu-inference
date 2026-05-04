@@ -183,10 +183,7 @@ class TestQwen3ForCausalLM:
 
         # Test model load
         with jax.set_mesh(mesh), set_current_vllm_config(mock_vllm_config):
-            loader = get_model_loader(
-                LoadConfig(
-                    load_format="hf",
-                    model_loader_extra_config={"enable_weights_track": False}))
+            loader = get_model_loader(LoadConfig(load_format="hf"))
             loader.load_weights(model, model_config)
 
         # Apply qwix quantization, no-op if rules are not given.
