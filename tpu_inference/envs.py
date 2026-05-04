@@ -265,14 +265,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
                      ]),
     "MOE_ALL_GATHER_ACTIVATION_DTYPE":
     lambda: os.getenv("MOE_ALL_GATHER_ACTIVATION_DTYPE", ""),
-    # Override for cache_config.mamba_ssm_cache_dtype on TPU. Default
-    # "bfloat16" halves mamba SSM state HBM and grows the attention KV pool
-    # ~2x on hybrid models (compute still runs fp32 internally via per-token
-    # / per-block cast in the GDN kernels). Set to "float32" (or "float16")
-    # to opt out, or to "" to defer to whatever vLLM/HF config decides
-    # (typically "float32" for Qwen3.5). At the pinned vLLM LKG,
-    # --mamba-ssm-cache-dtype's CLI parser does not accept "bfloat16", so
-    # this env var is the way to set bf16 without vendoring vLLM.
+    # Override cache_config.mamba_ssm_cache_dtype on TPU. Default "bfloat16"
+    # halves SSM state HBM; set "float32" to opt out, "" to defer to vLLM.
     "TPU_MAMBA_SSM_CACHE_DTYPE":
     lambda: os.getenv("TPU_MAMBA_SSM_CACHE_DTYPE", "bfloat16"),
     # kv offload to dram: skip pre-compiling swap-related jax functions
