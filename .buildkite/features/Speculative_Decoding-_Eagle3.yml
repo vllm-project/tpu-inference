@@ -24,8 +24,8 @@ steps:
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
     commands:
       - |
-        if [[ "$$MODEL_IMPL_TYPE" == "vllm" ]]; then
-          echo "Skipping test for MODEL_IMPL_TYPE=vllm..."
+        if [[ "$$NIGHTLY" == "1" && "$$MODEL_IMPL_TYPE" == "vllm" ]]; then
+          echo "Skipping test for NIGHTLY=1 and MODEL_IMPL_TYPE=vllm..."
           exit 0
         else
           .buildkite/scripts/run_in_docker.sh \

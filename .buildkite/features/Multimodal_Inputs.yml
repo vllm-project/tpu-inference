@@ -24,8 +24,8 @@ steps:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        if [[ "$$MODEL_IMPL_TYPE" == "vllm" ]]; then
-          echo "Skipping test for MODEL_IMPL_TYPE=vllm..."
+        if [[ "$$NIGHTLY" == "1" && "$$MODEL_IMPL_TYPE" == "vllm" ]]; then
+          echo "Skipping test for NIGHTLY=1 and MODEL_IMPL_TYPE=vllm..."
           exit 0
         else
           .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_multi_modal_inference.py
