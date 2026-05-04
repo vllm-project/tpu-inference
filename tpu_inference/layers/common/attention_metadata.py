@@ -28,6 +28,7 @@ import jax
         "query_start_loc",
         "request_distribution",
         "mamba_state_indices",
+        "kv_cache_lens",
     ],
     meta_fields=[],
     drop_fields=["query_start_loc_cpu", "seq_lens_cpu"],
@@ -53,6 +54,11 @@ class AttentionMetadata(object):
     # None for models without mamba layers; pure-mamba models would also
     # use this field, only hybrid models exercise it today.
     mamba_state_indices: jax.Array | None = None
+    # (max_num_seqs,) int32 — number of tokens already in the KV cache
+    # for each request before this step (i.e. seq_lens - q_lens).
+    # Used by the DCP attention wrapper to split "cached" vs "new" tokens.
+    # None when DCP is disabled.
+    kv_cache_lens: jax.Array | None = None
 
     query_start_loc_cpu: Any = field(init=False)
     seq_lens_cpu: Any = field(init=False)

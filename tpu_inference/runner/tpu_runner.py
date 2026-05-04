@@ -1634,6 +1634,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logits_indices = metadata["logits_indices"]
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
+            # kv_cache_lens[i] = seq_lens[i] - q_lens[i]; used by DCP attention
+            # to distinguish cached tokens from new tokens within the kernel.
+            q_lens = jnp.diff(query_start_loc)  # [max_num_seqs]
+            kv_cache_lens = seq_lens - q_lens
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
                 block_tables=block_tables,
@@ -1641,6 +1645,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
+                kv_cache_lens=kv_cache_lens,
             )
 
             # This is for making these cpu buffers hidden during tracing
@@ -1922,6 +1927,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logits_indices = metadata["logits_indices"]
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
+            # kv_cache_lens[i] = seq_lens[i] - q_lens[i]; used by DCP attention
+            # to distinguish cached tokens from new tokens within the kernel.
+            q_lens = jnp.diff(query_start_loc)  # [max_num_seqs]
+            kv_cache_lens = seq_lens - q_lens
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
                 block_tables=block_tables,
@@ -1929,6 +1938,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
+                kv_cache_lens=kv_cache_lens,
             )
             # This is for making these cpu buffers hidden during tracing
             attention_metadata_gid.query_start_loc_cpu = query_start_loc_view

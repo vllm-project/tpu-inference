@@ -335,12 +335,22 @@ def sharded_ragged_paged_attention(
     distribution: jax.Array,
     attention_sink: jax.Array | None,
     sm_scale: float,
+    kv_cache_lens: jax.Array | None = None,
     attention_chunk_size: int | None = None,
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
 ):
-    """Shards along KV heads."""
+    """Shards along KV heads. Supports Decode Context Parallelism (DCP).
+
+    When the mesh has a 'dcp' axis with size > 1, two kernel calls are issued:
+      1. Context attention: full Q heads attend to this rank's cached KV slice
+         (partial-KV); partial outputs + LSE are merged across dcp via pmax/psum.
+      2. Current attention: local Q heads attend to the new K/V tokens;
+         kernel fuses interleaved KV-cache write for this rank.
+    The two per-rank outputs are combined via online softmax.
+    When dcp == 1 the original single-call path is used unchanged.
+    """
     # Handle GQA/MQA where num_kv_heads < tp_size
     # We replicate KV heads to match tp_size so that we can shard them evenly.
     # TODO (ranlihao): This is not performant and introduces extra overhead during inference. We need to handle this during weight loading
@@ -356,31 +366,181 @@ def sharded_ragged_paged_attention(
             k = jnp.repeat(k, factor, axis=1)
             v = jnp.repeat(v, factor, axis=1)
 
-    qkv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
-    kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None,
-                      ShardingAxisName.ATTN_HEAD, None, None)
-    in_specs = (
-        qkv_spec,  # q
-        qkv_spec,  # k
-        qkv_spec,  # v
-        kv_cache_spec,  # kv cache
-        P(ShardingAxisName.ATTN_DATA),  # kv_lens
-        P(ShardingAxisName.ATTN_DATA),  # page_indices
-        P(ShardingAxisName.ATTN_DATA),  # cu_q_lens
-        P(ShardingAxisName.ATTN_DATA),  # distribution
-    )
-    out_specs = (qkv_spec, kv_cache_spec)
+    dcp_size = mesh.shape.get('dcp', 1)
 
-    args = (q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, distribution)
+    # kv_cache dim-1 is the page_size axis, sharded on the 'dcp' mesh axis.
+    q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
+    kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.KV_CACHE_HEAD,
+                None)
+    kv_cache_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.CONTEXT,
+                      ShardingAxisName.KV_CACHE_HEAD, None, None)
+    scalar_spec = P(ShardingAxisName.ATTN_DATA)
 
     use_hd64 = q.shape[-1] == 64
     func = ragged_paged_attention_hd64 if use_hd64 else ragged_paged_attention
+
+    if dcp_size > 1:
+        # ---------------------------------------------------------------
+        # DCP two-call path
+        # ---------------------------------------------------------------
+        # Number of Q heads per rank in the local (non-gathered) layout.
+        # After all-gather across dcp, each rank sees dcp_size× more heads.
+        h_local = q.shape[1] // dcp_size  # Q heads per dcp rank
+
+        # kv_cache_lens must be provided for DCP (split cached vs new).
+        assert kv_cache_lens is not None, (
+            "kv_cache_lens must be provided when dcp_size > 1")
+
+        # For call 1 (context) we need the full (gathered) Q head count for
+        # the LSE-merge broadcast_iota, so q_full has shape [T, N/dcp_m_e, H].
+        # The in_spec for that must be `P(ATTN_DATA, KV_CACHE_HEAD, None)`
+        # so shard_map sees 1 head per rank (post-repeat).
+        # For call 2 (current) Q uses the local dcp-sharded layout q_spec.
+
+        def _dcp_attention(q_local, k_local, v_local, kv_cache_shard,
+                           kv_lens, page_indices, cu_q_lens, distribution,
+                           kv_cache_lens):
+            cp_rank = jax.lax.axis_index('dcp')
+            # --- Call 1: context attention (full Q, partial KV from cache) ---
+            # All-gather Q across the dcp axis so this rank sees all Q heads.
+            q_full = jax.lax.all_gather(q_local, axis_name='dcp', axis=1,
+                                        tiled=True) #TODO: here we can use sharding constrains instead?
+            # Call 1 attends only to the cached portion: pass
+            # `kv_cache_lens` as the kernel's `kv_lens` so per-rank slot
+            # counts and the K-position cap both reflect cache size.
+            # Causal mask is disabled because every cached K position is
+            # strictly before every Q position; with `use_causal_mask=True`
+            # the kernel's `kv_q_gap = kv_len_global - q_len` would place
+            # Q inside the cache range and over-mask valid (Q, K) pairs.
+            out_ctx, lse_ctx, kv_cache_shard = func(
+                q_full,
+                k_local,
+                v_local,
+                kv_cache_shard,
+                kv_cache_lens,
+                page_indices,
+                cu_q_lens,
+                distribution,
+                kv_cache_lens=kv_cache_lens,
+                cp_rank=cp_rank,
+                cp_compute_group_size=dcp_size,
+                cp_write_group_size=1,  # no write for context call
+                kv_write_back=False,
+                return_lse=True,
+                use_causal_mask=False,
+                sm_scale=sm_scale,
+                sliding_window=attention_chunk_size,
+                q_scale=q_scale,
+                k_scale=k_scale,
+                v_scale=v_scale,
+            )
+            # out_ctx: [T, N/(m·e), H]  (full Q heads per rank)
+            # lse_ctx: [T, N/(m·e)]     (per-token-per-q-head scalar)
+
+            # LSE merge across dcp: log-sum-exp normalisation. lse_ctx is
+            # per-(token, head) scalar, so broadcast it over head_dim.
+            lse_max = jax.lax.pmax(lse_ctx, axis_name='dcp')
+            weights = jnp.exp(lse_ctx - lse_max)
+            out_ctx_num = jax.lax.psum(out_ctx * weights[..., None],
+                                       axis_name='dcp')
+            denom = jax.lax.psum(weights, axis_name='dcp')
+            out_ctx_merged = out_ctx_num / denom[..., None]
+            lse_ctx_merged = jnp.log(denom) + lse_max
+
+            # Reduce-scatter: slice back to local Q heads for this rank.
+            # TODO: with sharding constrains seems more natural.
+            out_ctx_local = jax.lax.dynamic_slice_in_dim(
+                out_ctx_merged, cp_rank * h_local, h_local, axis=1)
+            lse_ctx_local = jax.lax.dynamic_slice_in_dim(
+                lse_ctx_merged, cp_rank * h_local, h_local, axis=1)
+
+            # --- Call 2: current attention (local Q, new K/V, fused write) ---
+            # Treat the call as a fresh attention over only the new tokens:
+            # set kernel `kv_lens = q_lens` and `kv_cache_lens = 0` so
+            # `kv_new_len = q_lens` and `kv_q_gap = 0`. The kernel's
+            # default causal mask now correctly relates Q[i] to K[0..i].
+            q_lens_per_seq = kv_lens - kv_cache_lens
+            zeros_kv_cache_lens = jnp.zeros_like(kv_cache_lens)
+            out_cur, lse_cur, kv_cache_shard = func(
+                q_local,
+                k_local,
+                v_local,
+                kv_cache_shard,
+                q_lens_per_seq,
+                page_indices,
+                cu_q_lens,
+                distribution,
+                kv_cache_lens=zeros_kv_cache_lens,
+                cp_rank=cp_rank,
+                cp_compute_group_size=1,
+                cp_write_group_size=dcp_size,
+                kv_write_back=True,
+                return_lse=True,
+                sm_scale=sm_scale,
+                sliding_window=attention_chunk_size,
+                q_scale=q_scale,
+                k_scale=k_scale,
+                v_scale=v_scale,
+            )
+            # out_cur: [T, h_local, H], lse_cur: [T, h_local]
+
+            # --- Step 3: online softmax merge at local Q heads ---
+            m_final = jnp.maximum(lse_ctx_local, lse_cur)
+            w_ctx = jnp.exp(lse_ctx_local - m_final)
+            w_cur = jnp.exp(lse_cur - m_final)
+            denom2 = w_ctx + w_cur
+            out = (out_ctx_local * w_ctx[..., None] +
+                   out_cur * w_cur[..., None]) / denom2[..., None]
+
+            return out, kv_cache_shard
+
+        in_specs = (
+            q_spec,        # q_local: local Q heads (sharded on dcp)
+            kv_spec,       # k_local: K heads (sharded on model/expert, replicated on dcp)
+            kv_spec,       # v_local
+            kv_cache_spec, # kv_cache_shard: page_size sharded on dcp
+            scalar_spec,   # kv_lens
+            scalar_spec,   # page_indices
+            scalar_spec,   # cu_q_lens
+            scalar_spec,   # distribution
+            scalar_spec,   # kv_cache_lens
+        )
+        out_specs = (q_spec, kv_cache_spec)
+        args = (q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens,
+                distribution, kv_cache_lens)
+        output, kv_cache = jax.shard_map(
+            _dcp_attention,
+            mesh=mesh,
+            in_specs=in_specs,
+            out_specs=out_specs,
+            check_vma=False,
+        )(*args)
+        return output, kv_cache
+
+    # ---------------------------------------------------------------
+    # Non-DCP single-call path (unchanged behaviour)
+    # ---------------------------------------------------------------
+    qkv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
+    kv_cache_spec_legacy = P(ShardingAxisName.ATTN_DATA, None,
+                             ShardingAxisName.ATTN_HEAD, None, None)
+    in_specs = (
+        qkv_spec,            # q
+        qkv_spec,            # k
+        qkv_spec,            # v
+        kv_cache_spec_legacy,  # kv cache
+        scalar_spec,         # kv_lens
+        scalar_spec,         # page_indices
+        scalar_spec,         # cu_q_lens
+        scalar_spec,         # distribution
+    )
+    out_specs = (qkv_spec, kv_cache_spec_legacy)
+
+    args = (q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, distribution)
 
     if attention_sink is not None:
         if not use_hd64:
             raise NotImplementedError(
                 "Attention sink support is only available when head_dim==64")
-
         in_specs += (P(ShardingAxisName.ATTN_HEAD), )
         args += (attention_sink, )
 
@@ -451,6 +611,7 @@ def attention(
         md.request_distribution,
         sinks,
         sm_scale=sm_scale,
+        kv_cache_lens=md.kv_cache_lens,
         attention_chunk_size=attention_chunk_size,
         q_scale=q_scale,
         k_scale=k_scale,

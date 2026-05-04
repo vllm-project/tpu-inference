@@ -27,6 +27,7 @@ from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.linear import JaxEinsum
@@ -80,11 +81,11 @@ class Qwen3Attention(JaxModule):
         # NOTE: LAYOUT_Q_PROJ_AS_NDH is by default False
         if envs.LAYOUT_Q_PROJ_AS_NDH:
             rhs_str = "NDH"
-            q_proj_sharding = ("model", None, None)
+            q_proj_sharding = (ShardingAxisName.ATTN_HEAD, None, None)
             kernel_shape = (self.num_heads, self.hidden_size, self.head_dim)
         else:
             rhs_str = "DNH"
-            q_proj_sharding = (None, "model", None)
+            q_proj_sharding = (None, ShardingAxisName.ATTN_HEAD, None)
             kernel_shape = (self.hidden_size, self.num_heads, self.head_dim)
 
         logger.info_once(
@@ -115,7 +116,8 @@ class Qwen3Attention(JaxModule):
             (self.hidden_size, self.num_kv_heads, self.head_dim),
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.KV_CACHE_HEAD, None)),
             rngs=rng,
             quant_config=quant_config,
             prefix=prefix + ".k_proj",
@@ -135,7 +137,8 @@ class Qwen3Attention(JaxModule):
             (self.hidden_size, self.num_kv_heads, self.head_dim),
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.KV_CACHE_HEAD, None)),
             rngs=rng,
             quant_config=quant_config,
             prefix=prefix + ".v_proj",
@@ -145,7 +148,8 @@ class Qwen3Attention(JaxModule):
             (self.num_heads, self.head_dim, self.hidden_size),
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None, None)),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (ShardingAxisName.ATTN_HEAD, None, None)),
             rngs=rng,
             quant_config=quant_config,
             prefix=prefix + ".o_proj",
