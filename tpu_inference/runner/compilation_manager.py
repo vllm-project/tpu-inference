@@ -750,6 +750,8 @@ class CompilationManager:
         draft_hidden_size = self.runner.speculative_config.draft_model_config.get_hidden_size(
         )
         dtype = self.runner.model_config.dtype
+        data_parallel_attn_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
 
         num_kv_cache_groups = len(self.runner.kv_cache_config.kv_cache_groups)
         draft_kv_cache_group_id = num_kv_cache_groups - 1
@@ -760,13 +762,16 @@ class CompilationManager:
                                     sharding=PartitionSpec(None, ))
 
         seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
-                                             jnp.int32)
+                                             jnp.int32,
+                                             data_parallel_attn_sharding)
         query_start_loc = self._create_dummy_tensor(
-            (self.runner.max_num_reqs + 1, ), jnp.int32)
+            (self.runner.max_num_reqs + 1, ), jnp.int32,
+            data_parallel_attn_sharding)
 
-        request_distribution = np.array([0, 0, 0], dtype=np.int32)
-        request_distribution = device_array(self.runner.mesh,
-                                            request_distribution)
+        request_distribution = device_array(
+            self.runner.mesh,
+            np.array([0, 0, 0], dtype=np.int32),
+            sharding=data_parallel_attn_sharding)
         # Dummy mamba_state_indices for spec-decode compile-cache pre-tracing.
         # Must match the ATTN_DATA sharding `_prepare_inputs_*` produces at
         # runtime — otherwise the draft model_fn cache misses and the
@@ -786,7 +791,8 @@ class CompilationManager:
         next_token_ids = self._create_dummy_tensor(
             (self.runner.max_num_reqs, ), jnp.int32)
         last_token_indices = self._create_dummy_tensor(
-            (self.runner.max_num_reqs, ), jnp.int32)
+            (self.runner.max_num_reqs, ), jnp.int32,
+            data_parallel_attn_sharding)
         for num_tokens in self.runner.num_tokens_paddings:
             aux_hidden_states = [
                 self._create_dummy_tensor((num_tokens, target_hidden_size),
@@ -797,7 +803,8 @@ class CompilationManager:
                                           dtype),
             ]
 
-            positions = self._create_dummy_tensor((num_tokens, ), jnp.int32)
+            positions = self._create_dummy_tensor((num_tokens, ), jnp.int32,
+                                                  data_parallel_attn_sharding)
             attention_metadata = AttentionMetadata(
                 input_positions=positions,
                 block_tables=block_tables,
