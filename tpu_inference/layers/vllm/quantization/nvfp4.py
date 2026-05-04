@@ -13,9 +13,12 @@
 # limitations under the License.
 """NVFP4 (ModelOpt FP4) quantization support for TPU.
 
-Subclasses upstream vLLM's ModelOptNvFp4Config for config parsing, then
-overrides weight processing and inference to dequantize NVFP4 → re-quantize
-to FP8/FP4 for existing TPU kernel paths.
+Subclasses upstream vLLM's ModelOptNvFp4Config for config parsing.
+Weights are kept as NVFP4 (packed E2M1) in HBM with FP32 blockwise scales
+(combined from the original FP8 block scale and FP32 global scale).
+Dequantization happens in VMEM inside the matmul kernel (gmm_v2 dequant-
+before-matmul path) for MoE; for linear we dequant once to bf16 and run
+plain bf16 matmul.
 """
 
 from typing import Optional, Union
@@ -45,13 +48,9 @@ from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_moe_weights, quantize_moe_weights,
-    shard_moe_weights)
+    FusedMoEWeights, process_moe_weights, shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import NVFP4
-from tpu_inference.layers.common.quantization import (dequantize_tensor,
-                                                      quantize_tensor,
-                                                      u8_unpack_e2m1)
-from tpu_inference.layers.common.quantization.fp8 import Fp8LinearMethod
+from tpu_inference.layers.common.quantization import u8_unpack_e2m1
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
@@ -99,31 +98,20 @@ class VllmNvfp4Config(ModelOptNvFp4Config, VllmQuantConfig):
 
 
 # ---------------------------------------------------------------------------
-# Helper: dequantize NVFP4 packed weights to float32
+# Linear method — keep FP4 in HBM until process_weights, then dequant once
+# to bf16. Plain bf16 matmul in apply (no FP8 path, no requant).
 # ---------------------------------------------------------------------------
-def _dequantize_nvfp4_weights(
-    weight_packed: jax.Array,
-    weight_scale: jax.Array,
-    weight_global_scale: jax.Array,
-) -> jax.Array:
-    """Dequantize NVFP4: uint8 [out, in/2] → float32 [out, in]."""
-    fp4_weights = u8_unpack_e2m1(weight_packed)
-    effective_scale = weight_scale.astype(jnp.float32) * weight_global_scale
-    return dequantize_tensor(fp4_weights,
-                             effective_scale,
-                             axis=(0, 1),
-                             out_dtype=jnp.float32)
+class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
+    """NVFP4 linear for TPU.
 
-
-# ---------------------------------------------------------------------------
-# Linear method — dequant NVFP4 → requant FP8 per-channel → FP8 kernel
-# ---------------------------------------------------------------------------
-class VllmNvfp4LinearMethod(QuantizeMethodBase, Fp8LinearMethod):
-    """NVFP4 linear for TPU. Dequant → requant FP8 → reuse FP8 kernel."""
+    process_weights_after_loading dequantizes the full NVFP4 weight to bf16
+    (using the original two-level scales) and stores the bf16 result. apply
+    runs the inherited unquantized bf16 matmul path.
+    """
 
     def __init__(self, quant_config: VllmNvfp4Config,
                  linear_config: VllmQuantLinearConfig):
-        Fp8LinearMethod.__init__(self, linear_config)
+        VllmUnquantizedLinearMethod.__init__(self, linear_config)
         self.quant_config = quant_config
 
     def create_weights(self, layer, input_size_per_partition,
@@ -165,7 +153,7 @@ class VllmNvfp4LinearMethod(QuantizeMethodBase, Fp8LinearMethod):
         set_weight_attrs(weight_scale_2,
                          {"weight_loader": scalar_weight_loader})
 
-        # Per-block weight scale (E4M3).
+        # Per-block weight scale (E4M3, block_size=group_size along input dim).
         weight_scale = ModelWeightParameter(
             data=torch.empty(output_size_per_partition,
                              input_size_per_partition // group_size,
@@ -196,31 +184,30 @@ class VllmNvfp4LinearMethod(QuantizeMethodBase, Fp8LinearMethod):
         else:
             bias = None
 
-        dequantized = _dequantize_nvfp4_weights(weight_packed, weight_scale,
-                                                weight_global_scale)
+        # Dequant to bf16 once: unpack FP4 codes, multiply by combined scale.
+        # combined_scale[i, j] = fp32_global * fp8_block[i, j].astype(fp32)
+        @jax.jit
+        def _dequant_to_bf16(weight_packed, weight_scale, weight_global_scale):
+            fp4 = u8_unpack_e2m1(weight_packed)  # (O, I) float4_e2m1fn
+            fp4_fp32 = fp4.astype(jnp.float32)
+            block_scale = weight_scale.astype(
+                jnp.float32) * weight_global_scale  # (O, I/group)
+            # Broadcast block scale across the group dimension.
+            group_size = fp4.shape[-1] // block_scale.shape[-1]
+            scaled = fp4_fp32.reshape(fp4.shape[0], block_scale.shape[-1],
+                                      group_size) * block_scale[:, :, None]
+            return scaled.reshape(fp4.shape).astype(jnp.bfloat16)
 
-        # Re-quantize to FP8 per-channel (1D scale for XLA matmul path).
-        output_sizes = tuple(self.linear_config.output_sizes)
-        weights_list, scales_list = [], []
-        start = 0
-        for output_size in output_sizes:
-            end = start + output_size
-            w_q, w_s = quantize_tensor(jnp.float8_e4m3fn,
-                                       dequantized[start:end])
-            weights_list.append(w_q)
-            scales_list.append(w_s)
-            start = end
-
-        fp8_weight = jnp.concatenate(weights_list, axis=0)
-        fp8_scale = jnp.concatenate(scales_list, axis=0)
+        weight_bf16 = _dequant_to_bf16(weight_packed, weight_scale,
+                                       weight_global_scale)
 
         weights = process_linear_weights(
-            LinearWeights(weight=fp8_weight,
-                          weight_scale=fp8_scale,
+            LinearWeights(weight=weight_bf16,
+                          weight_scale=None,
                           zero_point=None,
                           bias=bias),
             fused=self.linear_config.fuse_matmuls,
-            output_sizes=output_sizes,
+            output_sizes=self.linear_config.output_sizes,
             reorder_size=self.linear_config.n_shards,
         )
 
@@ -234,48 +221,30 @@ class VllmNvfp4LinearMethod(QuantizeMethodBase, Fp8LinearMethod):
 
         if self.linear_config.fuse_matmuls:
             layer.weight = Parameter(weights.weight, requires_grad=False)
-            layer.weight_scale = Parameter(weights.weight_scale,
-                                           requires_grad=False)
             if bias is not None:
                 layer.bias = Parameter(weights.bias, requires_grad=False)
         else:
             layer.weight = to_parameter_list(weights.weight)
-            layer.weight_scale = to_parameter_list(weights.weight_scale)
             if bias is not None:
                 layer.bias = to_parameter_list(weights.bias)
 
-    def apply(self, layer, x, bias=None):
-        with jax.named_scope(layer._get_name()):
-            x_jax = jax_view(x)
-            bias_jax = jax_view(
-                bias) if bias is not None and not layer.skip_bias_add else None
-            if self.linear_config.fuse_matmuls:
-                weight_jax = jax_view(layer.weight)
-                weight_scale_jax = jax_view(layer.weight_scale)
-                out = self._apply_fused(x_jax, weight_jax, weight_scale_jax,
-                                        bias_jax)
-            else:
-                assert isinstance(layer.weight, torch.nn.ParameterList)
-                assert isinstance(layer.weight_scale, torch.nn.ParameterList)
-                weight_and_scale = [
-                    (jax_view(w), jax_view(s))
-                    for w, s in zip(layer.weight, layer.weight_scale)
-                ]
-                if bias is not None and not layer.skip_bias_add:
-                    assert isinstance(bias, torch.nn.ParameterList)
-                    bias_jax = [jax_view(b) for b in bias]
-                out = self._apply_split(x_jax,
-                                        weight_and_scale,
-                                        bias_jax,
-                                        mesh=self.linear_config.mesh)
-            return torch_view(out)
+    # apply() is inherited from VllmUnquantizedLinearMethod — plain bf16
+    # matmul over the dequantized weight stored at layer.weight.
 
 
 # ---------------------------------------------------------------------------
-# MoE method — dequant NVFP4 → requant FP4 per-channel → MoE kernel
+# MoE method — keep packed FP4 + combined FP32 blockwise scales in HBM,
+# dequant in VMEM via gmm_v2 dequant-before-matmul path.
 # ---------------------------------------------------------------------------
 class VllmNvfp4MoEMethod(FusedMoEMethodBase):
-    """NVFP4 MoE for TPU. Dequant → requant FP4 → reuse MoE kernel."""
+    """NVFP4 MoE for TPU.
+
+    process_weights_after_loading combines FP32 global × FP8 block scales
+    into a single FP32 block scale tensor, unpacks the packed E2M1 weight
+    into native float4_e2m1fn dtype, and lays out for the GMM kernel. No
+    requantization. The gmm_v2 kernel auto-trips its dequant-before-matmul
+    path because quant_block_size=16 < mxu_column_size=128.
+    """
 
     def __init__(self, quant_config, layer, mesh, ep_axis_name="model"):
         FusedMoEMethodBase.__init__(self, layer.moe_config)
@@ -397,11 +366,12 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
                                       w13_global_scale, w2_weight,
                                       w2_weight_scale, w2_global_scale,
                                       w13_bias, w2_bias):
-            w13_fp4 = u8_unpack_e2m1(w13_weight)
-            w2_fp4 = u8_unpack_e2m1(w2_weight)
+            # Unpack packed uint8 → native float4_e2m1fn (no value change).
+            w13_fp4 = u8_unpack_e2m1(w13_weight)  # (E, 2*I, H)
+            w2_fp4 = u8_unpack_e2m1(w2_weight)  # (E, H, I)
 
-            # Fold global scales into block scales and dequantize.
-            if w13_global_scale.ndim == 2:
+            # Combine FP32 global × FP8 block → single FP32 block scale.
+            if w13_global_scale.ndim == 2:  # (E, 2) — separate w1/w3 globals.
                 half = w13_weight_scale.shape[1] // 2
                 w1_eff = w13_weight_scale[:, :half].astype(
                     jnp.float32) * w13_global_scale[:, 0:1].reshape(-1, 1, 1)
@@ -411,31 +381,21 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
             else:
                 w13_scale_eff = w13_weight_scale.astype(
                     jnp.float32) * w13_global_scale.reshape(-1, 1, 1)
-            w13_dequant = dequantize_tensor(w13_fp4,
-                                            w13_scale_eff,
-                                            axis=(1, 2),
-                                            out_dtype=jnp.float32)
-
             w2_scale_eff = w2_weight_scale.astype(
                 jnp.float32) * w2_global_scale.reshape(-1, 1, 1)
-            w2_dequant = dequantize_tensor(w2_fp4,
-                                           w2_scale_eff,
-                                           axis=(1, 2),
-                                           out_dtype=jnp.float32)
 
             w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
             w13_reorder_size = get_mesh_shape_product(
                 self.mesh, ShardingAxisName.MLP_TENSOR)
 
-            weights = quantize_moe_weights(
-                FusedMoEWeights(w13_weight=w13_dequant,
-                                w13_weight_scale=None,
-                                w13_bias=w13_bias,
-                                w2_weight=w2_dequant,
-                                w2_weight_scale=None,
-                                w2_bias=w2_bias),
-                jnp.float4_e2m1fn,
-                None,
+            # Skip quantize_moe_weights — weights are already quantized.
+            weights = FusedMoEWeights(
+                w13_weight=w13_fp4,
+                w13_weight_scale=w13_scale_eff,
+                w13_bias=w13_bias,
+                w2_weight=w2_fp4,
+                w2_weight_scale=w2_scale_eff,
+                w2_bias=w2_bias,
             )
             return process_moe_weights(weights,
                                        moe_backend=self.moe_backend,
