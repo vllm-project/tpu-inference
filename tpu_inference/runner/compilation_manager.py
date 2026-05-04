@@ -106,6 +106,7 @@ class CompilationManager:
                 self._precompile_backbone_with_inputs_embeds()
             if self.runner.scheduler_config.async_scheduling:
                 self._precompile_substitute_placeholder_token()
+            self._precompile_unpack_arrays()
             if not self.runner.is_last_rank:
                 return
             self._precompile_select_from_array()
@@ -126,6 +127,68 @@ class CompilationManager:
 
         elapsed = time.perf_counter() - compilation_start_time
         self.runner.vllm_config.compilation_config.compilation_time += elapsed
+
+    def _precompile_unpack_arrays(self) -> None:
+        logger.info("Compiling unpack_arrays with different input shapes.")
+        from tpu_inference.utils import DeviceBuffer, DeviceBufferMetadata
+
+        dp_size = self.runner.dp_size
+        max_num_reqs = self.runner.max_num_reqs
+
+        # Determine keys and sizes that don't depend on padding
+        if dp_size > 1:
+            base_keys = [
+                "input_ids", "query_start_loc", "seq_lens", "logits_indices"
+            ]
+            base_sizes = [None, max_num_reqs + dp_size, max_num_reqs, None]
+            logits_index = 3
+        else:
+            base_keys = [
+                "input_ids", "logits_indices", "query_start_loc", "seq_lens"
+            ]
+            base_sizes = [None, None, max_num_reqs + 1, max_num_reqs]
+            logits_index = 1
+
+        # Add block tables
+        for gid, _ in enumerate(self.runner.kv_cache_config.kv_cache_groups):
+            base_keys.append(f"block_tables_gid_{gid}")
+            block_table_obj = self.runner.input_batch.block_table[gid]
+            base_sizes.append(max_num_reqs *
+                              block_table_obj.max_num_blocks_per_req)
+
+        # Iterate over paddings
+        logits_paddings = []
+        if self.runner.speculative_config:
+            logits_paddings.extend(self.runner.num_logits_paddings)
+        logits_paddings.extend(self.runner.num_reqs_paddings)
+        logits_paddings = sorted(list(set(logits_paddings)))
+
+        logger.info(
+            f"unpack_arrays num_tokens_paddings: {self.runner.num_tokens_paddings}"
+        )
+        logger.info(f"unpack_arrays logits_paddings: {logits_paddings}")
+
+        for num_tokens in self.runner.num_tokens_paddings:
+            for logits_padding in logits_paddings:
+                sizes = list(base_sizes)
+                sizes[0] = num_tokens
+                sizes[logits_index] = logits_padding
+
+                metadata = DeviceBufferMetadata(keys=tuple(base_keys),
+                                                sizes=tuple(sizes))
+                total_size = sum(sizes)
+
+                blob = self._create_dummy_tensor((total_size, ), jnp.int32)
+
+                self._run_compilation(
+                    "unpack_arrays",
+                    DeviceBuffer.unpack_arrays,
+                    blob,
+                    metadata.keys,
+                    metadata.sizes,
+                    num_tokens=num_tokens,
+                    logits_padding=logits_padding,
+                )
 
     def _precompile_input_embeddings_merger(self) -> None:
         for num_tokens in self.runner.num_tokens_paddings:

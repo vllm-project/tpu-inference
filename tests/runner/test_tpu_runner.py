@@ -27,6 +27,16 @@ from tpu_inference.models.common.interface import (ModelInterface,
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
+def mock_unpack_arrays(blob, keys, sizes):
+    blob_cpu = np.asarray(jax.device_get(blob))
+    indices = tuple(np.cumsum(sizes)[:-1])
+    parts = np.split(blob_cpu, indices)
+    return {key: parts[i] for i, key in enumerate(keys)}
+
+
+@patch(
+    'tpu_inference.runner.tpu_runner.common_utils.DeviceBuffer.unpack_arrays',
+    new=mock_unpack_arrays)
 class TestTPUJaxRunner:
 
     def setup_method(self):
@@ -40,7 +50,8 @@ class TestTPUJaxRunner:
              patch('jax.make_mesh', return_value=self.mock_mesh), \
              patch('jax.random.key', return_value=self.mock_rng_key), \
              patch('tpu_inference.runner.tpu_runner.get_model', return_value=MagicMock()), \
-             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh', return_value=self.mock_mesh):
+             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh', return_value=self.mock_mesh), \
+             patch('tpu_inference.utils.DeviceBuffer.unpack_arrays', side_effect=mock_unpack_arrays):
 
             model_config = ModelConfig(tokenizer_mode="auto",
                                        trust_remote_code=False,
@@ -197,6 +208,9 @@ class TestTPUJaxRunner:
         self.runner.use_hybrid_kvcache = True
 
 
+@patch(
+    'tpu_inference.runner.tpu_runner.common_utils.DeviceBuffer.unpack_arrays',
+    new=mock_unpack_arrays)
 class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
 
     def setup_method(self):
@@ -283,6 +297,9 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
         self.runner.embed_input_ids_fn.assert_not_called()
 
 
+@patch(
+    'tpu_inference.runner.tpu_runner.common_utils.DeviceBuffer.unpack_arrays',
+    new=mock_unpack_arrays)
 class TestTPUJaxRunnerDisableMM:
 
     def setup_method(self):

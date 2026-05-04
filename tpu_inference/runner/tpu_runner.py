@@ -1626,8 +1626,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.mesh, (request_distribution, metadata_blob),
                 sharding=data_parallel_attn_sharding)
 
-        metadata = common_utils.DeviceBuffer.unpack_arrays(
-            dev_arrays_payload, metadata_layout)
+        try:
+            with self.maybe_forbid_compile:
+                metadata = common_utils.DeviceBuffer.unpack_arrays(
+                    dev_arrays_payload, metadata_layout.keys,
+                    metadata_layout.sizes)
+        except RuntimeError as e:
+            logger.error(
+                f"unpack_arrays failed for metadata_layout in _prepare_inputs_dp: {metadata_layout}"
+            )
+            raise e
         input_ids = metadata["input_ids"]
         query_start_loc = metadata["query_start_loc"]
         seq_lens = metadata["seq_lens"]
@@ -1914,8 +1922,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.mesh, (request_distribution, metadata_blob),
                 sharding=data_parallel_attn_sharding)
 
-        metadata = common_utils.DeviceBuffer.unpack_arrays(
-            dev_arrays_payload, metadata_layout)
+        try:
+            with self.maybe_forbid_compile:
+                metadata = common_utils.DeviceBuffer.unpack_arrays(
+                    dev_arrays_payload, metadata_layout.keys,
+                    metadata_layout.sizes)
+        except RuntimeError as e:
+            logger.error(
+                f"unpack_arrays failed for metadata_layout in _prepare_inputs_non_dp: {metadata_layout}"
+            )
+            raise e
         input_ids = metadata["input_ids"]
         query_start_loc = metadata["query_start_loc"]
         seq_lens = metadata["seq_lens"]

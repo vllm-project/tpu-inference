@@ -489,13 +489,14 @@ class DeviceBuffer:
         self._sizes = []
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnums=(1, ))
-    def unpack_arrays(blob: jax.Array,
-                      metadata: DeviceBufferMetadata) -> Dict[str, jax.Array]:
+    @functools.partial(jax.jit, static_argnums=(1, 2))
+    def unpack_arrays(blob: jax.Array, keys: Tuple[str, ...],
+                      sizes: Tuple[int, ...]) -> Dict[str, jax.Array]:
         """
         Unpack a 1D blob into a dictionary of arrays based on provided metadata.
         Uses JIT and jnp.split to minimize dispatch overhead.
         """
-        indices = tuple(np.cumsum(metadata.sizes)[:-1])
+        sizes = tuple(int(x) for x in sizes)
+        indices = tuple(int(x) for x in np.cumsum(sizes)[:-1])
         parts = jnp.split(blob, indices)
-        return {key: parts[i] for i, key in enumerate(metadata.keys)}
+        return {key: parts[i] for i, key in enumerate(keys)}

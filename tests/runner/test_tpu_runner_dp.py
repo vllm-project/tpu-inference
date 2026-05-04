@@ -24,6 +24,16 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
+def mock_unpack_arrays(blob, keys, sizes):
+    blob_cpu = np.asarray(jax.device_get(blob))
+    indices = tuple(np.cumsum(sizes)[:-1])
+    parts = np.split(blob_cpu, indices)
+    return {key: parts[i] for i, key in enumerate(keys)}
+
+
+@patch(
+    'tpu_inference.runner.tpu_runner.common_utils.DeviceBuffer.unpack_arrays',
+    new=mock_unpack_arrays)
 class TestTPUJaxRunnerDPInputsLightweight:
 
     def setup_method(self):
