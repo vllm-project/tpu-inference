@@ -85,7 +85,7 @@ _TPU_QUEUE_MULTI = flags.DEFINE_string(
 )
 
 _KERNEL_TUNING_JOB_PRIORITY = flags.DEFINE_integer(
-    'kernel_tuning_job_priority', -10,
+    'priority_kernel_job_tuning', -10,
     'The priority to use for kernel tuning jobs. Higher priority jobs will be scheduled before lower priority ones. Default is -10, which is lower than typical user jobs to avoid impacting them.'
 )
 
@@ -168,7 +168,7 @@ def main(argv):
         run_locally=_RUN_LOCALLY.value,
         kernel_tuning_job_priority=_KERNEL_TUNING_JOB_PRIORITY.value)
 
-    if _RUN_LOCALLY.value:
+    if kernel_tuner.run_locally:
         logger.info(
             'Running in locally mode. Skipping Buildkite pipeline generation and running tuning jobs directly.'
         )
