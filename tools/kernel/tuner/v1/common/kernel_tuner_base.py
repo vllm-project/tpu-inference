@@ -113,7 +113,7 @@ class KernelTunerBase(ABC):
                  tpu_version: str = None,
                  tpu_cores: int = None,
                  tpu_queue_multi: str = None,
-                 run_locally: bool = None,
+                 run_locally: bool = False,
                  kernel_tuning_job_priority: int = -10):
         assert tuning_key_class is not None, "tuning_key_class must be specified"
         assert tunable_params_class is not None, "tunable_params_class must be specified"
@@ -263,7 +263,7 @@ class KernelTunerBase(ABC):
                     f'  --tpu_version={self.tpu_version} '
                     f'  --tpu_cores={self.tpu_cores} '
                     f'  --case_set_desc=\"{self.case_set_desc}\" '
-                    f'  --run_locally={self.run_locally} '
+                    f'  --run_locally=False '
                     f'  --tpu_queue_multi={self.tpu_queue_multi} '
                     f'  --begin_case_id={case_id_start} --end_case_id={case_id_end}\''
                 ),
@@ -436,6 +436,9 @@ class KernelTunerBase(ABC):
         for cid in range(begin_case_id, end_case_id):
             time_elapsed_minutes = (time.perf_counter() -
                                     bucket_start_perf) / 60
+            logger.info(
+                f"Worker [{FLAGS.worker_id}] Processing CaseId: {cid} in Bucket {bucket_id}, [{begin_case_id}-{end_case_id}) with elapsed time {time_elapsed_minutes:.2f} minutes."
+            )
             if not self.run_locally and (time_elapsed_minutes
                                          > self.run_at_most_minutes or
                                          (cid - begin_case_id) > 1):
