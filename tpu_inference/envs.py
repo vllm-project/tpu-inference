@@ -267,6 +267,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("MOE_ALL_GATHER_ACTIVATION_DTYPE", ""),
     # Override cache_config.mamba_ssm_cache_dtype on TPU. Default "bfloat16"
     # halves SSM state HBM; set "float32" to opt out, "" to defer to vLLM.
+    # TODO: remove once vLLM MambaDType includes bfloat16
+    # (https://github.com/vllm-project/vllm/pull/41680).
     "TPU_MAMBA_SSM_CACHE_DTYPE":
     lambda: os.getenv("TPU_MAMBA_SSM_CACHE_DTYPE", "bfloat16"),
     # kv offload to dram: skip pre-compiling swap-related jax functions
