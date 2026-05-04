@@ -58,7 +58,9 @@ def get_reshape_dimension(shape, reshape_axes, dtype=jnp.float32):
 
 @jax.jit(
     static_argnames=['transpose_axes',
-                     'reshape_axes']
+                     'reshape_axes', 
+                     'n_tile', 
+                     'm_tile']
 )
 def x_pose_pipeline(input, *, transpose_axes, reshape_axes=None, n_tile=128, m_tile=128):
     def x_pose_kernel(input_ref, output_ref):
@@ -68,6 +70,8 @@ def x_pose_pipeline(input, *, transpose_axes, reshape_axes=None, n_tile=128, m_t
                 .reshape(*reshape_axes)
         else:
             output_ref[...] = input_ref[...].transpose(*transpose_axes)
+    n_tile = n_tile if n_tile <= input.shape[0] else input.shape[0]
+    m_tile = m_tile if m_tile <= input.shape[1] else input.shape[1]
     assert input.shape[0] % n_tile == 0, f"input.shape[0]={input.shape[0]} must be divisible by n_tile={n_tile}."
     assert input.shape[1] % m_tile == 0, f"input.shape[1]={input.shape[1]} must be divisible by m_tile={m_tile}."
 
