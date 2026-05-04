@@ -107,16 +107,13 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-if [[ "${BUILDKITE:-false}" == "true" ]]; then
-  # TODO: Re-enable and check for compatible versions if running accuracy or lm-eval tasks.
-  # pip install evaluate==0.4.5 || true
-  # pip install rouge-score==0.1.2 || true
-  # # Install lm_eval with dependencies, version is same as https://github.com/vllm-project/vllm/blob/main/.buildkite/scripts/hardware_ci/run-tpu-v1-test.sh#L64
-  # pip install "lm-eval[api,math]>=0.4.9.2" || true
-
+if [ "${BUILDKITE:-false}" == "true" ]; then
+  ENV_CONTEXT="Buildkite environment"
   # Set umask so that any newly created files/directories have 777/666 permissions by default.
   # This ensures that the host user can delete artifacts created by the docker root user.
   umask 000
+else
+  ENV_CONTEXT="Local environment"
 fi
 
 if ! command -v gcloud &> /dev/null; then
@@ -542,11 +539,6 @@ run_benchmark(){
   echo "$throughput $p99_e2el"
 }
 
-if [ "${BUILDKITE:-false}" == "true" ]; then
-  ENV_CONTEXT="Buildkite environment"
-else
-  ENV_CONTEXT="Local environment"
-fi
 printf "[DEBUG] Checking folder structure (Environment: %s)...\n" "$ENV_CONTEXT"
 printf "[DEBUG] pwd=%s\n\nls $ARTIFACT_FOLDER=\n%s\n" "$(pwd)" "$(ls "$ARTIFACT_FOLDER")" || true
 printf "[DEBUG] ls $ARTIFACT_FOLDER/temp_logs=\n%s\n" "$(ls "$ARTIFACT_FOLDER"/temp_logs)" || true
