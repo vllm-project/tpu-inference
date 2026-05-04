@@ -225,7 +225,8 @@ def _patched_process_image_input(vllm_model, image_input):
         pixel_values = image_input["pixel_values"].type(
             vllm_model.visual.dtype)
         # Pass the TUPLE to visual (which is a JittableModule)
-        image_embeds = vllm_model.visual(pixel_values, grid_thw=grid_thw_tuple)
+        # We pass grid_thw as a POSITIONAL argument so JAX static_argnums can detect it
+        image_embeds = vllm_model.visual(pixel_values, grid_thw_tuple)
 
     if getattr(vllm_model, "is_multimodal_pruning_enabled", False):
         image_embeds = vllm_model._postprocess_image_embeds_evs(
@@ -263,7 +264,8 @@ def _patched_process_video_input(vllm_model, video_input):
         pixel_values = video_input["pixel_values"].type(
             vllm_model.visual.dtype)
         # Pass the TUPLE to visual (which is a JittableModule)
-        video_embeds = vllm_model.visual(pixel_values, grid_thw=grid_thw_tuple)
+        # We pass grid_thw as a POSITIONAL argument so JAX static_argnums can detect it
+        video_embeds = vllm_model.visual(pixel_values, grid_thw_tuple)
 
     if getattr(vllm_model, "is_multimodal_pruning_enabled", False):
         video_embeds = vllm_model._postprocess_image_embeds_evs(
@@ -295,9 +297,11 @@ def apply_qwen3_vl_patches(vllm_model):
 
     # 1. Patch vision encoder to handle grid_thw tuples
     if hasattr(vllm_model, "visual"):
-        orig_vision_forward = vllm_model.visual.forward
-        vllm_model.visual.forward = lambda x, grid_thw, **kwargs: _patched_vision_forward(
-            vllm_model.visual, orig_vision_forward, x, grid_thw, **kwargs)
+        # If wrapped by JittableModule, patch the underlying model so conversion happens inside JIT
+        target_module = getattr(vllm_model.visual, "_model", vllm_model.visual)
+        orig_vision_forward = target_module.forward
+        target_module.forward = lambda x, grid_thw, **kwargs: _patched_vision_forward(
+            target_module, orig_vision_forward, x, grid_thw, **kwargs)
 
     # 2. Patch model's processing methods to pass grid_thw as tuples to visual
     vllm_model._process_image_input = lambda image_input: _patched_process_image_input(

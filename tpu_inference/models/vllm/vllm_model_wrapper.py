@@ -244,6 +244,14 @@ class VllmModelWrapper:
         self._pooler: Pooler | None = self.model.pooler
 
         if self.vllm_config.model_config.is_multimodal_model:
+            # Hardcode "model.visual" for Qwen3-VL vision encoder JIT
+            jitted_keys = list(envs.JITTED_MM_MODULE_KEYS)
+            if hasattr(self.model.vllm_model, "config") and hasattr(self.model.vllm_model.config, "architectures"):
+                if "Qwen3VLForConditionalGeneration" in self.model.vllm_model.config.architectures:
+                    if "model.visual" not in jitted_keys:
+                        jitted_keys.append("model.visual")
+                        logger.info("Hardcoded model.visual to jitted_mm_module_keys for Qwen3-VL")
+
             # NOTE: It patch mm models to be JITtable within some submodule.
             # Caution: the submodule params_and_buffers would be put into
             # the wrapper directly. params_and_buffers should be sharded to tpu
@@ -251,7 +259,7 @@ class VllmModelWrapper:
             self.model, params_and_buffers = patch_mm_model(
                 self.model,
                 params_and_buffers,
-                jitted_mm_module_keys=envs.JITTED_MM_MODULE_KEYS,
+                jitted_mm_module_keys=jitted_keys,
                 register_mm_module_custom_pytree_classes=envs.
                 REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES,
             )
