@@ -236,6 +236,20 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
                                              intermediate_size_per_partition,
                                              params_dtype,
                                              **extra_weight_attrs)
+        # Upstream's create_weights only updates `extra_weight_attrs` after
+        # the scale params are registered, so vLLM's MoE weight loader does
+        # not see `quant_method` on them and rejects the load. Set them
+        # explicitly here.
+        from vllm.model_executor.layers.fused_moe.layer import \
+            FusedMoeWeightScaleSupported
+        for name in ("w13_weight_scale", "w2_weight_scale"):
+            set_weight_attrs(
+                getattr(layer, name),
+                {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value})
+        for name in ("w13_weight_scale_2", "w2_weight_scale_2"):
+            set_weight_attrs(
+                getattr(layer, name),
+                {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
         # Upstream NVFP4 MoE does not register bias; some models (e.g.
         # gpt-oss) need it. Keep our own bias registration.
         if self.moe.has_bias:
