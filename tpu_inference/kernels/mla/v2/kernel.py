@@ -23,7 +23,7 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from tpu_inference.kernels.custom_calls.kernel import x_pose_pipeline
+from tpu_inference.kernels.custom_calls.kernel import xpose_pipeline
 
 
 def cdiv_on_kv_packing(a, kv_packing):
@@ -1362,7 +1362,7 @@ def prepare_q_nope_inputs(
         constant_values=0,
     )
     # Physical transpose: (N, T, D) -> (T, N, D), pipelined over T
-    q = x_pose_pipeline(q, transpose_axes=(1, 0, 2), n_tile=128, m_tile=32)[0]
+    q = xpose_pipeline(q, transpose_axes=(1, 0, 2), n_tile=128, m_tile=32)[0]
     return q  # (max_num_tokens, num_q_heads, head_dim)
 
 

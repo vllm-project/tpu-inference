@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, PartitionSpec as P
 from jax import shard_map
-from tpu_inference.kernels.custom_calls.kernel import xpose_full, x_pose_pipeline
+from tpu_inference.kernels.custom_calls.kernel import xpose_full, xpose_pipelined
 
 def benchmark_op(name, op_func, input_data, number=10):
     """Utility to benchmark a JAX operation and print results."""
@@ -63,11 +63,11 @@ class CustomCallsTest(parameterized.TestCase):
         dict(shape=(1024, 2048), transpose_axes=(1, 0), n_tile=128, m_tile=128, reshape_axes=(-1, 2)),
         dict(shape=(512, 1024, 16), transpose_axes=(1, 0, 2), n_tile=64, m_tile=128, reshape_axes=(-1, 8, 2)),
     )
-    def test_x_pose_pipeline(self, shape, transpose_axes, n_tile, m_tile, reshape_axes):
+    def test_xpose_pipelined(self, shape, transpose_axes, n_tile, m_tile, reshape_axes):
         input_data = jnp.ones(shape, dtype=jnp.float32)
         
-        name = f"x_pose_pipeline_{len(shape)}d"
-        result = benchmark_op(name, lambda x: x_pose_pipeline(
+        name = f"xpose_pipelined_{len(shape)}d"
+        result = benchmark_op(name, lambda x: xpose_pipelined(
             x, transpose_axes=transpose_axes, reshape_axes=reshape_axes, n_tile=n_tile, m_tile=m_tile), input_data)
         
         expected = jnp.transpose(input_data, transpose_axes)

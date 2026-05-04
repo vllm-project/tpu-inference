@@ -9,17 +9,11 @@ min_pipeline = 3
 
 
 @jax.jit(
-    static_argnames=['transpose_axes',
-                     'reshape_axes']
+    static_argnames=['transpose_axes',]
 )
-def xpose_full(input, *, transpose_axes, reshape_axes=None):
+def xpose_full(input, *, transpose_axes):
     def xpose_kernel(input_ref, output_ref):
-        if reshape_axes is not None:
-            output_ref[...] = input_ref[...]\
-                .transpose(*transpose_axes)\
-                .reshape(*reshape_axes)
-        else:
-            output_ref[...] = input_ref[...].transpose(*transpose_axes)
+        output_ref[...] = input_ref[...].transpose(*transpose_axes)
     input_specs = [
         pl.BlockSpec(memory_space=pltpu.VMEM)
     ]
@@ -27,10 +21,7 @@ def xpose_full(input, *, transpose_axes, reshape_axes=None):
         pl.BlockSpec(memory_space=pltpu.VMEM)
     ]
     transposed_shape = tuple(input.shape[i] for i in transpose_axes)
-    if reshape_axes is not None:
-        final_shape = get_reshape_dimension(transposed_shape, reshape_axes, dtype=input.dtype)
-    else:
-        final_shape = transposed_shape
+    final_shape = transposed_shape
         
     output_shape = [
         jax.ShapeDtypeStruct(
@@ -58,18 +49,12 @@ def get_reshape_dimension(shape, reshape_axes, dtype=jnp.float32):
 
 @jax.jit(
     static_argnames=['transpose_axes',
-                     'reshape_axes', 
                      'n_tile', 
                      'm_tile']
 )
-def x_pose_pipeline(input, *, transpose_axes, reshape_axes=None, n_tile=128, m_tile=128):
-    def x_pose_kernel(input_ref, output_ref):
-        if reshape_axes is not None:
-            output_ref[...] = input_ref[...]\
-                .transpose(*transpose_axes)\
-                .reshape(*reshape_axes)
-        else:
-            output_ref[...] = input_ref[...].transpose(*transpose_axes)
+def xpose_pipeline(input, *, transpose_axes, n_tile=128, m_tile=128):
+    def xpose_kernel(input_ref, output_ref):
+        output_ref[...] = input_ref[...].transpose(*transpose_axes)
     n_tile = n_tile if n_tile <= input.shape[0] else input.shape[0]
     m_tile = m_tile if m_tile <= input.shape[1] else input.shape[1]
     assert input.shape[0] % n_tile == 0, f"input.shape[0]={input.shape[0]} must be divisible by n_tile={n_tile}."
@@ -80,16 +65,8 @@ def x_pose_pipeline(input, *, transpose_axes, reshape_axes=None, n_tile=128, m_t
     full_block_shape = (n_tile, m_tile) + input.shape[2:]
     transposed_block_shape  = tuple(full_block_shape[i] for i in transpose_axes)
     transposed_input_shape = tuple(input.shape[i] for i in transpose_axes)
-    if reshape_axes is not None:
-        reshaped_block_shape = get_reshape_dimension(transposed_block_shape, reshape_axes, dtype=input.dtype)
-        output_shape = get_reshape_dimension(transposed_input_shape, reshape_axes, dtype=input.dtype)
-        _n_tiles = input.shape[0] // n_tile
-        _trailing = len(reshaped_block_shape) - 1
-        out_index_map = lambda i, j, _nt=_n_tiles, _tr=_trailing: (j * _nt + i,) + (0,) * _tr
-    else:
-        reshaped_block_shape = transposed_block_shape
-        output_shape = transposed_input_shape
-        out_index_map = lambda i, j: (j, i) + (0,) * (input.ndim - 2)
+    output_shape = transposed_input_shape
+    out_index_map = lambda i, j: (j, i) + (0,) * (input.ndim - 2)
 
     input_specs = [
         pl.BlockSpec(
@@ -101,7 +78,7 @@ def x_pose_pipeline(input, *, transpose_axes, reshape_axes=None, n_tile=128, m_t
     output_specs = [
         pl.BlockSpec(
             index_map=out_index_map,
-            block_shape=reshaped_block_shape,
+            block_shape=transposed_block_shape,
             memory_space=pltpu.VMEM,
         )
     ]
@@ -109,7 +86,7 @@ def x_pose_pipeline(input, *, transpose_axes, reshape_axes=None, n_tile=128, m_t
     transpose_str = "x".join([str(i) for i in transpose_axes])
     scope_name = f"xpose_full_shape_{shape_str}_xpose_{transpose_str}_n_tile_{n_tile}_m_tile_{m_tile}"
     return pl.pallas_call(
-        x_pose_kernel,
+        xpose_kernel,
         grid=grid,
         compiler_params=pltpu.CompilerParams(
             dimension_semantics=("parallel", "arbitrary")
