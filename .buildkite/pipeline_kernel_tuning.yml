@@ -75,7 +75,7 @@ steps:
           --case_set_id=\${KERNEL_TUNING_CASE_SET_ID} \
           --run_id=\${KERNEL_TUNING_RUN_ID} \
           --tpu_cores=\${KERNEL_TUNING_TPU_CORES} \
-          --kernel_tuning_job_priority=\${KERNEL_TUNING_JOB_PRIORITY} \
+          --kernel_tuning_job_priority=\${KERNEL_TUNING_JOB_PRIORITY:-10} \
           --tpu_version=\${TPU_VERSION} "
       - |
         # Upload the generated pipeline YAML from the temp dir on the host.
