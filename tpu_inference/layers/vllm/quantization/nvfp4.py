@@ -13,12 +13,23 @@
 # limitations under the License.
 """NVFP4 (ModelOpt FP4) quantization support for TPU.
 
-Subclasses upstream vLLM's ModelOptNvFp4Config for config parsing.
-Weights are kept as NVFP4 (packed E2M1) in HBM with FP32 blockwise scales
-(combined from the original FP8 block scale and FP32 global scale).
-Dequantization happens in VMEM inside the matmul kernel (gmm_v2 dequant-
-before-matmul path) for MoE; for linear we dequant once to bf16 and run
-plain bf16 matmul.
+Subclasses upstream vLLM's NVFP4 config + linear/MoE methods for parameter
+registration; overrides only the TPU-specific paths:
+
+    - Config: subclass ModelOptNvFp4Config (config parsing).
+    - Linear: subclass VllmUnquantizedLinearMethod for the bf16 matmul apply
+      path; delegate create_weights to ModelOptNvFp4LinearMethod; override
+      process_weights_after_loading to dequant FP4 -> bf16 once.
+    - MoE: subclass FusedMoEMethodBase; delegate create_weights to
+      ModelOptNvFp4FusedMoE (and add bias params upstream omits); override
+      process_weights_after_loading to combine scales and reshape for
+      gmm_v2's dequant-in-VMEM path; override apply_monolithic to route
+      through vllm_moe_apply.
+
+Weights stay as packed E2M1 in HBM with a single FP32 blockwise scale
+(combined from FP8 block × FP32 global). Dequantization happens in VMEM
+inside gmm_v2 (block_size=16 < mxu_column_size=128 auto-trips the
+should_dequantize_before_matmul branch).
 """
 
 from typing import Optional, Union
@@ -31,16 +42,13 @@ from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.layer import \
-    FusedMoeWeightScaleSupported
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
-from vllm.model_executor.layers.quantization.modelopt import \
-    ModelOptNvFp4Config
-from vllm.model_executor.parameter import ModelWeightParameter
+from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptNvFp4Config, ModelOptNvFp4FusedMoE, ModelOptNvFp4LinearMethod)
 from vllm.model_executor.utils import set_weight_attrs
 
 from tpu_inference.layers.common.moe import MoEBackend
@@ -63,13 +71,7 @@ from tpu_inference.utils import get_mesh_shape_product, t2j
 
 logger = init_logger(__name__)
 
-# NVFP4 block size (elements per scale group).
-NVFP4_GROUP_SIZE = 16
 
-
-# ---------------------------------------------------------------------------
-# Config — subclass upstream ModelOptNvFp4Config for free config parsing
-# ---------------------------------------------------------------------------
 @register_quantization_config(NVFP4)
 class VllmNvfp4Config(ModelOptNvFp4Config, VllmQuantConfig):
     """NVFP4 config for TPU. Inherits config parsing from upstream."""
@@ -98,76 +100,40 @@ class VllmNvfp4Config(ModelOptNvFp4Config, VllmQuantConfig):
 
 
 # ---------------------------------------------------------------------------
-# Linear method — keep FP4 in HBM until process_weights, then dequant once
-# to bf16. Plain bf16 matmul in apply (no FP8 path, no requant).
+# Linear: delegate create_weights to upstream; dequant once to bf16; inherit
+# unquantized bf16 matmul apply.
 # ---------------------------------------------------------------------------
 class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
     """NVFP4 linear for TPU.
 
-    process_weights_after_loading dequantizes the full NVFP4 weight to bf16
-    (using the original two-level scales) and stores the bf16 result. apply
-    runs the inherited unquantized bf16 matmul path.
+    Reuses upstream ModelOptNvFp4LinearMethod.create_weights for parameter
+    registration. process_weights_after_loading dequants FP4 -> bf16 using
+    the original two-level scales. apply is inherited from
+    VllmUnquantizedLinearMethod (plain bf16 matmul).
     """
 
-    def __init__(self, quant_config: VllmNvfp4Config,
+    def __init__(self, quant_config: 'VllmNvfp4Config',
                  linear_config: VllmQuantLinearConfig):
+        # Skip ModelOptNvFp4LinearMethod.__init__ (calls GPU cutlass
+        # init_nvfp4_linear_kernel). Initialize the unquantized base instead.
         VllmUnquantizedLinearMethod.__init__(self, linear_config)
         self.quant_config = quant_config
 
     def create_weights(self, layer, input_size_per_partition,
                        output_partition_sizes, input_size, output_size,
                        params_dtype, **extra_weight_attrs):
-        output_size_per_partition = sum(output_partition_sizes)
-        weight_loader = extra_weight_attrs.get("weight_loader")
-        layer.logical_widths = output_partition_sizes
-        layer.input_size_per_partition = input_size_per_partition
-        layer.output_size_per_partition = output_size_per_partition
-        group_size = getattr(self.quant_config, 'group_size', NVFP4_GROUP_SIZE)
-
-        # Packed FP4 weight: 2 values per uint8 byte.
-        weight = ModelWeightParameter(
-            data=torch.empty(output_size_per_partition,
-                             input_size_per_partition // 2,
-                             dtype=torch.uint8),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("weight", weight)
-
-        # Scalar scale params — custom loader to bypass per-linear-type
-        # weight_loader shape assertions.
-        def scalar_weight_loader(param, loaded_weight, *args, **kwargs):
-            param.data.fill_(loaded_weight.item() if loaded_weight.numel() ==
-                             1 else loaded_weight.max().item())
-
-        input_scale = torch.nn.Parameter(torch.empty((), dtype=torch.float32),
-                                         requires_grad=False)
-        layer.register_parameter("input_scale", input_scale)
-        set_weight_attrs(input_scale, {"weight_loader": scalar_weight_loader})
-
-        weight_scale_2 = torch.nn.Parameter(torch.empty((),
-                                                        dtype=torch.float32),
-                                            requires_grad=False)
-        layer.register_parameter("weight_scale_2", weight_scale_2)
-        set_weight_attrs(weight_scale_2,
-                         {"weight_loader": scalar_weight_loader})
-
-        # Per-block weight scale (E4M3, block_size=group_size along input dim).
-        weight_scale = ModelWeightParameter(
-            data=torch.empty(output_size_per_partition,
-                             input_size_per_partition // group_size,
-                             dtype=torch.float8_e4m3fn),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("weight_scale", weight_scale)
+        ModelOptNvFp4LinearMethod.create_weights(
+            self, layer, input_size_per_partition, output_partition_sizes,
+            input_size, output_size, params_dtype, **extra_weight_attrs)
 
     def process_weights_after_loading(self, layer):
         assert isinstance(layer, LinearBase)
         weight_packed = t2j(layer.weight, use_dlpack=False)
         weight_scale = t2j(layer.weight_scale, use_dlpack=False)
+        # Upstream registers weight_scale_2 / input_scale as
+        # PerTensorScaleParameter of shape (num_partitions,). Take max so a
+        # fused-QKV layer with differing per-projection globals collapses to
+        # one scalar (matches upstream's process_weights_after_loading).
         weight_global_scale = jnp.max(
             t2j(layer.weight_scale_2, use_dlpack=False))
 
@@ -184,15 +150,12 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
         else:
             bias = None
 
-        # Dequant to bf16 once: unpack FP4 codes, multiply by combined scale.
-        # combined_scale[i, j] = fp32_global * fp8_block[i, j].astype(fp32)
         @jax.jit
         def _dequant_to_bf16(weight_packed, weight_scale, weight_global_scale):
             fp4 = u8_unpack_e2m1(weight_packed)  # (O, I) float4_e2m1fn
             fp4_fp32 = fp4.astype(jnp.float32)
             block_scale = weight_scale.astype(
                 jnp.float32) * weight_global_scale  # (O, I/group)
-            # Broadcast block scale across the group dimension.
             group_size = fp4.shape[-1] // block_scale.shape[-1]
             scaled = fp4_fp32.reshape(fp4.shape[0], block_scale.shape[-1],
                                       group_size) * block_scale[:, :, None]
@@ -228,29 +191,34 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
             if bias is not None:
                 layer.bias = to_parameter_list(weights.bias)
 
-    # apply() is inherited from VllmUnquantizedLinearMethod — plain bf16
-    # matmul over the dequantized weight stored at layer.weight.
+    # apply() inherited from VllmUnquantizedLinearMethod.
 
 
 # ---------------------------------------------------------------------------
-# MoE method — keep packed FP4 + combined FP32 blockwise scales in HBM,
-# dequant in VMEM via gmm_v2 dequant-before-matmul path.
+# MoE: delegate create_weights to upstream (and add bias params upstream
+# omits); combine scales + reshape for gmm_v2; route apply through
+# vllm_moe_apply.
 # ---------------------------------------------------------------------------
 class VllmNvfp4MoEMethod(FusedMoEMethodBase):
     """NVFP4 MoE for TPU.
 
-    process_weights_after_loading combines FP32 global × FP8 block scales
-    into a single FP32 block scale tensor, unpacks the packed E2M1 weight
-    into native float4_e2m1fn dtype, and lays out for the GMM kernel. No
-    requantization. The gmm_v2 kernel auto-trips its dequant-before-matmul
-    path because quant_block_size=16 < mxu_column_size=128.
+    Reuses upstream ModelOptNvFp4FusedMoE.create_weights for parameter
+    registration; adds bias parameters upstream does not register.
+    Weights stay packed E2M1 in HBM; the FP32 global × FP8 block scales are
+    combined into a single FP32 blockwise scale of size 16 and the matmul
+    runs through gmm_v2's dequant-in-VMEM path.
     """
 
     def __init__(self, quant_config, layer, mesh, ep_axis_name="model"):
+        # Skip ModelOptNvFp4FusedMoE.__init__ (selects GPU experts backend).
         FusedMoEMethodBase.__init__(self, layer.moe_config)
         self.quant_config = quant_config
         self.mesh = mesh
         self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
+        # Upstream's create_weights references self.use_global_sf to size the
+        # input_scale params; we don't use them so any value works — keep
+        # False to match a CPU/TPU "no global SF" path.
+        self.use_global_sf = False
         self.extra_backend_kwargs = {}
         if self.moe_backend == MoEBackend.FUSED_MOE:
             self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name)
@@ -262,74 +230,14 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
     def create_weights(self, layer, num_experts, hidden_size,
                        intermediate_size_per_partition, params_dtype,
                        **extra_weight_attrs):
-        layer.num_experts = num_experts
-        layer.orig_dtype = params_dtype
-        group_size = getattr(self.quant_config, 'group_size', NVFP4_GROUP_SIZE)
-
-        # Packed FP4 weights.
-        w13_weight = torch.nn.Parameter(torch.empty(
-            num_experts,
-            2 * intermediate_size_per_partition,
-            hidden_size // 2,
-            dtype=torch.uint8),
-                                        requires_grad=False)
-        layer.register_parameter("w13_weight", w13_weight)
-        set_weight_attrs(w13_weight, extra_weight_attrs)
-
-        w2_weight = torch.nn.Parameter(torch.empty(
-            num_experts,
-            hidden_size,
-            intermediate_size_per_partition // 2,
-            dtype=torch.uint8),
-                                       requires_grad=False)
-        layer.register_parameter("w2_weight", w2_weight)
-        set_weight_attrs(w2_weight, extra_weight_attrs)
-
-        # Per-block weight scales (E4M3).
-        w13_weight_scale = torch.nn.Parameter(torch.empty(
-            num_experts,
-            2 * intermediate_size_per_partition,
-            hidden_size // group_size,
-            dtype=torch.float8_e4m3fn),
-                                              requires_grad=False)
-        layer.register_parameter("w13_weight_scale", w13_weight_scale)
-        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
-        set_weight_attrs(
-            w13_weight_scale,
-            {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value})
-
-        w2_weight_scale = torch.nn.Parameter(torch.empty(
-            num_experts,
-            hidden_size,
-            intermediate_size_per_partition // group_size,
-            dtype=torch.float8_e4m3fn),
-                                             requires_grad=False)
-        layer.register_parameter("w2_weight_scale", w2_weight_scale)
-        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
-        set_weight_attrs(
-            w2_weight_scale,
-            {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value})
-
-        # Per-tensor global scales.
-        w13_weight_scale_2 = torch.nn.Parameter(torch.ones(
-            num_experts, 2, dtype=torch.float32),
-                                                requires_grad=False)
-        layer.register_parameter("w13_weight_scale_2", w13_weight_scale_2)
-        set_weight_attrs(w13_weight_scale_2, extra_weight_attrs)
-        set_weight_attrs(
-            w13_weight_scale_2,
-            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
-
-        w2_weight_scale_2 = torch.nn.Parameter(torch.ones(num_experts,
-                                                          dtype=torch.float32),
-                                               requires_grad=False)
-        layer.register_parameter("w2_weight_scale_2", w2_weight_scale_2)
-        set_weight_attrs(w2_weight_scale_2, extra_weight_attrs)
-        set_weight_attrs(
-            w2_weight_scale_2,
-            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
-
-        # Bias.
+        layer.params_dtype = params_dtype
+        ModelOptNvFp4FusedMoE.create_weights(self, layer, num_experts,
+                                             hidden_size,
+                                             intermediate_size_per_partition,
+                                             params_dtype,
+                                             **extra_weight_attrs)
+        # Upstream NVFP4 MoE does not register bias; some models (e.g.
+        # gpt-oss) need it. Keep our own bias registration.
         if self.moe.has_bias:
             w13_bias = torch.nn.Parameter(torch.zeros(
                 num_experts,
@@ -350,6 +258,11 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer):
         assert isinstance(layer, FusedMoE)
+        # Drop unused activation-quant scales registered by upstream.
+        for attr in ('w13_input_scale', 'w2_input_scale'):
+            if hasattr(layer, attr):
+                delattr(layer, attr)
+
         w13_weight = t2j(layer.w13_weight, use_dlpack=False)
         w13_weight_scale = t2j(layer.w13_weight_scale, use_dlpack=False)
         w2_weight = t2j(layer.w2_weight, use_dlpack=False)
@@ -366,11 +279,11 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
                                       w13_global_scale, w2_weight,
                                       w2_weight_scale, w2_global_scale,
                                       w13_bias, w2_bias):
-            # Unpack packed uint8 → native float4_e2m1fn (no value change).
-            w13_fp4 = u8_unpack_e2m1(w13_weight)  # (E, 2*I, H)
-            w2_fp4 = u8_unpack_e2m1(w2_weight)  # (E, H, I)
+            # Unpack packed uint8 -> native float4_e2m1fn (no value change).
+            w13_fp4 = u8_unpack_e2m1(w13_weight)
+            w2_fp4 = u8_unpack_e2m1(w2_weight)
 
-            # Combine FP32 global × FP8 block → single FP32 block scale.
+            # Combine FP32 global × FP8 block -> single FP32 block scale.
             if w13_global_scale.ndim == 2:  # (E, 2) — separate w1/w3 globals.
                 half = w13_weight_scale.shape[1] // 2
                 w1_eff = w13_weight_scale[:, :half].astype(
@@ -388,7 +301,6 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
             w13_reorder_size = get_mesh_shape_product(
                 self.mesh, ShardingAxisName.MLP_TENSOR)
 
-            # Skip quantize_moe_weights — weights are already quantized.
             weights = FusedMoEWeights(
                 w13_weight=w13_fp4,
                 w13_weight_scale=w13_scale_eff,
