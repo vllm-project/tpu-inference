@@ -173,6 +173,23 @@ upload_pipeline() {
     upload_with_priority .buildkite/pipeline_pypi.yml "$JOB_PRIORITY"
 }
 
+upload_benchmark_pipeline() {
+    VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH")
+    TPU_COMMIT_HASH=$(git rev-parse HEAD)
+    CODE_HASH="${VLLM_COMMIT_HASH}-${TPU_COMMIT_HASH}-"
+    buildkite-agent meta-data set "CODE_HASH" "${CODE_HASH}"
+    TIMEZONE="America/Los_Angeles"
+    JOB_REFERENCE="$(TZ="$TIMEZONE" date +%Y%m%d_%H%M%S)"
+    buildkite-agent meta-data set "JOB_REFERENCE" "${JOB_REFERENCE}"
+    echo "[BM-DEBUG] Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
+    echo "[BM-DEBUG] Using vllm-tpu commit hash: $(buildkite-agent meta-data get "CODE_HASH")"
+
+    # Upload benchmark pipelines
+    local case_folder=".buildkite/benchmark/cases/ci"
+    local generator_script="${SCRIPT_DIR}/../benchmark/scripts/generate_bk_pipeline.py"
+    process_json_benchmark_cases "$case_folder" "$generator_script" "$JOB_PRIORITY"
+}
+
 echo "--- Starting Buildkite Bootstrap"
 echo "Running in pipeline: $BUILDKITE_PIPELINE_SLUG"
 
@@ -261,6 +278,7 @@ else
     if [[ $PR_LABELS == *"ready"* ]]; then
       echo "Found 'ready' label on PR. Uploading main pipeline..."
       upload_pipeline
+      upload_benchmark_pipeline
     else
       # Explicitly fail the build because the required 'ready' label is missing.
       echo "Missing 'ready' label on PR. Failing build."
@@ -270,6 +288,7 @@ else
     # If it's NOT a Pull Request (e.g., branch push, tag, manual build)
     echo "This is not a Pull Request build. Uploading main pipeline."
     upload_pipeline
+    upload_benchmark_pipeline
   fi
 fi
 
