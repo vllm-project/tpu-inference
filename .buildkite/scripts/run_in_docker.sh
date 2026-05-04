@@ -60,7 +60,7 @@ ENV_VARS=(
 )
 
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
-    MODEL_IMPL_TYPE=flax_nnx
+    MODEL_IMPL_TYPE=auto
 fi
 
 IMAGE_NAME='vllm-tpu'

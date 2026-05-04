@@ -20,11 +20,9 @@ from jax.experimental.layout import Format, Layout
 from jax.sharding import Mesh, Sharding
 
 from tpu_inference import envs
-from tpu_inference.logger import init_logger
 
 # Lazy initialized, since device might not be ready at import time.
 _cpu_mesh = None
-logger = init_logger(__name__)
 
 
 def reorder_concatenated_tensor_for_sharding(concatenated_tensor: jax.Array,
@@ -158,34 +156,3 @@ def cpu_mesh() -> Mesh:
 def cpu_mesh_context():
     """A context to enforce using CPU mesh, used for loading weights on CPU."""
     return jax.set_mesh(cpu_mesh())
-
-
-def get_env_block_sizes():
-    """Read RPA block sizes from env vars and log them once.
-
-    Returns:
-        A 3-tuple of (d_block_sizes, p_block_sizes, m_block_sizes), each either
-        a (bq_sz, bkv_sz, bq_csz, bkv_csz) tuple or None if the env var is unset.
-    """
-    d_block_sizes = parse_block_sizes(envs.RPA_D_BLOCK_SIZES,
-                                      "RPA_D_BLOCK_SIZES")
-    p_block_sizes = parse_block_sizes(envs.RPA_P_BLOCK_SIZES,
-                                      "RPA_P_BLOCK_SIZES")
-    m_block_sizes = parse_block_sizes(envs.RPA_M_BLOCK_SIZES,
-                                      "RPA_M_BLOCK_SIZES")
-    logger.info_once(
-        "Custom RPA block sizes: decode=%s, prefill=%s, mixed=%s",
-        d_block_sizes,
-        p_block_sizes,
-        m_block_sizes,
-    )
-    return d_block_sizes, p_block_sizes, m_block_sizes
-
-
-def parse_block_sizes(env_val: str | None,
-                      env_key: str) -> tuple[int, int, int, int] | None:
-    if env_val is None:
-        return None
-    parts = [int(x.strip()) for x in env_val.split(",")]
-    assert len(parts) == 4, (f"Expected 4 values for {env_key}, got {parts}")
-    return tuple(parts)
