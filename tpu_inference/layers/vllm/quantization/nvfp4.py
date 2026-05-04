@@ -126,6 +126,25 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
             self, layer, input_size_per_partition, output_partition_sizes,
             input_size, output_size, params_dtype, **extra_weight_attrs)
 
+        # For fused-QKV layers, upstream registers `input_scale` and
+        # `weight_scale_2` as `PerTensorScaleParameter` with shape
+        # `(len(output_partition_sizes),)`. vLLM's QKVParallelLinear
+        # weight_loader expects the loaded scalar to match this shape and
+        # asserts (linear.py: `assert param_data.shape == loaded_weight.shape`),
+        # which fails because the checkpoint provides a single scalar per
+        # shard. Override the loader to fill the slot regardless of
+        # the loaded weight's shape (we only use the max in
+        # process_weights_after_loading anyway).
+        def scalar_weight_loader(param, loaded_weight, *args, **kwargs):
+            value = (loaded_weight.item() if loaded_weight.numel() == 1 else
+                     loaded_weight.max().item())
+            param.data.fill_(value)
+
+        for name in ("input_scale", "weight_scale_2"):
+            if hasattr(layer, name):
+                set_weight_attrs(getattr(layer, name),
+                                 {"weight_loader": scalar_weight_loader})
+
     def process_weights_after_loading(self, layer):
         assert isinstance(layer, LinearBase)
         weight_packed = t2j(layer.weight, use_dlpack=False)
