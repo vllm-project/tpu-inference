@@ -54,7 +54,6 @@ MODEL_TYPE_TO_TEMPLATE = {
     ModelType.VLLM_NATIVE.value: "vllm_native_model_template.yml",
 }
 
-# User Correction: Use double curly braces for shell variables to avoid Python format conflicts
 HOST_SCALE_TO_SETTINGS = {
     HostScale.SMALL.value: {
         "queue": "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}",
@@ -197,7 +196,7 @@ def generate_from_template(model_name: str, model_type: str,
         print(f"{RED}Error: Missing placeholder {e} in template.{RESET}")
         sys.exit(1)
 
-    generated_filepath = OUTPUT_DIR / f"{sanitized_model_name}.yml"
+    generated_filepath = OUTPUT_DIR / f"{sanitized_model_name}_{model_category}.yml"
     with open(generated_filepath, 'w', encoding='utf-8') as f:
         f.write(generated_content)
 
