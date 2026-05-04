@@ -237,20 +237,37 @@ class LocalDbManager(StorageManager):
             f'Marked bucket as in progress: cs_id={cs_id}, r_id={r_id}, b_id={b_id}, worker={self.worker_id}'
         )
 
-    def mark_bucket_completed(self, cs_id, r_id, b_id, tt_us):
+    def mark_bucket_completed(self, cs_id, r_id, b_id, tt_us=None):
         table = self._read_table('WorkBuckets')
         for row in table:
             if row['ID'] == cs_id and row['RunId'] == r_id and row[
                     'BucketId'] == b_id:
-                row.update({
+                update = {
                     'Status': 'COMPLETED',
-                    'TotalTime': tt_us,
                     'UpdatedAt': datetime.now().isoformat()
-                })
+                }
+                if tt_us is not None:
+                    update['TotalTime'] = tt_us
+                row.update(update)
                 break
         self._write_table('WorkBuckets', table)
         logger.info(
             f'Marked bucket as completed: cs_id={cs_id}, r_id={r_id}, b_id={b_id}, tt_us={tt_us}'
+        )
+
+    def add_bucket_processed_time_us(self, cs_id, r_id, b_id,
+                                     processed_time_us):
+        table = self._read_table('WorkBuckets')
+        for row in table:
+            if row['ID'] == cs_id and row['RunId'] == r_id and row[
+                    'BucketId'] == b_id:
+                row['TotalTime'] = (row.get('TotalTime')
+                                    or 0) + processed_time_us
+                row['UpdatedAt'] = datetime.now().isoformat()
+                break
+        self._write_table('WorkBuckets', table)
+        logger.info(
+            f'Added processed time: cs_id={cs_id}, r_id={r_id}, b_id={b_id}, processed_time_us={processed_time_us}'
         )
 
     def get_already_processed_ids(self, cs_id, r_id, start, end):

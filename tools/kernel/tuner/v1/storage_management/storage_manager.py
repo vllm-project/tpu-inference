@@ -151,17 +151,32 @@ class StorageManager:
         raise NotImplementedError(
             "Subclasses must implement mark_bucket_in_progress")
 
-    def mark_bucket_completed(self, cs_id, r_id, b_id, tt_us):
-        """Marks a work bucket as COMPLETED and records its total processing time.
+    def mark_bucket_completed(self, cs_id, r_id, b_id, tt_us=None):
+        """Marks a work bucket as COMPLETED and records its total processing time if provided.
 
         Args:
             cs_id: Case set ID the bucket belongs to.
             r_id: Run ID the bucket belongs to.
             b_id: Bucket ID to mark as completed.
-            tt_us: Total processing time for the bucket in microseconds.
+            tt_us: Total processing time for the bucket in microseconds. If is None, the total processing time will not be updated.
         """
         raise NotImplementedError(
             "Subclasses must implement mark_bucket_completed")
+
+    def add_bucket_processed_time_us(self, cs_id, r_id, b_id,
+                                     processed_time_us):
+        """Add the processed_time_us to the total processed time for the bucket.
+
+        Used by tuner agents to update the total processing time for a bucket as a whole bucket can be broken down into multiple smaller sub-buckets for enabling the TPU Machines to work on other jobs like CICD. Tuning jobs has the lowest priority it should be able to yield the resources when there is a high priority job.
+
+        Args:
+            cs_id: Case set ID the bucket belongs to.
+            r_id: Run ID the bucket belongs to.
+            b_id: Bucket ID to update the processed time for.
+            processed_time_us: Time in microseconds to add to the bucket's total processed time.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement add_bucket_processed_time_us")
 
     def get_already_processed_ids(self, cs_id, r_id, start, end):
         """Returns case IDs that have already been processed within a range.
