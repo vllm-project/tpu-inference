@@ -256,20 +256,20 @@ def _mla_ragged_paged_attention_kernel(
     bo_ids_ref,  # [4] (bo_sem_0_seq_idx, bo_sem_1_seq_idx, bo_sem_0_bo_idx, bo_sem_1_bo_idx)
     bkv_update_ids_ref,  # [batch_size, 6] (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz) * batch_size
     # Input
-    ql_nope_hbm_ref,  # [max_num_tokens, num_q_heads_per_q_packing, q_packing, lkv_dim]
-    q_pe_hbm_ref,  # [max_num_tokens, num_q_heads_per_q_packing, q_packing, r_dim]
+    ql_nope_hbm_ref,  # [max_num_tokens, num_q_heads, lkv_dim]
+    q_pe_hbm_ref,  # [max_num_tokens, num_q_heads, r_dim]
     new_kv_c_hbm_ref,  # [max_num_tokens_per_kv_packing, kv_packing, lkv_dim]
     new_k_pe_hbm_ref,  # [max_num_tokens_per_kv_packing, kv_packing, r_dim]
     cache_kv_hbm_ref,  # [total_num_pages, page_size_per_kv_packing, kv_packing, align_to(lkv_dim + r_dim, 128)]
     # Output
-    o_hbm_ref,  # [max_num_tokens, num_q_heads_per_q_packing, q_packing, lkv_dim]
+    o_hbm_ref,  # [max_num_tokens, num_q_heads, lkv_dim]
     updated_cache_kv_hbm_ref,  # [total_num_pages, page_size_per_kv_packing, kv_packing, align_to(lkv_dim + r_dim, 128)]
     # Scratch
     bkvc_x2_ref,  # [2, batch_size, bkv_buf_sz_per_kv_packing, kv_packing, lkv_dim]
     bkpe_x2_ref,  # [2, batch_size, bkv_buf_sz_per_kv_packing, kv_packing, r_dim]
-    bq_nope_x2_ref,  # [2, batch_size, bq_sz, num_q_heads_per_q_packing, q_packing, lkv_dim]
-    bq_rope_x2_ref,  # [2, batch_size, bq_sz, num_q_heads_per_q_packing, q_packing, r_dim]
-    bo_x2_ref,  # [2, batch_size, bq_sz, num_q_heads_per_q_packing, q_packing, lkv_dim]
+    bq_nope_x2_ref,  # [2, batch_size, bq_sz, num_q_heads, lkv_dim]
+    bq_rope_x2_ref,  # [2, batch_size, bq_sz, num_q_heads, r_dim]
+    bo_x2_ref,  # [2, batch_size, bq_sz, num_q_heads, lkv_dim]
     sems,  # [4, batch_size, 2]
     l_ref,  # [batch_size, bq_sz * num_q_heads, 128],
     m_ref,  # [batch_size, bq_sz * num_q_heads, 128],
@@ -296,9 +296,10 @@ def _mla_ragged_paged_attention_kernel(
     pe_dim = q_pe_hbm_ref.shape[-1]
     assert nope_dim + pe_dim == cache_kv_hbm_ref.shape[-1]
 
-    _, num_q_heads_per_q_packing, q_packing, lkv_dim = ql_nope_hbm_ref.shape
+    _, num_q_heads, lkv_dim = ql_nope_hbm_ref.shape
     r_dim = q_pe_hbm_ref.shape[-1]
-    num_q_heads = num_q_heads_per_q_packing * q_packing
+    q_packing = get_dtype_packing(ql_nope_hbm_ref.dtype)
+    num_q_heads_per_q_packing = num_q_heads // q_packing
     total_num_pages, page_size_per_kv_packing, kv_packing, _ = (
         cache_kv_hbm_ref.shape)
     max_num_seqs = kv_lens_ref.shape[0]
@@ -1324,28 +1325,18 @@ def prepare_q_inputs(
         q: jax.Array,  # [max_num_tokens, actual_num_q_heads, actual_head_dim],
 ):
     max_num_tokens, actual_num_q_heads, actual_head_dim = q.shape
-    q_packing = get_dtype_packing(q.dtype)
-    num_q_heads = align_to(actual_num_q_heads, q_packing)
+    num_q_heads = align_to(actual_num_q_heads, get_dtype_packing(q.dtype))
     head_dim = align_to(actual_head_dim, 128)
     q = jnp.pad(
-        q.reshape(
-            max_num_tokens,
-            actual_num_q_heads,
-            actual_head_dim,
-        ),
+        q,
         (
             (0, 0),
             (0, num_q_heads - actual_num_q_heads),
             (0, head_dim - actual_head_dim),
         ),
         constant_values=0,
-    ).reshape(
-        max_num_tokens,
-        num_q_heads // q_packing,
-        q_packing,
-        head_dim,
     )
-    return q
+    return q  # (max_num_tokens, num_q_heads, head_dim)
 
 
 def prepare_q_nope_inputs(
@@ -1354,14 +1345,12 @@ def prepare_q_nope_inputs(
     """Packs and physically transposes q_nope to the layout expected by the MLA kernel.
 
     The `q_nope` einsum emits in head-major layout (N, T, L). It needs to be transposed
-    into (T, N // q_packing, q_packing, L) which uses the custom call kernel to absorb
-    the copy latency.
+    into (T, N, L) which uses the custom call kernel to absorb the copy latency.
 
-    Returns: [max_num_tokens, num_q_heads // q_packing, q_packing, head_dim]
+    Returns: [max_num_tokens, num_q_heads, head_dim]
     """
     actual_num_q_heads, max_num_tokens, actual_head_dim = q.shape
-    q_packing = get_dtype_packing(q.dtype)
-    num_q_heads = align_to(actual_num_q_heads, q_packing)
+    num_q_heads = align_to(actual_num_q_heads, get_dtype_packing(q.dtype))
     head_dim = align_to(actual_head_dim, 128)
     q = jnp.pad(
         q,
@@ -1374,8 +1363,7 @@ def prepare_q_nope_inputs(
     )
     # Physical transpose: (N, T, D) -> (T, N, D), pipelined over T
     q = x_pose_pipeline(q, transpose_axes=(1, 0, 2), n_tile=128, m_tile=32)[0]
-    # Free reshape: physical layout is already T-first; just reinterpret N as (N//p, p)
-    return q.reshape(max_num_tokens, num_q_heads // q_packing, q_packing, head_dim)
+    return q  # (max_num_tokens, num_q_heads, head_dim)
 
 
 def prepare_kv_inputs(kv: jax.Array):
@@ -1394,21 +1382,11 @@ def prepare_kv_inputs(kv: jax.Array):
 
 
 def prepare_outputs(
-    out,  # [max_num_tokens, num_q_heads // q_packing, q_packing, head_dim]
+    out,  # [max_num_tokens, num_q_heads, head_dim]
     actual_num_q_heads: int,
     actual_head_dim: int,
 ):
-    (
-        max_num_tokens,
-        num_q_heads_per_q_packing,
-        q_packing,
-        head_dim,
-    ) = out.shape
-    return out.reshape(
-        max_num_tokens,
-        num_q_heads_per_q_packing * q_packing,
-        head_dim,
-    )[:, :actual_num_q_heads, :actual_head_dim]
+    return out[:, :actual_num_q_heads, :actual_head_dim]
 
 
 @functools.partial(
@@ -1554,9 +1532,9 @@ def mla_ragged_paged_attention(
 
     ql_nope = prepare_q_nope_inputs(
         ql_nope
-    )  # [max_num_tokens, num_q_heads_per_q_packing, q_packing, lkv_dim]
+    )  # [max_num_tokens, num_q_heads, lkv_dim]
     q_pe = prepare_q_inputs(
-        q_pe)  # [max_num_tokens, num_q_heads_per_q_packing, q_packing, r_dim]
+        q_pe)  # [max_num_tokens, num_q_heads, r_dim]
     new_kv_c = prepare_kv_inputs(
         new_kv_c)  # [max_num_tokens_per_kv_packing, kv_packing, lkv_dim]
     new_k_pe = prepare_kv_inputs(
@@ -1566,11 +1544,12 @@ def mla_ragged_paged_attention(
 
     _, page_size_per_kv_packing, kv_packing, _ = cache_kv.shape
     page_size = page_size_per_kv_packing * kv_packing
-    _, num_q_heads_per_q_packing, q_packing, _ = ql_nope.shape
+    _, num_q_heads, _ = ql_nope.shape
+    q_packing = get_dtype_packing(ql_nope.dtype)
+    num_q_heads_per_q_packing = num_q_heads // q_packing
     max_num_seqs = kv_lens.shape[0]
     num_page_indices = page_indices.shape[0]
     assert num_page_indices % max_num_seqs == 0
-    num_q_heads = num_q_heads_per_q_packing * q_packing
 
     def run_mla_kernel(
         ql_nope: jax.
@@ -1642,14 +1621,12 @@ def mla_ragged_paged_attention(
             cache_kv.dtype,
         )
         bq_nope_double_buf = pltpu.VMEM(
-            (2, batch_size, bq_sz, num_q_heads_per_q_packing, q_packing,
-             lkv_dim),
+            (2, batch_size, bq_sz, num_q_heads, lkv_dim),
             ql_nope.dtype,
         )
 
         bq_rope_double_buf = pltpu.VMEM(
-            (2, batch_size, bq_sz, num_q_heads_per_q_packing, q_packing,
-             r_dim),
+            (2, batch_size, bq_sz, num_q_heads, r_dim),
             q_pe.dtype,
         )
 
