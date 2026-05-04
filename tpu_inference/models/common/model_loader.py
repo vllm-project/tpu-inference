@@ -34,6 +34,8 @@ from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.interface import (ModelInterface,
                                                    MultiModalInterface)
+from tpu_inference.models.jax.utils.multi_modal_utils import \
+    prepare_jax_mm_embeds
 from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
     load_random_weights_into_qwix_abstract_model,
@@ -361,11 +363,30 @@ def get_flax_model(
         return model.embed_multimodal(**kwargs)
 
     embed_sharding = NamedSharding(mesh, PartitionSpec(None))
-    # This function will calculates the embeddings of input texts and then merge with the image embeddings
+
     @jax.jit(out_shardings=(embed_sharding))
-    def run_embed_input_ids(graphdef, state, *args, **kwargs):
+    def jitted_embed_input_ids(graphdef,
+                               state,
+                               input_ids,
+                               mm_embeds,
+                               is_multimodal=None):
         model = nnx.merge(graphdef, state)
-        return model.embed_input_ids(*args, **kwargs)
+        return model.embed_input_ids(input_ids,
+                                     mm_embeds,
+                                     is_multimodal=is_multimodal)
+
+    def run_embed_input_ids(graphdef,
+                            state,
+                            input_ids,
+                            mm_embeds=None,
+                            is_multimodal=None):
+        mm_embeds = prepare_jax_mm_embeds(mm_embeds,
+                                          target_pad_len=input_ids.shape[0])
+        return jitted_embed_input_ids(graphdef,
+                                      state,
+                                      input_ids,
+                                      mm_embeds,
+                                      is_multimodal=is_multimodal)
 
     # For models that want to work with EAGLE-3 speculative decoding
     @jax.jit(out_shardings=(logits_sharding))
@@ -381,6 +402,8 @@ def get_flax_model(
             run_model, graphdef)
     compute_logits_fn = functools.partial(run_compute_logits, graphdef)
     embed_multimodal_fn = functools.partial(run_embed_multimodal, graphdef)
+    jitted_embed_input_ids_fn = functools.partial(jitted_embed_input_ids,
+                                                  graphdef)
     embed_input_ids_fn = functools.partial(run_embed_input_ids, graphdef)
     lora_manager, model = None, None
     combine_hidden_states_fn = functools.partial(combine_hidden_states,
@@ -394,6 +417,7 @@ def get_flax_model(
         precompile_vision_encoder_fn=precompile_vision_encoder_fn,
         embed_multimodal_fn=embed_multimodal_fn,
         embed_input_ids_fn=embed_input_ids_fn,
+        jitted_embed_input_ids_fn=jitted_embed_input_ids_fn,
         get_mrope_input_positions_fn=get_mrope_input_positions_fn,
     )
 
@@ -440,6 +464,7 @@ def get_vllm_model(
         ),
         embed_multimodal_fn=model.wrap_embed_multimodal_func(),
         embed_input_ids_fn=model.wrap_embed_input_ids_func(),
+        jitted_embed_input_ids_fn=None,
         get_mrope_input_positions_fn=getattr(
             model.model.vllm_model,
             "get_mrope_input_positions",

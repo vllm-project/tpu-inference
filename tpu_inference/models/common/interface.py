@@ -32,6 +32,7 @@ class MultiModalInterface:
     precompile_vision_encoder_fn: Callable | None
     embed_multimodal_fn: Callable | None
     embed_input_ids_fn: Callable | None
+    jitted_embed_input_ids_fn: Callable | None
     get_mrope_input_positions_fn: Callable | None
 
 

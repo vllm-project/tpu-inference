@@ -128,6 +128,8 @@ class CompilationManager:
         self.runner.vllm_config.compilation_config.compilation_time += elapsed
 
     def _precompile_input_embeddings_merger(self) -> None:
+        if self.runner.jitted_embed_input_ids_fn is None:
+            return
         for num_tokens in self.runner.num_tokens_paddings:
             hidden_size = self.runner.vllm_config.model_config.get_hidden_size(
             )
@@ -148,7 +150,7 @@ class CompilationManager:
 
             self._run_compilation(
                 "input_embeddings_merger",
-                self.runner.embed_input_ids_fn,
+                self.runner.jitted_embed_input_ids_fn,
                 self.runner.state,
                 dummy_input_ids,
                 dummy_multimodal_embeddings,
@@ -158,7 +160,7 @@ class CompilationManager:
 
             self._run_compilation(
                 "input_embeddings_merger_text_only",
-                self.runner.embed_input_ids_fn,
+                self.runner.jitted_embed_input_ids_fn,
                 self.runner.state,
                 dummy_input_ids,
                 None,
