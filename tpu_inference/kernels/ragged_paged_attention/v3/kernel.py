@@ -92,7 +92,7 @@ def ref_ragged_paged_attention(
 
     if mask_value is None:
         # We do not set to -inf directly because (-inf) - (-inf) is nan.
-        mask_value = jnp.finfo(out_dtype).min
+        mask_value = -float(jnp.finfo(out_dtype).max)
     dynamic_validate_inputs(
         queries,
         keys,
@@ -204,8 +204,249 @@ def ref_ragged_paged_attention(
     result = jnp.concatenate(outputs, axis=0)
     return result, kv_cache
 
+def ref_ragged_paged_attention_cp(
+    queries: jax.Array,  # [max_num_tokens, actual_num_q_heads, actual_head_dim]
+    keys: jax.Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim]
+    values: jax.Array,  # [max_num_tokens, actual_num_kv_heads, actual_head_dim]
+    kv_cache: jax.Array,  # [total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
+    kv_lens: jax.Array,  # i32[max_num_seqs]
+    page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
+    cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
+    distribution: jax.Array,  # i32[3]
+    *,
+    cp_rank: int = 1,
+    cp_group_size: int = 1,
+    q_strides: jax.Array | None = None,  # i32[max_num_seqs]
+    kv_strides: jax.Array | None = None,  # i32[max_num_seqs]
+    use_causal_mask: bool = True,
+    return_softmax_lse: bool = True,
+    skip_kv_mask: bool = False,
+    sm_scale: float = 1.0,
+    sliding_window: int | None = None,
+    soft_cap: float | None = None,
+    out_dtype: Any = None,
+    mask_value: float | None = None,
+    q_scale: float | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
+):
+  if out_dtype is None:
+    out_dtype = jnp.float32 if queries.dtype == jnp.float32 else jnp.bfloat16
 
-def get_smem_estimate_bytes(max_num_seqs, pages_per_seq):
+  if mask_value is None:
+    # We do not set to -inf directly because (-inf) - (-inf) is nan.
+    mask_value = -float(jnp.finfo(out_dtype).max)
+  # Reference implementation skips validation for CP/sharding support.
+  # dynamic_validate_inputs(
+  #     queries,
+  #     keys,
+  #     values,
+  #     kv_cache,
+  #     kv_lens,
+  #     page_indices,
+  #     cu_q_lens,
+  #     distribution,
+  #     use_causal_mask=use_causal_mask,
+  #     skip_kv_mask=skip_kv_mask,
+  #     sm_scale=sm_scale,
+  #     sliding_window=sliding_window,
+  #     soft_cap=soft_cap,
+  #     out_dtype=out_dtype,
+  #     mask_value=mask_value,
+  #     q_scale=q_scale,
+  #     k_scale=k_scale,
+  #     v_scale=v_scale,
+  # )
+  actual_head_dim = queries.shape[2]
+  actual_num_q_heads = queries.shape[1]
+  actual_num_kv_heads = keys.shape[1]
+  merged_kv = merge_kv(keys, values)
+  assert merged_kv.shape[-3:] == kv_cache.shape[-3:]
+
+  _, page_size, num_kv_heads_x2_per_kv_packing, kv_packing, head_dim = (
+      kv_cache.shape
+  )
+  num_kv_heads_x2 = num_kv_heads_x2_per_kv_packing * kv_packing
+  assert num_kv_heads_x2 % 2 == 0
+  assert actual_num_q_heads % actual_num_kv_heads == 0
+  assert head_dim % 128 == 0
+  assert get_dtype_packing(kv_cache.dtype) == kv_packing
+  assert num_kv_heads_x2 == align_to(actual_num_kv_heads * 2, kv_packing)
+  actual_num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
+  max_num_seqs = kv_lens.shape[0]
+  num_page_indices = page_indices.shape[0]
+  assert num_page_indices % max_num_seqs == 0
+  pages_per_seq = num_page_indices // max_num_seqs
+  outputs = []
+  lse_outputs = []
+
+  for i in range(distribution[-1]):
+    q_stride = q_strides[i] if q_strides is not None else 1
+    kv_stride = kv_strides[i] if kv_strides is not None else 1
+    assert q_stride == 1 or q_stride == cp_group_size
+    assert kv_stride == 1 or kv_stride == cp_group_size
+    # Not support Partial Q + Partial KV.
+    if cp_group_size is not None and cp_group_size > 1:
+      assert not (q_stride == cp_group_size and kv_stride == cp_group_size)
+
+    # Get Global Q
+    q_start_global = cu_q_lens[i]
+    q_end_global = cu_q_lens[i + 1]
+    q_len_global = q_end_global - q_start_global
+    if q_stride > 1:
+      q_start_local = cdiv(q_start_global, cp_group_size)
+      q_end_local = cdiv(q_end_global, cp_group_size)
+      q_len_local = q_end_local - q_start_local
+      q_len_global_padded = cdiv(q_len_global, cp_group_size) * cp_group_size
+    else:
+      q_start_local = q_start_global
+      q_end_local = q_end_global
+      q_len_local = q_len_global
+      q_len_global_padded = q_len_local
+
+    # Get global KV
+    kv_len_global = kv_lens[i]
+    kv_len_global_padded = cdiv(kv_len_global, cp_group_size) * cp_group_size
+
+    cache_len = jnp.maximum(0, kv_len_global - q_len_global_padded)
+
+    if kv_stride > 1:
+      kv_len_local_padded = kv_len_global_padded // cp_group_size
+    else:
+
+      kv_len_local_padded = kv_len_global
+    if kv_stride > 1:
+      local_cache_len = (cache_len + cp_group_size - 1 - cp_rank) // cp_group_size
+    else:
+      local_cache_len = cache_len
+
+    # Get pages
+    indices_start = i * pages_per_seq
+    indices_end = indices_start + cdiv(kv_len_local_padded, page_size)
+    indices = page_indices[indices_start:indices_end]
+    q = queries[q_start_local:q_end_local, :, :actual_head_dim]
+    gathered_kv = kv_cache[indices]
+    gathered_shape = gathered_kv.shape
+    # Flatten num_pages, page_size
+    gathered_kv = gathered_kv.reshape(-1, *gathered_shape[-3:])
+
+    # KV_cache update
+    # Assume kv_cache is sharded on page_size dim
+    # 0) Always write kv cache in a interleaving way if cp_group_size > 1
+    # 1) Determine number of new KV tokens that belong to this rank
+    if cp_group_size > 1:
+      num_new_kv_tokens = cdiv(q_len_global_padded, cp_group_size)
+    else:
+      num_new_kv_tokens = q_len_local
+
+    print(f"==Debug== \n"
+          f"  q_len_local: {q_len_local}, \n"
+          f"  q_len_global_padded: {q_len_global_padded}, \n"
+          f"  kv_len_global: {kv_len_global}, \n"
+          f"  kv_len_global_padded: {kv_len_global_padded}, \n"
+          f"  cache_len: {cache_len}, \n"
+          f"  num_new_kv_tokens: {num_new_kv_tokens}, \n"
+          f"  num_new_tokens: {num_new_kv_tokens}, \n"
+          f"  kv_len_local_padded: {kv_len_local_padded}, \n"
+          f"  local_cache_len: {local_cache_len}, \n"
+          f"  cp_rank: {cp_rank}, \n"
+          f"  cp_group_size: {cp_group_size}, \n"
+          f"  kv_stride: {kv_stride}, \n"
+          f"  q_stride: {q_stride}, \n"
+          f"  cache_len: {cache_len}, \n"
+          f"  indices: {indices.shape}")
+    if cp_group_size > 1:
+      if kv_stride > 1:  # Partial Mode - rank owns all tokens in sharded merged_kv
+        selected_idx = jnp.arange(num_new_kv_tokens)
+        write_idx = local_cache_len + selected_idx
+      else:  # Full Mode - rank owns every cp_group_size-th token in global merged_kv
+        selected_idx = jnp.arange(cp_rank, num_new_kv_tokens, cp_group_size)
+        write_idx = local_cache_len + jnp.arange(selected_idx.shape[0])
+    else:
+      selected_idx = jnp.arange(num_new_kv_tokens)
+      write_idx = local_cache_len + selected_idx
+
+    # 2) Write to the kv cache
+    # Update the flattened gathered_kv instead of indexing into the 5D kv_cache directly
+    gathered_kv = gathered_kv.at[write_idx].set(merged_kv[selected_idx])
+    kv_cache = kv_cache.at[indices].set(gathered_kv.reshape(gathered_shape))
+
+    # Attn Calculation softmax(Q * K_T)
+    if cp_group_size > 1 and kv_stride == 1:
+      # merged_kv is [max_num_tokens, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
+      # Flatten to [max_num_tokens, num_kv_heads_x2, head_dim] first
+      kv_full = merged_kv[:kv_len_local_padded].reshape(-1, num_kv_heads_x2, head_dim)
+      kv = kv_full[:, : actual_num_kv_heads * 2, :].reshape(-1, actual_num_kv_heads, head_dim * 2)
+    else:
+      kv = gathered_kv.reshape(-1, num_kv_heads_x2, head_dim)[
+          :, : actual_num_kv_heads * 2, :
+      ].reshape(-1, actual_num_kv_heads, head_dim * 2)
+
+    k = kv[:kv_len_local_padded, :, :head_dim][:, :, :actual_head_dim]
+    v = kv[:kv_len_local_padded, :, head_dim:][:, :, :actual_head_dim]
+    k = jnp.repeat(k, actual_num_q_heads_per_kv_head, axis=1)
+    v = jnp.repeat(v, actual_num_q_heads_per_kv_head, axis=1)
+
+    if q_scale is not None:
+      q = q / q_scale
+      if jnp.issubdtype(k.dtype, jnp.floating):
+        dtype_info = jnp.finfo(k.dtype)
+        minval = float(dtype_info.min)
+        maxval = float(dtype_info.max)
+        q = jnp.clip(q, min=minval, max=maxval)
+      q = q.astype(k.dtype)
+
+    attn = jnp.einsum(
+        "qhd,khd->hqk", q, k, preferred_element_type=jnp.float32
+    ).astype(out_dtype)
+    attn *= sm_scale
+    if k_scale is not None:
+      attn *= k_scale
+    if q_scale is not None:
+      attn *= q_scale
+    if soft_cap is not None:
+      attn = soft_cap * jnp.tanh(attn / soft_cap)
+
+    # Casual Masking
+    if use_causal_mask:
+      q_idx_local = jax.lax.broadcasted_iota(jnp.int32, attn.shape, 1)
+      kv_idx_local = jax.lax.broadcasted_iota(jnp.int32, attn.shape, 2)
+      # Map to absolute global idx
+      q_span_global = cache_len + q_idx_local * q_stride + jnp.where(q_stride > 1, cp_rank, 0)
+      kv_span_global = kv_idx_local * kv_stride + jnp.where(kv_stride > 1, cp_rank, 0)
+      mask = q_span_global >= kv_span_global
+      # Exclude any padded KV tokens
+      valid_kv_mask = kv_span_global < kv_len_global
+      mask = jnp.logical_and(mask, valid_kv_mask)
+      if sliding_window is not None:
+        mask = jnp.logical_and(
+            mask, q_span_global < kv_span_global + sliding_window
+        )
+      attn = jnp.where(mask, attn, mask_value)
+
+    # Compute LSE (We only need lse when doing Full Q + Partial KV attention)
+    if return_softmax_lse:
+      m = jnp.max(attn, axis=-1)
+      m_safe = jnp.where(m == mask_value, 0.0, m)
+      l = jnp.sum(jnp.exp(attn - m_safe[:, :, None]), axis=-1)
+      lse = (m_safe + jnp.log(l)).astype(jnp.float32)
+      lse_outputs.append(lse.T)
+
+    attn = jax.nn.softmax(attn, axis=-1).astype(v.dtype)
+
+    # Attn Calculation (attn * V)
+    out = jnp.einsum("hqk,khd->qhd", attn, v).astype(out_dtype)
+    if v_scale is not None:
+      out *= v_scale
+
+    outputs.append(out)
+
+  result = jnp.concatenate(outputs, axis=0)
+  result_lse = jnp.concatenate(lse_outputs, axis=0)
+  return result, result_lse, kv_cache
+
+
+def get_smem_estimate_bytes(max_num_seqs, pages_per_seq, has_kv_cache_lens):
     total_bits = (
         # kv_lens_ref: i32[max_num_seqs]
         align_to(max_num_seqs, 128) * 32 +
@@ -221,6 +462,10 @@ def get_smem_estimate_bytes(max_num_seqs, pages_per_seq):
         128 * 32 +
         # bkv_update_ids_ref: i32[6]
         128 * 32)
+    if has_kv_cache_lens:
+        total_bits += (
+            # kv_cache_lens_ref: i32[max_num_seqs]
+            align_to(max_num_seqs, 128) * 32)
     return cdiv(total_bits, 8)
 
 
@@ -299,6 +544,8 @@ def _ragged_paged_attention_kernel_loop(
     sem_ids_ref,  # [3] (bq_sem_idx, bkv_sem_idx, bo_sem_idx)
     bo_ids_ref,  # [4] (bo_sem_0_seq_idx, bo_sem_1_seq_idx, bo_sem_0_bo_idx, bo_sem_1_bo_idx)
     bkv_update_ids_ref,  # [6] (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz)
+    kv_cache_lens_ref,  # [max_num_seqs]
+    cp_rank_ref,  # [1] dcp-axis rank index (ignored when cp_*_group_size == 1)
     # Input
     q_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
     kv_hbm_ref,  # [max_num_tokens, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
@@ -306,12 +553,14 @@ def _ragged_paged_attention_kernel_loop(
     # Output
     o_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
     updated_kv_cache_hbm_ref,  # [total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
+    lse_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head, 128] (last dim broadcast); only written when return_lse
     # Scratch
     ## Add one extra to handle bank conflicts for strided load if needed.
     bkv_x2_ref,  # [2, bkv_sz, num_kv_heads_x2 // kv_packing (+ 1), kv_packing, head_dim]
     bq_x2_ref,  # [2, actual_num_kv_heads, bq_sz, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
     bo_x2_ref,  # [2, actual_num_kv_heads, bq_sz, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
-    sems,  # [4, 2]
+    blse_x2_ref,  # [2, actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128] (LSE per-block double buffer)
+    sems,  # [5, 2] — extra semaphore (idx 4) for LSE send
     l_ref,  # [actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128],
     m_ref,  # [actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128],
     acc_ref,  # [actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, head_dim],
@@ -332,6 +581,10 @@ def _ragged_paged_attention_kernel_loop(
     bkv_csz,  # bkv compute size
     case: RpaCase = RpaCase.MIXED,
     debug_mode: bool = False,
+    kv_write_back: bool = True,
+    cp_compute_group_size: int = 1,
+    cp_write_group_size: int = 1,
+    return_lse: bool = False,
 ):
     assert q_hbm_ref.shape == o_hbm_ref.shape
     assert q_hbm_ref.shape[-1] == kv_cache_hbm_ref.shape[-1]
@@ -363,7 +616,7 @@ def _ragged_paged_attention_kernel_loop(
     num_page_indices = page_indices_ref.shape[0]
     assert num_page_indices % max_num_seqs == 0
     pages_per_seq = num_page_indices // max_num_seqs
-    # num_kv_heads_x2 = num_kv_heads_x2_per_kv_packing * kv_packing
+    num_kv_heads_x2 = num_kv_heads_x2_per_kv_packing * kv_packing
     num_q_heads_per_kv_head = num_q_heads_per_kv_head_per_packing * q_packing
     q_dtype = q_hbm_ref.dtype
     kv_dtype = kv_cache_hbm_ref.dtype
@@ -379,8 +632,33 @@ def _ragged_paged_attention_kernel_loop(
     q_start = cu_q_lens_ref[seq_idx]
     q_end = cu_q_lens_ref[seq_idx + 1]
     q_len = q_end - q_start
-    kv_len = kv_lens_ref[seq_idx]
-    kv_q_gap = kv_len - q_len
+    kv_len_global = kv_lens_ref[seq_idx]
+    if cp_compute_group_size > 1:
+        # Partial-KV (DCP) compute mode: this rank only owns every
+        # cp_compute_group_size-th KV token starting at cp_rank. The kernel
+        # iterates over the rank's interleaved slice; the global causal mask
+        # in `flash_attention_step1_qk_softmax` lifts each local index back
+        # to global coordinates via `local_idx * cp + cp_rank`.
+        cp_rank_val = cp_rank_ref[0].astype(jnp.int32)
+        # Number of rank-owned tokens in [0, kv_len_global).
+        # Rank r owns positions {r, r+cp, r+2cp, ...}; count = ceil((L - r) / cp).
+        kv_len = cdiv(
+            jnp.maximum(jnp.int32(0), kv_len_global - cp_rank_val),
+            cp_compute_group_size)
+        # Partial-KV compute is intended for cached-only attention (Call 1
+        # in the DCP wrapper). New-token attention should use
+        # cp_compute_group_size == 1 so the full new K/V is used uniformly.
+        kv_new_len = jnp.int32(0)
+    else:
+        cp_rank_val = jnp.int32(0)
+        kv_len = kv_len_global
+        if kv_cache_lens_ref is not None:
+            kv_new_len = kv_len - kv_cache_lens_ref[seq_idx]
+        else:
+            kv_new_len = q_len
+    # Q tokens occupy GLOBAL positions [kv_q_gap, kv_q_gap + q_len) regardless
+    # of CP partitioning: Q is replicated across the dcp axis.
+    kv_q_gap = kv_len_global - q_len
     cur_seq_start_bkv_idx = 0
     next_seq_start_bkv_idx = 0
 
@@ -470,13 +748,24 @@ def _ragged_paged_attention_kernel_loop(
             int_ty = jnp.int16
         processed_q_len_int = processed_q_len.astype(int_ty)
         processed_kv_len_int = processed_kv_len.astype(int_ty)
+        # effective_kv_len here is in GLOBAL coordinates so the masks below
+        # work uniformly for both full-KV (cp_compute_group_size==1) and
+        # partial-KV (cp_compute_group_size>1) modes.
         effective_kv_len_int = effective_kv_len.astype(int_ty)
         q_span = processed_q_len_int + (lax.broadcasted_iota(
             jnp.int32, s.shape, 0) // num_q_heads_per_kv_head).astype(int_ty)
+        # In partial-KV mode, the rank's local KV index `i` represents global
+        # position `i * cp + cp_rank`. Lift k_span / v_span to global coords so
+        # the same q_span >= k_span causal check works.
         k_span = processed_kv_len_int + lax.broadcasted_iota(
             int_ty, s.shape, 1)
         v_span = processed_kv_len_int + lax.broadcasted_iota(
             int_ty, v.shape, 0)
+        if cp_compute_group_size > 1:
+            cp_g = jnp.asarray(cp_compute_group_size, dtype=int_ty)
+            cp_r = cp_rank_val.astype(int_ty)
+            k_span = k_span * cp_g + cp_r
+            v_span = v_span * cp_g + cp_r
 
         mask = None
         if use_causal_mask:
@@ -554,12 +843,9 @@ def _ragged_paged_attention_kernel_loop(
         kv_len = kv_lens_ref[seq_idx]
         kv_len_start = bkv_idx * bkv_sz
         kv_p_start = bkv_idx * bkv_p
-        q_start = cu_q_lens_ref[seq_idx]
-        q_end = cu_q_lens_ref[seq_idx + 1]
-        q_len = q_end - q_start
 
         kv_left = kv_len - kv_len_start
-        kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
+        kv_left_frm_cache = jnp.maximum(kv_left - kv_new_len, 0)
         kv_left_frm_new = kv_left - kv_left_frm_cache
 
         bkv_sz_frm_cache = jnp.minimum(kv_left_frm_cache, bkv_sz)
@@ -739,6 +1025,35 @@ def _ragged_paged_attention_kernel_loop(
             wait,
         )
 
+    def _send_blse(seq_idx, bo_idx, bo_sem_idx, *, wait=False):
+        # DMA per-block LSE from `blse_x2_ref[bo_sem_idx]` to the corresponding
+        # slice of `lse_hbm_ref`. blse_x2_ref shape:
+        #   [2, actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128]
+        # lse_hbm_ref shape:
+        #   [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head, 128]
+        sem = sems.at[4, bo_sem_idx]
+        vmem_ref = blse_x2_ref.at[bo_sem_idx]  # [n_kv, bq_sz * n_q_per_kv, 128]
+        q_len_start = cu_q_lens_ref[seq_idx] + bo_idx * bq_sz
+        q_end = cu_q_lens_ref[seq_idx + 1]
+        sz = jnp.minimum(bq_sz, q_end - q_len_start)
+        # Reshape HBM slice to merge (max_num_tokens, n_q_per_kv) into one dim
+        # so the layout matches the vmem buffer.
+        lse_flat = lse_hbm_ref.reshape(
+            actual_num_kv_heads,
+            lse_hbm_ref.shape[1] * lse_hbm_ref.shape[2],
+            lse_hbm_ref.shape[3],
+        )
+        # Token range in the flat layout: [q_len_start * n_q_per_kv,
+        # (q_len_start + sz) * n_q_per_kv).
+        flat_start = q_len_start * num_q_heads_per_kv_head
+        flat_sz = sz * num_q_heads_per_kv_head
+        _async_copy(
+            vmem_ref.at[:, pl.ds(0, flat_sz)],
+            lse_flat.at[:, pl.ds(flat_start, flat_sz)],
+            sem,
+            wait,
+        )
+
     def start_fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx):
         return _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx)
 
@@ -755,6 +1070,8 @@ def _ragged_paged_attention_kernel_loop(
         bo_ids_ref[bo_sem_idx] = seq_idx
         bo_ids_ref[bo_sem_idx + 2] = bo_idx
         _send_bo(seq_idx, bo_idx, bo_sem_idx)
+        if return_lse:
+            _send_blse(seq_idx, bo_idx, bo_sem_idx)
 
     def wait_send_bo(bo_sem_idx):
         old_seq_idx = bo_ids_ref[bo_sem_idx]
@@ -765,12 +1082,121 @@ def _ragged_paged_attention_kernel_loop(
                             <= seq_idx))
         def _():
             _send_bo(old_seq_idx, old_bo_idx, bo_sem_idx, wait=True)
+            if return_lse:
+                _send_blse(old_seq_idx, old_bo_idx, bo_sem_idx, wait=True)
 
     def start_update_kv_cache(seq_idx, bkv_sem_idx, offset, update_sz):
         bkv_update_ids_ref[bkv_sem_idx] = seq_idx
         bkv_update_ids_ref[bkv_sem_idx + 2] = offset
         bkv_update_ids_ref[bkv_sem_idx + 4] = update_sz
         _update_kv_cache(seq_idx, bkv_sem_idx, offset, update_sz)
+
+    def _update_kv_cache_interleaved(seq_idx,
+                                     bkv_sem_idx,
+                                     offset,
+                                     update_sz,
+                                     *,
+                                     wait=False):
+        # DCP interleaved write. The bkv vmem buffer holds the FULL new K/V
+        # tokens for this seq (replicated across the dcp axis). This rank
+        # commits every cp_write_group_size-th token, starting at cp_rank,
+        # into consecutive slots of the rank-local cache slice.
+        #
+        # Strategy: one DMA per destination cache page. Source is a strided
+        # vmem slice (stride = cp_write_group_size); destination is a
+        # contiguous range of `sz` slots within the page. The TPU DMA engine
+        # supports leading-dim strided source via `pl.ds(start, size, stride)`.
+        sem = sems.at[3, bkv_sem_idx]
+        vmem_ref = bkv_x2_ref.at[
+            bkv_sem_idx, :, :num_kv_heads_x2_per_kv_packing]
+        cache_hbm_shape = updated_kv_cache_hbm_ref.shape
+        cache_hbm_ref = updated_kv_cache_hbm_ref.reshape(
+            cache_hbm_shape[0] * cache_hbm_shape[1], *cache_hbm_shape[2:])
+
+        cp_g_val = cp_write_group_size  # static int
+        cp_r = cp_rank_ref[0].astype(jnp.int32)
+
+        # `offset` is the LOCAL cache offset where this rank starts writing.
+        bkv_id = offset // bkv_sz
+        # Source position within the bkv vmem block of the first rank-owned
+        # token. We assume the bkv block starts at a token whose global index
+        # is a multiple of cp_g (the kernel's bkv loop uses contiguous
+        # global-aligned blocks for new tokens), so the first rank-owned slot
+        # is at `cp_rank` within the block.
+        # TODO(dcp): handle unaligned bkv blocks (if/when the kernel produces
+        # them) by recomputing `src_first` from the global token index.
+        src_first_in_block = cp_r
+        # Number of rank-owned tokens in [src_first, update_sz):
+        owned_count = jnp.maximum(
+            jnp.int32(0),
+            cdiv(update_sz - src_first_in_block, jnp.int32(cp_g_val)),
+        )
+
+        # Destination page bookkeeping (mirrors `_update_kv_cache`).
+        kv_p_start = offset // page_size
+        kv_p_end = cdiv(offset + owned_count, page_size)
+        ignore = offset % page_size
+        page_indices_offset = seq_idx * pages_per_seq + kv_p_start
+
+        debug_print(
+            "[RPA debug]"
+            f" -----------{'wait' if wait else 'start'}_update_kv_cache_interleaved-----------"
+        )
+        debug_print("[RPA debug] seq_idx={}", seq_idx)
+        debug_print("[RPA debug] offset={}", offset)
+        debug_print("[RPA debug] update_sz={}", update_sz)
+        debug_print("[RPA debug] owned_count={}", owned_count)
+        debug_print("[RPA debug] cp_rank={}", cp_r)
+        debug_print(f"[RPA debug] cp_write_group_size={cp_g_val}")
+
+        def loop_body(i, state):
+            owned_remaining, written_so_far, page_ignore = state
+            sz = jnp.minimum(page_size - page_ignore, owned_remaining)
+            # Strided source: `sz` rank-owned tokens starting at
+            # `src_first + written_so_far * cp_g`, stride `cp_g`. Each unit
+            # in the stride is one slot of the bkv vmem buffer (= one full
+            # token's heads × head_dim sub-tensor).
+            src_start_in_block = (
+                src_first_in_block + written_so_far * cp_g_val)
+            # Adjust to the bkv block's vmem position (already sliced; index 0
+            # corresponds to the start of THIS block's `bkv_sz` slots).
+            src_start = (kv_p_start - bkv_id * bkv_p) * page_size + src_start_in_block
+            # NOTE: `_update_kv_cache` derives the source page offset using
+            # `(p_ignore + i) * page_size + ignore`, but with a strided source
+            # the math is independent of the destination page boundary. We
+            # walk vmem at stride `cp_g` regardless of dest pagination.
+            page_id = page_indices_ref[page_indices_offset + i]
+            _async_copy(
+                vmem_ref.at[pl.ds(src_start, sz, cp_g_val)],
+                cache_hbm_ref.at[pl.ds(
+                    page_id * page_size + page_ignore, sz)],
+                sem,
+                wait,
+            )
+            debug_print("[RPA debug] page_loop i={}, sz={}, src_start={}", i,
+                        sz, src_start)
+            return owned_remaining - sz, written_so_far + sz, jnp.int32(0)
+
+        if not wait:
+            lax.fori_loop(
+                0,
+                kv_p_end - kv_p_start,
+                loop_body,
+                (owned_count, jnp.int32(0), ignore),
+                unroll=False,
+            )
+        else:
+            # Wait path: just signal the sem as done (src=dst no-op DMA),
+            # mirroring the contiguous variant.
+            dst = cache_hbm_ref.at[pl.ds(0, owned_count)]
+            _async_copy(src=dst, dst=dst, sem=sem, wait=True)
+
+    def start_update_kv_cache_interleaved(seq_idx, bkv_sem_idx, offset,
+                                          update_sz):
+        bkv_update_ids_ref[bkv_sem_idx] = seq_idx
+        bkv_update_ids_ref[bkv_sem_idx + 2] = offset
+        bkv_update_ids_ref[bkv_sem_idx + 4] = update_sz
+        _update_kv_cache_interleaved(seq_idx, bkv_sem_idx, offset, update_sz)
 
     def wait_update_kv_cache(bkv_sem_idx):
         update_sz = bkv_update_ids_ref[bkv_sem_idx + 4]
@@ -780,11 +1206,18 @@ def _ragged_paged_attention_kernel_loop(
             seq_idx = bkv_update_ids_ref[bkv_sem_idx]
             offset = bkv_update_ids_ref[bkv_sem_idx + 2]
             bkv_update_ids_ref[bkv_sem_idx + 4] = 0
-            _update_kv_cache(seq_idx,
-                             bkv_sem_idx,
-                             offset,
-                             update_sz,
-                             wait=True)
+            if cp_write_group_size > 1:
+                _update_kv_cache_interleaved(seq_idx,
+                                             bkv_sem_idx,
+                                             offset,
+                                             update_sz,
+                                             wait=True)
+            else:
+                _update_kv_cache(seq_idx,
+                                 bkv_sem_idx,
+                                 offset,
+                                 update_sz,
+                                 wait=True)
 
     def strided_load(ref, start, sz, step, *, dtype=None):
         assert get_dtype_packing(ref.dtype) == 1
@@ -926,13 +1359,24 @@ def _ragged_paged_attention_kernel_loop(
             start_bkv_idx = 0
             if sliding_window is not None:
                 # Recalculate the start_bkv_idx based on the processed_q_len.
+                # NOTE: sliding_window is not adapted for cp_compute_group_size>1.
                 start_bkv_idx = (
                     jnp.maximum(processed_q_len - sliding_window, 0) // bkv_sz)
+            # `effective_kv_len_global` is the global cap on KV positions for
+            # this bq slice (used by the masks); `effective_kv_len` is its
+            # rank-local equivalent (used for loop bounds and block sizing).
             if use_causal_mask:
-                effective_kv_len = jnp.minimum(kv_len,
-                                               processed_q_len + actual_bq_sz)
+                effective_kv_len_global = jnp.minimum(
+                    kv_len_global, processed_q_len + actual_bq_sz)
             else:
-                effective_kv_len = kv_len
+                effective_kv_len_global = kv_len_global
+            if cp_compute_group_size > 1:
+                effective_kv_len = cdiv(
+                    jnp.maximum(jnp.int32(0),
+                                effective_kv_len_global - cp_rank_val),
+                    cp_compute_group_size)
+            else:
+                effective_kv_len = effective_kv_len_global
             end_bkv_idx = cdiv(effective_kv_len, bkv_sz)
 
             # Prefetch next bq
@@ -971,8 +1415,19 @@ def _ragged_paged_attention_kernel_loop(
                 # Only needed in last bq loop.
                 @pl.when(jnp.logical_and(update_sz > 0, bq_idx == num_bq - 1))
                 def update_cur_bkv_to_cache():
-                    start_update_kv_cache(seq_idx, bkv_sem_idx, offset,
-                                          update_sz)
+                    if kv_write_back:
+                        if cp_write_group_size > 1:
+                            # DCP interleaved write: the bkv vmem buffer holds
+                            # the FULL new K/V tokens (replicated across the
+                            # dcp axis); this rank should commit only its
+                            # interleaved share (every cp_write_group_size-th
+                            # token starting at cp_rank) to consecutive slots
+                            # of the rank-local cache slice.
+                            start_update_kv_cache_interleaved(
+                                seq_idx, bkv_sem_idx, offset, update_sz)
+                        else:
+                            start_update_kv_cache(seq_idx, bkv_sem_idx, offset,
+                                                  update_sz)
 
                 debug_print(
                     "[RPA debug] -----------flash attention-----------")
@@ -1027,7 +1482,7 @@ def _ragged_paged_attention_kernel_loop(
                                 m_ref.at[*lm_slice],
                                 processed_q_len=processed_q_len + bq_start,
                                 processed_kv_len=processed_kv_len + bkv_start,
-                                effective_kv_len=effective_kv_len,
+                                effective_kv_len=effective_kv_len_global,
                             )
                             if prev_lm_slice is not None:
                                 flash_attention_step2_pv(
@@ -1071,7 +1526,21 @@ def _ragged_paged_attention_kernel_loop(
             out = pltpu.bitcast(out, out_ref.dtype).reshape(out_ref.shape)
             strided_store(out_ref, 0, out_ref.shape[0], 1, out)
 
-            # Send cur bo
+            # Compute LSE = m + log(l) per (Q-row, Q-head). The l_ref/m_ref are
+            # the final FlashAttention state for this bq block. Both are stored
+            # broadcast across the 128 minor lanes.
+            if return_lse:
+                m_block = m_ref[...]
+                l_block = l_ref[...]
+                # log(l) is safe: l >= 1 by construction unless every entry was
+                # masked out. For fully-masked rows we emit -inf so the merge
+                # ignores this rank's contribution.
+                lse_block = (m_block + jnp.log(l_block)).astype(jnp.float32)
+                # If every position was masked, m_block stayed at -inf and l
+                # stayed at 0; log(0) = -inf, so lse = -inf as desired.
+                blse_x2_ref[bo_sem_idx, ...] = lse_block
+
+            # Send cur bo (and lse, if return_lse).
             start_send_bo(seq_idx, bq_idx, bo_sem_idx)
 
     ### ------- Kernel start ------- ###
@@ -1542,7 +2011,8 @@ def get_default_block_sizes(
     }
 
 
-@jax.jit(
+@functools.partial(
+    jax.jit,
     static_argnames=(
         "use_causal_mask",
         "skip_kv_mask",
@@ -1562,8 +2032,11 @@ def get_default_block_sizes(
         "debug_mode",
         "disable_bounds_checks",
         "disable_semaphore_checks",
+        "cp_compute_group_size",
+        "cp_write_group_size",
+        "return_lse",
     ),
-    donate_argnames=("queries", "keys", "values", "kv_cache"),
+    # donate_argnames=("queries", "keys", "values", "kv_cache"),
 )
 def ragged_paged_attention(
     queries: jax.
@@ -1578,6 +2051,11 @@ def ragged_paged_attention(
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
     *,
+    kv_cache_lens: jax.Array | None = None,
+    cp_rank: jax.Array | int = 0,
+    cp_compute_group_size: int = 1,
+    cp_write_group_size: int = 1,
+    return_lse: bool = False,
     use_causal_mask: bool = True,
     skip_kv_mask: bool = False,
     sm_scale: float = 1.0,
@@ -1585,6 +2063,7 @@ def ragged_paged_attention(
     soft_cap: float | None = None,
     out_dtype: Any = None,
     mask_value: float | None = None,
+    kv_write_back: bool = True,
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
@@ -1629,6 +2108,21 @@ def ragged_paged_attention(
       lower for better performance, set higher for better accuracy. If None, it
       uses q.dtype.
     mask_value: mask value for causal mask.
+    cp_rank: the dcp-axis rank index of the calling device. Used both for
+      partial-KV mask computation (when cp_compute_group_size > 1) and for
+      interleaved cache writes (when cp_write_group_size > 1).
+    cp_compute_group_size: dcp group size used for partial-KV attention. When
+      > 1, the kernel treats the loaded KV slice as the rank's interleaved
+      share of the global KV (every cp_compute_group_size-th token starting at
+      cp_rank), and shifts the K span into global coordinates for masking.
+      Defaults to 1 (full-KV compute, no DCP semantics).
+    cp_write_group_size: dcp group size used for interleaved KV-cache writes.
+      When > 1 and kv_write_back=True, the kernel writes only the rank's owned
+      new tokens (every cp_write_group_size-th, starting at cp_rank) into the
+      cache. Defaults to 1 (contiguous writes).
+    return_lse: when True, return the per-token-per-q-head log-sum-exp of the
+      attention denominator alongside the output (needed for cross-rank LSE
+      merge in DCP).
     q_scale: the scale for the query.
     k_scale: the scale for the key.
     v_scale: the scale for the value.
@@ -1690,6 +2184,21 @@ def ragged_paged_attention(
     actual_head_dim = q.shape[2]
     actual_num_kv_heads = k.shape[1]
 
+    # Pallas drops `None` entries from `scalar_prefetches` when building the
+    # flat operand list, which would shift the positional binding of every
+    # subsequent prefetch (and break input_output_aliases indexing). To keep
+    # the layout stable independent of whether the caller passed an explicit
+    # `kv_cache_lens`, we always materialize a per-seq array. When `None`,
+    # default to `kv_lens - q_lens` so the kernel computes
+    # `kv_new_len = kv_len - kv_cache_lens = q_len` — matching the legacy
+    # default semantics.
+    if kv_cache_lens is None:
+        _max_num_seqs = kv_lens.shape[0]
+        _q_lens_per_seq = cu_q_lens[1:_max_num_seqs + 1] - cu_q_lens[:_max_num_seqs]
+        kv_cache_lens_for_kernel = (kv_lens - _q_lens_per_seq).astype(jnp.int32)
+    else:
+        kv_cache_lens_for_kernel = kv_cache_lens
+
     actual_num_q_heads_per_kv_head = actual_num_q_heads // actual_num_kv_heads
     q, kv = prepare_inputs(q, k, v)
     (
@@ -1717,6 +2226,7 @@ def ragged_paged_attention(
     def run_rpa_kernel(
         q,
         kv_cache,
+        lse_buf,
         *,
         bq_sz,
         bkv_sz,
@@ -1726,19 +2236,29 @@ def ragged_paged_attention(
         case: RpaCase = RpaCase.MIXED,
     ):
         in_specs = [
-            pl.BlockSpec(memory_space=pltpu.HBM),
-            pl.BlockSpec(memory_space=pltpu.HBM),
-            pl.BlockSpec(memory_space=pltpu.HBM),
+            pl.BlockSpec(memory_space=pltpu.HBM),  # q
+            pl.BlockSpec(memory_space=pltpu.HBM),  # kv
+            pl.BlockSpec(memory_space=pltpu.HBM),  # kv_cache
+            pl.BlockSpec(memory_space=pltpu.HBM),  # lse_in (aliased to lse_out)
         ]
 
         out_specs = [
-            pl.BlockSpec(memory_space=pltpu.HBM),
-            pl.BlockSpec(memory_space=pltpu.HBM),
+            pl.BlockSpec(memory_space=pltpu.HBM),  # q out (aliased)
+            pl.BlockSpec(memory_space=pltpu.HBM),  # kv_cache out (aliased)
+            pl.BlockSpec(memory_space=pltpu.HBM),  # lse out (aliased to lse_in)
         ]
 
         bkv_stride = num_kv_heads_x2_per_kv_packing
         if has_bank_conflicts(bkv_stride):
             bkv_stride += 1
+
+        # LSE HBM output shape: per (kv_head, token, q_per_kv, broadcast 128).
+        lse_shape = (
+            actual_num_kv_heads,
+            max_num_tokens,
+            num_q_heads_per_kv_head,
+            128,
+        )
 
         bkv_double_buf = pltpu.VMEM(
             (2, bkv_sz, bkv_stride, *kv_cache.shape[3:]),
@@ -1751,6 +2271,14 @@ def ragged_paged_attention(
         )
 
         bo_double_buf = bq_double_buf
+
+        # Per-block double buffer for LSE. Shape:
+        #   [2, actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128]
+        # Last 128 is the broadcast minor lane (matching l/m scratch layout).
+        blse_double_buf = pltpu.VMEM(
+            (2, actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128),
+            jnp.float32,
+        )
 
         l_scratch = pltpu.VMEM(
             (actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128),
@@ -1767,14 +2295,20 @@ def ragged_paged_attention(
             bkv_double_buf,  # (bkv_x2_ref) Double buffering for kv block.
             bq_double_buf,  # (bq_x2_ref) Double buffering for q block.
             bo_double_buf,  # (bo_x2_ref) Double buffering for output block.
-            # Semaphores for double buffering of bkv, bq, bo and bkv_update.
-            pltpu.SemaphoreType.DMA((4, 2)),
+            blse_double_buf,  # (blse_x2_ref) Double buffering for per-block LSE.
+            # Semaphores for double buffering of bkv, bq, bo, bkv_update, blse.
+            pltpu.SemaphoreType.DMA((5, 2)),
             # Intermediate buffers per kv head for flash attention.
             l_scratch,
             m_scratch,
             acc_scratch,
         ]
 
+        # cp_rank is dynamic (e.g. comes from jax.lax.axis_index('dcp') inside a
+        # shard_map). Pass it as a 1-element scalar prefetch so the kernel can
+        # read it from SMEM. When DCP is off (cp_compute_group_size == 1 and
+        # cp_write_group_size == 1), the kernel ignores it.
+        cp_rank_arr = jnp.asarray(cp_rank, dtype=jnp.int32).reshape((1, ))
         scalar_prefetches = (
             kv_lens,
             # TODO(jevinjiang): can we use ragged page_indices to save some smem?
@@ -1784,6 +2318,8 @@ def ragged_paged_attention(
             init_sem_ids,
             init_bo_ids,
             init_bkv_update_ids,
+            kv_cache_lens_for_kernel,
+            cp_rank_arr,
         )
 
         scope_name = f"RPA{case.symbol}-p_{page_size}-bq_{bq_sz}_{bq_csz}-bkv_{bkv_sz}_{bkv_csz}"
@@ -1808,6 +2344,10 @@ def ragged_paged_attention(
                 bkv_csz=bkv_csz,
                 case=case,
                 debug_mode=debug_mode,
+                kv_write_back=kv_write_back,
+                cp_compute_group_size=cp_compute_group_size,
+                cp_write_group_size=cp_write_group_size,
+                return_lse=return_lse,
             ),
             grid_spec=pltpu.PrefetchScalarGridSpec(
                 num_scalar_prefetch=len(scalar_prefetches),
@@ -1831,14 +2371,20 @@ def ragged_paged_attention(
             out_shape=[
                 pltpu.HBM(shape=q.shape, dtype=q.dtype),
                 pltpu.HBM(shape=kv_cache.shape, dtype=kv_cache.dtype),
+                pltpu.HBM(shape=lse_shape, dtype=jnp.float32),
             ] if tpu_version >= 7 else [
                 jax.ShapeDtypeStruct(shape=q.shape, dtype=q.dtype),
                 jax.ShapeDtypeStruct(shape=kv_cache.shape,
                                      dtype=kv_cache.dtype),
+                jax.ShapeDtypeStruct(shape=lse_shape, dtype=jnp.float32),
             ],
+            # 9 prefetches (indices 0..8) + q at 9, kv at 10, kv_cache at 11,
+            # lse_in at 12. `kv_cache_lens_for_kernel` is always materialized
+            # above so the prefetch count is fixed.
             input_output_aliases={
-                7: 0,
-                9: 1
+                9: 0,   # q -> q_out
+                11: 1,  # kv_cache -> kv_cache_out
+                12: 2,  # lse_in -> lse_out
             },
             name=scope_name,
         )
@@ -1846,19 +2392,21 @@ def ragged_paged_attention(
         if tpu_version >= 7:
             # jit to color the memory since the q, kv are just preprocessed.
             @jax.jit
-            def run(scalar_prefetches, q, kv, kv_cache):
+            def run(scalar_prefetches, q, kv, kv_cache, lse_buf):
                 return kernel(
                     *scalar_prefetches,
                     pltpu.with_memory_space_constraint(q, pltpu.HBM),
                     pltpu.with_memory_space_constraint(kv, pltpu.HBM),
                     pltpu.with_memory_space_constraint(kv_cache, pltpu.HBM),
+                    pltpu.with_memory_space_constraint(lse_buf, pltpu.HBM),
                 )
         else:
             # TODO(b/494285697): v6 has issues with pinning aliased memory.
-            def run(scalar_prefetches, q, kv, kv_cache):
-                return kernel(*scalar_prefetches, q, kv, kv_cache)
+            def run(scalar_prefetches, q, kv, kv_cache, lse_buf):
+                return kernel(*scalar_prefetches, q, kv, kv_cache, lse_buf)
 
-        return run(scalar_prefetches, q, kv, kv_cache)
+        # Returns (q_out, kv_cache_out, lse_out).
+        return run(scalar_prefetches, q, kv, kv_cache, lse_buf)
 
     def _prepare_block_sizes(block_sizes, case):
         if block_sizes is None:
@@ -1881,33 +2429,55 @@ def ragged_paged_attention(
             "bkv_csz": block_sizes[3],
         }
 
+    # Allocate the LSE buffer once and thread it through the three kernel
+    # calls (each call only writes to its sequence range; -inf-init lets
+    # downstream code identify unwritten slots).
+    lse_shape = (
+        actual_num_kv_heads,
+        max_num_tokens,
+        num_q_heads_per_kv_head,
+        128,
+    )
+    lse_buf = jnp.full(lse_shape, -jnp.inf, jnp.float32)
+
     # Decode-only
-    q, kv_cache = run_rpa_kernel(
+    q, kv_cache, lse_buf = run_rpa_kernel(
         q,
         kv_cache,
+        lse_buf,
         **_prepare_block_sizes(d_block_sizes, RpaCase.DECODE),
         static_q_len=1,
         case=RpaCase.DECODE,
     )
     if chunk_prefill_size is not None:
         # Prefill-only
-        q, kv_cache = run_rpa_kernel(
+        q, kv_cache, lse_buf = run_rpa_kernel(
             q,
             kv_cache,
+            lse_buf,
             **_prepare_block_sizes(p_block_sizes, RpaCase.PREFILL),
             static_q_len=chunk_prefill_size,
             case=RpaCase.PREFILL,
         )
     # Mixed
-    q, kv_cache = run_rpa_kernel(
+    q, kv_cache, lse_buf = run_rpa_kernel(
         q,
         kv_cache,
+        lse_buf,
         **_prepare_block_sizes(m_block_sizes, RpaCase.MIXED),
         static_q_len=None,
         case=RpaCase.MIXED,
     )
 
-    return (
-        prepare_outputs(q, actual_num_q_heads_per_kv_head, actual_head_dim),
-        kv_cache,
-    )
+    out = prepare_outputs(q, actual_num_q_heads_per_kv_head, actual_head_dim)
+    if return_lse:
+        # lse layout out of the kernel: [n_kv, max_num_tokens, n_q_per_kv, 128]
+        # Take lane 0 (broadcast minor) → [n_kv, max_num_tokens, n_q_per_kv].
+        # Then permute to [max_num_tokens, n_kv * n_q_per_kv] = [..., n_q].
+        lse_2d = lse_buf[..., 0]  # [n_kv, max_num_tokens, n_q_per_kv]
+        lse_2d = jnp.transpose(lse_2d, (1, 0, 2)).reshape(
+            max_num_tokens,
+            actual_num_kv_heads * num_q_heads_per_kv_head,
+        )[:, :actual_num_q_heads]
+        return out, lse_2d, kv_cache
+    return (out, kv_cache)

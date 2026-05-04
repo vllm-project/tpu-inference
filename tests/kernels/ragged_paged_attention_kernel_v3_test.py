@@ -528,6 +528,219 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
                 num_pages,
                 soft_cap=0.0,
             )
+    def test_dual_swap_sharded_q_prefill(self, cp_group_size=2):
+        # This test implements a TRUE dual swap prefill.
+        # Q is sharded (head/tail balanced) and KV is full (simulating all-gather).
+        print(
+            "-------------------- Dual Swap: Sharded Q + Full KV (True Dual Swap"
+            " Mode) --------------------"
+        )
+        # Init data
+        bq_sz=64
+        bkv_sz=256
+        bq_csz=32
+        bkv_csz=128
+        vmem_limit_bytes=100 * 1024 * 1024
+        max_num_batched_tokens=512
+        max_num_seq=8
+
+        # Assume only on sequence and is "initial prefill"
+        seq_lens = [(max_num_batched_tokens, max_num_batched_tokens)]
+        q_dtype = jnp.bfloat16
+        kv_dtype = jnp.bfloat16
+        num_heads = (32, 8)
+        head_dim = 128
+        page_size = 16
+        num_pages = 1000
+        rng = np.random.default_rng(1234)
+
+        def gen_random(shape, dtype):
+            return jnp.array(rng.random(size=shape, dtype=np.float32)).astype(dtype)
+
+        if not jtu.is_device_tpu_at_least(version=4):
+            self.skipTest("Expect TPUv4+")
+        cu_q_lens = [0]
+        kv_lens = []
+        for q_len, kv_len in seq_lens:
+            assert q_len <= kv_len
+        cu_q_lens.append(cu_q_lens[-1] + q_len)
+        kv_lens.append(kv_len)
+
+        max_num_batched_tokens = max(
+            align_to(cu_q_lens[-1], 128), max_num_batched_tokens
+        )
+        max_num_seq = max(align_to(len(seq_lens), 8), max_num_seq)
+        max_kv_len = max(kv_lens)
+        pages_per_seq = cdiv(max_kv_len, page_size)
+        num_q_heads, num_kv_heads = num_heads
+
+        q = gen_random((max_num_batched_tokens, num_q_heads, head_dim), q_dtype)
+        k = gen_random((max_num_batched_tokens, num_kv_heads, head_dim), kv_dtype)
+        v = gen_random((max_num_batched_tokens, num_kv_heads, head_dim), kv_dtype)
+        page_cnt = 0
+        page_indices_list = []
+        kv_pages_list = []
+        kv_packing = get_dtype_packing(kv_dtype)
+        padded_head_dim = align_to(head_dim, 128)
+        num_kv_heads_x2 = align_to(num_kv_heads * 2, kv_packing)
+        for kv_len in kv_lens:
+            kv = gen_random(
+                (
+                    kv_len,
+                    num_kv_heads_x2 // kv_packing,
+                    kv_packing,
+                    padded_head_dim,
+                ),
+                kv_dtype,
+            )
+            kv = jnp.pad(
+                kv,
+                (
+                    (
+                        0,
+                        cdiv(kv_len, page_size) * page_size - kv_len,
+                    ),
+                    (0, 0),
+                    (0, 0),
+                    (0, 0),
+                ),
+                constant_values=jnp.nan,
+            ).reshape(
+                -1,
+                page_size,
+                num_kv_heads_x2 // kv_packing,
+                kv_packing,
+                padded_head_dim,
+            )
+            indices = page_cnt + jnp.arange(kv.shape[0], dtype=jnp.int32)
+            indices = jnp.pad(
+                indices,
+                ((0, pages_per_seq - indices.shape[0]),),
+                constant_values=jnp.nan,
+            )
+            page_indices_list.append(indices)
+            page_cnt += kv.shape[0]
+            kv_pages_list.append(kv)
+
+        kv_cache = jnp.concatenate(kv_pages_list, axis=0)
+        kv_cache = jnp.pad(
+            kv_cache,
+            ((0, num_pages - kv_cache.shape[0]), (0, 0), (0, 0), (0, 0), (0, 0)),
+            constant_values=jnp.nan,
+        )
+        page_indices = jnp.stack(page_indices_list, axis=0)
+        page_indices = jnp.pad(
+            page_indices,
+            ((0, max_num_seq - page_indices.shape[0]), (0, 0)),
+            constant_values=jnp.nan,
+        )
+        page_indices = page_indices.reshape(-1)
+
+        cu_q_lens = jnp.array(cu_q_lens, dtype=jnp.int32)
+        cu_q_lens = jnp.pad(cu_q_lens, (0, max_num_seq + 1 - cu_q_lens.shape[0]))
+        kv_lens = jnp.array(kv_lens, dtype=jnp.int32)
+        kv_lens = jnp.pad(kv_lens, (0, max_num_seq - kv_lens.shape[0]))
+        distribution = jnp.array([0, 0, len(seq_lens)], dtype=jnp.int32)
+
+        kwargs = {
+            "use_causal_mask": True,
+        }
+
+        kv_cache_for_sharded = kv_cache.copy()
+        # Reference baseline (Full Attention, non-sharded)
+        expected_out, _ = ref_ragged_paged_attention(
+            q,
+            k,
+            v,
+            kv_cache,
+            kv_lens,
+            page_indices,
+            cu_q_lens,
+            distribution,
+            **kwargs,
+        )
+
+        print(f"expected_out: {expected_out.shape}")
+
+        # Dual Swap: Sharded Q + Full KV (Simulating all-gather)
+        actual_out = jnp.zeros_like(q)
+        num_chunks = 2 * cp_group_size
+        chunk_size = max_num_batched_tokens // num_chunks
+        for rank in range(cp_group_size):
+            # Dual Swap (Causal Masking Balance):
+            # Separate Q into 2N parts. Rank i gets the head's i-th part and
+            # the tail's (2N - 1 - i)-th part.
+            head_idx = rank
+            tail_idx = num_chunks - 1 - rank
+
+            head_start = head_idx * chunk_size
+            head_end = (head_idx + 1) * chunk_size
+
+            tail_start = tail_idx * chunk_size
+            tail_end = (tail_idx + 1) * chunk_size
+
+            # run ragged_paged_attention (head)
+            cu_q_lens_head = jnp.array([head_start, head_end], dtype=jnp.int32)
+            # NOTE: we have to avoid using kv_lens, because kv_lens mean "total
+            # length of seq including cache & new_kv_tokens, and RPA assumes
+            # cache_len == kv_lens - q_len". However, in this test,
+            # new_kv_tokens_len != q_len, that is to say, cache_len != kv_lens - q_len
+            # We need to pass 2 parameters: cache_len and new_kv_tokens_len.
+
+            kv_lens_head = jnp.array([head_end], dtype=jnp.int32)
+            kv_cache_lens = jnp.array([0], dtype=jnp.int32)
+            head_out, _ = ragged_paged_attention(
+                q,
+                k,
+                v,
+                kv_cache_for_sharded.copy(),
+                kv_lens_head,
+                page_indices,
+                cu_q_lens_head,
+                distribution,
+                kv_write_back=False, # avoids multiple writes to the same KV cache.
+                m_block_sizes=(64, 256, 32, 128),
+                kv_cache_lens=kv_cache_lens,
+                # debug_mode=True,
+                **kwargs,
+            )
+
+            # run ragged_paged_attention (tail)
+
+            cu_q_lens_tail = jnp.array([tail_start, tail_end], dtype=jnp.int32)
+            kv_lens_tail = jnp.array([tail_end], dtype=jnp.int32)
+            tail_out, _ = ragged_paged_attention(
+                q,
+                k,
+                v,
+                kv_cache_for_sharded.copy(),
+                kv_lens_tail,
+                page_indices,
+                cu_q_lens_tail,
+                distribution,
+                kv_write_back=False,  #
+                m_block_sizes=(64, 256, 32, 128),
+                kv_cache_lens=kv_cache_lens,
+                **kwargs,
+                # debug_mode=True,
+            )
+
+            # combine
+            actual_out = actual_out.at[head_start:head_end].set(head_out[head_start:head_end])
+            actual_out = actual_out.at[tail_start:tail_end].set(tail_out[tail_start:tail_end])
+
+        print(f"actual_out: {actual_out.shape}")
+        # Main verification: Since we are not writing back to the KV Cache,
+        # we only verify the output.
+        print("Verifying Output...")
+        self.assertAllClose(
+            actual_out,
+            expected_out,
+            rtol=0.2,
+            atol=0.2,
+            err_msg="Attention output does not match the expected baseline"
+        )
+        print("Output test passed!")
 
 
 if __name__ == "__main__":
