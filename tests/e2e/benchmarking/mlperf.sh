@@ -53,7 +53,6 @@ if [ "$QUANTIZATION" = "True" ]; then
 else
     echo "QUANTIZATION is False. Running without quantization."
 fi
-extra_serve_args+=('--model-loader-extra-config' '{"enable_weights_track": false}')
 
 root_dir=/workspace
 dataset_name=mlperf

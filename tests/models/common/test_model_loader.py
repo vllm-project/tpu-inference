@@ -73,9 +73,7 @@ def vllm_config() -> MagicMock:
     mock_config.load_config = MagicMock()
     mock_config.load_config.download_dir = None
     mock_config.load_config.load_format = "auto"
-    mock_config.load_config.model_loader_extra_config = {
-        "enable_weights_track": False
-    }
+    mock_config.load_config.model_loader_extra_config = dict()
     mock_config.additional_config = dict()
     mock_config.cache_config = MagicMock(cache_dtype="auto")
     mock_config.parallel_config = ParallelConfig(pipeline_parallel_size=1)
