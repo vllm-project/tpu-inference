@@ -142,8 +142,9 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
 
         for name in ("input_scale", "weight_scale_2"):
             if hasattr(layer, name):
-                set_weight_attrs(getattr(layer, name),
-                                 {"weight_loader": scalar_weight_loader})
+                # Direct assignment: upstream's constructor already attached
+                # a weight_loader, so set_weight_attrs would assert.
+                getattr(layer, name).weight_loader = scalar_weight_loader
 
     def process_weights_after_loading(self, layer):
         assert isinstance(layer, LinearBase)
