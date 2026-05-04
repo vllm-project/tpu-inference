@@ -12,6 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
+# Gemma4 uses batched RPA kernel, enabling it in test to catch potential issues related to the kernel.
+os.environ["USE_BATCHED_RPA_KERNEL"] = "1"
+
 from unittest.mock import MagicMock
 
 import jax
