@@ -113,6 +113,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         logprobs_tensors: Optional[LogprobsTensors] = None,
         expert_indices: Optional[jax.Array] = None,
         total_num_scheduled_tokens: int = 0,
+        num_logits_per_req: Optional[list[int]] = None,
     ):
         self._model_runner_output = model_runner_output
         self._next_tokens = next_tokens
@@ -122,13 +123,30 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._logprobs_tensors = logprobs_tensors
         self._expert_indices = expert_indices
         self._total_num_scheduled_tokens = total_num_scheduled_tokens
+        self.num_logits_per_req = num_logits_per_req
 
     def get_output(self) -> ModelRunnerOutput:
         next_tokens_cpu = np.asarray(jax.device_get(self._next_tokens))
         if self.logits_indices_selector is not None:
-            next_tokens_cpu = next_tokens_cpu[self.logits_indices_selector]
-        selected_token_ids = np.expand_dims(next_tokens_cpu[:self._num_reqs],
-                                            1)
+            # Map tokens back to the original order.
+            # If multiple tokens per req, only take the last one as the next token.
+            if self.num_logits_per_req is not None:
+                cu_num_logits = [0] + np.cumsum(
+                    self.num_logits_per_req).tolist()
+                last_logits_indices = [
+                    self.logits_indices_selector[cu_num_logits[i + 1] - 1]
+                    for i in range(self._num_reqs)
+                ]
+                selected_token_ids = np.expand_dims(
+                    next_tokens_cpu[last_logits_indices], 1)
+            else:
+                next_tokens_cpu = next_tokens_cpu[self.logits_indices_selector]
+                selected_token_ids = np.expand_dims(
+                    next_tokens_cpu[:self._num_reqs], 1)
+        else:
+            selected_token_ids = np.expand_dims(next_tokens_cpu[:self._num_reqs],
+                                                1)
+
         valid_sampled_token_ids = selected_token_ids.tolist()
         for i in self._discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
@@ -136,8 +154,61 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         if self._logprobs_tensors is not None:
             # Use materialize to ensure logprobs are ready on host when we return async results
-            self._model_runner_output.logprobs = _jax_logprobs_materialize(
-                self._logprobs_tensors, self.logits_indices_selector)
+            cu_num_logits = None
+            if self.num_logits_per_req is not None:
+                cu_num_logits = [0] + np.cumsum(
+                    self.num_logits_per_req).tolist()
+
+            materialized_logprobs = _jax_logprobs_materialize(
+                self._logprobs_tensors, self.logits_indices_selector,
+                cu_num_logits)
+
+            # Separate prompt logprobs and sampling logprobs
+            if self.num_logits_per_req is not None:
+                # vLLM V1 expects self._model_runner_output.logprobs to be [num_reqs, max_logprobs+1]
+                # If we have multiple tokens, we need to extract the last one for each request
+                # and put the others into prompt_logprobs_dict.
+                sampling_logprob_token_ids = []
+                sampling_logprobs = []
+                sampling_token_ranks = []
+
+                req_ids = self._model_runner_output.req_ids
+                for i in range(self._num_reqs):
+                    start = cu_num_logits[i]
+                    end = cu_num_logits[i + 1]
+                    num_tokens = self.num_logits_per_req[i]
+
+                    # The last one is for sampling
+                    sampling_logprob_token_ids.append(
+                        materialized_logprobs.logprob_token_ids[end - 1])
+                    sampling_logprobs.append(
+                        materialized_logprobs.logprobs[end - 1])
+                    sampling_token_ranks.append(
+                        materialized_logprobs.sampled_token_ranks[end - 1])
+
+                    if num_tokens > 1:
+                        # Everything except the last one is prompt logprobs
+                        # Note: prompt logprobs usually corresponds to tokens [1...L]
+                        # and we compute logits for [0...L-1].
+                        self._model_runner_output.prompt_logprobs_dict[
+                            req_ids[i]] = LogprobsLists(
+                                logprob_token_ids=materialized_logprobs.
+                                logprob_token_ids[start:end - 1],
+                                logprobs=materialized_logprobs.
+                                logprobs[start:end - 1],
+                                sampled_token_ranks=materialized_logprobs.
+                                sampled_token_ranks[start:end - 1],
+                            )
+
+                self._model_runner_output.logprobs = LogprobsLists(
+                    logprob_token_ids=np.array(sampling_logprob_token_ids),
+                    logprobs=np.array(sampling_logprobs),
+                    sampled_token_ranks=np.array(sampling_token_ranks),
+                    cu_num_generated_tokens=np.arange(
+                        self._num_reqs + 1, dtype=np.int32),
+                )
+            else:
+                self._model_runner_output.logprobs = materialized_logprobs
 
         if self._expert_indices is not None:
             expert_indices_cpu = np.asarray(
@@ -176,6 +247,7 @@ class ExecuteModelState:
     logits_indices_selector: Optional[List[int]] = None
     padded_num_reqs: Optional[int] = None
     expert_indices: Optional[jax.Array] = None
+    num_logits_per_req: Optional[list[int]] = None
 
 
 @jax.jit(donate_argnums=(0, 1, 2))
@@ -841,6 +913,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             spec_decode_metadata,
             logits_indices_selector,
             padded_num_reqs,
+            num_logits_per_req,
         ) = self._prepare_inputs(scheduler_output)
 
         # multi-modal support
@@ -934,7 +1007,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             kv_connector_output=kv_connector_output,
             logits_indices_selector=logits_indices_selector,
             padded_num_reqs=padded_num_reqs,
-            expert_indices=expert_indices)
+            expert_indices=expert_indices,
+            num_logits_per_req=num_logits_per_req)
         return None
 
     def _sample_from_logits(
@@ -951,6 +1025,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logits_indices_selector: Optional[List[int]] = None,
         padded_num_reqs: Optional[int] = None,
         expert_indices: Optional[jax.Array] = None,
+        num_logits_per_req: Optional[list[int]] = None,
     ) -> ModelRunnerOutput | AsyncTPUModelRunnerOutput:
         if padded_num_reqs is None:
             padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
@@ -1097,8 +1172,22 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             next_tokens = np.asarray(jax.device_get(next_tokens))
             # Map tokens back to the pre-dp shuffling order
             if logits_indices_selector is not None:
-                next_tokens = next_tokens[logits_indices_selector]
-            selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
+                # Map tokens back to the original order.
+                # If multiple tokens per req, only take the last one as the next token.
+                if num_logits_per_req is not None:
+                    cu_num_logits = [0] + np.cumsum(num_logits_per_req).tolist()
+                    last_logits_indices = [
+                        logits_indices_selector[cu_num_logits[i + 1] - 1]
+                        for i in range(num_reqs)
+                    ]
+                    selected_token_ids = np.expand_dims(
+                        next_tokens[last_logits_indices], 1)
+                else:
+                    next_tokens = next_tokens[logits_indices_selector]
+                    selected_token_ids = np.expand_dims(next_tokens[:num_reqs],
+                                                        1)
+            else:
+                selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
             valid_sampled_token_ids = selected_token_ids.tolist()
         else:
             valid_sampled_token_ids = self.rejection_sampler.parse_output(
@@ -1130,8 +1219,57 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if logprobs is not None:
             # Use materialize to ensure logprobs are ready on host when we return async results
-            logprobs_lists = _jax_logprobs_materialize(
-                logprobs, logits_indices_selector)
+            cu_num_logits = None
+            if num_logits_per_req is not None:
+                cu_num_logits = [0] + np.cumsum(num_logits_per_req).tolist()
+
+            materialized_logprobs = _jax_logprobs_materialize(
+                logprobs, logits_indices_selector, cu_num_logits)
+
+            # Separate prompt logprobs and sampling logprobs
+            if num_logits_per_req is not None:
+                # vLLM V1 expects self._model_runner_output.logprobs to be [num_reqs, max_logprobs+1]
+                # If we have multiple tokens, we need to extract the last one for each request
+                # and put the others into prompt_logprobs_dict.
+                sampling_logprob_token_ids = []
+                sampling_logprobs = []
+                sampling_token_ranks = []
+
+                for i in range(num_reqs):
+                    start = cu_num_logits[i]
+                    end = cu_num_logits[i + 1]
+                    num_tokens = num_logits_per_req[i]
+
+                    # The last one is for sampling
+                    sampling_logprob_token_ids.append(
+                        materialized_logprobs.logprob_token_ids[end - 1])
+                    sampling_logprobs.append(
+                        materialized_logprobs.logprobs[end - 1])
+                    sampling_token_ranks.append(
+                        materialized_logprobs.sampled_token_ranks[end - 1])
+
+                    if num_tokens > 1:
+                        # Everything except the last one is prompt logprobs
+                        # Note: prompt logprobs usually corresponds to tokens [1...L]
+                        # and we compute logits for [0...L-1].
+                        prompt_logprobs_dict[req_ids[i]] = LogprobsLists(
+                            logprob_token_ids=materialized_logprobs.
+                            logprob_token_ids[start:end - 1],
+                            logprobs=materialized_logprobs.
+                            logprobs[start:end - 1],
+                            sampled_token_ranks=materialized_logprobs.
+                            sampled_token_ranks[start:end - 1],
+                        )
+
+                logprobs_lists = LogprobsLists(
+                    logprob_token_ids=np.array(sampling_logprob_token_ids),
+                    logprobs=np.array(sampling_logprobs),
+                    sampled_token_ranks=np.array(sampling_token_ranks),
+                    cu_num_generated_tokens=np.arange(num_reqs + 1,
+                                                      dtype=np.int32),
+                )
+            else:
+                logprobs_lists = materialized_logprobs
         else:
             logprobs_lists = None
 
@@ -1390,18 +1528,25 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
+        any_prompt_logprobs = any(
+            req_id in self.input_batch.num_prompt_logprobs
+            for req_id in scheduler_output.num_scheduled_tokens)
 
-        if use_spec_decode:
-            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
-            for (
-                    req_id,
-                    draft_token_ids,
-            ) in scheduler_output.scheduled_spec_decode_tokens.items():
-                req_idx = self.input_batch.req_id_to_index[req_id]
-                num_draft_tokens[req_idx] = len(draft_token_ids)
+        if use_spec_decode or any_prompt_logprobs:
+            if use_spec_decode:
+                num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+                for (
+                        req_id,
+                        draft_token_ids,
+                ) in scheduler_output.scheduled_spec_decode_tokens.items():
+                    req_idx = self.input_batch.req_id_to_index[req_id]
+                    num_draft_tokens[req_idx] = len(draft_token_ids)
 
-            num_sampled_tokens = num_draft_tokens + 1
-            total_sampled_tokens = np.sum(num_sampled_tokens)
+                num_sampled_tokens = num_draft_tokens + 1
+                total_sampled_tokens = np.sum(num_sampled_tokens)
+            else:
+                total_sampled_tokens = total_num_scheduled_tokens
+
             padded_logits_length = runner_utils.get_padded_token_len(
                 self.num_logits_paddings, total_sampled_tokens)
             logits_indices_shape = (padded_logits_length, )
@@ -1494,18 +1639,82 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             seq_lens_cpu[_num_reqs:] = 0
 
         # populate logits_indices
-        for dp_rank in range(dp_size):
-            req_offset = dp_rank * padded_num_reqs_per_dp_rank
-            query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank + 1)
-            _num_reqs = num_req_per_dp_rank[dp_rank]
+        padded_logits_length_per_rank = padded_logits_length // dp_size
+        if not use_spec_decode and any_prompt_logprobs:
+            all_dp_logits_selectors = []
+            for dp_rank in range(dp_size):
+                logits_idx = dp_rank * padded_logits_length_per_rank
+                query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank + 1)
+                _num_reqs = num_req_per_dp_rank[dp_rank]
 
-            logits_indices_cpu = logits_indices_view[
-                req_offset:req_offset + padded_num_reqs_per_dp_rank]
-            logits_indices_cpu[:_num_reqs] = (
-                query_start_loc_view[query_loc_req_offset +
-                                     1:query_loc_req_offset + _num_reqs + 1] -
-                1)
-            logits_indices_cpu[_num_reqs:] = -1
+                dp_logits_selectors = []
+                for i in range(_num_reqs):
+                    start = query_start_loc_view[query_loc_req_offset + i]
+                    end = query_start_loc_view[query_loc_req_offset + i + 1]
+                    req_id = req_ids_dp[dp_rank][i]
+                    if req_id in self.input_batch.num_prompt_logprobs:
+                        num_logits = end - start
+                        logits_indices_view[logits_idx:logits_idx +
+                                            num_logits] = np.arange(
+                                                start, end, dtype=np.int32)
+                        dp_logits_selectors.extend(
+                            range(logits_idx, logits_idx + num_logits))
+                        logits_idx += num_logits
+                    else:
+                        logits_indices_view[logits_idx] = end - 1
+                        dp_logits_selectors.append(logits_idx)
+                        logits_idx += 1
+                
+                # Fill remaining of rank's chunk with -1
+                remaining = (dp_rank + 1) * padded_logits_length_per_rank - logits_idx
+                if remaining > 0:
+                    logits_indices_view[logits_idx:logits_idx + remaining].fill(-1)
+                
+                all_dp_logits_selectors.append(dp_logits_selectors)
+
+            # Update logits_indices_selector to account for multiple logits per request
+            new_selector = []
+            req_id_to_logits_indices = {}
+            req_id_to_num_logits = {}
+            for dp_rank in range(dp_size):
+                selectors = all_dp_logits_selectors[dp_rank]
+                sel_idx = 0
+                for req_id in req_ids_dp[dp_rank]:
+                    if req_id in self.input_batch.num_prompt_logprobs:
+                        num_logits = scheduler_output.num_scheduled_tokens[
+                            req_id]
+                        req_id_to_logits_indices[req_id] = selectors[
+                            sel_idx:sel_idx + num_logits]
+                        req_id_to_num_logits[req_id] = num_logits
+                        sel_idx += num_logits
+                    else:
+                        req_id_to_logits_indices[req_id] = [selectors[sel_idx]]
+                        req_id_to_num_logits[req_id] = 1
+                        sel_idx += 1
+
+            num_logits_per_req = []
+            for req_id in self.input_batch.req_ids[:num_reqs]:
+                new_selector.extend(req_id_to_logits_indices[req_id])
+                num_logits_per_req.append(req_id_to_num_logits[req_id])
+            logits_indices_selector = new_selector
+
+        else:
+            num_logits_per_req = []
+            for req_id in self.input_batch.req_ids[:num_reqs]:
+                num_logits_per_req.append(1)
+
+            for dp_rank in range(dp_size):
+                req_offset = dp_rank * padded_num_reqs_per_dp_rank
+                query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank + 1)
+                _num_reqs = num_req_per_dp_rank[dp_rank]
+
+                logits_indices_cpu = logits_indices_view[
+                    req_offset:req_offset + padded_num_reqs_per_dp_rank]
+                logits_indices_cpu[:_num_reqs] = (
+                    query_start_loc_view[query_loc_req_offset +
+                                         1:query_loc_req_offset + _num_reqs +
+                                         1] - 1)
+                logits_indices_cpu[_num_reqs:] = -1
 
         # Please see runner_utils.PhasedBasedProfiler for details
         if self.phase_based_profiler:
@@ -1704,6 +1913,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             spec_decode_metadata,
             logits_indices_selector,
             padded_num_reqs,
+            num_logits_per_req,
         )
 
     def _prepare_inputs_non_dp(self, scheduler_output: "VllmSchedulerOutput"):
@@ -1738,16 +1948,30 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
+        any_prompt_logprobs = any(
+            req_id in self.input_batch.num_prompt_logprobs
+            for req_id in scheduler_output.num_scheduled_tokens)
 
-        if use_spec_decode:
-            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
-            for req_id, draft_token_ids in (
-                    scheduler_output.scheduled_spec_decode_tokens.items()):
-                req_idx = self.input_batch.req_id_to_index[req_id]
-                num_draft_tokens[req_idx] = len(draft_token_ids)
+        if use_spec_decode or any_prompt_logprobs:
+            if use_spec_decode:
+                num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+                for req_id, draft_token_ids in (
+                        scheduler_output.scheduled_spec_decode_tokens.items()):
+                    req_idx = self.input_batch.req_id_to_index[req_id]
+                    num_draft_tokens[req_idx] = len(draft_token_ids)
 
-            num_sampled_tokens = num_draft_tokens + 1
-            total_sampled_tokens = np.sum(num_sampled_tokens)
+                num_sampled_tokens = num_draft_tokens + 1
+                total_sampled_tokens = np.sum(num_sampled_tokens)
+            else:
+                num_logits_per_req = []
+                for req_id in self.input_batch.req_ids[:num_reqs]:
+                    if req_id in self.input_batch.num_prompt_logprobs:
+                        num_logits_per_req.append(
+                            scheduler_output.num_scheduled_tokens[req_id])
+                    else:
+                        num_logits_per_req.append(1)
+                total_sampled_tokens = sum(num_logits_per_req)
+
             padded_logits_length = runner_utils.get_padded_token_len(
                 self.num_logits_paddings, total_sampled_tokens)
             logits_indices_shape = (padded_logits_length, )
@@ -1839,15 +2063,45 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
         spec_decode_metadata = None
+        logits_indices_selector = None
         if not use_spec_decode:
-            logits_indices_view[:padded_num_reqs] = (
-                query_start_loc_view[1:padded_num_reqs + 1] - 1)
+            if not any_prompt_logprobs:
+                logits_indices_view[:padded_num_reqs] = (
+                    query_start_loc_view[1:padded_num_reqs + 1] - 1)
+                num_logits_per_req = [1] * num_reqs
+            else:
+                # populate logits_indices for all tokens if prompt logprobs requested
+                logits_idx = 0
+                new_selector = []
+                num_logits_per_req = []
+                for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+                    start = query_start_loc_view[i]
+                    end = query_start_loc_view[i + 1]
+                    if req_id in self.input_batch.num_prompt_logprobs:
+                        num_logits = end - start
+                        indices = np.arange(start, end, dtype=np.int32)
+                        logits_indices_view[logits_idx:logits_idx +
+                                            num_logits] = indices
+                        new_selector.extend(
+                            range(logits_idx, logits_idx + num_logits))
+                        logits_idx += num_logits
+                        num_logits_per_req.append(num_logits)
+                    else:
+                        logits_indices_view[logits_idx] = end - 1
+                        new_selector.append(logits_idx)
+                        logits_idx += 1
+                        num_logits_per_req.append(1)
+                logits_indices_view[logits_idx:].fill(-1)
+                logits_indices_selector = new_selector
         else:
             spec_decode_metadata = self.speculative_decoding_manager.get_spec_decode_metadata(
                 num_draft_tokens, query_start_loc_view[1:num_reqs + 1],
                 padded_num_reqs, input_ids_view)
             logits_indices_view[:] = spec_decode_metadata.final_logits_indices.ravel(
             )
+            num_logits_per_req = [
+                self.speculative_config.num_speculative_tokens + 1
+            ] * num_reqs
 
         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
             self.mesh,
@@ -1961,11 +2215,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.lora_utils.set_active_loras(
                 num_scheduled_tokens_per_req, total_num_scheduled_tokens,
                 padded_total_num_scheduled_tokens)
-        logits_indices_selector = None
 
         return (input_ids, positions, attention_metadata, sampling_metadata,
                 logits_indices, spec_decode_metadata, logits_indices_selector,
-                padded_num_reqs)
+                padded_num_reqs, num_logits_per_req)
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
                               mm_embeds: jax.Array | None,

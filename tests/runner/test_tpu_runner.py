@@ -176,8 +176,8 @@ class TestTPUJaxRunner:
         mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
 
         output = self.runner._prepare_inputs_non_dp(scheduler_output)
-        assert len(output) == 8
-        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = output
+        assert len(output) == 9
+        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs, num_logits_per_req = output
         # assert it will create attention metadata for each layer.
         assert isinstance(attention_metadata, dict)
         assert len(attention_metadata) == 20

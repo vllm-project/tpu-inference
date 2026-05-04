@@ -118,6 +118,7 @@ class InputBatch:
         self.generators: dict[int, Any] = {}
 
         self.num_logprobs: dict[str, int] = {}
+        self.num_prompt_logprobs: dict[str, int] = {}
 
         self.logit_bias: list[Optional[dict[int,
                                             float]]] = [None] * max_num_reqs
@@ -255,6 +256,8 @@ class InputBatch:
 
             if sampling_params.logprobs is not None:
                 self.num_logprobs[req_id] = sampling_params.logprobs
+            if sampling_params.prompt_logprobs is not None:
+                self.num_prompt_logprobs[req_id] = sampling_params.prompt_logprobs
             if sampling_params.logit_bias is not None:
                 self.logit_bias[req_index] = sampling_params.logit_bias
 
@@ -332,6 +335,7 @@ class InputBatch:
         self.min_tokens.pop(req_index, None)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
+        self.num_prompt_logprobs.pop(req_id, None)
 
         # It's ok to pop nothing for non-pooling model.
         self.pooling_params.pop(req_id, None)
