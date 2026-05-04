@@ -33,6 +33,17 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
+class LiteralString(str):
+    pass
+
+
+def _literal_representer(dumper, data):
+    return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='|')
+
+
+yaml.add_representer(LiteralString, _literal_representer)
+
+
 @dataclass
 class TuningKey:
     # Specify the key for tuning case
@@ -238,34 +249,35 @@ class KernelTunerBase(ABC):
                 "TPU_VERSION": self.tpu_version
             },
             "commands": [
-                f"- |"
-                f"  rm -f \"/tmp/kernel_tuning/generated_pipeline.yml\""
-                f"- |"
-                f"  .buildkite/scripts/run_in_docker.sh bash -c \""
-                f"  pip install --upgrade google-cloud-spanner && "
-                f"  pip install --upgrade google-api-core && "
-                f"  pip install --upgrade google-auth && "
-                f"  pip install --upgrade absl-py && "
-                f"  python -m tools.kernel.tuner.v1.kernel_tuner_runner "
-                f"  --kernel_tuner_name={self.kernel_tuner_name} "
-                f"  --case_set_id={self.case_set_id} --run_id={self.run_id} "
-                f"  --tpu_version={self.tpu_version} "
-                f"  --tpu_cores={self.tpu_cores} "
-                f"  --case_set_desc=\"{self.case_set_desc}\" "
-                f"  --run_locally={self.run_locally} "
-                f"  --tpu_queue_multi={self.tpu_queue_multi} "
-                f"  --begin_case_id={case_id_start} --end_case_id={case_id_end}\""
-                f"- |"
-                f"  if [ -f /tmp/kernel_tuning/generated_pipeline.yml ]; then "
-                f"    buildkite-agent artifact upload \"/tmp/kernel_tuning/generated_pipeline.yml\" && "
-                f"    echo \"Upload generated pipeline YAML to Buildkite artifacts with priority {self.kernel_tuning_job_priority}\" && "
-                f"    {{ "
-                f"      echo \"priority: {self.kernel_tuning_job_priority}\"; "
-                f"      cat /tmp/kernel_tuning/generated_pipeline.yml; "
-                f"    }} | buildkite-agent pipeline upload; "
-                f"  else "
-                f"    echo \"File /tmp/kernel_tuning/generated_pipeline.yml does not exist. Exiting successfully.\"; "
-                f"  fi"
+                LiteralString(
+                    'rm -f /tmp/kernel_tuning/generated_pipeline.yml'),
+                LiteralString(
+                    '.buildkite/scripts/run_in_docker.sh bash -c \''
+                    'pip install --upgrade google-cloud-spanner && '
+                    'pip install --upgrade google-api-core && '
+                    'pip install --upgrade google-auth && '
+                    'pip install --upgrade absl-py && '
+                    'python -m tools.kernel.tuner.v1.kernel_tuner_runner '
+                    f'--kernel_tuner_name={self.kernel_tuner_name} '
+                    f'  --case_set_id={self.case_set_id} --run_id={self.run_id} '
+                    f'  --tpu_version={self.tpu_version} '
+                    f'  --tpu_cores={self.tpu_cores} '
+                    f'  --case_set_desc=\"{self.case_set_desc}\" '
+                    f'  --run_locally={self.run_locally} '
+                    f'  --tpu_queue_multi={self.tpu_queue_multi} '
+                    f'  --begin_case_id={case_id_start} --end_case_id={case_id_end}\''
+                ),
+                LiteralString(
+                    f'if [ -f /tmp/kernel_tuning/generated_pipeline.yml ]; then '
+                    f'  buildkite-agent artifact upload /tmp/kernel_tuning/generated_pipeline.yml && '
+                    f'  echo \"Upload generated pipeline YAML to Buildkite artifacts with priority {self.kernel_tuning_job_priority}\" && '
+                    f'  {{ '
+                    f'      echo \"priority: {self.kernel_tuning_job_priority}\"; '
+                    f'      cat /tmp/kernel_tuning/generated_pipeline.yml; '
+                    f'  }} | buildkite-agent pipeline upload; '
+                    f'  else '
+                    f'      echo \"File /tmp/kernel_tuning/generated_pipeline.yml does not exist. Exiting successfully.\"; '
+                    f'fi')
             ]
         }
 
