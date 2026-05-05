@@ -7,6 +7,9 @@ import jax.numpy as jnp
 from jax._src import dtypes
 
 from tpu_inference.kernels.quantized_matmul.tuned_block_sizes import TunedValue
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 def unfold_args(
@@ -103,6 +106,12 @@ def xla_quantized_matmul(
         w_q = (w_q_reshaped.astype(jnp.float32) *
                w_scale[:, jnp.newaxis, :, jnp.newaxis]).reshape(
                    out_features, in_features).astype(x.dtype)
+
+        # in this case, we don't want to quantize the activations
+        quantize_activation = False
+        logger.info_once(
+            "Skipping activation quantization due to weight requantization being disabled."
+        )
 
     if quantize_activation:
         acc_dtype = jnp.float32
