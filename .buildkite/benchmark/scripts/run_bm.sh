@@ -163,10 +163,10 @@ printf "[INFO] %-25s = %s\n" "BM_LOG" "$BM_LOG"
 printf "[INFO] %-25s = %s\n" "ARTIFACT_FOLDER" "$ARTIFACT_FOLDER"
 printf "[DEBUG] ls=%s\n\n" "$(ls "$ARTIFACT_FOLDER/../")" || true
 
-echo "model: $MODEL"
-echo "dataset: ${DATASET:-}"
-echo "(not use)lm_eval cmd: ${LM_EVAL_CMD:-}"
-echo "tp size: ${TENSOR_PARALLEL_SIZE:-}"
+printf "[DEBUG] model: %s\n" "$MODEL"
+printf "[DEBUG] dataset: %s\n" "${DATASET:-}"
+printf "[DEBUG] lm_eval pre-cmd: %s\n" "${LM_EVAL_CMD:-}"
+printf "[DEBUG] tp size: %s\n" "${TENSOR_PARALLEL_SIZE:-}"
 
 # Helper function to check if a value is in an array
 contains_element () {
