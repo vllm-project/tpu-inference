@@ -300,6 +300,12 @@ class RpaConfigs:
     ):
         """Validate inputs to the RPA kernel statically."""
 
+        if self.block.bkv_sz % self.serve.page_size != 0:
+            raise ValueError(
+                f"bkv_sz ({self.block.bkv_sz}) must be a perfect multiple of "
+                f"page_size ({self.serve.page_size}) to prevent silent token dropping."
+            )
+
         if not q.ndim == k.ndim == v.ndim == 3:
             raise ValueError(
                 f"Expected 3D array for {q.shape=}, {k.shape=}, {v.shape=}")

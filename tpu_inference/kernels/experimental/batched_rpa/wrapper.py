@@ -19,14 +19,14 @@ environment variable.
 
 Compared to the default RPA kernel, this kernel does the following:
 
-1. Batches multiple sequences together to replace per-request flash_attention loops. 
+1. Batches multiple sequences together to replace per-request flash_attention loops.
 
 2. Enables triple-buffering via Pallas emit_pipeline
 
-3. Precomputes expensive metadata upfront (e.g., page locations and bounds clipping) via 
-scheduler.py kernel. Kernel is calculated once and ammortized across different layers in a model. 
+3. Precomputes expensive metadata upfront (e.g., page locations and bounds clipping) via
+scheduler.py kernel. Kernel is calculated once and ammortized across different layers in a model.
 
-Note: batched_rpa is build on top / derived from RPA3. 
+Note: batched_rpa is build on top / derived from RPA3.
 """
 
 import jax
@@ -226,7 +226,8 @@ def calculate_block_sizes(
         # costs. Therefore, we conservatively only use 80% of the VMEM budget.
         capped_vmem_limit_bytes = vmem_limit_bytes * 0.8
 
-        bkv_sz = bkv_stride = mxu_column_size
+        bkv_stride = utils.align_to(mxu_column_size, serve_cfgs.page_size)
+        bkv_sz = bkv_stride
         if fixed_bq_sz is None:
             bq_sz = bq_stride = bkv_sz
         else:

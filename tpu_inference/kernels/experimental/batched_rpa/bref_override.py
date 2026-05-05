@@ -136,10 +136,10 @@ class KVBufferedRef(_BypassRef):
             for i in range(self.cfgs.bkv_p_new):
                 encoded_dst_hbm_off, _, src_vmem_off, new_sz = (
                     schedule_ref.get_dma_kv_new(block_idx, b, i))
-                global_p_idx = encoded_dst_hbm_off >> self.cfgs.serve.page_size_log2
-                p_off = encoded_dst_hbm_off & self.cfgs.serve.page_size_mask
-                dst_hbm_off = (page_indices_ref[global_p_idx] <<
-                               self.cfgs.serve.page_size_log2) | p_off
+                global_p_idx = encoded_dst_hbm_off // self.cfgs.serve.page_size
+                p_off = encoded_dst_hbm_off % self.cfgs.serve.page_size
+                dst_hbm_off = (page_indices_ref[global_p_idx] *
+                               self.cfgs.serve.page_size) + p_off
                 sz = jnp.where(do_writeback, new_sz, 0)
                 pltpu.make_async_copy(
                     vmem_src.at[b, pl.ds(src_vmem_off, sz)],

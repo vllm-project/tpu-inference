@@ -202,7 +202,7 @@ def compute_metadata(
         p_offset = s_idx * cfgs.serve.pages_per_seq + kv_p_start
 
         for i in range(cfgs.bkv_p_cache):
-            dst_vmem = i << cfgs.serve.page_size_log2
+            dst_vmem = i * cfgs.serve.page_size
             dma_sz = kv_left_frm_cache - dst_vmem
             dma_sz = jnp.clip(dma_sz, 0, cfgs.serve.page_size)
 
@@ -231,31 +231,32 @@ def compute_metadata(
             dst_vmem = bkv_sz_cache
             dma_sz = new_sz
 
-            p_idx = (kv_len_start + dst_vmem) >> cfgs.serve.page_size_log2
+            p_idx = (kv_len_start + dst_vmem) // cfgs.serve.page_size
             p_idx = jnp.minimum(p_idx, cfgs.serve.pages_per_seq - 1)
-            p_off = (kv_len_start + dst_vmem) & cfgs.serve.page_size_mask
+            p_off = (kv_len_start + dst_vmem) % cfgs.serve.page_size
             global_p_idx = s_idx * cfgs.serve.pages_per_seq + p_idx
 
-            dst_hbm = (global_p_idx << cfgs.serve.page_size_log2) | p_off
+            dst_hbm = global_p_idx * cfgs.serve.page_size + p_off
             schedule.dma_kv_new[step, target_lane, 0, 0] = dst_hbm
             schedule.dma_kv_new[step, target_lane, 0, 1] = src_hbm
             schedule.dma_kv_new[step, target_lane, 0, 2] = dst_vmem
             schedule.dma_kv_new[step, target_lane, 0, 3] = dma_sz
         else:
             for i in range(cfgs.bkv_p):
-                slot_start = i << cfgs.serve.page_size_log2
-                slot_end = (i + 1) << cfgs.serve.page_size_log2
+                slot_start = i * cfgs.serve.page_size
+                slot_end = (i + 1) * cfgs.serve.page_size
 
                 dst_vmem = jnp.maximum(slot_start, bkv_sz_cache)
                 end_in_slot = jnp.minimum(slot_end, bkv_sz_cache + new_sz)
                 dma_sz = jnp.maximum(0, end_in_slot - dst_vmem)
 
-                p_idx = (kv_len_start + dst_vmem) >> cfgs.serve.page_size_log2
+                # RELAXED
+                p_idx = (kv_len_start + dst_vmem) // cfgs.serve.page_size
                 p_idx = jnp.minimum(p_idx, cfgs.serve.pages_per_seq - 1)
-                p_off = (kv_len_start + dst_vmem) & cfgs.serve.page_size_mask
+                p_off = (kv_len_start + dst_vmem) % cfgs.serve.page_size
                 global_p_idx = s_idx * cfgs.serve.pages_per_seq + p_idx
 
-                dst_hbm = (global_p_idx << cfgs.serve.page_size_log2) | p_off
+                dst_hbm = global_p_idx * cfgs.serve.page_size + p_off
                 schedule.dma_kv_new[step, target_lane, i, 0] = dst_hbm
                 schedule.dma_kv_new[step, target_lane, i, 1] = src_hbm
                 schedule.dma_kv_new[step, target_lane, i, 2] = dst_vmem
