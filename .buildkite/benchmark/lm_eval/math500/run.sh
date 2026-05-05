@@ -46,8 +46,9 @@ CMD=(
     --apply_chat_template
 )
 
+echo "[DEBUG] Executing lm_eval_cmd: SKIP_JAX_PRECOMPILE=1 ${CLIENT_CMD_ENVS[*]} ${CMD[*]}"
 # Execute the command, allowing stderr for error visibility
-if ! SKIP_JAX_PRECOMPILE=1 "${CMD[@]}"; then
+if ! SKIP_JAX_PRECOMPILE=1 "${CLIENT_CMD_ENVS[@]}" "${CMD[@]}"; then
     echo "Error: lm_eval command failed. See output above for details."
     exit 1
 fi
