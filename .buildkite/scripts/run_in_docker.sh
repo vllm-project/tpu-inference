@@ -116,7 +116,6 @@ exec docker run \
   --net host \
   --shm-size=16G \
   --rm \
-  -v "$LOCAL_HF_HOME":"$DOCKER_HF_HOME" \
   -v "$KERNEL_TUNING_TMP_DIR":"$KERNEL_TUNING_TMP_DIR" \
   "${DEV_MOUNT[@]}" \
   "${ENV_VARS[@]}" \
