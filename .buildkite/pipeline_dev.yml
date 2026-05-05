@@ -89,4 +89,6 @@ steps:
             --load-format=runai_streamer \
             --async-scheduling \
             --enable-expert-parallel \
-            --additional_config='{"compilation_sizes": [2560], "sharding": {"sharding_strategy": {"enable_dp_attention": true}}}'
+            --additional_config='\''{"compilation_sizes": [2560], "sharding": {"sharding_strategy": {"enable_dp_attention": true}}}'\'' \
+            --trust-remote-code \
+            --generation-config "/tmp/DeepSeek-R1-Configs/DeepSeek-R1"'
