@@ -123,6 +123,12 @@ if [ -d "$HOME/.config/gcloud" ]; then
     GCLOUD_MOUNT_ARGS+=(-v "$HOME/.config/gcloud:/root/.config/gcloud")
 fi
 
+# Mount checkpoint directory if it exists
+CHECKPOINT_MOUNT_ARGS=()
+if [ -d "/mnt/disks/checkpoint" ]; then
+    CHECKPOINT_MOUNT_ARGS+=(-v "/mnt/disks/checkpoint:/mnt/disks/checkpoint")
+fi
+
 docker run \
     --privileged \
     --entrypoint /bin/bash \
@@ -131,5 +137,6 @@ docker run \
     --name "${CONTAINER_NAME}" \
     -v "${PATH_TO_HF_HOME}:/root/.cache/huggingface" \
     "${GCLOUD_MOUNT_ARGS[@]}" \
+    "${CHECKPOINT_MOUNT_ARGS[@]}" \
     "${ADDITIONAL_ARGS[@]}" \
     "${DOCKER_IMAGE}" -c "${RAY_START_CMD}"

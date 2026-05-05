@@ -42,7 +42,21 @@ class UnquantizedLinearMethod:
                      x_jax: jax.Array,
                      weight_jax: jax.Array,
                      bias_jax: Optional[jax.Array] = None,
-                     einsum_str: str = "mn,pn->mp") -> jax.Array:
+                     einsum_str: str = "...n,pn->...p") -> jax.Array:
+        """Applies fused linear operation.
+
+        Operates on a single large weight matrix that combines multiple logical
+        operations (e.g., QKV projection).
+
+        Args:
+            x_jax: Input array of shape [..., hidden_dim].
+            weight_jax: Weight array of shape [output_dim, hidden_dim].
+            bias_jax: Optional bias array of shape [output_dim].
+            einsum_str: Einsum string for the operation.
+
+        Returns:
+            Output array of shape [..., total_output_dim].
+        """
         outs = jnp.einsum(einsum_str, x_jax, weight_jax)
         if bias_jax is not None:
             outs += bias_jax
@@ -57,9 +71,22 @@ class UnquantizedLinearMethod:
             x_jax: jax.Array,
             weights: Sequence[jax.Array],
             bias_jax: Optional[Sequence[jax.Array]] = None) -> jax.Array:
+        """Applies split linear operation.
+
+        Operates on a sequence of separate weight matrices, performing
+        computation for each and concatenating the results.
+
+        Args:
+            x_jax: Input array of shape [..., hidden_dim].
+            weights: Sequence of weight arrays, each of shape [output_dim_i, hidden_dim].
+            bias_jax: Optional sequence of bias arrays, each of shape [output_dim_i].
+
+        Returns:
+            Output array of shape [..., total_output_dim].
+        """
         outs = []
         for i, weight_jax in enumerate(weights):
-            out = jnp.einsum("mn,pn->mp", x_jax, weight_jax)
+            out = jnp.einsum("...n,pn->...p", x_jax, weight_jax)
             if bias_jax is not None:
                 out += bias_jax[i]
 

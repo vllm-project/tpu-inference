@@ -108,8 +108,12 @@ class VllmMLAAttention(MLAAttention):
             for key in kv_b_proj_params.keys():
                 delattr(self.kv_b_proj, key)
 
-    def forward(self, q: torch.Tensor, kv_c_normed: torch.Tensor,
-                k_pe: torch.Tensor, **kwargs) -> torch.Tensor:
+    def forward(self,
+                q: tuple[torch.Tensor, torch.Tensor],
+                kv_c_normed: torch.Tensor,
+                k_pe: torch.Tensor,
+                output: torch.Tensor | None = None,
+                **kwargs) -> torch.Tensor:
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe,
                                                 self.layer_name)
@@ -127,12 +131,21 @@ class VllmMLAAttention(MLAAttention):
         attn_metadata, _, _, _ = get_attention_context(self.layer_name)
 
         # Run the fundamental MLA forward pass from the impl
-        outputs, new_kv_cache = self.impl.forward(q, kv_c_normed, k_pe,
-                                                  kv_cache, attn_metadata,
-                                                  mesh, self, **kwargs)
+        outputs, new_kv_cache = self.impl.forward(q,
+                                                  kv_c_normed,
+                                                  k_pe,
+                                                  kv_cache,
+                                                  attn_metadata,
+                                                  mesh,
+                                                  self,
+                                                  output=output,
+                                                  **kwargs)
 
         # Update KV cache
         vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
+
+        if outputs is not output and output is not None:
+            output.copy_(outputs)
 
         return torch_view(outputs)
 
@@ -154,6 +167,7 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        skip_topk: bool = False,
     ) -> None:
         torch.nn.Module.__init__(self)
 
@@ -177,8 +191,9 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         self.indexer = mla_modules.indexer
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
+        self.skip_topk = skip_topk
 
-        if self.indexer is not None:
+        if self.indexer is not None and not self.skip_topk:
             assert hasattr(self.indexer, "topk_tokens")
             self.topk_tokens = self.indexer.topk_tokens
             self.topk_indices_buffer = mla_modules.topk_indices_buffer
@@ -200,3 +215,67 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         )
 
         self.prefix = prefix
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        q_c = None
+        kv_lora = None
+
+        if self.q_lora_rank is not None:
+            assert self.fused_qkv_a_proj is not None, (
+                "fused_qkv_a_proj is required when q_lora_rank is not None")
+            assert self.q_a_layernorm is not None, (
+                "q_a_layernorm is required when q_lora_rank is not None")
+            assert self.q_b_proj is not None, (
+                "q_b_proj is required when q_lora_rank is not None")
+
+            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            q_c, kv_lora = qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
+            q_c = self.q_a_layernorm(q_c)
+            q = self.q_b_proj(q_c)[0]
+        else:
+            assert self.kv_a_proj_with_mqa is not None, (
+                "kv_a_proj_with_mqa is required when q_lora_rank is None")
+            assert self.q_proj is not None, (
+                "q_proj is required when q_lora_rank is None")
+            kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
+            q = self.q_proj(hidden_states)[0]
+
+        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim],
+                                   dim=-1)
+        kv_c_normed = self.kv_a_layernorm(kv_c)
+
+        q = q.view(-1, self.num_heads, self.qk_head_dim)
+        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
+                               dim=-1)
+
+        # Add head dim of 1 to k_pe
+        k_pe = k_pe.unsqueeze(1)
+
+        if self.rotary_emb is not None:
+            q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+
+        if self.indexer and self.is_sparse:
+            _topk_indices = self.indexer(hidden_states, q_c, positions,
+                                         self.indexer_rope_emb)
+
+        if llama_4_scaling is not None:
+            q_nope *= llama_4_scaling
+            q_pe *= llama_4_scaling
+
+        attn_out = self.mla_attn(
+            (q_nope, q_pe),
+            kv_c_normed,
+            k_pe,
+            output_shape=(hidden_states.shape[0],
+                          self.num_heads * self.v_head_dim),
+        )
+
+        return self.o_proj(attn_out)[0]

@@ -46,7 +46,7 @@ steps:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     env:
       TEST_MODEL: meta-llama/Llama-3.3-70B-Instruct
-      TENSOR_PARALLEL_SIZE: 8
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
       MINIMUM_ACCURACY_THRESHOLD: 0.90
     commands:
       - |
@@ -73,7 +73,7 @@ steps:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     env:
       TEST_MODEL: meta-llama/Llama-3.3-70B-Instruct
-      TENSOR_PARALLEL_SIZE: 8
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
       MINIMUM_THROUGHPUT_THRESHOLD: 7.0
       INPUT_LEN: 1800
       OUTPUT_LEN: 128

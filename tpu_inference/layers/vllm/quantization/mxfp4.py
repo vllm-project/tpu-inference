@@ -31,8 +31,10 @@ from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
-from vllm.model_executor.layers.quantization.mxfp4 import (Mxfp4Config,
-                                                           Mxfp4MoEMethod)
+from vllm.model_executor.layers.quantization.mxfp4 import \
+    GptOssMxfp4Config as Mxfp4Config
+from vllm.model_executor.layers.quantization.mxfp4 import \
+    GptOssMxfp4MoEMethod as Mxfp4MoEMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
@@ -202,6 +204,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
         weights = FusedMoEWeights(

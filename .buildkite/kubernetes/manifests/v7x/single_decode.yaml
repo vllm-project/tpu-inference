@@ -1,0 +1,138 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-vllm-d
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 500Gi
+  storageClassName: hyperdisk-balanced
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-decode
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-decode
+  template:
+    metadata:
+      labels:
+        app: vllm-decode
+    spec:
+      serviceAccountName: default
+      nodeSelector:
+        cloud.google.com/gke-tpu-topology: 2x2x1
+        cloud.google.com/gke-tpu-accelerator: tpu7x
+      initContainers:
+        - name: tpu-node-setup
+          image: busybox
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              # WARNING: This changes the HOST memory settings, not just the container.
+              # Required to prevent vLLM crashes due to memory mapping limits.
+              sysctl -w vm.max_map_count=8388608
+
+              # Check if the VFIO IOMMU module parameter exists, and if so, increase the
+              # limit on DMA mappings. This allows the TPU driver to pin and map a
+              # larger number of memory pages for direct hardware access.
+              if [ -f /sys/module/vfio_iommu_type1/parameters/dma_entry_limit ]; then
+                echo 2000000 > /sys/module/vfio_iommu_type1/parameters/dma_entry_limit
+                echo "Successfully increased dma_entry_limit to 2000000"
+              else
+                echo "Warning: vfio_iommu_type1 module parameter not found. Ensure the module is loaded."
+              fi
+          securityContext:
+            privileged: true
+      containers:
+      - name: vllm-tpu
+        image: vllm/vllm-tpu:nightly
+        imagePullPolicy: Always
+        command: [ "/bin/bash", "-c", "--" ]
+        args: ["vllm serve --seed=42 --model=Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 --max-model-len=10240 --max-num-batched-tokens=8192 --max-num-seqs=512 --no-enable-prefix-caching --tensor-parallel-size=8 --kv-cache-dtype=fp8 --gpu-memory-utilization=0.90 --async-scheduling --enable-expert-parallel --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}'"]
+        env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token-secret
+              key: token
+        - name: HF_HOME
+          value: /usr/vllm
+        - name: VLLM_LOGGING_LEVEL
+          value: "DEBUG"
+        - name: JAX_PLATFORMS
+          value: "tpu,cpu"
+        - name: TPU_BACKEND_TYPE
+          value: jax
+        - name: PJRT_DEVICE
+          value: TPU
+        - name: USE_MOE_EP_KERNEL
+          value: "0"
+        - name: MODEL_IMPL_TYPE
+          value: "vllm"
+        - name: USE_BATCHED_RPA_KERNEL
+          value: "0"
+        ports:
+        - containerPort: 8000
+        resources:
+          limits:
+            google.com/tpu: "4"
+            memory: "850Gi"
+            cpu: "220"
+            ephemeral-storage: "40Gi"
+          requests:
+            google.com/tpu: "4"
+            memory: "850Gi"
+            cpu: "220"
+            ephemeral-storage: "40Gi"
+        volumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
+        - name: pvc-vllm-vol
+          mountPath: "/usr/vllm"
+        securityContext:
+          privileged: true
+          capabilities:
+            add:
+            - IPC_LOCK
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+      - name: pvc-vllm-vol
+        persistentVolumeClaim:
+          claimName: pvc-vllm-d
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-service-decode
+  labels:
+    app: vllm-decode
+spec:
+  type: ClusterIP
+  selector:
+    app: vllm-decode
+  ports:
+  - protocol: TCP
+    port: 8000
+    targetPort: 8000

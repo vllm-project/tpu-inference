@@ -49,7 +49,7 @@ class GptOssRouter(Router):
                                    sharding=self.e_sharding,
                                    random_init=self.random_init)
 
-    def __call__(self, x_TD: Float):
+    def __call__(self, x_TD: Float) -> tuple[Float, jax.Array]:
         """
         Overrides the parent's forward pass to include the bias.
         """
@@ -132,8 +132,9 @@ class GptOssMoE(nnx.Module):
     ed_sharding: Sharding
 
     random_init: bool = False
+    enable_return_routed_experts: bool = False
 
-    def __call__(self, x_TD: Float) -> Float:
+    def __call__(self, x_TD: Float):
         """Performs the forward pass for the GPT-OSS MoE layer."""
         x_TD = jnp.asarray(x_TD, self.dtype)
         x_TD = lax.with_sharding_constraint(x_TD, self.activation_ffw_td)
@@ -169,7 +170,10 @@ class GptOssMoE(nnx.Module):
         # Weighted sum of expert outputs
         output_TD = self.combine_experts(down_proj_TED, weights_TX, indices_TX)
 
-        return output_TD
+        if self.enable_return_routed_experts:
+            return output_TD, indices_TX
+        else:
+            return output_TD, None
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Initializes all weights and biases for the MoE block."""

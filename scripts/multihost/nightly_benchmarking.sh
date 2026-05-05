@@ -64,14 +64,22 @@ export MOE_REQUANTIZE_BLOCK_SIZE=""
 export MOE_REQUANTIZE_WEIGHT_DTYPE=""
 export MOE_REQUANTIZE_BLOCK_SIZE_ENV=""
 export MOE_REQUANTIZE_WEIGHT_DTYPE_ENV=""
+export MOE_ALL_GATHER_ACTIVATION_DTYPE=""
+export MOE_ALL_GATHER_ACTIVATION_DTYPE_ENV=""
 export PHASED_PROFILING_DIR=""
 export PHASED_PROFILING_DIR_ENV=""
+export PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD_ENV=""
 export SKIP_DB_UPLOAD="false"
 export RUN_ACCURACY=""
+export MMLU_OUTPUT_LEN=""
 export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=vllm"
 export USE_UNFUSED_MEGABLOCKS_ENV=""
 export HF_CONFIG=""
 export USE_VLLM_LKG="true"
+export FORCE_MOE_RANDOM_ROUTING_ENV=""
+export FORCE_MOE_RANDOM_ROUTING=""
+export API_SERVER_COUNT=""
+export LOAD_FORMAT=""
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -99,12 +107,18 @@ while [[ $# -gt 0 ]]; do
     --vllm-mla-disable) VLLM_MLA_DISABLE_ENV="VLLM_MLA_DISABLE=${2}"; shift 2 ;;
     --moe-requantize-block-size) export MOE_REQUANTIZE_BLOCK_SIZE="$2"; MOE_REQUANTIZE_BLOCK_SIZE_ENV="MOE_REQUANTIZE_BLOCK_SIZE=$2"; shift 2 ;;
     --moe-requantize-weight-dtype) export MOE_REQUANTIZE_WEIGHT_DTYPE="$2"; MOE_REQUANTIZE_WEIGHT_DTYPE_ENV="MOE_REQUANTIZE_WEIGHT_DTYPE=$2"; shift 2 ;;
+    --moe-all-gather-activation-dtype) export MOE_ALL_GATHER_ACTIVATION_DTYPE="$2"; MOE_ALL_GATHER_ACTIVATION_DTYPE_ENV="MOE_ALL_GATHER_ACTIVATION_DTYPE=$2"; shift 2 ;;
     --phased-profiling-dir) export PHASED_PROFILING_DIR="$2"; PHASED_PROFILING_DIR_ENV="PHASED_PROFILING_DIR=$2"; shift 2 ;;
+    --phased-profiler-decode-only-kv-len-threshold) export PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD_ENV="PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=$2"; shift 2 ;;
     --skip-db-upload) export SKIP_DB_UPLOAD="true"; shift 1 ;;
     --run-accuracy) export RUN_ACCURACY="$2"; shift 2 ;;
+    --mmlu-output-len) export MMLU_OUTPUT_LEN="$2"; shift 2 ;;
     --model-impl-type) export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=$2"; shift 2 ;;
     --use-unfused-megablocks) export USE_UNFUSED_MEGABLOCKS_ENV="USE_UNFUSED_MEGABLOCKS=$2"; shift 2 ;;
     --hf-config) export HF_CONFIG="$2"; shift 2 ;;
+    --force-moe-random-routing) export FORCE_MOE_RANDOM_ROUTING="$2"; FORCE_MOE_RANDOM_ROUTING_ENV="FORCE_MOE_RANDOM_ROUTING=$2"; shift 2 ;;
+    --api-server-count) API_SERVER_COUNT="$2"; shift 2 ;;
+    --load-format) export LOAD_FORMAT="$2"; shift 2 ;;
     *) echo "Unknown parameter passed: $1"; exit 1 ;;
   esac
 done
@@ -131,14 +145,22 @@ if [[ -n "${HF_CONFIG}" ]]; then
   EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS} --hf-config=${HF_CONFIG}"
 fi
 
+if [[ -n "${LOAD_FORMAT}" ]]; then
+  EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS} --load-format=${LOAD_FORMAT}"
+fi
+
 # Define the commands utilizing the unified parameters
 SERVER_CMD="${PRE_SERVER_CMD}VLLM_DISABLE_SHARED_EXPERTS_STREAM=${DISABLE_SHARED_EXPERTS_STREAM} \
 NEW_MODEL_DESIGN=${NEW_MODEL_DESIGN} \
 ${VLLM_MLA_DISABLE_ENV} \
 ${MOE_REQUANTIZE_BLOCK_SIZE_ENV} \
 ${MOE_REQUANTIZE_WEIGHT_DTYPE_ENV} \
+${MOE_ALL_GATHER_ACTIVATION_DTYPE_ENV} \
 ${PHASED_PROFILING_DIR_ENV} \
+${PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD_ENV} \
 ${USE_UNFUSED_MEGABLOCKS_ENV} \
+VLLM_ENGINE_READY_TIMEOUT_S=10800 \
+${FORCE_MOE_RANDOM_ROUTING_ENV} \
 TPU_BACKEND_TYPE=jax \
 ${MODEL_IMPL_TYPE_ENV} \
 vllm serve \
@@ -147,6 +169,7 @@ vllm serve \
   ${EXTRA_SERVER_ARGS} \
   --served-model-name ${TARGET_TOKENIZER} \
   --max-model-len=${MAX_MODEL_LEN} \
+  ${API_SERVER_COUNT:+--api-server-count=${API_SERVER_COUNT}} \
   --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \
   --max-num-seqs ${MAX_NUM_SEQS} \
   --no-enable-prefix-caching \
@@ -156,7 +179,6 @@ vllm serve \
   --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION} \
   ${ENABLE_EXPERT_PARALLEL} \
   ${ADDITIONAL_CONFIG} \
-  --load-format=runai_streamer \
   --trust-remote-code"
 
 BENCHMARK_CMD="vllm bench serve \
@@ -182,6 +204,10 @@ if [[ "${RUN_ACCURACY}" == "mmlu" ]]; then
       --num-prompts 14000 \
       --run_eval \
       --temperature 0"
+  if [[ -n "${MMLU_OUTPUT_LEN}" ]]; then
+    BENCHMARK_CMD="${BENCHMARK_CMD} --mmlu-output-len ${MMLU_OUTPUT_LEN}"
+  fi
+
 fi
 
 
@@ -189,12 +215,17 @@ fi
 echo "=== Starting nightly benchmark (Record ID: $RECORD_ID) ==="
 echo "Logging output to: $BENCHMARK_LOG"
 
+# Ensure stale logs from previous runs are cleared
+rm -f /tmp/vllm_serve.log
+
 # 1. Run the benchmark using multihost launcher script
 if ! bash "$RUN_MULTIHOST_SCRIPT" "$SERVER_CMD" "$BENCHMARK_CMD" > "$BENCHMARK_LOG" 2>&1; then
   echo "Benchmarking failed. See log: $BENCHMARK_LOG"
   echo "Status=FAILED" > "$RESULT_FILE"
+  BENCHMARK_STATUS="FAILED"
 else
   echo "Benchmarking completed. Parsing results..."
+  BENCHMARK_STATUS="SUCCESS"
   
   # 2. Parse benchmark log and generate key-value .result file
   python3 -c '
@@ -271,14 +302,22 @@ NumPrompts=${NUM_PROMPTS}
 CodeHash=${CODE_HASH}
 Model=${MODEL_NAME}
 JobReference=${JOB_REFERENCE}
-ExtraArgs=${MODEL_IMPL_TYPE_ENV#*=}
+ExtraArgs=${MODEL_IMPL_TYPE_ENV#*=}${FORCE_MOE_RANDOM_ROUTING_ENV:+ ${FORCE_MOE_RANDOM_ROUTING_ENV}}
 EOF
 
 fi
 
 # Upload vllm_serve.log to GCS
 IMPL_TYPE="${MODEL_IMPL_TYPE_ENV#*=}"
-LOG_GCS_URI="gs://tpu-commons-ci/logs/${MODEL_NAME}_${INPUT_LEN}_${OUTPUT_LEN}_${IMPL_TYPE}_${CODE_HASH}_${JOB_REFERENCE}_vllm_serve.log"
+RUN_MODE="benchmark"
+if [ -n "$PHASED_PROFILING_DIR" ]; then
+  RUN_MODE="xprof"
+fi
+MOE_ROUTING_TAG=""
+if [ "${FORCE_MOE_RANDOM_ROUTING_ENV#*=}" = "1" ]; then
+  MOE_ROUTING_TAG="_force-moe-random-routing"
+fi
+LOG_GCS_URI="gs://tpu-commons-ci/logs/${MODEL_NAME}_${INPUT_LEN}_${OUTPUT_LEN}_${IMPL_TYPE}_${CODE_HASH}_${BENCHMARK_STATUS}_${RUN_MODE}${MOE_ROUTING_TAG}_${JOB_REFERENCE}_vllm_serve.log"
 if [ -f "/tmp/vllm_serve.log" ]; then
   echo "Uploading vllm_serve.log to $LOG_GCS_URI"
   gsutil cp /tmp/vllm_serve.log "$LOG_GCS_URI" || echo "Warning: Failed to upload vllm_serve.log"

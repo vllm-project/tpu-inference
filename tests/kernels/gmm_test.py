@@ -303,7 +303,7 @@ class GmmTest(jtu.JaxTestCase):
         in_size=[1024],
         out_size=[512],
         num_groups=[16],
-        weight_dtype=[jnp.int8, jnp.float8_e4m3fn],
+        weight_dtype=[jnp.int4, jnp.int8, jnp.float8_e4m3fn],
         block_size=[1024],
         tile_k=[128, 256, 512],
         group_offset=[0],
@@ -362,7 +362,7 @@ class GmmTest(jtu.JaxTestCase):
         in_size=[512, 1024],
         out_size=[512, 1024],
         num_groups=[16, 32],
-        weight_dtype=[jnp.int8, jnp.float8_e4m3fn],
+        weight_dtype=[jnp.int4, jnp.uint4, jnp.int8, jnp.float8_e4m3fn],
         block_size=[512, 1024],
         group_offset=[0, 2, 3],
     )

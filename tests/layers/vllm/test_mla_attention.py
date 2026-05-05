@@ -177,7 +177,7 @@ class TestVllmTPUMLAAttention:
         mock_get_attention_context.return_value = (mock_attn_metadata, None,
                                                    None, None)
 
-        q = torch.rand(1, 10)
+        q = (torch.rand(1, 5), torch.rand(1, 5))
         kv_c_normed = torch.rand(1, 10)
         k_pe = torch.rand(1, 10)
 
@@ -190,10 +190,14 @@ class TestVllmTPUMLAAttention:
             outputs = attn.forward(q, kv_c_normed, k_pe)
 
             mock_get_attention_context.assert_called_once_with("test_layer")
-            attn.impl.forward.assert_called_once_with(q, kv_c_normed, k_pe,
+            attn.impl.forward.assert_called_once_with(q,
+                                                      kv_c_normed,
+                                                      k_pe,
                                                       kv_cache,
-                                                      mock_attn_metadata, mesh,
-                                                      attn)
+                                                      mock_attn_metadata,
+                                                      mesh,
+                                                      attn,
+                                                      output=None)
 
             assert isinstance(outputs, torch.Tensor)
             context = get_vllm_model_wrapper_context()
@@ -234,7 +238,7 @@ class TestVllmTPUMLAAttention:
         mock_get_attention_context.return_value = (MagicMock(), None, None,
                                                    None)
 
-        q = torch.rand(1, 10)
+        q = (torch.rand(1, 5), torch.rand(1, 5))
         kv_c_normed = torch.rand(1, 10)
         k_pe = torch.rand(1, 10)
 

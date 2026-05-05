@@ -111,6 +111,8 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         discard_sampled_tokens_req_indices: list[int],
         logits_indices_selector: Optional[List[int]] = None,
         logprobs_tensors: Optional[LogprobsTensors] = None,
+        expert_indices: Optional[jax.Array] = None,
+        total_num_scheduled_tokens: int = 0,
     ):
         self._model_runner_output = model_runner_output
         self._next_tokens = next_tokens
@@ -118,6 +120,8 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._discard_sampled_tokens_req_indices = discard_sampled_tokens_req_indices
         self.logits_indices_selector: list[int] = logits_indices_selector
         self._logprobs_tensors = logprobs_tensors
+        self._expert_indices = expert_indices
+        self._total_num_scheduled_tokens = total_num_scheduled_tokens
 
     def get_output(self) -> ModelRunnerOutput:
         next_tokens_cpu = np.asarray(jax.device_get(self._next_tokens))
@@ -134,6 +138,13 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
             # Use materialize to ensure logprobs are ready on host when we return async results
             self._model_runner_output.logprobs = _jax_logprobs_materialize(
                 self._logprobs_tensors, self.logits_indices_selector)
+
+        if self._expert_indices is not None:
+            expert_indices_cpu = np.asarray(
+                jax.device_get(self._expert_indices))
+            expert_indices_cpu = expert_indices_cpu[:, :self.
+                                                    _total_num_scheduled_tokens, :]
+            self._model_runner_output.expert_indices = expert_indices_cpu
 
         return self._model_runner_output
 
@@ -164,6 +175,7 @@ class ExecuteModelState:
     kv_connector_output: Optional[KVConnectorOutput]
     logits_indices_selector: Optional[List[int]] = None
     padded_num_reqs: Optional[int] = None
+    expert_indices: Optional[jax.Array] = None
 
 
 @jax.jit(donate_argnums=(0, 1, 2))
@@ -296,6 +308,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self._pre_async_results: AsyncPreResults | None = None
         self._substitute_placeholder_token_fn = _substitute_placeholder_token
         self.execute_model_state: ExecuteModelState | None = None
+        self.batch_counter = 0
 
         self.kv_caches: list[jax.Array] = []
         self.layer_name_to_kvcache_index: dict[str, int] = {}
@@ -335,13 +348,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         return jax.sharding.Mesh(devices_array, MESH_AXIS_NAMES)
 
     def _create_single_slice_mesh(self) -> jax.Array:
-        sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
+        sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
         mesh_shape = (
-            sharding_strategy.model_dp_size,
-            sharding_strategy.attn_dp_size,
-            sharding_strategy.attn_dp_expert_size,
-            sharding_strategy.expert_size,
-            sharding_strategy.tp_size,
+            sharding_config.model_dp_size,
+            sharding_config.attn_dp_size,
+            sharding_config.attn_dp_expert_size,
+            sharding_config.expert_size,
+            sharding_config.tp_size,
+            sharding_config.decode_cp_size,
         )
 
         # Attempt to create a physically optimized mesh. Fall back to a simple
@@ -361,18 +375,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             return np.array(self.devices).reshape(mesh_shape)
 
     def _create_multi_slice_mesh(self, num_slices: int) -> jax.Array:
-        sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
-        dp_inner = sharding_strategy.model_dp_size // num_slices
+        sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
+        dp_inner = sharding_config.model_dp_size // num_slices
 
         # Splits data parallelism across multiple slices.
         ici_mesh_shape = (
             dp_inner,
-            sharding_strategy.attn_dp_size,
-            sharding_strategy.attn_dp_expert_size,
-            sharding_strategy.expert_size,
-            sharding_strategy.tp_size,
+            sharding_config.attn_dp_size,
+            sharding_config.attn_dp_expert_size,
+            sharding_config.expert_size,
+            sharding_config.tp_size,
+            sharding_config.decode_cp_size,
         )
-        dcn_mesh_shape = (num_slices, 1, 1, 1, 1)
+        dcn_mesh_shape = (num_slices, 1, 1, 1, 1, 1)
 
         # Attempt to create a physically optimized hybrid mesh (ICI + DCN).
         # Fall back to a logical reshape for non-power-of-two device counts
@@ -477,34 +492,32 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # padded max value to pre-allocate data structures and pre-compile.
         self.max_num_tokens = self.num_tokens_paddings[-1]
 
-        # Request states.
         self.requests: dict[str, CachedRequestState] = {}
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, jax.Array] = {}
+
+        # Use parallel_config as the primary source of truth during initialization
+        # to avoid AttributeError when self.mesh is not yet assigned (common in unit tests).
+        tp_size = 1
+        if self.vllm_config.parallel_config is not None:
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        elif hasattr(self, 'mesh') and self.mesh is not None:
+            tp_size = self.mesh.shape.get(ShardingAxisName.MODEL, 1)
+
+        self.vocab_size = common_utils.align_to(model_config.get_vocab_size(),
+                                                tp_size)
+
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
             max_num_batched_tokens=self.max_num_tokens,
             pin_memory=False,
-            vocab_size=self.model_config.get_vocab_size(),
+            vocab_size=self.vocab_size,
             block_sizes=[self.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
         )
 
-        self.input_ids_cpu = np.zeros(self.max_num_tokens, dtype=np.int32)
         self.positions_cpu = np.zeros(self.max_num_tokens, dtype=np.int32)
-        # Note: self.input_batch and self.block_tables_cpu are both initialized
-        # with only 1 block_size. For hybrid kv cache, it will be re-init
-        # in kv_cache_manager's maybe_reinitialize_input_batch.
-        self.block_tables_cpu = [
-            np.zeros((self.max_num_reqs, self.max_num_blocks_per_req),
-                     dtype=np.int32)
-        ]
-
-        self.query_start_loc_cpu = np.zeros(self.max_num_reqs + self.dp_size,
-                                            dtype=np.int32)
-        self.seq_lens_cpu = np.zeros(self.max_num_reqs, dtype=np.int32)
-        self.logits_indices_cpu = np.zeros(self.max_num_reqs, dtype=np.int32)
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
         # Keep in int64 to avoid overflow with long context
@@ -528,12 +541,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         else:
             self.num_logits_paddings = None
 
-        self.temperatures_cpu = np.zeros(self.max_num_tokens, dtype=np.float32)
-        self.top_ps_cpu = np.zeros(self.max_num_tokens, dtype=np.float32)
-        self.top_ks_cpu = np.zeros(self.max_num_tokens, dtype=np.int32)
-
         # tensors for structured decoding
-        self.vocab_size = self.model_config.get_vocab_size()
         self.grammar_bitmask_cpu = np.zeros(
             (self.max_num_reqs, cdiv(self.vocab_size, 32)),
             dtype=np.int32,
@@ -555,46 +563,58 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.mrope_positions_cpu = np.zeros((3, self.max_num_tokens),
                                             dtype=np.int64)
 
+        # Contiguous buffer for metadata array. By using a single buffer, we are
+        # able to avoid the overhead of multiple device_put operations.
+        # Initialize to a constant size, and resize later after kv cache size is
+        # known.
+        self.device_buffer = common_utils.DeviceBuffer(initial_capacity=1024)
+
     def load_model(self):
         with set_current_vllm_config(self.vllm_config):
-            self.model_fn, self.compute_logits_fn, self.pooler_fn, self.combine_hidden_states_fn, multimodal_fns, self.state, self.lora_manager, self.model = get_model(
+            model = get_model(
                 self.vllm_config,
                 self.rng_key,
                 self.mesh,
             )
 
-        multimodal_fns = multimodal_fns or {}
-        self.precompile_vision_encoder_fn = multimodal_fns.get(
-            "precompile_vision_encoder_fn", None)
-        self.embed_multimodal_fn = multimodal_fns.get("embed_multimodal_fn",
-                                                      None)
-        self.embed_input_ids_fn = multimodal_fns.get("embed_input_ids_fn",
-                                                     None)
-        self.get_mrope_input_positions_fn = multimodal_fns.get(
-            "get_mrope_input_positions_fn", None)
+        self.model_fn = model.model_fn
+        self.compute_logits_fn = model.compute_logits_fn
+        self.pooler_fn = model.pooler_fn
+        self.combine_hidden_states_fn = model.combine_hidden_states_fn
+        self.state = model.state
+        self.lora_manager = model.lora_manager
+        self.model = model.model
+
+        self.precompile_vision_encoder_fn = model.multimodal_fns.precompile_vision_encoder_fn
+        self.embed_multimodal_fn = model.multimodal_fns.embed_multimodal_fn
+        self.embed_input_ids_fn = model.multimodal_fns.embed_input_ids_fn
+        self.get_mrope_input_positions_fn = model.multimodal_fns.get_mrope_input_positions_fn
 
         if self.drafter is not None:
             logger.info("Loading drafter model...")
             self.drafter.load_model(self.state)
 
-        self.rng_params_for_sampling = nnx.Rngs(
-            jax.random.key(self.model_config.seed)).params()
-
+        rng_key = nnx.Rngs(jax.random.key(self.model_config.seed)).params()
+        self.rng_params_for_sampling = device_array(self.mesh,
+                                                    rng_key,
+                                                    sharding=NamedSharding(
+                                                        self.mesh,
+                                                        PartitionSpec()))
         # This allows a multi-modal model to be used as text-only, assuming the user
         # passes the following to vLLM (on the CLI):
         # --limit-mm-per-prompt '{"image": 0, "video": 0}'
         disable_mm_from_limits = False
         if self.model_config.is_multimodal_model:
             mm_limits = self.model_config.multimodal_config.limit_per_prompt
-            image_limit = mm_limits.get("image")
-            video_limit = mm_limits.get("video")
-            image_count = image_limit.count if image_limit else 0
-            video_count = video_limit.count if video_limit else 0
-            disable_mm_from_limits = image_count == 0 and video_count == 0
+            # According to https://github.com/vllm-project/vllm/blob/21d2b53f88d99f9ab369444f6d53ed2b9c260e4f/vllm/config/multimodal.py#L79-L95
+            # if a modality limit is missing, we should treat count as 999. So here we disable multi-modality only when all limits are set to 0.
+            if mm_limits and all(limit.count == 0
+                                 for limit in mm_limits.values()):
+                disable_mm_from_limits = True
 
             if disable_mm_from_limits:
-                logger.info(
-                    "Disabling multi-modality for model because limits are set to 0."
+                logger.warning(
+                    f"Disabling multi-modality for model because limits are set to 0. {mm_limits=}"
                 )
 
         self.is_multimodal_model = (self.model_config.is_multimodal_model
@@ -617,6 +637,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def get_kv_cache_spec(self):
         return self.kv_cache_manager.get_kv_cache_spec()
 
+    def get_kv_cache_layout(self):
+        return self.kv_cache_manager.get_kv_cache_layout()
+
     def initialize_kv_cache(self,
                             kv_cache_config: KVCacheConfig,
                             topology_order_id: int = 0) -> None:
@@ -624,6 +647,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.kv_cache_config = kv_cache_config
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
+
+        # This buffer grows dynamically to accommodate metadata and block tables.
+        # We re-initialize with a precise capacity now that kv_cache_config is known.
+        num_kv_groups = len(kv_cache_config.kv_cache_groups)
+        sampling_params_size = 3 * self.max_num_reqs
+        input_ids_size = self.max_num_tokens
+        query_start_loc_size = self.max_num_reqs + self.dp_size
+        seq_lens_size = self.max_num_reqs
+        logits_indices_size = self.max_num_reqs
+        # Block tables for each KV cache group.
+        block_tables_size = num_kv_groups * self.max_num_reqs * self.max_num_blocks_per_req
+
+        initial_capacity = (sampling_params_size + input_ids_size +
+                            query_start_loc_size + seq_lens_size +
+                            logits_indices_size + block_tables_size)
+        self.device_buffer = common_utils.DeviceBuffer(
+            initial_capacity=initial_capacity)
+
         if has_kv_transfer_group():
             get_kv_transfer_group().register_runner(self)
 
@@ -663,18 +704,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         (scheduler_output, attn_metadata, sampling_metadata, input_ids,
          hidden_states, logits, aux_hidden_states, spec_decode_metadata,
-         kv_connector_output, logits_indices_selector,
-         padded_num_reqs) = (self.execute_model_state.scheduler_output,
-                             self.execute_model_state.attn_metadata,
-                             self.execute_model_state.sampling_metadata,
-                             self.execute_model_state.input_ids,
-                             self.execute_model_state.hidden_states,
-                             self.execute_model_state.logits,
-                             self.execute_model_state.aux_hidden_states,
-                             self.execute_model_state.spec_decode_metadata,
-                             self.execute_model_state.kv_connector_output,
-                             self.execute_model_state.logits_indices_selector,
-                             self.execute_model_state.padded_num_reqs)
+         kv_connector_output, logits_indices_selector, padded_num_reqs,
+         expert_indices) = (self.execute_model_state.scheduler_output,
+                            self.execute_model_state.attn_metadata,
+                            self.execute_model_state.sampling_metadata,
+                            self.execute_model_state.input_ids,
+                            self.execute_model_state.hidden_states,
+                            self.execute_model_state.logits,
+                            self.execute_model_state.aux_hidden_states,
+                            self.execute_model_state.spec_decode_metadata,
+                            self.execute_model_state.kv_connector_output,
+                            self.execute_model_state.logits_indices_selector,
+                            self.execute_model_state.padded_num_reqs,
+                            self.execute_model_state.expert_indices)
         self.execute_model_state = None
 
         if grammar_output is not None:
@@ -691,7 +733,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         return self._sample_from_logits(
             scheduler_output, attn_metadata, sampling_metadata, input_ids,
             hidden_states, logits, aux_hidden_states, spec_decode_metadata,
-            kv_connector_output, logits_indices_selector, padded_num_reqs)
+            kv_connector_output, logits_indices_selector, padded_num_reqs,
+            expert_indices)
 
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
@@ -841,8 +884,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
-                (self.kv_caches, hidden_states,
-                 aux_hidden_states) = self.model_fn(
+                (self.kv_caches, hidden_states, aux_hidden_states,
+                 expert_indices) = self.model_fn(
                      self.state,
                      self.kv_caches,
                      input_ids,
@@ -858,17 +901,28 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             if not self.is_last_rank:
                 assert isinstance(hidden_states, JaxIntermediateTensors)
                 hidden_states.kv_connector_output = kv_connector_output
+                hidden_states.expert_indices = expert_indices
                 return hidden_states
 
             if self.is_pooling_model:
-                seq_lens = self.seq_lens_cpu[:self.input_batch.num_reqs]
+                seq_lens_view = self.device_buffer.get_view(
+                    (self.max_num_reqs, ), key="seq_lens")
+                seq_lens = seq_lens_view[:self.input_batch.num_reqs]
                 pooling_metadata = self.input_batch.get_pooling_metadata()
+
+                # Extract actual scheduled token counts for the current step
+                num_scheduled_tokens = np.array([
+                    scheduler_output.num_scheduled_tokens[req_id]
+                    for req_id in self.input_batch.req_ids
+                ],
+                                                dtype=np.int32)
 
                 pooler_fn: PoolerFunc = self.pooler_fn
                 pooler_output = pooler_fn(
                     hidden_states,
                     pooling_metadata,
                     seq_lens,
+                    num_scheduled_tokens,
                 )
 
                 return ModelRunnerOutput(
@@ -899,7 +953,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             spec_decode_metadata=spec_decode_metadata,
             kv_connector_output=kv_connector_output,
             logits_indices_selector=logits_indices_selector,
-            padded_num_reqs=padded_num_reqs)
+            padded_num_reqs=padded_num_reqs,
+            expert_indices=expert_indices)
         return None
 
     def _sample_from_logits(
@@ -915,6 +970,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         kv_connector_output: Optional[KVConnectorOutput],
         logits_indices_selector: Optional[List[int]] = None,
         padded_num_reqs: Optional[int] = None,
+        expert_indices: Optional[jax.Array] = None,
     ) -> ModelRunnerOutput | AsyncTPUModelRunnerOutput:
         if padded_num_reqs is None:
             padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
@@ -927,6 +983,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             step_rng = self.rng_params_for_sampling
 
         if spec_decode_metadata is None:
+            logits = logits.astype(jnp.float32)
             with self.maybe_forbid_compile:
                 next_tokens, processed_logits = sample(
                     step_rng,
@@ -964,12 +1021,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 key=rejection_rng,
             )
 
+        logits = logits.astype(jnp.float32)
         with self.maybe_forbid_compile:
+
             if tpu_sampling_metadata.logprobs:
-                if self.model_config.logprobs_mode == "processed_logprobs":
-                    logits = processed_logits
-                else:
-                    logits = logits.astype(jnp.float32)
+                logits = processed_logits if self.model_config.logprobs_mode == "processed_logprobs" else logits
                 logprobs = self._compute_and_gather_logprobs(
                     logits, next_tokens, self.model_config.max_logprobs)
                 logprobs = _jax_logprobs_copy_to_host_async(logprobs)
@@ -1051,7 +1107,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 num_reqs,
                 discard_sampled_tokens_req_indices,
                 logits_indices_selector,
-                logprobs_tensors=logprobs)
+                logprobs_tensors=logprobs,
+                expert_indices=expert_indices,
+                total_num_scheduled_tokens=scheduler_output.
+                total_num_scheduled_tokens)
             return async_model_runner_output
 
         if spec_decode_metadata is None:
@@ -1116,6 +1175,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             pooler_output=[],
             kv_connector_output=kv_connector_output,
         )
+
+        if expert_indices is not None:
+            expert_indices_cpu = np.asarray(jax.device_get(expert_indices))
+            # Slice to actual scheduled tokens
+            actual_t = scheduler_output.total_num_scheduled_tokens
+            expert_indices_cpu = expert_indices_cpu[:, :actual_t, :]
+            model_runner_output.expert_indices = expert_indices_cpu
+
         return model_runner_output
 
     @jax.jit(static_argnums=(0, ))
@@ -1332,6 +1399,38 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                  req_ids_dp, scheduled_tokens_per_dp_rank,
                  padded_num_scheduled_tokens_per_dp_rank, dp_size)
 
+        self.device_buffer.reset()
+
+        input_ids_view = self.device_buffer.get_view(
+            (padded_total_num_scheduled_tokens, ), key="input_ids")
+        query_start_loc_view = self.device_buffer.get_view(
+            (self.max_num_reqs + dp_size, ), key="query_start_loc")
+        seq_lens_view = self.device_buffer.get_view((self.max_num_reqs, ),
+                                                    key="seq_lens")
+
+        use_spec_decode = len(
+            scheduler_output.scheduled_spec_decode_tokens) > 0
+
+        if use_spec_decode:
+            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+            for (
+                    req_id,
+                    draft_token_ids,
+            ) in scheduler_output.scheduled_spec_decode_tokens.items():
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                num_draft_tokens[req_idx] = len(draft_token_ids)
+
+            num_sampled_tokens = num_draft_tokens + 1
+            total_sampled_tokens = np.sum(num_sampled_tokens)
+            padded_logits_length = runner_utils.get_padded_token_len(
+                self.num_logits_paddings, total_sampled_tokens)
+            logits_indices_shape = (padded_logits_length, )
+        else:
+            logits_indices_shape = (padded_num_reqs, )
+
+        logits_indices_view = self.device_buffer.get_view(logits_indices_shape,
+                                                          key="logits_indices")
+
         # Populates input_ids and positions
         for dp_rank in range(dp_size):
             if num_req_per_dp_rank[dp_rank] == 0:
@@ -1341,7 +1440,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 dp_rank]
             total_num_scheduled_tokens = num_scheduled_tokens_per_dp_rank[
                 dp_rank]
-            input_ids_cpu = self.input_ids_cpu[
+            input_ids_cpu = input_ids_view[
                 token_offset:token_offset +
                 padded_num_scheduled_tokens_per_dp_rank]
             positions_cpu = self.positions_cpu[
@@ -1385,11 +1484,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Prepare the attention metadata (query_start_loc_cpu, seq_lens_cpu)
         for dp_rank in range(dp_size):
             req_offset = dp_rank * max_num_reqs_per_dp_rank
-            query_start_loc_cpu = self.query_start_loc_cpu[
+            query_start_loc_cpu = query_start_loc_view[
                 req_offset + dp_rank:req_offset + max_num_reqs_per_dp_rank +
                 dp_rank + 1]
-            seq_lens_cpu = self.seq_lens_cpu[req_offset:req_offset +
-                                             max_num_reqs_per_dp_rank]
+            seq_lens_cpu = seq_lens_view[req_offset:req_offset +
+                                         max_num_reqs_per_dp_rank]
             _num_reqs = num_req_per_dp_rank[dp_rank]
             req_indices = req_indices_dp[dp_rank]
             num_scheduled_tokens_per_req = scheduled_tokens_per_dp_rank[
@@ -1400,6 +1499,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 seq_lens_cpu[:] = 0
                 continue
 
+            # After buffer.reset(), the buffer is still dirty, so we need to zero
+            # Out the starting index.
+            query_start_loc_cpu[0] = 0
             np.cumsum(
                 num_scheduled_tokens_per_req,
                 out=query_start_loc_cpu[1:_num_reqs + 1],
@@ -1417,34 +1519,27 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank + 1)
             _num_reqs = num_req_per_dp_rank[dp_rank]
 
-            logits_indices_cpu = self.logits_indices_cpu[
+            logits_indices_cpu = logits_indices_view[
                 req_offset:req_offset + padded_num_reqs_per_dp_rank]
             logits_indices_cpu[:_num_reqs] = (
-                self.query_start_loc_cpu[query_loc_req_offset +
-                                         1:query_loc_req_offset + _num_reqs +
-                                         1] - 1)
+                query_start_loc_view[query_loc_req_offset +
+                                     1:query_loc_req_offset + _num_reqs + 1] -
+                1)
             logits_indices_cpu[_num_reqs:] = -1
-
-        logits_indices = self.logits_indices_cpu[:padded_num_reqs]
 
         # Please see runner_utils.PhasedBasedProfiler for details
         if self.phase_based_profiler:
+            self.batch_counter += 1
             batch_composition_stats = runner_utils.get_batch_composition_stats(
-                self.input_batch, total_num_scheduled_tokens, num_reqs,
+                self.batch_counter, self.input_batch,
+                total_num_scheduled_tokens, num_reqs,
                 padded_total_num_scheduled_tokens, scheduler_output)
 
             self.phase_based_profiler.step(batch_composition_stats)
 
-        # Inputs
-        input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
         positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
         mrope_positions = self.mrope_positions_cpu[:, :
                                                    padded_total_num_scheduled_tokens]
-
-        query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs +
-                                                   dp_size]
-        seq_lens = self.seq_lens_cpu[:self.max_num_reqs]
-
         _request_distribution = []
         for dp_rank in range(dp_size):
             _num_reqs = num_req_per_dp_rank[dp_rank]
@@ -1461,24 +1556,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
-        if not use_spec_decode:
-            spec_decode_metadata = None
-        else:
-            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
-            for (
-                    req_id,
-                    draft_token_ids,
-            ) in scheduler_output.scheduled_spec_decode_tokens.items():
-                req_idx = self.input_batch.req_id_to_index[req_id]
-                num_draft_tokens[req_idx] = len(draft_token_ids)
-
+        spec_decode_metadata = None
+        if use_spec_decode:
             spec_decode_metadata = (
                 self.speculative_decoding_manager.get_spec_decode_metadata(
                     num_draft_tokens,
-                    self.query_start_loc_cpu[1:num_reqs + 1],
+                    query_start_loc_view[1:num_reqs + 1],
                     padded_num_reqs,
+                    input_ids_view,
                 ))
-            logits_indices = spec_decode_metadata.final_logits_indices
+            logits_indices_view[:] = spec_decode_metadata.final_logits_indices.ravel(
+            )
 
         # Put to device
         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
@@ -1487,40 +1575,83 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padded_num_reqs,
             sharding=data_parallel_attn_sharding,
         )
+
         if self.uses_mrope:
-            positions = mrope_positions
+            # M-RoPE positions are of the shape (3, max_num_tokens).
+            # https://github.com/vllm-project/tpu-inference/blob/efc9608acd925bb3b64db6fda509514f799ab7be/tpu_inference/runner/tpu_runner.py#L555
+            # Shard the positions accordingly.
+            mrope_sharding = NamedSharding(
+                self.mesh, PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+            positions = device_array(self.mesh,
+                                     mrope_positions,
+                                     sharding=mrope_sharding)
+        else:
+            positions = device_array(self.mesh,
+                                     positions,
+                                     sharding=data_parallel_attn_sharding)
 
-        query_start_loc_cpu = query_start_loc
-        logits_indices_cpu = logits_indices
-        seq_lens_cpu = seq_lens
+        # Collect block tables host arrays loops zone presence zones legality
+        def build_block_table_host(kv_cache_gid: int) -> None:
 
-        (input_ids, positions, query_start_loc, seq_lens, logits_indices,
-         request_distribution) = device_array(
-             self.mesh,
-             (input_ids, positions, query_start_loc, seq_lens, logits_indices,
-              request_distribution),
-             sharding=data_parallel_attn_sharding,
-         )
+            block_table_obj = self.input_batch.block_table[kv_cache_gid]
+            block_tables_view = self.device_buffer.get_view(
+                (self.max_num_reqs, block_table_obj.max_num_blocks_per_req),
+                key=f"block_tables_gid_{kv_cache_gid}")
 
-        def build_block_table(kv_cache_gid: int) -> jax.Array:
-            block_tables = self.block_tables_cpu[kv_cache_gid][:self.
-                                                               max_num_reqs]
+            # Zero out the view once for correct padding
+            block_tables_view.fill(0)
+
+            cpu_tensor = block_table_obj.get_cpu_tensor()
             for dp_rank in range(dp_size):
-                req_offset = dp_rank * max_num_reqs_per_dp_rank
                 _num_reqs = num_req_per_dp_rank[dp_rank]
+                if _num_reqs == 0:
+                    continue
 
-                block_tables[
-                    req_offset:req_offset + _num_reqs, :self.
-                    max_num_blocks_per_req] = self.input_batch.block_table[
-                        kv_cache_gid].get_cpu_tensor()[req_indices_dp[dp_rank]]
-            # Convert block_tables to 1D on cpu.
-            block_tables = block_tables.reshape(-1)
-            block_tables = device_array(
-                self.mesh,
-                (block_tables),
-                sharding=data_parallel_attn_sharding,
+                req_offset = dp_rank * max_num_reqs_per_dp_rank
+                # Use np.take with out= to avoid intermediate copies from advanced indexing
+                np.take(cpu_tensor,
+                        req_indices_dp[dp_rank],
+                        axis=0,
+                        out=block_tables_view[req_offset:req_offset +
+                                              _num_reqs])
+
+        if len(self.kv_cache_config.kv_cache_groups) <= 1:
+            no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0
+            if not no_kv_cache:
+                build_block_table_host(0)
+        else:
+            for gid, kv_cache_group in enumerate(
+                    self.kv_cache_config.kv_cache_groups):
+                build_block_table_host(gid)
+
+        metadata_blob, metadata_layout = self.device_buffer.build()
+
+        # Mamba slot ids are only consumed by hybrid attn+mamba models; for
+        # pure-attention models, leaving the field None keeps AttentionMetadata
+        # byte-identical to the pre-compact-mamba layout (so the model_fn
+        # signature on those models is unchanged).
+        if self.kv_cache_config.has_mamba_layers:
+            # Per-request mamba state slot ids; copy to keep the InputBatch's
+            # CPU buffer free for the next step's bookkeeping.
+            mamba_state_indices_cpu = self.input_batch.mamba_state_indices_cpu.copy(
             )
-            return block_tables
+            (request_distribution, mamba_state_indices,
+             dev_arrays_payload) = device_array(
+                 self.mesh, (request_distribution, mamba_state_indices_cpu,
+                             metadata_blob),
+                 sharding=data_parallel_attn_sharding)
+        else:
+            mamba_state_indices = None
+            (request_distribution, dev_arrays_payload) = device_array(
+                self.mesh, (request_distribution, metadata_blob),
+                sharding=data_parallel_attn_sharding)
+
+        metadata = common_utils.DeviceBuffer.unpack_arrays(
+            dev_arrays_payload, metadata_layout)
+        input_ids = metadata["input_ids"]
+        query_start_loc = metadata["query_start_loc"]
+        seq_lens = metadata["seq_lens"]
+        logits_indices = metadata["logits_indices"]
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
@@ -1529,22 +1660,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
+                mamba_state_indices=mamba_state_indices,
             )
 
             # This is for making these cpu buffers hidden during tracing
-            attention_metadata_gid.query_start_loc_cpu = query_start_loc_cpu
-            attention_metadata_gid.seq_lens_cpu = seq_lens_cpu
+            attention_metadata_gid.query_start_loc_cpu = query_start_loc_view
+            attention_metadata_gid.seq_lens_cpu = seq_lens_view
             return attention_metadata_gid
 
         attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]
         if len(self.kv_cache_config.kv_cache_groups) <= 1:
             # Pooling model will not using kv cache
             no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0
-            block_tables = build_block_table(0) if not no_kv_cache else None
+            block_tables = metadata.get(
+                "block_tables_gid_0") if not no_kv_cache else None
             attention_metadata = build_attn(block_tables)
         else:
             attention_metadata = {
-                name: build_attn(build_block_table(gid))
+                name: build_attn(metadata[f"block_tables_gid_{gid}"])
                 for gid, kv_cache_group in enumerate(
                     self.kv_cache_config.kv_cache_groups)
                 for name in kv_cache_group.layer_names
@@ -1571,6 +1704,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     input_ids, token_in_tpu_cur_input_indices,
                     token_in_tpu_pre_next_tokens_indices)
 
+        num_scheduled_tokens_per_req = np.concatenate([
+            np.array(scheduled_tokens_per_dp_rank[dp_rank], dtype=np.int32)
+            for dp_rank in range(dp_size)
+        ])
         if self.lora_config is not None:
             self.lora_utils.set_active_loras(
                 num_scheduled_tokens_per_req,
@@ -1598,6 +1735,52 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         data_parallel_attn_sharding = NamedSharding(
             self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
 
+        # Do the padding and copy the tensors to the TPU.
+        padded_total_num_scheduled_tokens = runner_utils.get_padded_token_len(
+            self.num_tokens_paddings, total_num_scheduled_tokens)
+        padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
+            num_reqs, self.max_num_reqs)
+
+        # Please see runner_utils.PhasedBasedProfiler for details
+        if self.phase_based_profiler:
+            self.batch_counter += 1
+            batch_composition_stats = runner_utils.get_batch_composition_stats(
+                self.batch_counter, self.input_batch,
+                total_num_scheduled_tokens, num_reqs,
+                padded_total_num_scheduled_tokens, scheduler_output)
+
+            self.phase_based_profiler.step(batch_composition_stats)
+
+        self.device_buffer.reset()
+
+        input_ids_view = self.device_buffer.get_view(
+            (padded_total_num_scheduled_tokens, ), key="input_ids")
+
+        use_spec_decode = len(
+            scheduler_output.scheduled_spec_decode_tokens) > 0
+
+        if use_spec_decode:
+            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+            for req_id, draft_token_ids in (
+                    scheduler_output.scheduled_spec_decode_tokens.items()):
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                num_draft_tokens[req_idx] = len(draft_token_ids)
+
+            num_sampled_tokens = num_draft_tokens + 1
+            total_sampled_tokens = np.sum(num_sampled_tokens)
+            padded_logits_length = runner_utils.get_padded_token_len(
+                self.num_logits_paddings, total_sampled_tokens)
+            logits_indices_shape = (padded_logits_length, )
+        else:
+            logits_indices_shape = (padded_num_reqs, )
+
+        logits_indices_view = self.device_buffer.get_view(logits_indices_shape,
+                                                          key="logits_indices")
+        query_start_loc_view = self.device_buffer.get_view(
+            (self.max_num_reqs + 1, ), key="query_start_loc")
+        seq_lens_view = self.device_buffer.get_view((self.max_num_reqs, ),
+                                                    key="seq_lens")
+
         # Get the number of scheduled tokens for each request.
         num_scheduled_tokens_per_req = []
         max_num_scheduled_tokens_all_reqs = 0
@@ -1610,8 +1793,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         num_scheduled_tokens_per_req = np.array(num_scheduled_tokens_per_req,
                                                 dtype=np.int32)
         assert max_num_scheduled_tokens_all_reqs > 0
-        padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
-            num_reqs, self.max_num_reqs)
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
@@ -1658,95 +1839,107 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # tensors.
         np.take(self.input_batch.token_ids_cpu.ravel(),
                 token_indices,
-                out=self.input_ids_cpu[:total_num_scheduled_tokens])
+                out=input_ids_view[:total_num_scheduled_tokens])
+        input_ids_view[total_num_scheduled_tokens:] = 0
 
         # Prepare the attention metadata.
-        self.query_start_loc_cpu[0] = 0
+        query_start_loc_view[0] = 0
         np.cumsum(num_scheduled_tokens_per_req,
-                  out=self.query_start_loc_cpu[1:num_reqs + 1])
-        self.query_start_loc_cpu[num_reqs + 1:] = 1
+                  out=query_start_loc_view[1:num_reqs + 1])
+        query_start_loc_view[num_reqs + 1:] = 1
 
-        self.seq_lens_cpu[:num_reqs] = (
+        seq_lens_view[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens_per_req)
+        seq_lens_view[num_reqs:] = 0
 
-        # Do the padding and copy the tensors to the TPU.
-        padded_total_num_scheduled_tokens = runner_utils.get_padded_token_len(
-            self.num_tokens_paddings, total_num_scheduled_tokens)
-        # Zero out to avoid spurious values from prev iteration (last cp chunk)
-        self.input_ids_cpu[
-            total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
-
-        # Please see runner_utils.PhasedBasedProfiler for details
-        if self.phase_based_profiler:
-            batch_composition_stats = runner_utils.get_batch_composition_stats(
-                self.input_batch, total_num_scheduled_tokens, num_reqs,
-                padded_total_num_scheduled_tokens, scheduler_output)
-
-            self.phase_based_profiler.step(batch_composition_stats)
-
-        # Inputs
-        input_ids = self.input_ids_cpu[:padded_total_num_scheduled_tokens]
         positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
         mrope_positions = self.mrope_positions_cpu[:, :
                                                    padded_total_num_scheduled_tokens]
-
-        # TODO(pooyam): Some paddings are up to `num_reqs_paddings` (spec decoding, select hidden states, etc) and some other are to `max_num_reqs` (block table, seq_lens). We should stick to one of them maybe?
-        query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1]
-        seq_lens = self.seq_lens_cpu[:self.max_num_reqs]
-        request_distribution = np.array(self.input_batch.request_distribution)
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
+        spec_decode_metadata = None
         if not use_spec_decode:
-            logits_indices = self.query_start_loc_cpu[1:padded_num_reqs +
-                                                      1] - 1
-            spec_decode_metadata = None
+            logits_indices_view[:padded_num_reqs] = (
+                query_start_loc_view[1:padded_num_reqs + 1] - 1)
         else:
-            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
-            for req_id, draft_token_ids in (
-                    scheduler_output.scheduled_spec_decode_tokens.items()):
-                req_idx = self.input_batch.req_id_to_index[req_id]
-                num_draft_tokens[req_idx] = len(draft_token_ids)
-
             spec_decode_metadata = self.speculative_decoding_manager.get_spec_decode_metadata(
-                num_draft_tokens, self.query_start_loc_cpu[1:num_reqs + 1],
-                padded_num_reqs)
-            logits_indices = spec_decode_metadata.final_logits_indices
+                num_draft_tokens, query_start_loc_view[1:num_reqs + 1],
+                padded_num_reqs, input_ids_view)
+            logits_indices_view[:] = spec_decode_metadata.final_logits_indices.ravel(
+            )
 
-        # Put to device
         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
             self.mesh,
             self.input_batch,
             padded_num_reqs,
             sharding=data_parallel_attn_sharding,
         )
+
         if self.uses_mrope:
-            positions = mrope_positions
-        query_start_loc_cpu = query_start_loc
-        seq_lens_cpu = seq_lens
+            # M-RoPE positions are of the shape (3, max_num_tokens).
+            # https://github.com/vllm-project/tpu-inference/blob/efc9608acd925bb3b64db6fda509514f799ab7be/tpu_inference/runner/tpu_runner.py#L555
+            # Shard the positions accordingly.
+            mrope_sharding = NamedSharding(
+                self.mesh, PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+            positions = device_array(self.mesh,
+                                     mrope_positions,
+                                     sharding=mrope_sharding)
+        else:
+            positions = device_array(self.mesh,
+                                     positions,
+                                     sharding=data_parallel_attn_sharding)
 
-        (input_ids, positions, query_start_loc, seq_lens, logits_indices,
-         request_distribution) = device_array(
-             self.mesh,
-             (input_ids, positions, query_start_loc, seq_lens, logits_indices,
-              request_distribution),
-             sharding=data_parallel_attn_sharding,
-         )
+        request_distribution = np.array(self.input_batch.request_distribution)
 
-        def build_block_table(kv_cache_gid: int) -> jax.Array:
-            block_tables = self.block_tables_cpu[kv_cache_gid][:self.
-                                                               max_num_reqs]
-            block_tables[:num_reqs] = (
-                self.input_batch.block_table[kv_cache_gid].get_cpu_tensor()
-                [:num_reqs])
-            # Convert block_tables to 1D on cpu.
-            block_tables = block_tables.reshape(-1)
-            block_tables = device_array(
-                self.mesh,
-                (block_tables),
-                sharding=data_parallel_attn_sharding,
+        def build_block_table_host(kv_cache_gid: int) -> None:
+            block_table_obj = self.input_batch.block_table[kv_cache_gid]
+            block_tables_view = self.device_buffer.get_view(
+                (self.max_num_reqs, block_table_obj.max_num_blocks_per_req),
+                key=f"block_tables_gid_{kv_cache_gid}")
+
+            cpu_tensor = block_table_obj.get_cpu_tensor()
+            np.copyto(block_tables_view[:num_reqs], cpu_tensor[:num_reqs])
+            block_tables_view[num_reqs:].fill(0)
+
+        if len(self.kv_cache_config.kv_cache_groups) <= 1:
+            # Pooling model will not using kv cache
+            no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0
+            if not no_kv_cache:
+                build_block_table_host(0)
+        else:
+            for gid, kv_cache_group in enumerate(
+                    self.kv_cache_config.kv_cache_groups):
+                build_block_table_host(gid)
+
+        metadata_blob, metadata_layout = self.device_buffer.build()
+
+        # Mamba slot ids are only consumed by hybrid attn+mamba models; for
+        # pure-attention models, leaving the field None keeps AttentionMetadata
+        # byte-identical to the pre-compact-mamba layout (so the model_fn
+        # signature on those models is unchanged).
+        if self.kv_cache_config.has_mamba_layers:
+            # Per-request mamba state slot ids; copy to keep the InputBatch's
+            # CPU buffer free for the next step's bookkeeping.
+            mamba_state_indices_cpu = self.input_batch.mamba_state_indices_cpu.copy(
             )
-            return block_tables
+            (request_distribution, mamba_state_indices,
+             dev_arrays_payload) = device_array(
+                 self.mesh, (request_distribution, mamba_state_indices_cpu,
+                             metadata_blob),
+                 sharding=data_parallel_attn_sharding)
+        else:
+            mamba_state_indices = None
+            (request_distribution, dev_arrays_payload) = device_array(
+                self.mesh, (request_distribution, metadata_blob),
+                sharding=data_parallel_attn_sharding)
+
+        metadata = common_utils.DeviceBuffer.unpack_arrays(
+            dev_arrays_payload, metadata_layout)
+        input_ids = metadata["input_ids"]
+        query_start_loc = metadata["query_start_loc"]
+        seq_lens = metadata["seq_lens"]
+        logits_indices = metadata["logits_indices"]
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
@@ -1754,21 +1947,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 block_tables=block_tables,
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
-                request_distribution=request_distribution)
+                request_distribution=request_distribution,
+                mamba_state_indices=mamba_state_indices,
+            )
             # This is for making these cpu buffers hidden during tracing
-            attention_metadata_gid.query_start_loc_cpu = query_start_loc_cpu
-            attention_metadata_gid.seq_lens_cpu = seq_lens_cpu
+            attention_metadata_gid.query_start_loc_cpu = query_start_loc_view
+            attention_metadata_gid.seq_lens_cpu = seq_lens_view
             return attention_metadata_gid
 
         attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]
         if len(self.kv_cache_config.kv_cache_groups) <= 1:
             # Pooling model will not using kv cache
             no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0
-            block_tables = build_block_table(0) if not no_kv_cache else None
+            block_tables = metadata.get(
+                "block_tables_gid_0") if not no_kv_cache else None
             attention_metadata = build_attn(block_tables)
         else:
             attention_metadata = {
-                name: build_attn(build_block_table(gid))
+                name: build_attn(metadata[f"block_tables_gid_{gid}"])
                 for gid, kv_cache_group in enumerate(
                     self.kv_cache_config.kv_cache_groups)
                 for name in kv_cache_group.layer_names

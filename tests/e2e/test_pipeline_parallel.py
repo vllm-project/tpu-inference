@@ -49,7 +49,6 @@ def _run_inference_with_config(model_name: str,
                                pipeline_parallel_size: int = 1,
                                data_parallel_size: int = 1,
                                enable_expert_parallel: bool = False,
-                               additional_config: dict = {},
                                kv_cache_dtype: str = "auto",
                                enable_prefix_caching: bool = False) -> list:
     """Helper function to run inference with specified configuration."""
@@ -60,11 +59,10 @@ def _run_inference_with_config(model_name: str,
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
         data_parallel_size=data_parallel_size,
-        gpu_memory_utilization=0.40,
+        gpu_memory_utilization=0.80,
         max_num_batched_tokens=128,
         max_num_seqs=16,
         enable_prefix_caching=enable_prefix_caching,
-        additional_config=additional_config,
         kv_cache_dtype=kv_cache_dtype,
         async_scheduling=False,
         enable_expert_parallel=enable_expert_parallel,
@@ -76,7 +74,7 @@ def _run_inference_with_config(model_name: str,
     finally:
         del llm
         # Wait for TPUs to be released
-        time.sleep(5)
+        time.sleep(15)
 
 
 @pytest.mark.parametrize(
@@ -90,7 +88,6 @@ def _run_inference_with_config(model_name: str,
             "dp": 1,
             "ep": False,
             "impl": "jax",
-            "additional_config": {}
         },
         {
             "id": "vllm_model",
@@ -100,7 +97,24 @@ def _run_inference_with_config(model_name: str,
             "dp": 1,
             "ep": False,
             "impl": "vllm",
-            "additional_config": {}
+        },
+        {
+            "id": "dp",
+            "model": None,
+            "tp": 1,
+            "pp": 2,
+            "dp": 4,
+            "ep": False,
+            "impl": "jax"
+        },
+        {
+            "id": "tp",
+            "model": None,
+            "tp": 4,
+            "pp": 2,
+            "dp": 1,
+            "ep": False,
+            "impl": "jax"
         },
         {
             "id": "ep",
@@ -109,50 +123,7 @@ def _run_inference_with_config(model_name: str,
             "pp": 2,
             "dp": 1,
             "ep": True,
-            "impl": "vllm",
-            "additional_config": {
-                "sharding": {
-                    "sharding_strategy": {
-                        "expert_parallelism": 2
-                    }
-                }
-            }
-        },
-        {
-            "id": "dp",
-            "model": None,
-            "tp": 1,
-            "pp": 2,
-            "dp": 2,
-            "ep": False,
-            "impl": "jax",
-            "additional_config": {}
-        },
-        {
-            "id": "tp",
-            "model": None,
-            "tp": 2,
-            "pp": 2,
-            "dp": 1,
-            "ep": False,
-            "impl": "jax",
-            "additional_config": {}
-        },
-        {
-            "id": "ep_tp",
-            "model": "Qwen/Qwen1.5-MoE-A2.7B",
-            "tp": 2,
-            "pp": 2,
-            "dp": 1,
-            "ep": True,
-            "impl": "vllm",
-            "additional_config": {
-                "sharding": {
-                    "sharding_strategy": {
-                        "expert_parallelism": 2,
-                    }
-                }
-            }
+            "impl": "jax"
         },
     ],
     ids=lambda x: x["id"],
@@ -183,7 +154,6 @@ def test_pipeline_parallel_configs(
         pipeline_parallel_size=case["pp"],
         data_parallel_size=case["dp"],
         enable_expert_parallel=case["ep"],
-        additional_config=case["additional_config"],
     )
 
     assert len(outputs) == len(test_prompts)

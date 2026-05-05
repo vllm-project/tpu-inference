@@ -28,6 +28,17 @@ declare -a TARGET_FOLDERS=(
     "rl"
 )
 
+failure_handler() {
+  local exit_code=$?
+  local line_no=$1
+  echo "--- ❌ Script failed at line $line_no with exit status: $exit_code"
+  echo "Hint: Check for duplicate step keys, YAML syntax errors, or failed buildkite-agent commands."
+  buildkite-agent meta-data set "stop_support_matrix" "true"
+  exit $exit_code
+}
+
+# Catch ERR signals
+trap 'failure_handler $LINENO' ERR
 
 # Use find to append the kernel_microbenchmarks subdirectories
 KERNEL_PARENT_DIR=".buildkite/kernel_microbenchmarks"
@@ -123,6 +134,12 @@ fi
 # Final Uploads (Two separate calls to handle variables) ---
 if [[ "${#pipeline_v6e_fragments[@]}" -gt 0 ]]; then
   echo "--- Uploading TPU v6e Pipeline Group"
+  # Export v6e specific variables
+  export TPU_QUEUE_SINGLE="tpu_v6e_queue"
+  export TPU_QUEUE_MULTI="tpu_v6e_8_queue"
+  export TPU_VERSION="tpu6e"
+  export TENSOR_PARALLEL_SIZE_SINGLE=1
+  export TENSOR_PARALLEL_SIZE_MULTI=8
   buildkite-agent meta-data set "run_v6_matrix" "true"
   {
     echo "priority: ${JOB_PRIORITY:-1}"
@@ -139,10 +156,12 @@ fi
 
 if [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
   echo "--- Uploading TPU v7x Pipeline Group"
-  # Export v7x specific variables (overwrites previous exports)
+  # Export v7x specific variables
   export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
   export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
   export TPU_VERSION="tpu7x"
+  export TENSOR_PARALLEL_SIZE_SINGLE=2
+  export TENSOR_PARALLEL_SIZE_MULTI=8
   buildkite-agent meta-data set "run_v7_matrix" "true"
   {
     echo "priority: ${JOB_PRIORITY:-1}"

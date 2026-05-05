@@ -11,11 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import functools
 from typing import Any, Optional
 
 import jax
+import numpy as np
 import torch
 import vllm.envs as vllm_envs
 from flax import nnx
@@ -32,6 +32,8 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common.interface import (ModelInterface,
+                                                   MultiModalInterface)
 from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
     load_random_weights_into_qwix_abstract_model,
@@ -49,8 +51,7 @@ _MODEL_REGISTRY = {}
 _VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset({
     "GptOssForCausalLM",
     "Qwen3MoeForCausalLM",
-    # Gemma4 model is lacking vision support in "flax_nnx" implementation.
-    "Gemma4ForConditionalGeneration",
+    "KimiK25ForConditionalGeneration",
 })
 
 # List of architectures that don't have pipeline parallelism support in jax yet.
@@ -68,7 +69,8 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # would cause JAX init failure when using multi hosts with Ray.
 
     from tpu_inference.models.jax.deepseek_v3 import DeepseekV3ForCausalLM
-    from tpu_inference.models.jax.gemma4 import Gemma4ForCausalLM
+    from tpu_inference.models.jax.gemma4_mm import \
+        Gemma4ForConditionalGeneration
     from tpu_inference.models.jax.gpt_oss import GptOss
     from tpu_inference.models.jax.llama3 import LlamaForCausalLM
     from tpu_inference.models.jax.llama4 import Llama4ForCausalLM
@@ -90,7 +92,8 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["Eagle3LlamaForCausalLM"] = EagleLlama3ForCausalLM
     _MODEL_REGISTRY["GptOssForCausalLM"] = GptOss
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
-    _MODEL_REGISTRY["Gemma4ForConditionalGeneration"] = Gemma4ForCausalLM
+    _MODEL_REGISTRY[
+        "Gemma4ForConditionalGeneration"] = Gemma4ForConditionalGeneration
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -108,7 +111,20 @@ def _get_nnx_model(
     vllm_config: VllmConfig,
     rng: jax.Array,
     mesh: Mesh,
+    pooler: Optional[Any] = None,
 ) -> nnx.Module:
+    """Instantiate the nnx JAX model and optionally pass the embedding/pooling layer.
+
+    Args:
+        model_class: The class of the model.
+        vllm_config: The current vLLM config.
+        rng: Array specifying random keys.
+        mesh: JAX device mesh for sharding.
+        pooler: The optional pooler for handling embedding path.
+
+    Returns:
+        nnx.Module: The instantiated JAX module.
+    """
 
     def create_abstract_model() -> nnx.Module:
         """
@@ -247,6 +263,7 @@ def _get_nnx_model(
                     vllm_config.load_config.load_format = "pathways_dummy"
                 else:
                     vllm_config.load_config.load_format = "jax_dummy"
+            vllm_config.pytorch_pooler = pooler
             loader = get_model_loader(vllm_config.load_config)
             if isinstance(model, LoadableWithIterator):
                 assert isinstance(model, JaxModule)
@@ -257,6 +274,7 @@ def _get_nnx_model(
                     model_weights = vllm_config.model_config.model_weights
                 weights_iterator = loader._get_weights_iterator(
                     model_weights, vllm_config.model_config.revision)
+
                 # We set the weights iterator at runtime, to prevent having to change
                 # every model's load_weights signature. This also prevents us from hitting
                 # a TypeError at runtime if you use the RunaiModelStreamerLoader with any
@@ -267,6 +285,8 @@ def _get_nnx_model(
                 del vllm_config.model_config.runai_model_weights_iterator
             else:
                 model.load_weights(rng)
+            if hasattr(vllm_config, "pytorch_pooler"):
+                del vllm_config.pytorch_pooler
             jit_model = create_jit_model(
                 model,
                 use_qwix_on_abstract_model=should_apply_qwix_on_abstract_model)
@@ -283,7 +303,7 @@ def get_flax_model(
     rng: jax.Array,
     mesh: Mesh,
     is_draft_model: bool = False,
-) -> nnx.Module:
+) -> ModelInterface:
     original_dtype = vllm_config.model_config.dtype
     model_dtype = to_jax_dtype(original_dtype)
     vllm_config.model_config.dtype = model_dtype
@@ -299,7 +319,22 @@ def get_flax_model(
     else:
         model_class = _get_model_architecture(
             vllm_config.model_config.hf_config)
-    jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
+
+    # Instantiate pooler if needed for Hybrid Path
+    is_pooling = vllm_config.model_config.runner_type == "pooling"
+    pooler = None
+    if is_pooling:
+        from vllm.model_executor.layers.pooler import DispatchPooler
+        pooler_config = getattr(vllm_config.model_config, "pooler_config",
+                                None)
+        if pooler_config is not None:
+            pooler = DispatchPooler.for_embedding(pooler_config)
+
+    jit_model = _get_nnx_model(model_class,
+                               vllm_config,
+                               rng,
+                               mesh,
+                               pooler=pooler)
     vllm_config.model_config.dtype = original_dtype
     kv_cache_sharding = NamedSharding(
         mesh,
@@ -319,6 +354,7 @@ def get_flax_model(
             kv_cache_sharding,
             hidden_states_sharding,
             hidden_states_sharding,  # aux hidden states
+            None,  # expert ids
         ),
         donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
         static_argnums=(
@@ -334,6 +370,7 @@ def get_flax_model(
             kv_cache_sharding,
             hidden_states_sharding,
             hidden_states_sharding,  # residual
+            None,  # expert ids
         ),
         donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
         static_argnums=(6, ),  # 6 is layer_name_to_kvcache_index
@@ -388,14 +425,57 @@ def get_flax_model(
         jit_model,
         "get_mrope_input_positions") else jit_model.get_mrope_input_positions
 
-    multimodal_fns = {
-        "precompile_vision_encoder_fn": precompile_vision_encoder_fn,
-        "embed_multimodal_fn": embed_multimodal_fn,
-        "embed_input_ids_fn": embed_input_ids_fn,
-        "get_mrope_input_positions_fn": get_mrope_input_positions_fn,
-    }
+    multimodal_fns = MultiModalInterface(
+        precompile_vision_encoder_fn=precompile_vision_encoder_fn,
+        embed_multimodal_fn=embed_multimodal_fn,
+        embed_input_ids_fn=embed_input_ids_fn,
+        get_mrope_input_positions_fn=get_mrope_input_positions_fn,
+    )
 
-    return model_fn, compute_logits_fn, _not_support, combine_hidden_states_fn, multimodal_fns, state, lora_manager, model
+    if pooler is not None:
+        import torchax
+        from torchax.interop import torch_view
+        from vllm.v1.pool.metadata import PoolingMetadata
+
+        def compute_pooler_output(
+            hidden_states: jax.Array,
+            pooling_metadata: PoolingMetadata,
+            seq_lens: np.ndarray,
+            num_scheduled_tokens: Optional[np.ndarray] = None,
+        ):
+            # Performance optimization: use torch_view and move to CPU non-blocking
+            torch_states = torch_view(hidden_states)
+            with torchax.default_env():
+                torch_states = torch_states.to('cpu', non_blocking=True)
+
+                if num_scheduled_tokens is None:
+                    num_scheduled_tokens = seq_lens
+
+                # Align with our StepPool logic
+                pooling_metadata.build_pooling_cursor(
+                    num_scheduled_tokens,
+                    torch.tensor(seq_lens),
+                    device=torch_states.device,
+                )
+
+                # Execute pooling on CPU
+                outputs = pooler(torch_states, pooling_metadata)
+                return outputs
+
+        pooler_fn = compute_pooler_output
+    else:
+        pooler_fn = _not_support
+
+    return ModelInterface(
+        model_fn=model_fn,
+        compute_logits_fn=compute_logits_fn,
+        pooler_fn=pooler_fn,
+        combine_hidden_states_fn=combine_hidden_states_fn,
+        multimodal_fns=multimodal_fns,
+        state=state,
+        lora_manager=lora_manager,
+        model=jit_model,
+    )
 
 
 def get_vllm_model(
@@ -403,7 +483,7 @@ def get_vllm_model(
     rng: jax.Array,
     mesh: Mesh,
     is_draft_model: bool = False,
-):
+) -> ModelInterface:
     model_dtype = to_torch_dtype(vllm_config.model_config.dtype)
     vllm_config.model_config.dtype = model_dtype
     from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
@@ -421,19 +501,32 @@ def get_vllm_model(
     pooler_fn = model.build_pooler_func()
     combine_hidden_states_fn = model.jit_combine_hidden_states_func()
 
-    multimodal_fns = {
-        "precompile_vision_encoder_fn":
-        getattr(model.model.vllm_model, "precompile_vision_encoder", None),
-        "embed_multimodal_fn":
-        model.wrap_embed_multimodal_func(),
-        "embed_input_ids_fn":
-        model.wrap_embed_input_ids_func(),
-        "get_mrope_input_positions_fn":
-        getattr(model.model.vllm_model, "get_mrope_input_positions", None),
-    }
+    multimodal_fns = MultiModalInterface(
+        precompile_vision_encoder_fn=getattr(
+            model.model.vllm_model,
+            "precompile_vision_encoder",
+            model.wrap_precompile_vision_encoder_fn(params),
+        ),
+        embed_multimodal_fn=model.wrap_embed_multimodal_func(),
+        embed_input_ids_fn=model.wrap_embed_input_ids_func(),
+        get_mrope_input_positions_fn=getattr(
+            model.model.vllm_model,
+            "get_mrope_input_positions",
+            None,
+        ),
+    )
 
     # the model needs to be returned because lora weights are neither torch.nn.parameter nor torch.nn.buffer. After we load the lora weights and set it to the torch.nn.Module, we can shard it and move it to TPU.
-    return jit_model, compute_logits_fn, pooler_fn, combine_hidden_states_fn, multimodal_fns, params, lora_manager, model
+    return ModelInterface(
+        model_fn=jit_model,
+        compute_logits_fn=compute_logits_fn,
+        pooler_fn=pooler_fn,
+        combine_hidden_states_fn=combine_hidden_states_fn,
+        multimodal_fns=multimodal_fns,
+        state=params,
+        lora_manager=lora_manager,
+        model=model,
+    )
 
 
 def get_model(
@@ -441,7 +534,7 @@ def get_model(
     rng: jax.Array,
     mesh: Mesh,
     is_draft_model: bool = False,
-) -> Any:
+) -> ModelInterface:
     if is_draft_model:
         impl = envs.DRAFT_MODEL_IMPL_TYPE
     else:

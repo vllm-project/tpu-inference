@@ -48,15 +48,15 @@ class KVCacheMetadata:
 
 def get_kv_cache_shape_with_mesh(mesh: Mesh,
                                  total_num_pages: int,
-                                 page_size: int,
+                                 block_size: int,
                                  actual_num_kv_heads: int,
                                  actual_head_dim: int,
                                  kv_dtype: any,
                                  use_mla: bool = False):
     """Gets the KV cache shape based on the mesh configuration."""
 
-    axis_name = ShardingAxisName.ATTN_HEAD
-    model_cnt = utils.get_mesh_shape_product(mesh, axis_name)
+    model_cnt = utils.get_mesh_shape_product(mesh,
+                                             ShardingAxisName.KV_CACHE_HEAD)
 
     # NOTE(chengjiyao): Currently, the attention kernel is tailored to the
     # specific model, rather than being determined by the head_dim. If new
@@ -67,7 +67,7 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
         # so actual_num_kv_heads is never used in mla.get_kv_cache_shape().
         get_kv_cache_shape_fn = mla.get_kv_cache_shape
         shape = list(
-            get_kv_cache_shape_fn(total_num_pages, page_size, actual_head_dim,
+            get_kv_cache_shape_fn(total_num_pages, block_size, actual_head_dim,
                                   kv_dtype))
     else:
         assert actual_num_kv_heads % model_cnt == 0
@@ -76,7 +76,7 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
                 else rpa.get_kv_cache_shape
         )
         shape = list(
-            get_kv_cache_shape_fn(total_num_pages, page_size,
+            get_kv_cache_shape_fn(total_num_pages, block_size,
                                   actual_num_kv_heads // model_cnt,
                                   actual_head_dim, kv_dtype))
         shape[2] *= model_cnt
@@ -120,14 +120,18 @@ def create_kv_caches(
                                                num_kv_heads, head_size,
                                                cache_dtype, use_mla)
 
+    # num_blocks --> shard by data batch
+    # block_size --> shard by context
+    # head       --> shard by heads
     if use_mla:
-        sharding = NamedSharding(mesh,
-                                 PartitionSpec(ShardingAxisName.MLP_TENSOR))
+        sharding = NamedSharding(
+            mesh,
+            PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.CONTEXT))
     else:
         sharding = NamedSharding(
             mesh,
-            PartitionSpec(ShardingAxisName.ATTN_DATA, None,
-                          ShardingAxisName.ATTN_HEAD))
+            PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.CONTEXT,
+                          ShardingAxisName.KV_CACHE_HEAD))
 
     def _allocate() -> jax.Array:
         return jnp.empty(
@@ -149,7 +153,7 @@ def get_attention_page_size_bytes(mesh, block_size, num_kv_heads, head_size,
     kv_cache_shape = get_kv_cache_shape_with_mesh(
         mesh=mesh,
         total_num_pages=1,
-        page_size=block_size,
+        block_size=block_size,
         actual_num_kv_heads=num_kv_heads,
         actual_head_dim=head_size,
         kv_dtype=jax_dtype,

@@ -9,6 +9,7 @@ NIGHTLY_SCRIPT="${SCRIPT_DIR}/../../../nightly_benchmarking.sh"
 # Adjust model-path, max-seqs, and code-hash below when officially serving DeepSeek.
 bash "${NIGHTLY_SCRIPT}" \
   --model-path "gs://tpu-commons-ci/deepseek/r1" \
+  --load-format "runai_streamer" \
   --model-name "DeepSeek-R1" \
   --tokenizer "deepseek-ai/DeepSeek-R1" \
   --input-len 8192 \
@@ -31,5 +32,6 @@ bash "${NIGHTLY_SCRIPT}" \
   --vllm-mla-disable "0" \
   --moe-requantize-block-size "512" \
   --moe-requantize-weight-dtype "fp4" \
+  --moe-all-gather-activation-dtype "fp8" \
   --phased-profiling-dir "gs://tpu-commons-ci/xprof/deepseek-r1/torchax/8k-1k" \
   --skip-db-upload

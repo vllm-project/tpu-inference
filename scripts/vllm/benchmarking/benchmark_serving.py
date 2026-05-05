@@ -28,6 +28,7 @@ import argparse
 import asyncio
 import contextlib
 import gc
+import logging
 import random
 import time
 import warnings
@@ -60,6 +61,7 @@ from benchmark_dataset import (GPQADataset, MLPerfDataset, MMLUDataset,
 from benchmark_utils import (eval_benchmark_dataset_result,
                              sample_warmup_requests)
 
+logger = logging.getLogger(__name__)
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
 
@@ -156,6 +158,7 @@ def calculate_metrics(
     e2els: list[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
+            logger.debug(f"Prompt: {input_requests[i].prompt}\nOutput: {outputs[i].generated_text}")
             output_len = outputs[i].output_tokens
 
             if not output_len:
@@ -460,6 +463,11 @@ def parse_goodput(slo_pairs):
 
 
 def main(args: argparse.Namespace):
+    if args.debug:
+        logger.setLevel(logging.DEBUG)
+    else:
+        logger.setLevel(logging.INFO)
+
     print(args)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -534,6 +542,7 @@ def main(args: argparse.Namespace):
                                     num_requests=args.num_prompts,
                                     input_len=args.mmlu_input_len,
                                     output_len=args.mmlu_output_len,
+                                    chat_template_system_prompt=args.chat_template_system_prompt,
                                     ),
             "mlperf":
             lambda: MLPerfDataset(random_seed=args.seed,
@@ -550,6 +559,7 @@ def main(args: argparse.Namespace):
                                     tokenizer=tokenizer,
                                     num_requests=args.num_prompts,
                                     output_len=args.gpqa_output_len,
+                                    chat_template_system_prompt=args.chat_template_system_prompt,
                                     ),
             "mmmu_pro":
             lambda: MMMUProDataset(
@@ -801,6 +811,12 @@ if __name__ == "__main__":
         default="benchmark-serving",
         help="Specify the prefix of request id.",
     )
+    parser.add_argument(
+        "--chat-template-system-prompt",
+        type=str,
+        default="Reasoning effort: high",
+        help="The system prompt to use when applying a chat template.",
+    )
 
     # group for dataset specific arguments
     mmlu_group = parser.add_argument_group("mmlu dataset options")
@@ -1001,6 +1017,11 @@ if __name__ == "__main__":
         default="sampled",
         choices=["none", "sampled", "full"],
         help="Whether to warmup first, and set the warmup mode",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Whether to print debug logs.",
     )
 
     args = parser.parse_args()

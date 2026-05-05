@@ -49,6 +49,14 @@ class PersistentBatchManager:
         swap_cnt = 0
         if num_reqs <= 0:
             return swap_cnt
+        # If total_num_scheduled_tokens == num_reqs, every request
+        # is scheduled for exactly 1 token (all decode). No reordering needed.
+        if scheduler_output.total_num_scheduled_tokens == num_reqs:
+            num_decode = num_reqs
+            self.input_batch.request_distribution = [
+                num_decode, num_decode, num_reqs
+            ]
+            return swap_cnt
         # Use two-pointer approach to reorder the decode requests to front.
         i, j = 0, num_reqs - 1
         while i < j:

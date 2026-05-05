@@ -1,0 +1,148 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Dev pipeline for tpu-inference-dev.
+# Demo/sample steps showing how to run custom tests on tpu7x.
+# Copy and adapt any step for your own experiments.
+#
+# HOW TO TRIGGER THIS PIPELINE
+# ─────────────────────────────
+# Option A — Buildkite UI:
+#   Go to https://buildkite.com/tpu-commons/tpu-inference-dev
+#   Click "New Build", set branch to your branch, click "Create Build".
+#
+# Option B — Buildkite API (requires BUILDKITE_API_TOKEN in your env):
+#   curl -s -X POST \
+#     -H "Authorization: Bearer $BUILDKITE_API_TOKEN" \
+#     -H "Content-Type: application/json" \
+#     "https://api.buildkite.com/v2/organizations/tpu-commons/pipelines/tpu-inference-dev/builds" \
+#     -d "{\"commit\": \"$(git rev-parse HEAD)\", \"branch\": \"$(git rev-parse --abbrev-ref HEAD)\", \"message\": \"my test\"}"
+#
+# HOW TO CUSTOMIZE
+# ─────────────────
+# 1. On your branch, edit this file — use any demo step below as a starting point.
+# 2. Change the command, model, env vars, or queue as needed.
+# 3. Trigger the pipeline — only your branch's file is used.
+
+steps:
+
+  # -----------------------------------------------------------------
+  # Build Step (required by all demo steps below)
+  # -----------------------------------------------------------------
+  - label: ":docker: Build and Push Base Image (tpu7x)"
+    key: tpu7x_build_docker
+    agents:
+      queue: cpu_64_core
+    env:
+      TPU_VERSION: "tpu7x"
+    commands:
+      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+
+  # -----------------------------------------------------------------
+  # Demo 1: offline_inference.py
+  # Shows the simplest pattern: run a Python script inside Docker.
+  # Use this as a starting point for any offline batch inference test.
+  # -----------------------------------------------------------------
+  - label: "tpu7x [demo] offline_inference.py"
+    key: tpu7x_demo_offline_inference
+    depends_on: tpu7x_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+    agents:
+      queue: tpu_v7x_2_queue
+    commands:
+      - |
+        # Run offline inference with a small model.
+        # --tensor-parallel-size 2: tp=1 is currently unsupported on tpu7x.
+        # Customize --model, --max-model-len, --max-tokens as needed.
+        .buildkite/scripts/run_in_docker.sh bash -c '
+          python3 examples/offline_inference.py \
+            --model Qwen/Qwen3-0.6B \
+            --tensor-parallel-size 2 \
+            --max-model-len 1024 \
+            --max-tokens 128'
+
+  # -----------------------------------------------------------------
+  # Demo 2: vllm serve + vllm bench serve
+  # Shows how to start a server and run a benchmark against it.
+  # Uses --dataset-name random so no dataset file is needed.
+  # -----------------------------------------------------------------
+  - label: "tpu7x [demo] vllm serve + vllm bench serve"
+    key: tpu7x_demo_serve_bench
+    depends_on: tpu7x_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+    agents:
+      queue: tpu_v7x_2_queue
+    commands:
+      - |
+        # Customize behaviour via env vars: MODEL, PORT, TENSOR_PARALLEL_SIZE,
+        # MAX_MODEL_LEN, RANDOM_INPUT_LEN, RANDOM_OUTPUT_LEN, NUM_PROMPTS, NUM_WARMUPS.
+        .buildkite/scripts/run_in_docker.sh bash .buildkite/scripts/run_benchmark_demo.sh
+
+  # -----------------------------------------------------------------
+  # Demo 3: DCN-based P/D disaggregation
+  # Mirrors test_25 in pipeline_jax.yml.
+  # Uses run_disagg.sh which delegates to examples/disagg/.
+  # Requires a multi-chip queue (tpu_v7x_8_queue).
+  # -----------------------------------------------------------------
+  - label: "tpu7x [demo] E2E disaggregation (DCN P/D)"
+    key: tpu7x_demo_disagg
+    depends_on: tpu7x_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+      # Customize these to change the disagg benchmark behaviour.
+      MODEL: "Qwen/Qwen3-0.6B"
+      INPUT_LEN: 1024
+      OUTPUT_LEN: 128
+      NUM_PROMPTS: 5
+      RANDOM_SEED: 10
+      MAX_CONCURRENCY: 4
+      TEST_MODE: 1
+    agents:
+      queue: tpu_v7x_8_queue
+    commands:
+      - .buildkite/scripts/run_disagg.sh
+
+  # -----------------------------------------------------------------
+  # Demo 4: Ray-based multi-host inference
+  # Mirrors test_26 in pipeline_jax.yml.
+  # Uses run_multihost.sh to serve a large model across 16 chips (2 hosts).
+  # Requires a 16-chip queue (tpu_v7x_16_queue).
+  # -----------------------------------------------------------------
+  - label: "tpu7x [demo] Ray-based multi-host"
+    key: tpu7x_demo_multihost
+    env:
+      TPU_VERSION: "tpu7x"
+    agents:
+      queue: tpu_v7x_16_queue
+    commands:
+      - |
+        MODEL="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
+        .buildkite/scripts/run_multihost.sh \
+          "vllm serve \${MODEL} \
+            --port 8000 \
+            --tensor-parallel-size 16 \
+            --trust-remote-code \
+            --max-model-len 1024 \
+            --no-async-scheduling \
+            --load-format=runai_streamer \
+            --no-enable-prefix-caching" \
+          "curl http://localhost:8000/v1/completions \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'"

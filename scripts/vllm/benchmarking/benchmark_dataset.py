@@ -275,6 +275,7 @@ class MMLUDataset(BenchmarkDataset):
         input_len: Optional[int] = None,
         output_len: Optional[int] = None,
         enable_multimodal_chat: bool = False,
+        chat_template_system_prompt: Optional[str] = None,
         **kwargs,
     ) -> list:
         samples: list = []
@@ -283,9 +284,12 @@ class MMLUDataset(BenchmarkDataset):
                 break
 
             if self.use_chat_template:
+                system_prompt = (chat_template_system_prompt
+                                 if chat_template_system_prompt is not None
+                                 else "Reasoning effort: high")
                 messages = [{
                     "role": "system",
-                    "content": "Reasoning effort: high"
+                    "content": system_prompt
                 }, {
                     "role": "user",
                     "content": prompt
@@ -472,6 +476,7 @@ Express your final answer as the corresponding option 'A', 'B', 'C', or 'D'."""
         num_requests: int,
         input_len: Optional[int] = None,
         output_len: Optional[int] = None,
+        chat_template_system_prompt: Optional[str] = None,
         **kwargs,
     ) -> list:
         samples: list = []
@@ -480,9 +485,12 @@ Express your final answer as the corresponding option 'A', 'B', 'C', or 'D'."""
                 break
 
             if self.use_chat_template:
+                system_prompt = (chat_template_system_prompt
+                                 if chat_template_system_prompt is not None
+                                 else "Reasoning effort: high")
                 messages = [{
                     "role": "system",
-                    "content": "Reasoning effort: high"
+                    "content": system_prompt
                 }, {
                     "role": "user",
                     "content": prompt
