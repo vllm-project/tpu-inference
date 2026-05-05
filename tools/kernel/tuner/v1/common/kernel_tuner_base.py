@@ -236,11 +236,15 @@ class KernelTunerBase(ABC):
             raise e
 
     def _build_step(self, case_id_start: int, case_id_end: int) -> dict:
+        step_key = f'{self.kernel_tuner_name}_{self.case_set_id}_{self.run_id}_{case_id_start}_{case_id_end}'
+        parent_step_key = os.environ.get("BUILDKITE_STEP_KEY")
         return {
             "label":
             f"cs_id={self.case_set_id} rid={self.run_id} Bucket([{case_id_start}, {case_id_end}))",
+            "key":
+            step_key,
             "depends_on":
-            f"{self.tpu_version}_build_docker",
+            parent_step_key,
             "agents": {
                 "queue": self.tpu_queue_multi
             },
@@ -302,7 +306,7 @@ class KernelTunerBase(ABC):
             f"Generated Buildkite pipeline YAML for sub-bucket [{start}, {end}) saved to {output_path} in Docker"
         )
 
-    def generate_buildkite_pipeline(self, ) -> str:
+    def generate_buildkite_pipeline(self) -> str:
         """Generate the Buildkite pipeline for the given tuning jobs. Each tuning job will be represented as a Buildkite step that calls the measure_latency function with the corresponding case_id range.
         """
         output_path = "/tmp/kernel_tuning/generated_pipeline.yml"
