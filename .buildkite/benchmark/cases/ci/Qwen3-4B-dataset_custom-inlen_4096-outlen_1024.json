@@ -1,0 +1,54 @@
+{
+  "env": {
+    "GCS_BUCKET": "vllm-cb-storage2",
+    "MODELTAG": "NEW",
+    "EXPECTED_ETEL": 3600000,
+    "INPUT_LEN": 4096,
+    "OUTPUT_LEN": 1024,
+    "PREFIX_LEN": 3600
+  },
+  "ci_queue": [
+    "tpu_v6e_queue",
+    "tpu_v7x_2_queue"
+  ],
+  "server_command_options": {
+    "command_type": "vllm_serve",
+    "env": {
+      "VLLM_USE_V1": "1",
+      "MODEL_IMPL_TYPE": "vllm",
+      "NEW_MODEL_DESIGN": "1"
+    },
+    "args": {
+      "model": "Qwen/Qwen3-4B",
+      "seed": 42,
+      "max-num-seqs": 128,
+      "max-num-batched-tokens": 8192,
+      "tensor-parallel-size": {
+        "v6e-1": 1,
+        "v7x-2": 2,
+        "default": 1
+      },
+      "no-enable-prefix-caching": false,
+      "max-model-len": 5120,
+      "kv-cache-dtype": "fp8",
+      "gpu-memory-utilization": 0.90,
+      "async-scheduling": true,
+      "additional-config": "{\"quantization\": { \"qwix\": { \"rules\": [{ \"module_path\": \".*\", \"weight_qtype\": \"float8_e4m3fn\", \"act_qtype\": \"float8_e4m3fn\"}]}}}"
+    }
+  },
+  "client_command_options": {
+    "command_type": "vllm_bench_serve",
+    "args": {
+      "model": "Qwen/Qwen3-4B",
+      "backend": "vllm",
+      "request-rate": "inf",
+      "dataset-name": "custom",
+      "dataset-path": "/workspace/tpu_inference/artifacts/dataset/Qwen3-4B/inlen4096_outlen1024_prefixlen3600.jsonl",
+      "num-prompts": 1000,
+      "percentile-metrics": "ttft,tpot,itl,e2el",
+      "ignore-eos": true,
+      "custom-output-len": 1024,
+      "skip-chat-template": true
+    }
+  }
+}
