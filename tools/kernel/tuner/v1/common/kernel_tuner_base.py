@@ -235,9 +235,12 @@ class KernelTunerBase(ABC):
                 f"Error initializing case set {self.case_set_id}: {e}")
             raise e
 
-    def _build_step(self, case_id_start: int, case_id_end: int) -> dict:
+    def _build_step(self,
+                    case_id_start: int,
+                    case_id_end: int,
+                    parent_step_key: str = None) -> dict:
         step_key = f'{self.kernel_tuner_name}_{self.case_set_id}_{self.run_id}_{case_id_start}_{case_id_end}'
-        parent_step_key = os.environ.get("BUILDKITE_STEP_KEY")
+        parent_step_key = parent_step_key or 'generate_tuning_cases_and_yml'
         return {
             "label":
             f"cs_id={self.case_set_id} rid={self.run_id} Bucket([{case_id_start}, {case_id_end}))",
@@ -285,19 +288,23 @@ class KernelTunerBase(ABC):
             ]
         }
 
-    def generate_buildkite_pipeline_subbucket(self, start: int, end: int):
+    def generate_buildkite_pipeline_subbucket(self, start: int, end: int,
+                                              parent_step_key: str):
         """Generate the Buildkite pipeline for a sub-bucket of tuning jobs.
 
         Args:
             start: The starting case_id of the sub-bucket (inclusive).
             end: The ending case_id of the sub-bucket (exclusive).
+            parent_step_key: The key of the parent step in the Buildkite pipeline.
         """
+        assert parent_step_key is not None, "parent_step_key must be specified for the sub-bucket pipeline generation to set the correct dependency in the Buildkite pipeline."
+        assert start < end, f"Invalid sub-bucket range: start {start} should be less than end {end}."
         output_path = "/tmp/kernel_tuning/generated_pipeline.yml"
         if os.path.exists(output_path):
             # clean up the existing one
             os.remove(output_path)
         next_group_label = f"Tune Case ID [{start}, {end})"
-        step = self._build_step(start, end)
+        step = self._build_step(start, end, parent_step_key=parent_step_key)
         pipeline = {"group": next_group_label, "steps": [step]}
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w") as f:
@@ -449,7 +456,9 @@ class KernelTunerBase(ABC):
                 logger.warning(
                     f"Worker [{FLAGS.worker_id}] has been processing bucket {bucket_id} for {time_elapsed_minutes:.2f} minutes, which exceeds the limit of {self.run_at_most_minutes} minutes. Stopping processing more cases in this bucket to allow other jobs(like CICD jobs) in the queue to proceed."
                 )
-                self.generate_buildkite_pipeline_subbucket(cid, end_case_id)
+                parent_step_key = f'{self.kernel_tuner_name}_{self.case_set_id}_{self.run_id}_{begin_case_id}_{end_case_id}'
+                self.generate_buildkite_pipeline_subbucket(
+                    cid, end_case_id, parent_step_key=parent_step_key)
                 bucket_fully_processed = False
                 break
             last_processed_case_id = cid
