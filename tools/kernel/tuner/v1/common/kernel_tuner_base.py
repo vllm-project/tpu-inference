@@ -303,9 +303,8 @@ class KernelTunerBase(ABC):
         if os.path.exists(output_path):
             # clean up the existing one
             os.remove(output_path)
-        next_group_label = f"Tune Case ID [{start}, {end})"
         step = self._build_step(start, end, parent_step_key=parent_step_key)
-        pipeline = {"group": next_group_label, "steps": [step]}
+        pipeline = {"group": 'Kernel Sweeping Group', "steps": [step]}
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w") as f:
             yaml.dump(pipeline, f, default_flow_style=False, sort_keys=False)
