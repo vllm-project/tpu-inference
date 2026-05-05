@@ -23,7 +23,10 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+<<<<<<< HEAD
 from tpu_inference.kernels.mla.v2.transpose import xpose_pipeline
+=======
+>>>>>>> 9cae579d (add logging)
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
@@ -1530,6 +1533,62 @@ def mla_ragged_paged_attention(
 
     if vmem_limit_bytes is None:
         vmem_limit_bytes = pltpu.get_tpu_info().vmem_capacity_bytes
+
+    logger.info(f"Array shapes: "
+                f"ql_nope={ql_nope.shape}, "
+                f"q_pe={q_pe.shape}, "
+                f"new_kv_c={new_kv_c.shape}, "
+                f"new_k_pe={new_k_pe.shape}, "
+                f"cache_kv={cache_kv.shape}, "
+                f"kv_lens={kv_lens.shape}, "
+                f"page_indices={page_indices.shape}, "
+                f"cu_q_lens={cu_q_lens.shape}, "
+                f"distribution={distribution.shape}")
+
+    logger.info(f"Scalar parameters: "
+                f"sm_scale={sm_scale}, "
+                f"sliding_window={sliding_window}, "
+                f"soft_cap={soft_cap}, "
+                f"mask_value={mask_value}, "
+                f"q_scale={q_scale}, "
+                f"k_scale={k_scale}, "
+                f"v_scale={v_scale}, "
+                f"chunk_prefill_size={chunk_prefill_size}")
+
+    logger.info(f"Kernel optimization params: "
+                f"num_kv_pages_per_blocks={num_kv_pages_per_blocks}, "
+                f"num_queries_per_blocks={num_queries_per_blocks}, "
+                f"vmem_limit_bytes={vmem_limit_bytes}, "
+                f"decode_batch_size={decode_batch_size}")
+
+    # ql_nope: jax.Array,  # [max_num_tokens, actual_num_q_heads, actual_lkv_dim]
+    # q_pe: jax.Array,  # [max_num_tokens, actual_num_q_heads, actual_r_dim]
+    # new_kv_c: jax.Array,  # [max_num_tokens, actual_lkv_dim]
+    # new_k_pe: jax.Array,  # [max_num_tokens, actual_r_dim]
+    # cache_kv: jax.Array,  # [total_num_pages, page_size_per_kv_packing, kv_packing, align_to(lkv_dim, 128)]
+    # kv_lens: jax.Array,  # i32[max_num_seqs]
+    # page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
+    # cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
+    # distribution: jax.Array,  # i32[3]
+
+
+#     sm_scale: float = 1.0,
+#     sliding_window: int | None = None,
+#     soft_cap: float | None = None,
+#     mask_value: float | None = None,
+#     q_scale: float | None = None,
+#     k_scale: float | None = None,
+#     v_scale: float | None = None,
+#     # Kernel optimization params.
+#     chunk_prefill_size: int | None = None,
+
+    # num_kv_pages_per_block: tuple[int, int, int] | int | None = None,
+    # num_queries_per_block: tuple[int, int, int] | int | None = None,
+    # vmem_limit_bytes: int | None = None,
+    # decode_batch_size: int = 1,
+    # s_dtype: jnp.dtype = jnp.bfloat16,
+    # p_same_dtype_as_v: bool = True,
+
 
     static_validate_inputs(
         ql_nope,
