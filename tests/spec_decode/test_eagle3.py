@@ -105,12 +105,11 @@ def test_prepare_inputs():
     # Inputs
     total_tokens = 16
     hidden_size = 128
-    # The input_ids should be large enough to be indexed by token_indices,
-    # which can access up to total_tokens for padded requests.
-    input_ids = jnp.arange(total_tokens + 1)
-    aux_hidden_states = (jnp.ones((total_tokens + 1, hidden_size)),
-                         jnp.ones((total_tokens + 1, hidden_size)),
-                         jnp.ones((total_tokens + 1, hidden_size)))
+    input_ids = jnp.arange(total_tokens)
+    aux_hidden_states = (jnp.ones(
+        (total_tokens, hidden_size)), jnp.ones(
+            (total_tokens, hidden_size)), jnp.ones(
+                (total_tokens, hidden_size)))
 
     num_rejected_tokens_cpu = np.zeros(max_num_seqs, dtype=np.int32)
     num_rejected_tokens_cpu[:num_reqs] = [1, 3, 2]
@@ -132,12 +131,11 @@ def test_prepare_inputs():
     attn_metadata.seq_lens_cpu = sl_cpu
 
     # Expected results
+    # Padded requests have query_len=0 and num_rejected=0, so they contribute
+    # 0 tokens to the new query_start_loc.
     expected_new_qsl = np.zeros(max_num_seqs + 1, dtype=np.int32)
     num_tokens_per_req = np.zeros(max_num_seqs, dtype=np.int32)
     num_tokens_per_req[:num_reqs] = [3, 4, 3]
-    # The implementation sets padded query lengths to 1, and rejected tokens
-    # are 0 for padded requests.
-    num_tokens_per_req[num_reqs:] = 1
     expected_new_qsl[1:] = np.cumsum(num_tokens_per_req)
 
     expected_new_seq_lens = np.zeros(max_num_seqs, dtype=np.int32)
