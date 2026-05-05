@@ -105,6 +105,7 @@ class WeightsRef(RhsRef):
     weight: Any
     scale: Any | None
     bias: Any | None
+    global_scale: Any | None = None
 
     def get_weight(self) -> jax.Array:
         return self.weight[...]
@@ -112,6 +113,10 @@ class WeightsRef(RhsRef):
     def get_scale(self) -> jax.Array:
         assert self.scale is not None
         return self.scale[...]
+
+    def get_global_scale(self) -> jax.Array:
+        assert self.global_scale is not None
+        return self.global_scale[...]
 
     def get_bias(self) -> jax.Array:
         assert self.bias is not None
@@ -135,6 +140,15 @@ class FusedWeightsRef(RhsRef):
         s_gate = self.gate.get_scale()
         s_up = self.up.get_scale()
         return jnp.concatenate([s_gate, s_up], axis=-1)
+
+    def get_global_scale(self) -> jax.Array:
+        # FusedWeightsRef does not currently carry a per-tensor global scale.
+        # Callers should fold any global into get_scale() before construction
+        # if they go through this path.
+        raise NotImplementedError(
+            "FusedWeightsRef.get_global_scale is not implemented. Fold the "
+            "global into the per-block scale before constructing FusedWeightsRef."
+        )
 
     def get_bias(self) -> jax.Array:
         b_gate = self.gate.get_bias()
@@ -173,6 +187,7 @@ class InputConfigs:
     dtype: jnp.dtype
     has_bias: bool = False
     has_scale: bool = False
+    has_global_scale: bool = False
 
     @property
     def should_bitcast(self) -> bool:
@@ -258,6 +273,11 @@ class IndexMaps:
         b_tile_id = b_row // self.cfgs.num_quant_blocks_per_tile_k
         return (group_id, b_tile_id, 0, n_id)
 
+    def rhs_global_scale_index_map(self, n_id: jax.Array, gm_id: jax.Array,
+                                   k_id: jax.Array):
+        group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
+        return (group_id, 0, 0, 0)
+
     def out_index_map(self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array):
         is_last_gm = gm_id == (pl.num_programs(1) - 1)
         m_start = self.metadata_ref.gm_id_to_m_offset[gm_id]
@@ -297,6 +317,7 @@ def generate_block_specs(
         pipeline_mode=pl.Buffered(buffer_count=3),
     )
     rhs_scale_block_spec = rhs_bias_block_spec = None
+    rhs_global_scale_block_spec = None
     if cfgs.rhs_cfgs.has_bias:
         rhs_bias_block_spec = pl.BlockSpec(
             (None, 1, cfgs.tiles.tile_n),
@@ -307,11 +328,17 @@ def generate_block_specs(
             (None, cfgs.num_quant_blocks_per_tile_k, 1, cfgs.tiles.tile_n),
             index_map.rhs_scale_index_map,
         )
+    if cfgs.rhs_cfgs.has_global_scale:
+        rhs_global_scale_block_spec = pl.BlockSpec(
+            (None, 1, 1, 1),
+            index_map.rhs_global_scale_index_map,
+        )
 
     rhs_block_spec = WeightsRef(
         weight=rhs_weight_spec,
         scale=rhs_scale_block_spec,
         bias=rhs_bias_block_spec,
+        global_scale=rhs_global_scale_block_spec,
     )
 
     out_block_spec = pl.BlockSpec(
@@ -376,6 +403,13 @@ def inner_kernel(
         if cfgs.rhs_cfgs.should_dequantize_before_matmul:
             rhs_qbs = cfgs.rhs_cfgs.quant_block_size
             tiled_rhs_scale = tiled_rhs_ref.get_scale().astype(acc_ref.dtype)
+            # Apply per-tensor global scale alongside the per-block scale so
+            # both NVFP4-style scales are explicitly consumed inside the
+            # kernel rather than precombined at load time.
+            if cfgs.rhs_cfgs.has_global_scale:
+                tiled_global_scale = tiled_rhs_ref.get_global_scale().astype(
+                    acc_ref.dtype)
+                tiled_rhs_scale = tiled_rhs_scale * tiled_global_scale
             num_blocks = cfgs.num_quant_blocks_per_tile_k
             tiled_rhs_dequant = tiled_rhs.astype(acc_ref.dtype).reshape(
                 num_blocks, rhs_qbs, rhs_tile_n)
@@ -1059,6 +1093,7 @@ def make_gmm_configs(
     maybe_quantize_lhs: bool,
     zero_initialize: bool,
     fuse_act: str | None = None,
+    rhs_global_scale: jax.Array | None = None,
 ):
     """Fills the GMM config for the GMM kernel."""
 
@@ -1081,6 +1116,7 @@ def make_gmm_configs(
         dtype=rhs.dtype,
         has_bias=rhs_bias is not None,
         has_scale=has_scale,
+        has_global_scale=rhs_global_scale is not None,
     )
 
     lhs_q_dtype = None
@@ -1162,22 +1198,23 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
     "fuse_act",
 ])
 def gmm_v2(
-    lhs: jax.Array,  # [size_m, size_k]
-    rhs: jax.Array,  # [size_group, size_k, size_n]
-    group_sizes: jax.Array,  # int32[size_lhs_group]
-    rhs_scale: jax.Array
+        lhs: jax.Array,  # [size_m, size_k]
+        rhs: jax.Array,  # [size_group, size_k, size_n]
+        group_sizes: jax.Array,  # int32[size_lhs_group]
+        rhs_scale: jax.Array
     | None = None,  # [size_group, num_blocks, 1, out_size]
-    rhs_bias: jax.Array | None = None,  # [size_group, 1, out_size]
-    group_offset: jax.Array | None = None,  # int32[1]
-    *,
-    tile_info: TileSizes | TileFn = calculate_tiling,
-    vmem_limit_bytes: int | None = None,
-    precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
-    preferred_element_type: jnp.dtype | None = None,
-    acc_dtype: jnp.dtype | None = None,
-    maybe_quantize_lhs: bool = True,
-    zero_initialize: bool = True,
-    fuse_act: str | None = None,
+        rhs_bias: jax.Array | None = None,  # [size_group, 1, out_size]
+        group_offset: jax.Array | None = None,  # int32[1]
+        *,
+        tile_info: TileSizes | TileFn = calculate_tiling,
+        vmem_limit_bytes: int | None = None,
+        precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
+        preferred_element_type: jnp.dtype | None = None,
+        acc_dtype: jnp.dtype | None = None,
+        maybe_quantize_lhs: bool = True,
+        zero_initialize: bool = True,
+        fuse_act: str | None = None,
+        rhs_global_scale: jax.Array | None = None,  # [size_group, 1, 1, 1]
 ) -> jax.Array:
     """GMM kernel implemented with emit_pipeline.
 
@@ -1230,18 +1267,23 @@ def gmm_v2(
         maybe_quantize_lhs=maybe_quantize_lhs,
         zero_initialize=zero_initialize,
         fuse_act=fuse_act,
+        rhs_global_scale=rhs_global_scale,
     )
     dims = cfgs.dims
     tiles = cfgs.tiles
 
     # Prepare block specs.
     rhs_scale_spec = rhs_bias_spec = None
+    rhs_global_scale_spec = None
     if rhs_scale is not None:
         rhs_scale = rhs_scale.astype(jnp.float32)
         rhs_scale_spec = pl.BlockSpec(memory_space=pltpu.HBM)
     if rhs_bias is not None:
         rhs_bias = rhs_bias.astype(jnp.float32)
         rhs_bias_spec = pl.BlockSpec(memory_space=pltpu.HBM)
+    if rhs_global_scale is not None:
+        rhs_global_scale = rhs_global_scale.astype(jnp.float32)
+        rhs_global_scale_spec = pl.BlockSpec(memory_space=pltpu.HBM)
 
     # Initialize scratch shapes.
     max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
@@ -1286,7 +1328,10 @@ def gmm_v2(
 
     aligned_n = align_to(cfgs.out_size_n, num_lanes)
     out_init = jax.ShapeDtypeStruct((dims.size_m, aligned_n), cfgs.out_dtype)
-    rhs_weights = WeightsRef(weight=rhs, scale=rhs_scale, bias=rhs_bias)
+    rhs_weights = WeightsRef(weight=rhs,
+                             scale=rhs_scale,
+                             bias=rhs_bias,
+                             global_scale=rhs_global_scale)
 
     return pl.pallas_call(
         functools.partial(kernel_main, cfgs=cfgs),
@@ -1299,6 +1344,7 @@ def gmm_v2(
                     weight=pl.BlockSpec(memory_space=pltpu.HBM),
                     scale=rhs_scale_spec,
                     bias=rhs_bias_spec,
+                    global_scale=rhs_global_scale_spec,
                 ),
             ],
             out_specs=pl.BlockSpec(memory_space=pltpu.HBM),

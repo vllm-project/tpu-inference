@@ -46,6 +46,11 @@ class FusedMoEWeights:
     w2_weight: jax.Array | Tensor
     w2_weight_scale: jax.Array | Tensor | None
     w2_bias: jax.Array | Tensor | None
+    # Optional per-tensor global scales (per-expert FP32 scalar) applied
+    # alongside the per-block weight scale inside the matmul kernel. Used by
+    # NVFP4 where the canonical format has a two-level scale structure.
+    w13_weight_global_scale: jax.Array | Tensor | None = None
+    w2_weight_global_scale: jax.Array | Tensor | None = None
 
 
 @jax.tree_util.register_dataclass

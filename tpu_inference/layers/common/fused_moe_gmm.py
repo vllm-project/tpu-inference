@@ -97,7 +97,8 @@ def gmm_wrapper(lhs,
                 group_sizes,
                 group_offset,
                 fuse_act=None,
-                preferred_element_type=None):
+                preferred_element_type=None,
+                rhs_global_scale=None):
     gmm_res = gmm_v2(
         lhs=lhs,
         rhs=rhs,
@@ -108,6 +109,7 @@ def gmm_wrapper(lhs,
         zero_initialize=False,
         fuse_act=fuse_act,
         preferred_element_type=preferred_element_type,
+        rhs_global_scale=rhs_global_scale,
     )
     return gmm_res
 
@@ -138,6 +140,8 @@ def moe_gmm_local(
     group_offset: jax.Array,
     topk_argsort_revert_indices: jax.Array,
     topk_weights: jax.Array,
+    w1_global_scale: jax.Array | None = None,
+    w2_global_scale: jax.Array | None = None,
     *,
     activation: str,
     topk: int,
@@ -162,6 +166,7 @@ def moe_gmm_local(
         group_offset,
         fuse_act=activation,
         preferred_element_type=x.dtype,
+        rhs_global_scale=w1_global_scale,
     )
 
     # When the parallelism is TP since w2_bias is not sharded, we should only apply bias
@@ -189,7 +194,8 @@ def moe_gmm_local(
                                w2_bias,
                                group_sizes,
                                group_offset,
-                               preferred_element_type=jnp.float32.dtype)
+                               preferred_element_type=jnp.float32.dtype,
+                               rhs_global_scale=w2_global_scale)
 
         if local_group_size < group_sizes.size:
             mask = mask.reshape(-1, topk)
@@ -212,7 +218,8 @@ def moe_gmm_local(
                                w2_bias,
                                group_sizes,
                                group_offset,
-                               preferred_element_type=x.dtype)
+                               preferred_element_type=x.dtype,
+                               rhs_global_scale=w2_global_scale)
 
         if local_group_size < group_sizes.size:
             group_offsets = jnp.cumulative_sum(group_sizes,
@@ -262,6 +269,8 @@ def tensor_parallel_gmm(
     mesh: Mesh,
     sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
+    w1_global_scale: jax.Array | None = None,
+    w2_global_scale: jax.Array | None = None,
 ) -> jax.Array:
     data_p_spec = P(ShardingAxisName.MLP_DATA)
     group_offset = jnp.array([0])
@@ -278,6 +287,10 @@ def tensor_parallel_gmm(
     w2_scale_spec = (None if num_blocks == 1 else P(
         None, ShardingAxisName.MLP_TENSOR, None, None))
     w2_bias_spec = None if w2_bias is None else P(None, None, None)
+
+    # Per-expert scalar globals: replicated across TP shards.
+    w1_global_scale_spec = None if w1_global_scale is None else P()
+    w2_global_scale_spec = None if w2_global_scale is None else P()
 
     return jax.shard_map(
         functools.partial(
@@ -301,6 +314,8 @@ def tensor_parallel_gmm(
             P(),
             data_p_spec,
             data_p_spec,
+            w1_global_scale_spec,
+            w2_global_scale_spec,
         ),
         out_specs=(data_p_spec),
         check_vma=False,
@@ -316,6 +331,8 @@ def tensor_parallel_gmm(
         group_offset,
         topk_argsort_revert_indices,
         topk_weights,
+        w1_global_scale,
+        w2_global_scale,
     )
 
 
@@ -336,6 +353,8 @@ def expert_parallel_gmm(
     mesh: Mesh,
     sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
+    w1_global_scale: jax.Array | None = None,
+    w2_global_scale: jax.Array | None = None,
 ) -> jax.Array:
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
@@ -348,6 +367,9 @@ def expert_parallel_gmm(
     w1_bias_spec = None if w1_bias is None else ep_p_spec
     w2_scale_spec = None if w2_scale is None else ep_p_spec
     w2_bias_spec = None if w2_bias is None else ep_p_spec
+    # Per-expert scalar globals: sharded along expert axis.
+    w1_global_scale_spec = None if w1_global_scale is None else ep_p_spec
+    w2_global_scale_spec = None if w2_global_scale is None else ep_p_spec
 
     return jax.shard_map(
         functools.partial(
@@ -371,6 +393,8 @@ def expert_parallel_gmm(
             ep_p_spec,
             data_p_spec,
             data_p_spec,
+            w1_global_scale_spec,
+            w2_global_scale_spec,
         ),
         out_specs=(data_p_spec),
         check_vma=False,
@@ -386,6 +410,8 @@ def expert_parallel_gmm(
         group_offset,
         topk_argsort_revert_indices,
         topk_weights,
+        w1_global_scale,
+        w2_global_scale,
     )
 
 
@@ -441,6 +467,8 @@ def fused_moe_func(
     sc_kernel_threshold: int,
     sc_kernel_col_chunk_size: int,
     all_gather_fp8: bool = False,
+    w1_global_scale: jax.Array | None = None,
+    w2_global_scale: jax.Array | None = None,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -573,6 +601,8 @@ def fused_moe_func(
             mesh=mesh,
             sc_kernel_threshold=sc_kernel_threshold,
             sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
+            w1_global_scale=w1_global_scale,
+            w2_global_scale=w2_global_scale,
         )
     else:
         x = tensor_parallel_gmm(
@@ -591,6 +621,8 @@ def fused_moe_func(
             mesh=mesh,
             sc_kernel_threshold=sc_kernel_threshold,
             sc_kernel_col_chunk_size=sc_kernel_col_chunk_size,
+            w1_global_scale=w1_global_scale,
+            w2_global_scale=w2_global_scale,
         )
 
     return x[:num_tokens, :hidden_size]

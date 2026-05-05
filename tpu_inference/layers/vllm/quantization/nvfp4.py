@@ -308,28 +308,29 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
         w2_bias = t2j(layer.w2_bias,
                       use_dlpack=False) if self.moe.has_bias else None
 
+        # Collapse w13's per-half global (E, 2) -> per-expert scalar (E,) by
+        # taking max. Upstream warns if w1/w3 globals differ
+        # (modelopt.py:1373); max is more conservative than picking [:, 0]
+        # if they don't match.
+        if w13_global_scale.ndim == 2:
+            w13_global_scale = jnp.max(w13_global_scale, axis=1)
+        # Reshape per-expert scalar globals to the (size_group, 1, 1, 1)
+        # layout the gmm_v2 kernel expects as `rhs_global_scale`.
+        w13_global_scale = w13_global_scale.reshape(-1, 1, 1, 1)
+        w2_global_scale = w2_global_scale.reshape(-1, 1, 1, 1)
+
         @jax.jit
-        def process_nvfp4_moe_weights(w13_weight, w13_weight_scale,
-                                      w13_global_scale, w2_weight,
-                                      w2_weight_scale, w2_global_scale,
-                                      w13_bias, w2_bias):
+        def process_nvfp4_moe_weights(w13_weight, w13_weight_scale, w2_weight,
+                                      w2_weight_scale, w13_bias, w2_bias):
             # Unpack packed uint8 -> native float4_e2m1fn (no value change).
             w13_fp4 = u8_unpack_e2m1(w13_weight)
             w2_fp4 = u8_unpack_e2m1(w2_weight)
 
-            # Combine FP32 global × FP8 block -> single FP32 block scale.
-            if w13_global_scale.ndim == 2:  # (E, 2) — separate w1/w3 globals.
-                half = w13_weight_scale.shape[1] // 2
-                w1_eff = w13_weight_scale[:, :half].astype(
-                    jnp.float32) * w13_global_scale[:, 0:1].reshape(-1, 1, 1)
-                w3_eff = w13_weight_scale[:, half:].astype(
-                    jnp.float32) * w13_global_scale[:, 1:2].reshape(-1, 1, 1)
-                w13_scale_eff = jnp.concatenate([w1_eff, w3_eff], axis=1)
-            else:
-                w13_scale_eff = w13_weight_scale.astype(
-                    jnp.float32) * w13_global_scale.reshape(-1, 1, 1)
-            w2_scale_eff = w2_weight_scale.astype(
-                jnp.float32) * w2_global_scale.reshape(-1, 1, 1)
+            # Cast FP8 block scale to FP32. Do NOT fold the per-tensor global
+            # scale here — keep it separate so it's applied at matmul time
+            # inside gmm_v2 (rhs_global_scale path).
+            w13_block_fp32 = w13_weight_scale.astype(jnp.float32)
+            w2_block_fp32 = w2_weight_scale.astype(jnp.float32)
 
             w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
             w13_reorder_size = get_mesh_shape_product(
@@ -337,10 +338,10 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
 
             weights = FusedMoEWeights(
                 w13_weight=w13_fp4,
-                w13_weight_scale=w13_scale_eff,
+                w13_weight_scale=w13_block_fp32,
                 w13_bias=w13_bias,
                 w2_weight=w2_fp4,
-                w2_weight_scale=w2_scale_eff,
+                w2_weight_scale=w2_block_fp32,
                 w2_bias=w2_bias,
             )
             return process_moe_weights(weights,
@@ -349,8 +350,7 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
                                        w13_interleave=w13_interleave)
 
         weights = process_nvfp4_moe_weights(w13_weight, w13_weight_scale,
-                                            w13_global_scale, w2_weight,
-                                            w2_weight_scale, w2_global_scale,
+                                            w2_weight, w2_weight_scale,
                                             w13_bias, w2_bias)
         weights = torch_view(
             shard_moe_weights(weights, self.moe_backend, self.mesh))
@@ -361,6 +361,12 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
                                            requires_grad=False)
         layer.w2_weight_scale = Parameter(weights.w2_weight_scale,
                                           requires_grad=False)
+        # Per-expert global scale (FP32, shape (E, 1, 1, 1)) kept separate;
+        # consumed by gmm_v2 alongside the per-block scale.
+        layer.w13_weight_scale_2 = Parameter(torch_view(w13_global_scale),
+                                             requires_grad=False)
+        layer.w2_weight_scale_2 = Parameter(torch_view(w2_global_scale),
+                                            requires_grad=False)
         if self.moe.has_bias:
             layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
             layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
@@ -373,6 +379,8 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
             w2_weight=jax_view(layer.w2_weight),
             w2_weight_scale=jax_view(layer.w2_weight_scale),
             w2_bias=jax_view(layer.w2_bias) if self.moe.has_bias else None,
+            w13_weight_global_scale=jax_view(layer.w13_weight_scale_2),
+            w2_weight_global_scale=jax_view(layer.w2_weight_scale_2),
         )
         return vllm_moe_apply(layer=layer,
                               weights=weights,
