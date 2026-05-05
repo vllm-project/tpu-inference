@@ -441,7 +441,7 @@ class KernelTunerBase(ABC):
             )
             if not self.run_locally and (time_elapsed_minutes
                                          > self.run_at_most_minutes or
-                                         (cid - begin_case_id) > 1):
+                                         (cid - begin_case_id) >= 1):
                 logger.warning(
                     f"Worker [{FLAGS.worker_id}] has been processing bucket {bucket_id} for {time_elapsed_minutes:.2f} minutes, which exceeds the limit of {self.run_at_most_minutes} minutes. Stopping processing more cases in this bucket to allow other jobs(like CICD jobs) in the queue to proceed."
                 )
@@ -519,5 +519,5 @@ class KernelTunerBase(ABC):
             self.storage_manager.mark_bucket_completed(self.case_set_id,
                                                        self.run_id, bucket_id)
         logger.info(
-            f"Worker [{FLAGS.worker_id}] Completed Bucket {bucket_id} ({begin_case_id}-{last_processed_case_id + 1}] for CaseSetId: {self.case_set_id}, RunId: {self.run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
+            f"Worker [{FLAGS.worker_id}] Completed Bucket {bucket_id} [{begin_case_id}-{last_processed_case_id + 1}) for CaseSetId: {self.case_set_id}, RunId: {self.run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
         )
