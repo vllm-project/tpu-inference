@@ -62,13 +62,13 @@ steps:
       queue: tpu_v7x_16_queue
     commands:
       - |
-        mkdir -p /tmp/DeepSeek-R1-Configs && \
-        gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1 /tmp/DeepSeek-R1-Configs
-      - |
         # Run offline inference with a small model.
         # --tensor-parallel-size 2: tp=1 is currently unsupported on tpu7x.
         # Customize --model, --max-model-len, --max-tokens as needed.
-        .buildkite/scripts/run_in_docker.sh bash -c 'MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8 \
+        .buildkite/scripts/run_in_docker.sh bash -c '\
+          mkdir -p /tmp/DeepSeek-R1-Configs && \
+          gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1 /tmp/DeepSeek-R1-Configs && \
+          MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8 \
           VLLM_DISABLE_SHARED_EXPERTS_STREAM=0 \
           NEW_MODEL_DESIGN=1 VLLM_MLA_DISABLE=0 \
           MOE_REQUANTIZE_BLOCK_SIZE=512 \
