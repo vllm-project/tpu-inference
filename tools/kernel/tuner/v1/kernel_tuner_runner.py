@@ -150,6 +150,7 @@ def main(argv):
             )
         tpu_queue_multi = tpu_queue_multi or ensure_tpu_queue_multi
 
+    tpu_queue_multi = tpu_queue_multi.replace("_1_queue", "_queue")
     if tpu_queue_multi:
         assert tpu_queue_multi in (
             ['tpu_v6e_queue', 'tpu_v6e_8_queue'] if tpu_version == 'tpu6e' else
