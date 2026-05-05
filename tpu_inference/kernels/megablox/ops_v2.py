@@ -431,13 +431,6 @@ def inner_kernel(
           block_scale_inv = jnp.where(block_scale == 0, 0, 1 / block_scale)
           # Convert lhs into quantized dtype.
           block_lhs_q = (block_lhs * block_scale_inv).astype(lhs_q_dtype)
-          # Some mixed precision matmuls are not supported. In that case,
-          # convert rhs into the same dtype as lhs. We generally expect that
-          # this will be an upcast, e.g. int4 -> fp8 or int8.
-          if not pltpu.get_tpu_info().is_matmul_supported(
-              lhs_q_dtype, block_rhs.dtype
-          ):
-            block_rhs = block_rhs.astype(lhs_q_dtype)
 
           block_acc = jnp.matmul(
               block_lhs_q,
@@ -560,7 +553,6 @@ def fill_metadata(
     metadata_ref: MetadataRef,
     *,
     cfgs: GmmConfigs,
-    process_empty_groups: bool = False,
 ) -> jax.Array:
   """Fills the metadata for the given lhs group sizes and group offset.
 
@@ -575,9 +567,6 @@ def fill_metadata(
     metadata_ref: Metadata that is used to determine the group id and m offsets
       for each gmm tile.
     cfgs: GmmConfigs.
-    process_empty_groups: Whether to process empty groups. If True, do not
-          squeeze tiles for empty groups out of the metadata. This is necessary
-          for tgmm, where we at least need to zero the output for each group.
 
   Returns:
       The number of gm tiles to process lhs with given group offset.
@@ -631,25 +620,8 @@ def fill_metadata(
     # We need to handle cases where we should not process the group.
     # 1. Even if group_size is 0, if local_offset is not 0, cdiv will return 1.
     # 2. If group comes before the group_offset, we should not process it.
-    should_process = jnp.logical_and(
-        jnp.logical_or(group_size > 0, process_empty_groups), group_id >= 0
-    )
+    should_process = jnp.logical_and(group_size > 0, group_id >= 0)
     curr_num_gm = jnp.where(should_process, curr_num_gm, 0)
-
-    # When process_empty_group is True, if group_size is 0 and
-    # local_offset is 0 or aligned (e.g., for the first group if it's empty),
-    # curr_num_gm will be 0. Since the intention of process_empty_groups is to
-    # ensure at least one tile is generated to zero out the output, we should
-    # ensure curr_num_gm is at least 1 when should_process is True.
-    curr_num_gm = jnp.where(
-        jnp.logical_and(
-            curr_num_gm == 0,
-            jnp.logical_and(process_empty_groups, group_id >= 0),
-        ),
-        1,
-        curr_num_gm,
-    )
-
     next_num_gm = num_gm + curr_num_gm
 
     tm_loop_fn = functools.partial(
@@ -1066,17 +1038,13 @@ def make_gmm_configs(
   if maybe_quantize_lhs and rhs_quant_dtype is not None:
     # Choose lhs quantization dtype based on TPU hardware support.
     is_rhs_float = jnp.issubdtype(rhs_quant_dtype, jnp.floating)
-    is_rhs_4bits = jax.dtypes.itemsize_bits(rhs_quant_dtype) == 4
     tpu_info = pltpu.get_tpu_info()
     # Check if there is hardware compute support for rhs dtype group.
-    # If the rhs is quantized to int4 or uint4 bits, these can be upcast to
-    # e4m3 without loss, so we consider both fp8 and int8.
-    # Does not consider int8 x fp4 since fp4 does not cleanly map to int8.
-    if tpu_info.fp8_ops_per_second > 0:
-      if is_rhs_float or is_rhs_4bits:
+    if is_rhs_float:
+      if tpu_info.fp8_ops_per_second > 0:
         lhs_q_dtype = jnp.float8_e4m3fn.dtype
-    if tpu_info.int8_ops_per_second > 0:
-      if not is_rhs_float:
+    else:
+      if tpu_info.int8_ops_per_second > 0:
         lhs_q_dtype = jnp.int8.dtype
 
   lhs_cfgs = InputConfigs(
