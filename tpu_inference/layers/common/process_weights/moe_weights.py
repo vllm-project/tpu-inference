@@ -761,7 +761,9 @@ def process_unquantized_moe_weights(
         )
 
     w13_interleave = activation == MoEActivation.SWIGLUOAI
-    w13_reorder_size = get_mesh_shape_product(jax.sharding.get_mesh(),
+    # Inside jax.jit only the abstract mesh is accessible; that's enough since
+    # get_mesh_shape_product only needs axis sizes.
+    w13_reorder_size = get_mesh_shape_product(jax.sharding.get_abstract_mesh(),
                                               ShardingAxisName.MLP_TENSOR)
 
     return process_moe_weights(
