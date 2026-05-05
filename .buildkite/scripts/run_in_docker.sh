@@ -103,6 +103,14 @@ DOCKER_HF_HOME="/tmp/hf_home"
 #   exit 1
 # fi
 
+DS_GENERATION_CONFIGS_DIR="/tmp/DeepSeek-R1-Configs"
+if ( mkdir -p "$DS_GENERATION_CONFIGS_DIR" ); then
+  echo "Created $DS_GENERATION_CONFIGS_DIR for DeepSeek R1 generation configs."
+else
+  echo "Error: Failed to create $DS_GENERATION_CONFIGS_DIR"
+  exit 1
+fi
+
 # Temporary directory for kernel tuning outputs (not persisted)
 KERNEL_TUNING_TMP_DIR="/tmp/kernel_tuning"
 mkdir -p "$KERNEL_TUNING_TMP_DIR"
@@ -118,6 +126,7 @@ exec docker run \
   --net host \
   --shm-size=16G \
   --rm \
+  -v "$DS_GENERATION_CONFIGS_DIR":"$DS_GENERATION_CONFIGS_DIR" \
   -v "$KERNEL_TUNING_TMP_DIR":"$KERNEL_TUNING_TMP_DIR" \
   "${DEV_MOUNT[@]}" \
   "${ENV_VARS[@]}" \
