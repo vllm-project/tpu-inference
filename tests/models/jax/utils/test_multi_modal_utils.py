@@ -227,9 +227,16 @@ def test_flatten_pad_mm_embeds_empty_list():
 
 
 def test_flatten_pad_mm_embeds_empty_arrays():
-    """Tests that a list of empty arrays returns None."""
-    empty_embeds = [jnp.empty((0, 128))]
-    assert flatten_pad_mm_embeds(empty_embeds, target_pad_len=10) is None
+    """Tests that a list of empty arrays returns a fully zero-padded tensor."""
+    empty_embeds = [jnp.empty((0, 128), dtype=jnp.float32)]
+    target_pad_len = 10
+
+    result = flatten_pad_mm_embeds(empty_embeds, target_pad_len=target_pad_len)
+
+    assert result is not None
+    assert result.shape == (10, 128)
+    np.testing.assert_array_equal(result, np.zeros((10, 128),
+                                                   dtype=np.float32))
 
 
 def test_flatten_pad_mm_embeds_with_padding():
