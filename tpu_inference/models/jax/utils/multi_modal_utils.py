@@ -183,8 +183,6 @@ def flatten_pad_mm_embeds(mm_embeds: list[jax.Array] | None,
         return None
 
     flattened_embeds = flatten_embeddings(mm_embeds)
-    if flattened_embeds.shape[0] == 0:
-        return None
 
     padding = jnp.zeros(
         (target_pad_len - flattened_embeds.shape[0],
