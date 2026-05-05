@@ -142,13 +142,9 @@ class FusedWeightsRef(RhsRef):
         return jnp.concatenate([s_gate, s_up], axis=-1)
 
     def get_global_scale(self) -> jax.Array:
-        # FusedWeightsRef does not currently carry a per-tensor global scale.
-        # Callers should fold any global into get_scale() before construction
-        # if they go through this path.
-        raise NotImplementedError(
-            "FusedWeightsRef.get_global_scale is not implemented. Fold the "
-            "global into the per-block scale before constructing FusedWeightsRef."
-        )
+        # gate and up reference the same per-expert global scale; either
+        # one returns the right value.
+        return self.gate.get_global_scale()
 
     def get_bias(self) -> jax.Array:
         b_gate = self.gate.get_bias()
@@ -874,8 +870,23 @@ def kernel_main(
     (lhs_spec, rhs_spec), out_spec = generate_block_specs(metadata_ref, cfgs)
 
     if cfgs.fuse_act is not None:
-        rhs_up_ref = jax.tree.map(lambda x: x.at[..., cfgs.out_size_n:],
-                                  rhs_ref)
+        # Slice the upper half of the n dim for the up projection. Skip the
+        # global_scale field because it has shape (size_group,) — no n dim
+        # — and is shared between the gate and up halves.
+        def _split_up_half(ref):
+            global_scale = ref.global_scale
+            sliced = jax.tree.map(
+                lambda x: x.at[..., cfgs.out_size_n:],
+                WeightsRef(weight=ref.weight,
+                           scale=ref.scale,
+                           bias=ref.bias,
+                           global_scale=None))
+            return WeightsRef(weight=sliced.weight,
+                              scale=sliced.scale,
+                              bias=sliced.bias,
+                              global_scale=global_scale)
+
+        rhs_up_ref = _split_up_half(rhs_ref)
         rhs_ref = FusedWeightsRef(gate=rhs_ref, up=rhs_up_ref)
 
         rhs_spec = FusedWeightsRef(
