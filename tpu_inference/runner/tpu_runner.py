@@ -1902,7 +1902,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Per-request mamba state slot ids; copy to keep the InputBatch's
             # CPU buffer free for the next step's bookkeeping.
             mamba_state_indices_cpu = self.input_batch.mamba_state_indices_cpu.copy(
-            )
+            )[:padded_num_reqs]
             (request_distribution, mamba_state_indices,
              dev_arrays_payload) = device_array(
                  self.mesh, (request_distribution, mamba_state_indices_cpu,
@@ -1917,8 +1917,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         metadata = common_utils.DeviceBuffer.unpack_arrays(
             dev_arrays_payload, metadata_layout)
         input_ids = metadata["input_ids"]
-        query_start_loc = metadata["query_start_loc"]
-        seq_lens = metadata["seq_lens"]
+        query_start_loc = metadata["query_start_loc"][:padded_num_reqs + 1]
+        seq_lens = metadata["seq_lens"][:padded_num_reqs]
         logits_indices = metadata["logits_indices"]
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:

@@ -109,6 +109,11 @@ def gdn_attention_core_tpu(
     state_indices = jax_view(attn_metadata.mamba_state_indices).astype(
         jnp.int32)
 
+
+    # jax.debug.print(f"state_indices [{{shape}}]: {{arr}}", shape=state_indices.shape, arr=state_indices)
+    # jax.debug.print(f"seq_lens [{{shape}}]: {{arr}}", shape=attn_metadata.seq_lens.shape, arr=attn_metadata.seq_lens)
+    # jax.debug.print(f"q_start_loc [{{shape}}]: {{arr}}", shape=attn_metadata.query_start_loc.shape, arr=attn_metadata.query_start_loc)
+
     # Map tokens to their respective requests
     q_loc = jax_view(attn_metadata.query_start_loc)
     distribution = jax_view(attn_metadata.request_distribution)
