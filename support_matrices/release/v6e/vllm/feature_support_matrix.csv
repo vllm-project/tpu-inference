@@ -13,6 +13,6 @@ Feature,CorrectnessTest,PerformanceTest
 "async scheduler",✅ Passing,✅ Passing
 "hybrid kv cache",✅ Passing,❓ Untested
 "multi-host",❓ Untested,❓ Untested
-"runai_model_streamer_loader",✅ Passing,❓ Untested
+"runai_model_streamer_loader",❌ Failing,❓ Untested
 "sampling_params",✅ Passing,❓ Untested
 "structured_decoding",✅ Passing,❓ Untested
