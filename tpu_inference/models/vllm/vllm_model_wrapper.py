@@ -583,14 +583,22 @@ class VllmModelWrapper:
             hidden_states: jax.Array,
             pooling_metadata: PoolingMetadata,
             seq_lens: np.ndarray,
+            num_scheduled_tokens: np.ndarray | None = None,
         ) -> PoolerOutput:
             assert self._pooler is not None, "Model does not support pooling"
+
+            # Fallback assignment: for pooling-only models running outside chunked prefill pipelines,
+            # we ensure the pooler receives the complete set of hidden states by using seq_lens.
+            if num_scheduled_tokens is None:
+                num_scheduled_tokens = seq_lens
 
             torch_states: torch.Tensor = torch_view(hidden_states)
             with torchax.default_env():
                 torch_states = torch_states.to('cpu', non_blocking=True)
+
+                # Ensure correct alignment for chunked prefill
                 pooling_metadata.build_pooling_cursor(
-                    seq_lens,
+                    num_scheduled_tokens,
                     torch.tensor(seq_lens),
                     device=torch_states.device,
                 )
@@ -598,6 +606,7 @@ class VllmModelWrapper:
                     torch_states,
                     pooling_metadata,
                 )
+
                 return outputs
 
         return compute_pooler_output

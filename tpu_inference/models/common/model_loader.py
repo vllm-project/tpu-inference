@@ -11,11 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import functools
 from typing import Any, Optional
 
 import jax
+import numpy as np
 import torch
 import vllm.envs as vllm_envs
 from flax import nnx
@@ -111,7 +111,20 @@ def _get_nnx_model(
     vllm_config: VllmConfig,
     rng: jax.Array,
     mesh: Mesh,
+    pooler: Optional[Any] = None,
 ) -> nnx.Module:
+    """Instantiate the nnx JAX model and optionally pass the embedding/pooling layer.
+
+    Args:
+        model_class: The class of the model.
+        vllm_config: The current vLLM config.
+        rng: Array specifying random keys.
+        mesh: JAX device mesh for sharding.
+        pooler: The optional pooler for handling embedding path.
+
+    Returns:
+        nnx.Module: The instantiated JAX module.
+    """
 
     def create_abstract_model() -> nnx.Module:
         """
@@ -250,6 +263,7 @@ def _get_nnx_model(
                     vllm_config.load_config.load_format = "pathways_dummy"
                 else:
                     vllm_config.load_config.load_format = "jax_dummy"
+            vllm_config.pytorch_pooler = pooler
             loader = get_model_loader(vllm_config.load_config)
             if isinstance(model, LoadableWithIterator):
                 assert isinstance(model, JaxModule)
@@ -260,6 +274,7 @@ def _get_nnx_model(
                     model_weights = vllm_config.model_config.model_weights
                 weights_iterator = loader._get_weights_iterator(
                     model_weights, vllm_config.model_config.revision)
+
                 # We set the weights iterator at runtime, to prevent having to change
                 # every model's load_weights signature. This also prevents us from hitting
                 # a TypeError at runtime if you use the RunaiModelStreamerLoader with any
@@ -270,6 +285,8 @@ def _get_nnx_model(
                 del vllm_config.model_config.runai_model_weights_iterator
             else:
                 model.load_weights(rng)
+            if hasattr(vllm_config, "pytorch_pooler"):
+                del vllm_config.pytorch_pooler
             jit_model = create_jit_model(
                 model,
                 use_qwix_on_abstract_model=should_apply_qwix_on_abstract_model)
@@ -302,7 +319,22 @@ def get_flax_model(
     else:
         model_class = _get_model_architecture(
             vllm_config.model_config.hf_config)
-    jit_model = _get_nnx_model(model_class, vllm_config, rng, mesh)
+
+    # Instantiate pooler if needed for Hybrid Path
+    is_pooling = vllm_config.model_config.runner_type == "pooling"
+    pooler = None
+    if is_pooling:
+        from vllm.model_executor.layers.pooler import DispatchPooler
+        pooler_config = getattr(vllm_config.model_config, "pooler_config",
+                                None)
+        if pooler_config is not None:
+            pooler = DispatchPooler.for_embedding(pooler_config)
+
+    jit_model = _get_nnx_model(model_class,
+                               vllm_config,
+                               rng,
+                               mesh,
+                               pooler=pooler)
     vllm_config.model_config.dtype = original_dtype
     kv_cache_sharding = NamedSharding(
         mesh,
@@ -400,15 +432,49 @@ def get_flax_model(
         get_mrope_input_positions_fn=get_mrope_input_positions_fn,
     )
 
+    if pooler is not None:
+        import torchax
+        from torchax.interop import torch_view
+        from vllm.v1.pool.metadata import PoolingMetadata
+
+        def compute_pooler_output(
+            hidden_states: jax.Array,
+            pooling_metadata: PoolingMetadata,
+            seq_lens: np.ndarray,
+            num_scheduled_tokens: Optional[np.ndarray] = None,
+        ):
+            # Performance optimization: use torch_view and move to CPU non-blocking
+            torch_states = torch_view(hidden_states)
+            with torchax.default_env():
+                torch_states = torch_states.to('cpu', non_blocking=True)
+
+                if num_scheduled_tokens is None:
+                    num_scheduled_tokens = seq_lens
+
+                # Align with our StepPool logic
+                pooling_metadata.build_pooling_cursor(
+                    num_scheduled_tokens,
+                    torch.tensor(seq_lens),
+                    device=torch_states.device,
+                )
+
+                # Execute pooling on CPU
+                outputs = pooler(torch_states, pooling_metadata)
+                return outputs
+
+        pooler_fn = compute_pooler_output
+    else:
+        pooler_fn = _not_support
+
     return ModelInterface(
         model_fn=model_fn,
         compute_logits_fn=compute_logits_fn,
-        pooler_fn=_not_support,
+        pooler_fn=pooler_fn,
         combine_hidden_states_fn=combine_hidden_states_fn,
         multimodal_fns=multimodal_fns,
         state=state,
         lora_manager=lora_manager,
-        model=model,
+        model=jit_model,
     )
 
 
