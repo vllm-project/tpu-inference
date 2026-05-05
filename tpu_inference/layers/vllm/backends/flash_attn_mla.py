@@ -30,9 +30,6 @@ from tpu_inference.layers.common.quantization import (
     quantize_kv, static_per_tensor_quantize_tensor)
 
 
-
-
-
 @register_backend(AttentionBackendEnum.FLASH_ATTN_MLA)
 class PallasMLAttentionBackend(AttentionBackend):
 
@@ -152,13 +149,12 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
         # (B, N, P) x (N, P, L) -> (N, B, L)  N-first so reshape in prepare_q_nope_inputs is layout-preserving
         # torch nn param
         q_nope = jnp.einsum("bnp,npl->nbl",
-                             q_nope,
-                             jax_view(layer.W_UK_T),
-                             preferred_element_type=jnp.float32)
+                            q_nope,
+                            jax_view(layer.W_UK_T),
+                            preferred_element_type=jnp.float32)
         scale = jax_view(layer.W_UK_T_scale)
         scale = scale.reshape(scale.shape[1], 1, scale.shape[-1])
-        q_nope = (q_nope  *
-                  scale).astype(input_dtype)
+        q_nope = (q_nope * scale).astype(input_dtype)
 
         q_scale = k_scale = v_scale = None
         if layer.kv_cache_quantized_dtype:
@@ -199,8 +195,8 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             sm_scale=self.scale,
         )
 
-        outputs = outputs.reshape(-1, self.num_heads, self.kv_lora_rank)
-        outputs = (jnp.einsum("bnl,nlv->bnv",
+        outputs = outputs.reshape(self.num_heads, -1, self.kv_lora_rank)
+        outputs = (jnp.einsum("nbl,nlv->bnv",
                               outputs,
                               jax_view(layer.W_UV),
                               preferred_element_type=jnp.float32) *

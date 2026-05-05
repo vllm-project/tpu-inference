@@ -503,7 +503,8 @@ def mla_attention(
         sm_scale: softmax scale
     """
     in_specs = (
-        q_nope_sharding or P(None, ShardingAxisName.MLP_TENSOR, None),  # q (head-major)
+        q_nope_sharding
+        or P(None, ShardingAxisName.MLP_TENSOR, None),  # q (head-major)
         query_tnh_sharding
         or P(ShardingAxisName.MLP_TENSOR, None, None),  # q_rope (token-major)
         keyvalue_skh_sharding or P(ShardingAxisName.MLP_TENSOR, None),  # k
@@ -518,7 +519,7 @@ def mla_attention(
     out_specs = (
         P(ShardingAxisName.MLP_TENSOR),  # kv cache
         attn_o_tnh_sharding
-        or P(ShardingAxisName.MLP_TENSOR, None, None)  # attn output
+        or P(None, ShardingAxisName.MLP_TENSOR, None)  # attn output
     )
 
     def _mla_ragged_paged_attention(q, q_rope, k, k_rope, cache, *args):

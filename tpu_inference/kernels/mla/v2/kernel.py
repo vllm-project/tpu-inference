@@ -23,7 +23,7 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from tpu_inference.kernels.custom_calls.kernel import xpose_pipeline
+from tpu_inference.kernels.custom_calls.kernel import (pin_vmem_custom_call, xpose_full, xpose_pipeline)
 
 
 def cdiv_on_kv_packing(a, kv_packing):
@@ -139,10 +139,12 @@ def static_validate_inputs(
     # ql_nope is (N, T, L) from "nbl" einsum; q_pe is (T, N, H) — check N and T match
     if ql_nope.shape[0] != q_pe.shape[1]:
         raise ValueError(
-            f"Expected ql_nope num_heads {ql_nope.shape[0]=} to equal q_pe num_heads {q_pe.shape[1]=}")
+            f"Expected ql_nope num_heads {ql_nope.shape[0]=} to equal q_pe num_heads {q_pe.shape[1]=}"
+        )
     if ql_nope.shape[1] != q_pe.shape[0]:
         raise ValueError(
-            f"Expected ql_nope num_tokens {ql_nope.shape[1]=} to equal q_pe num_tokens {q_pe.shape[0]=}")
+            f"Expected ql_nope num_tokens {ql_nope.shape[1]=} to equal q_pe num_tokens {q_pe.shape[0]=}"
+        )
     # ql_nope.shape[1] is T (tokens); new_kv_c.shape[0] is also T
     if ql_nope.shape[1] != new_kv_c.shape[0]:
         raise ValueError(
@@ -1386,7 +1388,18 @@ def prepare_outputs(
     actual_num_q_heads: int,
     actual_head_dim: int,
 ):
-    return out[:, :actual_num_q_heads, :actual_head_dim]
+    # Physical transpose: (T, N, D) -> (N, T, D), pipelined over T
+    out = xpose_pipeline(out,
+                         transpose_axes=(1, 0, 2),
+                         n_tile=out.shape[0],
+                         m_tile=64)[0]
+    #  parallel_axis=1, pipeline_axis=0)[0] # [num_q_heads, max_num_tokens, head_dim]
+    # out = pin_vmem_custom_call(xpose_full(out, transpose_axes=(1, 0, 2))[0])
+    # out = pin_vmem_custom_call(xpose_pipeline(out,
+    #                      transpose_axes=(1, 0, 2),
+    #                      n_tile=out.shape[0],
+    #                      m_tile=64)[0])
+    return out[:actual_num_q_heads, :, :actual_head_dim]
 
 
 @functools.partial(
@@ -1531,10 +1544,8 @@ def mla_ragged_paged_attention(
     actual_num_q_heads, _, actual_lkv_dim = ql_nope.shape
 
     ql_nope = prepare_q_nope_inputs(
-        ql_nope
-    )  # [max_num_tokens, num_q_heads, lkv_dim]
-    q_pe = prepare_q_inputs(
-        q_pe)  # [max_num_tokens, num_q_heads, r_dim]
+        ql_nope)  # [max_num_tokens, num_q_heads, lkv_dim]
+    q_pe = prepare_q_inputs(q_pe)  # [max_num_tokens, num_q_heads, r_dim]
     new_kv_c = prepare_kv_inputs(
         new_kv_c)  # [max_num_tokens_per_kv_packing, kv_packing, lkv_dim]
     new_k_pe = prepare_kv_inputs(
