@@ -110,7 +110,8 @@ mkdir -p "$KERNEL_TUNING_TMP_DIR"
 # Some test scripts set tp=2 on TPU_VERSION=tpu7x to mitigate test failures.
 # TODO (Qiliang Cui) Investigate why tensor-parallel-size=1 breaks in tpu7x.
 
-  # -v "$LOCAL_HF_HOME":"$DOCKER_HF_HOME" \
+# -v "$LOCAL_HF_HOME":"$DOCKER_HF_HOME" \
+
 exec docker run \
   --name "$IMAGE_NAME" \
   --privileged \

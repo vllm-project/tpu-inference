@@ -66,7 +66,11 @@ steps:
         # --tensor-parallel-size 2: tp=1 is currently unsupported on tpu7x.
         # Customize --model, --max-model-len, --max-tokens as needed.
         .buildkite/scripts/run_in_docker.sh bash -c '\
-          pip install gsutil && \
+          if ! command -v gsutil &> /dev/null; then \
+            echo "gsutil could not be found, installing..." && \
+            curl -sSl https://sdk.cloud.google.com | bash -s -- --disable-prompts > /dev/null && \
+            export PATH="/root/google-cloud-sdk/bin:$PATH" \
+          fi && \
           mkdir -p /tmp/DeepSeek-R1-Configs && \
           gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1 /tmp/DeepSeek-R1-Configs && \
           MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8 \
