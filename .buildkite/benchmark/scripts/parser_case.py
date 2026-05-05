@@ -178,11 +178,13 @@ def main():
     cli_env = cli_opts.get("env", {})
     cli_env_parts = [f"{k}={v}" for k, v in cli_env.items()]
     quoted_cli_env = ' '.join(shlex.quote(p) for p in cli_env_parts)
-    print(f"export CLIENT_CMD_ENVS=({quoted_cli_env})")
+    print(f"CLIENT_CMD_ENVS=({quoted_cli_env})")
+    # CLIENT_CMD_ENVS_STR for lm_eval
+    print(f"export CLIENT_CMD_ENVS_STR={shlex.quote(quoted_cli_env)}")
     srv_env = srv_opts.get("env", {})
     srv_env_list = [f"{k}={v}" for k, v in srv_env.items()]
     srv_env_str = ' '.join(shlex.quote(item) for item in srv_env_list)
-    print(f"export SERVER_CMD_ENVS=({srv_env_str})")
+    print(f"SERVER_CMD_ENVS=({srv_env_str})")
 
     cli_cmd_type = cli_opts.get("command_type", "vllm_bench_serve")
 
