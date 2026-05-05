@@ -183,10 +183,16 @@ class InputConfigs:
     def should_dequantize_before_matmul(self) -> bool:
         """Whether to dequantize before matmul.
 
-        Dequantization is required when the quant block size is smaller than the
-        MXU column size. This allows for the dequantized values to be computed
-        within VMEM, which may need to higher performance for small block sizes,
-        e.g. 64 or 32.
+        Dequantization is preferred when the quant block size is smaller than the
+        MXU column size. In the standard quantized matmul flow, the contracting
+        dimension is tied to the quantization block size. If the block size is
+        small (e.g., 16 or 32 for MX formats), it severely underutilizes the MXU
+        (which expects 128 or 256), causing poor performance.
+
+        By dequantizing the weights inside VMEM first, we can reshape them and
+        perform a regular bf16 matmul that fully utilizes the MXU capacity. This
+        retains high performance while allowing us to keep the original, non-requantized
+        weights in HBM.
         """
         if not self.has_scale or self.quant_block_size is None:
             return False

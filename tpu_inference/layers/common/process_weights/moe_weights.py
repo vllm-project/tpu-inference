@@ -182,13 +182,18 @@ def process_w13_for_gmm(tensor,
             TP sharding.
         name: String identifier used for logging tensor shapes.
         scale_ratio: The dimensional reduction factor of the `tensor` compared to the
-            base weight tensor.
-            - For standard weights, this is 1.
-            - For block-quantized scales (not using the requantized path
-            block size (e.g., 128).  This dynamically scales down the split and pad
-            indices in `config` to  prevent index out-of-bounds errors on the smaller scale
-            tensors. Finally, it upsamples (repeats) the resulting tensor by this ratio
-            so the final scales align 1-to-1 with the dimensions of the full weight tensor.
+            base weight tensor. This value is calculated and provided by the caller
+            (e.g., `process_moe_weights`) by dividing the base weight's dimension size
+            by the scale tensor's corresponding dimension size.
+            - When using the standard requantization flow (`DISABLE_WEIGHT_REQUANTIZATION=False`),
+              this value is always 1.
+            - When requantization is disabled (e.g., to support loading raw 2D-blockwise
+              MXFP8/NVFP4 weights), this represents the quantization block size (e.g., 32,
+              64, or 128). Providing this ratio dynamically scales down the split and pad
+              indices in `config` to prevent index out-of-bounds errors on the smaller
+              scale tensors. After processing, the tensor is upsampled (repeated) by this
+              ratio so the final scales align 1-to-1 with the dimensions of the full
+              weight tensor.
 
     Returns:
         The processed JAX array, appropriately padded and dimensionally aligned
@@ -196,7 +201,7 @@ def process_w13_for_gmm(tensor,
     """
 
     if not envs.DISABLE_WEIGHT_REQUANTIZATION:
-        assert scale_ratio == 1, "If not requantizing, scale_ratio should be 1!"
+        assert scale_ratio == 1, "If requantizing, scale_ratio should be 1!"
 
     # Adjust config values for scale tensors with reduced dimensions
     intermediate_size = config.intermediate_size // scale_ratio
@@ -233,12 +238,12 @@ def process_w13_for_gmm(tensor,
     # 3. Concatenate and Reorder for avoiding TP sharding comms
     w13_concat = jnp.concatenate([padded_w1, padded_w3], axis=concat_dim)
     if padded_output_sizes is not None:
-        padded_output_sizes_adj = [
+        padded_output_sizes_adjusted = [
             s // scale_ratio for s in padded_output_sizes
         ]
         w13_concat = reorder_concatenated_tensor_for_sharding(
             w13_concat,
-            padded_output_sizes_adj,
+            padded_output_sizes_adjusted,
             config.w13_reorder_size,
             dim=concat_dim,
         )
@@ -409,9 +414,11 @@ def process_moe_weights(
                                         name="w13_weight")
 
             if w13_weight_scale is not None:
+                # check if cleanly divisible
+                assert w13_weight.shape[2] % w13_weight_scale.shape[3] == 0
                 scale_ratio = w13_weight.shape[2] // w13_weight_scale.shape[3]
                 if not envs.DISABLE_WEIGHT_REQUANTIZATION:
-                    assert scale_ratio == 1, "If not requantizing, scale_ratio should be 1!"
+                    assert scale_ratio == 1, "If requantizing, scale_ratio should be 1!"
                 w13_weight_scale = process_w13_tp(tensor=w13_weight_scale,
                                                   concat_dim=3,
                                                   name="w13_weight_scale",
@@ -424,9 +431,11 @@ def process_moe_weights(
 
             if w2_weight_scale is not None:
                 # upscale out_dim // block_size to hidden_size
+                # check if cleanly divisible
+                assert hidden_size % w2_weight_scale.shape[3] == 0
                 scale_ratio = hidden_size // w2_weight_scale.shape[3]
                 if not envs.DISABLE_WEIGHT_REQUANTIZATION:
-                    assert scale_ratio == 1, "If not requantizing, scale_ratio should be 1!"
+                    assert scale_ratio == 1, "If requantizing, scale_ratio should be 1!"
                 if scale_ratio > 1:
                     w2_weight_scale = jnp.repeat(w2_weight_scale,
                                                  scale_ratio,
@@ -444,9 +453,11 @@ def process_moe_weights(
                                         name="w13_weight")
 
             if w13_weight_scale is not None:
+                # check if cleanly divisible
+                assert w13_weight.shape[2] % w13_weight_scale.shape[3] == 0
                 scale_ratio = w13_weight.shape[2] // w13_weight_scale.shape[3]
                 if not envs.DISABLE_WEIGHT_REQUANTIZATION:
-                    assert scale_ratio == 1, "If not requantizing, scale_ratio should be 1!"
+                    assert scale_ratio == 1, "If requantizing, scale_ratio should be 1!"
                 w13_weight_scale = process_w13_ep(tensor=w13_weight_scale,
                                                   concat_dim=3,
                                                   name="w13_weight_scale",
@@ -460,7 +471,7 @@ def process_moe_weights(
             if w2_weight_scale is not None:
                 scale_ratio = hidden_size // w2_weight_scale.shape[3]
                 if not envs.DISABLE_WEIGHT_REQUANTIZATION:
-                    assert scale_ratio == 1, "If not requantizing, scale_ratio should be 1!"
+                    assert scale_ratio == 1, "If requantizing, scale_ratio should be 1!"
                 if scale_ratio > 1:
                     w2_weight_scale = jnp.repeat(w2_weight_scale,
                                                  scale_ratio,

@@ -87,8 +87,11 @@ def xla_quantized_matmul(
     """
     skip_scale = False
     if w_scale is not None and w_scale.ndim == 2:
-        # If w_scale is 2D, we assume 2d-blockwise quantization and thus we
-        # want to de-quantize first before the matmul.
+        # If w_scale is 2D, we assume 2d-blockwise quantization. Because the scale
+        # is not constant along the contracting axis (different blocks in the same
+        # row have different scales), we mathematically cannot pull the scale out of
+        # the matmul summation. Thus, we must de-quantize the weights first before
+        # performing the matmul.
         skip_scale = True
         out_features, in_features = w_q.shape
         out_blocks, in_blocks = w_scale.shape
