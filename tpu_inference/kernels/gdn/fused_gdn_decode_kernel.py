@@ -245,22 +245,31 @@ def _decode_kernel_main(
                 else:
                     gk = g_t
 
-                h_new = h0 * jnp.exp(gk[:, :, None])
+                h_pre = h0 * jnp.exp(gk[:, :, None])
                 kh = jax.lax.dot_general(
                     k_t.reshape(H_v, 1, K),
-                    h_new,
+                    h_pre,
                     (((2, ), (1, )), ((0, ), (0, ))),
                     preferred_element_type=jnp.float32,
                 ).reshape(H_v, V)
                 v_diff = v_t - kh
                 b_v = beta_t * v_diff if b_ref is not None else v_diff
-                h_new = h_new + k_t[:, :, None] * b_v[:, None, :]
-                o_t = jax.lax.dot_general(
+
+                # Algebraic identity to skip the post-rank-1-update matmul:
+                # o = q @ (h_pre + outer(k, b_v))
+                #   = q @ h_pre + (q . k) * b_v
+                # (q . k)[h] is a per-head scalar, so the second term is a
+                # cheap HV*V scaled-add instead of a full HV*K*V matmul.
+                # This lets MXU(o) and VPU(rank-1 update) run in parallel.
+                o_step1 = jax.lax.dot_general(
                     q_t.reshape(H_v, 1, K),
-                    h_new,
+                    h_pre,
                     (((2, ), (1, )), ((0, ), (0, ))),
                     preferred_element_type=jnp.float32,
                 ).reshape(H_v, V)
+                qk_dot = jnp.sum(q_t * k_t, axis=-1, keepdims=True)
+                o_t = o_step1 + qk_dot * b_v
+                h_new = h_pre + k_t[:, :, None] * b_v[:, None, :]
 
                 o_ref[i_t] = o_t.astype(o_ref.dtype)
                 h_bufs_s[buf_idx, i_t] = h_new.astype(h_bufs_s.dtype)

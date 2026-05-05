@@ -368,22 +368,28 @@ def _recurrent_gdn_main(
             else:
                 gk = g_t
 
-            h = h * jnp.exp(gk[:, :, None])
+            # Same algebraic identity as fused_gdn_decode_kernel.py:
+            # o = q @ h_pre + (q . k) * b_v
+            # Lets MXU(o) and VPU(rank-1 update) run in parallel.
+            h_pre = h * jnp.exp(gk[:, :, None])
             kh = jax.lax.dot_general(
                 k_t.reshape(H_v, 1, K),
-                h,
+                h_pre,
                 (((2, ), (1, )), ((0, ), (0, ))),
                 preferred_element_type=jnp.float32,
             ).reshape(H_v, V)
             v_diff = v_t - kh
             b_v = beta_t * v_diff if b_ref is not None else v_diff
-            h = h + k_t[:, :, None] * b_v[:, None, :]
-            o_t = jax.lax.dot_general(
+
+            o_step1 = jax.lax.dot_general(
                 q_t.reshape(H_v, 1, K),
-                h,
+                h_pre,
                 (((2, ), (1, )), ((0, ), (0, ))),
                 preferred_element_type=jnp.float32,
             ).reshape(H_v, V)
+            qk_dot = jnp.sum(q_t * k_t, axis=-1, keepdims=True)
+            o_t = o_step1 + qk_dot * b_v
+            h = h_pre + k_t[:, :, None] * b_v[:, None, :]
 
             o_ref[local_t] = o_t.astype(o_ref.dtype)
             return h
