@@ -69,21 +69,24 @@ steps:
         # --tensor-parallel-size 2: tp=1 is currently unsupported on tpu7x.
         # Customize --model, --max-model-len, --max-tokens as needed.
         .buildkite/scripts/run_in_docker.sh bash -c '\
+          VLLM_ENGINE_READY_TIMEOUT_S=10800 \
           MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8 \
-          VLLM_DISABLE_SHARED_EXPERTS_STREAM=0 \
-          NEW_MODEL_DESIGN=1 VLLM_MLA_DISABLE=0 \
-          MOE_REQUANTIZE_BLOCK_SIZE=512 \
           MOE_REQUANTIZE_WEIGHT_DTYPE=fp4 \
-          TPU_BACKEND_TYPE=jax MODEL_IMPL_TYPE=vllm \
-          vllm serve \
-            --seed 42 --model gs://tpu-commons-ci/deepseek/r1 \
+          MOE_REQUANTIZE_BLOCK_SIZE=512 \
+          FORCE_MOE_RANDOM_ROUTING=1 \
+          NEW_MODEL_DESIGN=1 \
+          MODEL_IMPL_TYPE=vllm \
+          vllm serve gs://ranlihao-deepseek/model/r1 \
             --served-model-name deepseek-ai/DeepSeek-R1 \
-            --max-model-len=9216 --max-num-batched-tokens 512 \
-            --max-num-seqs 160 --no-enable-prefix-caching \
-            --tensor-parallel-size 16 --kv_cache_dtype="fp8" \
-            --async-scheduling --gpu-memory-utilization=0.95 \
-            --enable-expert-parallel \
-            --additional_config='\''{"sharding": {"sharding_strategy": {"enable_dp_attention": true}}, "compilation_sizes": [2560]}'\'' \
+            --api-server-count=3 \
+            --max-model-len=9216 \
+            --max-num-batched-tokens=512 \
+            --max-num-seqs=160 \
+            --kv-cache-dtype=fp8 \
+            --no-enable-prefix-caching \
+            --gpu-memory-utilization=0.95 \
+            --tensor-parallel-size=16 \
             --load-format=runai_streamer \
-            --trust-remote-code \
-            --generation-config "/tmp/DeepSeek-R1-Configs/DeepSeek-R1"'
+            --async-scheduling \
+            --enable-expert-parallel \
+            --additional_config='{"compilation_sizes": [2560], "sharding": {"sharding_strategy": {"enable_dp_attention": true}}}'
