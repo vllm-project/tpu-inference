@@ -524,6 +524,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         min_num_reqs = max(MIN_NUM_SEQS, next_power_of_2(self.dp_size))
         self.num_reqs_paddings = runner_utils.get_req_paddings(
             min_req_size=min_num_reqs, max_req_size=self.max_num_reqs)
+
+        # The num_reqs paddings for attention only since the padding can
+        # have custom overrides
+        self.attn_num_reqs_paddings = runner_utils.get_attn_req_paddings(
+            min_req_size=min_num_reqs, max_req_size=self.max_num_reqs)
         self.num_reqs_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_reqs_paddings
         ]
@@ -1306,6 +1311,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         padded_num_reqs_per_dp_rank = runner_utils.get_padded_token_len(
             self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)
         padded_num_reqs = padded_num_reqs_per_dp_rank * dp_size
+        attn_padded_num_reqs = runner_utils.get_padded_token_len(
+            self.attn_num_reqs_paddings, padded_num_reqs)
 
         all_req_indices = np.concatenate(
             [req_indices_dp[dp_rank] for dp_rank in range(dp_size)])
@@ -1321,8 +1328,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         return (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
                 scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
                 padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
-                padded_total_num_scheduled_tokens, padded_num_reqs_per_dp_rank,
-                logits_indices_selector, max_num_reqs_per_dp_rank)
+                attn_padded_num_reqs, padded_total_num_scheduled_tokens,
+                padded_num_reqs_per_dp_rank, logits_indices_selector,
+                max_num_reqs_per_dp_rank)
 
     def _prepare_async_token_substitution_indices_dp(
             self, req_ids_dp, scheduled_tokens_per_dp_rank,
@@ -1429,8 +1437,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
          scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
          padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
-         padded_total_num_scheduled_tokens, padded_num_reqs_per_dp_rank,
-         logits_indices_selector, max_num_reqs_per_dp_rank
+         attn_padded_num_reqs, padded_total_num_scheduled_tokens,
+         padded_num_reqs_per_dp_rank, logits_indices_selector,
+         max_num_reqs_per_dp_rank
          ) = self._prepare_dp_input_metadata(scheduler_output)
         # Multi-modal support
         # Calculate M-RoPE positions.
@@ -1685,7 +1694,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Per-request mamba state slot ids; copy to keep the InputBatch's
             # CPU buffer free for the next step's bookkeeping.
             mamba_state_indices_cpu = self.input_batch.mamba_state_indices_cpu.copy(
-            )
+            )[:attn_padded_num_reqs]
             (request_distribution, mamba_state_indices,
              dev_arrays_payload) = device_array(
                  self.mesh, (request_distribution, mamba_state_indices_cpu,
@@ -1700,8 +1709,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         metadata = common_utils.DeviceBuffer.unpack_arrays(
             dev_arrays_payload, metadata_layout)
         input_ids = metadata["input_ids"]
-        query_start_loc = metadata["query_start_loc"]
-        seq_lens = metadata["seq_lens"]
+        query_start_loc = metadata["query_start_loc"][:attn_padded_num_reqs +
+                                                      dp_size]
+        seq_lens = metadata["seq_lens"][:attn_padded_num_reqs]
         logits_indices = metadata["logits_indices"]
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
@@ -1791,6 +1801,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.num_tokens_paddings, total_num_scheduled_tokens)
         padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
             num_reqs, self.max_num_reqs)
+        attn_padded_num_reqs = runner_utils.get_padded_token_len(
+            self.attn_num_reqs_paddings, num_reqs)
 
         # Please see runner_utils.PhasedBasedProfiler for details
         if self.phase_based_profiler:
@@ -1973,7 +1985,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Per-request mamba state slot ids; copy to keep the InputBatch's
             # CPU buffer free for the next step's bookkeeping.
             mamba_state_indices_cpu = self.input_batch.mamba_state_indices_cpu.copy(
-            )
+            )[:attn_padded_num_reqs]
             (request_distribution, mamba_state_indices,
              dev_arrays_payload) = device_array(
                  self.mesh, (request_distribution, mamba_state_indices_cpu,
@@ -1988,8 +2000,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         metadata = common_utils.DeviceBuffer.unpack_arrays(
             dev_arrays_payload, metadata_layout)
         input_ids = metadata["input_ids"]
-        query_start_loc = metadata["query_start_loc"]
-        seq_lens = metadata["seq_lens"]
+        query_start_loc = metadata["query_start_loc"][:attn_padded_num_reqs +
+                                                      1]
+        seq_lens = metadata["seq_lens"][:attn_padded_num_reqs]
         logits_indices = metadata["logits_indices"]
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:

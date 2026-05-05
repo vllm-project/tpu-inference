@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import itertools
 import time
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 
@@ -86,6 +87,27 @@ class CompilationManager:
         if only_equal:
             return inner_val != outer_val
         return inner_val > outer_val
+
+    def _get_num_tokens_reqs_buckets(self) -> list[tuple[int, int]]:
+        """Gets valid combinations of token and request buckets for compilation."""
+        if not envs.USE_BUCKETIZED_NUM_REQS:
+            reqs = [self.runner.max_num_reqs]
+        elif envs.CUSTOM_NUM_REQS_BUCKETS:
+            reqs = envs.CUSTOM_NUM_REQS_BUCKETS
+        else:
+            reqs = self.runner.num_reqs_paddings
+
+        if self.runner.max_num_reqs not in reqs:
+            logger.warn(
+                "max_num_reqs must be supported but is not in CUSTOM_NUM_REQS_BUCKETS. Adding max_num_reqs to the num_reqs buckets."
+            )
+            reqs.append(self.runner.max_num_reqs)
+
+        tokens = self.runner.num_tokens_paddings
+
+        # The tokens > reqs cases impossible, avoid compiling those
+        return [(token, req) for token, req in itertools.product(tokens, reqs)
+                if req <= token and req <= self.runner.max_num_reqs]
 
     def _run_compilation(self,
                          name: str,
@@ -186,7 +208,8 @@ class CompilationManager:
                                     inputs_embeds,
                                     intermediate_tensors=None,
                                     is_first_rank=True,
-                                    is_last_rank=True) -> None:
+                                    is_last_rank=True,
+                                    num_reqs: int) -> None:
         num_tokens = None
         if input_ids is not None:
             num_tokens = input_ids.shape[0]
@@ -199,10 +222,10 @@ class CompilationManager:
             self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
 
         # Keep existing pattern for complex array operations
-        seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
-                                             jnp.int32, dp_sharding)
-        query_start_loc = self._create_dummy_tensor(
-            (self.runner.max_num_reqs + dp_size, ), jnp.int32, dp_sharding)
+        seq_lens = self._create_dummy_tensor((num_reqs, ), jnp.int32,
+                                             dp_sharding)
+        query_start_loc = self._create_dummy_tensor((num_reqs + dp_size, ),
+                                                    jnp.int32, dp_sharding)
 
         # Keep existing pattern for specific value arrays
         request_distribution = np.array([0, 0, 0] * dp_size, dtype=np.int32)
@@ -215,9 +238,8 @@ class CompilationManager:
         # primer must match that shape so the cached HLO is reused.
         if self.runner.kv_cache_config.has_mamba_layers:
             mamba_state_indices = device_array(self.runner.mesh,
-                                               np.zeros(
-                                                   self.runner.max_num_reqs,
-                                                   dtype=np.int32),
+                                               np.zeros(num_reqs,
+                                                        dtype=np.int32),
                                                sharding=dp_sharding)
         else:
             mamba_state_indices = None
@@ -297,6 +319,7 @@ class CompilationManager:
                 is_first_rank,
                 is_last_rank,
                 num_tokens=num_tokens,
+                num_reqs=num_reqs,
             )
 
     def _precompile_substitute_placeholder_token(self) -> None:
@@ -348,92 +371,102 @@ class CompilationManager:
     def _precompile_backbone_text_only(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
         for num_tokens in self.runner.num_tokens_paddings:
-            dp_sharding = NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
-            input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32,
-                                                  dp_sharding)
-            if self.runner.uses_mrope:
-                mrope_sharding = NamedSharding(
+            for num_reqs in self.runner.attn_num_reqs_paddings:
+                dp_sharding = NamedSharding(
                     self.runner.mesh,
-                    PartitionSpec(None, ShardingAxisName.ATTN_DATA))
-                positions = self._create_dummy_tensor(
-                    (3, num_tokens), jnp.int32, mrope_sharding)
-            else:
-                positions = self._create_dummy_tensor((num_tokens, ),
+                    PartitionSpec(ShardingAxisName.ATTN_DATA, ))
+                input_ids = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32, dp_sharding)
-            is_first_rank = self.runner.is_first_rank
-            is_last_rank = self.runner.is_last_rank
-            if is_first_rank:
-                intermediate_tensors = None
-            else:
-                sharding = NamedSharding(
-                    self.runner.mesh,
-                    PartitionSpec(ShardingAxisName.ATTN_DATA, None))
-                hidden_states = self._create_dummy_tensor(
-                    (num_tokens, hidden_size), jnp.bfloat16, sharding=sharding)
-                residual = self._create_dummy_tensor((num_tokens, hidden_size),
-                                                     jnp.bfloat16,
-                                                     sharding=sharding)
-                intermediate_tensors = JaxIntermediateTensors(
-                    tensors={
-                        "hidden_states": hidden_states,
-                        "residual": residual
-                    })
-            self._precompile_backbone_helper(
-                f"worker{self.runner.rank} backbone",
-                input_ids=input_ids,
-                positions=positions,
-                inputs_embeds=None,
-                intermediate_tensors=intermediate_tensors,
-                is_first_rank=is_first_rank,
-                is_last_rank=is_last_rank)
+                if self.runner.uses_mrope:
+                    mrope_sharding = NamedSharding(
+                        self.runner.mesh,
+                        PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+                    positions = self._create_dummy_tensor(
+                        (3, num_tokens), jnp.int32, mrope_sharding)
+                else:
+                    positions = self._create_dummy_tensor(
+                        (num_tokens, ), jnp.int32, dp_sharding)
+                is_first_rank = self.runner.is_first_rank
+                is_last_rank = self.runner.is_last_rank
+                if is_first_rank:
+                    intermediate_tensors = None
+                else:
+                    sharding = NamedSharding(
+                        self.runner.mesh,
+                        PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+                    hidden_states = self._create_dummy_tensor(
+                        (num_tokens, hidden_size),
+                        jnp.bfloat16,
+                        sharding=sharding)
+                    residual = self._create_dummy_tensor(
+                        (num_tokens, hidden_size),
+                        jnp.bfloat16,
+                        sharding=sharding)
+                    intermediate_tensors = JaxIntermediateTensors(
+                        tensors={
+                            "hidden_states": hidden_states,
+                            "residual": residual
+                        })
+                self._precompile_backbone_helper(
+                    f"worker{self.runner.rank} backbone",
+                    input_ids=input_ids,
+                    positions=positions,
+                    inputs_embeds=None,
+                    intermediate_tensors=intermediate_tensors,
+                    is_first_rank=is_first_rank,
+                    is_last_rank=is_last_rank,
+                    num_reqs=num_reqs)
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
         dtype = self.runner.model_config.dtype
         for num_tokens in self.runner.num_tokens_paddings:
-            sharding = NamedSharding(
-                self.runner.mesh,
-                PartitionSpec(ShardingAxisName.ATTN_DATA, None))
-            input_sharding = NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
-
-            inputs_embeds = self._create_dummy_tensor(
-                (num_tokens, hidden_size), dtype, sharding=sharding)
-            if self.runner.uses_mrope:
-                mrope_sharding = NamedSharding(
+            for num_reqs in self.runner.attn_num_reqs_paddings:
+                sharding = NamedSharding(
                     self.runner.mesh,
-                    PartitionSpec(None, ShardingAxisName.ATTN_DATA))
-                positions = self._create_dummy_tensor((3, num_tokens),
-                                                      jnp.int32,
-                                                      sharding=mrope_sharding)
-            else:
-                positions = self._create_dummy_tensor((num_tokens, ),
-                                                      jnp.int32,
-                                                      sharding=input_sharding)
-            is_first_rank = self.runner.is_first_rank
-            is_last_rank = self.runner.is_last_rank
-            if not is_first_rank:
-                hidden_states = self._create_dummy_tensor(
-                    (num_tokens, hidden_size), jnp.bfloat16, sharding=sharding)
-                residual = self._create_dummy_tensor((num_tokens, hidden_size),
-                                                     jnp.bfloat16,
-                                                     sharding=sharding)
-                intermediate_tensors = JaxIntermediateTensors(
-                    tensors={
-                        "hidden_states": hidden_states,
-                        "residual": residual
-                    })
-            else:
-                intermediate_tensors = None
-            self._precompile_backbone_helper(
-                f"worker{self.runner.rank} backbone with embeds",
-                input_ids=None,
-                positions=positions,
-                inputs_embeds=inputs_embeds,
-                intermediate_tensors=intermediate_tensors,
-                is_first_rank=is_first_rank,
-                is_last_rank=is_last_rank)
+                    PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+                input_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.ATTN_DATA))
+
+                inputs_embeds = self._create_dummy_tensor(
+                    (num_tokens, hidden_size), dtype, sharding=sharding)
+                if self.runner.uses_mrope:
+                    mrope_sharding = NamedSharding(
+                        self.runner.mesh,
+                        PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+                    positions = self._create_dummy_tensor(
+                        (3, num_tokens), jnp.int32, sharding=mrope_sharding)
+                else:
+                    positions = self._create_dummy_tensor(
+                        (num_tokens, ), jnp.int32, sharding=input_sharding)
+                is_first_rank = self.runner.is_first_rank
+                is_last_rank = self.runner.is_last_rank
+                if not is_first_rank:
+                    hidden_states = self._create_dummy_tensor(
+                        (num_tokens, hidden_size),
+                        jnp.bfloat16,
+                        sharding=sharding)
+                    residual = self._create_dummy_tensor(
+                        (num_tokens, hidden_size),
+                        jnp.bfloat16,
+                        sharding=sharding)
+                    intermediate_tensors = JaxIntermediateTensors(
+                        tensors={
+                            "hidden_states": hidden_states,
+                            "residual": residual
+                        })
+                else:
+                    intermediate_tensors = None
+                self._precompile_backbone_helper(
+                    f"worker{self.runner.rank} backbone with embeds",
+                    input_ids=None,
+                    positions=positions,
+                    inputs_embeds=inputs_embeds,
+                    intermediate_tensors=intermediate_tensors,
+                    is_first_rank=is_first_rank,
+                    is_last_rank=is_last_rank,
+                    num_reqs=num_reqs)
 
     def _precompile_select_from_array_helper(
         self,
