@@ -33,7 +33,6 @@ from tpu_inference.kernels.flash_attention.kernel import flash_attention
 from tpu_inference.kernels.mla.v2.kernel import mla_ragged_paged_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.common.utils import get_env_block_sizes
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_megacore, get_mesh_shape_product
 
@@ -377,10 +376,6 @@ def sharded_ragged_paged_attention(
     use_hd64 = q.shape[-1] == 64
     func = ragged_paged_attention_hd64 if use_hd64 else ragged_paged_attention
 
-    d_block_sizes, p_block_sizes, m_block_sizes = None, None, None
-    if not use_hd64:
-        d_block_sizes, p_block_sizes, m_block_sizes = get_env_block_sizes()
-
     if attention_sink is not None:
         if not use_hd64:
             raise NotImplementedError(
@@ -390,20 +385,14 @@ def sharded_ragged_paged_attention(
         args += (attention_sink, )
 
     def _ragged_paged_attention(*args):
-        kwargs = dict(
+        return func(
+            *args,
             sm_scale=sm_scale,
             sliding_window=attention_chunk_size,
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
         )
-        if not use_hd64:
-            kwargs.update(
-                d_block_sizes=d_block_sizes,
-                p_block_sizes=p_block_sizes,
-                m_block_sizes=m_block_sizes,
-            )
-        return func(*args, **kwargs)
 
     return jax.shard_map(
         _ragged_paged_attention,
