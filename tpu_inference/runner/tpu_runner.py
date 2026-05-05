@@ -1046,6 +1046,28 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         for req_id in self.input_batch.req_ids[:num_reqs]:
             prompt_logprobs_dict[req_id] = None
 
+        if self.speculative_config:
+            with self.maybe_forbid_compile, jax.set_mesh(self.mesh):
+                # TODO: add precompilation for `extract_last_sampled_tokens`
+                last_sampled_tokens, num_rejected_tokens = self.rejection_sampler.extract_last_sampled_tokens(
+                    next_tokens, self.input_batch.vocab_size,
+                    spec_decode_metadata.draft_lengths_cpu,
+                    spec_decode_metadata.draft_lengths, num_reqs,
+                    spec_decode_metadata.draft_token_ids.shape[0],
+                    self.speculative_config.num_speculative_tokens,
+                    self.max_num_reqs, self.mesh)
+
+                self.speculative_decoding_manager.propose_draft_token_ids(
+                    last_sampled_tokens,
+                    num_rejected_tokens,
+                    discard_sampled_tokens_req_indices,
+                    aux_hidden_states,
+                    attn_metadata,
+                    spec_decode_metadata,
+                    scheduler_output,
+                    input_ids,
+                )
+
         # If async scheduler enabled
         if self.scheduler_config.async_scheduling:
             # Get previous results from TPU and replace the placeholder.
@@ -1134,17 +1156,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 logprobs, logits_indices_selector)
         else:
             logprobs_lists = None
-
-        if self.speculative_config:
-            with self.maybe_forbid_compile, jax.set_mesh(self.mesh):
-                self.speculative_decoding_manager.propose_draft_token_ids(
-                    valid_sampled_token_ids,
-                    aux_hidden_states,
-                    attn_metadata,
-                    spec_decode_metadata,
-                    scheduler_output,
-                    input_ids,
-                )
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,

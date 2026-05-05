@@ -13,7 +13,7 @@
 # limitations under the License.
 """Implements the Eagle3 proposer for speculative decoding on JAX/TPU."""
 from dataclasses import replace
-from typing import Any, Optional
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -231,8 +231,10 @@ class Eagle3Proposer:
         attn_metadata: AttentionMetadata,
         input_ids: jax.Array,
         aux_hidden_states: tuple[jax.Array, ...],
-        next_token_ids: jax.Array,
-        num_rejected_tokens: Optional[jax.Array] = None,
+        last_sampled_token_ids: jax.Array,
+        next_prompt_token_ids: jax.Array,
+        is_in_prefill: jax.Array,
+        num_rejected_tokens: jax.Array,
     ) -> tuple[jax.Array, jax.Array, jax.Array, AttentionMetadata]:
         """Prepare drafter inputs based on target forward outputs.
 
@@ -260,7 +262,8 @@ class Eagle3Proposer:
                                 np.asarray([num_reqs], dtype=jnp.int32))
         block_tables = block_tables = device_array(self.mesh, block_tables)
         return self._prepare_inputs(self.state, attn_metadata, input_ids,
-                                    aux_hidden_states, next_token_ids,
+                                    aux_hidden_states, last_sampled_token_ids,
+                                    next_prompt_token_ids, is_in_prefill,
                                     block_tables, num_reqs,
                                     num_rejected_tokens)
 
@@ -271,10 +274,12 @@ class Eagle3Proposer:
         attn_metadata: AttentionMetadata,
         input_ids: jax.Array,
         aux_hidden_states: tuple[jax.Array, ...],
-        next_token_ids: jax.Array,
+        last_sampled_token_ids: jax.Array,
+        next_prompt_token_ids: jax.Array,
+        is_in_prefill: jax.Array,
         block_tables: jax.Array,
         num_reqs: jax.Array,
-        num_rejected_tokens: Optional[jax.Array] = None,
+        num_rejected_tokens: jax.Array,
     ) -> tuple[jax.Array, jax.Array, jax.Array, AttentionMetadata]:
         """Prepare drafter inputs based on target forward outputs.
 
@@ -288,14 +293,9 @@ class Eagle3Proposer:
         Returns updated AttentionMetadata (positions, query_start_loc, seq_lens)
         and the selected `target_token_ids` and `target_hidden_states`.
         """
-        if num_rejected_tokens is None:
-            attn_metadata = replace(attn_metadata, block_tables=block_tables)
-            target_hidden_states, input_ids, last_token_indices = self._prepare_hidden_states_and_input_ids(
-                state, aux_hidden_states, attn_metadata.query_start_loc,
-                input_ids, next_token_ids, num_reqs)
-            return target_hidden_states, input_ids, last_token_indices, attn_metadata
 
-        # Host copies from the metadata prepared by the runner.
+        next_token_ids = jnp.where(is_in_prefill, next_prompt_token_ids,
+                                   last_sampled_token_ids)
         query_start_loc = attn_metadata.query_start_loc
         seq_lens = attn_metadata.seq_lens
         assert query_start_loc is not None and seq_lens is not None

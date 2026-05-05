@@ -783,8 +783,6 @@ class CompilationManager:
         else:
             eagle3_mamba_state_indices = None
 
-        next_token_ids = self._create_dummy_tensor(
-            (self.runner.max_num_reqs, ), jnp.int32)
         last_token_indices = self._create_dummy_tensor(
             (self.runner.max_num_reqs, ), jnp.int32)
 
@@ -839,41 +837,46 @@ class CompilationManager:
                 num_tokens=num_tokens,
             )
 
-            for num_rejected_tokens in [
-                    None,
-                    self._create_dummy_tensor((self.runner.max_num_reqs, ),
-                                              jnp.int32)
-            ]:
-                aux_hidden_states = [
-                    self._create_dummy_tensor(
-                        (num_tokens, target_hidden_size), jnp.bfloat16,
-                        NamedSharding(self.runner.mesh,
-                                      PartitionSpec(None, None))),
-                    self._create_dummy_tensor(
-                        (num_tokens, target_hidden_size), jnp.bfloat16,
-                        NamedSharding(self.runner.mesh,
-                                      PartitionSpec(None, None))),
-                    self._create_dummy_tensor(
-                        (num_tokens, target_hidden_size), jnp.bfloat16,
-                        NamedSharding(self.runner.mesh,
-                                      PartitionSpec(None, None))),
-                ]
-                self._run_compilation(
-                    "drafter_prepare_inputs",
-                    self.runner.drafter._prepare_inputs,
-                    self.runner.drafter.state,
-                    attention_metadata,
-                    input_ids,
-                    aux_hidden_states,
-                    next_token_ids,
-                    block_tables,
-                    device_array(
-                        self.runner.mesh,
-                        np.asarray([self.runner.input_batch.num_reqs],
-                                   dtype=jnp.int32)),
-                    num_rejected_tokens,
-                    num_tokens=num_tokens,
-                )
+            num_rejected_tokens = self._create_dummy_tensor(
+                (self.runner.max_num_reqs, ), jnp.int32)
+            aux_hidden_states = [
+                self._create_dummy_tensor(
+                    (num_tokens, target_hidden_size), jnp.bfloat16,
+                    NamedSharding(self.runner.mesh, PartitionSpec(None,
+                                                                  None))),
+                self._create_dummy_tensor(
+                    (num_tokens, target_hidden_size), jnp.bfloat16,
+                    NamedSharding(self.runner.mesh, PartitionSpec(None,
+                                                                  None))),
+                self._create_dummy_tensor(
+                    (num_tokens, target_hidden_size), jnp.bfloat16,
+                    NamedSharding(self.runner.mesh, PartitionSpec(None,
+                                                                  None))),
+            ]
+            last_sampled_token_ids = self._create_dummy_tensor(
+                (self.runner.max_num_reqs, ), jnp.int32)
+            next_prompt_token_ids = self._create_dummy_tensor(
+                (self.runner.max_num_reqs, ), jnp.int32)
+            is_in_prefill = self._create_dummy_tensor(
+                (self.runner.max_num_reqs, ), jnp.int32)
+            self._run_compilation(
+                "drafter_prepare_inputs",
+                self.runner.drafter._prepare_inputs,
+                self.runner.drafter.state,
+                attention_metadata,
+                input_ids,
+                aux_hidden_states,
+                last_sampled_token_ids,
+                next_prompt_token_ids,
+                is_in_prefill,
+                block_tables,
+                device_array(
+                    self.runner.mesh,
+                    np.asarray([self.runner.input_batch.num_reqs],
+                               dtype=jnp.int32)),
+                num_rejected_tokens,
+                num_tokens=num_tokens,
+            )
 
     def _precompile_structured_decoding(self) -> None:
         logger.info(

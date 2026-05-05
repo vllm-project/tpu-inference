@@ -27,6 +27,7 @@ import numpy as np
 from tpu_inference.layers.common.binary_search import topk_mask, topp_mask
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
+from tpu_inference.utils import device_array
 
 # Placeholder token ID for rejected tokens
 PLACEHOLDER_TOKEN_ID = -1
@@ -136,6 +137,89 @@ class RejectionSampler:
             key=key,
         )
         return output_token_ids
+
+    def extract_last_sampled_tokens(
+        self,
+        output_token_ids: jnp.ndarray,
+        vocab_size: int,
+        num_draft_tokens_cpu: np.ndarray,
+        num_draft_tokens: jnp.ndarray,
+        num_reqs: int,
+        padded_tokens_length: int,
+        max_num_speculative_tokens: int,
+        max_num_seq: int,
+        mesh,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """Extract the last accepted token per sequence after rejection sampling.
+        """
+
+        main_tokens_indices = np.zeros(
+            (num_draft_tokens.shape[0], max_num_speculative_tokens),
+            dtype=np.int32)
+        start_idx = 0
+        for i in range(num_reqs):
+            seq_length = int(num_draft_tokens_cpu[i])
+            end_idx = start_idx + seq_length
+            for j in range(max_num_speculative_tokens):
+                if j < seq_length:
+                    main_tokens_indices[i, j] = start_idx + j
+                else:
+                    break
+            start_idx = end_idx
+        main_tokens_indices = device_array(mesh, main_tokens_indices)
+
+        return self._extract_last_sampled_tokens(
+            output_token_ids=output_token_ids,
+            main_tokens_indices=main_tokens_indices,
+            num_draft_tokens=num_draft_tokens,
+            vocab_size=vocab_size,
+            padded_tokens_length=padded_tokens_length,
+            max_num_speculative_tokens=max_num_speculative_tokens,
+            max_num_seq=max_num_seq)
+
+    @jax.jit(static_argnums=(
+        0,
+        4,
+        5,
+        6,
+        7,
+    ))
+    def _extract_last_sampled_tokens(
+            self, output_token_ids: jnp.ndarray,
+            main_tokens_indices: jnp.ndarray, num_draft_tokens: jnp.ndarray,
+            vocab_size: int, padded_tokens_length: int,
+            max_num_speculative_tokens: int,
+            max_num_seq: int) -> tuple[jnp.ndarray, jnp.ndarray]:
+
+        bonus_tokens = output_token_ids[padded_tokens_length:]
+        main_tokens = output_token_ids[main_tokens_indices]
+        batch_size = num_draft_tokens.shape[0]
+        main_tokens = jnp.where(
+            jax.lax.broadcasted_iota(jnp.int32,
+                                     (batch_size, max_num_speculative_tokens),
+                                     1) < num_draft_tokens[:, None],
+            main_tokens, PLACEHOLDER_TOKEN_ID)
+        main_tokens = jnp.where(main_tokens < vocab_size, main_tokens,
+                                PLACEHOLDER_TOKEN_ID)
+        all_tokens = jnp.concatenate([
+            main_tokens,
+            jnp.full((batch_size, 1), PLACEHOLDER_TOKEN_ID, dtype=jnp.int32)
+        ],
+                                     axis=1)
+        num_accepted_draft_tokens = jnp.sum(main_tokens
+                                            != PLACEHOLDER_TOKEN_ID,
+                                            axis=1)
+        all_tokens = all_tokens.at[jnp.arange(batch_size),
+                                   num_accepted_draft_tokens].set(bonus_tokens)
+        last_sampled_tokens = jnp.pad(all_tokens[jnp.arange(batch_size),
+                                                 num_accepted_draft_tokens],
+                                      (0, max_num_seq - batch_size),
+                                      constant_values=PLACEHOLDER_TOKEN_ID)
+        num_rejected_tokens = jnp.pad(num_draft_tokens -
+                                      num_accepted_draft_tokens,
+                                      (0, max_num_seq - batch_size),
+                                      constant_values=0)
+        return last_sampled_tokens, num_rejected_tokens
 
     @staticmethod
     def parse_output(
