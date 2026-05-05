@@ -72,19 +72,17 @@ steps:
           VLLM_DISABLE_SHARED_EXPERTS_STREAM=0 \
           NEW_MODEL_DESIGN=1 VLLM_MLA_DISABLE=0 \
           MOE_REQUANTIZE_BLOCK_SIZE=512 \
-          MOE_REQUANTIZE_WEIGHT_DTYPE=fp4   \
+          MOE_REQUANTIZE_WEIGHT_DTYPE=fp4 \
           TPU_BACKEND_TYPE=jax MODEL_IMPL_TYPE=vllm \
-          vllm serve  \
-            --seed 42   --model gs://tpu-commons-ci/deepseek/r1    \
-            --served-model-name deepseek-ai/DeepSeek-R1   \
-            --max-model-len=9216   --max-num-batched-tokens 512  \
-            --max-num-seqs 160   --no-enable-prefix-caching  \
-            --tensor-parallel-size 16   --kv_cache_dtype="fp8"  \
-            --async-scheduling   --gpu-memory-utilization=0.95 \
-            --enable-expert-parallel  \
-            --additional_config=\'{"sharding": \
-                                    {"sharding_strategy": {"enable_dp_attention": true}}, \
-                                  "compilation_sizes": [2560]}\'   \
-            --load-format=runai_streamer   \
+          vllm serve \
+            --seed 42 --model gs://tpu-commons-ci/deepseek/r1 \
+            --served-model-name deepseek-ai/DeepSeek-R1 \
+            --max-model-len=9216 --max-num-batched-tokens 512 \
+            --max-num-seqs 160 --no-enable-prefix-caching \
+            --tensor-parallel-size 16 --kv_cache_dtype="fp8" \
+            --async-scheduling --gpu-memory-utilization=0.95 \
+            --enable-expert-parallel \
+            --additional_config='\''{"sharding": {"sharding_strategy": {"enable_dp_attention": true}}, "compilation_sizes": [2560]}'\'' \
+            --load-format=runai_streamer \
             --trust-remote-code \
             --generation-config "/tmp/DeepSeek-R1-Configs/DeepSeek-R1"'
