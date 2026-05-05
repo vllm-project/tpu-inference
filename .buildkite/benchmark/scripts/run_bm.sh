@@ -167,6 +167,7 @@ printf "[DEBUG] model: %s\n" "$MODEL"
 printf "[DEBUG] dataset: %s\n" "${DATASET:-}"
 printf "[DEBUG] lm_eval pre-cmd: %s\n" "${LM_EVAL_CMD:-}"
 printf "[DEBUG] tp size: %s\n" "${TENSOR_PARALLEL_SIZE:-}"
+printf "[DEBUG] CLIENT_CMD_ENVS: %s\n" "${CLIENT_CMD_ENVS[*]:-}"
 
 # Helper function to check if a value is in an array
 contains_element () {
