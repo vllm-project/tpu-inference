@@ -288,6 +288,12 @@ def test_eagle3_correctness(
     '''
     model_name = 'meta-llama/Meta-Llama-3-8B-Instruct'
 
+    model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
+    if model_impl == "auto":
+        model_impl = "flax_nnx"
+    monkeypatch.setenv("MODEL_IMPL_TYPE", model_impl)
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
+
     _test_correctness_helper(
         monkeypatch, sampling_config, model_name, {
             'model': "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
@@ -306,6 +312,12 @@ def test_eagle3_performance(
     Compares timing between reference LLM and speculative LLM using Llama 3 8B.
     Expects spec_llm to be at least 1.8 faster than ref_llm.
     '''
+    model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
+    if model_impl == "auto":
+        model_impl = "flax_nnx"
+    monkeypatch.setenv("MODEL_IMPL_TYPE", model_impl)
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
+
     _test_performance_helper(
         monkeypatch, sampling_config, {
             "method": "eagle3",

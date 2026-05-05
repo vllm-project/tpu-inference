@@ -13,7 +13,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set -euo pipefail
+set -Eeuo pipefail
+
+# ==============================================================================
+# 0. Global Panic Handler (Crash Interceptor)
+# ==============================================================================
+# shellcheck disable=SC2317
+on_crash() {
+    local exit_code=$?
+    local line_no=$1
+    local command="$2"
+    
+    # Ignore normal exits (Fixed SC2086 by adding double quotes)
+    if [ "$exit_code" -eq 0 ]; then
+        return
+    fi
+
+    echo ""
+    echo "================================================================"
+    echo "🚨 [FATAL ERROR] Bash Script Crashed Unexpectedly!"
+    echo "================================================================"
+    echo "File:     $(basename "$0")"
+    echo "Line:     $line_no"
+    echo "Command:  $command"
+    echo "ExitCode: $exit_code"
+    echo "================================================================"
+    echo ""
+}
+
+# Bind the ERR signal: Triggers on_crash immediately if any command fails 
+# and is not explicitly caught by an 'if' statement or '||' operator.
+trap 'on_crash ${LINENO} "$BASH_COMMAND"' ERR
 
 # Helper function to escape single quotes and handle defaults for SQL
 prepare_sql_val() {
@@ -124,7 +154,7 @@ fi
       local section="$1"
       local label="$2"  # Mean, Median, or P99
       grep "$section (ms):" "$BM_LOG" | \
-      awk -v label="$label" '$0 ~ label { print $NF }'
+      awk -v label="$label" '$0 ~ label { print $NF }' || true
     }
 
     # Median values

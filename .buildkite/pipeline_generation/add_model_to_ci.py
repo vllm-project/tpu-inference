@@ -40,11 +40,13 @@ class ModelType(str, Enum):
 class ModelCategory(str, Enum):
     TEXT_ONLY = "text-only"
     MULTIMODAL = "multimodal"
+    EMBEDDING = "embedding"
+    DIFFUSION = "diffusion"
 
 
 class HostScale(str, Enum):
-    SINGLE = "single"
-    MULTI = "multi"
+    SMALL = "small"
+    LARGE = "large"
 
 
 MODEL_TYPE_TO_TEMPLATE = {
@@ -52,15 +54,14 @@ MODEL_TYPE_TO_TEMPLATE = {
     ModelType.VLLM_NATIVE.value: "vllm_native_model_template.yml",
 }
 
-# User Correction: Use double curly braces for shell variables to avoid Python format conflicts
 HOST_SCALE_TO_SETTINGS = {
-    HostScale.SINGLE.value: {
-        "queue": "${{TPU_QUEUE_SINGLE:-tpu_v6e_queue}}",
-        "tp_size": "${{TENSOR_PARALLEL_SIZE_SINGLE:-1}}",
+    HostScale.SMALL.value: {
+        "queue": "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}",
+        "tp_size": "${TENSOR_PARALLEL_SIZE_SINGLE:-1}",
     },
-    HostScale.MULTI.value: {
-        "queue": "${{TPU_QUEUE_MULTI:-tpu_v6e_8_queue}}",
-        "tp_size": "${{TENSOR_PARALLEL_SIZE_MULTI:-8}}",
+    HostScale.LARGE.value: {
+        "queue": "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}",
+        "tp_size": "${TENSOR_PARALLEL_SIZE_MULTI:-8}",
     },
 }
 
@@ -118,7 +119,9 @@ def get_interactive_input():
         f"   {YELLOW}Note: This sets the 'Type' column in the support matrix.{RESET}\n"
     )
     print(f"   [1] {BOLD}text-only{RESET}")
-    print(f"   [2] {BOLD}multimodal{RESET}\n")
+    print(f"   [2] {BOLD}multimodal{RESET}")
+    print(f"   [3] {BOLD}embedding{RESET}")
+    print(f"   [4] {BOLD}diffusion{RESET}\n")
     while True:
         choice = input(f"{BOLD}Select (1-2): {RESET}").strip()
         if choice == '1':
@@ -128,6 +131,14 @@ def get_interactive_input():
         elif choice == '2':
             m_cat = ModelCategory.MULTIMODAL.value
             print(f"{GREEN}✓ Category: {BOLD}multimodal{RESET}")
+            break
+        elif choice == '3':
+            m_cat = ModelCategory.EMBEDDING.value
+            print(f"{GREEN}✓ Category: {BOLD}embedding{RESET}")
+            break
+        elif choice == '4':
+            m_cat = ModelCategory.DIFFUSION.value
+            print(f"{GREEN}✓ Category: {BOLD}diffusion{RESET}")
             break
         print(f"{RED}❌ Invalid entry. Please enter 1 or 2.{RESET}\n")
 
@@ -139,20 +150,20 @@ def get_interactive_input():
         f"   {YELLOW}Hint: Choose the hardware scale based on your model's requirements{RESET}\n"
     )
     print(
-        f"   [1] {BOLD}single{RESET} : Runs tests on a single TPU host. (v6e: tpu_v6e_queue, v7x: tpu_v7x_2_queue)"
+        f"   [1] {BOLD}Small scale{RESET} : Runs tests on small scale queue. (v6e: tpu_v6e_queue, v7x: tpu_v7x_2_queue)"
     )
     print(
-        f"   [2] {BOLD}multi{RESET}  : Runs tests on multiple TPU hosts. (v6e: tpu_v6e_8_queue, v7x: tpu_v7x_8_queue)\n"
+        f"   [2] {BOLD}Large scale{RESET}  : Runs tests on large scale queue. (v6e: tpu_v6e_8_queue, v7x: tpu_v7x_8_queue)\n"
     )
     while True:
         choice = input(f"{BOLD}Select (1-2): {RESET}").strip()
         if choice == '1':
-            m_scale = HostScale.SINGLE.value
-            print(f"{GREEN}✓ Scale: {BOLD}single host{RESET}")
+            m_scale = HostScale.SMALL.value
+            print(f"{GREEN}✓ Scale: {BOLD}small scale{RESET}")
             break
         elif choice == '2':
-            m_scale = HostScale.MULTI.value
-            print(f"{GREEN}✓ Scale: {BOLD}multi host{RESET}")
+            m_scale = HostScale.LARGE.value
+            print(f"{GREEN}✓ Scale: {BOLD}large scale{RESET}")
             break
         print(f"{RED}❌ Invalid entry. Please enter 1 or 2.{RESET}\n")
 
@@ -185,7 +196,7 @@ def generate_from_template(model_name: str, model_type: str,
         print(f"{RED}Error: Missing placeholder {e} in template.{RESET}")
         sys.exit(1)
 
-    generated_filepath = OUTPUT_DIR / f"{sanitized_model_name}.yml"
+    generated_filepath = OUTPUT_DIR / f"{sanitized_model_name}_{model_category}.yml"
     with open(generated_filepath, 'w', encoding='utf-8') as f:
         f.write(generated_content)
 
@@ -228,7 +239,7 @@ def main():
         model_name = args.model_name
         model_type = args.type or ModelType.TPU_OPTIMIZED.value
         model_category = args.category or ModelCategory.TEXT_ONLY.value
-        host_scale = args.host_scale or HostScale.SINGLE.value
+        host_scale = args.host_scale or HostScale.SMALL.value
 
     generate_from_template(model_name, model_type, model_category, host_scale)
 

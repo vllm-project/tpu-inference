@@ -113,9 +113,18 @@ check_failed_requests() {
 
 cleanup_instances() {
   echo "Cleaning up any running vLLM instances..."
-  pkill -f "vllm" || true
-  pkill -f "toy_proxy_server" || true
-  sleep 1
+  pkill -9 -f "vllm" || true
+  pkill -9 -f "toy_proxy_server" || true
+  pkill -9 -f "multiprocess" || true
+  # Check if any accel devices exist before trying to kill processes on them
+  for dev in /dev/accel*; do
+    if [ -e "$dev" ]; then
+      fuser -k "$dev" || true
+    fi
+  done
+
+  rm -f /dev/shm/vllm_* || true
+  sleep 10
 }
 
 LOG_DIR=$HOME/logs
@@ -136,6 +145,7 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     PORT=$((8400 + i))
     KV_PORT=$((7100 + i))
     SIDE_PORT=$((6100 + i))
+    JAX_PORT=$((1200 + i))
 
     # os.environ[TPU_CHIPS_PER_PROCESS_BOUNDS] = "1,4,1"
     # os.environ[TPU_PROCESS_BOUNDS] = "1,1,1"
@@ -150,6 +160,9 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     SKIP_JAX_PRECOMPILE=1 \
     VLLM_XLA_CHECK_RECOMPILATION=0 \
     VLLM_XLA_CACHE_PATH="/tmp/jax_cache_$PORT" \
+    JAX_COORDINATOR_ADDRESS="127.0.0.1:$JAX_PORT" \
+    JAX_PROCESS_ID=0 \
+    JAX_NUM_PROCESSES=1 \
     \
     vllm serve $MODEL \
     --port $PORT \
@@ -176,6 +189,7 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     KV_PORT=$((7200 + i))
     # Same as prefill SIDE_PORT
     SIDE_PORT=$((6100 + i))
+    JAX_PORT=$((1210 + i))
 
     # os.environ[TPU_CHIPS_PER_PROCESS_BOUNDS] = "1,4,1"
     # os.environ[TPU_PROCESS_BOUNDS] = "1,1,1"
@@ -190,6 +204,9 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     SKIP_JAX_PRECOMPILE=1 \
     VLLM_XLA_CHECK_RECOMPILATION=0 \
     VLLM_XLA_CACHE_PATH="/tmp/jax_cache_$PORT" \
+    JAX_COORDINATOR_ADDRESS="127.0.0.1:$JAX_PORT" \
+    JAX_PROCESS_ID=0 \
+    JAX_NUM_PROCESSES=1 \
     \
     vllm serve $MODEL \
     --port $PORT \

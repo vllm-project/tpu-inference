@@ -28,6 +28,17 @@ declare -a TARGET_FOLDERS=(
     "rl"
 )
 
+failure_handler() {
+  local exit_code=$?
+  local line_no=$1
+  echo "--- ❌ Script failed at line $line_no with exit status: $exit_code"
+  echo "Hint: Check for duplicate step keys, YAML syntax errors, or failed buildkite-agent commands."
+  buildkite-agent meta-data set "stop_support_matrix" "true"
+  exit $exit_code
+}
+
+# Catch ERR signals
+trap 'failure_handler $LINENO' ERR
 
 # Use find to append the kernel_microbenchmarks subdirectories
 KERNEL_PARENT_DIR=".buildkite/kernel_microbenchmarks"

@@ -42,6 +42,7 @@ def _make_inputs(
     V,
     dtype=jnp.bfloat16,
     max_num_req=None,
+    state_dtype=jnp.float32,
 ):
     """Build inputs for fused_gdn tests."""
     all_seqlens = [1] * decode_N + list(mixed_seqlens)
@@ -77,7 +78,7 @@ def _make_inputs(
         a,
         b,
         jnp.array(A_log),
-        jnp.array(h0),
+        jnp.array(h0, dtype=state_dtype),
         jnp.array(cu_seqlens),
         jnp.array(state_indices),
         N,
@@ -106,6 +107,7 @@ class FusedGdnKernelTest(jtu.JaxTestCase):
         lower_bound=None,
         atol=1e-2,
         has_initial_state_active=None,
+        state_dtype=jnp.float32,
     ):
         rng = np.random.RandomState(42)
         q, k, v, a, b, A_log, h0, cu_seqlens, state_indices, N = _make_inputs(
@@ -117,6 +119,7 @@ class FusedGdnKernelTest(jtu.JaxTestCase):
             K,
             V,
             max_num_req=max_num_req,
+            state_dtype=state_dtype,
         )
         T = q.shape[0]
 
@@ -211,6 +214,35 @@ class FusedGdnKernelTest(jtu.JaxTestCase):
     )
     def test_basic(self, decode_N, mixed_seqlens):
         self._test_fused_gdn(decode_N, mixed_seqlens, 2, 2, 128, 128)
+
+    # ── bf16 state storage ──
+
+    def test_state_dtype_bf16_decode_and_mixed(self):
+        self._test_fused_gdn(3, [9, 15],
+                             2,
+                             2,
+                             128,
+                             128,
+                             state_dtype=jnp.bfloat16,
+                             atol=5e-2)
+
+    def test_state_dtype_bf16_gqa(self):
+        self._test_fused_gdn(5, [9, 15],
+                             2,
+                             8,
+                             128,
+                             128,
+                             state_dtype=jnp.bfloat16,
+                             atol=5e-2)
+
+    def test_state_dtype_bf16_decode_only(self):
+        self._test_fused_gdn(8, [],
+                             2,
+                             2,
+                             128,
+                             128,
+                             state_dtype=jnp.bfloat16,
+                             atol=5e-2)
 
     # ── Padded max_num_req ──
 

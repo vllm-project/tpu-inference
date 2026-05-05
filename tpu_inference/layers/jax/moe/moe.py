@@ -169,22 +169,39 @@ class JaxMoE(JaxModule):
     # ---- Quantization Specific Attributes ----
     quant_config: Optional[QuantizationConfig] = None
     prefix: str = ""
+    enable_return_routed_experts: bool = False
 
-    def __call__(self, x_TD: jax.Array) -> jax.Array:
+    def __call__(
+        self,
+        x_TD: jax.Array,
+        router_logits: Optional[jax.Array] = None
+    ) -> tuple[jax.Array, Optional[jax.Array]]:
         """Performs the forward pass of the MoE layer.
 
         Args:
             x_TD: Input array of shape (sequence_length, d_model).
+            router_logits: Optional pre-computed router logits. If not provided, logits will be computed using the router.
 
         Returns:
             Output array of shape (sequence_length, d_model) after passing through MoE.
+            If `enable_return_routed_experts` is True, also returns the indices of the selected experts.
         """
-        if self.quant_method is not None:
+        if self.quant_method is None:
+            raise ValueError("Expected quant_method to be set!")
+        if router_logits is None:
             router_logits = self.router(x_TD)
-            return self.quant_method.apply_jax(self,
-                                               x_TD,
-                                               router_logits=router_logits)
-        raise ValueError("Expected quant_method to be set!")
+        x_TD = self.quant_method.apply_jax(self,
+                                           x_TD,
+                                           router_logits=router_logits)
+        if self.enable_return_routed_experts:
+            if self.moe_backend in MoEBackend.fused_moe_backends():
+                _, selected_experts_TX = jax.lax.top_k(
+                    router_logits, self.num_experts_per_tok)
+            else:
+                _, selected_experts_TX = router_logits
+            return x_TD, selected_experts_TX
+        else:
+            return x_TD, None
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Generates the kernels (weights) for the router and experts (gating, up-projection, and down-projection layers)."""

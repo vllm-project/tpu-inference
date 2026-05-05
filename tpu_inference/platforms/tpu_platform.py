@@ -247,6 +247,16 @@ class TpuPlatform(Platform):
             logger.info(
                 f"Using KV cache block size: {cache_config.block_size}")
 
+        if cache_config and envs.TPU_MAMBA_SSM_CACHE_DTYPE:
+            override = envs.TPU_MAMBA_SSM_CACHE_DTYPE
+            current = cache_config.mamba_ssm_cache_dtype
+            if current != override:
+                logger.info(
+                    "TPU_MAMBA_SSM_CACHE_DTYPE=%s overriding "
+                    "cache_config.mamba_ssm_cache_dtype (was %r)", override,
+                    current)
+                cache_config.mamba_ssm_cache_dtype = override
+
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         parallel_config.worker_cls = \
@@ -296,6 +306,10 @@ class TpuPlatform(Platform):
         from tpu_inference.core.sched.dp_scheduler import \
             update_vllm_config_for_dp_scheduler
         update_vllm_config_for_dp_scheduler(vllm_config)
+
+        from tpu_inference.core.sched.utils import \
+            update_vllm_scheduler_for_exporting_expert_ids
+        update_vllm_scheduler_for_exporting_expert_ids()
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:

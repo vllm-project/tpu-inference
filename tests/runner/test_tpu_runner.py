@@ -156,6 +156,11 @@ class TestTPUJaxRunner:
         self.runner.input_batch.num_computed_tokens_cpu = np.array([10])
         self.runner.input_batch.token_ids_cpu = np.random.randint(
             0, 1000, (8, 64), dtype=np.int32)
+        # Concrete numpy array so `.copy()` returns a real ndarray
+        # (otherwise the surrounding `device_array` introspection on
+        # `MagicMock` recurses on every `dtype` access).
+        self.runner.input_batch.mamba_state_indices_cpu = np.zeros(
+            self.runner.max_num_reqs, dtype=np.int32)
 
         # Mock block tables
         # there will be 2 block tables since there are 2 kv cache groups

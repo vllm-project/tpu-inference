@@ -133,9 +133,7 @@ from tpu_inference.offload.cpu_backend import LocalCPUBackend
 from tpu_inference.offload.offload_manager import (LRUCacheManager,
                                                    StagingBufferManager)
 from tpu_inference.offload.utils import (CpuChunkId, ReqId,
-                                         pre_update_kv_caches,
                                          stack_kv_cache_cross_layers,
-                                         update_kv_caches,
                                          update_kv_caches_one)
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
@@ -1287,29 +1285,43 @@ class TPUOffloadConnectorWorker:
             self.device_sharding = kv_layer.sharding
             self.num_kv_blocks = self.shape[0]
 
+            # Cache the kv sharding spec at initialization
+            # to prevent recompilation. This avoids deriving
+            # kv_caches[0].sharding.spec in update_kv_caches_one at runtime,
+            # which can differ due to buffer donation side effects
+            self.cached_kv_sharding_spec = kv_layer.sharding.spec
+
             # NOTE(jcgu): shardings for the output of D2H / H2D transfer
             # default: [num_blocks, block_size, num_head, 2, head_dim]
             self.host_sharding = jax.sharding.NamedSharding(
                 mesh=self.device_sharding.mesh,
-                spec=jax.sharding.PartitionSpec(None, None, "model"),
+                spec=self.device_sharding.spec,
                 memory_kind="pinned_host")
+
+            flatten_spec = (None, ) + self.device_sharding.spec[2:] if len(
+                self.device_sharding.spec) >= 2 else (None, )
             # [num_blocks * block_size, num_head, 2, head_dim]
             self.flatten_device_sharding = jax.sharding.NamedSharding(
                 mesh=self.device_sharding.mesh,
-                spec=jax.sharding.PartitionSpec(None, "model"),
+                spec=jax.sharding.PartitionSpec(*flatten_spec),
                 memory_kind="device")
             self.flatten_host_sharding = jax.sharding.NamedSharding(
                 mesh=self.device_sharding.mesh,
-                spec=jax.sharding.PartitionSpec(None, "model"),
+                spec=jax.sharding.PartitionSpec(*flatten_spec),
                 memory_kind="pinned_host")
+
+            expanded_spec = (None,
+                             None) + self.device_sharding.spec[1:] if len(
+                                 self.device_sharding.spec) >= 1 else (None,
+                                                                       None)
             # [1, num_layers, block_size, num_head, 2, head_dim]
             self.expanded_host_sharding = jax.sharding.NamedSharding(
                 mesh=self.device_sharding.mesh,
-                spec=jax.sharding.PartitionSpec(None, None, None, "model"),
+                spec=jax.sharding.PartitionSpec(*expanded_spec),
                 memory_kind="pinned_host")
             self.expanded_device_sharding = jax.sharding.NamedSharding(
                 mesh=self.device_sharding.mesh,
-                spec=jax.sharding.PartitionSpec(None, None, None, "model"),
+                spec=jax.sharding.PartitionSpec(*expanded_spec),
                 memory_kind="device")
             self.indices_sharding = jax.sharding.NamedSharding(
                 mesh=self.device_sharding.mesh,
@@ -1328,6 +1340,7 @@ class TPUOffloadConnectorWorker:
             logger.info(f"  - Shape per layer: {self.shape}")
             logger.info(f"  - DType: {self.dtype}")
             logger.info(f"  - Device sharding: {self.device_sharding}")
+            logger.info(f"  - Sharding Spec: {self.cached_kv_sharding_spec}")
             logger.info(f"  - Layout: {self.kv_cache_layout}")
             logger.info(f"  - Total KV blocks: {self.num_kv_blocks}")
         else:
@@ -1381,23 +1394,27 @@ class TPUOffloadConnectorWorker:
 
                     # Warm up
                     for _ in range(num_warmup):
-                        dummy_block_ids = jnp.array(
-                            random.sample(all_block_ids, num_blocks))
+                        dummy_block_ids = random.sample(
+                            all_block_ids, num_blocks)
+                        dummy_block_ids_arr = jnp.array(dummy_block_ids)
+
                         # 1. gather / stack (for save)
                         paged_kv_for_compilation, stacked_dummy_kv_caches_tpu = stack_kv_cache_cross_layers(
-                            paged_kv_for_compilation, dummy_block_ids,
+                            paged_kv_for_compilation, dummy_block_ids_arr,
                             num_blocks)
+                        stacked_dummy_kv_caches_tpu = [
+                            jax.device_put(chunk,
+                                           self.expanded_device_sharding)
+                            for chunk in stacked_dummy_kv_caches_tpu
+                        ]
                         jax.block_until_ready(stacked_dummy_kv_caches_tpu)
+
                         # 2. update / insert  kv (for load)
-                        src_offsets, dest_offsets, chunk_sizes, num_chunks = pre_update_kv_caches(
-                            dummy_block_ids, self.mesh, self.indices_sharding)
-                        updated_kv_caches = update_kv_caches(
+                        updated_kv_caches = update_kv_caches_one(
                             paged_kv_for_compilation,
-                            stacked_dummy_kv_caches_tpu, src_offsets,
-                            dest_offsets, chunk_sizes, num_chunks, self.mesh,
-                            self.device_sharding.spec,
-                            self.device_sharding.spec,
-                            self.indices_sharding.spec)
+                            stacked_dummy_kv_caches_tpu, dummy_block_ids,
+                            self.mesh, self.cached_kv_sharding_spec,
+                            self.indices_sharding)
 
                         jax.block_until_ready(updated_kv_caches)
                         paged_kv_for_compilation = updated_kv_caches
@@ -1466,7 +1483,9 @@ class TPUOffloadConnectorWorker:
             return kv_caches
         if num_blocks in BLOCK_SIZE_BUCKETS:
             return update_kv_caches_one(kv_caches, kv_cache_slices, dst_blocks,
-                                        self.mesh, self.indices_sharding)
+                                        self.mesh,
+                                        self.cached_kv_sharding_spec,
+                                        self.indices_sharding)
 
         decomposed_block_buckets = self._decompose_into_buckets(dst_blocks)
         logger.debug(
@@ -1479,11 +1498,9 @@ class TPUOffloadConnectorWorker:
             bucket_size = len(decomposed_block_bucket)
             next_offset = block_offset + bucket_size
             slices_for_bucket = kv_cache_slices[block_offset:next_offset]
-            updated_kv_caches = update_kv_caches_one(updated_kv_caches,
-                                                     slices_for_bucket,
-                                                     decomposed_block_bucket,
-                                                     self.mesh,
-                                                     self.indices_sharding)
+            updated_kv_caches = update_kv_caches_one(
+                updated_kv_caches, slices_for_bucket, decomposed_block_bucket,
+                self.mesh, self.cached_kv_sharding_spec, self.indices_sharding)
             block_offset = next_offset
 
         return updated_kv_caches
@@ -2094,6 +2111,7 @@ class TPUOffloadConnectorWorker:
                     raw_chunked_kv_on_tpu,
                     dst_blocks,
                     self.mesh,
+                    self.cached_kv_sharding_spec,
                     self.indices_sharding,
                 )
             jax.block_until_ready(self.runner.kv_caches)

@@ -282,6 +282,31 @@ class TestLogprobsNoRecompilation:
                     f"Log probability must be <= 0, got {logprob_obj.logprob}")
 
 
+class TestMoEExpertIds:
+    """Verify that MoE routed experts are successfully returned when enabled.
+    """
+
+    def test_moe_expert_ids_returned(self, llm: LLM):
+        """routed_experts must be properly shaped if it is an MoE, or None if not."""
+        prompt = "The capital of France is"
+        # Test standard execution with the flag enabled.
+        llm.llm_engine.vllm_config.model_config.enable_return_routed_experts = True
+
+        sampling_params = SamplingParams(temperature=0, max_tokens=10)
+        outputs = llm.generate([prompt], sampling_params)
+        output = outputs[0].outputs[0]
+
+        is_moe = llm.llm_engine.model_config.is_moe
+        if is_moe:
+            assert output.routed_experts is not None, (
+                "MoE models must populate routed_experts when enabled")
+            assert len(output.routed_experts.shape) == 3, (
+                f"Expected 3D expert shape, got {output.routed_experts.shape}")
+        else:
+            assert output.routed_experts is None, (
+                "Non-MoE models must not populate routed_experts")
+
+
 # ========================================================================
 # Performance tests
 # ========================================================================
