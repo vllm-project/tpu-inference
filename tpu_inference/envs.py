@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
     RAGGED_GATED_DELTA_RULE_IMPL: str = "ragged_gated_delta_rule_chunked"
     MOE_ALL_GATHER_ACTIVATION_DTYPE: str = ""
+    TPU_MAMBA_SSM_CACHE_DTYPE: str = "bfloat16"
     TPU_OFFLOAD_SKIP_JAX_PRECOMPILE: bool = False
     TPU_OFFLOAD_DECODE_SAVE: bool = False
     TPU_OFFLOAD_NUM_CPU_CHUNKS: int = 1024
@@ -260,6 +261,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
                      ]),
     "MOE_ALL_GATHER_ACTIVATION_DTYPE":
     lambda: os.getenv("MOE_ALL_GATHER_ACTIVATION_DTYPE", ""),
+    # Override cache_config.mamba_ssm_cache_dtype on TPU. Default "bfloat16"
+    # halves SSM state HBM; set "float32" to opt out, "" to defer to vLLM.
+    # TODO: remove once vLLM MambaDType includes bfloat16
+    # (https://github.com/vllm-project/vllm/pull/41680).
+    "TPU_MAMBA_SSM_CACHE_DTYPE":
+    lambda: os.getenv("TPU_MAMBA_SSM_CACHE_DTYPE", "bfloat16"),
     # kv offload to dram: skip pre-compiling swap-related jax functions
     "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE":
     lambda: bool(int(os.getenv("TPU_OFFLOAD_SKIP_JAX_PRECOMPILE", "0"))),

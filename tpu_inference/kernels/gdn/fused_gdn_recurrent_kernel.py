@@ -38,17 +38,19 @@ def get_default_block_sizes(
     use_gate_in_kernel: bool,
     has_dt_bias: bool,
     vmem_bytes_limit: int,
+    state_dtype=jnp.float32,
 ) -> int:
     """Choose bt to maximize VMEM utilization.
 
     The recurrent kernel uses a fixed ``(2, H_v, K, V)`` state double
-    buffer regardless of bt.  Only pipeline tiles scale with bt.
+    buffer of ``state_dtype`` regardless of bt.  Only pipeline tiles scale with bt.
     """
     ibits = dtypes.itemsize_bits(dtype)
+    sbits = dtypes.itemsize_bits(state_dtype)
 
-    # Fixed (in bits): h_bufs (2, H_v, K, V) float32 — always 2 buffers
+    # Fixed (in bits): h_bufs (2, H_v, K, V) of state_dtype — always 2 buffers
     num_lanes = pltpu.get_tpu_info().num_lanes
-    fixed_bits = 2 * H_v * K * V * 32
+    fixed_bits = 2 * H_v * K * V * sbits
     if use_gate_in_kernel:
         fixed_bits += 2 * H_v * num_lanes * 32  # a_log: (H_v, num_lanes) f32
     if has_dt_bias:
@@ -508,8 +510,15 @@ def fused_recurrent_gdn(
     max_num_req = cu_seqlens.shape[0] - 1
 
     vmem_bytes_limit = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9)
-    bt = get_default_block_sizes(H_qk, H_v, K, V, dtype, use_gate_in_kernel,
-                                 dt_bias is not None, vmem_bytes_limit)
+    bt = get_default_block_sizes(H_qk,
+                                 H_v,
+                                 K,
+                                 V,
+                                 dtype,
+                                 use_gate_in_kernel,
+                                 dt_bias is not None,
+                                 vmem_bytes_limit,
+                                 state_dtype=initial_state.dtype)
 
     # Worst case: cdiv(T, bt) base blocks + up to max_num_req-1 boundary splits
     max_num_blocks = (T + bt - 1) // bt + max_num_req - 1
@@ -518,7 +527,8 @@ def fused_recurrent_gdn(
     smem_spec = pl.BlockSpec(memory_space=pltpu.SMEM)
 
     o_shape = jax.ShapeDtypeStruct((T, H_v, V), dtype)
-    state_shape = jax.ShapeDtypeStruct((num_states, H_v, K, V), jnp.float32)
+    state_shape = jax.ShapeDtypeStruct((num_states, H_v, K, V),
+                                       initial_state.dtype)
 
     meta = calculate_chunk_indices(cu_seqlens, distribution, max_num_blocks,
                                    bt)
@@ -563,8 +573,13 @@ def fused_recurrent_gdn(
             out_specs=[any_spec, any_spec],
             grid=(grid_dim, ),
             scratch_shapes=[
+                # h_bufs match HBM dtype so the DMAs don't need conversion.
+                # The compute path upcasts h_bufs to fp32 once per block
+                # (h = h_bufs_s[buf_idx].astype(fp32) above) and carries it
+                # as fp32 across the per-token fori_loop, so on-chip math is
+                # fp32 regardless of HBM storage dtype.
                 pltpu.VMEM((2, H_v, K, V),
-                           jnp.float32),  # h_bufs (double buffer)
+                           initial_state.dtype),  # h_bufs (double buffer)
                 pltpu.SemaphoreType.DMA((2, )),  # h_load_sems
                 pltpu.SemaphoreType.DMA((2, )),  # h_store_sems
             ],
