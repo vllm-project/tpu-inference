@@ -977,7 +977,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 and not self.scheduler_config.async_scheduling
                 and self.is_last_rank and not self.is_pooling_model
                 and not return_experts):
-            logger.debug("DEBUG HIHI")
             return self._execute_continue_decode(scheduler_output)
 
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
