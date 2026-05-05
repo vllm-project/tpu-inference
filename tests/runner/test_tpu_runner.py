@@ -85,7 +85,7 @@ class TestTPUJaxRunner:
         """Tests _get_input_ids_embeds for both multimodal and text-only models."""
         # 1. ===== Setup =====
         dummy_input_ids = jnp.array([1, 2, 3])
-        dummy_mm_embeds = jnp.ones((10, 128))
+        dummy_mm_embeds = [jnp.ones((10, 128))]
         dummy_is_mm_embed = jnp.array([False, True, True], dtype=jnp.bool_)
         dummy_final_embeds = jnp.ones((3, 128))
 
@@ -248,6 +248,7 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
             precompile_vision_encoder_fn=None,
             embed_multimodal_fn=None,
             embed_input_ids_fn=None,
+            jitted_embed_input_ids_fn=None,
             get_mrope_input_positions_fn=None)
         return ModelInterface(
             MagicMock(),  # TPUModelRunner.model_fn
@@ -271,7 +272,7 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
 
         self.runner.embed_input_ids_fn = MagicMock()
         dummy_input_ids = jnp.array([1, 2, 3])
-        dummy_mm_embeds = jnp.ones((10, 128))
+        dummy_mm_embeds = [jnp.ones((10, 128))]
         dummy_is_mm_embed = jnp.array([False, True, True], dtype=jnp.bool_)
         _ = self.runner._get_input_ids_embeds(dummy_input_ids, dummy_mm_embeds,
                                               dummy_is_mm_embed)
@@ -293,6 +294,7 @@ class TestTPUJaxRunnerDisableMM:
             precompile_vision_encoder_fn=None,
             embed_multimodal_fn=MagicMock(),
             embed_input_ids_fn=MagicMock(),
+            jitted_embed_input_ids_fn=MagicMock(),
             get_mrope_input_positions_fn=None)
         return ModelInterface(
             MagicMock(),  # TPUModelRunner.model_fn
