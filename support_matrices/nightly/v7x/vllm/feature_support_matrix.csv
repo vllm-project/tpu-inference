@@ -1,7 +1,7 @@
 Feature,CorrectnessTest,PerformanceTest
 "Chunked Prefill",✅ Passing,✅ Passing
-"DCN-based P/D disaggregation",✅ Passing,✅ Passing
-"KV Cache Offload",❌ Failing,❓ Untested
+"DCN-based P/D disaggregation",❌ Failing,✅ Passing
+"KV Cache Offload",✅ Passing,✅ Passing
 "LoRA_Torch",✅ Passing,✅ Passing
 "Multimodal Inputs",❌ Failing,❓ Untested
 "Out-of-tree model support",✅ Passing,✅ Passing
