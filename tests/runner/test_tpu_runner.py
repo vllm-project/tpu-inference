@@ -248,7 +248,6 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
             precompile_vision_encoder_fn=None,
             embed_multimodal_fn=None,
             embed_input_ids_fn=None,
-            jitted_embed_input_ids_fn=None,
             get_mrope_input_positions_fn=None)
         return ModelInterface(
             MagicMock(),  # TPUModelRunner.model_fn
@@ -294,7 +293,6 @@ class TestTPUJaxRunnerDisableMM:
             precompile_vision_encoder_fn=None,
             embed_multimodal_fn=MagicMock(),
             embed_input_ids_fn=MagicMock(),
-            jitted_embed_input_ids_fn=MagicMock(),
             get_mrope_input_positions_fn=None)
         return ModelInterface(
             MagicMock(),  # TPUModelRunner.model_fn

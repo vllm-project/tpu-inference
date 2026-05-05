@@ -128,8 +128,6 @@ class CompilationManager:
         self.runner.vllm_config.compilation_config.compilation_time += elapsed
 
     def _precompile_input_embeddings_merger(self) -> None:
-        if self.runner.jitted_embed_input_ids_fn is None:
-            return
         for num_tokens in self.runner.num_tokens_paddings:
             hidden_size = self.runner.vllm_config.model_config.get_hidden_size(
             )
@@ -139,10 +137,11 @@ class CompilationManager:
             input_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
 
-            dummy_multimodal_embeddings = self._create_dummy_tensor(
+            dummy_mm_embeds = self._create_dummy_tensor(
                 (num_tokens, hidden_size),
                 self.runner.vllm_config.model_config.dtype,
                 sharding=sharding)
+            dummy_multimodal_embeddings = [dummy_mm_embeds]
             dummy_input_ids = self._create_dummy_tensor(
                 (num_tokens, ), jnp.int32, sharding=input_sharding)
             dummy_is_multimodal = self._create_dummy_tensor(
@@ -150,7 +149,7 @@ class CompilationManager:
 
             self._run_compilation(
                 "input_embeddings_merger",
-                self.runner.jitted_embed_input_ids_fn,
+                self.runner.embed_input_ids_fn,
                 self.runner.state,
                 dummy_input_ids,
                 dummy_multimodal_embeddings,
@@ -160,7 +159,7 @@ class CompilationManager:
 
             self._run_compilation(
                 "input_embeddings_merger_text_only",
-                self.runner.jitted_embed_input_ids_fn,
+                self.runner.embed_input_ids_fn,
                 self.runner.state,
                 dummy_input_ids,
                 None,

@@ -564,7 +564,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.precompile_vision_encoder_fn = model.multimodal_fns.precompile_vision_encoder_fn
         self.embed_multimodal_fn = model.multimodal_fns.embed_multimodal_fn
         self.embed_input_ids_fn = model.multimodal_fns.embed_input_ids_fn
-        self.jitted_embed_input_ids_fn = model.multimodal_fns.jitted_embed_input_ids_fn
         self.get_mrope_input_positions_fn = model.multimodal_fns.get_mrope_input_positions_fn
 
         if self.drafter is not None:

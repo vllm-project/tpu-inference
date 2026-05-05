@@ -402,8 +402,6 @@ def get_flax_model(
             run_model, graphdef)
     compute_logits_fn = functools.partial(run_compute_logits, graphdef)
     embed_multimodal_fn = functools.partial(run_embed_multimodal, graphdef)
-    jitted_embed_input_ids_fn = functools.partial(jitted_embed_input_ids,
-                                                  graphdef)
     embed_input_ids_fn = functools.partial(run_embed_input_ids, graphdef)
     lora_manager, model = None, None
     combine_hidden_states_fn = functools.partial(combine_hidden_states,
@@ -417,7 +415,6 @@ def get_flax_model(
         precompile_vision_encoder_fn=precompile_vision_encoder_fn,
         embed_multimodal_fn=embed_multimodal_fn,
         embed_input_ids_fn=embed_input_ids_fn,
-        jitted_embed_input_ids_fn=jitted_embed_input_ids_fn,
         get_mrope_input_positions_fn=get_mrope_input_positions_fn,
     )
 
@@ -464,7 +461,6 @@ def get_vllm_model(
         ),
         embed_multimodal_fn=model.wrap_embed_multimodal_func(),
         embed_input_ids_fn=model.wrap_embed_input_ids_func(),
-        jitted_embed_input_ids_fn=None,
         get_mrope_input_positions_fn=getattr(
             model.model.vllm_model,
             "get_mrope_input_positions",
