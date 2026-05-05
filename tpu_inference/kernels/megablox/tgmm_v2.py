@@ -33,15 +33,9 @@ from tpu_inference.kernels.megablox.gmm_v2 import (
 )
 
 TileTgmmFn = Callable[
-    [Dimensions, InputConfigs, InputConfigs, int, jnp.dtype, jnp.dtype],
+    [Dimensions, InputConfigs, InputConfigs, int, jnp.dtype, jnp.dtype, int],
     TileSizes,
 ]
-
-# Target VMEM size for the zero-init scratch buffer (zero_ref). The actual
-# allocation may be smaller after capping by size_k and rounding down to a
-# sublane multiple, so this also serves as an upper bound used by
-# calculate_tgmm_tiling when reserving VMEM for zero_ref.
-TARGET_ZERO_REF_BYTES = 2 * 1024 * 1024
 
 
 def get_scope_name(cfgs: GmmConfigs) -> str:
@@ -60,8 +54,14 @@ def calculate_tgmm_tiling(
     vmem_limit_bytes: int,
     out_dtype: jnp.dtype,
     acc_dtype: jnp.dtype,
+    target_zero_ref_bytes: int,
 ) -> TileSizes:
-  """Calculate optimal tile sizes for TGMM kernel."""
+  """Calculate optimal tile sizes for TGMM kernel.
+
+  target_zero_ref_bytes is the upper bound on the VMEM reserved for zero_ref.
+  The actual allocation may be smaller after capping by size_k and rounding
+  down to a sublane multiple.
+  """
   # In tgmm, we calculate lhs.T @ dout which doesn't require quantization.
   # Since we use it in MOE, the m can be dynamic and small. So we don't
   # want it to be too big. At the same time, because the mxu size is 256, the
@@ -96,10 +96,10 @@ def calculate_tgmm_tiling(
         tile_k * tile_n * (acc_bytes + num_buffers * out_bytes)
         + (num_buffers + 1) * (tile_m * tile_k * lhs_bytes)
         + num_buffers * (tile_m * tile_n * rhs_bytes)
-        # Reserve VMEM for zero_ref. Use the upper bound TARGET_ZERO_REF_BYTES
+        # Reserve VMEM for zero_ref. Use the upper bound target_zero_ref_bytes
         # since the actual zero_ref size depends on out_dtype/size_k and is
         # always <= this value.
-        + TARGET_ZERO_REF_BYTES
+        + target_zero_ref_bytes
     )
     return budget <= vmem_limit_bytes
 
@@ -154,6 +154,7 @@ def make_tgmm_configs(
     vmem_limit_bytes: int | None,
     out_dtype: jnp.dtype,
     acc_dtype: jnp.dtype | None,
+    target_zero_ref_bytes: int,
 ):
   """Fills the GMM config for the TGMM kernel."""
   assert out_dtype, "out_dtype cannot be None"
@@ -194,7 +195,10 @@ def make_tgmm_configs(
   if isinstance(tile_info, TileSizes):
     tiles = tile_info
   else:
-    tiles = tile_info(dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes, out_dtype, acc_dtype)
+    tiles = tile_info(
+        dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes, out_dtype, acc_dtype,
+        target_zero_ref_bytes,
+    )
 
   return GmmConfigs(
       dims=dims,
@@ -499,6 +503,12 @@ def tgmm_v2(
   if vmem_limit_bytes is None:
     vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9)
 
+  # Target VMEM size for the zero-init scratch buffer (zero_ref). The actual
+  # allocation may be smaller after capping by size_k and rounding down to a
+  # sublane multiple, so this also serves as an upper bound used by
+  # calculate_tgmm_tiling when reserving VMEM for zero_ref.
+  target_zero_ref_bytes = 2 * 1024 * 1024
+
   cfgs = make_tgmm_configs(
       lhs,
       rhs,
@@ -508,6 +518,7 @@ def tgmm_v2(
       vmem_limit_bytes=vmem_limit_bytes,
       out_dtype=preferred_element_type,
       acc_dtype=acc_dtype,
+      target_zero_ref_bytes=target_zero_ref_bytes,
   )
   dims = cfgs.dims
   tiles = cfgs.tiles
@@ -532,7 +543,7 @@ def tgmm_v2(
 
   # Prepare zero initializing the drhs[i, :, :] where the group_size[i] is 0.
   out_bytes = jnp.dtype(cfgs.out_dtype).itemsize
-  tile_zero_k = TARGET_ZERO_REF_BYTES // num_lanes // out_bytes
+  tile_zero_k = target_zero_ref_bytes // num_lanes // out_bytes
   tile_zero_k = min(tile_zero_k, dims.size_k)
   size_out_sublane = pltpu.get_tpu_info().get_sublane_tiling(cfgs.out_dtype)
   tile_zero_k = (tile_zero_k // size_out_sublane) * size_out_sublane
