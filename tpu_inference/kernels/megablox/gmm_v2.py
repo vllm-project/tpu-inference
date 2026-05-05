@@ -276,7 +276,7 @@ class IndexMaps:
     def rhs_global_scale_index_map(self, n_id: jax.Array, gm_id: jax.Array,
                                    k_id: jax.Array):
         group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
-        return (group_id, 0, 0, 0)
+        return (group_id, )
 
     def out_index_map(self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array):
         is_last_gm = gm_id == (pl.num_programs(1) - 1)
@@ -330,7 +330,7 @@ def generate_block_specs(
         )
     if cfgs.rhs_cfgs.has_global_scale:
         rhs_global_scale_block_spec = pl.BlockSpec(
-            (None, 1, 1, 1),
+            (None, ),
             index_map.rhs_global_scale_index_map,
         )
 
@@ -1214,7 +1214,7 @@ def gmm_v2(
         maybe_quantize_lhs: bool = True,
         zero_initialize: bool = True,
         fuse_act: str | None = None,
-        rhs_global_scale: jax.Array | None = None,  # [size_group, 1, 1, 1]
+        rhs_global_scale: jax.Array | None = None,  # [size_group]
 ) -> jax.Array:
     """GMM kernel implemented with emit_pipeline.
 

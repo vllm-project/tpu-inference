@@ -314,10 +314,10 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
         # if they don't match.
         if w13_global_scale.ndim == 2:
             w13_global_scale = jnp.max(w13_global_scale, axis=1)
-        # Reshape per-expert scalar globals to the (size_group, 1, 1, 1)
-        # layout the gmm_v2 kernel expects as `rhs_global_scale`.
-        w13_global_scale = w13_global_scale.reshape(-1, 1, 1, 1)
-        w2_global_scale = w2_global_scale.reshape(-1, 1, 1, 1)
+        # gmm_v2 expects rhs_global_scale as a 1D per-expert FP32 vector
+        # (size_group,) -- one scalar per expert.
+        w13_global_scale = w13_global_scale.reshape(-1)
+        w2_global_scale = w2_global_scale.reshape(-1)
 
         @jax.jit
         def process_nvfp4_moe_weights(w13_weight, w13_weight_scale, w2_weight,
