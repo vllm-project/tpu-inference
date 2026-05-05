@@ -144,13 +144,12 @@ class MultiModalManager:
 
         Args:
             scheduler_output: The VllmSchedulerOutput.
-            target_pad_len: The target length to pad the resulting embeddings
-                and mask to.
+            target_pad_len: The target length to pad the resulting boolean mask to.
 
         Returns:
             A tuple containing:
-                - flattened_embeds: A JAX array of flattened multimodal
-                    embeddings, padded to target_pad_len.
+                - mm_embeds: A list of JAX arrays containing the unpadded multimodal
+                    embeddings, or None if there are no multimodal embeddings.
                 - is_mm_embed: A boolean JAX array mask indicating which
                     positions in the input sequence are multimodal embeddings.
         """
