@@ -470,7 +470,7 @@ class Eagle3Proposer:
 
         # input_ids and target_hidden_states for the first speculation have been prepared in prepare_inputs() to improve performance.
         kv_caches, hidden_states, residual, _ = self.model_fn(
-            self.state,
+            state,
             kv_caches,
             input_ids,
             target_hidden_states,
@@ -502,7 +502,7 @@ class Eagle3Proposer:
                 block_tables=new_block_tables,
             )
             kv_caches, new_hidden_states, residual, _ = self.model_fn(
-                self.state,
+                state,
                 kv_caches,
                 input_ids_loop,
                 hidden_states,  # This should be the hidden_states from previous step
