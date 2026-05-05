@@ -19,7 +19,7 @@ import pytest
 
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     MultiModalEmbeddings, NestedTensors, flatten_embeddings,
-    merge_multimodal_embeddings, prepare_jax_mm_embeds,
+    flatten_pad_mm_embeds, merge_multimodal_embeddings,
     sanity_check_mm_encoder_outputs)
 
 # --- Tests for sanity_check_mm_encoder_outputs ---
@@ -213,26 +213,26 @@ def test_merge_mm_embeds_count_too_many_no_raise(placeholder_id, base_embeds):
             f"Did not expect an exception, but got {type(e).__name__}: {e}")
 
 
-# --- Tests for prepare_jax_mm_embeds ---
+# --- Tests for flatten_pad_mm_embeds ---
 
 
-def test_prepare_jax_mm_embeds_none_input():
+def test_flatten_pad_mm_embeds_none_input():
     """Tests that None input returns None."""
-    assert prepare_jax_mm_embeds(None, target_pad_len=10) is None
+    assert flatten_pad_mm_embeds(None, target_pad_len=10) is None
 
 
-def test_prepare_jax_mm_embeds_empty_list():
+def test_flatten_pad_mm_embeds_empty_list():
     """Tests that an empty list returns None."""
-    assert prepare_jax_mm_embeds([], target_pad_len=10) is None
+    assert flatten_pad_mm_embeds([], target_pad_len=10) is None
 
 
-def test_prepare_jax_mm_embeds_empty_arrays():
+def test_flatten_pad_mm_embeds_empty_arrays():
     """Tests that a list of empty arrays returns None."""
     empty_embeds = [jnp.empty((0, 128))]
-    assert prepare_jax_mm_embeds(empty_embeds, target_pad_len=10) is None
+    assert flatten_pad_mm_embeds(empty_embeds, target_pad_len=10) is None
 
 
-def test_prepare_jax_mm_embeds_with_padding():
+def test_flatten_pad_mm_embeds_with_padding():
     """Tests flattening and padding of valid multimodal embeddings."""
     embeds = [
         jnp.ones((2, 128), dtype=jnp.float32),
@@ -240,7 +240,7 @@ def test_prepare_jax_mm_embeds_with_padding():
     ]
     target_pad_len = 8
 
-    result = prepare_jax_mm_embeds(embeds, target_pad_len=target_pad_len)
+    result = flatten_pad_mm_embeds(embeds, target_pad_len=target_pad_len)
 
     assert result is not None
     assert result.shape == (8, 128)
@@ -254,7 +254,7 @@ def test_prepare_jax_mm_embeds_with_padding():
                                   np.zeros((3, 128), dtype=np.float32))
 
 
-def test_prepare_jax_mm_embeds_exact_length():
+def test_flatten_pad_mm_embeds_exact_length():
     """Tests behavior when the flattened array exactly matches the target length."""
     embeds = [
         jnp.ones((2, 128), dtype=jnp.float32),
@@ -262,7 +262,7 @@ def test_prepare_jax_mm_embeds_exact_length():
     ]
     target_pad_len = 5
 
-    result = prepare_jax_mm_embeds(embeds, target_pad_len=target_pad_len)
+    result = flatten_pad_mm_embeds(embeds, target_pad_len=target_pad_len)
 
     assert result is not None
     assert result.shape == (5, 128)

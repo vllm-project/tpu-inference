@@ -177,7 +177,7 @@ def merge_multimodal_embeddings(
     )
 
 
-def prepare_jax_mm_embeds(mm_embeds: list[jax.Array] | None,
+def flatten_pad_mm_embeds(mm_embeds: list[jax.Array] | None,
                           target_pad_len: int) -> jax.Array | None:
     if mm_embeds is None or len(mm_embeds) == 0:
         return None

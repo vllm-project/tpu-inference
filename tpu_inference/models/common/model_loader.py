@@ -35,7 +35,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.common.interface import (ModelInterface,
                                                    MultiModalInterface)
 from tpu_inference.models.jax.utils.multi_modal_utils import \
-    prepare_jax_mm_embeds
+    flatten_pad_mm_embeds
 from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
     load_random_weights_into_qwix_abstract_model,
@@ -380,7 +380,7 @@ def get_flax_model(
                             input_ids,
                             mm_embeds=None,
                             is_multimodal=None):
-        mm_embeds = prepare_jax_mm_embeds(mm_embeds,
+        mm_embeds = flatten_pad_mm_embeds(mm_embeds,
                                           target_pad_len=input_ids.shape[0])
         return jitted_embed_input_ids(graphdef,
                                       state,
