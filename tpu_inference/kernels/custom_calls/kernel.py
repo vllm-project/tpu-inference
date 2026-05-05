@@ -1,3 +1,5 @@
+import bisect
+from sympy import divisors
 import jax
 import jax.experimental.pallas as pl
 import jax.experimental.pallas.tpu as pltpu
@@ -40,6 +42,20 @@ def xpose_full(input, *, transpose_axes):
         name=scope_name
     )(input)
 
+def prev_closest_divisor(number: int, divider: int) -> int:
+    """
+    Finds the smallest divisor of 'number' that is <= 'divider'.
+    """
+    if divider < 1:
+        return 1
+        
+    all_divisors = divisors(number)
+    idx = bisect.bisect_right(all_divisors, divider)
+    if idx > 0:
+        return all_divisors[idx - 1]
+        
+    raise ValueError(f"Could not find a next closest divisor for number={number} and divider={divider}.")
+
 
 def get_reshape_dimension(shape, reshape_axes, dtype=jnp.float32):
     input_shape_struct = jax.ShapeDtypeStruct(shape, dtype)
@@ -78,7 +94,7 @@ def pin_vmem_custom_call(input_tensor, num_scalars=0):
                 input_tensor.shape, input_tensor.dtype),
         ],
         name="prefetch",
-    ))(input_tensor)[0]
+    ))(input_tensor)
 
 @jax.jit(
     static_argnames=['transpose_axes',
@@ -133,7 +149,7 @@ def xpose_pipeline(input, *, transpose_axes, n_tile=128, m_tile=128, parallel_ax
     ]
     shape_str = "x".join([str(i) for i in input.shape])
     transpose_str = "x".join([str(i) for i in transpose_axes])
-    scope_name = f"xpose_full_shape_{shape_str}_xpose_{transpose_str}_n_tile_{n_tile}_m_tile_{m_tile}"
+    scope_name = f"xpose_full_shape_{shape_str}_xpose_{transpose_str}_n_tile_{n_tile}_m_tile_{m_tile}_pa_{parallel_axis}_pi_{pipeline_axis}"
     return pl.pallas_call(
         xpose_kernel,
         grid=grid,

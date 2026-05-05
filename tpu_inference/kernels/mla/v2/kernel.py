@@ -23,7 +23,9 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from tpu_inference.kernels.custom_calls.kernel import (pin_vmem_custom_call, xpose_full, xpose_pipeline)
+from tpu_inference.kernels.custom_calls.kernel import (pin_vmem_custom_call,
+                                                       xpose_pipeline,
+                                                       prev_closest_divisor)
 
 
 def cdiv_on_kv_packing(a, kv_packing):
@@ -1389,16 +1391,14 @@ def prepare_outputs(
     actual_head_dim: int,
 ):
     # Physical transpose: (T, N, D) -> (N, T, D), pipelined over T
+    # out = pin_vmem_custom_call(xpose_pipeline(out,
     out = xpose_pipeline(out,
                          transpose_axes=(1, 0, 2),
-                         n_tile=out.shape[0],
+                         # Tile to maximum of 160 or nearest clean divisor
+                         # of the number of tokens.
+                         n_tile=min(160, prev_closest_divisor(
+                                    out.shape[0], 160)),
                          m_tile=64)[0]
-    #  parallel_axis=1, pipeline_axis=0)[0] # [num_q_heads, max_num_tokens, head_dim]
-    # out = pin_vmem_custom_call(xpose_full(out, transpose_axes=(1, 0, 2))[0])
-    # out = pin_vmem_custom_call(xpose_pipeline(out,
-    #                      transpose_axes=(1, 0, 2),
-    #                      n_tile=out.shape[0],
-    #                      m_tile=64)[0])
     return out[:actual_num_q_heads, :, :actual_head_dim]
 
 
