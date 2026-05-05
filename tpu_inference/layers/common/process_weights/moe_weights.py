@@ -18,6 +18,7 @@ import jax.numpy as jnp
 from jax.experimental.layout import Layout, with_layout_constraint
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.tensor import Tensor
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 import tpu_inference.envs as envs
 from tpu_inference.layers.common.moe import MoEBackend
@@ -673,21 +674,69 @@ def process_fp8_moe_weights(
                                   if requant_block_size_from_env else None)
 
         moe_logging_str = (
-            "[MoE requantization]: re-quantizing MoE weights to "
-            f"{desired_quant_dtype}")
+            f"[MoE requantization]: re-quantizing MoE weights to {desired_quant_dtype}"
+        )
         if requant_block_size is not None:
             moe_logging_str += f" with block size {requant_block_size}"
-        logger.info(moe_logging_str)
+        logger.info_once(moe_logging_str)
 
         # Dequantize fp8 2d block quantized weights into fp32.
         w13_weight = dequantize_tensor(w13_weight,
-                                       w13_weight_scale, (1, 2),
-                                       jnp.float32,
-                                       block_size=weight_block_size)
+                                        w13_weight_scale, (1, 2),
+                                        jnp.float32,
+                                        block_size=weight_block_size)
         w2_weight = dequantize_tensor(w2_weight,
-                                      w2_weight_scale, (1, 2),
-                                      jnp.float32,
-                                      block_size=weight_block_size)
+                                        w2_weight_scale, (1, 2),
+                                        jnp.float32,
+                                        block_size=weight_block_size)
+
+        w13_interleave = activation == "swigluoai"
+        w13_reorder_size = get_mesh_shape_product(mesh,
+                                                ShardingAxisName.MLP_TENSOR)
+        weights = quantize_moe_weights(
+            FusedMoEWeights(
+                w13_weight=w13_weight,
+                w13_weight_scale=None,
+                w13_bias=None,
+                w2_weight=w2_weight,
+                w2_weight_scale=None,
+                w2_bias=None,
+            ),
+            desired_quant_dtype,
+            requant_block_size,
+        )
+    return process_moe_weights(
+        weights,
+        moe_backend=moe_backend,
+        w13_reorder_size=w13_reorder_size,
+        w13_interleave=w13_interleave,
+    )
+
+
+@jax.jit(static_argnames=('activation', 'moe_backend'))
+def process_unquantized_moe_weights(
+    *,
+    moe_backend: MoEBackend,
+    activation: MoEActivation,
+    w13_weight: jax.Array,
+    w13_bias: jax.Array | None,
+    w2_weight: jax.Array,
+    w2_bias: jax.Array | None,
+) -> FusedMoEWeights:
+    """Jit'ed version to process unquantized moe weights. See `process_moe_weights` for details.
+    """
+    if desired_quant_dtype_from_env := envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
+        desired_quant_dtype = to_jax_dtype(desired_quant_dtype_from_env)
+        requant_block_size = None
+        if requant_block_size_from_env := envs.MOE_REQUANTIZE_BLOCK_SIZE:
+            requant_block_size = (int(requant_block_size_from_env)
+                                  if requant_block_size_from_env else None)
+        moe_logging_str = (
+            f"[MoE requantization]: re-quantizing MoE weights to {desired_quant_dtype}"
+        )
+        if requant_block_size is not None:
+            moe_logging_str += f" with block size {requant_block_size}"
+        logger.info_once(moe_logging_str)
 
         weights = quantize_moe_weights(
             FusedMoEWeights(
@@ -701,11 +750,23 @@ def process_fp8_moe_weights(
             desired_quant_dtype,
             requant_block_size,
         )
+    else:
+        weights = FusedMoEWeights(
+            w13_weight=w13_weight,
+            w13_weight_scale=None,
+            w13_bias=w13_bias,
+            w2_weight=w2_weight,
+            w2_weight_scale=None,
+            w2_bias=w2_bias,
+        )
+
+    w13_interleave = activation == MoEActivation.SWIGLUOAI
+    w13_reorder_size = get_mesh_shape_product(jax.sharding.get_mesh(),
+                                              ShardingAxisName.MLP_TENSOR)
 
     return process_moe_weights(
         weights,
         moe_backend=moe_backend,
         w13_reorder_size=w13_reorder_size,
         w13_interleave=w13_interleave,
-        disable_weight_requantization=envs.DISABLE_WEIGHT_REQUANTIZATION,
     )
