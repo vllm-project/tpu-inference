@@ -32,11 +32,12 @@ inside gmm_v2 (block_size=16 < mxu_column_size=128 auto-trips the
 should_dequantize_before_matmul branch).
 """
 
-from typing import Optional, Union
+from typing import Optional, Sequence, Union
 
 import jax
 import jax.numpy as jnp
 import torch
+from jax.sharding import Mesh
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.attention import Attention
@@ -51,6 +52,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4Config, ModelOptNvFp4FusedMoE, ModelOptNvFp4LinearMethod)
 from vllm.model_executor.utils import set_weight_attrs
 
+from tpu_inference.layers.common.linear import sharded_quantized_matmul
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
@@ -60,6 +62,8 @@ from tpu_inference.layers.common.process_weights.moe_weights import (
 from tpu_inference.layers.common.quant_methods import NVFP4
 from tpu_inference.layers.common.quantization import u8_unpack_e2m1
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.utils import \
+    slice_sharded_tensor_for_concatenation
 from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import (
@@ -107,15 +111,12 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
     """NVFP4 linear for TPU.
 
     Reuses upstream ModelOptNvFp4LinearMethod.create_weights for parameter
-    registration. process_weights_after_loading dequants FP4 -> bf16 using
-    the original two-level scales. apply is inherited from
-    VllmUnquantizedLinearMethod (plain bf16 matmul).
+    registration. process_weights_after_loading unpacks FP4 and computes
+    block scales. apply routes to vllm_linear_apply for OTF dequantization.
     """
 
     def __init__(self, quant_config: 'VllmNvfp4Config',
                  linear_config: VllmQuantLinearConfig):
-        # Skip ModelOptNvFp4LinearMethod.__init__ (calls GPU cutlass
-        # init_nvfp4_linear_kernel). Initialize the unquantized base instead.
         VllmUnquantizedLinearMethod.__init__(self, linear_config)
         self.quant_config = quant_config
 
@@ -126,15 +127,6 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
             self, layer, input_size_per_partition, output_partition_sizes,
             input_size, output_size, params_dtype, **extra_weight_attrs)
 
-        # For fused-QKV layers, upstream registers `input_scale` and
-        # `weight_scale_2` as `PerTensorScaleParameter` with shape
-        # `(len(output_partition_sizes),)`. vLLM's QKVParallelLinear
-        # weight_loader expects the loaded scalar to match this shape and
-        # asserts (linear.py: `assert param_data.shape == loaded_weight.shape`),
-        # which fails because the checkpoint provides a single scalar per
-        # shard. Override the loader to fill the slot regardless of
-        # the loaded weight's shape (we only use the max in
-        # process_weights_after_loading anyway).
         def scalar_weight_loader(param, loaded_weight, *args, **kwargs):
             value = (loaded_weight.item() if loaded_weight.numel() == 1 else
                      loaded_weight.max().item())
@@ -142,18 +134,12 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
 
         for name in ("input_scale", "weight_scale_2"):
             if hasattr(layer, name):
-                # Direct assignment: upstream's constructor already attached
-                # a weight_loader, so set_weight_attrs would assert.
                 getattr(layer, name).weight_loader = scalar_weight_loader
 
     def process_weights_after_loading(self, layer):
         assert isinstance(layer, LinearBase)
         weight_packed = t2j(layer.weight, use_dlpack=False)
         weight_scale = t2j(layer.weight_scale, use_dlpack=False)
-        # Upstream registers weight_scale_2 / input_scale as
-        # PerTensorScaleParameter of shape (num_partitions,). Take max so a
-        # fused-QKV layer with differing per-projection globals collapses to
-        # one scalar (matches upstream's process_weights_after_loading).
         weight_global_scale = jnp.max(
             t2j(layer.weight_scale_2, use_dlpack=False))
 
@@ -171,22 +157,23 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
             bias = None
 
         @jax.jit
-        def _dequant_to_bf16(weight_packed, weight_scale, weight_global_scale):
+        def _unpack_and_scale(weight_packed, weight_scale,
+                              weight_global_scale):
             fp4 = u8_unpack_e2m1(weight_packed)  # (O, I) float4_e2m1fn
-            fp4_fp32 = fp4.astype(jnp.float32)
+
+            # Combine FP8 block scale & FP32 global scale
             block_scale = weight_scale.astype(
                 jnp.float32) * weight_global_scale  # (O, I/group)
-            group_size = fp4.shape[-1] // block_scale.shape[-1]
-            scaled = fp4_fp32.reshape(fp4.shape[0], block_scale.shape[-1],
-                                      group_size) * block_scale[:, :, None]
-            return scaled.reshape(fp4.shape).astype(jnp.bfloat16)
 
-        weight_bf16 = _dequant_to_bf16(weight_packed, weight_scale,
-                                       weight_global_scale)
+            return fp4, block_scale
+
+        weight_fp4, block_scale = _unpack_and_scale(weight_packed,
+                                                    weight_scale,
+                                                    weight_global_scale)
 
         weights = process_linear_weights(
-            LinearWeights(weight=weight_bf16,
-                          weight_scale=None,
+            LinearWeights(weight=weight_fp4,
+                          weight_scale=block_scale,
                           zero_point=None,
                           bias=bias),
             fused=self.linear_config.fuse_matmuls,
@@ -204,14 +191,81 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
 
         if self.linear_config.fuse_matmuls:
             layer.weight = Parameter(weights.weight, requires_grad=False)
+            layer.weight_scale = Parameter(weights.weight_scale,
+                                           requires_grad=False)
             if bias is not None:
                 layer.bias = Parameter(weights.bias, requires_grad=False)
         else:
             layer.weight = to_parameter_list(weights.weight)
+            layer.weight_scale = to_parameter_list(weights.weight_scale)
             if bias is not None:
                 layer.bias = to_parameter_list(weights.bias)
 
-    # apply() inherited from VllmUnquantizedLinearMethod.
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        with jax.named_scope(layer._get_name()):
+            x_jax = jax_view(x)
+            bias_jax = jax_view(
+                bias) if bias is not None and not layer.skip_bias_add else None
+            if self.linear_config.fuse_matmuls:
+                weight_jax = jax_view(layer.weight)
+                weight_scale_jax = jax_view(layer.weight_scale)
+                out = self._apply_fused(x_jax, weight_jax, weight_scale_jax,
+                                        bias_jax)
+            else:
+                assert isinstance(layer.weight, torch.nn.ParameterList)
+                assert isinstance(layer.weight_scale, torch.nn.ParameterList)
+                # jax_view cannot handle ParameterList directly, so we explicitly
+                # convert them to list of jax.Array.
+                weight_and_scale = [
+                    (jax_view(w), jax_view(s))
+                    for w, s in zip(layer.weight, layer.weight_scale)
+                ]
+                if bias is not None and not layer.skip_bias_add:
+                    assert isinstance(bias, torch.nn.ParameterList)
+                    bias_jax = [jax_view(b) for b in bias]
+                out = self._apply_split(x_jax, weight_and_scale, bias_jax)
+            return torch_view(out)
+
+    def _apply_fused(self,
+                     x: jax.Array,
+                     weight_jax: jax.Array,
+                     weight_scale_jax: jax.Array,
+                     bias: Optional[jax.Array] = None) -> jax.Array:
+
+        outs = sharded_quantized_matmul(x,
+                                        weight_jax,
+                                        weight_scale_jax,
+                                        self.linear_config.weight_sharding,
+                                        mesh=self.linear_config.mesh)
+
+        if bias is not None:
+            outs += bias
+        outs = slice_sharded_tensor_for_concatenation(
+            outs, self.linear_config.output_sizes, self.linear_config.n_shards)
+        return jnp.concatenate(outs, axis=-1)
+
+    def _apply_split(self,
+                     x: jax.Array,
+                     weight_and_scale: Sequence[tuple[jax.Array, jax.Array]],
+                     bias: Optional[Sequence[jax.Array]] = None,
+                     mesh: Optional[Mesh] = None) -> jax.Array:
+
+        outs = []
+        for i, (weight, weight_scale) in enumerate(weight_and_scale):
+
+            out = sharded_quantized_matmul(x,
+                                           weight,
+                                           weight_scale,
+                                           self.linear_config.weight_sharding,
+                                           mesh=mesh)
+
+            if bias is not None:
+                out += bias[i]
+            outs.append(out)
+        return jnp.concatenate(outs, axis=-1)
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +415,7 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
                                            requires_grad=False)
         layer.w2_weight_scale = Parameter(weights.w2_weight_scale,
                                           requires_grad=False)
+
         if self.moe.has_bias:
             layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
             layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)

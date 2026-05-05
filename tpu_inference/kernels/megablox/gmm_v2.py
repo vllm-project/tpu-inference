@@ -378,7 +378,7 @@ def inner_kernel(
 
         # This should only be taken in the case where we don't requantize
         # the scales and thus we need to dequantize inside VMEM to avoid small
-        # contracting dimensions.
+        # contracting dimmensions
         if cfgs.rhs_cfgs.should_dequantize_before_matmul:
             rhs_qbs = cfgs.rhs_cfgs.quant_block_size
             tiled_rhs_scale = tiled_rhs_ref.get_scale().astype(acc_ref.dtype)
@@ -1119,8 +1119,7 @@ def make_gmm_configs(
     )
 
     lhs_q_dtype = None
-    if (maybe_quantize_lhs and rhs_quant_dtype is not None
-            and not rhs_cfgs.should_dequantize_before_matmul):
+    if maybe_quantize_lhs and rhs_quant_dtype is not None and not rhs_cfgs.should_dequantize_before_matmul:
         # Choose lhs quantization dtype based on TPU hardware support.
         is_rhs_float = jnp.issubdtype(rhs_quant_dtype, jnp.floating)
         is_rhs_4bits = jax.dtypes.itemsize_bits(rhs_quant_dtype) == 4

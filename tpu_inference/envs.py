@@ -296,6 +296,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # A lower rate can speedup expert selection at the risk of higher accuracy loss.
     "MOE_APPROX_TOPK_RECALL_TARGET":
     lambda: float(os.getenv("MOE_APPROX_TOPK_RECALL_TARGET", "0.9")),
+    # NVFP4: skip the dequant->requant round trip for linear weights and
+    # consume the original packed FP4 + per-block FP8 scale at matmul time.
     "DISABLE_WEIGHT_REQUANTIZATION":
     env_bool("DISABLE_WEIGHT_REQUANTIZATION", default=False),
 }

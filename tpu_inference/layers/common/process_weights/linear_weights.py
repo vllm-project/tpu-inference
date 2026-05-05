@@ -20,7 +20,6 @@ from jax._src import mesh as meshlib
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn import ParameterList
 from torch.nn.parameter import Parameter
-from torchax.interop import jax_view
 from torchax.tensor import Tensor
 
 from tpu_inference.layers.common.utils import (
@@ -163,10 +162,11 @@ def shard_linear_weights(
     bias_sharding = NamedSharding(mesh, bias_p_spec)
     # If weight_scale is a list (split weights), we check the first element.
     sample_scale = weights.weight_scale[0] if isinstance(
-        weights.weight_scale, list
-        | tuple) and weights.weight_scale else jax_view(weights.weight_scale)
+        weights.weight_scale,
+        list) and weights.weight_scale else weights.weight_scale
 
-    if isinstance(sample_scale, jax.Array) and len(sample_scale.shape) == 3:
+    if isinstance(sample_scale,
+                  (jax.Array, Tensor)) and len(sample_scale.shape) == 3:
         num_blocks = sample_scale.shape[0]
         if len(weight_p_spec) != 2:
             raise ValueError(
@@ -177,7 +177,7 @@ def shard_linear_weights(
         out_axis = weight_p_spec[0]
         weight_scale_p_spec = P(in_axis, None, out_axis)
         weight_scale_sharding = NamedSharding(mesh, weight_scale_p_spec)
-    elif isinstance(sample_scale, jax.Array) and len(
+    elif isinstance(sample_scale, (jax.Array, Tensor)) and len(
             sample_scale.shape) == 2 and not per_tensor:
         # In case of 2D block-wise quantization scales [out_blocks, in_blocks],
         # we should follow the weight sharding (also 2D)
