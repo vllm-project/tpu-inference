@@ -286,6 +286,7 @@ class CompilationManager:
                 is_first_rank,
                 is_last_rank,
                 num_tokens=num_tokens,
+                num_reqs=num_reqs,
             )
 
     def _precompile_substitute_placeholder_token(self) -> None:
