@@ -27,7 +27,10 @@ export PRIORITY_KERNEL_TUNING=-1
 upload_with_priority() {
   local yaml_file=$1
   local JOB_PRIORITY=$2
+
+
   echo "--- :pipeline: Uploading $yaml_file with priority ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
+  cat "$yaml_file"
   { 
     echo "priority: ${JOB_PRIORITY:-PRIORITY_DEFAULT}"; 
     cat "$yaml_file"; 
