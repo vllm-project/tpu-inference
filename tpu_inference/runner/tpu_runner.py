@@ -127,25 +127,10 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         next_tokens_cpu = np.asarray(jax.device_get(self._next_tokens))
-        if self.logits_indices_selector is not None:
-            # Map tokens back to the original order.
-            # If multiple tokens per req, only take the last one as the next token.
-            if self.num_logits_per_req is not None:
-                cu_num_logits = [0] + np.cumsum(
-                    self.num_logits_per_req).tolist()
-                last_logits_indices = [
-                    self.logits_indices_selector[cu_num_logits[i + 1] - 1]
-                    for i in range(self._num_reqs)
-                ]
-                selected_token_ids = np.expand_dims(
-                    next_tokens_cpu[last_logits_indices], 1)
-            else:
-                next_tokens_cpu = next_tokens_cpu[self.logits_indices_selector]
-                selected_token_ids = np.expand_dims(
-                    next_tokens_cpu[:self._num_reqs], 1)
-        else:
-            selected_token_ids = np.expand_dims(next_tokens_cpu[:self._num_reqs],
-                                                1)
+        selected_token_ids = _extract_last_tokens(next_tokens_cpu,
+                                                  self._num_reqs,
+                                                  self.logits_indices_selector,
+                                                  self.num_logits_per_req)
 
         valid_sampled_token_ids = selected_token_ids.tolist()
         for i in self._discard_sampled_tokens_req_indices:
@@ -327,6 +312,32 @@ def _separate_logprobs(
         cu_num_generated_tokens=np.arange(num_reqs + 1, dtype=np.int32),
     )
     return sampling_result, prompt_logprobs_dict
+
+
+def _extract_last_tokens(
+    tokens: np.ndarray,
+    num_reqs: int,
+    logits_indices_selector: Optional[List[int]] = None,
+    num_logits_per_req: Optional[List[int]] = None,
+) -> np.ndarray:
+    """Extracts the last (next) token for each request from flattened tokens.
+
+    Handles reordering via selector and variable lengths via num_logits_per_req.
+    """
+    if logits_indices_selector is not None:
+        if num_logits_per_req is not None:
+            cu_num_logits = [0] + np.cumsum(num_logits_per_req).tolist()
+            last_logits_indices = [
+                logits_indices_selector[cu_num_logits[i + 1] - 1]
+                for i in range(num_reqs)
+            ]
+            selected_token_ids = tokens[last_logits_indices]
+        else:
+            selected_token_ids = tokens[logits_indices_selector[:num_reqs]]
+    else:
+        selected_token_ids = tokens[:num_reqs]
+
+    return np.expand_dims(selected_token_ids, 1)
 
 
 class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
@@ -1179,23 +1190,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if spec_decode_metadata is None:
             next_tokens = np.asarray(jax.device_get(next_tokens))
             # Map tokens back to the pre-dp shuffling order
-            if logits_indices_selector is not None:
-                # Map tokens back to the original order.
-                # If multiple tokens per req, only take the last one as the next token.
-                if num_logits_per_req is not None:
-                    cu_num_logits = [0] + np.cumsum(num_logits_per_req).tolist()
-                    last_logits_indices = [
-                        logits_indices_selector[cu_num_logits[i + 1] - 1]
-                        for i in range(num_reqs)
-                    ]
-                    selected_token_ids = np.expand_dims(
-                        next_tokens[last_logits_indices], 1)
-                else:
-                    next_tokens = next_tokens[logits_indices_selector]
-                    selected_token_ids = np.expand_dims(next_tokens[:num_reqs],
-                                                        1)
-            else:
-                selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
+            selected_token_ids = _extract_last_tokens(next_tokens, num_reqs,
+                                                      logits_indices_selector,
+                                                      num_logits_per_req)
             valid_sampled_token_ids = selected_token_ids.tolist()
         else:
             valid_sampled_token_ids = self.rejection_sampler.parse_output(
