@@ -1156,15 +1156,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logprobs_lists = None
 
         if self.speculative_config:
-            with self.maybe_forbid_compile, jax.set_mesh(self.mesh):
-                self.speculative_decoding_manager.propose_draft_token_ids(
-                    valid_sampled_token_ids,
-                    aux_hidden_states,
-                    attn_metadata,
-                    spec_decode_metadata,
-                    scheduler_output,
-                    input_ids,
-                )
+            self.speculative_decoding_manager.propose_draft_token_ids(
+                valid_sampled_token_ids,
+                aux_hidden_states,
+                attn_metadata,
+                spec_decode_metadata,
+                scheduler_output,
+                input_ids,
+            )
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,

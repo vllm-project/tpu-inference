@@ -208,6 +208,7 @@ def _test_performance_helper(
             enable_prefix_caching=False,
             tensor_parallel_size=_get_tensor_parallel_size(),
             model_loader_extra_config={"enable_weights_track": False},
+            download_dir="/mnt/pd",
             async_scheduling=0)
 
         start_time = time.time()
@@ -229,6 +230,7 @@ def _test_performance_helper(
             enable_prefix_caching=False,
             model_loader_extra_config={"enable_weights_track": False},
             disable_log_stats=False,
+            download_dir="/mnt/pd",
             async_scheduling=0)
 
         start_time = time.time()
