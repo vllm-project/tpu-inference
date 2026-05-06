@@ -227,7 +227,8 @@ def get_batch_composition_stats(
         num_scheduled_tokens_per_req_list.append(num_scheduled_for_req)
 
         # This is the number of tokens already processed for this request (before this step)
-        num_already_computed = num_computed_tokens_per_req[i]
+        num_already_computed = int(
+            num_computed_tokens_per_req[i])  # Cast from np.int32
         min_kv_len = min(min_kv_len, num_already_computed)
 
         if num_already_computed == 0:
