@@ -36,6 +36,7 @@ from tpu_inference.models.jax.utils.weight_utils import (
 modeling_flax_utils = FlaxUtils()
 logger = init_logger(__name__)
 
+
 @dataclass(kw_only=True)
 class CombineExperts(nnx.Module):
     """Combines expert outputs with router weights.
