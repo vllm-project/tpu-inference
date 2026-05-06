@@ -15,9 +15,38 @@
 import argparse
 import json
 import os
+import re
 import sys
+from typing import Any, Dict
 
 import yaml
+
+
+def clean_key_string(key: str) -> str:
+    # r'[^a-zA-Z0-9/-]' matches anything NOT in the specified set
+    return re.sub(r'[^a-zA-Z0-9/-_]', '-', key)
+
+
+def extract_arg_from_command_options(case_data: Dict[str, Any],
+                                     target_arg: str) -> Any:
+    # Define the option sources to search in order
+    target_options = ["server_command_options", "client_command_options"]
+
+    for opt_key in target_options:
+        # Safely extract layer by layer (prevents AttributeError caused by None)
+        options = case_data.get(opt_key) or {}
+        args = options.get("args") or {}
+        current_value = args.get(target_arg)
+
+        # Check if the extracted value is valid (excluding None, or empty strings)
+        if current_value:
+            # Return immediately once a valid value is found (Return-Early pattern)
+            return current_value
+
+    # If the loop finishes without returning, no valid value was found. Raise an error.
+    raise ValueError(
+        f"Extraction failed! Could not find a valid '{target_arg}' in the "
+        f"{target_options} structures of case_data.")
 
 
 def create_benchmark_group(case_data,
@@ -31,8 +60,7 @@ def create_benchmark_group(case_data,
     file_basename = os.path.splitext(os.path.basename(file_path))[0]
 
     # Identify Case Name
-    model_name = case_data.get("server_command_options",
-                               {}).get("args", {}).get("model", "unknown")
+    model_name = extract_arg_from_command_options(case_data, "model")
     case_name = case_data.get("case_name", model_name)
 
     # Extract TPU types from the case data
@@ -40,7 +68,7 @@ def create_benchmark_group(case_data,
 
     # Merge Environment Variables (Global + Case Specific)
     combined_env = {**global_env, **case_data.get("env", {})}
-    safe_key = case_name.replace("/", "-").replace(" ", "-")
+    safe_key = clean_key_string(file_basename)
 
     # Construct the Step dictionary
     child_steps = []
@@ -54,12 +82,17 @@ def create_benchmark_group(case_data,
             case_parameter = f"{file_path}"
         else:
             step_env["TARGET_CASE_NAME"] = case_name
-            step_label = f"{agent} {case_name}"
+            step_label = f"{agent} {file_basename} {case_name}"
             case_parameter = f"{file_path} {case_name}"
+
+        # Define step key
+        step_safe_key = clean_key_string(step_label)
 
         child_steps.append({
             "label":
             step_label,
+            "key":
+            step_safe_key,
             "env":
             step_env,
             "agents": {
@@ -69,7 +102,7 @@ def create_benchmark_group(case_data,
             f"bash .buildkite/benchmark/scripts/run_job.sh {case_parameter}",
         })
 
-    return {"group": case_name, "key": safe_key, "steps": child_steps}
+    return {"group": file_basename, "key": safe_key, "steps": child_steps}
 
 
 def main():
