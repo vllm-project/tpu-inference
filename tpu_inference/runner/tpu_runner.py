@@ -164,51 +164,9 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                 cu_num_logits)
 
             # Separate prompt logprobs and sampling logprobs
-            if self.num_logits_per_req is not None:
-                # vLLM V1 expects self._model_runner_output.logprobs to be [num_reqs, max_logprobs+1]
-                # If we have multiple tokens, we need to extract the last one for each request
-                # and put the others into prompt_logprobs_dict.
-                sampling_logprob_token_ids = []
-                sampling_logprobs = []
-                sampling_token_ranks = []
-
-                req_ids = self._model_runner_output.req_ids
-                for i in range(self._num_reqs):
-                    start = cu_num_logits[i]
-                    end = cu_num_logits[i + 1]
-                    num_tokens = self.num_logits_per_req[i]
-
-                    # The last one is for sampling
-                    sampling_logprob_token_ids.append(
-                        materialized_logprobs.logprob_token_ids[end - 1])
-                    sampling_logprobs.append(
-                        materialized_logprobs.logprobs[end - 1])
-                    sampling_token_ranks.append(
-                        materialized_logprobs.sampled_token_ranks[end - 1])
-
-                    if num_tokens > 1:
-                        # Everything except the last one is prompt logprobs
-                        # Note: prompt logprobs usually corresponds to tokens [1...L]
-                        # and we compute logits for [0...L-1].
-                        self._model_runner_output.prompt_logprobs_dict[
-                            req_ids[i]] = LogprobsLists(
-                                logprob_token_ids=materialized_logprobs.
-                                logprob_token_ids[start:end - 1],
-                                logprobs=materialized_logprobs.
-                                logprobs[start:end - 1],
-                                sampled_token_ranks=materialized_logprobs.
-                                sampled_token_ranks[start:end - 1],
-                            )
-
-                self._model_runner_output.logprobs = LogprobsLists(
-                    logprob_token_ids=np.array(sampling_logprob_token_ids),
-                    logprobs=np.array(sampling_logprobs),
-                    sampled_token_ranks=np.array(sampling_token_ranks),
-                    cu_num_generated_tokens=np.arange(
-                        self._num_reqs + 1, dtype=np.int32),
-                )
-            else:
-                self._model_runner_output.logprobs = materialized_logprobs
+            self._model_runner_output.logprobs, self._model_runner_output.prompt_logprobs_dict = _separate_logprobs(
+                materialized_logprobs, self.num_logits_per_req,
+                self._model_runner_output.req_ids)
 
         if self._expert_indices is not None:
             expert_indices_cpu = np.asarray(
@@ -319,6 +277,59 @@ def _jax_logprobs_materialize(
         sampled_token_ranks=np.array(selected_token_ranks.tolist()),
         cu_num_generated_tokens=cu_num_generated_tokens,
     )
+
+
+def _separate_logprobs(
+    materialized_logprobs: LogprobsLists,
+    num_logits_per_req: Optional[List[int]],
+    req_ids: List[str],
+) -> Tuple[LogprobsLists, Dict[str, LogprobsLists]]:
+    """Separates flattened logprobs into sampling logprobs and prompt logprobs.
+
+    In scenarios like Chunked Prefill or Speculative Decoding, a single request
+    may produce multiple logprobs. This function extracts the last logprob for
+    sampling/decoding and puts the preceding ones into prompt_logprobs_dict.
+    """
+    if num_logits_per_req is None:
+        return materialized_logprobs, {}
+
+    sampling_logprob_token_ids = []
+    sampling_logprobs = []
+    sampling_token_ranks = []
+    prompt_logprobs_dict = {}
+
+    num_reqs = len(req_ids)
+    cu_num_logits = [0] + np.cumsum(num_logits_per_req).tolist()
+
+    for i in range(num_reqs):
+        start = cu_num_logits[i]
+        end = cu_num_logits[i + 1]
+        num_tokens = num_logits_per_req[i]
+
+        # The last one is for sampling
+        sampling_logprob_token_ids.append(
+            materialized_logprobs.logprob_token_ids[end - 1])
+        sampling_logprobs.append(materialized_logprobs.logprobs[end - 1])
+        sampling_token_ranks.append(
+            materialized_logprobs.sampled_token_ranks[end - 1])
+
+        if num_tokens > 1:
+            # Everything except the last one is prompt logprobs
+            prompt_logprobs_dict[req_ids[i]] = LogprobsLists(
+                logprob_token_ids=materialized_logprobs.logprob_token_ids[
+                    start:end - 1],
+                logprobs=materialized_logprobs.logprobs[start:end - 1],
+                sampled_token_ranks=materialized_logprobs.sampled_token_ranks[
+                    start:end - 1],
+            )
+
+    sampling_result = LogprobsLists(
+        logprob_token_ids=np.array(sampling_logprob_token_ids),
+        logprobs=np.array(sampling_logprobs),
+        sampled_token_ranks=np.array(sampling_token_ranks),
+        cu_num_generated_tokens=np.arange(num_reqs + 1, dtype=np.int32),
+    )
+    return sampling_result, prompt_logprobs_dict
 
 
 class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
@@ -1227,49 +1238,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 logprobs, logits_indices_selector, cu_num_logits)
 
             # Separate prompt logprobs and sampling logprobs
-            if num_logits_per_req is not None:
-                # vLLM V1 expects self._model_runner_output.logprobs to be [num_reqs, max_logprobs+1]
-                # If we have multiple tokens, we need to extract the last one for each request
-                # and put the others into prompt_logprobs_dict.
-                sampling_logprob_token_ids = []
-                sampling_logprobs = []
-                sampling_token_ranks = []
-
-                for i in range(num_reqs):
-                    start = cu_num_logits[i]
-                    end = cu_num_logits[i + 1]
-                    num_tokens = num_logits_per_req[i]
-
-                    # The last one is for sampling
-                    sampling_logprob_token_ids.append(
-                        materialized_logprobs.logprob_token_ids[end - 1])
-                    sampling_logprobs.append(
-                        materialized_logprobs.logprobs[end - 1])
-                    sampling_token_ranks.append(
-                        materialized_logprobs.sampled_token_ranks[end - 1])
-
-                    if num_tokens > 1:
-                        # Everything except the last one is prompt logprobs
-                        # Note: prompt logprobs usually corresponds to tokens [1...L]
-                        # and we compute logits for [0...L-1].
-                        prompt_logprobs_dict[req_ids[i]] = LogprobsLists(
-                            logprob_token_ids=materialized_logprobs.
-                            logprob_token_ids[start:end - 1],
-                            logprobs=materialized_logprobs.
-                            logprobs[start:end - 1],
-                            sampled_token_ranks=materialized_logprobs.
-                            sampled_token_ranks[start:end - 1],
-                        )
-
-                logprobs_lists = LogprobsLists(
-                    logprob_token_ids=np.array(sampling_logprob_token_ids),
-                    logprobs=np.array(sampling_logprobs),
-                    sampled_token_ranks=np.array(sampling_token_ranks),
-                    cu_num_generated_tokens=np.arange(num_reqs + 1,
-                                                      dtype=np.int32),
-                )
-            else:
-                logprobs_lists = materialized_logprobs
+            logprobs_lists, prompt_logprobs_dict_updates = _separate_logprobs(
+                materialized_logprobs, num_logits_per_req, req_ids)
+            prompt_logprobs_dict.update(prompt_logprobs_dict_updates)
         else:
             logprobs_lists = None
 
