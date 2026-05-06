@@ -309,57 +309,61 @@ class VllmModelWrapper:
             *args,
         ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
                 List[jax.Array], jax.Array, List[jax.Array], jax.Array]:
-            layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
-            lora_metadata = torch_view(lora_metadata)
-            with torchax.default_env(), set_vllm_model_wrapper_context(
-                    kv_caches=kv_caches,
-                    mesh=self.mesh,
-                    layer_name_to_kvcache_index=layer_name_to_kvcache_index,
-                    vllm_config=self.vllm_config), set_forward_context(
-                        attn_metadata=attn_metadata,
-                        vllm_config=self.vllm_config):
-                # We need to wrap args from jax land into TorchValue with
-                # torch_view in order to call the Torch function.
-                original_lora_metadata = replace_lora_metadata(
-                    self.model, lora_metadata, self.vllm_config.lora_config)
-                if not is_first_rank:
-                    intermediate_tensors = intermediate_tensors.to_torch()
-                output_from_torch = torch.func.functional_call(
-                    self.model,
-                    torch_view(params_and_buffers),
-                    kwargs={
-                        "input_ids": torch_view(input_ids),
-                        "positions": torch_view(input_positions),
-                        "intermediate_tensors": intermediate_tensors,
-                        "inputs_embeds": torch_view(input_embeds),
-                    },
-                    tie_weights=False,
-                )
-                replace_lora_metadata(self.model, original_lora_metadata,
-                                      self.vllm_config.lora_config)
-                vllm_model_wrapper_context = get_vllm_model_wrapper_context()
-                new_kv_caches = vllm_model_wrapper_context.kv_caches
-
-                expert_indices_list = getattr(vllm_model_wrapper_context,
-                                              "expert_indices_list", [])
-
-            # Wrap the output(hidden states or intermediate tensor)
-            # from torch land into a JaxValue for the jax code to consume.
-            aux_hidden_states = []
-            if not is_last_rank:
-                output = JaxIntermediateTensors.from_torch(output_from_torch)
-            else:
-                if self.vllm_config.speculative_config and self.vllm_config.speculative_config.method == "eagle3":
-                    output, aux_hidden_states = jax_view(output_from_torch)
+            import threading
+            if not hasattr(self, "_tracing_lock"):
+                self._tracing_lock = threading.Lock()
+            with self._tracing_lock:
+                layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
+                lora_metadata = torch_view(lora_metadata)
+                with torchax.default_env(), set_vllm_model_wrapper_context(
+                        kv_caches=kv_caches,
+                        mesh=self.mesh,
+                        layer_name_to_kvcache_index=layer_name_to_kvcache_index,
+                        vllm_config=self.vllm_config), set_forward_context(
+                            attn_metadata=attn_metadata,
+                            vllm_config=self.vllm_config):
+                    # We need to wrap args from jax land into TorchValue with
+                    # torch_view in order to call the Torch function.
+                    original_lora_metadata = replace_lora_metadata(
+                        self.model, lora_metadata, self.vllm_config.lora_config)
+                    if not is_first_rank:
+                        intermediate_tensors = intermediate_tensors.to_torch()
+                    output_from_torch = torch.func.functional_call(
+                        self.model,
+                        torch_view(params_and_buffers),
+                        kwargs={
+                            "input_ids": torch_view(input_ids),
+                            "positions": torch_view(input_positions),
+                            "intermediate_tensors": intermediate_tensors,
+                            "inputs_embeds": torch_view(input_embeds),
+                        },
+                        tie_weights=False,
+                    )
+                    replace_lora_metadata(self.model, original_lora_metadata,
+                                          self.vllm_config.lora_config)
+                    vllm_model_wrapper_context = get_vllm_model_wrapper_context()
+                    new_kv_caches = vllm_model_wrapper_context.kv_caches
+    
+                    expert_indices_list = getattr(vllm_model_wrapper_context,
+                                                  "expert_indices_list", [])
+    
+                # Wrap the output(hidden states or intermediate tensor)
+                # from torch land into a JaxValue for the jax code to consume.
+                aux_hidden_states = []
+                if not is_last_rank:
+                    output = JaxIntermediateTensors.from_torch(output_from_torch)
                 else:
-                    output = jax_view(output_from_torch)
-
-            if expert_indices_list:
-                import jax.numpy as jnp
-                expert_indices = jnp.stack(expert_indices_list, axis=0)
-            else:
-                expert_indices = None
-            return new_kv_caches, output, aux_hidden_states, expert_indices
+                    if self.vllm_config.speculative_config and self.vllm_config.speculative_config.method == "eagle3":
+                        output, aux_hidden_states = jax_view(output_from_torch)
+                    else:
+                        output = jax_view(output_from_torch)
+    
+                if expert_indices_list:
+                    import jax.numpy as jnp
+                    expert_indices = jnp.stack(expert_indices_list, axis=0)
+                else:
+                    expert_indices = None
+                return new_kv_caches, output, aux_hidden_states, expert_indices
 
         @jax.jit(
             donate_argnames=("kv_caches", ),
@@ -387,31 +391,35 @@ class VllmModelWrapper:
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
         ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array],
                    Optional[jax.Array]]:
-            layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
-            with torchax.default_env(), set_vllm_model_wrapper_context(
-                    kv_caches=kv_caches,
-                    mesh=self.mesh,
-                    layer_name_to_kvcache_index=layer_name_to_kvcache_index
-            ), set_forward_context(attn_metadata=attn_metadata,
-                                   vllm_config=self.vllm_config):
-                output_from_torch = torch.func.functional_call(
-                    self.model,
-                    torch_view(params_and_buffers),
-                    kwargs={
-                        "input_ids": torch_view(input_ids),
-                        "positions": torch_view(attn_metadata.input_positions),
-                        "intermediate_tensors": torch_view(hidden_states),
-                        "inputs_embeds": None,
-                    },
-                    tie_weights=False,
-                )
-                vllm_model_wrapper_context = get_vllm_model_wrapper_context()
-                new_kv_caches = vllm_model_wrapper_context.kv_caches
-
-            hidden_states, hidden_prenorm = output_from_torch
-            hidden_states = jax_view(hidden_states)
-            hidden_prenorm = jax_view(hidden_prenorm)
-            return new_kv_caches, hidden_states, [hidden_prenorm], None
+            import threading
+            if not hasattr(self, "_tracing_lock"):
+                self._tracing_lock = threading.Lock()
+            with self._tracing_lock:
+                layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
+                with torchax.default_env(), set_vllm_model_wrapper_context(
+                        kv_caches=kv_caches,
+                        mesh=self.mesh,
+                        layer_name_to_kvcache_index=layer_name_to_kvcache_index
+                ), set_forward_context(attn_metadata=attn_metadata,
+                                       vllm_config=self.vllm_config):
+                    output_from_torch = torch.func.functional_call(
+                        self.model,
+                        torch_view(params_and_buffers),
+                        kwargs={
+                            "input_ids": torch_view(input_ids),
+                            "positions": torch_view(attn_metadata.input_positions),
+                            "intermediate_tensors": torch_view(hidden_states),
+                            "inputs_embeds": None,
+                        },
+                        tie_weights=False,
+                    )
+                    vllm_model_wrapper_context = get_vllm_model_wrapper_context()
+                    new_kv_caches = vllm_model_wrapper_context.kv_caches
+    
+                hidden_states, hidden_prenorm = output_from_torch
+                hidden_states = jax_view(hidden_states)
+                hidden_prenorm = jax_view(hidden_prenorm)
+                return new_kv_caches, hidden_states, [hidden_prenorm], None
 
         return draft_step_fun if self.is_draft_model else step_fun
 
@@ -533,22 +541,26 @@ class VllmModelWrapper:
             hidden_states: jax.Array,
             lora_metadata,
         ) -> jax.Array:
-            lora_metadata = torch_view(lora_metadata)
-            with torchax.default_env(), set_vllm_model_wrapper_context(
-                    kv_caches=None, mesh=self.mesh):
-                original_lora_metadata = replace_lora_metadata(
-                    self.model, lora_metadata, self.vllm_config.lora_config)
-                logits = torch.func.functional_call(
-                    self.model,
-                    torch_view(params_and_buffers),
-                    kwargs={
-                        "hidden_state": torch_view(hidden_states),
-                    },
-                    tie_weights=False,
-                )
-                replace_lora_metadata(self.model, original_lora_metadata,
-                                      self.vllm_config.lora_config)
-            return jax_view(logits)
+            import threading
+            if not hasattr(self, "_tracing_lock"):
+                self._tracing_lock = threading.Lock()
+            with self._tracing_lock:
+                lora_metadata = torch_view(lora_metadata)
+                with torchax.default_env(), set_vllm_model_wrapper_context(
+                        kv_caches=None, mesh=self.mesh):
+                    original_lora_metadata = replace_lora_metadata(
+                        self.model, lora_metadata, self.vllm_config.lora_config)
+                    logits = torch.func.functional_call(
+                        self.model,
+                        torch_view(params_and_buffers),
+                        kwargs={
+                            "hidden_state": torch_view(hidden_states),
+                        },
+                        tie_weights=False,
+                    )
+                    replace_lora_metadata(self.model, original_lora_metadata,
+                                          self.vllm_config.lora_config)
+                return jax_view(logits)
 
         return compute_logits_func
 
@@ -560,20 +572,24 @@ class VllmModelWrapper:
                           ShardingAxisName.MLP_TENSOR))))
         def combine_hidden_states_func(params_and_buffers: Any,
                                        hidden_states: jax.Array) -> jax.Array:
-            with torchax.default_env(), set_vllm_model_wrapper_context(
-                    kv_caches=None, mesh=self.mesh):
-                logits = torch.func.functional_call(
-                    self.model,
-                    torch_view(params_and_buffers),
-                    kwargs={
-                        "call_method": "combine_hidden_states",
-                        "call_args": (),
-                        "call_kwargs": {
-                            "hidden_states": torch_view(hidden_states),
+            import threading
+            if not hasattr(self, "_tracing_lock"):
+                self._tracing_lock = threading.Lock()
+            with self._tracing_lock:
+                with torchax.default_env(), set_vllm_model_wrapper_context(
+                        kv_caches=None, mesh=self.mesh):
+                    logits = torch.func.functional_call(
+                        self.model,
+                        torch_view(params_and_buffers),
+                        kwargs={
+                            "call_method": "combine_hidden_states",
+                            "call_args": (),
+                            "call_kwargs": {
+                                "hidden_states": torch_view(hidden_states),
+                            },
                         },
-                    },
-                )
-            return jax_view(logits)
+                    )
+                return jax_view(logits)
 
         return combine_hidden_states_func
 

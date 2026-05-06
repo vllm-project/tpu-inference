@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -30,15 +31,16 @@ class VllmModelWrapperContext:
     expert_indices_list: List[jax.Array] = field(default_factory=list)
 
 
-_vllm_model_wrapper_context: Optional[VllmModelWrapperContext] = None
+_thread_local = threading.local()
 
 
 def get_vllm_model_wrapper_context() -> VllmModelWrapperContext:
-    assert _vllm_model_wrapper_context is not None, (
+    ctx = getattr(_thread_local, "context", None)
+    assert ctx is not None, (
         "VllmModelWrapperContext is not set. "
         "Please use `set_vllm_model_wrapper_context` to set the VllmModelWrapperContext."
     )
-    return _vllm_model_wrapper_context
+    return ctx
 
 
 @contextmanager
@@ -49,9 +51,8 @@ def set_vllm_model_wrapper_context(
     layer_name_to_kvcache_index: Dict[str, int] = None,
     vllm_config: Optional[VllmConfig] = None,
 ):
-    global _vllm_model_wrapper_context
-    prev_context = _vllm_model_wrapper_context
-    _vllm_model_wrapper_context = VllmModelWrapperContext(
+    prev_context = getattr(_thread_local, "context", None)
+    _thread_local.context = VllmModelWrapperContext(
         kv_caches=kv_caches,
         mesh=mesh,
         layer_name_to_kvcache_index=layer_name_to_kvcache_index,
@@ -61,4 +62,4 @@ def set_vllm_model_wrapper_context(
     try:
         yield
     finally:
-        _vllm_model_wrapper_context = prev_context
+        _thread_local.context = prev_context

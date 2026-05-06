@@ -13,11 +13,13 @@
 # limitations under the License.
 
 import time
+import concurrent.futures
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from vllm.forward_context import set_forward_context
 import vllm.envs as vllm_envs
 from jax.sharding import NamedSharding, PartitionSpec
 
@@ -58,7 +60,7 @@ class CompilationManager:
                                   -1)
                 jax.config.update("jax_persistent_cache_min_compile_time_secs",
                                   -1)
-
+        
     def _create_dummy_tensor(self,
                              shape: Tuple[int, ...],
                              dtype: Any,
@@ -260,12 +262,12 @@ class CompilationManager:
             is_first_rank,
             is_last_rank,
         ):
-            kv_caches, hidden_states, *_ = self.runner.model_fn(
-                state, kv_caches, input_ids, attention_metadata, inputs_embeds,
-                positions, layer_name_to_kvcache_index, lora_metadata,
-                intermediate_tensors, is_first_rank, is_last_rank)
-            self.runner.kv_caches = kv_caches
-            return hidden_states
+            with set_forward_context(attention_metadata, self.runner.vllm_config):
+                kv_caches, hidden_states, *_ = self.runner.model_fn(
+                    state, kv_caches, input_ids, attention_metadata, inputs_embeds,
+                    positions, layer_name_to_kvcache_index, lora_metadata,
+                    intermediate_tensors, is_first_rank, is_last_rank)
+            return hidden_states, kv_caches
 
         with self.runner.maybe_select_dummy_loras(
                 self.runner.lora_config, np.array([num_tokens],
@@ -337,48 +339,62 @@ class CompilationManager:
 
     def _precompile_backbone_text_only(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
-        for num_tokens in self.runner.num_tokens_paddings:
-            for num_reqs in self.runner.num_reqs_paddings:
-                dp_sharding = NamedSharding(
-                    self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
-                input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32,
-                                                    dp_sharding)
-                if self.runner.uses_mrope:
-                    mrope_sharding = NamedSharding(
-                        self.runner.mesh,
-                        PartitionSpec(None, ShardingAxisName.ATTN_DATA))
-                    positions = self._create_dummy_tensor(
-                        (3, num_tokens), jnp.int32, mrope_sharding)
-                else:
-                    positions = self._create_dummy_tensor((num_tokens, ),
-                                                        jnp.int32, dp_sharding)
-                is_first_rank = self.runner.is_first_rank
-                is_last_rank = self.runner.is_last_rank
-                if is_first_rank:
-                    intermediate_tensors = None
-                else:
-                    sharding = NamedSharding(
-                        self.runner.mesh,
-                        PartitionSpec(ShardingAxisName.ATTN_DATA, None))
-                    hidden_states = self._create_dummy_tensor(
-                        (num_tokens, hidden_size), jnp.bfloat16, sharding=sharding)
-                    residual = self._create_dummy_tensor((num_tokens, hidden_size),
-                                                        jnp.bfloat16,
-                                                        sharding=sharding)
-                    intermediate_tensors = JaxIntermediateTensors(
-                        tensors={
-                            "hidden_states": hidden_states,
-                            "residual": residual
-                        })
-                self._precompile_backbone_helper(
-                    f"worker{self.runner.rank} backbone",
-                    input_ids=input_ids,
-                    positions=positions,
-                    inputs_embeds=None,
-                    intermediate_tensors=intermediate_tensors,
-                    is_first_rank=is_first_rank,
-                    is_last_rank=is_last_rank,
-                    num_reqs=num_reqs)
+
+        def compile_for_shape(num_tokens: int, num_reqs: int) -> None:
+            dp_sharding = NamedSharding(
+                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
+            input_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32,
+                                                  dp_sharding)
+            if self.runner.uses_mrope:
+                mrope_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+                positions = self._create_dummy_tensor(
+                    (3, num_tokens), jnp.int32, mrope_sharding)
+            else:
+                positions = self._create_dummy_tensor((num_tokens, ),
+                                                      jnp.int32, dp_sharding)
+            is_first_rank = self.runner.is_first_rank
+            is_last_rank = self.runner.is_last_rank
+            if is_first_rank:
+                intermediate_tensors = None
+            else:
+                sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+                hidden_states = self._create_dummy_tensor(
+                    (num_tokens, hidden_size), jnp.bfloat16, sharding=sharding)
+                residual = self._create_dummy_tensor((num_tokens, hidden_size),
+                                                     jnp.bfloat16,
+                                                     sharding=sharding)
+                intermediate_tensors = JaxIntermediateTensors(
+                    tensors={
+                        "hidden_states": hidden_states,
+                        "residual": residual
+                    })
+            self._precompile_backbone_helper(
+                f"worker{self.runner.rank} backbone",
+                input_ids=input_ids,
+                positions=positions,
+                inputs_embeds=None,
+                intermediate_tensors=intermediate_tensors,
+                is_first_rank=is_first_rank,
+                is_last_rank=is_last_rank,
+                num_reqs=num_reqs)
+            logger.info(f"Compilation done for {num_tokens=} {num_reqs=}")
+
+        # Note: We use ThreadPoolExecutor instead of ProcessPoolExecutor because:
+        # 1. Local functions and JAX structures (e.g. Mesh, DeviceArrays) cannot be pickled.
+        # 2. JAX compilation (XLA) releases the Python GIL, meaning threads achieve true parallelism seamlessly.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futures = []
+            for num_tokens in self.runner.num_tokens_paddings:
+                for num_reqs in self.runner.num_reqs_paddings:
+                    futures.append(
+                        executor.submit(compile_for_shape, num_tokens, num_reqs)
+                    )
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
@@ -547,9 +563,14 @@ class CompilationManager:
                     self.runner.lora_config,
                     np.array([num_reqs], dtype=np.int32)):
                 lora_metadata = self.runner.lora_utils.extract_lora_metadata()
+                
+                def compute_logits_wrapper(state, hidden_states, lora_metadata):
+                    with set_forward_context(None, self.runner.vllm_config):
+                        return self.runner.compute_logits_fn(state, hidden_states, lora_metadata)
+
                 self._run_compilation(
                     f"worker{self.runner.rank} compute_logits",
-                    self.runner.compute_logits_fn,
+                    compute_logits_wrapper,
                     self.runner.state,
                     hidden_states,
                     lora_metadata,
@@ -918,11 +939,11 @@ class CompilationManager:
                 attention_metadata,
                 layer_name_to_kvcache_index,
             ):
-                kv_caches, hidden_states, _, _ = self.runner.drafter.model_fn(
-                    state, kv_caches, input_ids, draft_hidden_states,
-                    attention_metadata, layer_name_to_kvcache_index)
-                self.runner.kv_caches = kv_caches
-                return hidden_states
+                with set_forward_context(None, self.runner.vllm_config):
+                    kv_caches, hidden_states, _, _ = self.runner.drafter.model_fn(
+                        state, kv_caches, input_ids, draft_hidden_states,
+                        attention_metadata, layer_name_to_kvcache_index)
+                return hidden_states, kv_caches
 
             draft_hidden_states = self._create_dummy_tensor(
                 (num_tokens, draft_hidden_size), dtype,
