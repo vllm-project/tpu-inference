@@ -187,7 +187,7 @@ def moe_gmm_local(x: jax.Array, w1: jax.Array, w1_scale: jax.Array | None,
     chunk_size = max(lcm, (TARGET_SLOT_CHUNK_SIZE + lcm // 2) // lcm * lcm)
 
     use_sc = gather_reduce_sc.is_supported_by_sc_gather_reduce(
-        gmm1_res.shape[0], chunk_size, topk)
+        gmm1_res.shape[0], chunk_size) and topk == 8
 
     if batch_size <= chunk_size:
         # Path 3: No pipeline at all no kernel
