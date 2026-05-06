@@ -13,6 +13,11 @@
 # limitations under the License.
 
 import functools
+import math
+
+# Target chunk size of 2048 slots was found empirically to be optimal
+# for MoE workloads (e.g., Qwen) to hide ICI/DMA latency during AllReduce.
+TARGET_SLOT_CHUNK_SIZE = 2048
 from typing import Literal
 
 import jax
@@ -178,9 +183,8 @@ def moe_gmm_local(x: jax.Array, w1: jax.Array, w1_scale: jax.Array | None,
     reduction_axis = (ShardingAxisName.MLP_TENSOR
                       if parallelism == "tp" else ShardingAxisName.EXPERT)
 
-    import math
     lcm = (128 * topk) // math.gcd(128, topk)
-    chunk_size = max(lcm, (2048 + lcm // 2) // lcm * lcm)
+    chunk_size = max(lcm, (TARGET_SLOT_CHUNK_SIZE + lcm // 2) // lcm * lcm)
 
     use_sc = gather_reduce_sc.is_supported_by_sc_gather_reduce(
         gmm1_res.shape[0], chunk_size, topk)
