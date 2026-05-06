@@ -37,6 +37,7 @@
           "max-model-len": 2048,
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.9,
+          "additional-config": "{\"quantization\": { \"qwix\": { \"rules\": [{ \"module_path\": \".*\", \"weight_qtype\": \"float8_e4m3fn\", \"act_qtype\": \"float8_e4m3fn\"}]}}}",
           "block-size": 256
         }
       },
