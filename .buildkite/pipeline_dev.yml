@@ -68,4 +68,4 @@ steps:
         # Run offline inference with a small model.
         # --tensor-parallel-size 2: tp=1 is currently unsupported on tpu7x.
         # Customize --model, --max-model-len, --max-tokens as needed.
-        .scripts/multihost/benchmarks/jax/xprof/xprof_deepseek_v3_1k_8k.sh
+        scripts/multihost/benchmarks/jax/xprof/xprof_deepseek_v3_1k_8k.sh
