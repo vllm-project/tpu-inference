@@ -376,6 +376,151 @@ def _get_total_sampled_tokens(
     return total_sampled_tokens
 
 
+def _populate_logits_metadata(
+    scheduler_output: VllmSchedulerOutput,
+    input_batch: InputBatch,
+    num_reqs: int,
+    dp_size: int,
+    max_num_reqs_per_dp_rank: int,
+    padded_num_reqs_per_dp_rank: int,
+    query_start_loc_view: np.ndarray,
+    logits_indices_view: np.ndarray,
+    req_ids_dp: List[List[str]],
+    num_req_per_dp_rank: List[int],
+    padded_logits_length: int,
+    is_dp: bool = True,
+) -> Tuple[Optional[List[int]], List[int]]:
+    """Populates logits_indices_view and generates selector/num_logits_per_req.
+
+    Handles Standard, Prompt Logprobs, and Speculative Decoding across DP/non-DP.
+    """
+    use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+    any_prompt_logprobs = any(
+        req_id in input_batch.num_prompt_logprobs
+        for req_id in scheduler_output.num_scheduled_tokens)
+
+    num_logits_per_req = []
+    logits_indices_selector = []
+
+    # Fast path: Standard Decoding
+    if not (use_spec_decode or any_prompt_logprobs):
+        num_logits_per_req = [1] * num_reqs
+        if is_dp:
+            for dp_rank in range(dp_size):
+                req_offset = dp_rank * padded_num_reqs_per_dp_rank
+                query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank + 1)
+                _num_reqs = num_req_per_dp_rank[dp_rank]
+                logits_view = logits_indices_view[
+                    req_offset:req_offset + padded_num_reqs_per_dp_rank]
+                logits_view[:_num_reqs] = (
+                    query_start_loc_view[query_loc_req_offset + 1:
+                                         query_loc_req_offset + _num_reqs + 1] -
+                    1)
+                logits_view[_num_reqs:] = -1
+        else:
+            padded_num_reqs = padded_num_reqs_per_dp_rank  # in non-dp, this is total padded reqs
+            logits_indices_view[:padded_num_reqs] = (
+                query_start_loc_view[1:padded_num_reqs + 1] - 1)
+        return None, num_logits_per_req
+
+    # Complex path: Variable-length (Logprobs or Spec Decode)
+    if is_dp:
+        padded_logits_length_per_rank = padded_logits_length // dp_size
+        all_dp_logits_selectors = []
+
+        for dp_rank in range(dp_size):
+            logits_idx = dp_rank * padded_logits_length_per_rank
+            query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank + 1)
+            _num_reqs = num_req_per_dp_rank[dp_rank]
+
+            dp_selectors = []
+            for i in range(_num_reqs):
+                start = query_start_loc_view[query_loc_req_offset + i]
+                end = query_start_loc_view[query_loc_req_offset + i + 1]
+                req_id = req_ids_dp[dp_rank][i]
+
+                if use_spec_decode:
+                    num_logits = len(
+                        scheduler_output.scheduled_spec_decode_tokens.get(
+                            req_id, [])) + 1
+                elif req_id in input_batch.num_prompt_logprobs:
+                    num_logits = end - start
+                else:
+                    num_logits = 1
+
+                if num_logits > 1:
+                    logits_indices_view[logits_idx:logits_idx +
+                                        num_logits] = np.arange(
+                                            start, end, dtype=np.int32)[
+                                                -num_logits:]
+                    dp_selectors.extend(range(logits_idx,
+                                              logits_idx + num_logits))
+                    logits_idx += num_logits
+                else:
+                    logits_indices_view[logits_idx] = end - 1
+                    dp_selectors.append(logits_idx)
+                    logits_idx += 1
+
+            remaining = (dp_rank + 1) * padded_logits_length_per_rank - logits_idx
+            if remaining > 0:
+                logits_indices_view[logits_idx:logits_idx + remaining].fill(-1)
+            all_dp_logits_selectors.append(dp_selectors)
+
+        req_id_to_indices = {}
+        req_id_to_count = {}
+        for dp_rank in range(dp_size):
+            selectors = all_dp_logits_selectors[dp_rank]
+            sel_idx = 0
+            for req_id in req_ids_dp[dp_rank]:
+                if use_spec_decode:
+                    num_logits = len(
+                        scheduler_output.scheduled_spec_decode_tokens.get(
+                            req_id, [])) + 1
+                elif req_id in input_batch.num_prompt_logprobs:
+                    num_logits = scheduler_output.num_scheduled_tokens[req_id]
+                else:
+                    num_logits = 1
+                req_id_to_indices[req_id] = selectors[sel_idx:sel_idx +
+                                                      num_logits]
+                req_id_to_count[req_id] = num_logits
+                sel_idx += num_logits
+
+        for req_id in input_batch.req_ids[:num_reqs]:
+            logits_indices_selector.extend(req_id_to_indices[req_id])
+            num_logits_per_req.append(req_id_to_count[req_id])
+    else:
+        # Non-DP Complex path
+        logits_idx = 0
+        for i, req_id in enumerate(input_batch.req_ids[:num_reqs]):
+            start, end = query_start_loc_view[i], query_start_loc_view[i + 1]
+            if use_spec_decode:
+                num_logits = len(
+                    scheduler_output.scheduled_spec_decode_tokens.get(
+                        req_id, [])) + 1
+            elif req_id in input_batch.num_prompt_logprobs:
+                num_logits = end - start
+            else:
+                num_logits = 1
+
+            if num_logits > 1:
+                logits_indices_view[logits_idx:logits_idx +
+                                    num_logits] = np.arange(
+                                        start, end, dtype=np.int32)[
+                                            -num_logits:]
+                logits_indices_selector.extend(
+                    range(logits_idx, logits_idx + num_logits))
+                logits_idx += num_logits
+                num_logits_per_req.append(num_logits)
+            else:
+                logits_indices_view[logits_idx] = end - 1
+                logits_indices_selector.append(logits_idx)
+                logits_idx += 1
+                num_logits_per_req.append(1)
+        logits_indices_view[logits_idx:].fill(-1)
+
+    return logits_indices_selector, num_logits_per_req
+
+
 class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def __init__(
@@ -1614,83 +1759,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 num_scheduled_tokens_per_req)
             seq_lens_cpu[_num_reqs:] = 0
 
+        use_spec_decode = len(
+            scheduler_output.scheduled_spec_decode_tokens) > 0
+        num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+        if use_spec_decode:
+            for req_id, draft_token_ids in (
+                    scheduler_output.scheduled_spec_decode_tokens.items()):
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                num_draft_tokens[req_idx] = len(draft_token_ids)
+
         # populate logits_indices
-        padded_logits_length_per_rank = padded_logits_length // dp_size
-        if not use_spec_decode and any_prompt_logprobs:
-            all_dp_logits_selectors = []
-            for dp_rank in range(dp_size):
-                logits_idx = dp_rank * padded_logits_length_per_rank
-                query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank + 1)
-                _num_reqs = num_req_per_dp_rank[dp_rank]
-
-                dp_logits_selectors = []
-                for i in range(_num_reqs):
-                    start = query_start_loc_view[query_loc_req_offset + i]
-                    end = query_start_loc_view[query_loc_req_offset + i + 1]
-                    req_id = req_ids_dp[dp_rank][i]
-                    if req_id in self.input_batch.num_prompt_logprobs:
-                        num_logits = end - start
-                        logits_indices_view[logits_idx:logits_idx +
-                                            num_logits] = np.arange(
-                                                start, end, dtype=np.int32)
-                        dp_logits_selectors.extend(
-                            range(logits_idx, logits_idx + num_logits))
-                        logits_idx += num_logits
-                    else:
-                        logits_indices_view[logits_idx] = end - 1
-                        dp_logits_selectors.append(logits_idx)
-                        logits_idx += 1
-                
-                # Fill remaining of rank's chunk with -1
-                remaining = (dp_rank + 1) * padded_logits_length_per_rank - logits_idx
-                if remaining > 0:
-                    logits_indices_view[logits_idx:logits_idx + remaining].fill(-1)
-                
-                all_dp_logits_selectors.append(dp_logits_selectors)
-
-            # Update logits_indices_selector to account for multiple logits per request
-            new_selector = []
-            req_id_to_logits_indices = {}
-            req_id_to_num_logits = {}
-            for dp_rank in range(dp_size):
-                selectors = all_dp_logits_selectors[dp_rank]
-                sel_idx = 0
-                for req_id in req_ids_dp[dp_rank]:
-                    if req_id in self.input_batch.num_prompt_logprobs:
-                        num_logits = scheduler_output.num_scheduled_tokens[
-                            req_id]
-                        req_id_to_logits_indices[req_id] = selectors[
-                            sel_idx:sel_idx + num_logits]
-                        req_id_to_num_logits[req_id] = num_logits
-                        sel_idx += num_logits
-                    else:
-                        req_id_to_logits_indices[req_id] = [selectors[sel_idx]]
-                        req_id_to_num_logits[req_id] = 1
-                        sel_idx += 1
-
-            num_logits_per_req = []
-            for req_id in self.input_batch.req_ids[:num_reqs]:
-                new_selector.extend(req_id_to_logits_indices[req_id])
-                num_logits_per_req.append(req_id_to_num_logits[req_id])
-            logits_indices_selector = new_selector
-
-        else:
-            num_logits_per_req = []
-            for req_id in self.input_batch.req_ids[:num_reqs]:
-                num_logits_per_req.append(1)
-
-            for dp_rank in range(dp_size):
-                req_offset = dp_rank * padded_num_reqs_per_dp_rank
-                query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank + 1)
-                _num_reqs = num_req_per_dp_rank[dp_rank]
-
-                logits_indices_cpu = logits_indices_view[
-                    req_offset:req_offset + padded_num_reqs_per_dp_rank]
-                logits_indices_cpu[:_num_reqs] = (
-                    query_start_loc_view[query_loc_req_offset +
-                                         1:query_loc_req_offset + _num_reqs +
-                                         1] - 1)
-                logits_indices_cpu[_num_reqs:] = -1
+        logits_indices_selector, num_logits_per_req = _populate_logits_metadata(
+            scheduler_output, self.input_batch, num_reqs, dp_size,
+            max_num_reqs_per_dp_rank, padded_num_reqs_per_dp_rank,
+            query_start_loc_view, logits_indices_view, req_ids_dp,
+            num_req_per_dp_rank,
+            padded_logits_length if (total_sampled_tokens != -1) else 0,
+            is_dp=True)
 
         # Please see runner_utils.PhasedBasedProfiler for details
         if self.phase_based_profiler:
@@ -2016,46 +2101,25 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                                    padded_total_num_scheduled_tokens]
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
+        num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+        if use_spec_decode:
+            for req_id, draft_token_ids in (
+                    scheduler_output.scheduled_spec_decode_tokens.items()):
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                num_draft_tokens[req_idx] = len(draft_token_ids)
+
+        logits_indices_selector, num_logits_per_req = _populate_logits_metadata(
+            scheduler_output, self.input_batch, num_reqs, 1, 0,
+            padded_num_reqs, query_start_loc_view, logits_indices_view, [], [],
+            0, is_dp=False)
+
         spec_decode_metadata = None
-        logits_indices_selector = None
-        if not use_spec_decode:
-            if not any_prompt_logprobs:
-                logits_indices_view[:padded_num_reqs] = (
-                    query_start_loc_view[1:padded_num_reqs + 1] - 1)
-                num_logits_per_req = [1] * num_reqs
-            else:
-                # populate logits_indices for all tokens if prompt logprobs requested
-                logits_idx = 0
-                new_selector = []
-                num_logits_per_req = []
-                for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-                    start = query_start_loc_view[i]
-                    end = query_start_loc_view[i + 1]
-                    if req_id in self.input_batch.num_prompt_logprobs:
-                        num_logits = end - start
-                        indices = np.arange(start, end, dtype=np.int32)
-                        logits_indices_view[logits_idx:logits_idx +
-                                            num_logits] = indices
-                        new_selector.extend(
-                            range(logits_idx, logits_idx + num_logits))
-                        logits_idx += num_logits
-                        num_logits_per_req.append(num_logits)
-                    else:
-                        logits_indices_view[logits_idx] = end - 1
-                        new_selector.append(logits_idx)
-                        logits_idx += 1
-                        num_logits_per_req.append(1)
-                logits_indices_view[logits_idx:].fill(-1)
-                logits_indices_selector = new_selector
-        else:
+        if use_spec_decode:
             spec_decode_metadata = self.speculative_decoding_manager.get_spec_decode_metadata(
                 num_draft_tokens, query_start_loc_view[1:num_reqs + 1],
                 padded_num_reqs, input_ids_view)
             logits_indices_view[:] = spec_decode_metadata.final_logits_indices.ravel(
             )
-            num_logits_per_req = [
-                self.speculative_config.num_speculative_tokens + 1
-            ] * num_reqs
 
         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
             self.mesh,
