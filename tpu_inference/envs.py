@@ -50,6 +50,8 @@ if TYPE_CHECKING:
     TPU_OFFLOAD_BATCHED_SAVE: bool = False
     TPU_OFFLOAD_METRICS_LOG_INTERVAL: int = 5
     TPU_OFFLOAD_USE_UNPINNED_HOST: bool = False
+    MOE_APPROX_TOPK: bool = False
+    MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
 
 
 def env_with_choices(
@@ -286,6 +288,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # kv offload to dram: Whether to use unpinned_host for KV cache tensors on host dram.
     "TPU_OFFLOAD_USE_UNPINNED_HOST":
     lambda: bool(int(os.getenv("TPU_OFFLOAD_USE_UNPINNED_HOST", "0"))),
+    # MoE: whether to use approximate top-k for expert selection.
+    # Enabling this may speedup the expert selection at the risk of accuracy loss.
+    "MOE_APPROX_TOPK":
+    env_bool("MOE_APPROX_TOPK", default=False),
+    # MoE: the target recall rate for approximate top-k expert selection.
+    # A higher rate increases accuracy at the cost of slower speed.
+    # A lower rate can speedup expert selection at the risk of higher accuracy loss.
+    "MOE_APPROX_TOPK_RECALL_TARGET":
+    lambda: float(os.getenv("MOE_APPROX_TOPK_RECALL_TARGET", "0.9")),
 }
 
 
