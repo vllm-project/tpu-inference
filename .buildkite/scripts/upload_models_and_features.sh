@@ -35,19 +35,23 @@ failure_handler() {
 trap 'failure_handler $LINENO' ERR
 declare -a TARGET_FOLDERS=()
 
+# Append the kernel_microbenchmarks subdirectories
+add_kernel_microbenchmarks() {
+  local kernel_parent_dir=".buildkite/kernel_microbenchmarks"
+  if [[ -d "$kernel_parent_dir" ]]; then
+    while IFS= read -r dir; do
+      local folder_path_to_add="${dir#"${BUILDKITE_DIR}"/}"
+      TARGET_FOLDERS+=("$folder_path_to_add")
+    done < <(find "$kernel_parent_dir" -maxdepth 1 -mindepth 1 -type d)
+  else
+    echo "Warning: Kernel microbenchmarks directory '$kernel_parent_dir' not found. Skipping dynamic folder discovery."
+  fi
+}
+
 case "${MODEL_IMPL_TYPE}" in
   "auto")
     TARGET_FOLDERS=("parallelism" "models" "features" "rl")
-    # Use find to append the kernel_microbenchmarks subdirectories
-    KERNEL_PARENT_DIR=".buildkite/kernel_microbenchmarks"
-    if [[ -d "$KERNEL_PARENT_DIR" ]]; then
-      while IFS= read -r dir; do
-        folder_path_to_add="${dir#"${BUILDKITE_DIR}"/}"
-        TARGET_FOLDERS+=("$folder_path_to_add")
-      done < <(find "$KERNEL_PARENT_DIR" -maxdepth 1 -mindepth 1 -type d)
-    else
-      echo "Warning: Kernel microbenchmarks directory '$KERNEL_PARENT_DIR' not found. Skipping dynamic folder discovery."
-    fi
+    add_kernel_microbenchmarks
     ;;
   "flax_nnx")
     TARGET_FOLDERS=("quantization" "parallelism" "features")
