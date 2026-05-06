@@ -91,6 +91,9 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     else
       echo "Code files changed. Proceeding with pipeline upload."
     fi
+
+    # Count files not matching the benchmark prefix
+    NON_BENCHMARK_COUNT=$(printf "%s\n" "$NON_SKIPPABLE_FILES" | grep -c -v "^\.buildkite/benchmark" || true)
     
     # Validate custom pipeline metadata (Uniqueness & Completeness)
     if .buildkite/scripts/validate_pipeline_metadata.sh "$NON_SKIPPABLE_FILES"; then
@@ -277,7 +280,10 @@ else
     # If it's a PR, check for the specific label
     if [[ $PR_LABELS == *"ready"* ]]; then
       echo "Found 'ready' label on PR. Uploading main pipeline..."
-      upload_pipeline
+      # Upload main pipeline if file list is empty or contains non-benchmark files
+      if [ -z "${NON_SKIPPABLE_FILES:-}" ] || [ "${NON_BENCHMARK_COUNT:--1}" -ne 0 ]; then
+        upload_pipeline
+      fi
       upload_benchmark_pipeline
     else
       # Explicitly fail the build because the required 'ready' label is missing.
