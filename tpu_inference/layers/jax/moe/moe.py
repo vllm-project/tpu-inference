@@ -277,7 +277,7 @@ class JaxMoE(JaxModule):
     def _load_weights(self,
                       weights: Iterable,
                       *,
-                      mesh:jax.sharding.Mesh | None = None):
+                      mesh: jax.sharding.Mesh | None = None):
         """Load HF weights into the layer.
 
         self.quant_method might reuse this method if the quantization method has specific logic for loading weights.
