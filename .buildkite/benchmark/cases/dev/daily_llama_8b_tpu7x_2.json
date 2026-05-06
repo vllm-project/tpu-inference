@@ -3,11 +3,7 @@
     "GCP_PROJECT_ID": "cloud-tpu-inference-test",
     "GCS_BUCKET": "vllm-cb-storage2",
     "GCP_INSTANCE_ID": "vllm-bm-inst",
-    "GCP_DATABASE_ID": "vllm-bm-bk-runs",
-    "MODELTAG": "NEW",
-    "EXPECTED_ETEL": 43200000,
-    "USE_MOE_EP_KERNEL": 0,
-    "MODEL_IMPL_TYPE": "vllm"
+    "GCP_DATABASE_ID": "vllm-bm-bk-runs"
   },
   "benchmark_cases": [
     {
