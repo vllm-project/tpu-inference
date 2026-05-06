@@ -20,7 +20,7 @@
         "PREFIX_LEN": 0
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -67,7 +67,7 @@
         "PREFIX_LEN": 0
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -114,7 +114,7 @@
         "PREFIX_LEN": 3600
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -161,7 +161,7 @@
         "PREFIX_LEN": 7900
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -209,7 +209,7 @@
         "PREFIX_LEN": 0
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -257,7 +257,7 @@
         "PREFIX_LEN": 0
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -305,7 +305,7 @@
         "PREFIX_LEN": 3600
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -353,7 +353,7 @@
         "PREFIX_LEN": 7900
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -402,7 +402,7 @@
         "PREFIX_LEN": 0
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -449,7 +449,7 @@
         "PREFIX_LEN": 0
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -496,7 +496,7 @@
         "PREFIX_LEN": 3600
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -543,7 +543,7 @@
         "PREFIX_LEN": 7900
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -591,7 +591,7 @@
         "PREFIX_LEN": 0
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -638,7 +638,7 @@
         "PREFIX_LEN": 0
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -685,7 +685,7 @@
         "PREFIX_LEN": 3600
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -732,7 +732,7 @@
         "PREFIX_LEN": 7900
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -780,7 +780,7 @@
         "PREFIX_LEN": 0
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -830,7 +830,7 @@
         "PREFIX_LEN": 0
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -880,7 +880,7 @@
         "PREFIX_LEN": 3600
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -930,7 +930,7 @@
         "PREFIX_LEN": 7900
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -981,7 +981,7 @@
         "PREFIX_LEN": 0
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -1028,7 +1028,7 @@
         "PREFIX_LEN": 0
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -1075,7 +1075,7 @@
         "PREFIX_LEN": 3600
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -1122,7 +1122,7 @@
         "PREFIX_LEN": 7900
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -1170,7 +1170,7 @@
         "PREFIX_LEN": 0
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -1220,7 +1220,7 @@
         "PREFIX_LEN": 0
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -1270,7 +1270,7 @@
         "PREFIX_LEN": 3600
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -1320,7 +1320,7 @@
         "PREFIX_LEN": 7900
       },
       "ci_queue": [
-        "tpu_tpu7x_2_queue"
+        "tpu_v7x_2_queue"
       ],
       "server_command_options": {
         "command_type": "vllm_serve",
