@@ -153,20 +153,10 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._model_runner_output.sampled_token_ids = valid_sampled_token_ids
 
         if self._logprobs_tensors is not None:
-            # Use materialize to ensure logprobs are ready on host when we return async results
-            cu_num_logits = None
-            if self.num_logits_per_req is not None:
-                cu_num_logits = [0] + np.cumsum(
-                    self.num_logits_per_req).tolist()
-
-            materialized_logprobs = _jax_logprobs_materialize(
-                self._logprobs_tensors, self.logits_indices_selector,
-                cu_num_logits)
-
             # Separate prompt logprobs and sampling logprobs
             self._model_runner_output.logprobs, self._model_runner_output.prompt_logprobs_dict = _separate_logprobs(
-                materialized_logprobs, self.num_logits_per_req,
-                self._model_runner_output.req_ids)
+                self._logprobs_tensors, self.logits_indices_selector,
+                self.num_logits_per_req, self._model_runner_output.req_ids)
 
         if self._expert_indices is not None:
             expert_indices_cpu = np.asarray(
@@ -280,16 +270,25 @@ def _jax_logprobs_materialize(
 
 
 def _separate_logprobs(
-    materialized_logprobs: LogprobsLists,
+    logprobs_tensors: LogprobsTensors,
+    logits_indices_selector: Optional[List[int]],
     num_logits_per_req: Optional[List[int]],
     req_ids: List[str],
 ) -> Tuple[LogprobsLists, Dict[str, LogprobsLists]]:
-    """Separates flattened logprobs into sampling logprobs and prompt logprobs.
+    """Materializes logprobs from TPU and separates them into sampling and prompt logprobs.
 
-    In scenarios like Chunked Prefill or Speculative Decoding, a single request
-    may produce multiple logprobs. This function extracts the last logprob for
-    sampling/decoding and puts the preceding ones into prompt_logprobs_dict.
+    This function handles the entire pipeline:
+    1. Calculating cumulative offsets.
+    2. Materializing (JAX to NumPy) the logprobs.
+    3. Splitting into next-token logprobs and prompt logprobs.
     """
+    cu_num_logits = None
+    if num_logits_per_req is not None:
+        cu_num_logits = [0] + np.cumsum(num_logits_per_req).tolist()
+
+    materialized_logprobs = _jax_logprobs_materialize(
+        logprobs_tensors, logits_indices_selector, cu_num_logits)
+
     if num_logits_per_req is None:
         return materialized_logprobs, {}
 
@@ -299,8 +298,6 @@ def _separate_logprobs(
     prompt_logprobs_dict = {}
 
     num_reqs = len(req_ids)
-    cu_num_logits = [0] + np.cumsum(num_logits_per_req).tolist()
-
     for i in range(num_reqs):
         start = cu_num_logits[i]
         end = cu_num_logits[i + 1]
@@ -1229,17 +1226,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             req_state.output_token_ids.extend(sampled_ids)
 
         if logprobs is not None:
-            # Use materialize to ensure logprobs are ready on host when we return async results
-            cu_num_logits = None
-            if num_logits_per_req is not None:
-                cu_num_logits = [0] + np.cumsum(num_logits_per_req).tolist()
-
-            materialized_logprobs = _jax_logprobs_materialize(
-                logprobs, logits_indices_selector, cu_num_logits)
-
             # Separate prompt logprobs and sampling logprobs
             logprobs_lists, prompt_logprobs_dict_updates = _separate_logprobs(
-                materialized_logprobs, num_logits_per_req, req_ids)
+                logprobs, logits_indices_selector, num_logits_per_req, req_ids)
             prompt_logprobs_dict.update(prompt_logprobs_dict_updates)
         else:
             logprobs_lists = None
