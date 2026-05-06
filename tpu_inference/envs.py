@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     TPU_OFFLOAD_SAVE_THREADS: int = 1
     TPU_OFFLOAD_BATCHED_SAVE: bool = False
     TPU_OFFLOAD_METRICS_LOG_INTERVAL: int = 5
+    TPU_OFFLOAD_USE_UNPINNED_HOST: bool = False
 
 
 def env_with_choices(
@@ -288,6 +289,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # kv offload to dram: prometheus metrics log interval in seconds
     "TPU_OFFLOAD_METRICS_LOG_INTERVAL":
     lambda: int(os.getenv("TPU_OFFLOAD_METRICS_LOG_INTERVAL", "10")),
+    # kv offload to dram: Whether to use unpinned_host for KV cache tensors on host dram.
+    "TPU_OFFLOAD_USE_UNPINNED_HOST":
+    lambda: bool(int(os.getenv("TPU_OFFLOAD_USE_UNPINNED_HOST", "0"))),
 }
 
 
