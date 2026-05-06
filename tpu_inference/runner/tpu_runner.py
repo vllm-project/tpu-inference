@@ -280,6 +280,42 @@ def _extract_last_tokens(
     return np.expand_dims(selected_token_ids, 1)
 
 
+def _get_total_sampled_tokens(
+    scheduler_output: VllmSchedulerOutput,
+    input_batch: InputBatch,
+    num_reqs: int,
+) -> int:
+    """Calculates the total number of logits (sampled tokens) to be returned.
+
+    This is used to determine the buffer size for logits_indices on the TPU.
+    """
+    use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+    any_prompt_logprobs = any(
+        req_id in input_batch.num_prompt_logprobs
+        for req_id in scheduler_output.num_scheduled_tokens)
+
+    if not (use_spec_decode or any_prompt_logprobs):
+        return -1  # Indicates we use standard 1-per-request sampling
+
+    if use_spec_decode:
+        num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+        for req_id, draft_token_ids in (
+                scheduler_output.scheduled_spec_decode_tokens.items()):
+            req_idx = input_batch.req_id_to_index[req_id]
+            num_draft_tokens[req_idx] = len(draft_token_ids)
+        return np.sum(num_draft_tokens + 1)
+
+    # Case: any_prompt_logprobs is True
+    total_sampled_tokens = 0
+    for req_id in input_batch.req_ids[:num_reqs]:
+        if req_id in input_batch.num_prompt_logprobs:
+            total_sampled_tokens += scheduler_output.num_scheduled_tokens[
+                req_id]
+        else:
+            total_sampled_tokens += 1
+    return total_sampled_tokens
+
+
 def _separate_logprobs(
     logprobs_tensors: LogprobsTensors,
     logits_indices_selector: Optional[List[int]],
@@ -1483,27 +1519,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         seq_lens_view = self.device_buffer.get_view((self.max_num_reqs, ),
                                                     key="seq_lens")
 
-        use_spec_decode = len(
-            scheduler_output.scheduled_spec_decode_tokens) > 0
-        any_prompt_logprobs = any(
-            req_id in self.input_batch.num_prompt_logprobs
-            for req_id in scheduler_output.num_scheduled_tokens)
+        total_sampled_tokens = _get_total_sampled_tokens(
+            scheduler_output, self.input_batch, num_reqs)
 
-        if use_spec_decode or any_prompt_logprobs:
-            if use_spec_decode:
-                num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
-                for (
-                        req_id,
-                        draft_token_ids,
-                ) in scheduler_output.scheduled_spec_decode_tokens.items():
-                    req_idx = self.input_batch.req_id_to_index[req_id]
-                    num_draft_tokens[req_idx] = len(draft_token_ids)
-
-                num_sampled_tokens = num_draft_tokens + 1
-                total_sampled_tokens = np.sum(num_sampled_tokens)
-            else:
-                total_sampled_tokens = total_num_scheduled_tokens
-
+        if total_sampled_tokens != -1:
             padded_logits_length = runner_utils.get_padded_token_len(
                 self.num_logits_paddings, total_sampled_tokens)
             logits_indices_shape = (padded_logits_length, )
@@ -1903,32 +1922,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         input_ids_view = self.device_buffer.get_view(
             (padded_total_num_scheduled_tokens, ), key="input_ids")
 
-        use_spec_decode = len(
-            scheduler_output.scheduled_spec_decode_tokens) > 0
-        any_prompt_logprobs = any(
-            req_id in self.input_batch.num_prompt_logprobs
-            for req_id in scheduler_output.num_scheduled_tokens)
+        total_sampled_tokens = _get_total_sampled_tokens(
+            scheduler_output, self.input_batch, num_reqs)
 
-        if use_spec_decode or any_prompt_logprobs:
-            if use_spec_decode:
-                num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
-                for req_id, draft_token_ids in (
-                        scheduler_output.scheduled_spec_decode_tokens.items()):
-                    req_idx = self.input_batch.req_id_to_index[req_id]
-                    num_draft_tokens[req_idx] = len(draft_token_ids)
-
-                num_sampled_tokens = num_draft_tokens + 1
-                total_sampled_tokens = np.sum(num_sampled_tokens)
-            else:
-                num_logits_per_req = []
-                for req_id in self.input_batch.req_ids[:num_reqs]:
-                    if req_id in self.input_batch.num_prompt_logprobs:
-                        num_logits_per_req.append(
-                            scheduler_output.num_scheduled_tokens[req_id])
-                    else:
-                        num_logits_per_req.append(1)
-                total_sampled_tokens = sum(num_logits_per_req)
-
+        if total_sampled_tokens != -1:
             padded_logits_length = runner_utils.get_padded_token_len(
                 self.num_logits_paddings, total_sampled_tokens)
             logits_indices_shape = (padded_logits_length, )
