@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import unittest
-from unittest.mock import patch
 
 import jax
 import jax.numpy as jnp
@@ -24,7 +23,7 @@ from jax.sharding import PartitionSpec as P
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, shard_linear_weights)
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    W13PaddingConfig, process_w13_for_gmm)
+    W13PaddingConfig, get_w13_padding_config, process_w13_for_gmm)
 
 
 class TestProcessWeights(unittest.TestCase):
@@ -41,7 +40,7 @@ class TestProcessWeights(unittest.TestCase):
         weight_p_spec = P('model', 'data')
         bias_p_spec = P('model')
 
-        # 2D scale [out_blocks, in_blocks]
+        # 2D scale[out_blocks, in_blocks]
         weight_scale = jnp.ones((8, 4))
         weights = LinearWeights(
             weight=jnp.ones((1024, 512)),
@@ -68,7 +67,7 @@ class TestProcessWeights(unittest.TestCase):
         weight_p_spec = P('model', 'data')
         bias_p_spec = P('model')
 
-        # 3D scale [num_blocks, 1, out_features]
+        # 3D scale[num_blocks, 1, out_features]
         weight_scale = jnp.ones((4, 1, 1024))
         weights = LinearWeights(
             weight=jnp.ones((1024, 512)),
@@ -90,29 +89,43 @@ class TestProcessWeights(unittest.TestCase):
         self.assertEqual(sharded_weights.weight_scale.sharding,
                          NamedSharding(mesh, expected_scale_spec))
 
-    @patch("tpu_inference.envs.DISABLE_WEIGHT_REQUANTIZATION", True)
-    def test_process_w13_for_gmm_with_scale_ratio(self):
-        """Test process_w13_for_gmm with scale_ratio > 1 (block-quantized scales)."""
-        # config for weights: intermediate=128, local=64, pad=0, padded=128
-        # total width = 256
+    def test_get_w13_padding_config_with_block_size(self):
+        """Test get_w13_padding_config scales down dimensions based on block_size."""
+        # intermediate_size = 128, reorder_size = 2 -> local_intermediate_size = 64
+        # align = 128 -> padded_local_intermediate_size = 128, pad_amount = 64
+        # padded_intermediate_size = 256
+        # With block_size = 2, all these should be halved.
+        config = get_w13_padding_config(intermediate_size=128,
+                                        reorder_size=2,
+                                        align=128,
+                                        block_size=2)
+
+        self.assertEqual(config.intermediate_size, 64)
+        self.assertEqual(config.w13_reorder_size, 2)
+        self.assertEqual(config.local_intermediate_size, 32)
+        self.assertEqual(config.pad_amount, 32)
+        self.assertEqual(config.padded_intermediate_size, 128)
+
+    def test_process_w13_for_gmm_with_scaled_config(self):
+        """Test process_w13_for_gmm with config scaled for block-quantized scales."""
+        # For block_size=2, the config should be pre-scaled by get_w13_padding_config.
+        # Original intermediate=128, total width=256.
+        # Scaled config: intermediate=64, local=32, pad=0, padded=64.
         config = W13PaddingConfig(
-            intermediate_size=128,
-            local_intermediate_size=64,
+            intermediate_size=64,
+            local_intermediate_size=32,
             pad_amount=0,
-            padded_intermediate_size=128,
+            padded_intermediate_size=64,
             w13_reorder_size=2,
         )
 
-        # If scale_ratio=2, the scale tensor dimensions are half
         # Input tensor (scale) has width 128 (64 for W1, 64 for W3)
-        scale_ratio = 2
         tensor = jnp.arange(128).reshape(1, 128)
 
         processed = process_w13_for_gmm(
             tensor,
             concat_dim=-1,
             config=config,
-            scale_ratio=scale_ratio,
         )
 
         # Expected behavior:
@@ -122,14 +135,14 @@ class TestProcessWeights(unittest.TestCase):
         #    - pad (0) -> stays (1, 2, 32)
         #    - reshape back to (1, 64)
         # 3. Concatenate w1, w3 -> (1, 128)
-        # 4. Repeat by scale_ratio=2 along concat_dim -> (1, 256)
+        # Note: Repeat by block_size is now handled outside process_w13_for_gmm.
 
-        self.assertEqual(processed.shape, (1, 256))
-        # Check first few elements (repeated)
+        self.assertEqual(processed.shape, (1, 128))
+        # Check first few elements (not repeated anymore)
         self.assertEqual(processed[0, 0], 0)
-        self.assertEqual(processed[0, 1], 0)
-        self.assertEqual(processed[0, 2], 1)
-        self.assertEqual(processed[0, 3], 1)
+        self.assertEqual(processed[0, 1], 1)
+        self.assertEqual(processed[0, 2], 2)
+        self.assertEqual(processed[0, 3], 3)
 
 
 if __name__ == "__main__":
