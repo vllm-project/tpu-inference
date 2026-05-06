@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: openai/gpt-oss-20b
-# pipeline-type: text-only
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for openai/gpt-oss-20b"
     key: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-20b_UnitTest"

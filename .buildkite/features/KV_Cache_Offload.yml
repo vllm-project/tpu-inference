@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: KV Cache Offload
-# pipeline-type: feature support matrix
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for KV Cache Offload"
     key: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_CorrectnessTest"

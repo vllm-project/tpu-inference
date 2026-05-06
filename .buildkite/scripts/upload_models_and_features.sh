@@ -76,12 +76,12 @@ for folder_path in "${TARGET_FOLDERS[@]}"; do
   while IFS= read -r -d '' yml_file; do
     echo "--- handling yml file: ${yml_file}"
 
-    # Targeted Extraction: Find the line starting with '# pipeline-name:'
-    subject_name_line=$(awk '/^# ?pipeline-name:/ {print $0; exit}' "${yml_file}")
+    # Use the first occurrence of CI_TARGET as the subject name
+    subject_name_line=$(grep -m 1 "^[[:space:]]*CI_TARGET:" "${yml_file}" || true)
 
     if [[ -n "$subject_name_line" ]]; then
-      # Extract value: Remove everything up to and including the colon and optional space
-      subject_name="${subject_name_line#*:[[:space:]]}"
+      # Extract value after colon and remove quotes/whitespace
+      subject_name=$(echo "$subject_name_line" | sed 's/^[^:]*:[[:space:]]*//' | tr -d '"'\' | xargs)
       # Trim trailing whitespace/carriage returns
       subject_name="${subject_name%"${subject_name##*[![:space:]]}"}"
 

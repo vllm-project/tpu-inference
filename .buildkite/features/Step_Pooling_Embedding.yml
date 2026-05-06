@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: Step Pooling (Embedding)
-# pipeline-type: feature support matrix
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for Step Pooling (Embedding)"
     key: "${TPU_VERSION:-tpu6e}_Step_Pooling_Embedding_CorrectnessTest"

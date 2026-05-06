@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: MiniMaxAI/MiniMax-M2.5
-# pipeline-type: text-only
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for MiniMaxAI/MiniMax-M2.5"
     key: "${TPU_VERSION:-tpu6e}_MiniMaxAI_MiniMax-M2_5_UnitTest"
