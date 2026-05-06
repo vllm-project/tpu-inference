@@ -350,6 +350,14 @@ class AggregatedStatsLogger:
                                  stderr=subprocess.DEVNULL)
 
     def log(self, batch_composition_stats: dict) -> None:
+        """
+        Logs a single batch's composition statistics to local temporary files.
+        Automatically triggers a flush to storage if the step count reaches the flush interval.
+
+        Args:
+            batch_composition_stats: A dictionary containing the composition statistics
+                for the current batch.
+        """
         stats_json = json.dumps(batch_composition_stats) + "\n"
         self._f_local.write(stats_json)
         self._f_tmp.write(stats_json)
@@ -359,6 +367,13 @@ class AggregatedStatsLogger:
             self.flush()
 
     def flush(self, blocking: bool = False) -> None:
+        """
+        Flushes the current buffered logs to local disk and syncs to Google Cloud Storage (GCS)
+        if the target profile directory is a GCS URI.
+
+        Args:
+            blocking: If True, waits for the GCS sync subprocess to finish before returning.
+        """
         self._f_local.flush()
         self._f_tmp.flush()
         if self.target_file.startswith("gs://") and os.path.exists(
@@ -371,6 +386,10 @@ class AggregatedStatsLogger:
                               blocking=blocking)
 
     def close(self) -> None:
+        """
+        Closes the file handles, ensuring a final blocking flush to storage.
+        If syncing to GCS, cleans up the local temporary file.
+        """
         self.flush(blocking=True)
         self._f_local.close()
         self._f_tmp.close()
