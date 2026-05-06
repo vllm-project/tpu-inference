@@ -599,5 +599,7 @@ def test_merge_multihost_profile_directories(tmp_path):
     assert not dir_late.exists()
     assert (dir_early / "node-1-0.xplane.pb").exists()
     assert (dir_early / "node-0-0.xplane.pb").exists()
-    assert (dir_early / "node-1-0.xplane.pb").read_text() == "dummy_trace_data_1"
-    assert (dir_early / "node-0-0.xplane.pb").read_text() == "dummy_trace_data_0"
+    assert (dir_early /
+            "node-1-0.xplane.pb").read_text() == "dummy_trace_data_1"
+    assert (dir_early /
+            "node-0-0.xplane.pb").read_text() == "dummy_trace_data_0"

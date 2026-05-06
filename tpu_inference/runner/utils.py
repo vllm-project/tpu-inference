@@ -471,18 +471,22 @@ class PhasedBasedProfiler:
         After merge:
           All host trace artifacts are consolidated under the earliest timestamp folder (2026_05_06_04_47_36/).
         """
-        profile_path = os.path.join(self.profile_dir_with_phase_suffix, "plugins", "profile")
+        profile_path = os.path.join(self.profile_dir_with_phase_suffix,
+                                    "plugins", "profile")
         if not os.path.exists(profile_path):
             return
         try:
             # Get all timestamp subdirectories sorted by time
-            dirs = sorted([d for d in os.listdir(profile_path) if os.path.isdir(os.path.join(profile_path, d))])
+            dirs = sorted([
+                d for d in os.listdir(profile_path)
+                if os.path.isdir(os.path.join(profile_path, d))
+            ])
             if len(dirs) <= 1:
                 return
-            
+
             # Use the earliest directory as the canonical destination target
             target_dir = os.path.join(profile_path, dirs[0])
-            
+
             # Move all files from trailing directories into the canonical target directory
             for src in dirs[1:]:
                 src_dir = os.path.join(profile_path, src)
@@ -494,9 +498,12 @@ class PhasedBasedProfiler:
                     os.rmdir(src_dir)
                 except Exception:
                     pass
-            logger.info("Successfully merged multi-host profile directories into: %s", dirs[0])
+            logger.info(
+                "Successfully merged multi-host profile directories into: %s",
+                dirs[0])
         except Exception as e:
-            logger.warning("Failed to merge multi-host profile directories: %s", e)
+            logger.warning(
+                "Failed to merge multi-host profile directories: %s", e)
 
     def step(self, batch_composition_stats: dict) -> None:
         """
