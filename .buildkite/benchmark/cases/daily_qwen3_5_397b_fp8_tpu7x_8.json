@@ -37,7 +37,6 @@
           "max-model-len": 2048,
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.9,
-          "additional-config": "",
           "block-size": 256
         }
       },
@@ -83,7 +82,6 @@
           "max-model-len": 9216,
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.9,
-          "additional-config": "",
           "block-size": 256
         }
       },
@@ -129,7 +127,6 @@
           "max-model-len": 9216,
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.9,
-          "additional-config": "",
           "block-size": 256
         }
       },
