@@ -450,8 +450,7 @@ class KernelTunerBase(ABC):
                 f"Worker [{FLAGS.worker_id}] Processing CaseId: {cid} in Bucket {bucket_id}, [{begin_case_id}-{end_case_id}) with elapsed time {time_elapsed_minutes:.2f} minutes."
             )
             if not self.run_locally and (time_elapsed_minutes
-                                         > self.run_at_most_minutes or
-                                         (cid - begin_case_id) >= 1):
+                                         > self.run_at_most_minutes):
                 logger.warning(
                     f"Worker [{FLAGS.worker_id}] has been processing bucket {bucket_id} for {time_elapsed_minutes:.2f} minutes, which exceeds the limit of {self.run_at_most_minutes} minutes. Stopping processing more cases in this bucket to allow other jobs(like CICD jobs) in the queue to proceed."
                 )
