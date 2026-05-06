@@ -704,7 +704,7 @@ class TPUOffloadConnectorScheduler():
         )
 
         # external_computed_tokens, load_kv_async
-        return num_to_load, False
+        return num_to_load, num_to_load > 0
 
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
@@ -1254,11 +1254,17 @@ class TPUOffloadConnectorWorker:
         self.save_executor = ThreadPoolExecutor(
             max_workers=self.num_save_threads,
             thread_name_prefix="tpu_save_handler")
+        self.num_load_threads = getattr(envs, 'TPU_OFFLOAD_LOAD_THREADS', 1)
+        self.load_executor = ThreadPoolExecutor(
+            max_workers=self.num_load_threads,
+            thread_name_prefix="tpu_load_handler")
         self.finished_save_reqs: set[ReqId] = set()
+        self.finished_load_reqs: set[ReqId] = set()
         # Tracks if wait_for_save has been called for the current step's metadata.
         self._processed_save_for_step = False
         # On-going asynchronous save operations tracking futures and their associated manifest.
         self._pending_save_futures: list[tuple[Future, list[SaveReqInfo]]] = []
+        self._pending_load_futures: list[Future] = []
 
         # record finished save / load blocks (with req_ids) for each iteration
         self.offload_stats = KVOffloadConnectorStats()
@@ -1271,6 +1277,7 @@ class TPUOffloadConnectorWorker:
     def __del__(self):
         logger.info("TPUOffloadConnectorWorker: Entering __del__")
         self.save_executor.shutdown(wait=True)
+        self.load_executor.shutdown(wait=True)
 
     def register_runner(self, runner: TPUModelRunner):
         logger.info("TPUOffloadConnectorWorker: Entering register_runner")
@@ -1997,26 +2004,144 @@ class TPUOffloadConnectorWorker:
 
         self._pending_save_futures = remaining_futures
 
+    def _async_h2d_task(self, req_id: str, src_chunks: list[int],
+                        dst_blocks: list[int], num_matched_tokens: int,
+                        num_skip_leading_tokens: int,
+                        request_load_start_time: float) -> tuple:
+        """
+        Asynchronously fetches chunks from CPU and transfers them to TPU.
+        """
+        num_blocks_to_load = len(dst_blocks)
+        num_tokens_to_load_delta = num_matched_tokens - num_skip_leading_tokens
+
+        logger.debug(
+            f"Processing KV load for request {req_id}: "
+            f"Total matched: {num_matched_tokens}, "
+            f"Already computed: {num_skip_leading_tokens}. "
+            f"Fetching delta of {num_tokens_to_load_delta} tokens from cache for "
+            f"{num_blocks_to_load} blocks.")
+
+        # Fetch and chunks from the backend.
+        assembled_kv_on_cpu = []
+        for i in range(num_blocks_to_load):
+            src_chunk_id = src_chunks[i]
+            cached_value = self.cpu_backend.get(src_chunk_id)
+            if cached_value is not None:
+                assembled_kv_on_cpu.append(cached_value)
+            else:
+                raise ValueError(
+                    f"Chunk[{src_chunk_id}] not found in CPU backend for request {req_id}."
+                )
+
+        # swap-in
+        # [stacked_kv(1, num_layers, block_size, num_head, 2, head_dim)] * num_blocks_to_load
+        raw_chunked_kv_on_tpu = []
+        for i in range(num_blocks_to_load):
+            raw_chunked_kv_on_tpu.append(
+                jax.device_put(assembled_kv_on_cpu[i],
+                               self.expanded_device_sharding))
+        jax.block_until_ready(raw_chunked_kv_on_tpu)
+
+        return (req_id, raw_chunked_kv_on_tpu, dst_blocks, src_chunks,
+                num_matched_tokens, num_skip_leading_tokens,
+                assembled_kv_on_cpu, request_load_start_time)
+
+    def _process_completed_loads(self):
+        """
+        Checks for and processes completed asynchronous H2D load operations.
+        Updates the KV caches with the loaded chunks.
+        """
+        if not self._pending_load_futures:
+            return
+
+        completed_count = 0
+        remaining_futures = []
+        load_times = []
+
+        for future in self._pending_load_futures:
+            if future.done():
+                try:
+                    result = future.result()
+                    if result is None:
+                        continue
+                    (req_id, raw_chunked_kv_on_tpu, dst_blocks, src_chunks,
+                     num_matched_tokens, num_skip_leading_tokens,
+                     assembled_kv_on_cpu, request_load_start_time) = result
+
+                    num_blocks_to_load = len(dst_blocks)
+                    num_tokens_to_load_delta = num_matched_tokens - num_skip_leading_tokens
+
+                    update_kv_start = time.time()
+                    if self.use_bucketed_swap_ops:
+                        self.runner.kv_caches = self._bucketed_update_kv_caches(
+                            self.runner.kv_caches,
+                            raw_chunked_kv_on_tpu,
+                            dst_blocks,
+                        )
+                    else:
+                        self.runner.kv_caches = update_kv_caches_one(
+                            self.runner.kv_caches,
+                            raw_chunked_kv_on_tpu,
+                            dst_blocks,
+                            self.mesh,
+                            self.cached_kv_sharding_spec,
+                            self.indices_sharding,
+                        )
+                    jax.block_until_ready(self.runner.kv_caches)
+                    update_duration = time.time() - update_kv_start
+
+                    logger.debug(
+                        f"Request {req_id}: Loaded {num_tokens_to_load_delta} tokens into "
+                        f"{num_blocks_to_load} new blocks; "
+                        f" src_chunks: {src_chunks}, "
+                        f" dst blocks: {dst_blocks}, "
+                        f" insert duration {update_duration} s.")
+
+                    load_duration = time.time() - request_load_start_time
+                    load_times.append(load_duration)
+                    self.metrics_collector.record_h2d_transfer_latency(
+                        load_duration)
+                    total_size_bytes = sum(
+                        self._chunk_nbytes(chunk)
+                        for chunk in assembled_kv_on_cpu)
+                    self.metrics_collector.record_h2d_bytes(total_size_bytes)
+                    if load_duration > 0:
+                        bw_gbps = (total_size_bytes /
+                                   (1024**3)) / load_duration
+                        self.metrics_collector.record_h2d_transfer_bw(bw_gbps)
+                    if num_blocks_to_load > 0:
+                        self.offload_stats.record_load(
+                            req=req_id, loaded_chunk_ids=src_chunks)
+                        self.finished_load_reqs.add(req_id)
+                    self.metrics_collector.record_h2d_operation()
+                    completed_count += 1
+                except Exception as e:
+                    logger.error(f"A load operation failed: {e}",
+                                 exc_info=True)
+            else:
+                remaining_futures.append(future)
+
+        if load_times:
+            aggregate_load_time = sum(load_times)
+            logger.debug(
+                f"TPUOffloadConnectorWorker: Aggregate KV cache load time for {completed_count} requests: {aggregate_load_time:.4f} seconds"
+            )
+
+        self._pending_load_futures = remaining_futures
+
     def start_load_kv(self, fwd_ctx: "ForwardContext") -> None:
         """
         This function is the worker-side entry point for loading data from the
         local CPU backend into the TPU's sharded KV cache.
-        Executes a synchronous two-stage load (prefix-hit) pipeline.
-        This operation is fully blocking to ensure the KV cache is populated
-        before the model's forward pass begins.
-
-        Stage 1: Swap-In (Synchronous)
-        - Fetches requested chunks from the LocalCPUBackend (Host RAM).
-        - Performs a Host-to-Device (H2D) transfer to move the data into
-          a HBM staging buffer.
-
-        Stage 2: Scatter (Synchronous)
-        - Uses a JIT-compiled scatter kernel to disperse the contiguous
-          data from the staging buffer into the specific non-contiguous
-          physical blocks assigned to the request.
+        It has been split into two parts for async loading:
+        1. Process previously completed H2D transfers and update KV cache.
+        2. Submit new H2D transfers asynchronously.
         """
         # Reset the save processing flag at the start of a new step.
         self._processed_save_for_step = False
+
+        self._process_completed_loads()
+
         metadata = self.connector._get_connector_metadata()
         if not isinstance(
                 metadata,
@@ -2031,8 +2156,7 @@ class TPUOffloadConnectorWorker:
 
         assert self.runner is not None and self.runner.kv_caches is not None
 
-        # Process each request that needs its KV cache loaded
-        load_times = []
+        # 2. Submit new requests that need their KV cache loaded
         for meta in metadata.requests_meta:
             if not (meta.load_spec and meta.load_spec.can_load):
                 continue
@@ -2072,79 +2196,13 @@ class TPUOffloadConnectorWorker:
                     f"Request({meta.req_id}): dst_blocks {dst_blocks} contains blocks not present in local_block_ids {meta.local_block_ids}"
                 )
 
-            logger.debug(
-                f"Processing KV load for request {meta.req_id}: "
-                f"Total matched: {num_matched_tokens}, "
-                f"Already computed: {num_skip_leading_tokens}. "
-                f"Fetching delta of {num_tokens_to_load_delta} tokens from cache for "
-                f"{num_blocks_to_load} blocks.")
-
-            # Fetch and chunks from the backend.
-            assembled_kv_on_cpu = []
-            for i in range(num_blocks_to_load):
-                src_chunk_id = src_chunks[i]
-                cached_value = self.cpu_backend.get(src_chunk_id)
-                if cached_value is not None:
-                    assembled_kv_on_cpu.append(cached_value)
-                else:
-                    logger.error(
-                        f"Chunk[{src_chunk_id}] not found in CPU backend for request {meta.req_id}. Inconsistent state detected."
-                    )
-                    return
-
-            # swap-in
-            # [stacked_kv(1, num_layers, block_size, num_head, 2, head_dim)] * num_blocks_to_load
-            raw_chunked_kv_on_tpu = []
-            for i in range(num_blocks_to_load):
-                raw_chunked_kv_on_tpu.append(
-                    jax.device_put(assembled_kv_on_cpu[i],
-                                   self.expanded_device_sharding))
-            jax.block_until_ready(raw_chunked_kv_on_tpu)
-
-            update_kv_start = time.time()
-            if self.use_bucketed_swap_ops:
-                self.runner.kv_caches = self._bucketed_update_kv_caches(
-                    self.runner.kv_caches,
-                    raw_chunked_kv_on_tpu,
-                    dst_blocks,
-                )
-            else:
-                self.runner.kv_caches = update_kv_caches_one(
-                    self.runner.kv_caches,
-                    raw_chunked_kv_on_tpu,
-                    dst_blocks,
-                    self.mesh,
-                    self.cached_kv_sharding_spec,
-                    self.indices_sharding,
-                )
-            jax.block_until_ready(self.runner.kv_caches)
-            update_duration = time.time() - update_kv_start
-            logger.debug(
-                f"Request {meta.req_id}: Loaded {num_tokens_to_load_delta} tokens into "
-                f"{num_blocks_to_load} new blocks; "
-                f" src_chunks: {src_chunks}, "
-                f" dst blocks: {dst_blocks}, "
-                f" insert duration {update_duration} s.")
-
-            load_duration = time.time() - request_load_start_time
-            load_times.append(load_duration)
-            self.metrics_collector.record_h2d_transfer_latency(load_duration)
-            total_size_bytes = sum(
-                self._chunk_nbytes(chunk) for chunk in assembled_kv_on_cpu)
-            self.metrics_collector.record_h2d_bytes(total_size_bytes)
-            if load_duration > 0:
-                bw_gbps = (total_size_bytes / (1024**3)) / load_duration
-                self.metrics_collector.record_h2d_transfer_bw(bw_gbps)
-            if num_blocks_to_load > 0:
-                self.offload_stats.record_load(req=meta.req_id,
-                                               loaded_chunk_ids=src_chunks)
-            self.metrics_collector.record_h2d_operation()
-
-        if load_times:
-            aggregate_load_time = sum(load_times)
-            logger.debug(
-                f"TPUOffloadConnectorWorker: Aggregate KV cache load time for {len(load_times)} requests: {aggregate_load_time:.4f} seconds"
-            )
+            # Submit the async H2D task
+            future = self.load_executor.submit(self._async_h2d_task,
+                                               meta.req_id, src_chunks,
+                                               dst_blocks, num_matched_tokens,
+                                               num_skip_leading_tokens,
+                                               request_load_start_time)
+            self._pending_load_futures.append(future)
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """
@@ -2173,13 +2231,12 @@ class TPUOffloadConnectorWorker:
         self.start_save_kv()
         # collect the completed save requests.
         self._process_completed_saves()
+        self._process_completed_loads()
 
         finished_saves = self.finished_save_reqs
         self.finished_save_reqs = set()
-        # TODO: add back self.finished_load_reqs and report it back to
-        # vllm scheduler when async load gets implemented.
-        finished_loads = set()
-        # NOTE(jcgu): both are empty now.
+        finished_loads = self.finished_load_reqs
+        self.finished_load_reqs = set()
         logger.debug(f"Finished saves: {finished_saves}, "
                      f"Finished loads: {finished_loads}")
         return finished_saves, finished_loads
