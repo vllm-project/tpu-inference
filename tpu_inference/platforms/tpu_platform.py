@@ -306,16 +306,12 @@ class TpuPlatform(Platform):
         enable_continue_decode = vllm_config.additional_config.get(
             "enable_continue_decode", False)
         is_pooling_model = vllm_config.model_config.runner_type == "pooling"
-        return_experts = getattr(vllm_config.model_config,
-                                 "enable_return_routed_experts", False)
         async_scheduling = vllm_config.scheduler_config.async_scheduling
 
         # continue_decode is only active for generative (non-pooling) models,
-        # when MoE expert routing debug is disabled, and when async scheduling
-        # is disabled (to avoid KV cache desynchronization).
+        # and when async scheduling is disabled (to avoid KV cache desynchronization).
         should_use_continue_decode = (enable_continue_decode
                                       and not is_pooling_model
-                                      and not return_experts
                                       and not async_scheduling)
 
         # Late initialization to avoid circular import.
