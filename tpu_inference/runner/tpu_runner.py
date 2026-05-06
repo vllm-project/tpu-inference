@@ -254,6 +254,32 @@ def _jax_logprobs_materialize(
     )
 
 
+def _extract_last_tokens(
+    tokens: np.ndarray,
+    num_reqs: int,
+    logits_indices_selector: Optional[List[int]] = None,
+    num_logits_per_req: Optional[List[int]] = None,
+) -> np.ndarray:
+    """Extracts the last (next) token for each request from flattened tokens.
+
+    Handles reordering via selector and variable lengths via num_logits_per_req.
+    """
+    if logits_indices_selector is not None:
+        if num_logits_per_req is not None:
+            cu_num_logits = [0] + np.cumsum(num_logits_per_req).tolist()
+            last_logits_indices = [
+                logits_indices_selector[cu_num_logits[i + 1] - 1]
+                for i in range(num_reqs)
+            ]
+            selected_token_ids = tokens[last_logits_indices]
+        else:
+            selected_token_ids = tokens[logits_indices_selector[:num_reqs]]
+    else:
+        selected_token_ids = tokens[:num_reqs]
+
+    return np.expand_dims(selected_token_ids, 1)
+
+
 def _separate_logprobs(
     logprobs_tensors: LogprobsTensors,
     logits_indices_selector: Optional[List[int]],
@@ -312,32 +338,6 @@ def _separate_logprobs(
         cu_num_generated_tokens=np.arange(num_reqs + 1, dtype=np.int32),
     )
     return sampling_result, prompt_logprobs_dict
-
-
-def _extract_last_tokens(
-    tokens: np.ndarray,
-    num_reqs: int,
-    logits_indices_selector: Optional[List[int]] = None,
-    num_logits_per_req: Optional[List[int]] = None,
-) -> np.ndarray:
-    """Extracts the last (next) token for each request from flattened tokens.
-
-    Handles reordering via selector and variable lengths via num_logits_per_req.
-    """
-    if logits_indices_selector is not None:
-        if num_logits_per_req is not None:
-            cu_num_logits = [0] + np.cumsum(num_logits_per_req).tolist()
-            last_logits_indices = [
-                logits_indices_selector[cu_num_logits[i + 1] - 1]
-                for i in range(num_reqs)
-            ]
-            selected_token_ids = tokens[last_logits_indices]
-        else:
-            selected_token_ids = tokens[logits_indices_selector[:num_reqs]]
-    else:
-        selected_token_ids = tokens[:num_reqs]
-
-    return np.expand_dims(selected_token_ids, 1)
 
 
 class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
