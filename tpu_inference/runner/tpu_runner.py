@@ -867,7 +867,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # it will embed the text tokens and merge with the existing modality embeds
         # Later, the multi-modality model will take the embedding as the input.
         # For text-only model, this does nothing. It will input the input_ids and
-        # leave the mebedding job inside the forward pass
+        # leave the embedding job inside the forward pass
         input_ids, inputs_embeds = self._get_input_ids_embeds(
             input_ids, mm_embeds, is_mm_embed)
 
@@ -1988,7 +1988,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 padded_num_reqs)
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
-                              mm_embeds: jax.Array | None,
+                              mm_embeds: list[jax.Array] | None,
                               is_mm_embed: jax.Array | None):
         # Prevent the cost of calling additional function.
         if self.is_multimodal_model and mm_embeds is not None:

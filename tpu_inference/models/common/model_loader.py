@@ -34,6 +34,8 @@ from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.interface import (ModelInterface,
                                                    MultiModalInterface)
+from tpu_inference.models.jax.utils.multi_modal_utils import \
+    flatten_pad_mm_embeds
 from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
     load_random_weights_into_qwix_abstract_model,
@@ -396,11 +398,30 @@ def get_flax_model(
         return model.embed_multimodal(**kwargs)
 
     embed_sharding = NamedSharding(mesh, PartitionSpec(None))
-    # This function will calculates the embeddings of input texts and then merge with the image embeddings
+
     @jax.jit(out_shardings=(embed_sharding))
-    def run_embed_input_ids(graphdef, state, *args, **kwargs):
+    def jitted_embed_input_ids(graphdef,
+                               state,
+                               input_ids,
+                               mm_embeds,
+                               is_multimodal=None):
         model = nnx.merge(graphdef, state)
-        return model.embed_input_ids(*args, **kwargs)
+        return model.embed_input_ids(input_ids,
+                                     mm_embeds,
+                                     is_multimodal=is_multimodal)
+
+    def run_embed_input_ids(graphdef,
+                            state,
+                            input_ids,
+                            mm_embeds=None,
+                            is_multimodal=None):
+        mm_embeds = flatten_pad_mm_embeds(mm_embeds,
+                                          target_pad_len=input_ids.shape[0])
+        return jitted_embed_input_ids(graphdef,
+                                      state,
+                                      input_ids,
+                                      mm_embeds,
+                                      is_multimodal=is_multimodal)
 
     # For models that want to work with EAGLE-3 speculative decoding
     @jax.jit(out_shardings=(logits_sharding))

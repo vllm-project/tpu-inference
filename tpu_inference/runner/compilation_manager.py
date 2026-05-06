@@ -148,10 +148,11 @@ class CompilationManager:
             input_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
 
-            dummy_multimodal_embeddings = self._create_dummy_tensor(
+            dummy_mm_embeds = self._create_dummy_tensor(
                 (num_tokens, hidden_size),
                 self.runner.vllm_config.model_config.dtype,
                 sharding=sharding)
+            dummy_multimodal_embeddings = [dummy_mm_embeds]
             dummy_input_ids = self._create_dummy_tensor(
                 (num_tokens, ), jnp.int32, sharding=input_sharding)
             dummy_is_multimodal = self._create_dummy_tensor(
