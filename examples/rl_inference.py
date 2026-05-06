@@ -111,6 +111,9 @@ def main(args: dict):
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
 
+        P = len(output.prompt_token_ids)
+        print(f"Prompt token count (P): {P}")
+
         for completion in output.outputs:
             if completion.routed_experts is not None:
                 # Shape will be [len(completion.token_ids), num_layers, top_k]
@@ -118,6 +121,17 @@ def main(args: dict):
                     f"Routed experts shape: {completion.routed_experts.shape}")
                 print(
                     f"First token expert selection: {completion.routed_experts[0]}"
+                )
+
+            G = len(completion.token_ids)
+            print(f"Generated token count (G): {G}")
+            if completion.routed_experts is not None:
+                expected_len = P + G - 1
+                print(
+                    f"Expected routed experts 0-th dim (P + G - 1): {expected_len}"
+                )
+                print(
+                    f"Actual routed experts shape: {completion.routed_experts.shape}"
                 )
 
             if completion.logprobs is not None:
