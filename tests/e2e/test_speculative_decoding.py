@@ -313,9 +313,6 @@ def test_eagle3_correctness(
     model_name = 'meta-llama/Meta-Llama-3-8B-Instruct'
 
     model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
-    if model_impl == "auto":
-        model_impl = "flax_nnx"
-    monkeypatch.setenv("MODEL_IMPL_TYPE", model_impl)
     monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
 
     _test_correctness_helper(
@@ -337,9 +334,6 @@ def test_eagle3_performance(
     Expects spec_llm to be at least 1.8 faster than ref_llm.
     '''
     model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
-    if model_impl == "auto":
-        model_impl = "flax_nnx"
-    monkeypatch.setenv("MODEL_IMPL_TYPE", model_impl)
     monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
 
     _test_performance_helper(
