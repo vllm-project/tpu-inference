@@ -7,7 +7,7 @@
   },
   "benchmark_cases": [
     {
-      "case_name": "Llama-3.1-8B-dataset_custom-inlen_2048-outlen_8192",
+      "case_name": "Llama-3.1-8B-Instruct-dataset_custom-inlen_2048-outlen_8192",
       "env": {
         "MODELTAG": "NEW",
         "EXPECTED_ETEL": 3600000,
@@ -54,7 +54,7 @@
       }
     },
     {
-      "case_name": "Llama-3.1-8B-dataset_custom-inlen_1024-outlen_4096",
+      "case_name": "Llama-3.1-8B-Instruct-dataset_custom-inlen_1024-outlen_4096",
       "env": {
         "MODELTAG": "NEW",
         "EXPECTED_ETEL": 3600000,
@@ -101,7 +101,7 @@
       }
     },
     {
-      "case_name": "Llama-3.1-8B-dataset_custom-inlen_4096-outlen_1024",
+      "case_name": "Llama-3.1-8B-Instruct-dataset_custom-inlen_4096-outlen_1024",
       "env": {
         "MODELTAG": "NEW",
         "EXPECTED_ETEL": 3600000,
@@ -148,7 +148,7 @@
       }
     },
     {
-      "case_name": "Llama-3.1-8B-dataset_custom-inlen_8192-outlen_2048",
+      "case_name": "Llama-3.1-8B-Instruct-dataset_custom-inlen_8192-outlen_2048",
       "env": {
         "MODELTAG": "NEW",
         "EXPECTED_ETEL": 3600000,
@@ -196,7 +196,7 @@
     },
 
     {
-      "case_name": "Llama-3.1-8B-dataset_custom-inlen_2048-outlen_8192-add",
+      "case_name": "Llama-3.1-8B-Instruct-dataset_custom-inlen_2048-outlen_8192-add",
       "env": {
         "MODELTAG": "NEW",
         "EXPECTED_ETEL": 3600000,
@@ -244,7 +244,7 @@
       }
     },
     {
-      "case_name": "Llama-3.1-8B-dataset_custom-inlen_1024-outlen_4096-add",
+      "case_name": "Llama-3.1-8B-Instruct-dataset_custom-inlen_1024-outlen_4096-add",
       "env": {
         "MODELTAG": "NEW",
         "EXPECTED_ETEL": 3600000,
@@ -292,7 +292,7 @@
       }
     },
     {
-      "case_name": "Llama-3.1-8B-dataset_custom-inlen_4096-outlen_1024-add",
+      "case_name": "Llama-3.1-8B-Instruct-dataset_custom-inlen_4096-outlen_1024-add",
       "env": {
         "MODELTAG": "NEW",
         "EXPECTED_ETEL": 3600000,
@@ -340,7 +340,7 @@
       }
     },
     {
-      "case_name": "Llama-3.1-8B-dataset_custom-inlen_8192-outlen_2048-add",
+      "case_name": "Llama-3.1-8B-Instruct-dataset_custom-inlen_8192-outlen_2048-add",
       "env": {
         "MODELTAG": "NEW",
         "EXPECTED_ETEL": 3600000,
