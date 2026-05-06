@@ -27,6 +27,7 @@ export PRIORITY_KERNEL_TUNING=-1
 upload_with_priority() {
   local yaml_file=$1
   local JOB_PRIORITY=$2
+  cat "$yaml_file"
   echo "--- :pipeline: Uploading $yaml_file with priority ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
   { 
     echo "priority: ${JOB_PRIORITY:-PRIORITY_DEFAULT}"; 
@@ -67,7 +68,6 @@ process_json_benchmark_cases() {
 
   for case_file in "${files[@]}"; do
     echo "Processing case file: $case_file"
-    cat "$(python3 "$generator" --input "$case_file")"
     if upload_with_priority <(python3 "$generator" --input "$case_file") "$priority"; then
       echo "Successfully uploaded pipeline for $case_file"
     else
