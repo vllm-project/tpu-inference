@@ -120,9 +120,8 @@ def initialize_layer_weights(layer: torch.nn.Module):
 @pytest.mark.parametrize("hidden_size", [128])
 @pytest.mark.parametrize("num_experts", [8])
 @pytest.mark.parametrize("topk", [2])
-@pytest.mark.parametrize("use_ep", [True, False])
 def test_fused_moe_method(mesh, num_tokens, intermediate_size, hidden_size,
-                          num_experts, topk, use_ep):
+                          num_experts, topk):
     engine_args = EngineArgs(
         model=MODEL,
         max_model_len=64,
