@@ -416,7 +416,7 @@ class GmmTest(jtu.JaxTestCase):
     rhs_quant_dtype = jnp.float8_e5m2
 
     key1, key2 = jax.random.split(jax.random.key(0), 2)
-    lhs = jax.random.normal(key1, (batch_size, in_size), dtype=jnp.bfloat16)
+    lhs = jax.random.normal(key1, (batch_size, in_size), dtype=jnp.float8_e4m3fn)
     grad = jax.random.normal(key2, (batch_size, out_size), dtype=jnp.float32)
     
     grad_q, grad_scale = quantize_tensor(

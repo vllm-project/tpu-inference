@@ -145,6 +145,7 @@ def calculate_tgmm_tiling(
 def make_tgmm_configs(
     lhs: jax.Array,  # [m, k]
     rhs: jax.Array,  # [m, n]
+    rhs_scale: jax.Array,  # [1, 1, n] (per-N scale)
     group_sizes: jax.Array,
     num_actual_groups: int,
     *,
@@ -161,6 +162,8 @@ def make_tgmm_configs(
   )
   size_m, size_k = lhs.shape
   _, size_n = rhs.shape
+  if rhs_scale is not None:
+    assert rhs_scale.shape == (1, 1, size_n), "expecting rhs_scale.shape to be (1, 1, size_n)."
   # size_lhs_sublane is used in tgmm_inner_kernel to set the
   # (m/size_lhs_sublane, size_lhs_sublane, ...) reshape tile used on the m-axis
   # for both 'tiled_lhs_ref' and 'tiled_rhs_ref'.
@@ -181,10 +184,12 @@ def make_tgmm_configs(
       size_lhs_sublane=size_lhs_sublane,
   )
 
+  rhs_quant_block_size_m = size_m
   rhs_cfgs = gmm_v2.InputConfigs(
       quant_dtype=None,
-      quant_block_size=-1,
+      quant_block_size=rhs_quant_block_size_m,
       dtype=rhs.dtype,
+      has_scale=(rhs_scale is not None),
   )
   lhs_cfgs = gmm_v2.InputConfigs(
       quant_dtype=None,
@@ -219,14 +224,8 @@ def make_tgmm_configs(
 
 def tgmm_inner_kernel(
     tiled_lhs_ref: jax.Array,
-    # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_k]
     tiled_rhs_ref: jax.Array,
-    # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_n]
-    tiled_out_ref: jax.Array,  # [None, tile_k, tile_n]
-    # scratch
-    acc_ref: jax.Array,  # for accumulation [tile_k, tile_n]
-    metadata_ref: gmm_v2.MetadataRef,
-    *,
+    *rest,
     cfgs: gmm_v2.GmmConfigs,
 ):
   """Inner kernel for TGMM computation.
@@ -236,14 +235,19 @@ def tgmm_inner_kernel(
   and accumulation across different group-major tiles.
 
   Args:
-    tiled_lhs_ref: Reference to the tiled LHS data.
-    tiled_rhs_ref: Reference to the tiled RHS data.
-    tiled_out_ref: Reference to the tiled output buffer.
-    acc_ref: Scratch memory for accumulation.
+    tiled_lhs_ref: Reference to the tiled LHS data [tile_m // size_lhs_sublane, size_lhs_sublane, tile_k].
+    tiled_rhs_ref: Reference to the tiled RHS data [tile_m // size_lhs_sublane, size_lhs_sublane, tile_n].
+    tiled_out_ref: Reference to the tiled output buffer [None, tile_k, tile_n].
+    acc_ref: Scratch memory for accumulation [tile_k, tile_n].
     metadata_ref: Contains metadata like group offsets and group IDs.
     cfgs: GmmConfigs object containing kernel configurations.
   """
   # NB: grid=(num_n, num_k, num_gm)
+  if cfgs.rhs_cfgs.has_scale:
+    tiled_rhs_scale_ref, tiled_out_ref, acc_ref, metadata_ref = rest
+  else:
+    tiled_out_ref, acc_ref, metadata_ref = rest
+
   tiled_lhs_ref = tiled_lhs_ref.reshape(-1, tiled_lhs_ref.shape[-1])
   tiled_rhs_ref = tiled_rhs_ref.reshape(-1, tiled_rhs_ref.shape[-1])
   gm_id = pl.program_id(2)
@@ -283,6 +287,9 @@ def tgmm_inner_kernel(
       acc += acc_ref[...]
 
     if is_group_changing:
+      if cfgs.rhs_cfgs.has_scale:
+        scale_slice = tiled_rhs_scale_ref[0]
+        acc *= scale_slice
       tiled_out_ref[...] = acc.astype(tiled_out_ref.dtype)
     else:
       acc_ref[...] = acc
@@ -356,6 +363,9 @@ class TgmmIndexMaps:
     row_end = pl.cdiv(m_end, self.cfgs.dims.size_lhs_sublane)
     row_size = row_end - row_start
     return (pl.ds(row_start, row_size), 0, n_id)
+  
+  def rhs_scale_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array):
+    return (0, 0, n_id)
 
   def out_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array):
     group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
@@ -382,12 +392,19 @@ def generate_tgmm_block_specs(
       (bounded_slice_gm, cfgs.dims.size_lhs_sublane, cfgs.tiles.tile_n),
       index_map.rhs_index_map,
   )
+  in_specs = [lhs_block_spec, rhs_block_spec]
+  if cfgs.rhs_cfgs.has_scale:
+    rhs_scale_block_spec = pl.BlockSpec(
+        (1, 1, cfgs.tiles.tile_n),
+        index_map.rhs_scale_index_map,
+    )
+    in_specs.append(rhs_scale_block_spec)
   out_block_spec = pl.BlockSpec(
       (None, cfgs.tiles.tile_k, cfgs.tiles.tile_n),
       index_map.out_index_map,
   )
 
-  return (lhs_block_spec, rhs_block_spec), out_block_spec
+  return tuple(in_specs), out_block_spec
 
 
 def tgmm_kernel_main(
@@ -395,11 +412,7 @@ def tgmm_kernel_main(
     group_offset_ref,  # int32[1]
     lhs_ref,  # [m, k]
     rhs_ref,  # [m, n]
-    out_ref,  # [num_groups, k, n]
-    # scratch memory
-    acc_ref: jax.Array,  # [tile_k, tile_n]
-    metadata_ref: gmm_v2.MetadataRef,
-    *,
+    *rest,
     cfgs,
 ):
   """Main kernel function for TGMM computation.
@@ -414,6 +427,12 @@ def tgmm_kernel_main(
     metadata_ref: Reference to the metadata structure.
     cfgs: GmmConfigs object containing kernel configurations.
   """
+  if cfgs.rhs_cfgs.has_scale:
+    rhs_scale_ref, out_ref, acc_ref, metadata_ref = rest
+  else:
+    rhs_scale_ref = None
+    out_ref, acc_ref, metadata_ref = rest
+
   num_k = pl.cdiv(cfgs.dims.size_k, cfgs.tiles.tile_k)
   num_n = pl.cdiv(cfgs.dims.size_n, cfgs.tiles.tile_n)
   num_gm = gmm_v2.fill_metadata(
@@ -433,8 +452,12 @@ def tgmm_kernel_main(
   )
   lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, lhs_ref.shape[-1])
   rhs_in = rhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, rhs_ref.shape[-1])
+  pipeline_in_args = (
+      (lhs_in, rhs_in, rhs_scale_ref) if cfgs.rhs_cfgs.has_scale else (lhs_in, rhs_in)
+  )
   scratches = [acc_ref, metadata_ref]
-  pipeline_fn(lhs_in, rhs_in, out_ref, scratches=scratches)
+
+  pipeline_fn(*pipeline_in_args, out_ref, scratches=scratches)
 
 
 @jax.jit(
@@ -452,6 +475,7 @@ def tgmm_v2(
     rhs: jax.Array,  # [size_m, size_n]
     group_sizes: jax.Array,
     num_actual_groups: int,
+    rhs_scale: jax.Array | None = None,  # [1, 1, size_n] (per-N scale)
     group_offset: jax.Array | None = None,
     *,
     tile_info: gmm_v2.TileSizes | TileTgmmFn = calculate_tgmm_tiling,
@@ -471,6 +495,7 @@ def tgmm_v2(
     rhs: The right-hand side array with shape [size_m, size_n].
     group_sizes: The group sizes of lhs with shape [size_lhs_group].
     num_actual_groups: The actual number of groups: weight.shape[0].
+    rhs_scale: The per-N scale of the rhs.
     group_offset: An optional offset for the group indices.
     tile_info: Specifies the tiling strategy. Can be a `TileSizes` object or a
       function to calculate it.
@@ -495,6 +520,7 @@ def tgmm_v2(
   cfgs = make_tgmm_configs(
       lhs,
       rhs,
+      rhs_scale,
       group_sizes,
       num_actual_groups,
       tile_info=tile_info,
@@ -504,7 +530,7 @@ def tgmm_v2(
   )
   dims = cfgs.dims
   tiles = cfgs.tiles
-
+  
   num_lanes = pltpu.get_tpu_info().num_lanes
   aligned_n = gmm_v2.align_to(dims.size_n, num_lanes)
   out_init = jax.ShapeDtypeStruct(
@@ -521,15 +547,25 @@ def tgmm_v2(
       ),
   ]
 
+  in_specs = [
+    pl.BlockSpec(memory_space=pl.tpu.HBM),  # lhs
+    pl.BlockSpec(memory_space=pl.tpu.HBM),  # rhs
+  ]
+  call_args = [group_sizes, group_offset, lhs, rhs]
+  if rhs_scale is not None:
+    rhs_scale = rhs_scale.astype(jnp.float32)
+    pad_n = aligned_n - dims.size_n
+    if pad_n > 0:
+      rhs_scale = jnp.pad(rhs_scale, ((0, 0), (0, 0), (0, pad_n)))
+    in_specs.append(pl.BlockSpec(memory_space=pltpu.HBM))  # rhs_scale
+    call_args.append(rhs_scale)
+
   return pl.pallas_call(
       functools.partial(tgmm_kernel_main, cfgs=cfgs),
       out_shape=out_init,
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
-          in_specs=[
-              pl.BlockSpec(memory_space=pltpu.HBM),  # x
-              pl.BlockSpec(memory_space=pltpu.HBM),  # dout
-          ],
+          in_specs=in_specs,
           out_specs=pl.BlockSpec(memory_space=pltpu.HBM),
           scratch_shapes=scratch_shapes,
       ),
@@ -541,4 +577,4 @@ def tgmm_v2(
       # the metadata here is for profiling, debugging, and cost modeling.
       # It does not affect the kernel's computation.
       metadata=gmm_v2.get_metadata(cfgs),
-  )(group_sizes, group_offset, lhs, rhs)[:, :, : dims.size_n]
+  )(*call_args)[:, :, : dims.size_n]
