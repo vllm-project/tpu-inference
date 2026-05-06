@@ -450,7 +450,8 @@ class PhasedBasedProfiler:
             self.profiling_n_steps_left -= 1
             if self.profiling_n_steps_left <= 0:
                 jax.profiler.stop_trace()
-                self._merge_multihost_profile_directories()
+                if envs.TPU_MULTIHOST_BACKEND == "ray":
+                    self._merge_multihost_profile_directories()
                 logger.info(
                     f"Profiling for {self.current_phase} phase finished")
                 self.current_phase = ""
