@@ -9,7 +9,7 @@
   },
   "benchmark_cases": [
     {
-      "case_name": "Qwen3.5-397B-A17B-FP8-dataset_random-inlen_1024-outlen_1024",
+      "case_name": "Qwen3_5-397B-A17B-FP8-dataset_random-inlen_1024-outlen_1024",
       "ci_queue": [
         "tpu_v7x_8_queue"
       ],
@@ -54,7 +54,7 @@
       }
     },
     {
-      "case_name": "Qwen3.5-397B-A17B-FP8-dataset_random-inlen_8192-outlen_1024",
+      "case_name": "Qwen3_5-397B-A17B-FP8-dataset_random-inlen_8192-outlen_1024",
       "ci_queue": [
         "tpu_v7x_8_queue"
       ],
@@ -99,7 +99,7 @@
       }
     },
     {
-      "case_name": "Qwen3.5-397B-A17B-FP8-dataset_random-inlen_1024-outlen_8192",
+      "case_name": "Qwen3_5-397B-A17B-FP8-dataset_random-inlen_1024-outlen_8192",
       "ci_queue": [
         "tpu_v7x_8_queue"
       ],
