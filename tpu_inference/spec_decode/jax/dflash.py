@@ -83,33 +83,34 @@ class DFlashProposer:
 
     def load_model(self, target_model: Any) -> None:
         """Load the DFlash draft model and share embeddings from target."""
-        (
-            self.model_fn,
-            self.compute_logits_fn,
-            self.combine_hidden_states_fn,
-            _,
-            self.state,
-            _,
-            _,
-        ) = get_model(self.vllm_config,
-                      self.rng_key,
-                      self.mesh,
-                      is_draft_model=True)
+        draft_mi = get_model(self.vllm_config,
+                             self.rng_key,
+                             self.mesh,
+                             is_draft_model=True)
+        self.model_fn = draft_mi.model_fn
+        self.compute_logits_fn = draft_mi.compute_logits_fn
+        self.combine_hidden_states_fn = draft_mi.combine_hidden_states_fn
+        self.state = draft_mi.state
 
         # Share the target model's embedding with the draft model.
-        draft_embed = getattr(self.state.model, "embed_tokens", None)
-        target_embed = getattr(target_model.model, "embed_tokens", None)
-        if target_embed is None:
-            target_embed = getattr(target_model.model, "embed", None)
-        if target_embed is not None:
-            if draft_embed is None or not jnp.any(draft_embed.embedding):
-                logger.info(
-                    "Sharing target model embedding with DFlash draft model.")
-                self.state.model.embed_tokens = target_embed
-            elif jnp.array_equal(draft_embed.embedding,
-                                 target_embed.embedding):
-                logger.info("Draft embedding identical to target; sharing.")
-                self.state.model.embed_tokens = target_embed
+        # Only applicable to flax_nnx state (has .model); vllm-impl state is
+        # a params dict, in which case the draft keeps its own embedding.
+        if hasattr(self.state, "model") and hasattr(target_model, "model"):
+            draft_embed = getattr(self.state.model, "embed_tokens", None)
+            target_embed = getattr(target_model.model, "embed_tokens", None)
+            if target_embed is None:
+                target_embed = getattr(target_model.model, "embed", None)
+            if target_embed is not None:
+                if draft_embed is None or not jnp.any(draft_embed.embedding):
+                    logger.info(
+                        "Sharing target model embedding with DFlash draft model."
+                    )
+                    self.state.model.embed_tokens = target_embed
+                elif jnp.array_equal(draft_embed.embedding,
+                                     target_embed.embedding):
+                    logger.info(
+                        "Draft embedding identical to target; sharing.")
+                    self.state.model.embed_tokens = target_embed
 
         # Allocate on-device KV caches
         hf_config = self.draft_model_config.hf_config
@@ -139,7 +140,7 @@ class DFlashProposer:
             cache_shape,
         )
 
-    @functools.partial(jax.jit, static_argnums=(0,))
+    @functools.partial(jax.jit, static_argnums=(0, ))
     def _project_aux_hidden(
             self, state: nnx.State,
             aux_hidden_states: tuple[jax.Array, ...]) -> jax.Array:

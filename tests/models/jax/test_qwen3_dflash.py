@@ -14,11 +14,9 @@
 
 from types import SimpleNamespace
 
-from tpu_inference.models.jax.qwen3 import \
-    _get_dflash_target_layer_ids as get_target_layer_ids_for_qwen3
-from tpu_inference.models.jax.qwen3_dflash import _build_target_layer_ids
 from tpu_inference.models.jax.qwen3_dflash import \
-    _get_dflash_target_layer_ids as get_target_layer_ids_for_qwen3_dflash
+    _build_target_layer_ids  # isort: split
+from tpu_inference.models.jax.qwen3_dflash import _get_dflash_target_layer_ids
 
 
 def test_build_target_layer_ids_default_layout():
@@ -33,19 +31,14 @@ def test_get_target_layer_ids_prefers_explicit_config():
         num_hidden_layers=3,
     )
 
-    assert get_target_layer_ids_for_qwen3_dflash(cfg, 32) == [2, 6, 10]
-    assert get_target_layer_ids_for_qwen3(32, cfg) == [2, 6, 10]
+    assert _get_dflash_target_layer_ids(cfg, 32) == [2, 6, 10]
 
 
-def test_get_target_layer_ids_fallback_matches_between_modules():
+def test_get_target_layer_ids_fallback():
     cfg = SimpleNamespace(
         dflash_config=None,
         num_target_layers=32,
         num_hidden_layers=3,
     )
 
-    dflash_ids = get_target_layer_ids_for_qwen3_dflash(cfg, 32)
-    qwen3_ids = get_target_layer_ids_for_qwen3(32, cfg)
-
-    assert dflash_ids == [1, 15, 29]
-    assert qwen3_ids == dflash_ids
+    assert _get_dflash_target_layer_ids(cfg, 32) == [1, 15, 29]

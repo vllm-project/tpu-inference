@@ -34,10 +34,6 @@ from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.qwen2 import Qwen2MLP as Qwen3MLP
-from tpu_inference.models.jax.qwen3 import \
-    _build_target_layer_ids as _build_target_layer_ids_shared
-from tpu_inference.models.jax.qwen3 import \
-    _get_dflash_target_layer_ids as _get_dflash_target_layer_ids_shared
 from tpu_inference.models.jax.utils.weight_utils import (BaseWeightLoader,
                                                          get_default_maps,
                                                          load_hf_weights)
@@ -49,15 +45,25 @@ init_fn = nnx.initializers.uniform()
 
 def _build_target_layer_ids(num_target_layers: int,
                             num_draft_layers: int) -> list[int]:
-    return _build_target_layer_ids_shared(num_target_layers, num_draft_layers)
+    if num_draft_layers == 1:
+        return [num_target_layers // 2]
+    return [
+        round(1 + i * (num_target_layers - 4) / (num_draft_layers - 1))
+        for i in range(num_draft_layers)
+    ]
 
 
 def _get_dflash_target_layer_ids(
     draft_hf_config: Qwen3Config,
     target_num_layers: int,
 ) -> list[int]:
-    return _get_dflash_target_layer_ids_shared(target_num_layers,
-                                               draft_hf_config)
+    dflash_cfg = getattr(draft_hf_config, "dflash_config", None)
+    if dflash_cfg is not None:
+        target_layer_ids = dflash_cfg.get("target_layer_ids", None)
+        if target_layer_ids is not None:
+            return list(target_layer_ids)
+    num_draft_layers = draft_hf_config.num_hidden_layers
+    return _build_target_layer_ids(target_num_layers, num_draft_layers)
 
 
 class Qwen3DFlashAttention(nnx.Module):

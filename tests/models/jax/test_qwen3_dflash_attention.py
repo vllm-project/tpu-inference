@@ -53,21 +53,23 @@ def _dense_reference_attention(
 
 def _build_stub_attention(impl: str) -> Qwen3DFlashAttention:
     attention = object.__new__(Qwen3DFlashAttention)
-    attention.q_proj = lambda x: x
-    attention.q_norm = lambda x: x
-    attention.k_proj = lambda x: x
-    attention.k_norm = lambda x: x
-    attention.v_proj = lambda x: x
-    attention.o_proj = lambda x: x
-    attention.head_dim_original = 1
-    attention.rope_theta = 10000.0
-    attention.rope_scaling = None
-    attention.mesh = object()
-    attention.dflash_attention_impl = impl
-    attention.max_query_len = 2
-    attention.kv_cache_quantized_dtype = None
-    attention._k_scale = 1.0
-    attention._v_scale = 1.0
+    # nnx.Module is frozen in flax >= 0.12.4; bypass the freeze for the stub.
+    _set = object.__setattr__.__get__(attention)
+    _set("q_proj", lambda x: x)
+    _set("q_norm", lambda x: x)
+    _set("k_proj", lambda x: x)
+    _set("k_norm", lambda x: x)
+    _set("v_proj", lambda x: x)
+    _set("o_proj", lambda x: x)
+    _set("head_dim_original", 1)
+    _set("rope_theta", 10000.0)
+    _set("rope_scaling", None)
+    _set("mesh", object())
+    _set("dflash_attention_impl", impl)
+    _set("max_query_len", 2)
+    _set("kv_cache_quantized_dtype", None)
+    _set("_k_scale", 1.0)
+    _set("_v_scale", 1.0)
     return attention
 
 
