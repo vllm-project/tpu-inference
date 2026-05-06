@@ -1,0 +1,94 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Dev pipeline for tpu-inference-dev.
+# Demo/sample steps showing how to run custom tests on tpu7x.
+# Copy and adapt any step for your own experiments.
+#
+# HOW TO TRIGGER THIS PIPELINE
+# ─────────────────────────────
+# Option A — Buildkite UI:
+#   Go to https://buildkite.com/tpu-commons/tpu-inference-dev
+#   Click "New Build", set branch to your branch, click "Create Build".
+#
+# Option B — Buildkite API (requires BUILDKITE_API_TOKEN in your env):
+#   curl -s -X POST \
+#     -H "Authorization: Bearer $BUILDKITE_API_TOKEN" \
+#     -H "Content-Type: application/json" \
+#     "https://api.buildkite.com/v2/organizations/tpu-commons/pipelines/tpu-inference-dev/builds" \
+#     -d "{\"commit\": \"$(git rev-parse HEAD)\", \"branch\": \"$(git rev-parse --abbrev-ref HEAD)\", \"message\": \"my test\"}"
+#
+# HOW TO CUSTOMIZE
+# ─────────────────
+# 1. On your branch, edit this file — use any demo step below as a starting point.
+# 2. Change the command, model, env vars, or queue as needed.
+# 3. Trigger the pipeline — only your branch's file is used.
+
+steps:
+
+  # -----------------------------------------------------------------
+  # Build Step (required by all demo steps below)
+  # -----------------------------------------------------------------
+  - label: ":docker: Build and Push Base Image (tpu7x)"
+    key: tpu7x_build_docker
+    agents:
+      queue: cpu_64_core
+    env:
+      TPU_VERSION: "tpu7x"
+    commands:
+      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+
+  # -----------------------------------------------------------------
+  # Demo 1: Run deepseek R1 for collecting kernel tuning keys
+  # -----------------------------------------------------------------
+  - label: "tpu7x [demo] offline_inference.py"
+    key: tpu7x_demo_offline_inference
+    depends_on: tpu7x_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+    agents:
+      queue: tpu_v7x_16_queue
+    commands:
+      - |
+        mkdir -p /tmp/DeepSeek-R1-Configs && \
+        gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1 /tmp/DeepSeek-R1-Configs
+      - |
+        # Run offline inference with a small model.
+        # --tensor-parallel-size 2: tp=1 is currently unsupported on tpu7x.
+        # Customize --model, --max-model-len, --max-tokens as needed.
+        .buildkite/scripts/run_in_docker.sh bash -c '\
+          VLLM_ENGINE_READY_TIMEOUT_S=10800 \
+          MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8 \
+          MOE_REQUANTIZE_WEIGHT_DTYPE=fp4 \
+          MOE_REQUANTIZE_BLOCK_SIZE=512 \
+          FORCE_MOE_RANDOM_ROUTING=1 \
+          NEW_MODEL_DESIGN=1 \
+          MODEL_IMPL_TYPE=vllm \
+          vllm serve gs://tpu-commons-ci/deepseek/r1 \
+            --served-model-name deepseek-ai/DeepSeek-R1 \
+            --api-server-count=3 \
+            --max-model-len=9216 \
+            --max-num-batched-tokens=512 \
+            --max-num-seqs=160 \
+            --kv-cache-dtype=fp8 \
+            --no-enable-prefix-caching \
+            --gpu-memory-utilization=0.95 \
+            --tensor-parallel-size=16 \
+            --load-format=runai_streamer \
+            --async-scheduling \
+            --enable-expert-parallel \
+            --additional_config='\''{"compilation_sizes": [2560], "sharding": {"sharding_strategy": {"enable_dp_attention": true}}}'\'' \
+            --trust-remote-code \
+            --generation-config "/tmp/DeepSeek-R1-Configs/DeepSeek-R1"'

@@ -28,7 +28,7 @@ bash "${NIGHTLY_SCRIPT}" \
   --enable-expert-parallel \
   --additional-config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true, "expert_parallelism": 16, "tensor_parallelism": 1}}, "replicate_attn_weights": "True", "sparse_matmul": "True", "compilation_sizes": [2560]}' \
   --disable-shared-experts-stream "0" \
-  --generation-config "gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1" \
+  --generation-config "/tmp/DeepSeek-R1-Configs/DeepSeek-R1" \
   --vllm-mla-disable "0" \
   --moe-requantize-block-size "512" \
   --moe-requantize-weight-dtype "fp4" \
