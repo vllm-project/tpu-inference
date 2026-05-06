@@ -50,12 +50,21 @@ def get_ngram_test_prompts():
 
 
 def get_eagle3_test_prompts():
-    num_prompts = 100
-    prompts = []
+    import json
 
-    for _ in range(num_prompts):
-        prompts.append(
-            "Predict the continuation of this sequence: 1 2 3 4 5 6 7 8")
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    dataset_path = os.path.join(current_dir, "dataset", "spec_bench.jsonl")
+
+    prompts = []
+    if os.path.exists(dataset_path):
+        with open(dataset_path, "r") as f:
+            for line in f:
+                item = json.loads(line)
+                if item.get("category") == "summarization":
+                    if item.get("turns"):
+                        prompts.append(item["turns"][0])
+    else:
+        raise FileNotFoundError(f"Dataset not found at {dataset_path}")
 
     return prompts
 
@@ -93,6 +102,7 @@ def _test_correctness_helper(
     sampling_config: SamplingParams,
     model_name: str,
     speculative_config: dict,
+    max_model_len: int = 1024,
 ):
     '''
     Helper function to test ngram correctness.
@@ -104,7 +114,7 @@ def _test_correctness_helper(
 
         ref_llm = LLM(
             model=model_name,
-            max_model_len=1024,
+            max_model_len=max_model_len,
             max_num_seqs=4,
             tensor_parallel_size=_get_tensor_parallel_size(),
             model_loader_extra_config={"enable_weights_track": False},
@@ -119,7 +129,7 @@ def _test_correctness_helper(
         spec_llm = LLM(
             model=model_name,
             speculative_config=speculative_config,
-            max_model_len=1024,
+            max_model_len=max_model_len,
             max_num_seqs=4,
             tensor_parallel_size=_get_tensor_parallel_size(),
             model_loader_extra_config={"enable_weights_track": False},
@@ -189,6 +199,7 @@ def _test_performance_helper(
     sampling_config: SamplingParams,
     speculative_config: dict,
     min_acceptance_rate: float,
+    max_model_len: int = 1024,
 ):
     '''
     Helper function to test speculative decoding performance.
@@ -203,7 +214,7 @@ def _test_performance_helper(
         # Test reference LLM timing
         ref_llm = LLM(
             model=model_name,
-            max_model_len=1024,
+            max_model_len=max_model_len,
             max_num_seqs=1,
             enable_prefix_caching=False,
             tensor_parallel_size=_get_tensor_parallel_size(),
@@ -223,7 +234,7 @@ def _test_performance_helper(
         spec_llm = LLM(
             model=model_name,
             speculative_config=speculative_config,
-            max_model_len=1024,
+            max_model_len=max_model_len,
             max_num_seqs=1,
             tensor_parallel_size=_get_tensor_parallel_size(),
             enable_prefix_caching=False,
@@ -316,12 +327,15 @@ def test_eagle3_correctness(
     monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
 
     _test_correctness_helper(
-        monkeypatch, sampling_config, model_name, {
+        monkeypatch,
+        sampling_config,
+        model_name, {
             'model': "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
             "num_speculative_tokens": 3,
             "method": "eagle3",
             "draft_tensor_parallel_size": 1
-        })
+        },
+        max_model_len=2048)
 
 
 def test_eagle3_performance(
@@ -344,4 +358,5 @@ def test_eagle3_performance(
             "num_speculative_tokens": 2,
             "draft_tensor_parallel_size": 1
         },
-        min_acceptance_rate=0.75)
+        min_acceptance_rate=0.75,
+        max_model_len=2048)
