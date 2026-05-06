@@ -1787,3 +1787,14 @@ def sc_gather_reduce(
             idx,
             op,
         ]))
+
+
+def get_valid_col_chunk_size(hidden_size: int) -> int:
+    import math
+    i = math.ceil(hidden_size / 3584)
+    sc_kernel_col_chunk_size = 3584
+    for target_i in range(i, hidden_size + 1):
+        if hidden_size % target_i == 0:
+            sc_kernel_col_chunk_size = hidden_size // target_i
+            break
+    return sc_kernel_col_chunk_size

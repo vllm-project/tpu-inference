@@ -213,14 +213,8 @@ def moe_gmm_local(x: jax.Array, w1: jax.Array, w1_scale: jax.Array | None,
     if use_sc:
         # Path 1: Kernel pipeline
         hidden_size = gmm2_res.shape[1]
-        i = math.ceil(hidden_size / 3584)
-        sc_kernel_col_chunk_size = 3584
-        for target_i in range(i, hidden_size + 1):
-            if hidden_size % target_i == 0:
-                sc_kernel_col_chunk_size = hidden_size // target_i
-                break
         sc_kernel_col_chunk_size = gather_reduce_sc.get_valid_col_chunk_size(
-            hidden_size, sc_kernel_col_chunk_size)
+            hidden_size)
 
         if local_group_size < group_sizes.size:
             mask_flat = mask.reshape(-1, topk)
