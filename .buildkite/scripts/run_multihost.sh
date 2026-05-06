@@ -270,6 +270,8 @@ VLLM_SERVE_CMD="vllm serve ${MODEL} \
   --load-format=runai_streamer \
   --max-model-len 1024"
 
+mkdir -p /tmp/DeepSeek-R1-Configs
+gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1 /tmp/DeepSeek-R1-Configs
 # Override VLLM_SERVE_CMD if provided as the first argument
 if [ "$#" -ge 1 ]; then
     VLLM_SERVE_CMD="$1"
