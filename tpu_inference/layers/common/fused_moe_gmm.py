@@ -14,10 +14,6 @@
 
 import functools
 import math
-
-# Target chunk size of 2048 slots was found empirically to be optimal
-# for MoE workloads (e.g., Qwen) to hide ICI/DMA latency during AllReduce.
-TARGET_SLOT_CHUNK_SIZE = 2048
 from typing import Literal
 
 import jax
@@ -36,6 +32,10 @@ from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
+
+# Target chunk size of 2048 slots was found empirically to be optimal
+# for MoE workloads (e.g., Qwen) to hide ICI/DMA latency during AllReduce.
+TARGET_SLOT_CHUNK_SIZE = 2048
 
 
 def _override_token_indices_for_random_routing(
