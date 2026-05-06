@@ -314,10 +314,15 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
         # if they don't match.
         if w13_global_scale.ndim == 2:
             w13_global_scale = jnp.max(w13_global_scale, axis=1)
-        # gmm_v2 expects rhs_global_scale as a 1D per-expert FP32 vector
-        # (size_group,) -- one scalar per expert.
-        w13_global_scale = w13_global_scale.reshape(-1)
-        w2_global_scale = w2_global_scale.reshape(-1)
+        # gmm_v2 expects rhs_global_scale shaped (size_group, 128). The
+        # last dim is the TPU lane dim — must be tile-aligned to 128 — so
+        # we broadcast the per-expert scalar across all 128 lanes (the
+        # kernel reduces it back to a scalar via [0]).
+        lane = 128
+        w13_global_scale = jnp.broadcast_to(w13_global_scale.reshape(-1, 1),
+                                            (w13_global_scale.shape[0], lane))
+        w2_global_scale = jnp.broadcast_to(w2_global_scale.reshape(-1, 1),
+                                           (w2_global_scale.shape[0], lane))
 
         @jax.jit
         def process_nvfp4_moe_weights(w13_weight, w13_weight_scale, w2_weight,

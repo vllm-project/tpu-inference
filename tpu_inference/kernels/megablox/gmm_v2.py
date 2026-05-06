@@ -272,7 +272,7 @@ class IndexMaps:
     def rhs_global_scale_index_map(self, n_id: jax.Array, gm_id: jax.Array,
                                    k_id: jax.Array):
         group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
-        return (group_id, )
+        return (group_id, 0)
 
     def out_index_map(self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array):
         is_last_gm = gm_id == (pl.num_programs(1) - 1)
@@ -325,8 +325,11 @@ def generate_block_specs(
             index_map.rhs_scale_index_map,
         )
     if cfgs.rhs_cfgs.has_global_scale:
+        # Last dim is broadcast across 128 TPU lanes so DMAs along the
+        # expert axis stay tile-aligned. The kernel collapses back to a
+        # scalar via [0].
         rhs_global_scale_block_spec = pl.BlockSpec(
-            (None, ),
+            (None, 128),
             index_map.rhs_global_scale_index_map,
         )
 
@@ -403,8 +406,9 @@ def inner_kernel(
             # both NVFP4-style scales are explicitly consumed inside the
             # kernel rather than precombined at load time.
             if cfgs.rhs_cfgs.has_global_scale:
-                tiled_global_scale = tiled_rhs_ref.get_global_scale().astype(
-                    acc_ref.dtype)
+                # Broadcast-replicated across 128 lanes; pick element [0].
+                tiled_global_scale = tiled_rhs_ref.get_global_scale(
+                )[0].astype(acc_ref.dtype)
                 tiled_rhs_scale = tiled_rhs_scale * tiled_global_scale
             num_blocks = cfgs.num_quant_blocks_per_tile_k
             tiled_rhs_dequant = tiled_rhs.astype(acc_ref.dtype).reshape(
@@ -1225,7 +1229,7 @@ def gmm_v2(
         maybe_quantize_lhs: bool = True,
         zero_initialize: bool = True,
         fuse_act: str | None = None,
-        rhs_global_scale: jax.Array | None = None,  # [size_group]
+        rhs_global_scale: jax.Array | None = None,  # [size_group, 128]
 ) -> jax.Array:
     """GMM kernel implemented with emit_pipeline.
 
