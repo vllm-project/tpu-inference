@@ -82,7 +82,7 @@ def continue_decode(
         dp_size: Data parallel size (needed for correct metadata padding).
 
     Returns:
-        Tuple of (generated_tokens, final_kv_caches, final_state, final_rng).
+    Tuple of (generated_tokens, final_kv_caches, final_state, final_rng, all_expert_indices).
     """
 
     batch_size = init_state.current_tokens.shape[0]
@@ -95,12 +95,14 @@ def continue_decode(
     attn_metadata = init_state.attn_metadata
     current_rng = rng
 
+    all_expert_indices = None
+
     for step_idx in range(max_decode_steps):
         # Split RNG for current step
         current_rng, step_rng = jax.random.split(current_rng)
 
         # 1. Forward pass
-        kv_caches, hidden_states, _, _ = model_fn(
+        kv_caches, hidden_states, _, expert_indices_step = model_fn(
             state,
             kv_caches,
             current_tokens,
@@ -113,6 +115,17 @@ def continue_decode(
             is_first_rank,
             is_last_rank,
         )
+
+        # Initialize and record expert indices if returned
+        if expert_indices_step is not None:
+            if step_idx == 0:
+                num_layers, _, top_k = expert_indices_step.shape
+                all_expert_indices = jnp.zeros(
+                    (max_decode_steps, num_layers, batch_size, top_k),
+                    dtype=expert_indices_step.dtype,
+                )
+            all_expert_indices = all_expert_indices.at[step_idx].set(
+                expert_indices_step)
 
         # 2. Compute logits and sample
         logits = compute_logits_fn(state, hidden_states, None)
@@ -165,4 +178,4 @@ def continue_decode(
         step_counter=jnp.array(max_decode_steps, dtype=jnp.int32),
     )
 
-    return generated_tokens, kv_caches, final_state, current_rng
+    return generated_tokens, kv_caches, final_state, current_rng, all_expert_indices
