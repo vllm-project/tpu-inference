@@ -146,7 +146,7 @@ def calculate_metrics(
     tokenizer: PreTrainedTokenizerBase,
     selected_percentiles: list[float],
     goodput_config_dict: dict[str, float],
-) -> tuple[BenchmarkMetrics, list[int]]:
+) -> tuple[BenchmarkMetrics, list[int], list[int]]:
     actual_output_lens: list[int] = []
     actual_input_lens: list[int] = []
     total_input = 0
@@ -349,7 +349,7 @@ async def benchmark(
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
-    metrics, actual_output_lens, actual_input_lens = calculate_metrics(
+    metrics, actual_output_lens, input_lens = calculate_metrics(
         input_requests=input_requests,
         outputs=outputs,
         dur_s=benchmark_duration,
@@ -385,7 +385,7 @@ async def benchmark(
         metrics.request_goodput if goodput_config_dict else None,
         "output_throughput": metrics.output_throughput,
         "total_token_throughput": metrics.total_token_throughput,
-        "input_lens": actual_input_lens,
+        "input_lens": input_lens,
         "output_lens": actual_output_lens,
         "ttfts": [output.ttft for output in outputs],
         "itls": [output.itl for output in outputs],
