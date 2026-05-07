@@ -140,6 +140,7 @@ def test_fused_moe_method(mesh, num_tokens, intermediate_size, hidden_size,
                          top_k=topk,
                          hidden_size=hidden_size,
                          intermediate_size=intermediate_size)
+        layer.moe_parallel_config.use_ep = use_ep
     weight_quant = quant_config.target_scheme_map['Linear']['weights']
     input_quant = quant_config.target_scheme_map['Linear']['input_activations']
     moe = quant_config.get_moe_config(layer)
