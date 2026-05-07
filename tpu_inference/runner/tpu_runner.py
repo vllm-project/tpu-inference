@@ -577,6 +577,38 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.mesh,
             )
 
+            # Only pre-warm torchax for pooling tasks to prevent JIT during inference
+            # while avoiding unnecessary overhead for standard generative models.
+            if self.is_pooling_model:
+                import jax.numpy as jnp
+                import torchax
+                from jax.sharding import NamedSharding, PartitionSpec
+                from torchax.interop import torch_view
+
+                from tpu_inference.layers.common.sharding import \
+                    ShardingAxisName
+
+                h_size = self.model_config.get_hidden_size()
+                # Use the actual model mesh and ATTN_DATA axis for sharding alignment
+                pooling_sharding = NamedSharding(
+                    self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+
+                logger.info(
+                    f"Pre-warming StepPooler for shapes: {self.num_tokens_paddings}"
+                )
+                with torchax.default_env():
+                    for max_tokens in self.num_tokens_paddings:
+                        # Create a dummy JAX array with exact shape and sharding metadata
+                        dummy_jax = jnp.zeros((max_tokens, h_size),
+                                              dtype=jnp.bfloat16)
+                        # Shard the array to match real-time hidden_states
+                        dummy_jax = jax.device_put(dummy_jax, pooling_sharding)
+
+                        # Trigger the casting and host-transfer kernels
+                        # Using non_blocking=False to ensure AOT compilation completes during load
+                        _ = torch_view(dummy_jax).to('cpu', non_blocking=False)
+                logger.info("Universal StepPooler pre-warming successful.")
+
         self.model_fn = model.model_fn
         self.compute_logits_fn = model.compute_logits_fn
         self.pooler_fn = model.pooler_fn
