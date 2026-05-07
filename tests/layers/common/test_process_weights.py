@@ -41,7 +41,8 @@ class TestProcessWeights(unittest.TestCase):
         bias_p_spec = P('model')
 
         # 2D scale[out_blocks, in_blocks]
-        weight_scale = jnp.ones((8, 4))
+        # Multiply size by mesh dimension to ensure divisibility across multiple chips.
+        weight_scale = jnp.ones((8, 4 * mesh.shape['data']))
         weights = LinearWeights(
             weight=jnp.ones((1024, 512)),
             weight_scale=weight_scale,
@@ -68,7 +69,8 @@ class TestProcessWeights(unittest.TestCase):
         bias_p_spec = P('model')
 
         # 3D scale[num_blocks, 1, out_features]
-        weight_scale = jnp.ones((4, 1, 1024))
+        # Multiply size by mesh dimension to ensure divisibility across multiple chips.
+        weight_scale = jnp.ones((4 * mesh.shape['data'], 1, 1024))
         weights = LinearWeights(
             weight=jnp.ones((1024, 512)),
             weight_scale=weight_scale,
@@ -89,16 +91,16 @@ class TestProcessWeights(unittest.TestCase):
         self.assertEqual(sharded_weights.weight_scale.sharding,
                          NamedSharding(mesh, expected_scale_spec))
 
-    def test_get_w13_padding_config_with_block_size(self):
-        """Test get_w13_padding_config scales down dimensions based on block_size."""
+    def test_get_w13_padding_config_with_outer_block_size(self):
+        """Test get_w13_padding_config scales down dimensions based on outer_block_size."""
         # intermediate_size = 128, reorder_size = 2 -> local_intermediate_size = 64
         # align = 128 -> padded_local_intermediate_size = 128, pad_amount = 64
         # padded_intermediate_size = 256
-        # With block_size = 2, all these should be halved.
+        # With outer_block_size = 2, all these should be halved.
         config = get_w13_padding_config(intermediate_size=128,
                                         reorder_size=2,
                                         align=128,
-                                        block_size=2)
+                                        outer_block_size=2)
 
         self.assertEqual(config.intermediate_size, 64)
         self.assertEqual(config.w13_reorder_size, 2)
@@ -108,7 +110,7 @@ class TestProcessWeights(unittest.TestCase):
 
     def test_process_w13_for_gmm_with_scaled_config(self):
         """Test process_w13_for_gmm with config scaled for block-quantized scales."""
-        # For block_size=2, the config should be pre-scaled by get_w13_padding_config.
+        # For outer_block_size=2, the config should be pre-scaled by get_w13_padding_config.
         # Original intermediate=128, total width=256.
         # Scaled config: intermediate=64, local=32, pad=0, padded=64.
         config = W13PaddingConfig(
@@ -135,7 +137,7 @@ class TestProcessWeights(unittest.TestCase):
         #    - pad (0) -> stays (1, 2, 32)
         #    - reshape back to (1, 64)
         # 3. Concatenate w1, w3 -> (1, 128)
-        # Note: Repeat by block_size is now handled outside process_w13_for_gmm.
+        # Note: Repeat by outer_block_size is now handled outside process_w13_for_gmm.
 
         self.assertEqual(processed.shape, (1, 128))
         # Check first few elements (not repeated anymore)

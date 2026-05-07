@@ -142,16 +142,15 @@ class W13PaddingConfig:
 def get_w13_padding_config(intermediate_size: int,
                            reorder_size: int,
                            align: int = 128,
-                           block_size: int | None = None) -> W13PaddingConfig:
+                           outer_block_size: int = 1) -> W13PaddingConfig:
     """Calculates padded dimensions and pad amounts for w13 tensors.
 
     Args:
         intermediate_size: size of the intermediate dimension.
         reorder_size: size of the reorder dimension.
         align: alignment of the padded dimensions.
-        block_size: block size of the quantized weights.  This is only not None
-            in the case where we skip requantization and thus have 2D-blockwise
-            quantized scales.
+        outer_block_size: outer block size of the quantized weights.
+            It is 1 for 1D block quantization and > 1 for 2D block quantization.
 
     Returns:
         W13PaddingConfig
@@ -162,22 +161,17 @@ def get_w13_padding_config(intermediate_size: int,
     padded_intermediate_size = padded_local_intermediate_size * reorder_size
     pad_amount = padded_local_intermediate_size - local_intermediate_size
 
-    # See notes above -- if block_size is None, then we don't need to
-    # scale by the block size
-    if block_size is None:
-        block_size = 1
-
-    assert padded_intermediate_size % block_size == 0
-    assert pad_amount % block_size == 0
-    assert local_intermediate_size % block_size == 0
-    assert intermediate_size % block_size == 0
+    assert padded_intermediate_size % outer_block_size == 0
+    assert pad_amount % outer_block_size == 0
+    assert local_intermediate_size % outer_block_size == 0
+    assert intermediate_size % outer_block_size == 0
 
     return W13PaddingConfig(
-        intermediate_size=intermediate_size // block_size,
+        intermediate_size=intermediate_size // outer_block_size,
         w13_reorder_size=reorder_size,
-        local_intermediate_size=local_intermediate_size // block_size,
-        pad_amount=pad_amount // block_size,
-        padded_intermediate_size=padded_intermediate_size // block_size)
+        local_intermediate_size=local_intermediate_size // outer_block_size,
+        pad_amount=pad_amount // outer_block_size,
+        padded_intermediate_size=padded_intermediate_size // outer_block_size)
 
 
 def process_w13_for_gmm(tensor,
@@ -195,11 +189,12 @@ def process_w13_for_gmm(tensor,
         tensor: The input JAX array. Can be the actual weight tensor or its
             corresponding block-quantized scale tensor.
         concat_dim: The axis dimension along which W1 and W3 are concatenated.
-        config: A `W13PaddingConfig` object containing the unscaled sizes and padding
-            amounts calculated based on the full *weight* tensor dimensions.
-        padded_output_sizes: Optional list of sizes for the padded W1 and W3 blocks.
-            If provided, triggers a reordering of the concatenated tensor for optimal
-            TP sharding.
+        config: A `W13PaddingConfig` object containing the unscaled sizes
+            and padding amounts calculated based on the full *weight*
+            tensor dimensions.
+        padded_output_sizes: Optional list of sizes for the padded W1 and W3
+            blocks. If provided, triggers a reordering of the concatenated
+            tensor for optimal TP sharding.
         name: String identifier used for logging tensor shapes.
 
     Returns:
@@ -251,6 +246,7 @@ def process_moe_weights(
     moe_backend: MoEBackend,
     w13_reorder_size: int | None = None,
     w13_interleave: bool = False,
+    disable_weight_requantization: bool = False,
 ) -> FusedMoEWeights:
     """Process fused moe weights to a layout that moe backend expects.
 
@@ -264,6 +260,8 @@ def process_moe_weights(
         w13_interleave: used when loaded w13_weight is stored in interleaved
             pattern where even index element is w1 and odd index element is w3.
             we uninterleave so that first half is w1 and second half is w3.
+        disable_weight_requantization: whether to keep scales broad for GMM
+            setups.
 
     Returns:
         MoE weights that are processed for specified backend.
@@ -290,13 +288,18 @@ def process_moe_weights(
                 w3_weight_scale = w13_weight_scale[:, 1::2, :]
                 w13_weight_scale = jnp.concat(
                     [w1_weight_scale, w3_weight_scale], axis=1)
+            else:
+                block_size = w13_weight.shape[1] // w13_weight_scale.shape[1]
+                assert block_size % 2 == 0, (
+                    f"Block size {block_size} must be even for "
+                    "interleaved weights")
 
         if w13_bias is not None:
             w1_bias = w13_bias[:, ::2]
             w3_bias = w13_bias[:, 1::2]
             w13_bias = jnp.concat([w1_bias, w3_bias], axis=1)
 
-    # Transpose non-constracting dim to right most dim
+    # Transpose non-contracting dim to right most dim
     w13_weight = jnp.swapaxes(w13_weight, 1, 2)
     w2_weight = jnp.swapaxes(w2_weight, 1, 2)
 
@@ -305,7 +308,8 @@ def process_moe_weights(
     w2_weight = with_layout_constraint(w2_weight, Layout((0, 1, 2)))
 
     if w13_weight_scale is not None:
-        # For block scales (experts, out_blocks, in_blocks), we need to maintain the block dims
+        # For block scales (experts, out_blocks, in_blocks), we need to maintain
+        # the block dims
         w13_weight_scale = w13_weight_scale.astype(jnp.float32)
         w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
         w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
@@ -314,6 +318,18 @@ def process_moe_weights(
         w2_weight_scale = w2_weight_scale.astype(jnp.float32)
         w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
         w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
+
+    w13_outer_block_size = 1
+    w2_outer_block_size = 1
+    if disable_weight_requantization:
+        if w13_weight_scale is not None:
+            assert w13_weight.shape[2] % w13_weight_scale.shape[3] == 0
+            w13_outer_block_size = (w13_weight.shape[2] //
+                                    w13_weight_scale.shape[3])
+        if w2_weight_scale is not None:
+            assert w2_weight.shape[2] % w2_weight_scale.shape[3] == 0
+            w2_outer_block_size = (w2_weight.shape[2] //
+                                   w2_weight_scale.shape[3])
 
     if w13_bias is not None:
         w13_bias = w13_bias.astype(jnp.float32)
@@ -406,18 +422,11 @@ def process_moe_weights(
                 name="w13_weight")
 
             if w13_weight_scale is not None:
-                block_size = None
-                if envs.DISABLE_WEIGHT_REQUANTIZATION:
-                    # check if cleanly divisible
-                    assert w13_weight.shape[2] % w13_weight_scale.shape[3] == 0
-                    block_size = w13_weight.shape[2] // w13_weight_scale.shape[
-                        3]
-
                 pad_config_scale = get_w13_padding_config(
                     intermediate_size,
                     w13_reorder_size,
                     align=128,
-                    block_size=block_size)
+                    outer_block_size=w13_outer_block_size)
                 padded_output_sizes_scales = [
                     pad_config_scale.padded_intermediate_size,
                     pad_config_scale.padded_intermediate_size
@@ -428,9 +437,12 @@ def process_moe_weights(
                     config=pad_config_scale,
                     padded_output_sizes=padded_output_sizes_scales,
                     name="w13_weight_scale")
-                if block_size is not None and block_size > 1:
+                if w13_outer_block_size > 1:
+                    # GMM currently expects scales to be broadcasted to
+                    # full shape along the contracting dimension when
+                    # skipping requantization.
                     w13_weight_scale = jnp.repeat(w13_weight_scale,
-                                                  block_size,
+                                                  w13_outer_block_size,
                                                   axis=3)
             if w13_bias is not None:
                 w13_bias = process_w13_for_gmm(
@@ -440,14 +452,12 @@ def process_moe_weights(
                     padded_output_sizes=padded_output_sizes,
                     name="w13_bias")
             if w2_weight_scale is not None:
-                block_size = None
-                if envs.DISABLE_WEIGHT_REQUANTIZATION:
-                    # check if cleanly divisible
-                    assert hidden_size % w2_weight_scale.shape[3] == 0
-                    block_size = hidden_size // w2_weight_scale.shape[3]
-                if block_size is not None and block_size > 1:
+                if w2_outer_block_size > 1:
+                    # GMM currently expects scales to be broadcasted to
+                    # full shape along the contracting dimension when
+                    # skipping requantization.
                     w2_weight_scale = jnp.repeat(w2_weight_scale,
-                                                 block_size,
+                                                 w2_outer_block_size,
                                                  axis=3)
 
         case MoEBackend.GMM_EP:
@@ -461,25 +471,21 @@ def process_moe_weights(
                                              name="w13_weight")
 
             if w13_weight_scale is not None:
-                block_size = None
-                if envs.DISABLE_WEIGHT_REQUANTIZATION:
-                    # check if cleanly divisible
-                    assert w13_weight.shape[2] % w13_weight_scale.shape[3] == 0
-                    block_size = w13_weight.shape[2] // w13_weight_scale.shape[
-                        3]
-
                 pad_config_scale = get_w13_padding_config(
                     intermediate_size,
                     reorder_size=1,
                     align=128,
-                    block_size=block_size)
+                    outer_block_size=w13_outer_block_size)
                 w13_weight_scale = process_w13_for_gmm(tensor=w13_weight_scale,
                                                        concat_dim=3,
                                                        config=pad_config_scale,
                                                        name="w13_weight_scale")
-                if block_size is not None and block_size > 1:
+                if w13_outer_block_size > 1:
+                    # GMM currently expects scales to be broadcasted to
+                    # full shape along the contracting dimension when
+                    # skipping requantization.
                     w13_weight_scale = jnp.repeat(w13_weight_scale,
-                                                  block_size,
+                                                  w13_outer_block_size,
                                                   axis=3)
 
             if w13_bias is not None:
@@ -489,26 +495,24 @@ def process_moe_weights(
                                                name="w13_bias")
 
             if w2_weight_scale is not None:
-                block_size = None
-                if envs.DISABLE_WEIGHT_REQUANTIZATION:
-                    # check if cleanly divisible
-                    assert hidden_size % w2_weight_scale.shape[3] == 0
-                    block_size = hidden_size // w2_weight_scale.shape[3]
-                if block_size is not None and block_size > 1:
+                if w2_outer_block_size > 1:
+                    # GMM currently expects scales to be broadcasted to
+                    # full shape along the contracting dimension when
+                    # skipping requantization.
                     w2_weight_scale = jnp.repeat(w2_weight_scale,
-                                                 block_size,
+                                                 w2_outer_block_size,
                                                  axis=3)
 
         case MoEBackend.DENSE_MAT:
             # TODO (jacobplatin)
             raise NotImplementedError(
-                "process_moe_weights is not yet implemented for dense matmul backend."
-            )
+                "process_moe_weights is not yet implemented for dense matmul "
+                "backend.")
         case MoEBackend.MEGABLX_GMM:
             # TODO (jacobplatin)
             raise NotImplementedError(
-                "process_moe_weights is not yet implemented for megablox gmm backend"
-            )
+                "process_moe_weights is not yet implemented for megablox gmm "
+                "backend")
 
     return FusedMoEWeights(
         w13_weight=w13_weight,
@@ -626,86 +630,82 @@ def process_fp8_moe_weights(
     if envs.DISABLE_WEIGHT_REQUANTIZATION:
         logger.info_once("Disabled weight requantization")
 
-        in_block_size = weight_block_size[
-            1] if weight_block_size is not None else 128
+        assert weight_block_size is not None
+        in_block_size = weight_block_size[1]
         if w13_weight_scale is not None and w13_weight_scale.ndim == 3:
             # out_dim = 2 * inter, in_dim = hidden
             # we want (experts, out_blocks, in_blocks)
             # check if it is (experts, in_blocks, out_blocks)
             in_blocks_13 = w13_weight.shape[2] // in_block_size
-            if w13_weight_scale.shape[
-                    1] == in_blocks_13 and w13_weight_scale.shape[
-                        2] != in_blocks_13:
+            if (w13_weight_scale.shape[1] == in_blocks_13
+                    and w13_weight_scale.shape[2] != in_blocks_13):
                 w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
         if w2_weight_scale is not None and w2_weight_scale.ndim == 3:
             # out_dim = hidden, in_dim = inter
             # we want (experts, out_blocks, in_blocks)
             in_blocks_2 = w2_weight.shape[2] // in_block_size
-            if w2_weight_scale.shape[
-                    1] == in_blocks_2 and w2_weight_scale.shape[
-                        2] != in_blocks_2:
+            if (w2_weight_scale.shape[1] == in_blocks_2
+                    and w2_weight_scale.shape[2] != in_blocks_2):
                 w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
 
         # TODO (jacobplatin): add support for bias
-        return process_moe_weights(
-            FusedMoEWeights(
-                w13_weight=w13_weight,
-                w13_weight_scale=w13_weight_scale,
-                w13_bias=None,
-                w2_weight=w2_weight,
-                w2_weight_scale=w2_weight_scale,
-                w2_bias=None,
-            ),
-            moe_backend=moe_backend,
-            w13_reorder_size=w13_reorder_size,
-            w13_interleave=w13_interleave,
-        )
-
-    if desired_quant_dtype_from_env := envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
-        desired_quant_dtype = to_jax_dtype(desired_quant_dtype_from_env)
-    else:
-        desired_quant_dtype = w13_weight.dtype
-        if w13_weight.dtype != w2_weight.dtype:
-            raise ValueError(
-                f"Expected w13_weight and w2_weight to have the same dtype, but got {w13_weight.dtype} and {w2_weight.dtype}"
-            )
-    requant_block_size = None
-    if requant_block_size_from_env := envs.MOE_REQUANTIZE_BLOCK_SIZE:
-        requant_block_size = (int(requant_block_size_from_env)
-                              if requant_block_size_from_env else None)
-
-    moe_logging_str = (
-        f"[MoE requantization]: re-quantizing MoE weights to {desired_quant_dtype}"
-    )
-    if requant_block_size is not None:
-        moe_logging_str += f" with block size {requant_block_size}"
-    logger.info(moe_logging_str)
-
-    # Dequantize fp8 2d block quantized weights into fp32.
-    w13_weight = dequantize_tensor(w13_weight,
-                                   w13_weight_scale, (1, 2),
-                                   jnp.float32,
-                                   block_size=weight_block_size)
-    w2_weight = dequantize_tensor(w2_weight,
-                                  w2_weight_scale, (1, 2),
-                                  jnp.float32,
-                                  block_size=weight_block_size)
-
-    weights = quantize_moe_weights(
-        FusedMoEWeights(
+        weights = FusedMoEWeights(
             w13_weight=w13_weight,
-            w13_weight_scale=None,
+            w13_weight_scale=w13_weight_scale,
             w13_bias=None,
             w2_weight=w2_weight,
-            w2_weight_scale=None,
+            w2_weight_scale=w2_weight_scale,
             w2_bias=None,
-        ),
-        desired_quant_dtype,
-        requant_block_size,
-    )
+        )
+
+    else:
+        if desired_quant_dtype_from_env := envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
+            desired_quant_dtype = to_jax_dtype(desired_quant_dtype_from_env)
+        else:
+            desired_quant_dtype = w13_weight.dtype
+            if w13_weight.dtype != w2_weight.dtype:
+                raise ValueError(
+                    "Expected w13_weight and w2_weight to have the same dtype, "
+                    f"but got {w13_weight.dtype} and {w2_weight.dtype}")
+        requant_block_size = None
+        if requant_block_size_from_env := envs.MOE_REQUANTIZE_BLOCK_SIZE:
+            requant_block_size = (int(requant_block_size_from_env)
+                                  if requant_block_size_from_env else None)
+
+        moe_logging_str = (
+            "[MoE requantization]: re-quantizing MoE weights to "
+            f"{desired_quant_dtype}")
+        if requant_block_size is not None:
+            moe_logging_str += f" with block size {requant_block_size}"
+        logger.info(moe_logging_str)
+
+        # Dequantize fp8 2d block quantized weights into fp32.
+        w13_weight = dequantize_tensor(w13_weight,
+                                       w13_weight_scale, (1, 2),
+                                       jnp.float32,
+                                       block_size=weight_block_size)
+        w2_weight = dequantize_tensor(w2_weight,
+                                      w2_weight_scale, (1, 2),
+                                      jnp.float32,
+                                      block_size=weight_block_size)
+
+        weights = quantize_moe_weights(
+            FusedMoEWeights(
+                w13_weight=w13_weight,
+                w13_weight_scale=None,
+                w13_bias=None,
+                w2_weight=w2_weight,
+                w2_weight_scale=None,
+                w2_bias=None,
+            ),
+            desired_quant_dtype,
+            requant_block_size,
+        )
+
     return process_moe_weights(
         weights,
         moe_backend=moe_backend,
         w13_reorder_size=w13_reorder_size,
         w13_interleave=w13_interleave,
+        disable_weight_requantization=envs.DISABLE_WEIGHT_REQUANTIZATION,
     )
