@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import os
 
 from vllm import LLM, EngineArgs
@@ -27,6 +28,8 @@ def create_parser():
     sampling_group.add_argument("--top-k", type=int)
     sampling_group.add_argument("--log-probs", type=int)
     sampling_group.add_argument("--prompt-logprobs", type=int)
+    sampling_group.add_argument("--mixed-logprobs", action="store_true", 
+                               help="Use mixed prompt_logprobs in one batch for testing")
 
     return parser
 
@@ -39,6 +42,7 @@ def main(args: dict):
     top_k = args.pop("top_k")
     log_probs = args.pop("log_probs")
     prompt_logprobs = args.pop("prompt_logprobs")
+    mixed_logprobs = args.pop("mixed_logprobs")
 
     # Create an LLM
     args["enable_return_routed_experts"] = True
@@ -98,6 +102,19 @@ def main(args: dict):
         "Who wrote the American Declaration of Independence?",
         'Who wrote the novel "Pride and Prejudice"?',
     ]
+
+    # To truly test 'mixed' in one batch, we pass a list of sampling_params.
+    if mixed_logprobs:
+        print("--- Running in MIXED LOGPROBS mode ---")
+        base_params = copy.deepcopy(sampling_params)
+        sampling_params = []
+        for i in range(len(prompts)):
+            p = copy.deepcopy(base_params)
+            if i % 2 == 0:
+                p.prompt_logprobs = prompt_logprobs if prompt_logprobs is not None else 10
+            else:
+                p.prompt_logprobs = None
+            sampling_params.append(p)
 
     profiler_config = llm.llm_engine.vllm_config.profiler_config
     if profiler_config.profiler == "torch":
