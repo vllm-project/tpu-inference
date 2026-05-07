@@ -78,7 +78,6 @@ class RaggedGatedDeltaRuleImpl(enum.Enum):
 
 @jax.jit(
     # because , recurrent_scan_v2 call pltpu.get_tpu_info().num_lanes
-    backend='tpu', 
     donate_argnames=('recurrent_state',),
     static_argnames=(
         'config',
