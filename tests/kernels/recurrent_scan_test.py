@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 
@@ -28,162 +27,166 @@ from tpu_inference.layers.common.ragged_gated_delta_rule_ref import \
 jax.config.parse_flags_with_absl()
 
 
-def _make_inputs(
-    rng,
-    decode_N,
-    mixed_seqlens,
-    H_qk,
-    H_v,
-    K,
-    V,
-    dtype=jnp.bfloat16,
-    max_num_req=None,
-    state_dtype=jnp.float32,
-):
-    """Build inputs for recurrent_scan tests."""
-    all_seqlens = [1] * decode_N + list(mixed_seqlens)
-    N = len(all_seqlens)
-    T = sum(all_seqlens)
-    cu_seqlens = np.cumsum([0] + all_seqlens).astype(np.int32)
-
-    if max_num_req is not None:
-        padded_cu = np.full(max_num_req + 1, T, dtype=np.int32)
-        padded_cu[:len(cu_seqlens)] = cu_seqlens
-        cu_seqlens = padded_cu
-
-    # recurrent_scan expects flat mixed_qkv: [T, 2*H_qk*K + H_v*V]
-    dim = 2 * H_qk * K + H_v * V
-    mixed_qkv = rng.randn(T, dim).astype(np.float32)
-    a = rng.randn(T, H_v).astype(np.float32)
-    b = rng.randn(T, H_v).astype(np.float32)
-    A_log = rng.randn(H_v).astype(np.float32)
-    dt_bias = rng.randn(H_v).astype(np.float32)
-
-    h0_N = max_num_req if max_num_req is not None else N
-    h0 = rng.randn(h0_N, H_v, K, V).astype(np.float32)
-    state_indices = np.arange(h0_N, dtype=np.int32)
-
-    if dtype != np.float32:
-        mixed_qkv, a, b, dt_bias = (jnp.array(x, dtype=dtype)
-                                    for x in [mixed_qkv, a, b, dt_bias])
-    else:
-        mixed_qkv, a, b, dt_bias = (jnp.array(x)
-                                    for x in [mixed_qkv, a, b, dt_bias])
-
-    return (
-        mixed_qkv,
-        a,
-        b,
-        jnp.array(A_log),
-        jnp.array(dt_bias, dtype=dtype),
-        jnp.array(h0, dtype=state_dtype),
-        jnp.array(cu_seqlens),
-        jnp.array(state_indices),
-        N,
-    )
-
-
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
 class RecurrentScanKernelTest(jtu.JaxTestCase):
 
-    def _test_recurrent_scan(
-        self,
-        decode_N,
-        mixed_seqlens,
-        H_qk,
-        H_v,
-        K,
-        V,
-        *,
-        max_num_req=512,
-        atol=5e-2,
-        state_dtype=jnp.float32,
-    ):
-        rng = np.random.RandomState(42)
-        mixed_qkv, a, b, A_log, dt_bias, h0, cu_seqlens, state_indices, N = _make_inputs(
-            rng,
-            decode_N,
-            mixed_seqlens,
-            H_qk,
-            H_v,
-            K,
-            V,
-            max_num_req=max_num_req,
-            state_dtype=state_dtype,
+    def _test_recurrent_scan(self, decode_lengths, prefill_lengths,
+                             chunk_size):
+        dtype = jnp.bfloat16
+        kq_head_dim = 128
+        v_head_dim = 128
+        n_kq = 2
+        n_v = 8
+
+        MAX_TOKENS = 8192
+        MAX_REQS = 512
+
+        actual_num_tokens = decode_lengths + sum(prefill_lengths)
+        actual_max_reqs = decode_lengths + len(prefill_lengths)
+
+        q_loc = jnp.cumsum(
+            jnp.array([0] + [1] * decode_lengths + prefill_lengths,
+                      dtype=jnp.int32))
+        q_loc = jnp.pad(
+            q_loc,
+            (0, MAX_REQS + 1 - len(q_loc)),
+            mode="constant",
+            constant_values=1,
         )
-        T = mixed_qkv.shape[0]
+
+        rngs = iter(jax.random.split(jax.random.key(0), 15))
+
+        available_indices = jax.random.permutation(
+            next(rngs), jnp.arange(1, MAX_REQS, dtype=jnp.int32))
+        valid_state_indices = available_indices[:actual_max_reqs]
+        state_indices = jnp.pad(
+            valid_state_indices,
+            (0, MAX_REQS - actual_max_reqs),
+            mode="constant",
+            constant_values=0,
+        )
+
+        query = jax.random.normal(next(rngs), (MAX_TOKENS, n_kq * kq_head_dim),
+                                  dtype=dtype)
+        key = jax.random.normal(next(rngs), (MAX_TOKENS, n_kq * kq_head_dim),
+                                dtype=dtype)
+        value = jax.random.normal(next(rngs), (MAX_TOKENS, n_v * v_head_dim),
+                                  dtype=dtype)
+        b = jax.random.normal(next(rngs), (MAX_TOKENS, n_v), dtype=dtype)
+        a = jax.random.normal(next(rngs), (MAX_TOKENS, n_v), dtype=dtype)
+
+        # Pad inputs at the end to avoid out-of-bounds DMA reads
+        query = jnp.pad(query, ((0, chunk_size), (0, 0)))
+        key = jnp.pad(key, ((0, chunk_size), (0, 0)))
+        value = jnp.pad(value, ((0, chunk_size), (0, 0)))
+        b = jnp.pad(b, ((0, chunk_size), (0, 0)))
+        a = jnp.pad(a, ((0, chunk_size), (0, 0)))
+
+        recurrent_state = jnp.zeros((MAX_REQS, n_v, kq_head_dim, v_head_dim),
+                                    dtype=jnp.float32)
+
+        num_decodes = decode_lengths
+        decode_state = jax.random.normal(
+            next(rngs),
+            (num_decodes, n_v, kq_head_dim, v_head_dim),
+            dtype=jnp.float32,
+        )
+        prefill_state = jnp.zeros(
+            (actual_max_reqs - num_decodes, n_v, kq_head_dim, v_head_dim),
+            dtype=jnp.float32,
+        )
+        valid_recurrent_state = jnp.concatenate([decode_state, prefill_state],
+                                                axis=0)
+        recurrent_state = recurrent_state.at[valid_state_indices].set(
+            valid_recurrent_state)
+
+        A_log = jax.random.normal(next(rngs), (n_v, ), dtype=dtype)
+        dt_bias = jax.random.normal(jax.random.key(0), (n_v, ), dtype=dtype)
+
+        mixed_qkv = jnp.concatenate([query, key, value], axis=-1)
+
+        distribution = jnp.array(
+            [decode_lengths, actual_max_reqs, actual_max_reqs],
+            dtype=jnp.int32)
 
         # ── Reference (ragged_gated_delta_rule_ref) ──
-        # Note: SiLU is applied inside ref now, so we pass raw mixed_qkv.
+        has_initial_state = jnp.zeros((MAX_REQS, ), dtype=bool)
+        has_initial_state = has_initial_state.at[:num_decodes].set(True)
 
-        distribution_ref = jnp.array([decode_N, N, N], dtype=jnp.int32)
-
-        # Reference expects has_initial_state. We pass all True to match the
-        # behavior where tests were closer to passing.
-        max_num_req_padded = state_indices.shape[0]
-        has_initial_state = jnp.zeros((max_num_req_padded, ), dtype=bool)
-        has_initial_state = has_initial_state.at[:decode_N].set(True)
+        dummy_state = jnp.zeros((1, n_v, kq_head_dim, v_head_dim),
+                                dtype=jnp.float32)
+        recurrent_state_ref = jnp.concatenate([dummy_state, recurrent_state],
+                                              axis=0)
 
         ref_state, ref_o = ragged_gated_delta_rule_ref(
             mixed_qkv.astype(jnp.float32),
             b.astype(jnp.float32),
             a.astype(jnp.float32),
-            h0.astype(jnp.float32),
+            recurrent_state_ref,
             A_log[None, None, :],
             dt_bias[None, None, :],
-            cu_seqlens,
-            state_indices,
-            distribution_ref,
+            q_loc,
+            state_indices + 1,
+            distribution,
             has_initial_state,
-            n_kq=H_qk,
-            n_v=H_v,
-            d_k=K,
-            d_v=V,
+            n_kq=n_kq,
+            n_v=n_v,
+            d_k=kq_head_dim,
+            d_v=v_head_dim,
         )
 
         # ── Kernel ──
-        # recurrent_scan takes raw mixed_qkv (fuses SiLU)
-        # Note: has_initial_state is not passed here because recurrent_scan
-        # does not need it.
         pallas_state, pallas_o = recurrent_scan(
             mixed_qkv=mixed_qkv,
             b=b,
             a=a,
-            recurrent_state=h0,
+            recurrent_state=recurrent_state,
             A_log=A_log,
             dt_bias=dt_bias,
-            query_start_loc=cu_seqlens,
+            query_start_loc=q_loc,
             state_indices=state_indices,
-            distribution=jnp.array([decode_N, T, T], dtype=jnp.int32),
-            n_kq=H_qk,
-            n_v=H_v,
-            d_k=K,
-            d_v=V,
-            chunk_size=128,
-            BT=128,
+            distribution=distribution,
+            n_kq=n_kq,
+            n_v=n_v,
+            d_k=kq_head_dim,
+            d_v=v_head_dim,
+            chunk_size=chunk_size,
+            BT=chunk_size,
             use_qk_norm_in_gdn=True,
         )
 
         # ── Compare ──
-        self.assertAllClose(pallas_o,
-                            ref_o,
-                            atol=atol,
-                            rtol=atol,
-                            check_dtypes=False)
         self.assertAllClose(
-            pallas_state[:N],
-            ref_state[:N],
-            atol=atol,
-            rtol=atol,
+            pallas_o[:actual_num_tokens],
+            ref_o[:actual_num_tokens],
+            atol=5e-2,
+            rtol=5e-2,
+            check_dtypes=False,
+        )
+        self.assertAllClose(
+            pallas_state[valid_state_indices],
+            ref_state[valid_state_indices + 1],
+            atol=5e-2,
+            rtol=5e-2,
             check_dtypes=False,
         )
 
     @parameterized.parameters(
         (0, [128, 256]),
         (0, [64, 128]),
+        (13, [8, 16, 24]),
+        (8, []),
+        (10, [9, 15]),
     )
     def test_basic(self, decode_N, mixed_seqlens):
-        self._test_recurrent_scan(decode_N, mixed_seqlens, 2, 8, 128, 128)
+        self._test_recurrent_scan(decode_N, mixed_seqlens, 64)
+
+    @parameterized.parameters(
+        (8, []),
+        (10, [9, 15]),
+    )
+    def test_gqa(self, decode_N, mixed_seqlens):
+        self._test_recurrent_scan(decode_N, mixed_seqlens, 64)
 
 
 if __name__ == "__main__":
