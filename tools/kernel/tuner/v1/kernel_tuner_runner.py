@@ -177,7 +177,8 @@ def main(argv):
             kernel_tuner.generate_buildkite_pipeline(case_set_id=case_set_id,
                                                      run_id=run_id,
                                                      desc=case_set_desc,
-                                                     tpu_version=tpu_version)
+                                                     tpu_version=tpu_version,
+                                                     tpu_cores=tpu_cores)
         else:
             begin_case_id = _BEGIN_CASE_ID.value
             end_case_id = _END_CASE_ID.value

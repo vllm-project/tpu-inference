@@ -218,6 +218,7 @@ class KernelTunerBase(ABC):
         run_id: str,
         desc: str,
         tpu_version: str,
+        tpu_cores: int,
     ) -> str:
         """Generate the Buildkite pipeline for the given tuning jobs. Each tuning job will be represented as a Buildkite step that calls the measure_latency function with the corresponding case_id range.
 
@@ -227,6 +228,9 @@ class KernelTunerBase(ABC):
             run_id: Identifies a run of the tuning pipeline. Can be used to distinguish different
                 runs of the tuning pipeline with the same caseset_id — useful when the caseset has
                 not changed but the KernelTunerRunner class has changed.
+            desc: A description for this case set, which will be persisted in local file or database using storage_management module.
+            tpu_version: The version of TPU to run the tuning jobs on, which will determine the TPU queue to use for the tuning jobs.
+            tpu_cores: The number of TPU cores to run the tuning jobs on, which will determine the TPU queue to use for the tuning jobs
 
         Returns:
             A string representing the Buildkite pipeline configuration in YAML format.
@@ -256,7 +260,7 @@ class KernelTunerBase(ABC):
                     "TPU_VERSION": tpu_version
                 },
                 "commands": [
-                    f".buildkite/scripts/run_in_docker.sh bash -c \"pip install --upgrade google-cloud-spanner && pip install --upgrade google-api-core && pip install --upgrade google-auth && pip install --upgrade absl-py && python -m tools.kernel.tuner.v1.kernel_tuner_runner --kernel_tuner_name={self.kernel_tuner_name} --case_set_id={case_set_id} --run_id={run_id} --tpu_version={tpu_version} --tpu_queue_multi={self.tpu_queue_multi} --begin_case_id={case_id_start} --end_case_id={case_id_end}\""
+                    f".buildkite/scripts/run_in_docker.sh bash -c \"pip install --upgrade google-cloud-spanner && pip install --upgrade google-api-core && pip install --upgrade google-auth && pip install --upgrade absl-py && python -m tools.kernel.tuner.v1.kernel_tuner_runner --kernel_tuner_name={self.kernel_tuner_name} --case_set_id={case_set_id} --run_id={run_id} --tpu_version={tpu_version} --tpu_cores={tpu_cores} --tpu_queue_multi={self.tpu_queue_multi} --begin_case_id={case_id_start} --end_case_id={case_id_end}\""
                 ]
             }
             pipeline["steps"].append(step)
