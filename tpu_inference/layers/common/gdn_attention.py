@@ -43,14 +43,7 @@ class RaggedConv1dImpl(enum.Enum):
     JAX = "ragged_conv1d_jax"
 
 
-class RaggedGatedDeltaRuleImpl(enum.Enum):
-    REF = "ragged_gated_delta_rule_ref"
-    CHUNKED = "ragged_gated_delta_rule_chunked"
-
-    V2 = "ragged_recurrent_scan_v2"
-    COMBINED = "ragged_gated_delta_rule_chunked_scan"
-    FUSED = "fused_gdn_kernel"
-    ROUTED_FUSED_V2 = "routed_fused_v2"
+RaggedGatedDeltaRuleImpl = ragged_gated_delta_rule_wrapper.RaggedGatedDeltaRuleImpl
 
 
 @jax.tree_util.register_dataclass
@@ -167,24 +160,8 @@ def run_jax_gdn_attention_local(
             d_k=d_k,
             d_v=d_v,
         )
-    elif config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.CHUNKED:
-        out_mixed_qkv = jax.nn.silu(out_mixed_qkv)
-        ragged_gdn_impl = functools.partial(
-            ragged_gated_delta_rule_chunked,
-            has_initial_state=has_initial_state,
-            n_kq=n_kq,
-            n_v=n_v,
-            d_k=d_k,
-            d_v=d_v,
-            use_qk_norm_in_gdn=True,
-            chunk_size=64,
-            # triangle_solver_impl=config.triangle_solver_impl,
-            use_v2_in_chunked=False,
-        )
-    elif config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.V2:
-
-        def ragged_gdn_impl(
-            mixed_qkv,
+        new_recurrent_state, output = ragged_gdn_impl(
+            out_mixed_qkv,
             b,
             a,
             recurrent_state,
@@ -193,62 +170,28 @@ def run_jax_gdn_attention_local(
             query_start_loc,
             state_indices,
             distribution,
-        ):
-            return recurrent_scan_v2.recurrent_scan(
-                mixed_qkv,
-                b,
-                a,
-                recurrent_state,
-                A_log,
-                dt_bias,
-                query_start_loc,
-                state_indices,
-                distribution,
-                n_kq=n_kq,
-                n_v=n_v,
-                d_k=d_k,
-                d_v=d_v,
-                chunk_size=64,
-                BT=64,
-                use_qk_norm_in_gdn=True,
-            )
-    elif config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.COMBINED:
-        ragged_gdn_impl = functools.partial(
-            ragged_gated_delta_rule_chunked,
-            has_initial_state=has_initial_state,
-            n_kq=n_kq,
-            n_v=n_v,
-            d_k=d_k,
-            d_v=d_v,
-            use_qk_norm_in_gdn=True,
-            chunk_size=64,
-            # triangle_solver_impl=config.triangle_solver_impl,
-            use_v2_in_chunked=True,
-        )
-    elif config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.ROUTED_FUSED_V2:
-        ragged_gdn_impl = functools.partial(
-            ragged_gated_delta_rule_routed_fused_v2,
-            n_kq=n_kq,
-            n_v=n_v,
-            d_k=d_k,
-            d_v=d_v,
-            chunk_size=64,
         )
     else:
-        raise ValueError(
-            f"Unsupported implementation: {config.ragged_gated_delta_rule_impl}"
+        wrapper_config = config.ragged_gated_delta_rule_impl.to_config()
+        new_recurrent_state, output = ragged_gated_delta_rule_wrapper.ragged_gated_delta_rule_wrapper(
+            mixed_qkv=out_mixed_qkv,
+            b=b,
+            a=a,
+            recurrent_state=recurrent_state,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            query_start_loc=query_start_loc,
+            state_indices=state_indices,
+            distribution=distribution,
+            n_kq=n_kq,
+            n_v=n_v,
+            d_k=d_k,
+            d_v=d_v,
+            config=wrapper_config,
+            chunk_size=64,
+            triangle_solver_impl=triangle_solver.TriangleSolverImpl.GAUSSIAN,
+            has_initial_state=has_initial_state,
         )
-    new_recurrent_state, output = ragged_gdn_impl(
-        out_mixed_qkv,
-        b,
-        a,
-        recurrent_state,
-        A_log,
-        dt_bias,
-        query_start_loc,
-        state_indices,
-        distribution,
-    )
 
     return (new_conv_state, new_recurrent_state), output
 

@@ -638,7 +638,6 @@ def ragged_gated_delta_rule_decode_only(
         'chunk_size',
         'use_qk_norm_in_gdn',
         'triangle_solver_impl',
-        'use_v2_in_chunked',
     ),
 )
 @jax.named_scope('ragged_gated_delta_rule_chunked')
@@ -662,7 +661,6 @@ def ragged_gated_delta_rule(
     use_qk_norm_in_gdn: bool = True,
     triangle_solver_impl: triangle_solver.TriangleSolverImpl = triangle_solver.
     TriangleSolverImpl.GAUSSIAN,
-    use_v2_in_chunked: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Applies the gated delta rule over ragged seq lengths
 
@@ -718,14 +716,9 @@ def ragged_gated_delta_rule(
     a_reshaped = a.reshape(num_tokens, n_v)
 
     def decode_only_branch(_):
-        if use_v2_in_chunked:
-            q_silu = jax.nn.silu(q_reshaped)
-            k_silu = jax.nn.silu(k_reshaped)
-            v_silu = jax.nn.silu(v_reshaped)
-        else:
-            q_silu = q_reshaped
-            k_silu = k_reshaped
-            v_silu = v_reshaped
+        q_silu = q_reshaped
+        k_silu = k_reshaped
+        v_silu = v_reshaped
 
         new_state, output = ragged_gated_delta_rule_decode_only(
             query=q_silu,
@@ -745,49 +738,23 @@ def ragged_gated_delta_rule(
 
     def mixed_prefill_branch(_):
 
-        def use_v2(_):
-            return recurrent_scan(
-                mixed_qkv=mixed_qkv,
-                b=b,
-                a=a,
-                recurrent_state=recurrent_state,
-                A_log=A_log,
-                dt_bias=dt_bias,
-                query_start_loc=query_start_loc,
-                state_indices=state_indices,
-                distribution=distribution,
-                n_kq=n_kq,
-                n_v=n_v,
-                d_k=d_k,
-                d_v=d_v,
-                chunk_size=chunk_size,
-                BT=chunk_size,
-                use_qk_norm_in_gdn=use_qk_norm_in_gdn,
-            )
-
-        def use_original(_):
-            return ragged_gated_delta_rule_mixed_prefill(
-                query=q_reshaped,
-                key=k_reshaped,
-                value=v_reshaped,
-                b_reshaped=b_reshaped,
-                a_reshaped=a_reshaped,
-                A_log=A_log,
-                dt_bias=dt_bias,
-                query_start_loc=query_start_loc,
-                recurrent_state=recurrent_state,
-                state_indices=state_indices,
-                distribution=distribution,
-                has_initial_state=has_initial_state,
-                chunk_size=chunk_size,
-                use_qk_norm_in_gdn=use_qk_norm_in_gdn,
-                triangle_solver_impl=triangle_solver_impl,
-            )
-
-        if use_v2_in_chunked:
-            return use_v2(None)
-        else:
-            return use_original(None)
+        return ragged_gated_delta_rule_mixed_prefill(
+            query=q_reshaped,
+            key=k_reshaped,
+            value=v_reshaped,
+            b_reshaped=b_reshaped,
+            a_reshaped=a_reshaped,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            query_start_loc=query_start_loc,
+            recurrent_state=recurrent_state,
+            state_indices=state_indices,
+            distribution=distribution,
+            has_initial_state=has_initial_state,
+            chunk_size=chunk_size,
+            use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+            triangle_solver_impl=triangle_solver_impl,
+        )
 
     # distribution[0] is decode_end, distribution[2] is mixed_end.
     # If decode_end == mixed_end, all sequences are decode requests.
