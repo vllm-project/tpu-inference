@@ -97,7 +97,7 @@ steps:
           buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_google_gemma-4-26B-A4B-it_Benchmark" "not enough HBM"
           exit 0
         fi
-        .buildkite/scripts/run_in_docker.sh bash -c 'USE_BATCHED_RPA_KERNEL=1 JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh'
+        .buildkite/scripts/run_in_docker.sh bash -c 'TIMEOUT_SECONDS=960 USE_BATCHED_RPA_KERNEL=1 JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh'
 
   - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for google/gemma-4-26B-A4B-it"
     key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-26B-A4B-it_Benchmark"
