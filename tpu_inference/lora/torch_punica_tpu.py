@@ -155,13 +155,13 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         y = y.view(-1, y.shape[-1])
         x = x.view(-1, x.shape[-1])
         
-        add_input = kwargs.get('add_input', add_inputs)
+        add_inputs = kwargs.get('add_inputs', add_inputs)
         
         # Embedding layer only needs the expand operation as lookup in LoRA A is done beforehand.
         y = bgmv_expand_slice(x, lora_b_stacked, y,
                               self._get_token_lora_indices(x),
                               0, y.shape[-1],
-                              add_input)
+                              add_inputs)
         return y.view(y_orig.shape)
 
     def add_lora_linear(self,
@@ -240,6 +240,9 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             buffer (Optional[torch.Tensor]):Default to None.
         """
 
+        # Note: We use per-token indices here because the TPU bgmv ops expect a tensor
+        # of shape [num_tokens].
+        
         # Step 1: Shrink operation
         buffer = bgmv_shrink(x, lora_a_stacked, self._get_sampler_indices(x), scale)
         

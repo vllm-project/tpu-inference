@@ -640,6 +640,9 @@ def load_lora_model(model: torch.nn.Module, vllm_config: VllmConfig,
         logger.warning("Regarding multimodal models, vLLM currently "
                        "only supports adding LoRA to language model.")
 
+    # The target_modules list is used by vLLM's LoRA manager to identify
+    # which modules in the base model should have LoRA adapters attached.
+    # Overriding it here allows targeting custom module paths specified via env var on TPU.
     env_modules = _parse_lora_module_path_env()
     if env_modules is not None and vllm_config.lora_config:
         vllm_config.lora_config.target_modules = env_modules
