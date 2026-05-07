@@ -20,13 +20,7 @@ BUILDKITE_DIR=".buildkite"
 MODEL_LIST_KEY="model-list"
 FEATURE_LIST_KEY="feature-list"
 
-declare -a TARGET_FOLDERS=(
-    "quantization"
-    "parallelism"
-    "models"
-    "features"
-    "rl"
-)
+MODEL_IMPL_TYPE="${MODEL_IMPL_TYPE:-auto}"
 
 failure_handler() {
   local exit_code=$?
@@ -39,18 +33,33 @@ failure_handler() {
 
 # Catch ERR signals
 trap 'failure_handler $LINENO' ERR
+declare -a TARGET_FOLDERS=()
 
-# Use find to append the kernel_microbenchmarks subdirectories
-KERNEL_PARENT_DIR=".buildkite/kernel_microbenchmarks"
-
-if [[ -d "$KERNEL_PARENT_DIR" ]]; then
+# Append the kernel_microbenchmarks subdirectories
+add_kernel_microbenchmarks() {
+  local kernel_parent_dir=".buildkite/kernel_microbenchmarks"
+  if [[ -d "$kernel_parent_dir" ]]; then
     while IFS= read -r dir; do
-        folder_path_to_add="${dir#"${BUILDKITE_DIR}"/}"
-        TARGET_FOLDERS+=("$folder_path_to_add")
-    done < <(find "$KERNEL_PARENT_DIR" -maxdepth 1 -mindepth 1 -type d)
-else
-    echo "Warning: Kernel microbenchmarks directory '$KERNEL_PARENT_DIR' not found. Skipping dynamic folder discovery."
-fi
+      local folder_path_to_add="${dir#"${BUILDKITE_DIR}"/}"
+      TARGET_FOLDERS+=("$folder_path_to_add")
+    done < <(find "$kernel_parent_dir" -maxdepth 1 -mindepth 1 -type d)
+  else
+    echo "Warning: Kernel microbenchmarks directory '$kernel_parent_dir' not found. Skipping dynamic folder discovery."
+  fi
+}
+
+case "${MODEL_IMPL_TYPE}" in
+  "auto")
+    TARGET_FOLDERS=("parallelism" "models" "features" "rl")
+    add_kernel_microbenchmarks
+    ;;
+  "flax_nnx")
+    TARGET_FOLDERS=("quantization" "parallelism" "features")
+    ;;
+  "vllm")
+    TARGET_FOLDERS=("quantization" "parallelism" "models" "features")
+    ;;
+esac
 
 # Arrays to store YAML content fragments (without 'steps:' header)
 pipeline_v6e_fragments=()
@@ -90,10 +99,7 @@ for folder_path in "${TARGET_FOLDERS[@]}"; do
           model_list+=("$subject_name")
           ;;
         "features" | "parallelism" | "quantization" | "kernel_microbenchmarks"/* | "rl")
-          # When MODEL_IMPL_TYPE is 'auto', do not add quantization tests to the list for reporting.
-          if ! [[ "$folder_path" == "quantization" && "${MODEL_IMPL_TYPE:-auto}" == "auto" ]]; then
-            feature_list+=("${subject_name}")
-          fi
+          feature_list+=("${subject_name}")
           ;;
       esac
     fi
@@ -102,16 +108,11 @@ for folder_path in "${TARGET_FOLDERS[@]}"; do
     # This is required because we wrap them inside a 'group' later
     yml_content=$(grep -v "^steps:" "${yml_file}")
 
-    # When MODEL_IMPL_TYPE is 'auto', quantization tests are not uploaded or reported.
-    if [[ "$folder_path" == "quantization" && "${MODEL_IMPL_TYPE:-auto}" == "auto" ]]; then
-      echo "Skipping upload and reporting of quantization test '${yml_file}' because MODEL_IMPL_TYPE is 'auto'."
-    else
-      # Store the content for both hardware types
-      if [[ "$subject_name" != "multi-host" ]]; then
-        pipeline_v6e_fragments+=("${yml_content}")
-      fi
-      pipeline_v7x_fragments+=("${yml_content}")
+    # Store the content for both hardware types
+    if [[ "$subject_name" != "multi-host" ]]; then
+      pipeline_v6e_fragments+=("${yml_content}")
     fi
+    pipeline_v7x_fragments+=("${yml_content}")
 
   done < <(find "$folder" -maxdepth 1 -type f \( -name "*.yml" -o -name "*.yaml" \) -print0)
 done
