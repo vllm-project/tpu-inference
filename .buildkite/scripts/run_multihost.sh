@@ -153,10 +153,14 @@ wait_for_server() {
   local end_time=$((SECONDS + timeout))
   while [[ $SECONDS -lt $end_time ]]; do
     # 2. Check health
-    if curl -fs "localhost:${port}/health" > /dev/null; then
-      echo "===== $service_name is healthy on port: $port. ==="
+    local health_response=$(curl -fs "localhost:${port}/health" || true)
+    if [[ -n "$health_response" ]]; then
+      echo "===== $service_name is healthy on port: $port. ====="
+      echo "Health response: $health_response"
       return 0
     fi
+    echo "Not Health response: $health_response"
+
 
     # 3. Check if PID is alive INSIDE the container
     if ! docker exec "$container_name" kill -0 "$pid" 2>/dev/null; then
