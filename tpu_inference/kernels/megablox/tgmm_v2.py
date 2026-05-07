@@ -469,12 +469,22 @@ def validate_tgmm_inputs(
 
   Call this eagerly before invoking the kernel. It is not jit-safe because it
   concretizes 'group_offset'.
+
+  Args:
+    group_sizes: The sizes of each group.
+    num_actual_groups: The number of actual groups.
+    group_offset: An optional offset for the group indices.
   """
-  offset = 0 if group_offset is None else int(group_offset[0])
-  if group_sizes.size < offset + num_actual_groups:
+  if group_offset is None:
+    group_offset = jnp.array([0], dtype=jnp.int32)
+  elif jnp.isscalar(group_offset):
+    assert group_offset.size == 1
+    if jnp.isscalar(group_offset):
+      group_offset = group_offset[None]
+  if group_sizes.size < group_offset[0] + num_actual_groups:
     raise ValueError(
-        f"group_sizes.size ({group_sizes.size}) must be >= "
-        f"group_offset ({offset}) + num_actual_groups ({num_actual_groups})"
+        f"group_sizes.size ({group_sizes.size}) must be >= group_offset"
+        f" ({group_offset[0]}) + num_actual_groups ({num_actual_groups})"
     )
 
 

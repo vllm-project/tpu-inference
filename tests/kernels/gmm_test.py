@@ -432,7 +432,7 @@ class GmmTest(jtu.JaxTestCase):
   @parameterized.product(
       batch_size=[128, 512],          # M
       in_size=[256, 512],             # K
-      out_size=[256, 512, 300],       # N (300 % 128 != 0 exercises N-padding)
+      out_size=[256, 512],            # N
       num_groups=[4, 8],
       group_offset=[0, 2],
       dtype_pair=[
@@ -475,6 +475,45 @@ class GmmTest(jtu.JaxTestCase):
         preferred_element_type=jnp.bfloat16,
     )
     self.assertEqual(actual.shape, (num_local_groups, in_size, out_size))
+    self.assertAllClose(actual, expected, rtol=1e-2, atol=6e-1)
+
+  def test_tgmm_with_rhs_scale_n_padding(self):
+    # Pins tile_n=128 with out_size=300 so the kernel runs 3 n-tiles over an
+    # aligned width of 384; the last tile (n_id=2) reads scale[..., 256:384]
+    # where columns 300..383 are pad. Exercises the rhs_scale pad in
+    # tgmm_v2.py:573-577 and the output slice-back at tgmm_v2.py:598.
+    batch_size, in_size, out_size = 128, 256, 300
+    num_groups = 4
+    rhs_quant_dtype = jnp.float8_e5m2
+
+    key1, key2 = jax.random.split(jax.random.key(0), 2)
+    lhs = jax.random.normal(
+        key1, (batch_size, in_size), dtype=jnp.bfloat16
+    ).astype(jnp.float8_e4m3fn)
+    grad = jax.random.normal(key2, (batch_size, out_size), dtype=jnp.float32)
+
+    grad_q, grad_scale = quantize_tensor(
+        grad, rhs_quant_dtype, axis=0, block_size=batch_size,
+    )
+    grad_scale = jnp.expand_dims(grad_scale, axis=1)  # [1, 1, N]
+    assert grad_scale.shape == (1, 1, out_size)
+
+    group_sizes = get_group_sizes(batch_size, num_groups)
+    tile_info = TileSizes(tile_m=128, tile_k=256, tile_n=128)
+
+    expected = reference_tgmm(
+        lhs.swapaxes(0, 1), grad_q, group_sizes, num_groups,
+        rhs_scale=grad_scale,
+        out_dtype=jnp.bfloat16,
+    )
+    validate_tgmm_inputs(group_sizes, num_groups)
+    actual = tgmm_v2(
+        lhs, grad_q, group_sizes, num_groups,
+        rhs_scale=grad_scale,
+        tile_info=tile_info,
+        preferred_element_type=jnp.bfloat16,
+    )
+    self.assertEqual(actual.shape, (num_groups, in_size, out_size))
     self.assertAllClose(actual, expected, rtol=1e-2, atol=6e-1)
 
 
