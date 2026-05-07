@@ -190,6 +190,8 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
 
             w13_weight = layer.kernel_gating_upproj_E2DF.value if layer.moe_backend == MoEBackend.FUSED_MOE else layer.kernel_gating_upproj_EDF.value
             w2_weight = layer.kernel_down_proj_EFD.value
+            # Although this is UnquantizedMethod, when MOE_REQUANTIZE_WEIGHT_DTYPE
+            # is set, the weights are quantized on the fly and scales are produced
             w13_scale = getattr(layer, "kernel_gating_upproj_EDF_weight_scale",
                                 None)
             w2_scale = getattr(layer, "kernel_down_proj_EFD_weight_scale",
@@ -197,12 +199,10 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             # TODO (jacobplatin/bzgoogle): we should support bias
             weights = FusedMoEWeights(
                 w13_weight=w13_weight,
-                w13_weight_scale=w13_scale.value
-                if w13_scale is not None else None,
+                w13_weight_scale=getattr(w13_scale, "value", None),
                 w13_bias=None,
                 w2_weight=w2_weight,
-                w2_weight_scale=w2_scale.value
-                if w2_scale is not None else None,
+                w2_weight_scale=getattr(w2_scale, "value", None),
                 w2_bias=None,
             )
         elif layer.moe_backend in [
