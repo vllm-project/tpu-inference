@@ -75,7 +75,13 @@
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
-      <td>Single-Host-P-D-disaggregation</td>
+      <td>async scheduler</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+    </tr>
+    <tr>
+      <td>Step Pooling (Embedding)</td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
@@ -106,6 +112,12 @@
     </tr>
     <tr>
       <td>Step Pooling (Embedding)</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>Single-Host-P-D-disaggregation</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
