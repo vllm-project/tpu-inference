@@ -28,7 +28,6 @@ from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import (
     get_model, resolve_model_architecture)
-from tpu_inference.runner import utils as runner_utils
 from tpu_inference.utils import device_array
 
 logger = init_logger(__name__)
@@ -136,7 +135,6 @@ class Eagle3Proposer:
             else:
                 logger.info("Draft model has its own embed_tokens.")
 
-    @jax.jit(static_argnums=(0, ))
     def _prepare_input_ids(
             self, query_start_loc: jax.Array, target_token_ids: jax.Array,
             next_token_ids: jax.Array,
@@ -209,7 +207,6 @@ class Eagle3Proposer:
         """JIT-compiled helper for stacking draft token IDs."""
         return jnp.stack(draft_token_ids_list, axis=1)
 
-    @jax.jit(static_argnums=(0, ))
     def _prepare_hidden_states_and_input_ids(
         self,
         state: nnx.State,
@@ -259,84 +256,99 @@ class Eagle3Proposer:
             draft_kv_cache_group_id].get_cpu_tensor().reshape(-1)
         # Number of active requests in this step (un-padded count).
         num_reqs = self.runner.input_batch.num_reqs
+        num_reqs, block_tables = device_array(
+            self.mesh, (np.asarray([num_reqs], dtype=jnp.int32), block_tables))
+        return self._prepare_inputs(state=self.state,
+                                    num_reqs=num_reqs,
+                                    block_tables=block_tables,
+                                    attn_metadata=attn_metadata,
+                                    input_ids=input_ids,
+                                    aux_hidden_states=aux_hidden_states,
+                                    next_token_ids=next_token_ids,
+                                    num_rejected_tokens=num_rejected_tokens)
+
+    @jax.jit(static_argnums=(0, ))
+    def _prepare_inputs(
+        self,
+        state: nnx.State,
+        num_reqs: jax.Array,
+        block_tables: jax.Array,
+        attn_metadata: AttentionMetadata,
+        input_ids: jax.Array,
+        aux_hidden_states: tuple[jax.Array, ...],
+        next_token_ids: jax.Array,
+        num_rejected_tokens: Optional[jax.Array] = None,
+    ) -> tuple[jax.Array, jax.Array, jax.Array, AttentionMetadata]:
+        """Prepare drafter inputs based on target forward outputs.
+
+        Mirrors the GPU reference logic but adapted to TPU/JAX types:
+        - When no rejection happened, select the first N scheduled tokens.
+        - When rejections happened, trim the per-request tail tokens and
+          update attention metadata accordingly.
+        - Build the EAGLE3 hidden input by concatenating auxiliary hidden
+          states along the last dimension.
+
+        Returns updated AttentionMetadata (positions, query_start_loc, seq_lens)
+        and the selected `target_token_ids` and `target_hidden_states`.
+        """
+        assert aux_hidden_states is not None and len(aux_hidden_states) > 0, (
+            "EAGLE3 requires auxiliary hidden states from the target model.")
 
         if num_rejected_tokens is None:
-            num_reqs = device_array(self.mesh,
-                                    np.asarray([num_reqs], dtype=jnp.int32))
             # block_tables = device_array(self.mesh, block_tables)
-            attn_metadata = replace(attn_metadata,
-                                    block_tables=device_array(
-                                        self.mesh, block_tables))
+            attn_metadata = replace(attn_metadata, block_tables=block_tables)
             target_hidden_states, input_ids, last_token_indices = self._prepare_hidden_states_and_input_ids(
-                self.state, aux_hidden_states, attn_metadata.query_start_loc,
+                state, aux_hidden_states, attn_metadata.query_start_loc,
                 input_ids, next_token_ids, num_reqs)
             return target_hidden_states, input_ids, last_token_indices, attn_metadata
 
-        # Host copies from the metadata prepared by the runner.
-        query_start_loc_cpu = attn_metadata.query_start_loc_cpu
-        seq_lens_cpu = attn_metadata.seq_lens_cpu
-        assert query_start_loc_cpu is not None and seq_lens_cpu is not None
+        query_start_loc = attn_metadata.query_start_loc
+        seq_lens = attn_metadata.seq_lens
 
         # Rejection-aware path: compute new per-request lengths and token indices.
         # Convert to host numpy for efficient prefix-sum and repeat ops.
-        nrt_cpu = jax.device_get(num_rejected_tokens).astype("int32")
-
         # query_len_per_req = [q1, q2, ...]
-        query_len_per_req = (query_start_loc_cpu[1:] -
-                             query_start_loc_cpu[:-1])
+        query_len_per_req = (query_start_loc[1:] - query_start_loc[:-1])
 
-        # query_start_loc_cpu and consequentaly query_len_per_req are padded
+        # query_start_loc and consequentaly query_len_per_req are padded
         # For padded requests, the query length should be 0.
-        query_len_per_req[num_reqs:] = 1
+        query_len_per_req = jnp.where(
+            jnp.arange(query_len_per_req.shape[0]) < num_reqs,
+            query_len_per_req, 1)
         # num_tokens_per_req = [q1 - n1, q2 - n2, ...]
-        num_tokens_per_req = (query_len_per_req - nrt_cpu)
-        assert (num_tokens_per_req
-                >= 0).all(), ("num_tokens_per_req must be non-negative")
+        num_tokens_per_req = (query_len_per_req - num_rejected_tokens)
 
         # new_query_start_loc = [0, q1-n1, q1+q2-n1-n2, ...]
         # Use numpy for cumsum and then convert back.
-        new_query_start_loc_cpu = np.zeros_like(query_start_loc_cpu)
-        np.cumsum(num_tokens_per_req, out=new_query_start_loc_cpu[1:])
-
-        # Build token indices selecting the kept tokens from each request.
-        total_num_tokens = int(new_query_start_loc_cpu[-1])
-
-        # Pad to total_num_tokens.
-        padded_total_num_tokens = runner_utils.get_padded_token_len(
-            self.runner.num_tokens_paddings, total_num_tokens)
-        pad_width = padded_total_num_tokens - total_num_tokens
-        assert pad_width >= 0, (
-            f"total_num_tokens {total_num_tokens} exceeds "
-            f"num_tokens_paddings {self.runner.num_tokens_paddings}")
+        new_query_start_loc = jnp.cumsum(num_tokens_per_req)
+        new_query_start_loc = jnp.pad(new_query_start_loc, (1, 0),
+                                      constant_values=0)
+        total_num_tokens = input_ids.shape[0]
 
         # Expand request starts: [0, 0, q1-n1, ...,]
-        expanded_new_query_start_loc = np.repeat(new_query_start_loc_cpu[:-1],
-                                                 num_tokens_per_req)
+        expanded_new_query_start_loc = jnp.repeat(
+            new_query_start_loc[:-1],
+            num_tokens_per_req,
+            total_repeat_length=total_num_tokens)
         # Offsets within each request window: [0,1,2, 0,1,2,3, ...]
-        token_offsets = np.arange(total_num_tokens, dtype=np.int32)
+        token_offsets = jnp.arange(total_num_tokens, dtype=np.int32)
         token_offsets -= expanded_new_query_start_loc
         # Map into old flat indices by adding original request starts.
-        old_query_start_loc_expanded = np.repeat(query_start_loc_cpu[:-1],
-                                                 num_tokens_per_req)
+        old_query_start_loc_expanded = jnp.repeat(
+            query_start_loc[:-1],
+            num_tokens_per_req,
+            total_repeat_length=total_num_tokens)
 
-        token_indices_cpu = token_offsets + old_query_start_loc_expanded
-        token_indices_cpu = np.pad(token_indices_cpu, (0, pad_width),
-                                   "constant",
-                                   constant_values=0)
+        token_indices = token_offsets + old_query_start_loc_expanded
+
         # Update seq_lens for active requests only: new_seq_lens = s - n.
-        new_seq_lens_cpu = seq_lens_cpu - nrt_cpu
-
-        query_start_loc, seq_lens, token_indices, num_reqs, block_tables = device_array(
-            self.mesh,
-            (new_query_start_loc_cpu, new_seq_lens_cpu, token_indices_cpu,
-             np.asarray([num_reqs], dtype=jnp.int32), block_tables))
+        new_seq_lens = seq_lens - num_rejected_tokens
 
         attn_metadata = replace(attn_metadata, block_tables=block_tables)
         return self._filter_token_and_prepare_initial_inputs(
-            self.state, token_indices, query_start_loc, seq_lens, input_ids,
+            state, token_indices, new_query_start_loc, new_seq_lens, input_ids,
             aux_hidden_states, attn_metadata, next_token_ids, num_reqs)
 
-    @jax.jit(static_argnums=(0, ))
     def _filter_token_and_prepare_initial_inputs(
         self,
         state: nnx.State,

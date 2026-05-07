@@ -142,9 +142,7 @@ def test_prepare_inputs():
     expected_new_seq_lens = np.zeros(max_num_seqs, dtype=np.int32)
     expected_new_seq_lens[:num_reqs] = [3, 4, 3]
 
-    expected_total_tokens = int(expected_new_qsl[-1])
-    expected_total_tokens = runner_utils.get_padded_token_len(
-        proposer.runner.num_tokens_paddings, expected_total_tokens)
+    expected_total_tokens = input_ids.shape[0]
 
     expected_last_token_indices = jnp.array(expected_new_qsl[1:] - 1)
 
