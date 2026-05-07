@@ -349,22 +349,29 @@ done < "$RESULT_FILE"
 
 if [ "$keys" == "RecordId, " ]; then
   echo "Result file was empty or parsing failed. Marking status as FAILED."
-  keys+="Status, RunBy, LastUpdate, CreatedTime"
-  vals+="'FAILED', '${GCP_INSTANCE_NAME}', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()"
+  STATUS="FAILED"
 else
-  keys+="Status, RunBy, LastUpdate, CreatedTime"
-  vals+="'COMPLETED', '${GCP_INSTANCE_NAME}', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()"
+  STATUS="COMPLETED"
 fi
 
-SQL="INSERT INTO RunRecord (${keys}) VALUES (${vals});"
+RUN_BY="${GCP_INSTANCE_NAME}"
 
-echo "Executing SQL for Spanner update:"
-echo "$SQL"
+keys_final="${keys} Status, RunBy, LastUpdate, CreatedTime"
+vals_final="${vals} @status, @run_by, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()"
+SQL="INSERT INTO RunRecord (${keys_final}) VALUES (${vals_final});"
+PARAMS="status='${STATUS}',run_by='${RUN_BY}'"
+
+echo "--------------------------------------------------------"
+echo "Executing SQL for Spanner update"
+echo "Query Template: $SQL"
+echo "Parameters:     $PARAMS"
+echo "--------------------------------------------------------"
 
 if ! gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
   --project="$GCP_PROJECT_ID" \
   --instance="$GCP_INSTANCE_ID" \
-  --sql="$SQL"; then
+  --sql="$SQL" \
+  --parameters="$PARAMS"; then
   echo "Failed to update Spanner record!"
   exit 1
 fi
