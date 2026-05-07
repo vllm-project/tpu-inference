@@ -429,24 +429,37 @@ class GmmTest(jtu.JaxTestCase):
     self.assertEqual(actual.shape, (num_groups, in_size, out_size))
     self.assertAllClose(actual, expected, rtol=1e-2, atol=1e-2)
 
-  def test_tgmm_with_rhs_scale(self):
-    batch_size, in_size, out_size = 1024, 256, 256
-    num_groups = 4
-    rhs_quant_dtype = jnp.float8_e5m2
+  @parameterized.product(
+      batch_size=[128, 512],          # M
+      in_size=[256, 512],             # K
+      out_size=[256, 512],            # N
+      num_groups=[4, 8],
+      group_offset=[0, 2],
+      dtype_pair=[
+          (jnp.float8_e4m3fn, jnp.float8_e5m2),       # production
+          (jnp.float8_e4m3fn, jnp.float8_e4m3fn),     # symmetric fp8
+      ],
+  )
+  def test_tgmm_with_rhs_scale(
+      self, batch_size, in_size, out_size, num_groups, group_offset, dtype_pair
+  ):
+    lhs_dtype, rhs_quant_dtype = dtype_pair
+    num_local_groups = num_groups - group_offset
 
     key1, key2 = jax.random.split(jax.random.key(0), 2)
-    lhs = jax.random.normal(key1, (batch_size, in_size), dtype=jnp.float8_e4m3fn)
+    lhs = jax.random.normal(
+        key1, (batch_size, in_size), dtype=jnp.bfloat16
+    ).astype(lhs_dtype)
     grad = jax.random.normal(key2, (batch_size, out_size), dtype=jnp.float32)
-    
+
     grad_q, grad_scale = quantize_tensor(
         grad, rhs_quant_dtype, axis=0, block_size=batch_size,
     )
     grad_scale = jnp.expand_dims(grad_scale, axis=1)  # [1, 1, N]
     assert grad_scale.shape == (1, 1, out_size)
-    
+
     group_sizes = get_group_sizes(batch_size, num_groups)
-    group_offset_arr = jnp.array([2], dtype=jnp.int32)
-    num_local_groups = num_groups - int(group_offset_arr[0])
+    group_offset_arr = jnp.array([group_offset], dtype=jnp.int32)
 
     expected = reference_tgmm(
         lhs.swapaxes(0, 1), grad_q, group_sizes, num_local_groups,
@@ -461,10 +474,6 @@ class GmmTest(jtu.JaxTestCase):
         group_offset=group_offset_arr,
         preferred_element_type=jnp.bfloat16,
     )
-    diff = jnp.abs(expected - actual)
-    max_diff_idx = jnp.unravel_index(jnp.argmax(diff), diff.shape)
-    print(f"Output max diff: {jnp.max(diff)} at index {max_diff_idx}")
-    print(f"Output mean diff: {jnp.mean(jnp.abs(expected - actual))}")
     self.assertEqual(actual.shape, (num_local_groups, in_size, out_size))
     self.assertAllClose(actual, expected, rtol=1e-2, atol=6e-1)
 
