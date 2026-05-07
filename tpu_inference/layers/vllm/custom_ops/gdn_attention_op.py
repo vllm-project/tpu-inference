@@ -25,7 +25,9 @@ from vllm.model_executor.layers.mamba.gdn_linear_attn import \
 
 from tpu_inference import envs
 from tpu_inference.layers.common.gdn_attention import (
-    GdnAttentionConfig, RaggedGatedDeltaRuleImpl, run_jax_gdn_attention)
+    GdnAttentionConfig, run_jax_gdn_attention)
+from tpu_inference.layers.common.ragged_gated_delta_rule_wrapper import (
+    RaggedGatedDeltaRuleImpl)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     reorder_concatenated_tensor_for_sharding
