@@ -432,7 +432,7 @@ class GmmTest(jtu.JaxTestCase):
   @parameterized.product(
       batch_size=[128, 512],          # M
       in_size=[256, 512],             # K
-      out_size=[256, 512],            # N
+      out_size=[256, 512, 300],       # N (300 % 128 != 0 exercises N-padding)
       num_groups=[4, 8],
       group_offset=[0, 2],
       dtype_pair=[
