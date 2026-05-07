@@ -13,17 +13,38 @@
 # limitations under the License.
 
 import sys
+from abc import ABC, abstractmethod
 from collections import OrderedDict
 from typing import Any, Optional
 
 from tpu_inference.logger import init_logger
 from tpu_inference.offload.metrics import TPUKVCacheMetrics
+from tpu_inference.offload.offload_manager import ChunkHash
 from tpu_inference.offload.utils import CpuChunkId
 
 logger = init_logger(__name__)
 
 
-class LocalCPUBackend:
+class Backend(ABC):
+
+    @abstractmethod
+    def add(self, chunk_id: CpuChunkId, chunk_hash: ChunkHash,
+            value: Any) -> bool:
+        """
+        Adds a key-value pair to the cache.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get(self, chunk_id: CpuChunkId,
+            chunk_hash: ChunkHash) -> Optional[Any]:
+        """
+        Gets the value for a given chunk_id
+        """
+        raise NotImplementedError
+
+
+class LocalCPUBackend(Backend):
     """
     An in-memory CPU backend for storing KV cache keys and values.
 
@@ -63,7 +84,7 @@ class LocalCPUBackend:
             size_in_bytes = sys.getsizeof(value)
         return size_in_bytes
 
-    def add(self, chunk_id: CpuChunkId, value: Any) -> bool:
+    def add(self, chunk_id: CpuChunkId, _: ChunkHash, value: Any) -> bool:
         """
         Adds a key-value pair to the cache.
 
@@ -95,7 +116,15 @@ class LocalCPUBackend:
             self.current_size_bytes)
         return True
 
-    def get(self, chunk_id: CpuChunkId) -> Optional[Any]:
+    def wait_for_add_background(self):
+        """
+        Waits for any background add() processing to finish (eg, FS writes).
+
+        By default does nothing; eg CPU offload has no background processing.
+        """
+        pass
+
+    def get(self, chunk_id: CpuChunkId, _: ChunkHash) -> Optional[Any]:
         """
         Gets the value for a given chunk_id and marks it as recently used.
         """

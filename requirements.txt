@@ -23,5 +23,6 @@ runai-model-streamer[s3,gcs]==0.15.9
 gcsfs==2026.1.0
 hypothesis==6.151.9
 sortedcontainers==2.4.0
-# Upstream pins to 5.5.3 https://github.com/vllm-project/vllm/blob/de3fe8dc62f3d77eb8dab8125ca90436f606bccb/requirements/test/nightly-torch.txt#L32
 transformers>=5.8.0
+tensorstore>=0.1.50
+zarr>=2.16.0

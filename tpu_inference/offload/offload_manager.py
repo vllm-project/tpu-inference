@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from abc import ABC, abstractmethod
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Literal, Optional, Tuple
@@ -126,7 +127,45 @@ class CPUChunkPool:
         return True
 
 
-class LRUCacheManager:
+class CacheManager(ABC):
+
+    @abstractmethod
+    def lookup(self, chunk_hashes: list[ChunkHash]) -> int:
+        """_summary_
+        return the number of cache hit starting from the first chunk
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def touch(self, chunk_hashes: list[ChunkHash]) -> int:
+        """ access chunks for both save / load; and move them to the end."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def allocate_for_save(
+        self, chunk_hashes: list[ChunkHash]
+    ) -> Tuple[list[CPUChunk], list[int]] | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def prepare_load(self, chunk_hashes: list[ChunkHash]) -> list[CPUChunk]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def complete_save(self, chunk_hashes: list[ChunkHash]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def complete_load(self, chunk_hashes: list[ChunkHash]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def mark_completion(self, chunk_ids, operation: Literal['save',
+                                                            'load']) -> None:
+        raise NotImplementedError
+
+
+class LRUCacheManager(CacheManager):
     """
     Manages the logical mapping and eviction policy of the CPU KV cache.
 
@@ -174,7 +213,7 @@ class LRUCacheManager:
         num_new_chunks = len(new_chunk_idxs)
         if num_new_chunks == 0:
             logger.debug("No new chunks to allocate")
-            return None
+            return [], []
         num_chunks_to_evict = max(
             0, num_new_chunks - self.chunk_pool.num_free_chunks)
 
@@ -189,6 +228,9 @@ class LRUCacheManager:
                         break
             else:
                 # we could not evict enough chunks
+                logger.warning(
+                    f"Could not evict {num_chunks_to_evict} chunks after evicting {len(to_evict)}"
+                )
                 return None
 
         # evict chunks
