@@ -512,7 +512,13 @@ class InputBatch:
 
     @property
     def max_num_logprobs(self) -> Optional[int]:
-        return max(self.num_logprobs.values()) if self.num_logprobs else None
+        max_gen_logprobs = max(
+            self.num_logprobs.values()) if self.num_logprobs else 0
+        max_prompt_logprobs = max(
+            self.num_prompt_logprobs.values()) if self.num_prompt_logprobs else 0
+        
+        total_max = max(max_gen_logprobs, max_prompt_logprobs)
+        return total_max if total_max > 0 else None
 
     def make_lora_inputs(
         self, num_scheduled_tokens: np.ndarray
