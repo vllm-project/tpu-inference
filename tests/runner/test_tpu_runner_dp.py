@@ -347,7 +347,8 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
             # 10. sampling_indices_selector: Array to map back to original request order
             assert isinstance(sampling_indices_selector, np.ndarray)
-            assert len(sampling_indices_selector) == 8  # Now same as self.max_num_reqs
+            assert len(sampling_indices_selector
+                       ) == 8  # Now same as self.max_num_reqs
             # Should map distributed positions back to original order
             expected_selector = np.zeros(8, dtype=np.int32)
             expected_selector[:4] = [0, 1, 16, 17]
@@ -1003,8 +1004,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
             self.runner)
 
         self.runner.dp_size = 2
-        self.runner._prepare_inputs_dp = MagicMock(
-            return_value=(None, ) * 12)
+        self.runner._prepare_inputs_dp = MagicMock(return_value=(None, ) * 12)
 
         scheduler_output = MagicMock()
         scheduler_output.scheduled_spec_decode_tokens = {}
@@ -1025,8 +1025,8 @@ class TestTPUJaxRunnerDPInputsLightweight:
             self.runner)
 
         self.runner.dp_size = 1
-        self.runner._prepare_inputs_non_dp = MagicMock(
-            return_value=(None, ) * 12)
+        self.runner._prepare_inputs_non_dp = MagicMock(return_value=(None, ) *
+                                                       12)
 
         scheduler_output = MagicMock()
         scheduler_output.scheduled_spec_decode_tokens = {}

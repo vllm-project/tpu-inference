@@ -266,7 +266,8 @@ class InputBatch:
             if sampling_params.logprobs is not None:
                 self.num_logprobs[req_id] = sampling_params.logprobs
             if sampling_params.prompt_logprobs is not None:
-                self.num_prompt_logprobs[req_id] = sampling_params.prompt_logprobs
+                self.num_prompt_logprobs[
+                    req_id] = sampling_params.prompt_logprobs
             if sampling_params.logit_bias is not None:
                 self.logit_bias[req_index] = sampling_params.logit_bias
 
@@ -514,9 +515,9 @@ class InputBatch:
     def max_num_logprobs(self) -> Optional[int]:
         max_gen_logprobs = max(
             self.num_logprobs.values()) if self.num_logprobs else 0
-        max_prompt_logprobs = max(
-            self.num_prompt_logprobs.values()) if self.num_prompt_logprobs else 0
-        
+        max_prompt_logprobs = max(self.num_prompt_logprobs.values()
+                                  ) if self.num_prompt_logprobs else 0
+
         total_max = max(max_gen_logprobs, max_prompt_logprobs)
         return total_max if total_max > 0 else None
 

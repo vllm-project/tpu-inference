@@ -40,8 +40,8 @@ from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
-                             DraftTokenIds, KVConnectorOutput, LogprobsLists,
-                             LogprobsTensors, ModelRunnerOutput)
+                             DraftTokenIds, KVConnectorOutput, LogprobsTensors,
+                             ModelRunnerOutput)
 from vllm.v1.request import Request
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.kv_connector_model_runner_mixin import \
@@ -131,9 +131,10 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         self.any_prompt_logprobs = any_prompt_logprobs
         self.sampling_indices_selector = sampling_indices_selector
         self.gi_physical_indices = gi_physical_indices
+
     def get_output(self) -> ModelRunnerOutput:
         next_tokens_cpu = np.asarray(jax.device_get(self._next_tokens))
-        
+
         # Use the dedicated sampling selector to unsuffle tokens from multiple chips
         # Only use the portion corresponding to the current active requests
         active_selector = self.sampling_indices_selector[:self._num_reqs]
@@ -269,8 +270,6 @@ def _jax_logprobs_materialize(
     )
 
 
-
-
 def _separate_logprobs(
     logprobs_tensors: LogprobsTensors,
     logits_indices_selector: Optional[List[int]],
@@ -288,8 +287,9 @@ def _separate_logprobs(
     if num_logits_per_req is not None:
         cu_num_logits = [0] + np.cumsum(num_logits_per_req).tolist()
 
-    materialized_logprobs = _jax_logprobs_materialize(
-        logprobs_tensors, logits_indices_selector, cu_num_logits)
+    materialized_logprobs = _jax_logprobs_materialize(logprobs_tensors,
+                                                      logits_indices_selector,
+                                                      cu_num_logits)
 
     if num_logits_per_req is None:
         return materialized_logprobs, {}
@@ -315,11 +315,11 @@ def _separate_logprobs(
         if num_tokens > 1:
             # Everything except the last one is prompt logprobs
             prompt_logprobs_dict[req_ids[i]] = LogprobsTensors(
-                logprob_token_ids=materialized_logprobs.logprob_token_ids[
-                    start:end - 1],
+                logprob_token_ids=materialized_logprobs.
+                logprob_token_ids[start:end - 1],
                 logprobs=materialized_logprobs.logprobs[start:end - 1],
-                selected_token_ranks=materialized_logprobs.selected_token_ranks[
-                    start:end - 1],
+                selected_token_ranks=materialized_logprobs.
+                selected_token_ranks[start:end - 1],
                 cu_num_generated_tokens=None,
             )
 
@@ -380,7 +380,7 @@ def _get_total_sampled_tokens(
     # DP Case: Find the maximum tokens required by any single rank
     padded_num_reqs_per_rank = padded_num_reqs // dp_size
     tokens_per_rank = np.zeros(dp_size, dtype=np.int32)
-    
+
     # Base slots for generation
     tokens_per_rank += padded_num_reqs_per_rank
 
@@ -389,10 +389,11 @@ def _get_total_sampled_tokens(
         dp_rank = scheduler_output.assigned_dp_rank.get(req_id, 0)
         extra = 0
         if use_spec_decode:
-            extra = len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
+            extra = len(
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
         elif req_id in input_batch.num_prompt_logprobs:
             extra = scheduler_output.num_scheduled_tokens[req_id] - 1
-        
+
         tokens_per_rank[dp_rank] += extra
 
     max_tokens_per_rank = np.max(tokens_per_rank)
@@ -422,13 +423,15 @@ def _populate_logits_metadata(
     gi_physical_indices = np.zeros(padded_num_reqs, dtype=np.int32)
 
     if is_dp:
-        padded_logits_length_per_rank = int(padded_logits_length) // int(dp_size)
+        padded_logits_length_per_rank = int(padded_logits_length) // int(
+            dp_size)
         req_id_to_indices = {}
         req_id_to_count = {}
 
         for dp_rank in range(int(dp_size)):
             req_offset = dp_rank * padded_logits_length_per_rank
-            query_loc_req_offset = dp_rank * (int(max_num_reqs_per_dp_rank) + 1)
+            query_loc_req_offset = dp_rank * (int(max_num_reqs_per_dp_rank) +
+                                              1)
             _num_reqs_in_rank = num_req_per_dp_rank[dp_rank]
 
             for i in range(_num_reqs_in_rank):
@@ -440,17 +443,24 @@ def _populate_logits_metadata(
                 if not (any_prompt_logprobs or use_spec_decode):
                     num_logits = 1
                 else:
-                    num_logits = (end - start) if (req_id in input_batch.num_prompt_logprobs and not use_spec_decode) else 1
+                    num_logits = (end - start) if (
+                        req_id in input_batch.num_prompt_logprobs
+                        and not use_spec_decode) else 1
                     if use_spec_decode:
-                        num_logits = len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])) + 1
+                        num_logits = len(
+                            scheduler_output.scheduled_spec_decode_tokens.get(
+                                req_id, [])) + 1
 
-                logits_indices_view[req_offset:req_offset + num_logits] = np.arange(start, end)[-num_logits:]
+                logits_indices_view[req_offset:req_offset +
+                                    num_logits] = np.arange(start,
+                                                            end)[-num_logits:]
                 indices = list(range(req_offset, req_offset + num_logits))
                 req_id_to_indices[req_id] = indices
                 req_id_to_count[req_id] = num_logits
-                
+
                 # Physical slot i in this rank's Gi-block
-                gi_physical_indices[dp_rank * int(padded_num_reqs_per_dp_rank) + i] = req_offset + num_logits - 1
+                gi_physical_indices[dp_rank * int(padded_num_reqs_per_dp_rank)
+                                    + i] = req_offset + num_logits - 1
                 req_offset += num_logits
 
         for req_id in input_batch.req_ids[:int(num_reqs)]:
@@ -460,20 +470,24 @@ def _populate_logits_metadata(
         req_offset = 0
         for i, req_id in enumerate(input_batch.req_ids[:int(num_reqs)]):
             start, end = query_start_loc_view[i], query_start_loc_view[i + 1]
-            
+
             if not (any_prompt_logprobs or use_spec_decode):
                 num_logits = 1
             else:
-                num_logits = (end - start) if (req_id in input_batch.num_prompt_logprobs and not use_spec_decode) else 1
-            
-            logits_indices_view[req_offset:req_offset + num_logits] = np.arange(start, end)[-num_logits:]
-            logits_indices_selector.extend(range(req_offset, req_offset + num_logits))
+                num_logits = (
+                    end - start) if (req_id in input_batch.num_prompt_logprobs
+                                     and not use_spec_decode) else 1
+
+            logits_indices_view[req_offset:req_offset +
+                                num_logits] = np.arange(start,
+                                                        end)[-num_logits:]
+            logits_indices_selector.extend(
+                range(req_offset, req_offset + num_logits))
             num_logits_per_req.append(num_logits)
             gi_physical_indices[i] = req_offset + num_logits - 1
             req_offset += num_logits
 
     return logits_indices_selector, num_logits_per_req, gi_physical_indices
-
 
 
 class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
@@ -949,13 +963,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 arange,
             )
         return self._sample_from_logits(
-            state.scheduler_output, state.attn_metadata, state.sampling_metadata,
-            state.input_ids, state.hidden_states, logits, state.aux_hidden_states,
-            state.spec_decode_metadata, state.kv_connector_output,
-            state.logits_indices_selector, state.padded_num_reqs,
-            state.expert_indices, state.num_logits_per_req,
-            state.any_prompt_logprobs, state.sampling_indices_selector,
-            state.gi_physical_indices)
+            state.scheduler_output, state.attn_metadata,
+            state.sampling_metadata, state.input_ids, state.hidden_states,
+            logits, state.aux_hidden_states, state.spec_decode_metadata,
+            state.kv_connector_output, state.logits_indices_selector,
+            state.padded_num_reqs, state.expert_indices,
+            state.num_logits_per_req, state.any_prompt_logprobs,
+            state.sampling_indices_selector, state.gi_physical_indices)
 
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
@@ -968,12 +982,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         pre_sampling_indices_selector = self._pre_async_results.sampling_indices_selector
 
         next_tokens_cpu = np.asarray(jax.device_get(pre_next_tokens))
-        
+
         # Use sampling_indices_selector to correctly map tokens from multiple chips back to original req order
         active_selector = pre_sampling_indices_selector[:len(pre_req_ids)]
         selected_token_ids = next_tokens_cpu[active_selector]
         selected_token_ids = np.expand_dims(selected_token_ids, 1)
-        
+
         valid_sampled_token_ids = selected_token_ids.tolist()
 
         # Mask out the sampled tokens that should not be sampled.
@@ -1220,16 +1234,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if spec_decode_metadata is None:
             logits = logits.astype(jnp.float32)
-            
-            # Use gi_physical_indices to correctly extract the sampling logits 
-            # from the flattened array. This handles both Interleaved and 
+
+            # Use gi_physical_indices to correctly extract the sampling logits
+            # from the flattened array. This handles both Interleaved and
             # Generation First layouts, and ensures SPMD alignment across all chips.
             if gi_physical_indices is not None:
                 gen_logits = logits[jnp.array(gi_physical_indices)]
             else:
                 # Fallback to legacy behavior if gi_physical_indices is missing
                 gen_logits = logits[:padded_num_reqs]
-            
+
             with self.maybe_forbid_compile:
                 next_tokens, processed_gen_logits = sample(
                     step_rng,
@@ -1237,14 +1251,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     gen_logits,
                     tpu_sampling_metadata,
                 )
-                
-                # Reconstruct the full processed_logits by placing sampled results 
+
+                # Reconstruct the full processed_logits by placing sampled results
                 # back into their respective slots.
                 processed_logits = logits
                 if gi_physical_indices is not None:
-                    processed_logits = processed_logits.at[jnp.array(gi_physical_indices)].set(processed_gen_logits)
+                    processed_logits = processed_logits.at[jnp.array(
+                        gi_physical_indices)].set(processed_gen_logits)
                 else:
-                    processed_logits = processed_logits.at[:padded_num_reqs].set(processed_gen_logits)
+                    processed_logits = processed_logits.at[:padded_num_reqs].set(
+                        processed_gen_logits)
         else:
             # TODO(gxd3): wrap the spec decode sampling code block
             # under maybe_forbid_compile as well.
@@ -1280,23 +1296,26 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             if tpu_sampling_metadata.logprobs:
                 logits = processed_logits if self.model_config.logprobs_mode == "processed_logprobs" else logits
-                
+
                 # In prompt_logprobs mode, logits are longer than next_tokens.
                 # We pad next_tokens to match the logits shape for broadcasting,
                 # ensuring gather_logprobs doesn't crash.
                 if any_prompt_logprobs:
                     # Ensure next_tokens is 1D (B_gen,) before set()
-                    tokens_1d = jnp.reshape(next_tokens, (-1,))
-                        
-                    padded_next_tokens = jnp.zeros((logits.shape[0],), 
-                                                 dtype=next_tokens.dtype)
-                    padded_next_tokens = padded_next_tokens.at[:tokens_1d.shape[0]].set(tokens_1d)
+                    tokens_1d = jnp.reshape(next_tokens, (-1, ))
+
+                    padded_next_tokens = jnp.zeros((logits.shape[0], ),
+                                                   dtype=next_tokens.dtype)
+                    padded_next_tokens = padded_next_tokens.at[:tokens_1d.
+                                                               shape[0]].set(
+                                                                   tokens_1d)
                     token_ids_for_gather = padded_next_tokens
                 else:
                     token_ids_for_gather = next_tokens
-                    
+
                 logprobs = self._compute_and_gather_logprobs(
-                    logits, token_ids_for_gather, self.model_config.max_logprobs)
+                    logits, token_ids_for_gather,
+                    self.model_config.max_logprobs)
                 logprobs = _jax_logprobs_copy_to_host_async(logprobs)
             else:
                 logprobs = None
@@ -1390,7 +1409,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             return async_model_runner_output
         if spec_decode_metadata is None:
             next_tokens = np.asarray(jax.device_get(next_tokens))
-            
+
             active_selector = sampling_indices_selector[:num_reqs]
             selected_token_ids = next_tokens[active_selector]
             selected_token_ids = np.expand_dims(selected_token_ids, 1)
@@ -1651,9 +1670,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                                any_prompt_logprobs)
 
     def _prepare_inputs_dp(self,
-                          scheduler_output: "VllmSchedulerOutput",
-                          use_spec_decode: Optional[bool] = None,
-                          any_prompt_logprobs: Optional[bool] = None):
+                           scheduler_output: "VllmSchedulerOutput",
+                           use_spec_decode: Optional[bool] = None,
+                           any_prompt_logprobs: Optional[bool] = None):
         if use_spec_decode is None:
             use_spec_decode = len(
                 scheduler_output.scheduled_spec_decode_tokens) > 0

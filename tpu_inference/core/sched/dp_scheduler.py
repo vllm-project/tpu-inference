@@ -40,8 +40,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
-from vllm.v1.outputs import (DraftTokenIds, LogprobsLists, LogprobsTensors,
-                             ModelRunnerOutput)
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -907,7 +906,7 @@ class DPScheduler(SchedulerInterface):
         is_tensors = hasattr(global_logprobs, "selected_token_ranks")
         rank_attr = "selected_token_ranks" if is_tensors else "sampled_token_ranks"
         out_cls = type(global_logprobs)
-        
+
         cu = global_logprobs.cu_num_generated_tokens
         if cu is None:
             # Direct indexing

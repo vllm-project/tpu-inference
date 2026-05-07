@@ -28,8 +28,10 @@ def create_parser():
     sampling_group.add_argument("--top-k", type=int)
     sampling_group.add_argument("--log-probs", type=int)
     sampling_group.add_argument("--prompt-logprobs", type=int)
-    sampling_group.add_argument("--mixed-logprobs", action="store_true", 
-                               help="Use mixed prompt_logprobs in one batch for testing")
+    sampling_group.add_argument(
+        "--mixed-logprobs",
+        action="store_true",
+        help="Use mixed prompt_logprobs in one batch for testing")
 
     return parser
 

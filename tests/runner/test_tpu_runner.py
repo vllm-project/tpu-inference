@@ -175,8 +175,9 @@ class TestTPUJaxRunner:
         mock_sampling_instance = MagicMock()
         mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
 
-        output = self.runner._prepare_inputs_non_dp(
-            scheduler_output, use_spec_decode=False, any_prompt_logprobs=False)
+        output = self.runner._prepare_inputs_non_dp(scheduler_output,
+                                                    use_spec_decode=False,
+                                                    any_prompt_logprobs=False)
         assert len(output) == 12
         (input_ids, positions, attention_metadata, sampling_metadata,
          logits_indices, spec_decode_metadata, logits_indices_selector,
