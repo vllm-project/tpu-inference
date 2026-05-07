@@ -291,6 +291,8 @@ docker exec \
   node bash -c "${VLLM_SERVE_CMD} > /root/vllm_serve.log 2>&1"
 
 # 4. Wait for the server to be healthy
+echo "--- To check vllm logs, run: docker exec node tail -f /root/vllm_serve.log"
+echo "--- To enter docker terminal: docker exec -it node bash"
 wait_for_server "$VLLM_PORT" "node" "vllm serve" "/root/vllm_serve.log"
 
 # 5. Run Benchmarks / Validation
