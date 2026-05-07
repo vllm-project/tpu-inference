@@ -571,7 +571,7 @@ def _populate_logits_metadata(
                 num_logits_per_req.append(num_logits)
         
         # Fill gaps
-        logits_indices_view[gen_req_offset:padded_num_reqs].fill(-1)
+        logits_indices_view[gen_req_offset:padded_num_reqs_per_dp_rank].fill(-1)
         logits_indices_view[extra_req_offset:].fill(-1)
 
     return logits_indices_selector, num_logits_per_req
