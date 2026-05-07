@@ -116,6 +116,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         total_num_scheduled_tokens: int = 0,
         num_logits_per_req: Optional[list[int]] = None,
         any_prompt_logprobs: bool = False,
+        sampling_indices_selector: Optional[np.ndarray] = None,
     ):
         self._model_runner_output = model_runner_output
         self._next_tokens = next_tokens
@@ -127,19 +128,18 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._total_num_scheduled_tokens = total_num_scheduled_tokens
         self.num_logits_per_req = num_logits_per_req
         self.any_prompt_logprobs = any_prompt_logprobs
-
+        self.sampling_indices_selector = sampling_indices_selector
     def get_output(self) -> ModelRunnerOutput:
         next_tokens_cpu = np.asarray(jax.device_get(self._next_tokens))
         
-        if self.any_prompt_logprobs:
-            # In prompt_logprobs mode with Generation First layout, next_tokens 
-            # are already ordered by request index [0..num_reqs-1].
-            selected_token_ids = np.expand_dims(next_tokens_cpu[:self._num_reqs], 1)
-        else:
-            selected_token_ids = _extract_last_tokens(next_tokens_cpu,
-                                                      self._num_reqs,
-                                                      self.logits_indices_selector,
-                                                      self.num_logits_per_req)
+        # Determine if we are in DP mode
+        is_dp = self.logits_indices_selector is not None and len(self.logits_indices_selector) > self._num_reqs
+        
+        # Use the dedicated sampling selector to unsuffle tokens from multiple chips
+        # Only use the portion corresponding to the current active requests
+        active_selector = self.sampling_indices_selector[:self._num_reqs]
+        selected_token_ids = next_tokens_cpu[active_selector]
+        selected_token_ids = np.expand_dims(selected_token_ids, 1)
 
         valid_sampled_token_ids = selected_token_ids.tolist()
         for i in self._discard_sampled_tokens_req_indices:
@@ -171,6 +171,7 @@ class AsyncPreResults:
     placeholder_req_id_to_index: dict[str, int]
     logits_indices_selector: Optional[List[int]] = None
     any_prompt_logprobs: bool = False
+    sampling_indices_selector: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -192,6 +193,7 @@ class ExecuteModelState:
     expert_indices: Optional[jax.Array] = None
     num_logits_per_req: Optional[list[int]] = None
     any_prompt_logprobs: bool = False
+    sampling_indices_selector: Optional[np.ndarray] = None
 
 
 @jax.jit(donate_argnums=(0, 1, 2))
@@ -279,13 +281,24 @@ def _extract_last_tokens(
     if logits_indices_selector is not None:
         if num_logits_per_req is not None:
             cu_num_logits = [0] + np.cumsum(num_logits_per_req).tolist()
+            # For each request, the next token is at the last index of its logprobs block.
+            # Due to Generation First layout, the selector already points to the 
+            # correct slot. If the slot index is larger than the number of 
+            # samplable tokens, it means we are trying to extract from a prompt-only 
+            # slot which shouldn't happen here.
             last_logits_indices = [
                 logits_indices_selector[cu_num_logits[i + 1] - 1]
                 for i in range(num_reqs)
             ]
-            selected_token_ids = tokens[last_logits_indices]
+            
+            # Clamp indices to the samplable range [0, tokens.shape[0]-1]
+            # to avoid IndexErrors from prompt slots in the selector.
+            safe_indices = [min(idx, tokens.shape[0] - 1) for idx in last_logits_indices]
+            selected_token_ids = tokens[safe_indices]
         else:
-            selected_token_ids = tokens[logits_indices_selector[:num_reqs]]
+            # Standard path: selector might contain large indices for prompt regions
+            safe_indices = [min(idx, tokens.shape[0] - 1) for idx in logits_indices_selector[:num_reqs]]
+            selected_token_ids = tokens[safe_indices]
     else:
         selected_token_ids = tokens[:num_reqs]
 
@@ -454,8 +467,9 @@ def _populate_logits_metadata(
             query_loc_req_offset = dp_rank * (max_num_reqs_per_dp_rank + 1)
             _num_reqs = num_req_per_dp_rank[dp_rank]
 
-            # In 'Generation First' layout, we use two offsets per rank
+            # Block 1 (Generation): starts at 0 for each rank's sharded slice
             gen_req_offset = dp_rank * padded_logits_length_per_rank
+            # Block 2 (Prompt): starts after the generation block in each rank
             extra_req_offset = gen_req_offset + padded_num_reqs_per_dp_rank
 
             dp_selectors = []
@@ -473,19 +487,17 @@ def _populate_logits_metadata(
                 else:
                     num_logits = 1
 
-                # We only use the 'Generation First' layout if NOT using spec decode.
-                # Speculative decoding manages its own variable-length logits.
                 if not use_spec_decode and num_logits > 1:
-                    # 1. Generation token ALWAYS goes to the primary block
+                    # Generation token ALWAYS goes to the primary block
                     logits_indices_view[gen_req_offset] = end - 1
                     
-                    # 2. Prompt tokens go to the extra block
+                    # Prompt tokens go to the extra block
                     num_prompt_logits = num_logits - 1
                     logits_indices_view[extra_req_offset:extra_req_offset +
                                         num_prompt_logits] = np.arange(
                                             start, end - 1, dtype=np.int32)
                     
-                    # 3. Request selector: [Prompts..., Generation]
+                    # Selector: [Prompts..., Generation]
                     req_indices = list(range(extra_req_offset, extra_req_offset + num_prompt_logits))
                     req_indices.append(gen_req_offset)
                     dp_selectors.append(req_indices)
@@ -493,33 +505,16 @@ def _populate_logits_metadata(
                     gen_req_offset += 1
                     extra_req_offset += num_prompt_logits
                 else:
-                    # Standard or Speculative decoding (interleaved)
-                    # For consistency with the sampler, we still use gen_req_offset
-                    # if num_logits == 1.
-                    if num_logits == 1:
-                        logits_indices_view[gen_req_offset] = end - 1
-                        dp_selectors.append([gen_req_offset])
-                        gen_req_offset += 1
-                    else:
-                        # Interleaved speculative logits
-                        # Start at gen_req_offset because spec decode expects
-                        # its block to start there.
-                        logits_indices_view[gen_req_offset:gen_req_offset +
-                                            num_logits] = np.arange(
-                                                start, end, dtype=np.int32)[
-                                                    -num_logits:]
-                        dp_selectors.append(list(range(gen_req_offset, gen_req_offset + num_logits)))
-                        gen_req_offset += num_logits
+                    # Single logit or spec-decode
+                    logits_indices_view[gen_req_offset] = end - 1
+                    dp_selectors.append([gen_req_offset])
+                    gen_req_offset += 1
 
-            # Fill remaining space in both blocks with -1
+            # Fill remaining space in gen block with -1
             gen_block_end = dp_rank * padded_logits_length_per_rank + padded_num_reqs_per_dp_rank
             if gen_req_offset < gen_block_end:
                 logits_indices_view[gen_req_offset:gen_block_end].fill(-1)
             
-            rank_end = (dp_rank + 1) * padded_logits_length_per_rank
-            if extra_req_offset < rank_end:
-                logits_indices_view[extra_req_offset:rank_end].fill(-1)
-                
             all_dp_logits_selectors.append(dp_selectors)
 
         req_id_to_indices = {}
@@ -537,7 +532,7 @@ def _populate_logits_metadata(
     else:
         # Non-DP Complex path
         gen_req_offset = 0
-        extra_req_offset = padded_num_reqs_per_dp_rank # Padded_num_reqs is total reqs in non-DP
+        extra_req_offset = padded_num_reqs_per_dp_rank
         for i, req_id in enumerate(input_batch.req_ids[:num_reqs]):
             start, end = query_start_loc_view[i], query_start_loc_view[i + 1]
             if use_spec_decode:
@@ -550,40 +545,21 @@ def _populate_logits_metadata(
                 num_logits = 1
 
             if not use_spec_decode and num_logits > 1:
-                # Generation token to primary block
                 logits_indices_view[gen_req_offset] = end - 1
-                
-                # Prompt tokens to extra block
                 num_prompt_logits = num_logits - 1
                 logits_indices_view[extra_req_offset:extra_req_offset +
                                     num_prompt_logits] = np.arange(
                                         start, end - 1, dtype=np.int32)
-                
-                # Selector: [Prompts..., Generation]
                 logits_indices_selector.extend(range(extra_req_offset, extra_req_offset + num_prompt_logits))
                 logits_indices_selector.append(gen_req_offset)
-                
                 gen_req_offset += 1
                 extra_req_offset += num_prompt_logits
-                num_logits_per_req.append(num_logits)
             else:
-                # Interleaved or single logit
-                if num_logits == 1:
-                    logits_indices_view[gen_req_offset] = end - 1
-                    logits_indices_selector.append(gen_req_offset)
-                    gen_req_offset += 1
-                else:
-                    # Spec decode path
-                    logits_indices_view[gen_req_offset:gen_req_offset +
-                                        num_logits] = np.arange(
-                                            start, end, dtype=np.int32)[
-                                                -num_logits:]
-                    logits_indices_selector.extend(
-                        range(gen_req_offset, gen_req_offset + num_logits))
-                    gen_req_offset += num_logits
-                num_logits_per_req.append(num_logits)
+                logits_indices_view[gen_req_offset] = end - 1
+                logits_indices_selector.append(gen_req_offset)
+                gen_req_offset += 1
+            num_logits_per_req.append(num_logits)
         
-        # Fill gaps
         logits_indices_view[gen_req_offset:padded_num_reqs_per_dp_rank].fill(-1)
         logits_indices_view[extra_req_offset:].fill(-1)
 
@@ -1047,26 +1023,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # This can happen in pipeline parallel case.
             return EMPTY_MODEL_RUNNER_OUTPUT
 
-        (scheduler_output, attn_metadata, sampling_metadata, input_ids,
-         hidden_states, logits, aux_hidden_states, spec_decode_metadata,
-         kv_connector_output, logits_indices_selector, padded_num_reqs,
-         expert_indices, num_logits_per_req, any_prompt_logprobs) = (
-             self.execute_model_state.scheduler_output,
-             self.execute_model_state.attn_metadata,
-             self.execute_model_state.sampling_metadata,
-             self.execute_model_state.input_ids,
-             self.execute_model_state.hidden_states,
-             self.execute_model_state.logits,
-             self.execute_model_state.aux_hidden_states,
-             self.execute_model_state.spec_decode_metadata,
-             self.execute_model_state.kv_connector_output,
-             self.execute_model_state.logits_indices_selector,
-             self.execute_model_state.padded_num_reqs,
-             self.execute_model_state.expert_indices,
-             self.execute_model_state.num_logits_per_req,
-             self.execute_model_state.any_prompt_logprobs)
+        state = self.execute_model_state
         self.execute_model_state = None
 
+        logits = state.logits
         if grammar_output is not None:
             (
                 require_struct_decoding, grammar_bitmask_padded, arange
@@ -1079,10 +1039,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 arange,
             )
         return self._sample_from_logits(
-            scheduler_output, attn_metadata, sampling_metadata, input_ids,
-            hidden_states, logits, aux_hidden_states, spec_decode_metadata,
-            kv_connector_output, logits_indices_selector, padded_num_reqs,
-            expert_indices, num_logits_per_req, any_prompt_logprobs)
+            state.scheduler_output, state.attn_metadata, state.sampling_metadata,
+            state.input_ids, state.hidden_states, logits, state.aux_hidden_states,
+            state.spec_decode_metadata, state.kv_connector_output,
+            state.logits_indices_selector, state.padded_num_reqs,
+            state.expert_indices, state.num_logits_per_req,
+            state.any_prompt_logprobs, state.sampling_indices_selector)
 
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
@@ -1092,20 +1054,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         pre_next_tokens = self._pre_async_results.next_tokens
         pre_request_seq_lens = self._pre_async_results.request_seq_lens
         pre_discard_sampled_tokens_req_indices = self._pre_async_results.discard_sampled_tokens_req_indices
-        pre_logits_indices_selector = self._pre_async_results.logits_indices_selector
-        pre_any_prompt_logprobs = self._pre_async_results.any_prompt_logprobs
+        pre_sampling_indices_selector = self._pre_async_results.sampling_indices_selector
 
         next_tokens_cpu = np.asarray(jax.device_get(pre_next_tokens))
-        if pre_any_prompt_logprobs:
-            # In prompt_logprobs mode with Generation First layout, next_tokens 
-            # are already ordered by request index [0..num_reqs-1].
-            selected_token_ids = np.expand_dims(
-                next_tokens_cpu[:len(pre_req_ids)], 1)
-        else:
-            if pre_logits_indices_selector is not None:
-                next_tokens_cpu = next_tokens_cpu[pre_logits_indices_selector]
-            selected_token_ids = np.expand_dims(
-                next_tokens_cpu[:len(pre_req_ids)], 1)
+        
+        # Use sampling_indices_selector to correctly map tokens from multiple chips back to original req order
+        active_selector = pre_sampling_indices_selector[:len(pre_req_ids)]
+        selected_token_ids = next_tokens_cpu[active_selector]
+        selected_token_ids = np.expand_dims(selected_token_ids, 1)
         
         valid_sampled_token_ids = selected_token_ids.tolist()
 
@@ -1209,6 +1165,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padded_num_reqs,
             num_logits_per_req,
             any_prompt_logprobs,
+            sampling_indices_selector,
         ) = self._prepare_inputs(scheduler_output)
 
         # multi-modal support
@@ -1314,7 +1271,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padded_num_reqs=padded_num_reqs,
             expert_indices=expert_indices,
             num_logits_per_req=num_logits_per_req,
-            any_prompt_logprobs=any_prompt_logprobs)
+            any_prompt_logprobs=any_prompt_logprobs,
+            sampling_indices_selector=sampling_indices_selector)
         return None
 
     def _sample_from_logits(
@@ -1333,6 +1291,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         expert_indices: Optional[jax.Array] = None,
         num_logits_per_req: Optional[list[int]] = None,
         any_prompt_logprobs: bool = False,
+        sampling_indices_selector: Optional[np.ndarray] = None,
     ) -> ModelRunnerOutput | AsyncTPUModelRunnerOutput:
         if padded_num_reqs is None:
             padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
@@ -1346,9 +1305,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if spec_decode_metadata is None:
             logits = logits.astype(jnp.float32)
-            # When prompt logprobs are requested, logits contains extra tokens
-            # beyond the standard generation tokens. We only sample from the
-            # primary generation tokens (first padded_num_reqs rows).
+            
+            # With the new DP-aware Generation First layout, the sampling logits 
+            # are always in the first 'padded_num_reqs' rows of the global array.
+            # This maintains SPMD alignment across all TPU chips.
             gen_logits = logits[:padded_num_reqs]
             
             with self.maybe_forbid_compile:
@@ -1359,10 +1319,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     tpu_sampling_metadata,
                 )
                 
-                # Combine processed generation logits with original prompt logits
-                # to maintain the full processed_logits feature.
-                processed_logits = jnp.concatenate(
-                    [processed_gen_logits, logits[padded_num_reqs:]], axis=0)
+                # Reconstruct the full processed_logits by placing sampled results 
+                # back into the primary block.
+                processed_logits = logits
+                processed_logits = processed_logits.at[:padded_num_reqs].set(processed_gen_logits)
         else:
             # TODO(gxd3): wrap the spec decode sampling code block
             # under maybe_forbid_compile as well.
@@ -1476,7 +1436,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 discard_sampled_tokens_req_indices,
                 placeholder_req_id_to_index=placeholder_req_id_to_index,
                 logits_indices_selector=logits_indices_selector,
-                any_prompt_logprobs=any_prompt_logprobs)
+                any_prompt_logprobs=any_prompt_logprobs,
+                sampling_indices_selector=sampling_indices_selector)
 
             # Return Model output to executor
             model_runner_output = ModelRunnerOutput(
@@ -1500,20 +1461,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 total_num_scheduled_tokens=scheduler_output.
                 total_num_scheduled_tokens,
                 num_logits_per_req=num_logits_per_req,
-                any_prompt_logprobs=any_prompt_logprobs)
+                any_prompt_logprobs=any_prompt_logprobs,
+                sampling_indices_selector=sampling_indices_selector)
             return async_model_runner_output
 
         if spec_decode_metadata is None:
             next_tokens = np.asarray(jax.device_get(next_tokens))
-            # In prompt_logprobs mode with Generation First layout, next_tokens 
-            # (from gen_logits) are already ordered by request index [0..num_reqs-1].
-            if any_prompt_logprobs:
-                selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
-            else:
-                # Map tokens back to the pre-dp shuffling order
-                selected_token_ids = _extract_last_tokens(next_tokens, num_reqs,
-                                                          logits_indices_selector,
-                                                          num_logits_per_req)
+            
+            is_dp = logits_indices_selector is not None and len(logits_indices_selector) > num_reqs
+            active_selector = sampling_indices_selector[:num_reqs]
+            selected_token_ids = next_tokens[active_selector]
+            selected_token_ids = np.expand_dims(selected_token_ids, 1)
             valid_sampled_token_ids = selected_token_ids.tolist()
         else:
             valid_sampled_token_ids = self.rejection_sampler.parse_output(
@@ -1652,22 +1610,27 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)
         padded_num_reqs = padded_num_reqs_per_dp_rank * dp_size
 
-        all_req_indices = np.concatenate(
-            [req_indices_dp[dp_rank] for dp_rank in range(dp_size)])
-        all_positions = np.concatenate([
-            np.arange(len(req_indices_dp[dp_rank])) +
-            padded_num_reqs_per_dp_rank * dp_rank for dp_rank in range(dp_size)
-        ])
+        # Create two selectors:
+        # 1. sampling_indices_selector: maps [0..num_reqs-1] -> [0..padded_num_reqs-1]
+        #    used to unsuffle tokens returned by the sampler.
+        # 2. logits_indices_selector: maps [0..total_logits-1] -> [0..padded_logits-1]
+        #    used to unsuffle logprobs from the full device buffer.
+        sampling_indices_selector = np.zeros(self.max_num_reqs, dtype=np.int32)
+        logits_indices_selector = np.zeros(self.max_num_reqs, dtype=np.int32) # Placeholder, will be extended
+        logits_indices_selector = []
 
-        # Sort positions by request indices
-        sorted_indices = np.argsort(all_req_indices)
-        logits_indices_selector = all_positions[sorted_indices]
+        for dp_rank in range(dp_size):
+            for i, req_idx in enumerate(req_indices_dp[dp_rank]):
+                # The sampler only sees the 'Generation Block' [0..padded_num_reqs-1]
+                # Each rank's portion is padded_num_reqs_per_dp_rank wide.
+                sampling_loc = i + padded_num_reqs_per_dp_rank * dp_rank
+                sampling_indices_selector[req_idx] = sampling_loc
 
         return (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
                 scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
                 padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
                 padded_total_num_scheduled_tokens, padded_num_reqs_per_dp_rank,
-                logits_indices_selector, max_num_reqs_per_dp_rank)
+                sampling_indices_selector, max_num_reqs_per_dp_rank)
 
     def _prepare_async_token_substitution_indices_dp(
             self, req_ids_dp, scheduled_tokens_per_dp_rank,
@@ -1785,7 +1748,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
          scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
          padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
          padded_total_num_scheduled_tokens, padded_num_reqs_per_dp_rank,
-         logits_indices_selector, max_num_reqs_per_dp_rank
+         sampling_indices_selector, max_num_reqs_per_dp_rank
          ) = self._prepare_dp_input_metadata(scheduler_output)
         # Multi-modal support
         # Calculate M-RoPE positions.
@@ -2121,6 +2084,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padded_num_reqs,
             num_logits_per_req,
             any_prompt_logprobs,
+            sampling_indices_selector,
         )
 
     def _prepare_inputs_non_dp(self, scheduler_output: "VllmSchedulerOutput",
@@ -2379,9 +2343,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 num_scheduled_tokens_per_req, total_num_scheduled_tokens,
                 padded_total_num_scheduled_tokens)
 
+        # Non-DP sampling selector is just a range
+        sampling_indices_selector = np.arange(num_reqs, dtype=np.int32)
+
         return (input_ids, positions, attention_metadata, sampling_metadata,
                 logits_indices, spec_decode_metadata, logits_indices_selector,
-                padded_num_reqs, num_logits_per_req, any_prompt_logprobs)
+                padded_num_reqs, num_logits_per_req, any_prompt_logprobs,
+                sampling_indices_selector)
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
                               mm_embeds: list[jax.Array] | None,

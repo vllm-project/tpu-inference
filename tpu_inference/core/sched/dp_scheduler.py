@@ -40,7 +40,8 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
-from vllm.v1.outputs import DraftTokenIds, LogprobsLists, ModelRunnerOutput
+from vllm.v1.outputs import (DraftTokenIds, LogprobsLists, LogprobsTensors,
+                             ModelRunnerOutput)
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -893,18 +894,18 @@ class DPScheduler(SchedulerInterface):
 
     @staticmethod
     def _slice_logprobs(
-        global_logprobs: LogprobsLists,
+        global_logprobs: LogprobsTensors,
         global_indices: list[int],
-    ) -> LogprobsLists:
-        """Slice a global LogprobsLists to only the given request indices."""
+    ) -> LogprobsTensors:
+        """Slice a global LogprobsTensors to only the given request indices."""
         cu = global_logprobs.cu_num_generated_tokens
         if cu is None:
             # Arrays indexed directly by req_index — just fancy-index rows.
             idx = np.array(global_indices, dtype=np.intp)
-            return LogprobsLists(
+            return LogprobsTensors(
                 logprob_token_ids=global_logprobs.logprob_token_ids[idx],
                 logprobs=global_logprobs.logprobs[idx],
-                sampled_token_ranks=global_logprobs.sampled_token_ranks[idx],
+                selected_token_ranks=global_logprobs.selected_token_ranks[idx],
                 cu_num_generated_tokens=None,
             )
 
@@ -920,12 +921,14 @@ class DPScheduler(SchedulerInterface):
 
         def _gather(arr):
             parts = [arr[s:e] for s, e in slices]
+            if isinstance(arr, torch.Tensor):
+                return torch.cat(parts, axis=0) if parts else arr[:0]
             return np.concatenate(parts, axis=0) if parts else arr[:0]
 
-        return LogprobsLists(
+        return LogprobsTensors(
             logprob_token_ids=_gather(global_logprobs.logprob_token_ids),
             logprobs=_gather(global_logprobs.logprobs),
-            sampled_token_ranks=_gather(global_logprobs.sampled_token_ranks),
+            selected_token_ranks=_gather(global_logprobs.selected_token_ranks),
             cu_num_generated_tokens=new_cu,
         )
 
