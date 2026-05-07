@@ -46,7 +46,7 @@ set_jax_envs() {
             ;;
         tpu7x)
             export TPU_VERSION="tpu7x"
-            export TPU_QUEUE_SINGLE="tpu_v7x_queue"
+            export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
             case $tpu_cores in
                 2) export TPU_QUEUE_MULTI="tpu_v7x_2_queue" ;;
                 8) export TPU_QUEUE_MULTI="tpu_v7x_8_queue" ;;
