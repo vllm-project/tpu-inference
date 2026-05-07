@@ -22,7 +22,7 @@ from jax._src import test_util as jtu
 
 from tpu_inference.kernels.megablox.gmm_v2 import (TileSizes, apply_act_fn)
 from tpu_inference.kernels.megablox.ops_v2 import gmm_v2
-from tpu_inference.kernels.megablox.tgmm_v2 import tgmm_v2
+from tpu_inference.kernels.megablox.tgmm_v2 import tgmm_v2, validate_tgmm_inputs
 
 jax.config.parse_flags_with_absl()
 
@@ -145,6 +145,12 @@ def reference_tgmm(
     assert group_offset.size == 1
     if jnp.isscalar(group_offset):
       group_offset = group_offset[None]
+
+  assert group_sizes.size >= int(group_offset[0]) + num_actual_groups, (
+      f"group_sizes.size ({group_sizes.size}) must be >= "
+      f"group_offset ({int(group_offset[0])}) + num_actual_groups "
+      f"({num_actual_groups})"
+  )
 
   start = 0
   out = []
@@ -271,6 +277,7 @@ class GmmTest(jtu.JaxTestCase):
     expected = reference_tgmm(
         lhs_t, grad, group_sizes, num_local_groups, group_offset=group_offset
     )
+    validate_tgmm_inputs(group_sizes, num_local_groups, group_offset)
     actual = tgmm_v2(
         lhs, grad, group_sizes, num_local_groups, group_offset=group_offset, preferred_element_type=jnp.bfloat16
     )
@@ -315,6 +322,7 @@ class GmmTest(jtu.JaxTestCase):
     expected = reference_tgmm(
         lhs_t, grad, group_sizes, num_local_groups, group_offset=group_offset
     )
+    validate_tgmm_inputs(group_sizes, num_local_groups, group_offset)
     actual = tgmm_v2(
         lhs, grad, group_sizes, num_local_groups,
         group_offset=group_offset,
@@ -350,6 +358,7 @@ class GmmTest(jtu.JaxTestCase):
     )
 
     tile_info = TileSizes(tile_m=256, tile_k=tile_k, tile_n=tile_n)
+    validate_tgmm_inputs(group_sizes, num_local_groups, group_offset)
     actual = tgmm_v2(
         lhs, grad, group_sizes, num_local_groups,
         group_offset=group_offset,
@@ -389,6 +398,7 @@ class GmmTest(jtu.JaxTestCase):
     #expected = reference_tgmm(
     #    lhs_t, grad, group_sizes, num_local_groups, group_offset=group_offset
     #)
+    validate_tgmm_inputs(group_sizes, num_local_groups, group_offset)
     actual = tgmm_v2(
         lhs, grad, group_sizes, num_local_groups,
         group_offset=group_offset,
@@ -410,11 +420,12 @@ class GmmTest(jtu.JaxTestCase):
     expected = reference_tgmm(
         lhs_fp8.swapaxes(0, 1), rhs_fp8, group_sizes, num_groups,
     )
+    validate_tgmm_inputs(group_sizes, num_groups)
     actual = tgmm_v2(
         lhs_fp8, rhs_fp8, group_sizes, num_groups,
         preferred_element_type=jnp.bfloat16,
     )
-    
+
     self.assertEqual(actual.shape, (num_groups, in_size, out_size))
     self.assertAllClose(actual, expected, rtol=1e-2, atol=1e-2)
 
@@ -434,22 +445,27 @@ class GmmTest(jtu.JaxTestCase):
     assert grad_scale.shape == (1, 1, out_size)
     
     group_sizes = get_group_sizes(batch_size, num_groups)
+    group_offset_arr = jnp.array([2], dtype=jnp.int32)
+    num_local_groups = num_groups - int(group_offset_arr[0])
 
     expected = reference_tgmm(
-        lhs.swapaxes(0, 1), grad_q, group_sizes, num_groups,
+        lhs.swapaxes(0, 1), grad_q, group_sizes, num_local_groups,
         rhs_scale=grad_scale,
+        group_offset=group_offset_arr,
         out_dtype=jnp.bfloat16,
     )
+    validate_tgmm_inputs(group_sizes, num_local_groups, group_offset_arr)
     actual = tgmm_v2(
-        lhs, grad_q, group_sizes, num_groups,
+        lhs, grad_q, group_sizes, num_local_groups,
         rhs_scale=grad_scale,
+        group_offset=group_offset_arr,
         preferred_element_type=jnp.bfloat16,
     )
     diff = jnp.abs(expected - actual)
     max_diff_idx = jnp.unravel_index(jnp.argmax(diff), diff.shape)
     print(f"Output max diff: {jnp.max(diff)} at index {max_diff_idx}")
     print(f"Output mean diff: {jnp.mean(jnp.abs(expected - actual))}")
-    self.assertEqual(actual.shape, (num_groups, in_size, out_size))
+    self.assertEqual(actual.shape, (num_local_groups, in_size, out_size))
     self.assertAllClose(actual, expected, rtol=1e-2, atol=6e-1)
 
 
@@ -1019,6 +1035,7 @@ class GmmTest(jtu.JaxTestCase):
     )
     grad_lhs.block_until_ready()
 
+    validate_tgmm_inputs(group_sizes, num_groups)
     grad_rhs = tgmm_v2(
         lhs,
         cotangent,
@@ -1057,6 +1074,7 @@ class GmmTest(jtu.JaxTestCase):
         f"xw32 test_gmm_benchmark_small tgmm inputs: {lhs.shape=}, {cotangent.shape=},"
         f" {group_sizes=}, {num_groups=}"
     )
+    validate_tgmm_inputs(group_sizes, num_groups)
     grad_rhs = tgmm_v2(
         lhs,
         cotangent,

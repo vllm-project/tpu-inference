@@ -460,6 +460,24 @@ def tgmm_kernel_main(
   pipeline_fn(*pipeline_in_args, out_ref, scratches=scratches)
 
 
+def validate_tgmm_inputs(
+    group_sizes: jax.Array,
+    num_actual_groups: int,
+    group_offset: jax.Array | None = None,
+) -> None:
+  """Validates inputs to 'tgmm_v2'.
+
+  Call this eagerly before invoking the kernel. It is not jit-safe because it
+  concretizes 'group_offset'.
+  """
+  offset = 0 if group_offset is None else int(group_offset[0])
+  if group_sizes.size < offset + num_actual_groups:
+    raise ValueError(
+        f"group_sizes.size ({group_sizes.size}) must be >= "
+        f"group_offset ({offset}) + num_actual_groups ({num_actual_groups})"
+    )
+
+
 @jax.jit(
     static_argnames=[
         "num_actual_groups",
