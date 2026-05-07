@@ -27,13 +27,12 @@ export PRIORITY_KERNEL_TUNING=-1
 upload_with_priority() {
   local yaml_file=$1
   local JOB_PRIORITY=$2
+  cat "$yaml_file"
   echo "--- :pipeline: Uploading $yaml_file with priority ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
-  # { 
-  #   echo "priority: ${JOB_PRIORITY:-PRIORITY_DEFAULT}"; 
-  #   cat "$yaml_file"; 
-  # } | buildkite-agent pipeline upload
-  export JOB_PRIORITY="${JOB_PRIORITY:-PRIORITY_DEFAULT}"
-  yq eval ".priority = env(JOB_PRIORITY)" "$yaml_file" | buildkite-agent pipeline upload
+  { 
+    echo "priority: ${JOB_PRIORITY:-PRIORITY_DEFAULT}"; 
+    cat "$yaml_file"; 
+  } | buildkite-agent pipeline upload
 }
 
 get_vllm_commit_hash() {
