@@ -32,32 +32,36 @@ set_jax_envs() {
 
     echo "Setting JAX environment variables for TPU version: ${tpu_version}, TPU cores: ${tpu_cores}"
     
+    # keep in sync with the logic in kernel_tuner_runner.py:get_tpu_queue_by_version_and_cores
     case $tpu_version in
-        v6)
+        tpu6e)
             export TPU_VERSION="tpu6e"
             export TPU_QUEUE_SINGLE="tpu_v6e_queue"
-            if [ "$tpu_cores" == "1" ]; then
-                export TPU_QUEUE_MULTI="tpu_v6e_queue"
-            else
-                export TPU_QUEUE_MULTI="tpu_v6e_8_queue"
-            fi
+            case $tpu_cores in
+                1) export TPU_QUEUE_MULTI="tpu_v6e_queue" ;;
+                8) export TPU_QUEUE_MULTI="tpu_v6e_8_queue" ;;
+                *) echo "ERROR: unsupported tpu_cores=$tpu_cores for tpu6e"; exit 1 ;;
+            esac
             echo "Set TPU_VERSION=${TPU_VERSION}, TPU_QUEUE_SINGLE=${TPU_QUEUE_SINGLE}, TPU_QUEUE_MULTI=${TPU_QUEUE_MULTI}"
             ;;
-        v7)
+        tpu7x)
             export TPU_VERSION="tpu7x"
-            export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
-            if [ "$tpu_cores" == "2" ]; then
-                export TPU_QUEUE_MULTI="tpu_v7x_2_queue"
-            elif [ "$tpu_cores" == "8" ]; then
-                export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
-            else
-                export TPU_QUEUE_MULTI="tpu_v7x_16_queue"
-            fi
+            export TPU_QUEUE_SINGLE="tpu_v7x_queue"
+            case $tpu_cores in
+                2) export TPU_QUEUE_MULTI="tpu_v7x_2_queue" ;;
+                8) export TPU_QUEUE_MULTI="tpu_v7x_8_queue" ;;
+                16) export TPU_QUEUE_MULTI="tpu_v7x_16_queue" ;;
+                *) echo "ERROR: unsupported tpu_cores=$tpu_cores for tpu7x"; exit 1 ;;
+            esac
             echo "Set TPU_VERSION=${TPU_VERSION}, TPU_QUEUE_SINGLE=${TPU_QUEUE_SINGLE}, TPU_QUEUE_MULTI=${TPU_QUEUE_MULTI}"
             ;;
         unset)
             unset TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI
             echo "Unset TPU_VERSION, TPU_QUEUE_SINGLE, TPU_QUEUE_MULTI"
+            ;;
+        *)
+            echo "ERROR: unsupported tpu_version=${tpu_version}"
+            exit 1
             ;;
     esac
 }
@@ -96,23 +100,8 @@ echo "  KERNEL_TUNING_TPU_CORES=${KERNEL_TUNING_TPU_CORES:-}"
 echo "  HOST_NAME=${HOST_NAME:-}"
 
 # Validate KERNEL_TUNING_TPU_CORES based on KERNEL_TUNING_TPU_VERSION
-TPU_VERSION="${KERNEL_TUNING_TPU_VERSION:-v6}"
+TPU_VERSION="${KERNEL_TUNING_TPU_VERSION:-tpu6e}"
 TPU_CORES="${KERNEL_TUNING_TPU_CORES:-1}"
-
-case "${TPU_VERSION}" in
-    v6)
-        if [[ ! "${TPU_CORES}" =~ ^(1|8)$ ]]; then
-            echo "ERROR: For TPU version v6, KERNEL_TUNING_TPU_CORES must be 1 or 8, got: ${TPU_CORES}"
-            exit 1
-        fi
-        ;;
-    v7)
-        if [[ ! "${TPU_CORES}" =~ ^(2|8|16)$ ]]; then
-            echo "ERROR: For TPU version v7, KERNEL_TUNING_TPU_CORES must be 2, 8, or 16, got: ${TPU_CORES}"
-            exit 1
-        fi
-        ;;
-esac
 
 set_jax_envs "${TPU_VERSION}" "${TPU_CORES}"
 buildkite-agent pipeline upload .buildkite/pipeline_kernel_tuning.yml
