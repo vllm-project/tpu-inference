@@ -36,6 +36,8 @@ case "${BM_CASE_TYPE}" in
         ;;
 esac
 
+echo "Only Test"
+
 JOB_PRIORITY="$PRIORITY_BENCHMARK"
 export JOB_PRIORITY
 buildkite-agent meta-data set "JOB_PRIORITY" "$JOB_PRIORITY"
