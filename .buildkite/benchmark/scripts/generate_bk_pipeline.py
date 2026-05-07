@@ -15,6 +15,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 
 import yaml
@@ -39,8 +40,18 @@ def create_benchmark_group(case_data,
     ci_queues = case_data.get("ci_queue", [])
 
     # Merge Environment Variables (Global + Case Specific)
-    combined_env = {**global_env, **case_data.get("env", {})}
-    safe_key = case_name.replace("/", "-").replace(" ", "-")
+    # Ensure values are strings for Buildkite compatibility
+    combined_env = {
+        k: str(v)
+        for k, v in {
+            **global_env,
+            **case_data.get("env", {})
+        }.items()
+    }
+
+    # Generate a unique and safe key for the group
+    safe_key = re.sub(r'[^a-z0-9-]', '-',
+                      f"{file_basename}-{case_name}".lower())
 
     # Construct the Step dictionary
     child_steps = []
@@ -60,6 +71,8 @@ def create_benchmark_group(case_data,
         child_steps.append({
             "label":
             step_label,
+            "key":
+            re.sub(r'[^a-z0-9-]', '-', f"{agent}-{safe_key}"[:95]),
             "env":
             step_env,
             "agents": {
@@ -107,7 +120,11 @@ def main():
                                    is_single_case=True))
 
     print(
-        yaml.dump({"steps": steps}, sort_keys=False, default_flow_style=False))
+        yaml.dump({"steps": steps},
+                  sort_keys=False,
+                  default_flow_style=False,
+                  width=float("inf"),
+                  indent=2))
 
 
 if __name__ == "__main__":
