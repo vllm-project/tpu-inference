@@ -13,15 +13,15 @@
 # limitations under the License.
 
 steps:
-  - group: "${TESTS_GROUP_LABEL:-[jax] TPU6e Tests Group}"
+  - group: "${TESTS_GROUP_LABEL:-[jax] TPU7x Tests Group}"
     steps:
-      - label: "${TPU_VERSION:-tpu6e} E2E test for Ray-based multi-host"
-        key: "${TPU_VERSION:-tpu6e}_test_26"
+      - label: "${TPU_VERSION:-tpu7x} E2E test for Ray-based multi-host"
+        key: "${TPU_VERSION:-tpu7x}_test_26"
         soft_fail: true
         agents:
           queue: tpu_v7x_16_queue
         env:
-          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+          TPU_VERSION: "${TPU_VERSION:-tpu7x}"
         commands:
           # Correctness Test Example:
           # 1. Start vLLM with specific model and tensor parallel size
