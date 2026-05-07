@@ -93,7 +93,7 @@ class RecurrentScanKernelTest(jtu.JaxTestCase):
         K,
         V,
         *,
-        max_num_req=None,
+        max_num_req=512,
         atol=5e-2,
         state_dtype=jnp.float32,
     ):
@@ -112,8 +112,7 @@ class RecurrentScanKernelTest(jtu.JaxTestCase):
         T = mixed_qkv.shape[0]
 
         # ── Reference (ragged_gated_delta_rule_ref) ──
-        # Reference expects SiLU applied to mixed_qkv!
-        mixed_qkv_silu = jax.nn.silu(mixed_qkv)
+        # Note: SiLU is applied inside ref now, so we pass raw mixed_qkv.
         
         distribution_ref = jnp.array([decode_N, N, N], dtype=jnp.int32)
 
@@ -123,7 +122,7 @@ class RecurrentScanKernelTest(jtu.JaxTestCase):
         has_initial_state = jnp.ones((max_num_req_padded,), dtype=jnp.bool_)
 
         ref_state, ref_o = ragged_gated_delta_rule_ref(
-            mixed_qkv_silu.astype(jnp.float32),
+            mixed_qkv.astype(jnp.float32),
             b.astype(jnp.float32),
             a.astype(jnp.float32),
             h0.astype(jnp.float32),
