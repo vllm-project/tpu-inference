@@ -10,7 +10,7 @@
     {
       "case_name": "Gemma4-26B-A4B-1k/500-GBS256",
       "ci_queue": [
-        "tpu_v6e_queue",
+        "tpu_v6e_8_queue",
         "tpu_v7x_2_queue"
       ],
       "env": {
@@ -32,9 +32,9 @@
           "max-num-seqs": 256,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-2": 2,
+            "v6e-8": 2,
             "v7x-2": 2,
-            "default": 2
+            "default": 1
           },
           "max-model-len": 2048,
           "kv-cache-dtype": "fp8",
@@ -61,7 +61,7 @@
     {
       "case_name": "Gemma4-26B-A4B-1k/1f512x512/500-GBS256",
       "ci_queue": [
-        "tpu_v6e_queue",
+        "tpu_v6e_8_queue",
         "tpu_v7x_2_queue"
       ],
       "env": {
@@ -83,9 +83,9 @@
           "max-num-seqs": 256,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-2": 2,
+            "v6e-8": 2,
             "v7x-2": 2,
-            "default": 2
+            "default": 1
           },
           "max-model-len": 2048,
           "kv-cache-dtype": "fp8",
