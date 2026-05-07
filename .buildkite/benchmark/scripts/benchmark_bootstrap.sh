@@ -45,7 +45,7 @@ JOB_REFERENCE="$(TZ="$TIMEZONE" date +%Y%m%d_%H%M%S)"
 buildkite-agent meta-data set "JOB_REFERENCE" "${JOB_REFERENCE}"
 
 upload_benchmark_pipeline() {
-    local target_case_type="$BM_CASE_TYPE"
+    # local target_case_type="$BM_CASE_TYPE"
 
     VLLM_COMMIT_HASH=$(get_vllm_commit_hash)
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
@@ -56,9 +56,9 @@ upload_benchmark_pipeline() {
     echo "Using vllm-tpu commit hash: $(buildkite-agent meta-data get "CODE_HASH")"
 
     # Convert uppercase target_case_type to lowercase for the directory path.
-    local folder_name="${target_case_type,,}"
+    # local folder_name="${target_case_type,,}"
     # Set benchmark cases directory dynamically based on target_case_type.
-    local case_folder=".buildkite/benchmark/cases/${folder_name}"
+    local case_folder=".buildkite/benchmark/cases/dev"
     local generator_script="${SCRIPT_DIR}/generate_bk_pipeline.py"
     process_json_benchmark_cases "$case_folder" "$generator_script" "$JOB_PRIORITY"
 }
