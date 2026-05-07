@@ -9,6 +9,7 @@ import functools
 import json
 import os
 import subprocess
+import threading
 import tempfile
 import time
 from enum import Enum
@@ -333,21 +334,21 @@ class AggregatedStatsLogger:
         os.makedirs(base_dir, exist_ok=True)
         return target, target
 
-    def _sync_to_gcs(self,
-                     local_file: str,
-                     target_file: str,
-                     blocking: bool = False) -> None:
-        """Helper to sync local file to GCS."""
+    def _sync_to_gcs(self, local_file: str, target_file: str, blocking: bool = False) -> None:
+        """Helper to sync local file to GCS using the Python SDK."""
         if target_file.startswith("gs://") and os.path.exists(local_file):
-            cmd = ["gcloud", "storage", "cp", local_file, target_file]
+            def _upload():
+                from google.cloud import storage    # type: ignore
+                client = storage.Client()
+                # e.g., gs://my-bucket/path/to/file.txt -> ("my-bucket", "path/to/file.txt")
+                bucket_name, blob_name = target_file[5:].split("/", 1)
+                client.bucket(bucket_name).blob(blob_name).upload_from_filename(local_file)
+
             if blocking:
-                subprocess.run(cmd,
-                               stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL)
+                _upload()
             else:
-                subprocess.Popen(cmd,
-                                 stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL)
+                threading.Thread(target=_upload, daemon=True).start()
+
 
     def log(self, batch_composition_stats: dict) -> None:
         """
