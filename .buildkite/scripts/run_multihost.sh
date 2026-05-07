@@ -127,7 +127,7 @@ wait_for_server() {
   local container_name=$2
   local service_name=$3
   local log_path=$4
-  local timeout=${5:-7200} # Default 2 hours
+  local timeout=${5:-1200} # Default 20 minutes
 
   echo "Waiting for $service_name on port $port to become healthy (Timeout: ${timeout}s)..."
 
