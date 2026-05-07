@@ -28,10 +28,10 @@ BM_CASE_TYPE="${BM_CASE_TYPE:-DAILY}"
 
 # Validate BM_CASE_TYPE input.
 case "${BM_CASE_TYPE}" in
-    DAILY|HOURLY|CI)
+    DAILY|HOURLY|CI|DEV)
         ;;
     *)
-        echo "🚨 Error: Invalid BM_CASE_TYPE '${BM_CASE_TYPE}'. Allowed values are DAILY, HOURLY, CI." >&2
+        echo "🚨 Error: Invalid BM_CASE_TYPE '${BM_CASE_TYPE}'. Allowed values are DAILY, HOURLY, CI, DEV." >&2
         exit 1
         ;;
 esac
