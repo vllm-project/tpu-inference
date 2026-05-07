@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import Any, Literal
 from unittest.mock import patch
 
@@ -35,7 +36,6 @@ from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
-import tpu_inference.envs as envs
 from tpu_inference.offload.tpu_offload_connector import (
     KVOffloadConnectorStats, TPUOffloadConnector, TPUOffloadConnectorMetadata)
 
@@ -144,17 +144,17 @@ def create_vllm_config(
 
 class TPURequestRunner:
 
-    def __init__(self, block_size: int, num_gpu_blocks: int,
+    def __init__(self, block_size: int, num_blocks: int,
                  async_scheduling: bool):
         self.block_size = block_size
-        self.num_gpu_blocks = num_gpu_blocks
+        self.num_blocks = num_blocks
         self.async_scheduling = async_scheduling
         self.req_id = -1
 
         # We need to mock envs to allow the scheduler to be created
-        envs.TPU_OFFLOAD_NUM_CPU_CHUNKS = 100
-        envs.TPU_OFFLOAD_NUM_STAGING_BLOCKS = 100
-        envs.TPU_OFFLOAD_DECODE_SAVE = 1
+        os.environ["TPU_OFFLOAD_NUM_CPU_CHUNKS"] = "100"
+        os.environ["TPU_OFFLOAD_NUM_STAGING_BLOCKS"] = "100"
+        os.environ["TPU_OFFLOAD_DECODE_SAVE"] = "1"
 
         vllm_config = create_vllm_config(
             block_size=block_size,
@@ -180,11 +180,11 @@ class TPURequestRunner:
             )
         ]
         kv_cache_config = KVCacheConfig(
-            num_blocks=num_gpu_blocks,
+            num_blocks=num_blocks,
             kv_cache_tensors=[],
             kv_cache_groups=kv_cache_groups,
         )
-        vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
+        vllm_config.cache_config.num_gpu_blocks = num_blocks
 
         def mock_create_connector(config,
                                   role,

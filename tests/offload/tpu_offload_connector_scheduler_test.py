@@ -496,9 +496,9 @@ class TestTPUOffloadConnectorScheduler:
 def tpu_request_runner():
     runners = []
 
-    def runner_factory(block_size, num_gpu_blocks, async_scheduling):
+    def runner_factory(block_size, num_blocks, async_scheduling):
         runner = TPURequestRunner(block_size=block_size,
-                                  num_gpu_blocks=num_gpu_blocks,
+                                  num_blocks=num_blocks,
                                   async_scheduling=async_scheduling)
         runners.append(runner)
         return runner
@@ -510,11 +510,11 @@ def tpu_request_runner():
 def test_tpu_offloading_connector_end_to_end(tpu_request_runner,
                                              async_scheduling: bool):
     block_size = 4
-    num_gpu_blocks = 100
+    num_blocks = 128
 
     runner = tpu_request_runner(
         block_size=block_size,
-        num_gpu_blocks=num_gpu_blocks,
+        num_blocks=num_blocks,
         async_scheduling=async_scheduling,
     )
 
