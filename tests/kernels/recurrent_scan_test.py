@@ -15,15 +15,15 @@
 
 from __future__ import annotations
 
-from absl.testing import absltest
-from absl.testing import parameterized
 import jax
-from jax._src import test_util as jtu
 import jax.numpy as jnp
 import numpy as np
-from tpu_inference.kernels.gdn.recurrent_scan_v2 import recurrent_scan
-from tpu_inference.layers.common.ragged_gated_delta_rule_ref import ragged_gated_delta_rule as ragged_gated_delta_rule_ref
+from absl.testing import absltest, parameterized
+from jax._src import test_util as jtu
 
+from tpu_inference.kernels.gdn.recurrent_scan_v2 import recurrent_scan
+from tpu_inference.layers.common.ragged_gated_delta_rule_ref import \
+    ragged_gated_delta_rule as ragged_gated_delta_rule_ref
 
 jax.config.parse_flags_with_absl()
 
@@ -64,9 +64,11 @@ def _make_inputs(
     state_indices = np.arange(h0_N, dtype=np.int32)
 
     if dtype != np.float32:
-        mixed_qkv, a, b, dt_bias = (jnp.array(x, dtype=dtype) for x in [mixed_qkv, a, b, dt_bias])
+        mixed_qkv, a, b, dt_bias = (jnp.array(x, dtype=dtype)
+                                    for x in [mixed_qkv, a, b, dt_bias])
     else:
-        mixed_qkv, a, b, dt_bias = (jnp.array(x) for x in [mixed_qkv, a, b, dt_bias])
+        mixed_qkv, a, b, dt_bias = (jnp.array(x)
+                                    for x in [mixed_qkv, a, b, dt_bias])
 
     return (
         mixed_qkv,
@@ -113,13 +115,14 @@ class RecurrentScanKernelTest(jtu.JaxTestCase):
 
         # ── Reference (ragged_gated_delta_rule_ref) ──
         # Note: SiLU is applied inside ref now, so we pass raw mixed_qkv.
-        
+
         distribution_ref = jnp.array([decode_N, N, N], dtype=jnp.int32)
 
         # Reference expects has_initial_state. We pass all True to match the
         # behavior where tests were closer to passing.
         max_num_req_padded = state_indices.shape[0]
-        has_initial_state = jnp.ones((max_num_req_padded,), dtype=jnp.bool_)
+        has_initial_state = jnp.zeros((max_num_req_padded, ), dtype=bool)
+        has_initial_state = has_initial_state.at[:decode_N].set(True)
 
         ref_state, ref_o = ragged_gated_delta_rule_ref(
             mixed_qkv.astype(jnp.float32),
@@ -181,6 +184,7 @@ class RecurrentScanKernelTest(jtu.JaxTestCase):
     )
     def test_basic(self, decode_N, mixed_seqlens):
         self._test_recurrent_scan(decode_N, mixed_seqlens, 2, 8, 128, 128)
+
 
 if __name__ == "__main__":
     absltest.main(testLoader=jtu.JaxTestLoader())
