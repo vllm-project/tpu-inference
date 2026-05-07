@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     FORCE_MOE_RANDOM_ROUTING: bool = False
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
-    RAGGED_GATED_DELTA_RULE_IMPL: str = "ragged_gated_delta_rule_chunked"
+    RAGGED_GATED_DELTA_RULE_IMPL: str = "chunked_jax_pd"
     MOE_ALL_GATHER_ACTIVATION_DTYPE: str = ""
     TPU_MAMBA_SSM_CACHE_DTYPE: str = "bfloat16"
     TPU_OFFLOAD_SKIP_JAX_PRECOMPILE: bool = False
@@ -252,10 +252,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_str_list("REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES"),
     "RAGGED_GATED_DELTA_RULE_IMPL":
     env_with_choices(
-        "RAGGED_GATED_DELTA_RULE_IMPL", "ragged_gated_delta_rule_chunked", [
-            "ragged_gated_delta_rule_ref", "ragged_gated_delta_rule_chunked",
-            "fused_gdn_kernel", "ragged_recurrent_scan_v2", "routed_fused_v2",
-            "ragged_gated_delta_rule_chunked_scan"
+        "RAGGED_GATED_DELTA_RULE_IMPL", "chunked_jax_pd", [
+            "ref", "chunked_jax_pd", "chunked_kernel_pd",
+            "chunked_kernel_p_jax_d", "chunked_kernel_p_recurrent_kernel_d",
+            "recurrent_kernel_pd"
         ]),
     "MOE_ALL_GATHER_ACTIVATION_DTYPE":
     lambda: os.getenv("MOE_ALL_GATHER_ACTIVATION_DTYPE", ""),
