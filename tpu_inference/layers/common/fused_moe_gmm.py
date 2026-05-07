@@ -494,7 +494,13 @@ def fused_moe_func(
     assert gating_output.shape == (num_tokens, global_num_experts)
 
     topk_weights = apply_scoring_fn(scoring_fn, gating_output)
-    topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
+    if envs.MOE_APPROX_TOPK:
+        topk_weights, topk_indices = jax.lax.approx_max_k(
+            topk_weights,
+            k=topk,
+            recall_target=envs.MOE_APPROX_TOPK_RECALL_TARGET)
+    else:
+        topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
     # All gathering topk_indices and topk_weights if attention dp is used.
