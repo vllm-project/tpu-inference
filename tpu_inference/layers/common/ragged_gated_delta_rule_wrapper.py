@@ -105,7 +105,7 @@ def ragged_gated_delta_rule_wrapper(
     has_initial_state: jnp.ndarray,
     *,
     chunk_size: int,
-    triangle_solver_impl: triangle_solver.TriangleSolverImpl,
+    triangle_solver_impl: triangle_solver.TriangleSolverImpl = triangle_solver.TriangleSolverImpl.GAUSSIAN,
     n_kq: int,
     n_v: int,
     d_k: int,

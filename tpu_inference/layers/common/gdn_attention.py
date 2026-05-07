@@ -178,7 +178,6 @@ def run_jax_gdn_attention_local(
             d_v=d_v,
             config=wrapper_config,
             chunk_size=64,
-            triangle_solver_impl=triangle_solver.TriangleSolverImpl.GAUSSIAN,
             has_initial_state=has_initial_state,
         )
 
