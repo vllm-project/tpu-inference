@@ -21,6 +21,9 @@ if TYPE_CHECKING:
     NEW_MODEL_DESIGN: bool = False
     PHASED_PROFILING_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
+    HOST_TRACER_LEVEL: str | None = None
+    TPU_NUM_CHIPS_TO_PROFILE_PER_TASK: str | None = None
+    TPU_NUM_SPARSE_CORES_TO_TRACE: str | None = None
     USE_MOE_EP_KERNEL: bool = False
     USE_UNFUSED_MEGABLOCKS: bool = False
     USE_DENSE_MOE: bool = False
@@ -197,6 +200,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Python tracer level for profiling
     "PYTHON_TRACER_LEVEL":
     lambda: int(os.getenv("PYTHON_TRACER_LEVEL") or "1"),
+    # Host tracer level for profiling
+    "HOST_TRACER_LEVEL":
+    lambda: os.getenv("HOST_TRACER_LEVEL", None),
+    # TPU num chips to profile per task
+    "TPU_NUM_CHIPS_TO_PROFILE_PER_TASK":
+    lambda: os.getenv("TPU_NUM_CHIPS_TO_PROFILE_PER_TASK", None),
+    # TPU num sparse cores to trace
+    "TPU_NUM_SPARSE_CORES_TO_TRACE":
+    lambda: os.getenv("TPU_NUM_SPARSE_CORES_TO_TRACE", None),
     # Use custom expert-parallel kernel for MoE (Mixture of Experts)
     "USE_MOE_EP_KERNEL":
     env_bool("USE_MOE_EP_KERNEL", default=False),
