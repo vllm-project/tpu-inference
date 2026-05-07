@@ -50,6 +50,8 @@ class RaggedGatedDeltaRuleImpl(enum.Enum):
                 RaggedGatedDeltaRuleImpl.CHUNKED_JAX_PD,
         ):
             return 'jax'
+        elif self == RaggedGatedDeltaRuleImpl.RECURRENT_KERNEL_PD:
+            return 'fused'
         else:
             return 'recurrent_scan_v2'
 
@@ -256,6 +258,24 @@ def ragged_gated_delta_rule_wrapper(
                 chunk_size=chunk_size,
                 BT=chunk_size,
                 use_qk_norm_in_gdn=config.use_qk_norm_in_gdn,
+            )
+        elif impl == 'fused':
+            qkv_in = jax.nn.silu(mixed_qkv)
+            return fused_impl(
+                mixed_qkv=qkv_in,
+                b=b,
+                a=a,
+                recurrent_state=recurrent_state,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                query_start_loc=query_start_loc,
+                state_indices=state_indices,
+                distribution=distribution,
+                has_initial_state=has_initial_state,
+                n_kq=n_kq,
+                n_v=n_v,
+                d_k=d_k,
+                d_v=d_v,
             )
         else:
             raise ValueError(f'Unknown prefill_impl: {impl}')
