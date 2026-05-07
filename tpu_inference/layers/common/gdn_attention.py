@@ -24,19 +24,17 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference.kernels.gdn import recurrent_scan_v2
+
 from tpu_inference.kernels.gdn.fused_gdn_kernel_wrapper import \
     ragged_gated_delta_rule as ragged_gated_delta_rule_fused
 from tpu_inference.layers.common.ragged_conv1d_jax import \
     ragged_conv1d as ragged_conv1d_jax
-from tpu_inference.layers.common.ragged_gated_delta_rule_chunked import \
-    ragged_gated_delta_rule as ragged_gated_delta_rule_chunked
-from tpu_inference.layers.common.ragged_gated_delta_rule_chunked import \
-    ragged_gated_delta_rule_routed_fused_v2
+
 from tpu_inference.layers.common.ragged_gated_delta_rule_ref import \
     ragged_gated_delta_rule as ragged_gated_delta_rule_ref
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
+import tpu_inference.layers.common.ragged_gated_delta_rule_wrapper as ragged_gated_delta_rule_wrapper
 
 
 class RaggedConv1dImpl(enum.Enum):
