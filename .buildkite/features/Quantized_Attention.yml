@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: Quantized Attention
-# pipeline-type: kernel support matrix
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for Quantized Attention"
     key: "${TPU_VERSION:-tpu6e}_Quantized_Attention_CorrectnessTest"

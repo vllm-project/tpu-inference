@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: {MODEL_NAME}/{CATEGORY}
-# pipeline-type: {CATEGORY}
 steps:
   - label: "${{TPU_VERSION:-tpu6e}} Unit tests for {MODEL_NAME}/{CATEGORY}"
     key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"

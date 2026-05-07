@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: mla-w4a4
-# pipeline-type: kernel support matrix microbenchmarks
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for mla-w4a4"
     key: "${TPU_VERSION:-tpu6e}_mla-w4a4_CorrectnessTest"

@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: meta-llama/Llama-Guard-4-12B/multimodal
-# pipeline-type: multimodal
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for meta-llama/Llama-Guard-4-12B/multimodal"
     key: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-Guard-4-12B_multimodal_UnitTest"

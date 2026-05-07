@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal
-# pipeline-type: multimodal
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal"
     key: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_UnitTest"
