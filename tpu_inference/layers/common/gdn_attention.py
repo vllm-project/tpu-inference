@@ -139,16 +139,7 @@ def run_jax_gdn_attention_local(
         kernel_size=kernel_size,
     )
 
-    if config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.FUSED:
-        out_mixed_qkv = jax.nn.silu(out_mixed_qkv)
-        ragged_gdn_impl = functools.partial(
-            ragged_gated_delta_rule_fused,
-            n_kq=n_kq,
-            n_v=n_v,
-            d_k=d_k,
-            d_v=d_v,
-        )
-    elif config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.REF:
+    if config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.REF:
         out_mixed_qkv = jax.nn.silu(out_mixed_qkv)
         ragged_gdn_impl = functools.partial(
             ragged_gated_delta_rule_ref,

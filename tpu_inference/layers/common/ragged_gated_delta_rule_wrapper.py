@@ -102,6 +102,7 @@ def ragged_gated_delta_rule_wrapper(
     query_start_loc: jnp.ndarray,
     state_indices: jnp.ndarray,
     distribution: jnp.ndarray,
+    has_initial_state: jnp.ndarray,
     *,
     chunk_size: int,
     triangle_solver_impl: triangle_solver.TriangleSolverImpl,
@@ -130,6 +131,14 @@ def ragged_gated_delta_rule_wrapper(
     state_indices: Indices mapping sequences to recurrent state slots.
     distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end,
       mixed_end)`.
+    has_initial_state: Boolean tensor of shape `(max_reqs,)`. ``True`` when the
+      request has prior recurrent state to use (chunked-prefill continuation or
+      prefix-cache hit). ``False`` for brand-new prefills, in which case the
+      gathered recurrent state is treated as zeros — matching GPU's
+      `initial_state[~has_initial_state, ...] = 0` in
+      `gdn_linear_attn._forward_core`.
+    chunk_size: Chunk size for padding.
+    triangle_solver_impl: Which triangle solver implementation to use.
     n_kq: Number of key/query heads.
     n_v: Number of value heads.
     d_k: Key/query dimension.
@@ -157,6 +166,7 @@ def ragged_gated_delta_rule_wrapper(
           query_start_loc=query_start_loc,
           state_indices=state_indices,
           distribution=distribution,
+          has_initial_state=has_initial_state,
           n_kq=n_kq,
           n_v=n_v,
           d_k=d_k,
@@ -231,7 +241,7 @@ def ragged_gated_delta_rule_wrapper(
           chunk_size=chunk_size,
           use_qk_norm_in_gdn=config.use_qk_norm_in_gdn,
           triangle_solver_impl=triangle_solver_impl,
-          has_initial_state=jnp.ones(query_start_loc.shape[0] - 1, dtype=jnp.int32),
+          has_initial_state=has_initial_state,
       )
     elif impl == 'recurrent_scan_v2':
       return recurrent_scan(
