@@ -354,30 +354,49 @@ def _get_total_sampled_tokens(
     use_spec_decode: bool,
     any_prompt_logprobs: bool,
     padded_num_reqs: int,
+    dp_size: int = 1,
 ) -> int:
     """Calculates the total number of logits (sampled tokens) to be returned.
 
-    This is used to determine the buffer size for logits_indices on the TPU.
+    In DP mode, we must ensure each rank has an identical-sized shard to 
+    maintain SPMD alignment and avoid memory overwrites between ranks.
     """
     if not (use_spec_decode or any_prompt_logprobs):
-        return -1  # Indicates we use standard 1-per-request sampling
+        return -1
 
-    if use_spec_decode:
-        num_draft_tokens = _get_num_draft_tokens(scheduler_output,
-                                                 input_batch.req_id_to_index,
-                                                 num_reqs)
-        return np.sum(num_draft_tokens + 1)
+    if dp_size <= 1:
+        if use_spec_decode:
+            num_draft_tokens = _get_num_draft_tokens(
+                scheduler_output, input_batch.req_id_to_index, num_reqs)
+            return np.sum(num_draft_tokens + 1)
 
-    # Case: any_prompt_logprobs is True
-    # We use 'Generation First' layout: [padded_num_reqs slots for gen] + [extra slots for prompt]
-    total_extra_tokens = 0
-    for req_id in input_batch.req_ids[:num_reqs]:
-        if req_id in input_batch.num_prompt_logprobs:
-            # All tokens in prompt except the one used for next-token generation
-            total_extra_tokens += scheduler_output.num_scheduled_tokens[
-                req_id] - 1
+        total_extra_tokens = 0
+        for req_id in input_batch.req_ids[:num_reqs]:
+            if req_id in input_batch.num_prompt_logprobs:
+                total_extra_tokens += scheduler_output.num_scheduled_tokens[
+                    req_id] - 1
+        return padded_num_reqs + total_extra_tokens
+
+    # DP Case: Find the maximum tokens required by any single rank
+    padded_num_reqs_per_rank = padded_num_reqs // dp_size
+    tokens_per_rank = np.zeros(dp_size, dtype=np.int32)
     
-    return padded_num_reqs + total_extra_tokens
+    # Base slots for generation
+    tokens_per_rank += padded_num_reqs_per_rank
+
+    # Add extra slots for prompt logprobs or spec-decode
+    for req_id in input_batch.req_ids[:num_reqs]:
+        dp_rank = scheduler_output.assigned_dp_rank.get(req_id, 0)
+        extra = 0
+        if use_spec_decode:
+            extra = len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
+        elif req_id in input_batch.num_prompt_logprobs:
+            extra = scheduler_output.num_scheduled_tokens[req_id] - 1
+        
+        tokens_per_rank[dp_rank] += extra
+
+    max_tokens_per_rank = np.max(tokens_per_rank)
+    return max_tokens_per_rank * dp_size
 
 
 def _populate_logits_metadata(
@@ -992,7 +1011,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _update_placeholder(self,
                             discard_sampled_tokens_req_indices,
                             request_seq_lens,
-                            logits_indices_selector=None):
+                            sampling_indices_selector=None):
         placeholder_req_id_to_index: dict[str, int] = {}
         discard_sampled_tokens_req_indices_set = set(
             discard_sampled_tokens_req_indices)
@@ -1014,11 +1033,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             # For placeholder, should be update on next execute.
             req_state.output_token_ids.extend([0])
-            if logits_indices_selector is None:
+            if sampling_indices_selector is None:
                 placeholder_req_id_to_index[req_state.req_id] = req_idx
             else:
+                # Use the sampling selector to find the exact slot in the next_tokens array
                 placeholder_req_id_to_index[
-                    req_state.req_id] = logits_indices_selector[req_idx]
+                    req_state.req_id] = sampling_indices_selector[req_idx]
         return placeholder_req_id_to_index
 
     def _execute_model(
@@ -1326,7 +1346,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             placeholder_req_id_to_index: dict[
                 str, int] = self._update_placeholder(
                     discard_sampled_tokens_req_indices, request_seq_lens,
-                    logits_indices_selector)
+                    sampling_indices_selector)
 
             # Save the previous results
             next_tokens = jax.copy_to_host_async(next_tokens)
@@ -1676,7 +1696,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         total_sampled_tokens = _get_total_sampled_tokens(
             scheduler_output, self.input_batch, num_reqs, use_spec_decode,
-            any_prompt_logprobs, padded_num_reqs)
+            any_prompt_logprobs, padded_num_reqs, self.dp_size)
 
         if total_sampled_tokens != -1:
             padded_logits_length = runner_utils.get_padded_token_len(
@@ -2018,7 +2038,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         total_sampled_tokens = _get_total_sampled_tokens(
             scheduler_output, self.input_batch, num_reqs, use_spec_decode,
-            any_prompt_logprobs, padded_num_reqs)
+            any_prompt_logprobs, padded_num_reqs, self.dp_size)
 
         if total_sampled_tokens != -1:
             padded_logits_length = runner_utils.get_padded_token_len(
