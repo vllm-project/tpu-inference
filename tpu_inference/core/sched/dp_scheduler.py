@@ -894,22 +894,33 @@ class DPScheduler(SchedulerInterface):
 
     @staticmethod
     def _slice_logprobs(
-        global_logprobs: LogprobsTensors,
+        global_logprobs: Any,
         global_indices: list[int],
-    ) -> LogprobsTensors:
-        """Slice a global LogprobsTensors to only the given request indices."""
+    ) -> Any:
+        """Slice a global logprobs object (Lists or Tensors) to request indices.
+        
+        Handles the name discrepancy in v1: 
+        LogprobsLists uses 'sampled_token_ranks'
+        LogprobsTensors uses 'selected_token_ranks'
+        """
+        # Determine attribute names and output class
+        is_tensors = hasattr(global_logprobs, "selected_token_ranks")
+        rank_attr = "selected_token_ranks" if is_tensors else "sampled_token_ranks"
+        out_cls = type(global_logprobs)
+        
         cu = global_logprobs.cu_num_generated_tokens
         if cu is None:
-            # Arrays indexed directly by req_index — just fancy-index rows.
+            # Direct indexing
             idx = np.array(global_indices, dtype=np.intp)
-            return LogprobsTensors(
-                logprob_token_ids=global_logprobs.logprob_token_ids[idx],
-                logprobs=global_logprobs.logprobs[idx],
-                selected_token_ranks=global_logprobs.selected_token_ranks[idx],
-                cu_num_generated_tokens=None,
-            )
+            kwargs = {
+                "logprob_token_ids": global_logprobs.logprob_token_ids[idx],
+                "logprobs": global_logprobs.logprobs[idx],
+                rank_attr: getattr(global_logprobs, rank_attr)[idx],
+                "cu_num_generated_tokens": None
+            }
+            return out_cls(**kwargs)
 
-        # Variable-length layout: rebuild slices + compact cumulative offsets.
+        # Variable-length layout
         total = global_logprobs.logprob_token_ids.shape[0]
         slices = []
         new_cu = [0]
@@ -925,12 +936,13 @@ class DPScheduler(SchedulerInterface):
                 return torch.cat(parts, axis=0) if parts else arr[:0]
             return np.concatenate(parts, axis=0) if parts else arr[:0]
 
-        return LogprobsTensors(
-            logprob_token_ids=_gather(global_logprobs.logprob_token_ids),
-            logprobs=_gather(global_logprobs.logprobs),
-            selected_token_ranks=_gather(global_logprobs.selected_token_ranks),
-            cu_num_generated_tokens=new_cu,
-        )
+        kwargs = {
+            "logprob_token_ids": _gather(global_logprobs.logprob_token_ids),
+            "logprobs": _gather(global_logprobs.logprobs),
+            rank_attr: _gather(getattr(global_logprobs, rank_attr)),
+            "cu_num_generated_tokens": new_cu
+        }
+        return out_cls(**kwargs)
 
     def _split_model_output_by_rank(
             self, scheduler_output: DPSchedulerOutput,

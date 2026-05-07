@@ -1650,8 +1650,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                                use_spec_decode,
                                                any_prompt_logprobs)
 
-    def _prepare_inputs_dp(self, scheduler_output: "VllmSchedulerOutput",
-                          use_spec_decode: bool, any_prompt_logprobs: bool):
+    def _prepare_inputs_dp(self,
+                          scheduler_output: "VllmSchedulerOutput",
+                          use_spec_decode: Optional[bool] = None,
+                          any_prompt_logprobs: Optional[bool] = None):
+        if use_spec_decode is None:
+            use_spec_decode = len(
+                scheduler_output.scheduled_spec_decode_tokens) > 0
+        if any_prompt_logprobs is None:
+            any_prompt_logprobs = any(
+                req_id in self.input_batch.num_prompt_logprobs
+                for req_id in scheduler_output.num_scheduled_tokens)
+
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -1707,6 +1717,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logits_indices_shape = (padded_logits_length, )
         logits_indices_view = self.device_buffer.get_view(logits_indices_shape,
                                                           key="logits_indices")
+        logits_indices_view.fill(-1)
 
         # Populates input_ids and positions
         for dp_rank in range(dp_size):
@@ -2004,10 +2015,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             gi_physical_indices,
         )
 
-    def _prepare_inputs_non_dp(self, scheduler_output: "VllmSchedulerOutput",
-                              use_spec_decode: bool,
-                              any_prompt_logprobs: bool):
+    def _prepare_inputs_non_dp(self,
+                               scheduler_output: "VllmSchedulerOutput",
+                               use_spec_decode: Optional[bool] = None,
+                               any_prompt_logprobs: Optional[bool] = None):
+        if use_spec_decode is None:
+            use_spec_decode = len(
+                scheduler_output.scheduled_spec_decode_tokens) > 0
+        if any_prompt_logprobs is None:
+            any_prompt_logprobs = any(
+                req_id in self.input_batch.num_prompt_logprobs
+                for req_id in scheduler_output.num_scheduled_tokens)
+
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
@@ -2049,6 +2070,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logits_indices_shape = (padded_logits_length, )
         logits_indices_view = self.device_buffer.get_view(logits_indices_shape,
                                                           key="logits_indices")
+        logits_indices_view.fill(-1)
         query_start_loc_view = self.device_buffer.get_view(
             (self.max_num_reqs + 1, ), key="query_start_loc")
         seq_lens_view = self.device_buffer.get_view((self.max_num_reqs, ),
