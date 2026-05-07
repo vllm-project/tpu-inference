@@ -797,17 +797,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padding // self.dp_size for padding in self.num_reqs_paddings
         ]
 
-        # Padding for logits. Without speculative decoding, each request has one position to select from.
-        # With speculative decoding, each request has multiple positions to select from.
-        max_logits_per_req = 1
+        # Padding for logits. Without speculative decoding or prompt logprobs,
+        # each request has one position to select from.
         if self.speculative_config:
             max_logits_per_req = self.speculative_config.num_speculative_tokens + 1  # Including bonus token
-            self.num_logits_paddings = runner_utils.get_token_paddings(
-                min_token_size=MIN_NUM_SEQS,
-                max_token_size=self.max_num_reqs * max_logits_per_req,
-                padding_gap=0)
+        elif self.model_config.max_logprobs > 0:
+            # If the model config allows logprobs, we prepare for the possibility
+            # of prompt_logprobs, which can have up to max_model_len logits.
+            max_logits_per_req = self.max_model_len
         else:
-            self.num_logits_paddings = None
+            max_logits_per_req = 1
+
+        self.num_logits_paddings = runner_utils.get_token_paddings(
+            min_token_size=MIN_NUM_SEQS,
+            max_token_size=self.max_num_reqs * max_logits_per_req,
+            padding_gap=0)
 
         # tensors for structured decoding
         self.vocab_size = self.model_config.get_vocab_size()
