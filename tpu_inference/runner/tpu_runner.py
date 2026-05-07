@@ -1178,10 +1178,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if expert_indices is not None:
             expert_indices_cpu = np.asarray(jax.device_get(expert_indices))
-            # Slice to actual scheduled tokens
-            actual_t = scheduler_output.total_num_scheduled_tokens
-            expert_indices_cpu = expert_indices_cpu[:, :actual_t, :]
-            model_runner_output.expert_indices = expert_indices_cpu
+            
+            routed_experts_dict = {}
+            current_token_offset = 0
+            for req_id, num_tokens_scheduled in scheduler_output.num_scheduled_tokens.items():
+                start_idx = current_token_offset
+                end_idx = start_idx + num_tokens_scheduled
+                current_token_offset = end_idx
+                
+                # Slicing the correct part of the batch for this request
+                # Shape: (num_tokens_scheduled, num_layers, top_k)
+                step_experts = expert_indices_cpu[:, start_idx:end_idx, :].transpose(1, 0, 2)
+                routed_experts_dict[req_id] = step_experts
+                
+            model_runner_output.routed_experts_dict = routed_experts_dict
 
         return model_runner_output
 

@@ -307,10 +307,6 @@ class TpuPlatform(Platform):
             update_vllm_config_for_dp_scheduler
         update_vllm_config_for_dp_scheduler(vllm_config)
 
-        from tpu_inference.core.sched.utils import \
-            update_vllm_scheduler_for_exporting_expert_ids
-        update_vllm_scheduler_for_exporting_expert_ids()
-
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         # TODO: TPU still sets block_size in check_and_update_config.
