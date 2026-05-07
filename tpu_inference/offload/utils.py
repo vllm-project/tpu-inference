@@ -164,8 +164,23 @@ def update_kv_caches_one(
     stacked_blocks: List[jax.Array],
     block_indices: List[int],
     mesh: Mesh,
+    cached_kv_sharding_spec: PartitionSpec | None = None,
     replicated_sharding: PartitionSpec | None = None,
 ) -> List[jax.Array]:
+    """Update KV caches using cached sharding spec to avoid recompilation.
+    
+    Args:
+        kv_caches: List of KV cache arrays
+        stacked_blocks: List of stacked KV blocks
+        block_indices: List of destination block indices
+        mesh: JAX mesh for sharding
+        cached_kv_sharding_spec: Pre-cached sharding spec from initialization.
+                                 If None, derived from kv_caches[0].sharding.spec (fallback).
+        replicated_sharding: PartitionSpec for replicated sharding
+    """
+    # Use cached spec if provided, otherwise fall back to extracting from input
+    if cached_kv_sharding_spec is None:
+        cached_kv_sharding_spec = kv_caches[0].sharding.spec
 
     src_offsets, dest_offsets, chunk_sizes, num_chunks = pre_update_kv_caches(
         block_indices, mesh, replicated_sharding)
@@ -177,8 +192,8 @@ def update_kv_caches_one(
         chunk_sizes,
         num_chunks,
         mesh,
-        kv_caches[0].sharding.spec,
-        kv_caches[0].sharding.spec,
+        cached_kv_sharding_spec,
+        cached_kv_sharding_spec,
         replicated_sharding.spec,
     )
 
@@ -219,12 +234,19 @@ def update_kv_caches(kv_caches: List[jax.Array],
                      dest_sharding_spec,
                      replicated_sharding_spec) -> List[jax.Array]:
     """
-    Updates KV caches by unstacking gathered blocks and inserting slices using scatter.
+    Updates KV caches by unstacking gathered blocks and copying slices.
 
     Args:
       kv_caches: List of original KV caches for each layer.
       stacked_blocks: List of gathered blocks, each with shape (1, num_layers, ...).
-      block_indices: Array of block indices to update.
+      src_offsets: Source offsets for copying.
+      dest_offsets: Destination offsets for copying.
+      chunk_sizes: Sizes of chunks to copy.
+      num_chunks: Number of chunks.
+      mesh: JAX mesh for sharding.
+      src_sharding_spec: PartitionSpec for source arrays.
+      dest_sharding_spec: PartitionSpec for destination arrays.
+      replicated_sharding_spec: PartitionSpec for replicated sharding.
 
     Returns:
       List of updated KV caches for each layer.

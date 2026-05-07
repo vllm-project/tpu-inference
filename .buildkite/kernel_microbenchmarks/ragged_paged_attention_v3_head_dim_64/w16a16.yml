@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: ragged paged attention v3 head_dim 64-w16a16
-# pipeline-type: kernel support matrix microbenchmarks
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for ragged paged attention v3 head_dim 64-w16a16"
     key: "${TPU_VERSION:-tpu6e}_ragged_paged_attention_v3_head_dim_64-w16a16_CorrectnessTest"

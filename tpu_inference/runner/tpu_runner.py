@@ -771,16 +771,27 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # padded max value to pre-allocate data structures and pre-compile.
         self.max_num_tokens = self.num_tokens_paddings[-1]
 
-        # Request states.
         self.requests: dict[str, CachedRequestState] = {}
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, jax.Array] = {}
+
+        # Use parallel_config as the primary source of truth during initialization
+        # to avoid AttributeError when self.mesh is not yet assigned (common in unit tests).
+        tp_size = 1
+        if self.vllm_config.parallel_config is not None:
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        elif hasattr(self, 'mesh') and self.mesh is not None:
+            tp_size = self.mesh.shape.get(ShardingAxisName.MODEL, 1)
+
+        self.vocab_size = common_utils.align_to(model_config.get_vocab_size(),
+                                                tp_size)
+
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
             max_num_batched_tokens=self.max_num_tokens,
             pin_memory=False,
-            vocab_size=self.model_config.get_vocab_size(),
+            vocab_size=self.vocab_size,
             block_sizes=[self.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
         )
@@ -814,7 +825,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padding_gap=0)
 
         # tensors for structured decoding
-        self.vocab_size = self.model_config.get_vocab_size()
         self.grammar_bitmask_cpu = np.zeros(
             (self.max_num_reqs, cdiv(self.vocab_size, 32)),
             dtype=np.int32,
@@ -1141,7 +1151,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # it will embed the text tokens and merge with the existing modality embeds
         # Later, the multi-modality model will take the embedding as the input.
         # For text-only model, this does nothing. It will input the input_ids and
-        # leave the mebedding job inside the forward pass
+        # leave the embedding job inside the forward pass
         input_ids, inputs_embeds = self._get_input_ids_embeds(
             input_ids, mm_embeds, is_mm_embed)
 
@@ -1179,14 +1189,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 return hidden_states
 
             if self.is_pooling_model:
-                seq_lens = self.seq_lens_cpu[:self.input_batch.num_reqs]
+                seq_lens_view = self.device_buffer.get_view(
+                    (self.max_num_reqs, ), key="seq_lens")
+                seq_lens = seq_lens_view[:self.input_batch.num_reqs]
                 pooling_metadata = self.input_batch.get_pooling_metadata()
+
+                # Extract actual scheduled token counts for the current step
+                num_scheduled_tokens = np.array([
+                    scheduler_output.num_scheduled_tokens[req_id]
+                    for req_id in self.input_batch.req_ids
+                ],
+                                                dtype=np.int32)
 
                 pooler_fn: PoolerFunc = self.pooler_fn
                 pooler_output = pooler_fn(
                     hidden_states,
                     pooling_metadata,
                     seq_lens,
+                    num_scheduled_tokens,
                 )
 
                 return ModelRunnerOutput(
@@ -2257,7 +2277,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 padded_num_reqs, num_logits_per_req)
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
-                              mm_embeds: jax.Array | None,
+                              mm_embeds: list[jax.Array] | None,
                               is_mm_embed: jax.Array | None):
         # Prevent the cost of calling additional function.
         if self.is_multimodal_model and mm_embeds is not None:

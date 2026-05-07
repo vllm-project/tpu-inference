@@ -302,6 +302,15 @@ class TestMoEExpertIds:
                 "MoE models must populate routed_experts when enabled")
             assert len(output.routed_experts.shape) == 3, (
                 f"Expected 3D expert shape, got {output.routed_experts.shape}")
+
+            # Verify that the token dimension has size P + G - 1
+            P = len(outputs[0].prompt_token_ids)
+            G = len(output.token_ids)
+            expected_len = P + G - 1
+            actual_len = output.routed_experts.shape[0]
+            assert actual_len == expected_len, (
+                f"Expected expert 0-th dim to be P + G - 1 ({expected_len}), "
+                f"got {actual_len}")
         else:
             assert output.routed_experts is None, (
                 "Non-MoE models must not populate routed_experts")

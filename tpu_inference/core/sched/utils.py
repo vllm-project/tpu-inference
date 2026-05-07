@@ -15,9 +15,14 @@
 
 def update_vllm_scheduler_for_exporting_expert_ids():
     # Monkeypatch vLLM Scheduler to attach expert indices to outputs
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    if getattr(Scheduler, "_expert_ids_patched", False):
+        return
+    Scheduler._expert_ids_patched = True
+
     from vllm.model_executor.layers.fused_moe.routed_experts_capturer import \
         RoutedExpertsReader
-    from vllm.v1.core.sched.scheduler import Scheduler
 
     class DummyRoutedExpertsReader:
 

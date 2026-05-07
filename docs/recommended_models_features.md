@@ -32,6 +32,16 @@ These tables show the models currently tested for accuracy and performance.
 
     --8<-- "docs/includes/nightly_model_support.md"
 
+### Embedding Models
+
+=== "v7x"
+
+    {{ read_csv('support_matrices/release/v7x/default/model_support_matrix.csv') }}
+
+=== "v6e"
+
+    {{ read_csv('support_matrices/release/v6e/default/model_support_matrix.csv') }}
+
 ## Recommended Features
 
 This table shows the features currently tested for accuracy and performance.

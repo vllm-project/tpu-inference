@@ -247,6 +247,16 @@ class TpuPlatform(Platform):
             logger.info(
                 f"Using KV cache block size: {cache_config.block_size}")
 
+        if cache_config and envs.TPU_MAMBA_SSM_CACHE_DTYPE:
+            override = envs.TPU_MAMBA_SSM_CACHE_DTYPE
+            current = cache_config.mamba_ssm_cache_dtype
+            if current != override:
+                logger.info(
+                    "TPU_MAMBA_SSM_CACHE_DTYPE=%s overriding "
+                    "cache_config.mamba_ssm_cache_dtype (was %r)", override,
+                    current)
+                cache_config.mamba_ssm_cache_dtype = override
+
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         parallel_config.worker_cls = \

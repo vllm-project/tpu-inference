@@ -7,6 +7,7 @@ import datetime
 import functools
 import json
 import os
+import shutil
 import time
 from enum import Enum
 from typing import Any
@@ -227,7 +228,8 @@ def get_batch_composition_stats(
         num_scheduled_tokens_per_req_list.append(num_scheduled_for_req)
 
         # This is the number of tokens already processed for this request (before this step)
-        num_already_computed = num_computed_tokens_per_req[i]
+        num_already_computed = int(
+            num_computed_tokens_per_req[i])  # Cast from np.int32
         min_kv_len = min(min_kv_len, num_already_computed)
 
         if num_already_computed == 0:
@@ -449,9 +451,60 @@ class PhasedBasedProfiler:
             self.profiling_n_steps_left -= 1
             if self.profiling_n_steps_left <= 0:
                 jax.profiler.stop_trace()
+                if envs.TPU_MULTIHOST_BACKEND == "ray":
+                    self._merge_multihost_profile_directories()
                 logger.info(
                     f"Profiling for {self.current_phase} phase finished")
                 self.current_phase = ""
+
+    def _merge_multihost_profile_directories(self) -> None:
+        """
+        Merges multi-host JAX profiler timestamp subdirectories that drift due to asynchronous step trigger times.
+
+        Fixes issues where separate host nodes create disjoint timestamp folders due to 1-2 seconds startup
+        skew, which blocks downstream multi-host profile analysis tools (e.g., c2xprof or TensorBoard profile plugins)
+        from recognizing them as a single concurrent distributed profiling session.
+
+        Example split state before merge:
+          .../plugins/profile/2026_05_06_04_47_36/j-1b8d22de-2250-4697-9dfc-ray-node-1-0.xplane.pb
+          .../plugins/profile/2026_05_06_04_47_38/j-1b8d22de-2250-4697-9dfc-ray-node-0-0.xplane.pb
+
+        After merge:
+          All host trace artifacts are consolidated under the earliest timestamp folder (2026_05_06_04_47_36/).
+        """
+        profile_path = os.path.join(self.profile_dir_with_phase_suffix,
+                                    "plugins", "profile")
+        if not os.path.exists(profile_path):
+            return
+        try:
+            # Get all timestamp subdirectories sorted by time
+            dirs = sorted([
+                d for d in os.listdir(profile_path)
+                if os.path.isdir(os.path.join(profile_path, d))
+            ])
+            if len(dirs) <= 1:
+                return
+
+            # Use the earliest directory as the canonical destination target
+            target_dir = os.path.join(profile_path, dirs[0])
+
+            # Move all files from trailing directories into the canonical target directory
+            for src in dirs[1:]:
+                src_dir = os.path.join(profile_path, src)
+                for f in os.listdir(src_dir):
+                    src_file = os.path.join(src_dir, f)
+                    dst_file = os.path.join(target_dir, f)
+                    shutil.move(src_file, dst_file)
+                try:
+                    os.rmdir(src_dir)
+                except Exception:
+                    pass
+            logger.info(
+                "Successfully merged multi-host profile directories into: %s",
+                dirs[0])
+        except Exception as e:
+            logger.warning(
+                "Failed to merge multi-host profile directories: %s", e)
 
     def step(self, batch_composition_stats: dict) -> None:
         """
