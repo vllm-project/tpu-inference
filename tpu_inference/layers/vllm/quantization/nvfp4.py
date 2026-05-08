@@ -13,23 +13,18 @@
 # limitations under the License.
 """NVFP4 (ModelOpt FP4) quantization support for TPU.
 
-Subclasses upstream vLLM's NVFP4 config + linear/MoE methods for parameter
-registration; overrides only the TPU-specific paths:
+This module provides the TPU-specific implementation for loading and executing
+NVIDIA's ModelOpt FP4 (NVFP4) quantized checkpoints in vLLM.
 
-    - Config: subclass ModelOptNvFp4Config (config parsing).
-    - Linear: subclass VllmUnquantizedLinearMethod for the bf16 matmul apply
-      path; delegate create_weights to ModelOptNvFp4LinearMethod; override
-      process_weights_after_loading to dequant FP4 -> bf16 once.
-    - MoE: subclass FusedMoEMethodBase; delegate create_weights to
-      ModelOptNvFp4FusedMoE (and add bias params upstream omits); override
-      process_weights_after_loading to combine scales and reshape for
-      gmm_v2's dequant-in-VMEM path; override apply_monolithic to route
-      through vllm_moe_apply.
+Important notes:
+ - Weight Processing: During `process_weights_after_loading`, we:
+   - Unpack the 8-bit packed into unpacked FP4 weights
+   - Pre-fuse the FP8 block scales and the FP32 global scale into a single,
+     unified FP32 1D-Blockwise scale.
 
-Weights stay as packed E2M1 in HBM with a single FP32 blockwise scale
-(combined from FP8 block × FP32 global). Dequantization happens in VMEM
-inside gmm_v2 (block_size=16 < mxu_column_size=128 auto-trips the
-should_dequantize_before_matmul branch).
+ - Execution:
+   - Linear (via sharded_quantized_matmul) and MoE (via GMM_v2) will dequantize weights
+     on-the-fly.
 """
 
 from typing import Optional, Sequence, Union
@@ -103,10 +98,6 @@ class VllmNvfp4Config(ModelOptNvFp4Config, VllmQuantConfig):
         return None
 
 
-# ---------------------------------------------------------------------------
-# Linear: delegate create_weights to upstream; dequant once to bf16; inherit
-# unquantized bf16 matmul apply.
-# ---------------------------------------------------------------------------
 class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
     """NVFP4 linear for TPU.
 
@@ -128,8 +119,8 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
             input_size, output_size, params_dtype, **extra_weight_attrs)
 
         def scalar_weight_loader(param, loaded_weight, *args, **kwargs):
-            value = (loaded_weight.item() if loaded_weight.numel() == 1 else
-                     loaded_weight.max().item())
+            assert loaded_weight.numel() == 1
+            value = loaded_weight.item()
             param.data.fill_(value)
 
         for name in ("input_scale", "weight_scale_2"):
@@ -140,8 +131,13 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
         assert isinstance(layer, LinearBase)
         weight_packed = t2j(layer.weight, use_dlpack=False)
         weight_scale = t2j(layer.weight_scale, use_dlpack=False)
-        weight_global_scale = jnp.max(
-            t2j(layer.weight_scale_2, use_dlpack=False))
+        # vLLM allocates this based on the output sizes, so it's the same scalar broadcasted (potentially) multiple times,
+        # so we can just grab one, see here:
+        # https://github.com/vllm-project/vllm/blob/10ebb40d62e024116c1a4473f8e357a3e72761ed/vllm/model_executor/layers/quantization/modelopt.py#L1149
+        weight_global_scale = t2j(layer.weight_scale_2, use_dlpack=False)
+        # assert that all elements are the same
+        assert jnp.all(weight_global_scale == weight_global_scale[0])
+        weight_global_scale = weight_global_scale[0]
 
         for attr in ('weight', 'weight_scale', 'weight_scale_2',
                      'input_scale'):
@@ -268,11 +264,6 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
         return jnp.concatenate(outs, axis=-1)
 
 
-# ---------------------------------------------------------------------------
-# MoE: delegate create_weights to upstream (and add bias params upstream
-# omits); combine scales + reshape for gmm_v2; route apply through
-# vllm_moe_apply.
-# ---------------------------------------------------------------------------
 class VllmNvfp4MoEMethod(FusedMoEMethodBase):
     """NVFP4 MoE for TPU.
 
