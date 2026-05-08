@@ -860,21 +860,18 @@ def calculate_tiling(
     tile_m = bf16_bf16_tile_m * lhs_mod // rhs_mod
     tile_m = min(tile_m, dims.size_m)
 
-    # Calculate vmem limit for a single rhs buffer when using triple buffers.
-    num_rhs_buffers = 3
-    rhs_vmem_target = vmem_limit_bytes // num_rhs_buffers
-    base_rhs_size_bytes = dims.size_k * dims.size_n * rhs_bits // 8
-
     # To avoid stalling MXU, we add some buffer room where tile_n cannot go
     # smaller than 2x of mxu_column_size.
     tile_n_limit = pltpu.get_tpu_info().mxu_column_size * 2
     tile_n_limit = min(tile_n_limit, dims.size_n)
 
     size_n_per_rhs = dims.size_n
+    fuse_act_factor = 1
     if fuse_act is not None:
         # When computing activation function, rhs is concatenated along dim n.
-        size_n_per_rhs //= 2
-        tile_n_limit //= 2
+        fuse_act_factor = 2
+        size_n_per_rhs //= fuse_act_factor
+        tile_n_limit //= fuse_act_factor
 
     def _is_tile_k_quant_block_compatible(tk: int) -> bool:
         if (tk % rhs_cfgs.quant_block_size != 0
@@ -888,11 +885,42 @@ def calculate_tiling(
     tile_k = align_to(dims.size_k, num_lanes)
     tile_n = align_to(size_n_per_rhs, num_lanes)
 
-    # Multiple k tiles will introduce accumulation overhead. Thus, we first try
-    # to fit rhs into vmem by only adjusting tile_n.
+    def _gmm_vmem_estimate(tn: int, tk: int) -> int:
+        # 1. LHS tile (double-buffered)
+        lhs_tile_bytes = lhs_bits // 8
+        lhs_vmem = 2 * tile_m * tk * lhs_tile_bytes
 
-    # Decrease tile_n until rhs fits in vmem target.
-    while (pl.cdiv(base_rhs_size_bytes, num_n_tiles) > rhs_vmem_target
+        # 2. RHS tile (triple-buffered, includes scale and bias if present)
+        # If fuse_act is enabled, we have both gate and up weights,
+        # so RHS memory is doubled.
+        rhs_weight_vmem = tk * tn * rhs_bits // 8
+        rhs_scale_vmem = 0
+        if rhs_cfgs.has_scale and rhs_cfgs.quant_block_size is not None:
+            num_quant_blocks_per_tile_k = pl.cdiv(tk,
+                                                  rhs_cfgs.quant_block_size)
+            rhs_scale_vmem = num_quant_blocks_per_tile_k * tn * 4
+        rhs_bias_vmem = 0
+        if rhs_cfgs.has_bias:
+            rhs_bias_vmem = tn * 4
+        rhs_vmem = fuse_act_factor * (3 * rhs_weight_vmem +
+                                      2 * rhs_scale_vmem + 2 * rhs_bias_vmem)
+
+        # 3. Accumulator
+        acc_cols = fuse_act_factor * tn
+        acc_dtype_bytes = 2 if lhs_cfgs.quant_dtype is not None else 4
+        acc_vmem = tile_m * acc_cols * acc_dtype_bytes
+
+        # 4. Output tile (double-buffered)
+        out_dtype_bytes = jax.dtypes.itemsize_bits(lhs_cfgs.dtype) // 8
+        out_vmem = 2 * tile_m * tn * out_dtype_bytes
+
+        return lhs_vmem + rhs_vmem + acc_vmem + out_vmem
+
+    # Multiple k tiles will introduce accumulation overhead. Thus, we first try
+    # to fit the tensors into vmem by only adjusting tile_n.
+
+    # Decrease tile_n until total memory fits in vmem limit.
+    while (_gmm_vmem_estimate(tile_n, tile_k) > vmem_limit_bytes
            and tile_n > tile_n_limit):
         num_n_tiles += 1
         tile_n = align_to(size_n_per_rhs,
@@ -904,19 +932,18 @@ def calculate_tiling(
         tile_n = align_to(size_n_per_rhs,
                           num_n_tiles * num_lanes) // num_n_tiles
 
-        # Decrease tile_k until rhs fits in vmem target and tile_k is valid.
-        base_rhs_size_bytes = pl.cdiv(base_rhs_size_bytes, num_n_tiles)
-        while pl.cdiv(
-                base_rhs_size_bytes, num_k_tiles
-        ) > rhs_vmem_target or not _is_tile_k_quant_block_compatible(tile_k):
+        # Decrease tile_k until total memory fits in vmem limit and tile_k is valid.
+        while _gmm_vmem_estimate(
+                tile_n, tile_k
+        ) > vmem_limit_bytes or not _is_tile_k_quant_block_compatible(tile_k):
             num_k_tiles += 1
             tile_k = align_to(dims.size_k,
                               num_k_tiles * num_lanes) // num_k_tiles
 
     if tile_n == 0 or tile_k == 0:
-        raise ValueError(
-            f"Could not find valid tile sizes for {dims=} and {rhs_vmem_target=}."
-        )
+        final_estimate = _gmm_vmem_estimate(tile_n, tile_k)
+        raise ValueError(f"Could not find valid tile sizes for {dims=} and"
+                         f" {final_estimate=} (limit: {vmem_limit_bytes}).")
 
     return TileSizes(tile_m=tile_m, tile_k=tile_k, tile_n=tile_n)
 
