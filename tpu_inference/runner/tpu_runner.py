@@ -1238,8 +1238,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Use gi_physical_indices to correctly extract the sampling logits
             # from the flattened array. This handles both Interleaved and
             # Generation First layouts, and ensures SPMD alignment across all chips.
+            idx_jax = None
             if gi_physical_indices is not None:
-                gen_logits = logits[jnp.array(gi_physical_indices)]
+                idx_jax = jnp.array(gi_physical_indices)
+                gen_logits = logits[idx_jax]
             else:
                 # Fallback to legacy behavior if gi_physical_indices is missing
                 gen_logits = logits[:padded_num_reqs]
@@ -1252,15 +1254,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     tpu_sampling_metadata,
                 )
 
-                # Reconstruct the full processed_logits by placing sampled results
-                # back into their respective slots.
-                processed_logits = logits
-                if gi_physical_indices is not None:
-                    processed_logits = processed_logits.at[jnp.array(
-                        gi_physical_indices)].set(processed_gen_logits)
-                else:
-                    processed_logits = processed_logits.at[:padded_num_reqs].set(
-                        processed_gen_logits)
+            # Reconstruct the full processed_logits by placing sampled results
+            # back into their respective slots.
+            # Moved OUTSIDE the forbid_compile block to allow first-time kernel compilation.
+            processed_logits = logits
+            if idx_jax is not None:
+                processed_logits = processed_logits.at[idx_jax].set(
+                    processed_gen_logits)
+            else:
+                processed_logits = processed_logits.at[:padded_num_reqs].set(
+                    processed_gen_logits)
         else:
             # TODO(gxd3): wrap the spec decode sampling code block
             # under maybe_forbid_compile as well.
