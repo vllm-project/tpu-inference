@@ -880,9 +880,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             0] == self.input_batch.num_reqs
         enable_continue_decode = self.vllm_config.additional_config.get(
             "enable_continue_decode", False)
-        if (is_decode_only and enable_continue_decode
-                and not self.scheduler_config.async_scheduling
-                and self.is_last_rank and not self.is_pooling_model):
+        if (is_decode_only and enable_continue_decode and self.is_last_rank
+                and not self.is_pooling_model):
             return self._execute_continue_decode(scheduler_output)
 
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
@@ -1218,6 +1217,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if expert_indices_cpu is not None:
             output.expert_indices = expert_indices_cpu
+
+        # Export actual_steps so the CPU Scheduler rollback loop can read it
+        output.actual_steps = actual_steps
 
         self._continue_decode_output = output
         return None

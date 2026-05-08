@@ -13,87 +13,60 @@
 # limitations under the License.
 
 
-def update_vllm_scheduler_for_exporting_expert_ids():
-    # Monkeypatch vLLM Scheduler to attach expert indices to outputs
-    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import \
-        RoutedExpertsReader
-    from vllm.v1.core.sched.scheduler import Scheduler
-
-    class DummyRoutedExpertsReader:
-
-        @staticmethod
-        def create():
-            return DummyRoutedExpertsReader()
-
-        def attach_buffer(self, *args, **kwargs):
-            pass
-
-        def get_routed_experts(self, *args, **kwargs):
-            return None
-
-    # Since we are reusing the upstream enable_return_routed_experts flag,
-    # we need to stub out the actual RoutedExpertsReader class which the
-    # upstream scheduler tries to create.
-    RoutedExpertsReader.create = DummyRoutedExpertsReader.create
-
-    original_update_from_output = Scheduler.update_from_output
-
-    def custom_update_from_output(self, scheduler_output, model_runner_output):
-        expert_indices = getattr(model_runner_output, "expert_indices", None)
-
-        if expert_indices is not None:
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-            current_token_offset = 0
-            for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
-                start_idx = current_token_offset
-                end_idx = start_idx + num_tokens_scheduled
-                current_token_offset = end_idx
-
-                request = self.requests.get(req_id)
-                if request is not None:
-                    step_experts = expert_indices[:, start_idx:
-                                                  end_idx, :].transpose(
-                                                      1, 0, 2)
-                    if not hasattr(request, "_accumulated_routed_experts"):
-                        request._accumulated_routed_experts = []
-                    request._accumulated_routed_experts.append(step_experts)
-
-        return original_update_from_output(self, scheduler_output,
-                                           model_runner_output)
-
-    Scheduler.update_from_output = custom_update_from_output
-
-    original_get_routed_experts = Scheduler._get_routed_experts
-
-    def custom_get_routed_experts(self, request):
-        if hasattr(request, "_accumulated_routed_experts"
-                   ) and request._accumulated_routed_experts:
-            import numpy as np
-            return np.concatenate(request._accumulated_routed_experts, axis=0)
-        return original_get_routed_experts(self, request)
-
-    Scheduler._get_routed_experts = custom_get_routed_experts
-
-
-def patch_vllm_scheduler_for_continue_decode():
+def patch_vllm_scheduler_for_continue_decode(vllm_config):
     # Monkeypatch vLLM Scheduler to support continue decode multi-step scheduling
     from vllm.v1.core.sched.scheduler import Scheduler
+    from vllm.v1.request import Request, RequestStatus
 
-    # Avoid patching multiple times
-    if not getattr(Scheduler, "_continue_decode_patched", False):
-        original_update_base = Scheduler._update_request_with_output
+    max_decode_steps = vllm_config.additional_config.get(
+        "max_decode_steps", 10)
 
-        def patched_update_base(scheduler_self, request, new_token_ids):
-            # Call original first (which trims new_token_ids in-place if stopped)
-            res_token_ids, stopped = original_update_base(
-                scheduler_self, request, new_token_ids)
+    if not getattr(Scheduler, "_continue_decode_property_patched", False):
+        # 1. Monkeypatch Request.num_tokens_with_spec
+        original_num_tokens_with_spec = Request.num_tokens_with_spec
 
-            # Update num_computed_tokens using the trimmed token length
-            diff = len(res_token_ids) - 1
-            if diff > 0:
-                request.num_computed_tokens += diff
+        @property
+        def hacked_num_tokens_with_spec(self):
+            # If the request is running and not in prefill chunk, force scheduling of max_decode_steps tokens
+            if self.status == RequestStatus.RUNNING and not self.is_prefill_chunk:
+                return len(self._all_token_ids) + max_decode_steps
+            return original_num_tokens_with_spec.__get__(self)
 
-            return res_token_ids, stopped
+        Request.num_tokens_with_spec = hacked_num_tokens_with_spec
 
-        Scheduler._update_request_with_output = patched_update_base
-        Scheduler._continue_decode_patched = True
+        # 2. Monkeypatch Scheduler.update_from_output to rollback state if TPU early terminated
+        original_update_from_output = Scheduler.update_from_output
+
+        def custom_update_from_output(self, scheduler_output,
+                                      model_runner_output):
+            # Read execution step count returned from TPU
+            actual_steps = getattr(model_runner_output, "actual_steps", None)
+
+            if actual_steps is not None:
+                # Prior to executing standard update_from_output (which reads num_computed_tokens),
+                # we correct the placeholder and computed token counts.
+                for req_id, scheduled_tokens in scheduler_output.num_scheduled_tokens.items(
+                ):
+                    request = self.requests.get(req_id)
+                    if request is not None:
+                        # 1. Dynamic alignment of placeholders for async scheduling
+                        # Because the CPU scheduler only incremented placeholders by +1 during scheduling,
+                        # but the TPU actually generated actual_steps (e.g., K) tokens,
+                        # we must pre-advance placeholders by +(K - 1) so that the standard
+                        # update_from_output's -= K subtraction evaluates to exactly 0 without going negative.
+                        if request.num_output_placeholders > 0:
+                            request.num_output_placeholders += (actual_steps -
+                                                                1)
+
+                        # 2. Standard rollback for early termination mismatch (K < M)
+                        mismatch = scheduled_tokens - actual_steps
+                        if mismatch > 0:
+                            request.num_computed_tokens -= mismatch
+                            if request.num_output_placeholders > 0:
+                                request.num_output_placeholders -= mismatch
+
+            return original_update_from_output(self, scheduler_output,
+                                               model_runner_output)
+
+        Scheduler.update_from_output = custom_update_from_output
+        Scheduler._continue_decode_property_patched = True
