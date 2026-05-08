@@ -530,3 +530,76 @@ def test_phased_profiler_skip_only_affects_decode_heavy(profiler_fixture):
     profiler.step(stats)
     assert mock_start.call_count == 2  # Not started yet
     assert profiler.decode_steps_skipped == 1
+
+
+def test_phased_profiler_skips_decode_only_steps_based_on_kv_len(
+        profiler_fixture):
+    """Tests that the profiler skips DECODE_ONLY steps until min KV len reaches threshold."""
+    profiler = profiler_fixture["profiler"]
+    mock_start = profiler_fixture["mock_start"]
+    mock_stop = profiler_fixture["mock_stop"]
+    mock_determine_phase = profiler_fixture["mock_determine_phase"]
+
+    kv_len_threshold = 10
+    profiler.decode_kv_len_threshold = kv_len_threshold
+
+    stats = {"num_reqs": 2, "total_num_scheduled_tokens": 100, "min_kv_len": 5}
+    mock_determine_phase.return_value = InferencePhase.DECODE_ONLY
+
+    # Should be skipped as min_kv_len (5) < threshold (10)
+    profiler.step(stats)
+    mock_start.assert_not_called()
+    assert not profiler.inference_phase_seen[InferencePhase.DECODE_ONLY]
+
+    # Should start profiling as min_kv_len (10) >= threshold (10)
+    stats["min_kv_len"] = 10
+    profiler.step(stats)
+    mock_start.assert_called_once()
+    assert profiler.inference_phase_seen[InferencePhase.DECODE_ONLY]
+    assert profiler.current_phase == "decode_only"
+    assert profiler.profiling_n_steps_left == PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
+
+    # Profiling continues
+    stats["min_kv_len"] = 11
+    profiler.step(stats)
+    mock_start.assert_called_once()
+
+    # Complete the profiling cycle (1 more step already done in the step above)
+    for _ in range(PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR - 1):
+        profiler.step(stats)
+    mock_stop.assert_called_once()
+    assert profiler.current_phase == ""
+
+
+def test_merge_multihost_profile_directories(tmp_path):
+    """Tests that multi-host profile directories with different timestamps are consolidated correctly."""
+    profiler = PhasedBasedProfiler(profile_dir=str(tmp_path))
+    phase_dir = tmp_path / "prefill_heavy"
+    profiler.profile_dir_with_phase_suffix = str(phase_dir)
+
+    profile_path = phase_dir / "plugins" / "profile"
+    dir_early = profile_path / "2026_05_06_04_47_36"
+    dir_late = profile_path / "2026_05_06_04_47_38"
+
+    # Create the nested timestamped directories
+    dir_early.mkdir(parents=True, exist_ok=True)
+    dir_late.mkdir(parents=True, exist_ok=True)
+
+    # Create dummy host files inside each directory
+    file_early = dir_early / "node-1-0.xplane.pb"
+    file_late = dir_late / "node-0-0.xplane.pb"
+    file_early.write_text("dummy_trace_data_1")
+    file_late.write_text("dummy_trace_data_0")
+
+    # Execute consolidation merge
+    profiler._merge_multihost_profile_directories()
+
+    # Verify that the trailing directory is deleted and all files are merged into the earliest directory
+    assert dir_early.exists()
+    assert not dir_late.exists()
+    assert (dir_early / "node-1-0.xplane.pb").exists()
+    assert (dir_early / "node-0-0.xplane.pb").exists()
+    assert (dir_early /
+            "node-1-0.xplane.pb").read_text() == "dummy_trace_data_1"
+    assert (dir_early /
+            "node-0-0.xplane.pb").read_text() == "dummy_trace_data_0"

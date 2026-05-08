@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import unittest
 
 import jax
@@ -185,13 +184,6 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
             jax.block_until_ready(updated_caches)
             initial_kv_caches = updated_caches
 
-        exp_name = "test_kv_transfer"
-        profile_dir = f"/mnt/disks/jcgu/code/ullm/rebase/offload_tests/{exp_name}"
-        options = jax.profiler.ProfileOptions()
-        # default: https://docs.jax.dev/en/latest/profiling.html#general-options
-        options.python_tracer_level = 1
-        options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 2)
-        jax.profiler.start_trace(profile_dir, profiler_options=options)
         updated_caches = update_kv_caches(initial_kv_caches, stacked_blocks,
                                           src_offsets, dest_offsets,
                                           chunk_sizes, num_chunks, self.mesh,
@@ -200,7 +192,6 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
                                           self.replicated_device_sharding.spec)
 
         jax.block_until_ready(updated_caches)
-        jax.profiler.stop_trace()
 
         # Verification
         for layer_idx in range(self.num_layers):

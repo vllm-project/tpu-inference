@@ -9,12 +9,6 @@
   </thead>
   <tbody>
     <tr>
-      <td>async scheduler</td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-    </tr>
-    <tr>
       <td>Chunked Prefill</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
@@ -69,6 +63,18 @@
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
+      <td>async scheduler</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+    </tr>
+    <tr>
+      <td>runai_model_streamer_loader</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
       <td>hybrid kv cache</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -82,12 +88,6 @@
     </tr>
     <tr>
       <td>multi-host</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-    </tr>
-    <tr>
-      <td>runai_model_streamer_loader</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>

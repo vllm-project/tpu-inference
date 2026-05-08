@@ -21,6 +21,7 @@ export PRIORITY_INTEGRATION=3
 export PRIORITY_BENCHMARK=2
 export PRIORITY_DEFAULT=1
 export PRIORITY_NIGHTLY=0
+export PRIORITY_KERNEL_TUNING=-1
 
 # Implemented dynamic job prioritization by injecting integers during upload
 upload_with_priority() {
@@ -46,4 +47,31 @@ get_vllm_commit_hash() {
   fi
 
   echo "$commit_hash"
+}
+
+# Function to process every JSON file in the cases directory
+process_json_benchmark_cases() {
+  local case_folder="$1"
+  local generator="$2"
+  local priority="$3"
+
+  echo "--- Generating dynamic pipelines from $case_folder"
+
+  shopt -s nullglob
+  local files=("$case_folder"/*.json)
+  
+  if [ ${#files[@]} -eq 0 ]; then
+    echo "No JSON files found in $case_folder."
+    return
+  fi
+
+  for case_file in "${files[@]}"; do
+    echo "Processing case file: $case_file"
+    if upload_with_priority <(python3 "$generator" --input "$case_file") "$priority"; then
+      echo "Successfully uploaded pipeline for $case_file"
+    else
+      echo "🚨 Error: Failed to generate or upload pipeline for $case_file"
+      exit 1
+    fi
+  done
 }

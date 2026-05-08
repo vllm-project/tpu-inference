@@ -175,3 +175,20 @@ def merge_multimodal_embeddings(
         (input_ids == placeholder_token_id),
         multimodal_embeddings,
     )
+
+
+def flatten_pad_mm_embeds(mm_embeds: list[jax.Array] | None,
+                          target_pad_len: int) -> jax.Array | None:
+    if mm_embeds is None or len(mm_embeds) == 0:
+        return None
+
+    flattened_embeds = flatten_embeddings(mm_embeds)
+
+    padding = jnp.zeros(
+        (target_pad_len - flattened_embeds.shape[0],
+         flattened_embeds.shape[1]),
+        dtype=flattened_embeds.dtype,
+    )
+    flattened_embeds = jnp.concatenate([flattened_embeds, padding], axis=0)
+
+    return flattened_embeds

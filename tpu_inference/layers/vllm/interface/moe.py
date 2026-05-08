@@ -77,6 +77,27 @@ def vllm_moe_apply(layer: FusedMoE, weights: FusedMoEWeights,
     assert isinstance(quant_method_instance, FusedMoEMethodBase)
     assert isinstance(weights, FusedMoEWeights)
 
+    from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+        get_vllm_model_wrapper_context
+    try:
+        context = get_vllm_model_wrapper_context()
+        vllm_config = context.vllm_config
+    except AssertionError:
+        vllm_config = None
+
+    enable_return_routed_experts = vllm_config.model_config.enable_return_routed_experts if vllm_config else False
+
+    if enable_return_routed_experts:
+        if isinstance(router_logits, torch.Tensor):
+            _, expert_indices = torch.topk(router_logits, layer.top_k, dim=-1)
+            from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+                get_vllm_model_wrapper_context
+            try:
+                context = get_vllm_model_wrapper_context()
+                context.expert_indices_list.append(jax_view(expert_indices))
+            except AssertionError:
+                pass
+
     return torch_view(
         moe_apply(
             layer=layer,

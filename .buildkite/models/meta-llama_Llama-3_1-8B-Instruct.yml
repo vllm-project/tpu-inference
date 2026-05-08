@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: meta-llama/Llama-3.1-8B-Instruct
-# pipeline-type: text-only
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for meta-llama/Llama-3.1-8B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_1-8B-Instruct_UnitTest"

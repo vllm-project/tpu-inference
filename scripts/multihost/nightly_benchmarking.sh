@@ -68,8 +68,10 @@ export MOE_ALL_GATHER_ACTIVATION_DTYPE=""
 export MOE_ALL_GATHER_ACTIVATION_DTYPE_ENV=""
 export PHASED_PROFILING_DIR=""
 export PHASED_PROFILING_DIR_ENV=""
+export PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD_ENV=""
 export SKIP_DB_UPLOAD="false"
 export RUN_ACCURACY=""
+export MMLU_OUTPUT_LEN=""
 export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=vllm"
 export USE_UNFUSED_MEGABLOCKS_ENV=""
 export HF_CONFIG=""
@@ -107,8 +109,10 @@ while [[ $# -gt 0 ]]; do
     --moe-requantize-weight-dtype) export MOE_REQUANTIZE_WEIGHT_DTYPE="$2"; MOE_REQUANTIZE_WEIGHT_DTYPE_ENV="MOE_REQUANTIZE_WEIGHT_DTYPE=$2"; shift 2 ;;
     --moe-all-gather-activation-dtype) export MOE_ALL_GATHER_ACTIVATION_DTYPE="$2"; MOE_ALL_GATHER_ACTIVATION_DTYPE_ENV="MOE_ALL_GATHER_ACTIVATION_DTYPE=$2"; shift 2 ;;
     --phased-profiling-dir) export PHASED_PROFILING_DIR="$2"; PHASED_PROFILING_DIR_ENV="PHASED_PROFILING_DIR=$2"; shift 2 ;;
+    --phased-profiler-decode-only-kv-len-threshold) export PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD_ENV="PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=$2"; shift 2 ;;
     --skip-db-upload) export SKIP_DB_UPLOAD="true"; shift 1 ;;
     --run-accuracy) export RUN_ACCURACY="$2"; shift 2 ;;
+    --mmlu-output-len) export MMLU_OUTPUT_LEN="$2"; shift 2 ;;
     --model-impl-type) export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=$2"; shift 2 ;;
     --use-unfused-megablocks) export USE_UNFUSED_MEGABLOCKS_ENV="USE_UNFUSED_MEGABLOCKS=$2"; shift 2 ;;
     --hf-config) export HF_CONFIG="$2"; shift 2 ;;
@@ -153,6 +157,7 @@ ${MOE_REQUANTIZE_BLOCK_SIZE_ENV} \
 ${MOE_REQUANTIZE_WEIGHT_DTYPE_ENV} \
 ${MOE_ALL_GATHER_ACTIVATION_DTYPE_ENV} \
 ${PHASED_PROFILING_DIR_ENV} \
+${PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD_ENV} \
 ${USE_UNFUSED_MEGABLOCKS_ENV} \
 VLLM_ENGINE_READY_TIMEOUT_S=10800 \
 ${FORCE_MOE_RANDOM_ROUTING_ENV} \
@@ -199,6 +204,10 @@ if [[ "${RUN_ACCURACY}" == "mmlu" ]]; then
       --num-prompts 14000 \
       --run_eval \
       --temperature 0"
+  if [[ -n "${MMLU_OUTPUT_LEN}" ]]; then
+    BENCHMARK_CMD="${BENCHMARK_CMD} --mmlu-output-len ${MMLU_OUTPUT_LEN}"
+  fi
+
 fi
 
 
