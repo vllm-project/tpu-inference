@@ -59,7 +59,7 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.vllm.experimental.model_patcher import patch_mm_model
 from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import (
-    maybe_apply_qwen3_vl_patches, maybe_update_qwen3_vl_jitted_keys)
+    maybe_apply_qwen3_vl_patches, maybe_update_qwen3_vl_patching_configs)
 from tpu_inference.models.vllm.experimental.vision_tower_jit import (
     maybe_jit_embed_multimodal_func, maybe_precompile_vision_encoder_fn,
     maybe_prepare_for_jit)
@@ -249,7 +249,8 @@ class VllmModelWrapper:
         if self.vllm_config.model_config.is_multimodal_model:
             # Hardcode "model.visual" for Qwen3-VL vision encoder JIT
             jitted_keys = list(envs.JITTED_MM_MODULE_KEYS)
-            maybe_update_qwen3_vl_jitted_keys(self.model.vllm_model, jitted_keys)
+            extra_jit_args = {}
+            maybe_update_qwen3_vl_patching_configs(self.model.vllm_model, jitted_keys, extra_jit_args)
 
             # NOTE: It patch mm models to be JITtable within some submodule.
             # Caution: the submodule params_and_buffers would be put into
@@ -259,6 +260,7 @@ class VllmModelWrapper:
                 self.model,
                 params_and_buffers,
                 jitted_mm_module_keys=jitted_keys,
+                extra_jit_args=extra_jit_args,
                 register_mm_module_custom_pytree_classes=envs.
                 REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES,
             )

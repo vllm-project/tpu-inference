@@ -42,6 +42,7 @@ def patch_mm_model(
     *,
     jitted_mm_module_keys: Sequence[str],
     register_mm_module_custom_pytree_classes: Sequence[str],
+    extra_jit_args: dict[str, dict] = None,
 ) -> tuple["_VllmRunner", dict[str, torchax.torch.Tensor]]:
     """Jit some modules in the multimodal.
 
@@ -111,13 +112,12 @@ def patch_mm_model(
             cur_module = getattr(cur_module, name)
 
         target_module_name = module_names[-1]
-        extra_jit_args = dict(static_argnums=(3,))
-        if target_module_name == "visual":
-            extra_jit_args["static_argnames"] = ("grid_thw",)
+        # Resolve custom JIT arguments if provided, otherwise default to an empty dict.
+        module_extra_jit_args = (extra_jit_args or {}).get(module_key, {})
 
         jitted_module = JittableModule(
             getattr(cur_module, target_module_name),
-            extra_jit_args=extra_jit_args)
+            extra_jit_args=module_extra_jit_args)
         setattr(cur_module, target_module_name, jitted_module)
 
         # params_and_buffers is a dict. for each key with prefix of the module,
