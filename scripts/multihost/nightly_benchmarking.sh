@@ -347,31 +347,32 @@ while IFS='=' read -r key value; do
   fi
 done < "$RESULT_FILE"
 
+sql_escape() {
+  # Replaces each single quote ' with two single quotes ''
+  printf '%s' "$1" | sed "s/'/''/g"
+}
+
+# Escape the variable that is being added to the SQL string
+ESCAPED_GCP_INSTANCE_NAME=$(sql_escape "$GCP_INSTANCE_NAME")
+
 if [ "$keys" == "RecordId, " ]; then
   echo "Result file was empty or parsing failed. Marking status as FAILED."
-  STATUS="FAILED"
+  keys+="Status, RunBy, LastUpdate, CreatedTime"
+  vals+="'FAILED', '${ESCAPED_GCP_INSTANCE_NAME}', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()"
 else
-  STATUS="COMPLETED"
+  keys+="Status, RunBy, LastUpdate, CreatedTime"
+  vals+="'COMPLETED', '${ESCAPED_GCP_INSTANCE_NAME}', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()"
 fi
 
-RUN_BY="${GCP_INSTANCE_NAME}"
+SQL="INSERT INTO RunRecord (${keys}) VALUES (${vals});"
 
-keys_final="${keys} Status, RunBy, LastUpdate, CreatedTime"
-vals_final="${vals} @status, @run_by, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()"
-SQL="INSERT INTO RunRecord (${keys_final}) VALUES (${vals_final});"
-PARAMS="status='${STATUS}',run_by='${RUN_BY}'"
-
-echo "--------------------------------------------------------"
-echo "Executing SQL for Spanner update"
-echo "Query Template: $SQL"
-echo "Parameters:     $PARAMS"
-echo "--------------------------------------------------------"
+echo "Executing SQL for Spanner update:"
+echo "$SQL"
 
 if ! gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
   --project="$GCP_PROJECT_ID" \
   --instance="$GCP_INSTANCE_ID" \
-  --sql="$SQL" \
-  --parameters="$PARAMS"; then
+  --sql="$SQL"; then
   echo "Failed to update Spanner record!"
   exit 1
 fi
