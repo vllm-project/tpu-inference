@@ -1,0 +1,114 @@
+{
+  "global_env": {
+    "GCP_PROJECT_ID": "cloud-tpu-inference-test",
+    "GCS_BUCKET": "vllm-cb-storage2",
+    "GCP_INSTANCE_ID": "vllm-bm-inst",
+    "GCP_DATABASE_ID": "vllm-bm-bk-runs",
+    "SERVER_WAIT_MINS": 180
+  },
+  "benchmark_cases": [
+    {
+      "case_name": "Gemma4-31B-1k/500-GBS256",
+      "ci_queue": [
+        "tpu_v6e_8_queue",
+        "tpu_v7x_2_queue"
+      ],
+      "env": {
+        "MODELTAG": "NEW",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1024,
+        "OUTPUT_LEN": 500
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "MODEL_IMPL_TYPE": "flax_nnx",
+          "USE_BATCHED_RPA_KERNEL": "1"
+        },
+        "args": {
+          "model": "google/gemma-4-31B-it",
+          "max-num-seqs": 256,
+          "max-num-batched-tokens": 4096,
+          "tensor-parallel-size": {
+            "v6e-8": 2,
+            "v7x-2": 2,
+            "default": 1
+          },
+          "max-model-len": 2048,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.9,
+          "async-scheduling": true,
+          "additional-config": "{\"quantization\": { \"qwix\": { \"rules\": [{ \"module_path\": \".*\", \"weight_qtype\": \"float8_e4m3fn\", \"act_qtype\": \"float8_e4m3fn\"}]}}}"
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "google/gemma-4-31B-it",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "random",
+          "random-input-len": 1024,
+          "random-output-len": 500,
+          "num-prompts": 1000,
+          "ignore-eos": true,
+          "temperature": 0
+        }
+      }
+    },
+    {
+      "case_name": "Gemma4-31B-1k/1f512x512/500-GBS256",
+      "ci_queue": [
+        "tpu_v6e_8_queue",
+        "tpu_v7x_2_queue"
+      ],
+      "env": {
+        "MODELTAG": "NEW",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1024,
+        "OUTPUT_LEN": 500
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "MODEL_IMPL_TYPE": "flax_nnx",
+          "USE_BATCHED_RPA_KERNEL": "1"
+        },
+        "args": {
+          "model": "google/gemma-4-31B-it",
+          "max-num-seqs": 256,
+          "max-num-batched-tokens": 4096,
+          "tensor-parallel-size": {
+            "v6e-8": 2,
+            "v7x-2": 2,
+            "default": 1
+          },
+          "max-model-len": 2048,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.9,
+          "async-scheduling": true,
+          "additional-config": "{\"quantization\": { \"qwix\": { \"rules\": [{ \"module_path\": \".*\", \"weight_qtype\": \"float8_e4m3fn\", \"act_qtype\": \"float8_e4m3fn\"}]}}}"
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "google/gemma-4-31B-it",
+          "backend": "openai-chat",
+          "request-rate": "inf",
+          "dataset-name": "random-mm",
+          "endpoint": "/v1/chat/completions",
+          "random-mm-bucket-config": "{(512, 512, 1): 1.0}",
+          "random-mm-limit-mm-per-prompt": "{\"image\": 1}",
+          "random-input-len": 1024,
+          "random-output-len": 500,
+          "num-prompts": 1000,
+          "ignore-eos": true,
+          "temperature": 0
+        }
+      }
+    }
+  ]
+}

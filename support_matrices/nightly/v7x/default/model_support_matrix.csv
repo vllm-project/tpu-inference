@@ -5,8 +5,8 @@ Model,Type,UnitTest,Accuracy/Correctness,Benchmark
 "Qwen/Qwen3-VL-8B-Instruct",Multimodal,❓ Untested,❓ Untested,❓ Untested
 "Qwen/Qwen3.5-9B",Multimodal,❓ Untested,❓ Untested,❓ Untested
 "deepseek-ai/DeepSeek-OCR",Multimodal,❓ Untested,❓ Untested,❓ Untested
-"google/gemma-4-26B-A4B-it",Multimodal,✅ Passing,✅ Passing,❌ Failing
-"google/gemma-4-31B-it",Multimodal,✅ Passing,✅ Passing,❌ Failing
+"google/gemma-4-26B-A4B-it",Multimodal,✅ Passing,✅ Passing,✅ Passing
+"google/gemma-4-31B-it",Multimodal,✅ Passing,✅ Passing,✅ Passing
 "MiniMaxAI/MiniMax-M2.5",Text,❓ Untested,❓ Untested,❓ Untested
 "Qwen/Qwen3-30B-A3B",Text,✅ Passing,✅ Passing,✅ Passing
 "Qwen/Qwen3-32B",Text,✅ Passing,✅ Passing,✅ Passing

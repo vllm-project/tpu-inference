@@ -13,18 +13,31 @@
 # limitations under the License.
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import sys
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import yaml
 
 
 def clean_key_string(key: str) -> str:
-    # r'[^a-zA-Z0-9/-]' matches anything NOT in the specified set
-    return re.sub(r'[^a-zA-Z0-9/-_]', '-', key)
+    """
+    Sanitizes the string and ensures the length does not exceed 100 characters.
+    """
+    # Replace invalid characters with '-'
+    sanitized = re.sub(r'[^a-zA-Z0-9/-_]', '-', key)
+
+    # If length exceeds 100, truncate and append a hash for uniqueness
+    if len(sanitized) > 100:
+        # Take the first 90 chars and append the first 8 chars of an MD5 hash.
+        # This ensures that even if truncated, the Key remains unique.
+        suffix = hashlib.md5(key.encode()).hexdigest()[:8]
+        return f"{sanitized[:90]}-{suffix}"
+
+    return sanitized
 
 
 def extract_arg_from_command_options(case_data: Dict[str, Any],
@@ -49,14 +62,14 @@ def extract_arg_from_command_options(case_data: Dict[str, Any],
         f"{target_options} structures of case_data.")
 
 
-def create_benchmark_group(case_data,
+def create_benchmark_steps(case_data,
                            global_env,
                            file_path,
-                           is_single_case=False):
+                           is_single_case=False) -> List[Dict[str, Any]]:
     """
-    Creates a Buildkite Group step.
+    Generates a list of Buildkite steps for a case.
     """
-    # Extract filename without extension to be used as the step label
+    # Extract filename without extension to be used as part of step label
     file_basename = os.path.splitext(os.path.basename(file_path))[0]
 
     # Identify Case Name
@@ -68,7 +81,6 @@ def create_benchmark_group(case_data,
 
     # Merge Environment Variables (Global + Case Specific)
     combined_env = {**global_env, **case_data.get("env", {})}
-    safe_key = clean_key_string(file_basename)
 
     # Construct the Step dictionary
     child_steps = []
@@ -102,7 +114,7 @@ def create_benchmark_group(case_data,
             f"bash .buildkite/benchmark/scripts/run_job.sh {case_parameter}",
         })
 
-    return {"group": file_basename, "key": safe_key, "steps": child_steps}
+    return child_steps
 
 
 def main():
@@ -121,26 +133,37 @@ def main():
         data = json.load(f)
 
     global_env = data.get("global_env", {})
-    steps = []
+    file_basename = os.path.splitext(os.path.basename(args.input))[0]
+
+    all_steps = []
 
     if "benchmark_cases" in data:
         for case in data["benchmark_cases"]:
-            # Multi-case: Requires TARGET_CASE_NAME to distinguish between tests
-            steps.append(
-                create_benchmark_group(case,
+            # Aggregate all steps from all cases
+            all_steps.extend(
+                create_benchmark_steps(case,
                                        global_env,
                                        args.input,
                                        is_single_case=False))
     else:
         # Single-case
-        steps.append(
-            create_benchmark_group(data,
+        all_steps.extend(
+            create_benchmark_steps(data,
                                    global_env,
                                    args.input,
                                    is_single_case=True))
 
+    # Wrap everything in a single group
+    grouped_pipeline = {
+        "steps": [{
+            "group": file_basename,
+            "key": clean_key_string(file_basename),
+            "steps": all_steps
+        }]
+    }
+
     print(
-        yaml.dump({"steps": steps}, sort_keys=False, default_flow_style=False))
+        yaml.dump(grouped_pipeline, sort_keys=False, default_flow_style=False))
 
 
 if __name__ == "__main__":

@@ -27,7 +27,7 @@ init_env() {
     gcloud container clusters get-credentials "$CLUSTER_NAME" --zone "$ZONE" --project "$PROJECT_NAME"
 
     # Ensure HF_TOKEN is set
-    echo "kubectl create secret generic hf-token-secret --from-literal=token=$HF_TOKEN"
+    echo "kubectl create secret generic hf-token-secret --from-literal=token=[redacted] --dry-run=client -o yaml | kubectl apply -f -"
     kubectl create secret generic hf-token-secret --from-literal=token="$HF_TOKEN" --dry-run=client -o yaml | kubectl apply -f -
 
     # Create storage class
