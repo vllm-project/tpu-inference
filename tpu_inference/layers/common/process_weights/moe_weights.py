@@ -409,16 +409,28 @@ def process_moe_weights(
                                      config=pad_config,
                                      padded_output_sizes=padded_output_sizes)
 
+            # Compute scale_ratio from the UNPADDED weight output dim
+            # (= 2 * intermediate_size) and the scale's unpadded output dim.
+            # This must happen BEFORE process_w13_tp pads the weight, otherwise
+            # for models whose intermediate_size is not aligned to 128 * tp
+            # (e.g. nvidia/Qwen3-30B-A3B-NVFP4 with intermediate=768, tp=8 ->
+            # local=96 -> padded_local=128 = +33%), the assertion
+            # `padded_weight_out % unpadded_scale_out == 0` fails because
+            # padding changed the weight dim but the scale dim is still
+            # unpadded.
+            scale_ratio = 1
+            if w13_weight_scale is not None:
+                unpadded_w13_out = 2 * intermediate_size
+                assert unpadded_w13_out % w13_weight_scale.shape[3] == 0
+                scale_ratio = unpadded_w13_out // w13_weight_scale.shape[3]
+                if not envs.DISABLE_WEIGHT_REQUANTIZATION:
+                    assert scale_ratio == 1, "If requantizing, scale_ratio should be 1!"
+
             w13_weight = process_w13_tp(tensor=w13_weight,
                                         concat_dim=2,
                                         name="w13_weight")
 
             if w13_weight_scale is not None:
-                # check if cleanly divisible
-                assert w13_weight.shape[2] % w13_weight_scale.shape[3] == 0
-                scale_ratio = w13_weight.shape[2] // w13_weight_scale.shape[3]
-                if not envs.DISABLE_WEIGHT_REQUANTIZATION:
-                    assert scale_ratio == 1, "If requantizing, scale_ratio should be 1!"
                 w13_weight_scale = process_w13_tp(tensor=w13_weight_scale,
                                                   concat_dim=3,
                                                   name="w13_weight_scale",
