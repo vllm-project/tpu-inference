@@ -308,10 +308,23 @@ def apply_gemma4_patches(vllm_model):
 
     # Convert non-persistent scale buffers to torchax tensors so they
     # interoperate with the torchax tensor world at math time.
+    # vllm gemma4 stores these in TWO places:
+    #   - Gemma4Model._buffers (registered via register_buffer)
+    #   - Gemma4SelfDecoderLayers as plain attributes (passed in at
+    #     __init__, not registered) — and Gemma4CrossDecoderLayers too
+    #     if fast_prefill is enabled.
+    # shard_model_to_tpu only ships the buffers on Gemma4Model. The plain
+    # attribute references on self_decoder/cross_decoder stay as the
+    # original torch.Tensor and crash when multiplied with torchax.
     text_model = getattr(getattr(vllm_model, "language_model", None),
                          "model", None)
     if text_model is not None:
         _coerce_scale_buffers_to_torchax(text_model)
+        # Walk into self_decoder / cross_decoder if present.
+        for sub_name in ("self_decoder", "cross_decoder"):
+            sub = getattr(text_model, sub_name, None)
+            if sub is not None:
+                _coerce_scale_buffers_to_torchax(sub)
 
     orig_embed = getattr(vllm_model, "embed_input_ids", None)
     orig_forward = getattr(vllm_model, "forward", None)
