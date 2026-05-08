@@ -13,10 +13,6 @@
 # limitations under the License.
 
 import multiprocessing as mp
-import os
-
-os.environ["JAX_TRACEBACK_FILTERING"] = "off"
-os.environ["VLLM_LOGGING_LEVEL"] = "DEBUG"
 
 try:
     if mp.get_start_method(allow_none=True) != 'spawn':
