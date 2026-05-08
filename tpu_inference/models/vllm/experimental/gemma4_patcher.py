@@ -252,8 +252,24 @@ def _coerce_scale_buffers_to_torchax(text_model):
         if buf.__class__.__module__.startswith("torchax"):
             continue
         try:
-            arr = buf.detach().cpu().numpy()
-            jax_arr = jax.device_put(arr)
+            # Go through float32 numpy because numpy doesn't support
+            # BFloat16 natively. Cast back to the original dtype on the
+            # JAX side so subsequent math uses the right precision.
+            target_dtype = buf.dtype
+            np_arr = buf.detach().cpu().float().numpy()
+            jax_arr = jax.device_put(np_arr)
+            # Map torch dtype → jax dtype (limited set sufficient for these
+            # scalar buffers; default to keeping float32 if unknown).
+            import jax.numpy as jnp
+            torch_to_jnp = {
+                torch.bfloat16: jnp.bfloat16,
+                torch.float16: jnp.float16,
+                torch.float32: jnp.float32,
+                torch.float64: jnp.float64,
+            }
+            jax_dtype = torch_to_jnp.get(target_dtype)
+            if jax_dtype is not None:
+                jax_arr = jax_arr.astype(jax_dtype)
             new_buf = torch_view(jax_arr)
         except Exception as e:  # noqa: BLE001
             logger.warning(
