@@ -44,6 +44,8 @@ making sure they go through standard function arguments:
 import torch
 from torchax.interop import jax_view, torch_view
 from vllm.sequence import IntermediateTensors
+from vllm.model_executor.models.qwen3_vl import \
+    Qwen3VLForConditionalGeneration
 
 from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
@@ -230,9 +232,18 @@ def apply_qwen3_vl_patches(vllm_model):
         vllm_model, orig_forward, *args, **kwargs)
 
 
-def maybe_apply_qwen3_vl_patches(vllm_model):
+def is_qwen3_vl(vllm_model) -> bool:
+    """Check if the given vLLM model is of architecture Qwen3VLForConditionalGeneration."""
+    return isinstance(vllm_model, Qwen3VLForConditionalGeneration)
 
-    if hasattr(vllm_model, "config") and hasattr(vllm_model.config,
-                                                 "architectures"):
-        if "Qwen3VLForConditionalGeneration" in vllm_model.config.architectures:
-            apply_qwen3_vl_patches(vllm_model)
+
+def maybe_apply_qwen3_vl_patches(vllm_model):
+    if is_qwen3_vl(vllm_model):
+        apply_qwen3_vl_patches(vllm_model)
+
+
+def maybe_update_qwen3_vl_jitted_keys(vllm_model, jitted_keys: list):
+    """Hardcode 'model.visual' to jitted_keys if the model is Qwen3-VL."""
+    if is_qwen3_vl(vllm_model):
+        if "model.visual" not in jitted_keys:
+            jitted_keys.append("model.visual")
