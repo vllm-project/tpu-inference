@@ -15,35 +15,41 @@
 
 Why this is needed:
 The vLLM `Gemma4ForConditionalGeneration` (vllm/model_executor/models/gemma4_mm.py)
-implements Per-Layer Embeddings (PLE — used by E2B / E4B variants) by:
-
-  1. Pre-allocating `self.per_layer_embeddings` as a torch zeros buffer at
+uses Per-Layer Embeddings (PLE — used by E2B / E4B variants) by:
+  1. Pre-allocating `self.per_layer_embeddings` as a torch.zeros buffer at
      init time (gemma4_mm.py:993).
-  2. Inside `embed_input_ids`, computing per-layer features and copying them
-     into the buffer **in-place** with `.copy_()` (gemma4_mm.py:1322).
-  3. Inside `forward`, reading `self.per_layer_embeddings[:N]` and passing
-     to the language model.
+  2. Inside `embed_input_ids`, computing per-layer features and copying
+     them into the buffer in-place with `.copy_()` (gemma4_mm.py:1322).
+  3. Inside `forward`, reading `self.per_layer_embeddings[:N]` and
+     passing to `language_model.model(...)` via the `per_layer_inputs`
+     kwarg.
 
-The in-place `.copy_()` does not survive torchax's `__torch_dispatch__` —
-the destination buffer was created by torch.zeros (no `_elem` attribute
-required by torchax) but the source is a torchax tensor. The dispatch
-fails with `AttributeError: 'Tensor' object has no attribute '_elem'`.
+Two problems for torchax:
+  (a) The in-place `.copy_()` does not survive `__torch_dispatch__`:
+      destination buffer was created by torch.zeros (no `_elem` attr) but
+      the source is a torchax tensor. Result:
+      `AttributeError: 'Tensor' object has no attribute '_elem'`.
+  (b) Even if (a) is bypassed, JIT captures `self.per_layer_embeddings`
+      at trace time. Subsequent Python attribute assignments don't
+      propagate across the JIT boundary, so `forward` still reads the
+      original zeros and the LM gets no PLE → garbage outputs.
 
-The fix:
-Replace `embed_input_ids` with a version that:
-  - Computes per-layer features the same way as the original.
-  - **Rebinds** `self.per_layer_embeddings` (Python attribute assignment,
-    not an in-place tensor op) to the freshly-computed tensor.
-  - Sets `self.per_layer_embeddings = None` while calling the original
-    `embed_input_ids` so the original's broken in-place branch is skipped.
-  - Restores the rebound attribute after the call so `forward` reads it.
+Fix (mirrors qwen3_vl_patcher.py's deepstack pack/unpack strategy):
+  PLE flows through **function arguments**, not state.
 
-This is structurally similar to `qwen3_vl_patcher.py` (which solves the
-analogous deepstack stateful-write problem), but simpler — Gemma-4's PLE
-flows through `self.per_layer_embeddings` and is read as a plain tensor
-in `forward`, so we don't need to pack/unpack into `inputs_embeds`.
+  - `_patched_embed_input_ids`: compute per_layer_inputs the same way as
+    the original; PACK them into the returned `inputs_embeds` tensor by
+    concatenating along the hidden dim. Skip the broken `.copy_()` by
+    setting `self.per_layer_embeddings = None` for the duration of the
+    delegated call (so the upstream PLE branch is short-circuited).
+  - `_patched_forward`: detect packed `inputs_embeds` (hidden dim larger
+    than `text_config.hidden_size`); split text embeds vs packed PLE;
+    reshape PLE to `[N, num_layers, ple_dim]`; call
+    `language_model.model(...)` directly with `per_layer_inputs=<the
+    reshaped PLE>` and `inputs_embeds=<text embeds>`. Bypass the
+    upstream `forward`'s read of `self.per_layer_embeddings`.
 
-Wire this in via `maybe_apply_gemma4_patches(vllm_model)` from
+Wire via `maybe_apply_gemma4_patches(vllm_model)` from
 `vllm_model_wrapper.py` next to `maybe_apply_qwen3_vl_patches`.
 """
 
@@ -62,20 +68,13 @@ def _patched_embed_input_ids(
     *,
     is_multimodal: torch.Tensor | None = None,
 ):
-    """Patched embed_input_ids that avoids the in-place .copy_() on
-    self.per_layer_embeddings.
-
-    Mirrors the original logic from vllm gemma4_mm.py but rebinds the
-    attribute instead of doing an in-place buffer write.
-    """
-    # We replicate the PLE branch first, then call the original method
-    # with self.per_layer_embeddings temporarily set to None so the
-    # broken in-place .copy_() block at gemma4_mm.py:1320-1323 is
-    # skipped.
+    """Pack PLE into the returned inputs_embeds so it crosses the JIT
+    boundary as an explicit value (not as model state)."""
     text_config = vllm_model.config.text_config
-    has_ple = vllm_model.per_layer_embeddings is not None
+    has_ple = (vllm_model.per_layer_embeddings is not None
+               and getattr(text_config, "hidden_size_per_layer_input", 0) > 0)
 
-    new_ple = None
+    per_layer_inputs = None
     if has_ple:
         if is_multimodal is not None:
             ple_input_ids = torch.where(
@@ -89,32 +88,108 @@ def _patched_embed_input_ids(
         per_layer_inputs = (
             vllm_model.language_model.model.get_per_layer_inputs(ple_input_ids))
         if per_layer_inputs is not None:
-            new_ple = per_layer_inputs.reshape(
+            per_layer_inputs = per_layer_inputs.reshape(
                 -1,
                 text_config.num_hidden_layers,
                 text_config.hidden_size_per_layer_input,
             )
 
-    # Temporarily mask out the broken branch by setting the attribute to
-    # None for the duration of the call. Restore (with the new tensor)
-    # afterwards so `forward` reads the right values.
+    # Set per_layer_embeddings = None so the orig method's broken
+    # in-place .copy_() block (gemma4_mm.py:1320-1323) is short-circuited.
     saved_buf = vllm_model.per_layer_embeddings
     vllm_model.per_layer_embeddings = None
     try:
         if multimodal_embeddings is None or is_multimodal is None:
-            result = orig_method(input_ids)
+            inputs_embeds = orig_method(input_ids)
         else:
-            result = orig_method(
+            inputs_embeds = orig_method(
                 input_ids,
                 multimodal_embeddings=multimodal_embeddings,
                 is_multimodal=is_multimodal,
             )
     finally:
-        # Rebind to the freshly-computed PLE tensor (or original buffer
-        # if we didn't compute one, e.g. variant without PLE).
-        vllm_model.per_layer_embeddings = (new_ple
-                                            if new_ple is not None else saved_buf)
-    return result
+        vllm_model.per_layer_embeddings = saved_buf
+
+    # Pack PLE into the returned embeds along the hidden dim. The
+    # patched forward will detect the larger-than-expected hidden dim
+    # and unpack.
+    if per_layer_inputs is not None:
+        cur_tokens = inputs_embeds.size(0)
+        ple_slice = per_layer_inputs[:cur_tokens]
+        # Reshape: [N, num_layers, ple_dim] -> [N, num_layers*ple_dim]
+        packed = ple_slice.reshape(cur_tokens, -1).to(inputs_embeds.device)
+        inputs_embeds = torch.cat([inputs_embeds, packed], dim=-1)
+
+    return inputs_embeds
+
+
+def _patched_forward(
+    vllm_model,
+    orig_forward,
+    input_ids: torch.Tensor,
+    positions: torch.Tensor,
+    intermediate_tensors=None,
+    inputs_embeds=None,
+    **kwargs,
+):
+    """Unpack PLE from inputs_embeds, then call the language model's
+    underlying forward directly with per_layer_inputs as an argument."""
+    text_config = vllm_model.config.text_config
+    text_hidden = text_config.hidden_size
+    num_layers = text_config.num_hidden_layers
+    ple_dim = getattr(text_config, "hidden_size_per_layer_input", 0)
+
+    # If embeddings carry packed PLE (and we're in the prefill path,
+    # not intermediate-tensors propagation), split them.
+    per_layer_inputs = None
+    if (intermediate_tensors is None and inputs_embeds is not None
+            and ple_dim > 0
+            and inputs_embeds.shape[-1] > text_hidden):
+        packed_dim = inputs_embeds.shape[-1] - text_hidden
+        expected_packed = num_layers * ple_dim
+        if packed_dim == expected_packed:
+            packed_ple = inputs_embeds[..., text_hidden:]
+            inputs_embeds = inputs_embeds[..., :text_hidden]
+            per_layer_inputs = packed_ple.reshape(-1, num_layers, ple_dim)
+        else:
+            logger.warning(
+                "Gemma-4 patcher: unexpected packed dim %d (expected %d); "
+                "falling back to original forward.", packed_dim,
+                expected_packed)
+
+    if intermediate_tensors is not None:
+        inputs_embeds = None
+
+    # Preserve the upstream side effect that runs outside the compiled
+    # subgraph (it mutates Python state on the language model so that
+    # full-attention layers can clear the multi-modal prefix range).
+    if hasattr(vllm_model, "_clear_mm_prefix_for_full_attn_layers"):
+        vllm_model._clear_mm_prefix_for_full_attn_layers()
+
+    if per_layer_inputs is not None:
+        # We've split out PLE; call the language model directly with
+        # the unpacked per_layer_inputs to avoid the upstream forward's
+        # `self.per_layer_embeddings[:N]` read.
+        hidden_states = vllm_model.language_model.model(
+            input_ids,
+            positions,
+            per_layer_inputs=per_layer_inputs,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            **kwargs,
+        )
+        return hidden_states
+
+    # No PLE in this call (e.g., 26B/31B variants without PLE, or
+    # decode steps that don't pass inputs_embeds). Defer to the
+    # original forward.
+    return orig_forward(
+        input_ids=input_ids,
+        positions=positions,
+        intermediate_tensors=intermediate_tensors,
+        inputs_embeds=inputs_embeds,
+        **kwargs,
+    )
 
 
 def apply_gemma4_patches(vllm_model):
@@ -136,10 +211,11 @@ def apply_gemma4_patches(vllm_model):
         return
 
     orig_embed = getattr(vllm_model, "embed_input_ids", None)
-    if orig_embed is None:
+    orig_forward = getattr(vllm_model, "forward", None)
+    if orig_embed is None or orig_forward is None:
         logger.warning(
-            "Gemma-4 patcher: vllm_model has no embed_input_ids; skipping patch."
-        )
+            "Gemma-4 patcher: vllm_model missing embed_input_ids/forward; "
+            "skipping patch.")
         return
 
     vllm_model.embed_input_ids = (
@@ -151,9 +227,14 @@ def apply_gemma4_patches(vllm_model):
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
         ))
+
+    vllm_model.forward = (lambda *args, **kwargs: _patched_forward(
+        vllm_model, orig_forward, *args, **kwargs))
+
     logger.info(
-        "Gemma-4 patcher: applied PLE in-place-copy avoidance "
-        "(hidden_size_per_layer_input=%d).", ple_dim)
+        "Gemma-4 patcher: applied PLE pack/unpack via inputs_embeds "
+        "(hidden_size_per_layer_input=%d, num_hidden_layers=%d).", ple_dim,
+        text_cfg.num_hidden_layers)
 
 
 def maybe_apply_gemma4_patches(vllm_model):
