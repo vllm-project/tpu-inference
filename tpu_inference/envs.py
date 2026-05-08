@@ -231,8 +231,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("MOE_REQUANTIZE_WEIGHT_DTYPE", ""),
     # Specify requantization block size for MoE weights
     "MOE_REQUANTIZE_BLOCK_SIZE":
-    lambda: int(block_size) if (block_size := os.getenv(
-        "MOE_REQUANTIZE_BLOCK_SIZE")) is not None else None,
+    lambda: int(block_size)
+    if (block_size := os.getenv("MOE_REQUANTIZE_BLOCK_SIZE")) else None,
     # dictates whether to layout q-proj as NDH (q-heads, model dim, head dim)
     # or DNH (model dim, q-heads, head dim), which is the default (False)
     "LAYOUT_Q_PROJ_AS_NDH":

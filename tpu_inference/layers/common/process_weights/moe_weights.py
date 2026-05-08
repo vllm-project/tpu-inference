@@ -630,6 +630,9 @@ def process_fp8_moe_weights(
 
     if envs.DISABLE_WEIGHT_REQUANTIZATION:
         logger.info_once("Disabled weight requantization")
+        assert not envs.MOE_REQUANTIZE_WEIGHT_DTYPE, (
+            "MOE_REQUANTIZE_WEIGHT_DTYPE should not be set when weight "
+            "requantization is disabled.")
 
         assert weight_block_size is not None
         in_block_size = weight_block_size[1]
@@ -674,25 +677,22 @@ def process_fp8_moe_weights(
                                   if requant_block_size_from_env else None)
 
         moe_logging_str = (
-            f"[MoE requantization]: re-quantizing MoE weights to {desired_quant_dtype}"
-        )
+            f"[MoE requantization]: re-quantizing MoE weights to "
+            f"{desired_quant_dtype}")
         if requant_block_size is not None:
             moe_logging_str += f" with block size {requant_block_size}"
         logger.info_once(moe_logging_str)
 
         # Dequantize fp8 2d block quantized weights into fp32.
         w13_weight = dequantize_tensor(w13_weight,
-                                        w13_weight_scale, (1, 2),
-                                        jnp.float32,
-                                        block_size=weight_block_size)
+                                       w13_weight_scale, (1, 2),
+                                       jnp.float32,
+                                       block_size=weight_block_size)
         w2_weight = dequantize_tensor(w2_weight,
-                                        w2_weight_scale, (1, 2),
-                                        jnp.float32,
-                                        block_size=weight_block_size)
+                                      w2_weight_scale, (1, 2),
+                                      jnp.float32,
+                                      block_size=weight_block_size)
 
-        w13_interleave = activation == "swigluoai"
-        w13_reorder_size = get_mesh_shape_product(mesh,
-                                                ShardingAxisName.MLP_TENSOR)
         weights = quantize_moe_weights(
             FusedMoEWeights(
                 w13_weight=w13_weight,
@@ -710,6 +710,7 @@ def process_fp8_moe_weights(
         moe_backend=moe_backend,
         w13_reorder_size=w13_reorder_size,
         w13_interleave=w13_interleave,
+        disable_weight_requantization=envs.DISABLE_WEIGHT_REQUANTIZATION,
     )
 
 
@@ -725,6 +726,11 @@ def process_unquantized_moe_weights(
 ) -> FusedMoEWeights:
     """Jit'ed version to process unquantized moe weights. See `process_moe_weights` for details.
     """
+    if envs.DISABLE_WEIGHT_REQUANTIZATION:
+        logger.info_once("Disabled weight requantization")
+        assert not envs.MOE_REQUANTIZE_WEIGHT_DTYPE, (
+            "MOE_REQUANTIZE_WEIGHT_DTYPE should not be set when weight "
+            "requantization is disabled.")
     if desired_quant_dtype_from_env := envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
         desired_quant_dtype = to_jax_dtype(desired_quant_dtype_from_env)
         requant_block_size = None
@@ -732,8 +738,8 @@ def process_unquantized_moe_weights(
             requant_block_size = (int(requant_block_size_from_env)
                                   if requant_block_size_from_env else None)
         moe_logging_str = (
-            f"[MoE requantization]: re-quantizing MoE weights to {desired_quant_dtype}"
-        )
+            f"[MoE requantization]: re-quantizing MoE weights to "
+            f"{desired_quant_dtype}")
         if requant_block_size is not None:
             moe_logging_str += f" with block size {requant_block_size}"
         logger.info_once(moe_logging_str)
@@ -771,4 +777,5 @@ def process_unquantized_moe_weights(
         moe_backend=moe_backend,
         w13_reorder_size=w13_reorder_size,
         w13_interleave=w13_interleave,
+        disable_weight_requantization=envs.DISABLE_WEIGHT_REQUANTIZATION,
     )
