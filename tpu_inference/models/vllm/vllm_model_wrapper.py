@@ -18,7 +18,6 @@ from collections.abc import Sequence
 from contextlib import nullcontext
 from typing import Any, List, Optional, Tuple
 from unittest.mock import patch
-import jax.numpy as jnp
 
 import jax
 import numpy as np
