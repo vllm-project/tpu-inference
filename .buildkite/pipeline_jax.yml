@@ -15,32 +15,65 @@
 steps:
   - group: "${TESTS_GROUP_LABEL:-[jax] TPU7x Tests Group}"
     steps:
-      - label: "${TPU_VERSION:-tpu7x} E2E test for Ray-based multi-host"
-        key: "${TPU_VERSION:-tpu7x}_test_26"
-        soft_fail: true
-        agents:
-          queue: tpu_v7x_16_queue
-        env:
-          TPU_VERSION: "${TPU_VERSION:-tpu7x}"
-        commands:
-          # Correctness Test Example:
-          # 1. Start vLLM with specific model and tensor parallel size
-          # 2. Run curl commands against it
-          - |
-            if [[ "$$TPU_VERSION" == "tpu7x" ]]; then
-              MODEL="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
-              .buildkite/scripts/run_multihost.sh \
-                "vllm serve \${MODEL} \
-                  --port 8000 \
-                  --tensor-parallel-size 16 \
-                  --trust-remote-code \
-                  --max-model-len 1024 \
-                  --no-async-scheduling \
-                  --load-format=runai_streamer \
-                  --no-enable-prefix-caching" \
-                "curl http://localhost:8000/v1/completions \
+      # - label: "${TPU_VERSION:-tpu7x} E2E test for Ray-based multi-host"
+      #   key: "${TPU_VERSION:-tpu7x}_test_26"
+      #   soft_fail: true
+      #   agents:
+      #     queue: tpu_v7x_16_queue
+      #   env:
+      #     TPU_VERSION: "${TPU_VERSION:-tpu7x}"
+      #   commands:
+      #     # Correctness Test Example:
+      #     # 1. Start vLLM with specific model and tensor parallel size
+      #     # 2. Run curl commands against it
+      #     - |
+      #       if [[ "$$TPU_VERSION" == "tpu7x" ]]; then
+      #         MODEL="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
+      #         .buildkite/scripts/run_multihost.sh \
+      #           "vllm serve \${MODEL} \
+      #             --port 8000 \
+      #             --tensor-parallel-size 16 \
+      #             --trust-remote-code \
+      #             --max-model-len 1024 \
+      #             --no-async-scheduling \
+      #             --load-format=runai_streamer \
+      #             --no-enable-prefix-caching" \
+      #           "curl http://localhost:8000/v1/completions \
+      #             -X POST \
+      #             -H 'Content-Type: application/json' \
+      #             -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'
+      #           "
+      #       fi
+      - |
+        if [[ "$$TPU_VERSION" == "tpu7x" ]]; then
+          MODEL="gs://tpu-commons-ci/deepseek/r1"
+          .buildkite/scripts/run_multihost.sh '\
+            VLLM_ENGINE_READY_TIMEOUT_S=10800 \
+            MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8 \
+            MOE_REQUANTIZE_WEIGHT_DTYPE=fp4 \
+            MOE_REQUANTIZE_BLOCK_SIZE=512 \
+            FORCE_MOE_RANDOM_ROUTING=1 \
+            NEW_MODEL_DESIGN=1 \
+            MODEL_IMPL_TYPE=vllm \
+            vllm serve gs://tpu-commons-ci/deepseek/r1 \
+              --served-model-name deepseek-ai/DeepSeek-R1 \
+              --api-server-count=3 \
+              --max-model-len=9216 \
+              --max-num-batched-tokens=512 \
+              --max-num-seqs=160 \
+              --kv-cache-dtype=fp8 \
+              --no-enable-prefix-caching \
+              --gpu-memory-utilization=0.95 \
+              --tensor-parallel-size=16 \
+              --load-format=runai_streamer \
+              --async-scheduling \
+              --enable-expert-parallel \
+              --additional_config='\''{"compilation_sizes": [2560], "sharding": {"sharding_strategy": {"enable_dp_attention": true}}}'\'' \
+              --trust-remote-code \
+              --generation-config "/tmp/DeepSeek-R1-Configs/DeepSeek-R1" && \
+             curl http://localhost:8000/v1/completions \
                   -X POST \
-                  -H 'Content-Type: application/json' \
-                  -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'
-                "
-            fi
+                  -d '\''{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'\'' 
+                  -H "Content-Type: application/json" \
+              '
+        fi
