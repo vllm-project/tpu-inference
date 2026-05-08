@@ -67,6 +67,9 @@ def patch_mm_model(
     Returns:
         The patched model and the updated parameters and buffers.
     """
+    if extra_jit_args is None:
+        extra_jit_args = {}
+
     if not jitted_mm_module_keys:
         return model, params_and_buffers
 
@@ -113,7 +116,7 @@ def patch_mm_model(
 
         target_module_name = module_names[-1]
         # Resolve custom JIT arguments if provided, otherwise default to an empty dict.
-        module_extra_jit_args = (extra_jit_args or {}).get(module_key, {})
+        module_extra_jit_args = extra_jit_args.get(module_key, {})
 
         jitted_module = JittableModule(
             getattr(cur_module, target_module_name),
