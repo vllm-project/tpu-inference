@@ -315,6 +315,8 @@ def _ragged_paged_attention_kernel_loop(
     l_ref,  # [actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128],
     m_ref,  # [actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128],
     acc_ref,  # [actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, head_dim],
+    k_centroids_ref: jax.Array | None = None,
+    v_centroids_ref: jax.Array | None = None,
     *,
     use_causal_mask: bool = True,
     skip_kv_mask: bool = False,
@@ -842,6 +844,10 @@ def _ragged_paged_attention_kernel_loop(
             v = strided_load(kv_ref, start + 1, sz, step, dtype=kv_dtype)
             k = pltpu.bitcast(k, kv_dtype)
             v = pltpu.bitcast(v, kv_dtype)
+            if k_centroids_ref is not None:
+                k = k_centroids_ref[k.astype(jnp.uint32)]
+            if v_centroids_ref is not None:
+                v = v_centroids_ref[v.astype(jnp.uint32)]
             return k, v
 
         num_kv_per_load = kv_packing // 2
@@ -854,6 +860,15 @@ def _ragged_paged_attention_kernel_loop(
         v = k >> bitwidth
         k = pltpu.bitcast(k.astype(repack_ty), kv_dtype)
         v = pltpu.bitcast(v.astype(repack_ty), kv_dtype)
+
+        if k_centroids_ref is not None:
+            # We stored the indices disguised as float8_e4m3fn.
+            k_indices = pltpu.bitcast(k, jnp.uint8).astype(jnp.uint32)
+            k = k_centroids_ref[k_indices]
+        if v_centroids_ref is not None:
+            v_indices = pltpu.bitcast(v, jnp.uint8).astype(jnp.uint32)
+            v = v_centroids_ref[v_indices]
+
         return k, v
 
     def broadcast_minor(src, shape):
@@ -1229,6 +1244,8 @@ def dynamic_validate_inputs(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    k_centroids: jax.Array | None = None,
+    v_centroids: jax.Array | None = None,
     # Kernel optimization params.
     chunk_prefill_size: int | None = None,
     # Kernel tuning params.
@@ -1324,6 +1341,8 @@ def static_validate_inputs(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    k_centroids: jax.Array | None = None,
+    v_centroids: jax.Array | None = None,
     # Kernel optimization params.
     chunk_prefill_size: int | None = None,
     # Kernel tuning params.
@@ -1554,6 +1573,8 @@ def get_default_block_sizes(
         "q_scale",
         "k_scale",
         "v_scale",
+        "k_centroids",
+        "v_centroids",
         "chunk_prefill_size",
         "d_block_sizes",
         "p_block_sizes",
@@ -1588,6 +1609,8 @@ def ragged_paged_attention(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    k_centroids: jax.Array | None = None,
+    v_centroids: jax.Array | None = None,
     # Kernel optimization params.
     chunk_prefill_size: int | None = None,
     # Kernel tuning params for decode, prefill, and mixed cases.
@@ -1730,6 +1753,10 @@ def ragged_paged_attention(
             pl.BlockSpec(memory_space=pltpu.HBM),
             pl.BlockSpec(memory_space=pltpu.HBM),
         ]
+        if k_centroids is not None:
+            in_specs.append(pl.BlockSpec(memory_space=pltpu.HBM))
+        if v_centroids is not None:
+            in_specs.append(pl.BlockSpec(memory_space=pltpu.HBM))
 
         out_specs = [
             pl.BlockSpec(memory_space=pltpu.HBM),
@@ -1801,6 +1828,8 @@ def ragged_paged_attention(
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
+                k_centroids_ref=k_centroids,
+                v_centroids_ref=v_centroids,
                 static_q_len=static_q_len,
                 bq_sz=bq_sz,
                 bkv_sz=bkv_sz,
@@ -1846,19 +1875,36 @@ def ragged_paged_attention(
         if tpu_version >= 7:
             # jit to color the memory since the q, kv are just preprocessed.
             @jax.jit
-            def run(scalar_prefetches, q, kv, kv_cache):
-                return kernel(
+            def run(scalar_prefetches, q, kv, kv_cache, k_centroids,
+                    v_centroids):
+                args = [
                     *scalar_prefetches,
                     pltpu.with_memory_space_constraint(q, pltpu.HBM),
                     pltpu.with_memory_space_constraint(kv, pltpu.HBM),
                     pltpu.with_memory_space_constraint(kv_cache, pltpu.HBM),
-                )
+                ]
+                if k_centroids is not None:
+                    args.append(
+                        pltpu.with_memory_space_constraint(
+                            k_centroids, pltpu.HBM))
+                if v_centroids is not None:
+                    args.append(
+                        pltpu.with_memory_space_constraint(
+                            v_centroids, pltpu.HBM))
+                return kernel(*args)
         else:
             # TODO(b/494285697): v6 has issues with pinning aliased memory.
-            def run(scalar_prefetches, q, kv, kv_cache):
-                return kernel(*scalar_prefetches, q, kv, kv_cache)
+            def run(scalar_prefetches, q, kv, kv_cache, k_centroids,
+                    v_centroids):
+                args = [*scalar_prefetches, q, kv, kv_cache]
+                if k_centroids is not None:
+                    args.append(k_centroids)
+                if v_centroids is not None:
+                    args.append(v_centroids)
+                return kernel(*args)
 
-        return run(scalar_prefetches, q, kv, kv_cache)
+        return run(scalar_prefetches, q, kv, kv_cache, k_centroids,
+                   v_centroids)
 
     def _prepare_block_sizes(block_sizes, case):
         if block_sizes is None:

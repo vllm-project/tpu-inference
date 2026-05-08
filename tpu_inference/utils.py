@@ -44,6 +44,8 @@ _DTYPE_STR_ALIAS_TO_JAX_DTYPE = {
 
 def to_jax_dtype(dtype: str | jnp.dtype | torch.dtype) -> jnp.dtype:
     if isinstance(dtype, (str, type)):
+        if isinstance(dtype, str) and dtype.startswith("turboquant_"):
+            return jnp.float8_e4m3fn
         if isinstance(dtype, str) and (dict_dtype :=
                                        _DTYPE_STR_ALIAS_TO_JAX_DTYPE.get(
                                            dtype, None)):

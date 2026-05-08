@@ -303,7 +303,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         cache_dtype = self.cache_config.cache_dtype
         if cache_dtype == "auto":
             cache_dtype = self.dtype
-        self.kv_cache_dtype = to_torch_dtype(cache_dtype)
+        if cache_dtype.startswith("turboquant_"):
+            self.kv_cache_dtype = to_torch_dtype("float8_e4m3fn")
+        else:
+            self.kv_cache_dtype = to_torch_dtype(cache_dtype)
 
         self._pre_async_results: AsyncPreResults | None = None
         self._substitute_placeholder_token_fn = _substitute_placeholder_token
@@ -476,7 +479,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         cache_dtype = self.cache_config.cache_dtype
         if cache_dtype == "auto":
             cache_dtype = self.dtype
-        kv_cache_dtype = to_jax_dtype(cache_dtype)
+        if cache_dtype.startswith("turboquant_"):
+            kv_cache_dtype = jnp.float8_e4m3fn
+        else:
+            kv_cache_dtype = to_jax_dtype(cache_dtype)
         kv_packing = common_utils.get_dtype_packing(kv_cache_dtype)
         self.num_tokens_paddings = runner_utils.get_token_paddings(
             min_token_size=max(16, next_power_of_2(self.dp_size * kv_packing)),

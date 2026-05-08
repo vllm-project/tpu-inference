@@ -19,6 +19,8 @@ from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
+from tpu_inference.layers.common.quantization.turboquant import \
+    TurboQuantConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
@@ -126,8 +128,14 @@ class PallasAttentionBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         if alibi_slopes is not None:
             raise NotImplementedError("Alibi slopes is not supported.")
+
+        self.turboquant_config = None
         self.kv_cache_quantized_dtype = None
-        if kv_cache_dtype != "auto":
+        if kv_cache_dtype.startswith("turboquant_"):
+            self.turboquant_config = TurboQuantConfig(kv_cache_dtype,
+                                                      head_size)
+            self.kv_cache_quantized_dtype = jnp.float8_e4m3fn
+        elif kv_cache_dtype != "auto":
             self.kv_cache_quantized_dtype = utils.to_jax_dtype(kv_cache_dtype)
 
         if attn_type != AttentionType.DECODER:
@@ -209,6 +217,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             k_scale,
             v_scale,
             self.sliding_window,
+            self.turboquant_config,
         )
         vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
 
@@ -229,6 +238,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         "k_scale",
         "v_scale",
         "sliding_window",
+        "turboquant_config",
     ),
     donate_argnames=("kv_cache"),
 )
@@ -248,6 +258,7 @@ def _jax_attn_func(
     k_scale: float | None = None,
     v_scale: float | None = None,
     sliding_window: int | None = None,
+    turboquant_config: TurboQuantConfig | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
     # Get shapes from vllm
     q_len = q.shape[0]
@@ -257,6 +268,14 @@ def _jax_attn_func(
     q = q.reshape(q_len, num_heads, head_size)
     k = k.reshape(k_len, num_kv_heads, head_size)
     v = v.reshape(k_len, num_kv_heads, head_size)
+
+    k_centroids = None
+    v_centroids = None
+    if turboquant_config is not None:
+        q = turboquant_config.rotate_q(q)
+        k, v = turboquant_config.quantize_kv(k, v)
+        k_centroids = turboquant_config.k_centroids
+        v_centroids = turboquant_config.v_centroids
 
     new_kv_cache, outputs = attention(
         kv_cache,
@@ -271,7 +290,12 @@ def _jax_attn_func(
         v_scale=v_scale,
         sinks=sinks,
         attention_chunk_size=sliding_window,
+        k_centroids=k_centroids,
+        v_centroids=v_centroids,
     )
+
+    if turboquant_config is not None:
+        outputs = turboquant_config.rotate_o(outputs)
 
     # Convert the shape back to vLLM's convention
     assert outputs.shape[0] == q_len
