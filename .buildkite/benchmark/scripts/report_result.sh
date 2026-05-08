@@ -45,7 +45,44 @@ on_crash() {
 # and is not explicitly caught by an 'if' statement or '||' operator.
 trap 'on_crash ${LINENO} "$BASH_COMMAND"' ERR
 
-# Helper function to escape single quotes and handle defaults for SQL
+# ==============================================================================
+# Strict allowlist for metric column names read from RESULT_FILE.
+# ==============================================================================
+ALLOWED_METRIC_KEYS=(
+    "Throughput"
+    "MedianITL"
+    "MedianTPOT"
+    "MedianTTFT"
+    "MedianETEL"
+    "P99ITL"
+    "P99TPOT"
+    "P99TTFT"
+    "P99ETEL"
+    "OutputTokenThroughput"
+    "TotalTokenThroughput"
+    "AccuracyMetrics"
+)
+
+is_allowed_metric_key() {
+    local key="$1"
+    local allowed
+    for allowed in "${ALLOWED_METRIC_KEYS[@]}"; do
+        if [[ "$key" == "$allowed" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ==============================================================================
+# Validate that a value is a safe numeric literal before embedding it directly (without quoting) into SQL.
+# Rejects anything that is not a plain integer or decimal float.
+# ==============================================================================
+is_safe_numeric() {
+    local val="$1"
+    [[ "$val" =~ ^[0-9]+(\.[0-9]+)?$ ]]
+}
+
 prepare_sql_val() {
   local val="$1"
   local default="$2"
@@ -53,10 +90,32 @@ prepare_sql_val() {
     echo "$default"
     return
   fi
+
+  # Strip surrounding whitespace
+  val="${val#"${val%%[![:space:]]*}"}"
+  val="${val%"${val##*[![:space:]]}"}"
+
   val="${val#\'}"
   val="${val%\'}"
+  
   local escaped_val="${val//\'/\'\'}"
   echo "'$escaped_val'"
+}
+
+# ==============================================================================
+# Validate numeric-only environment variables before they are
+# interpolated bare (unquoted) into the SQL string.
+# ==============================================================================
+safe_numeric_or_null() {
+    local val="${1:-}"
+    if [[ -z "$val" ]]; then
+        echo "NULL"
+    elif is_safe_numeric "$val"; then
+        echo "$val"
+    else
+        echo "Error: Expected a numeric value but got: '$val'" >&2
+        exit 1
+    fi
 }
 
 if [ $# -ne 1 ]; then
@@ -197,25 +256,47 @@ if [[ -n "${GCP_DATABASE_ID:-}" && -n "${GCP_PROJECT_ID:-}" && -n "${GCP_INSTANC
   update_metrics=""
 
   if [ -f "$RESULT_FILE" ]; then
-    while IFS='=' read -r key value; do
-      if [[ -n "$key" && -n "$value" ]]; then
-        insert_cols+=", $key"
-        if [[ "$key" == "AccuracyMetrics" ]]; then
-          val_str="JSON '${value}'"
-        elif [[ "$value" =~ ^[0-9.]+$ ]]; then
-          val_str="${value}"
-        else
-          val_str="'${value//\'/\'\'}'"
-        fi
-        insert_vals+=", $val_str"
-        # Use excluded keyword to refer to the proposed insert value
-        update_metrics+=", ${key}=excluded.${key}"
-        FINAL_STATUS="COMPLETED"
-      fi
-    done < "$RESULT_FILE"
+      while IFS='=' read -r key value; do
+          # ------------------------------------------------------------------
+          # Validate key against strict allowlist.
+          # Keys that are not in the allowlist are silently skipped.
+          # ------------------------------------------------------------------
+          if [[ -z "$key" || -z "$value" ]]; then
+              continue
+          fi
+
+          if ! is_allowed_metric_key "$key"; then
+              echo "Warning: Skipping unrecognized metric key '$key' (not in allowlist)." >&2
+              continue
+          fi
+
+          # ------------------------------------------------------------------
+          # Validate value types before SQL embedding.
+          # AccuracyMetrics is kept as a JSON literal; all other metric values
+          # must be strictly numeric — any non-numeric value aborts the script.
+          # ------------------------------------------------------------------
+          if [[ "$key" == "AccuracyMetrics" ]]; then
+              val_str="JSON '${value}'"
+          elif is_safe_numeric "$value"; then
+              val_str="${value}"
+          else
+              echo "Error: Non-numeric value for metric key '$key': '$value'" >&2
+              exit 1
+          fi
+
+          insert_cols+=", $key"
+          insert_vals+=", $val_str"
+          # Use excluded keyword to refer to the proposed insert value
+          update_metrics+=", ${key}=excluded.${key}"
+          FINAL_STATUS="COMPLETED"
+      done < "$RESULT_FILE"
   fi
 
-  # Prepare Base SQL Values
+  # ------------------------------------------------------------------
+  # All string variables passed into SQL go through the hardened prepare_sql_val (backslash + single-quote
+  # escaping, length cap).
+  # Numeric variables go through safe_numeric_or_null which rejects anything that is not a plain integer or decimal float.
+  # ------------------------------------------------------------------
   SQL_ADDITIONAL_CONFIG=$(prepare_sql_val "${ADDITIONAL_CONFIG:-}" "'{}'")
   SQL_EXTRA_ARGS=$(prepare_sql_val "${EXTRA_ARGS:-}" "''")
   SQL_EXTRA_ENVS=$(prepare_sql_val "${EXTRA_ENVS:-}" "''")
@@ -232,7 +313,17 @@ if [[ -n "${GCP_DATABASE_ID:-}" && -n "${GCP_PROJECT_ID:-}" && -n "${GCP_INSTANC
   SQL_MODELTAG=$(prepare_sql_val "${MODELTAG:-PROD}" "PROD")
   SQL_CONFIG=$(prepare_sql_val "${CASE_CONFIG_JSON:-}" "{}")
 
-  # Construct the atomic Upsert (Insert or Update) SQL statement
+  # Validate all bare numeric placeholders.
+  SQL_MAX_NUM_SEQS=$(safe_numeric_or_null "${MAX_NUM_SEQS:-}")
+  SQL_MAX_NUM_BATCHED_TOKENS=$(safe_numeric_or_null "${MAX_NUM_BATCHED_TOKENS:-}")
+  SQL_TENSOR_PARALLEL_SIZE=$(safe_numeric_or_null "${TENSOR_PARALLEL_SIZE:-}")
+  SQL_MAX_MODEL_LEN=$(safe_numeric_or_null "${MAX_MODEL_LEN:-}")
+  SQL_INPUT_LEN=$(safe_numeric_or_null "${INPUT_LEN:-}")
+  SQL_OUTPUT_LEN=$(safe_numeric_or_null "${OUTPUT_LEN:-}")
+  SQL_EXPECTED_ETEL=$(safe_numeric_or_null "${EXPECTED_ETEL:-3600000}")
+  SQL_NUM_PROMPTS=$(safe_numeric_or_null "${NUM_PROMPTS:-1000}")
+  SQL_PREFIX_LEN=$(safe_numeric_or_null "${PREFIX_LEN:-0}")
+
   SQL="INSERT INTO RunRecord (
       RecordId, Status, CreatedTime, LastUpdate, CreatedBy, JobReference, RunBy,
       Device, Model, RunType, CodeHash,
@@ -243,9 +334,9 @@ if [[ -n "${GCP_DATABASE_ID:-}" && -n "${GCP_PROJECT_ID:-}" && -n "${GCP_INSTANC
     ) VALUES (
       $SQL_RECORD_ID, $SQL_STATUS, PENDING_COMMIT_TIMESTAMP(), PENDING_COMMIT_TIMESTAMP(), $SQL_USER, $SQL_JOB_REFERENCE, $SQL_AGENT_NAME,
       $SQL_DEVICE, $SQL_MODEL, $SQL_RUN_TYPE, $SQL_CODE_HASH,
-      ${MAX_NUM_SEQS:-NULL}, ${MAX_NUM_BATCHED_TOKENS:-NULL}, ${TENSOR_PARALLEL_SIZE:-NULL}, ${MAX_MODEL_LEN:-NULL},
-      $SQL_DATASET, $INPUT_LEN, $OUTPUT_LEN,
-      ${EXPECTED_ETEL:-3600000}, ${NUM_PROMPTS:-1000}, $SQL_MODELTAG, ${PREFIX_LEN:-0},
+      $SQL_MAX_NUM_SEQS, $SQL_MAX_NUM_BATCHED_TOKENS, $SQL_TENSOR_PARALLEL_SIZE, $SQL_MAX_MODEL_LEN,
+      $SQL_DATASET, $SQL_INPUT_LEN, $SQL_OUTPUT_LEN,
+      $SQL_EXPECTED_ETEL, $SQL_NUM_PROMPTS, $SQL_MODELTAG, $SQL_PREFIX_LEN,
       $SQL_EXTRA_ENVS, $SQL_ADDITIONAL_CONFIG, $SQL_EXTRA_ARGS, 1, JSON r$SQL_CONFIG $insert_vals
     ) ON CONFLICT (RecordId) DO UPDATE SET
       Status = excluded.Status,
