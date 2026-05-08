@@ -456,12 +456,13 @@ class Gemma4Attention(JaxModule):
             raise NotImplementedError("Expect no shared layers")
 
         q_scale = k_scale = v_scale = None
-        if self.kv_cache_quantized_dtype:
-            # q_scale = self._q_scale
-            k_scale = self._k_scale
-            v_scale = self._v_scale
-            k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
-                               v_scale)
+        # Apply quantize_kv even if kv_cache_type is None or "auto",
+        # the intermediate clip+divide ops force k/v to have a layout that
+        # prevents issue in #2506
+        target_kv_dtype = self.kv_cache_quantized_dtype or k.dtype
+        k_scale = self._k_scale
+        v_scale = self._v_scale
+        k, v = quantize_kv(target_kv_dtype, k, v, k_scale, v_scale)
         new_kv_cache, outputs = attention(
             kv_cache,
             q,
