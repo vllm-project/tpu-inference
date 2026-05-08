@@ -170,7 +170,8 @@ def maybe_prepare_for_jit(kwargs: dict, vllm_model) -> dict:
     Specifically, convert "image_grid_thw", "video_grid_thw", and "grid_thw" to
     GridTHW instances, which are tuple subclasses that can be hashed in jax.jit.
     """
-    if not is_jittable_architecture(vllm_model):
+    is_qwen3_vl = type(vllm_model).__name__ == "Qwen3VLForConditionalGeneration"
+    if not (is_jittable_architecture(vllm_model) or is_qwen3_vl):
         return kwargs
 
     for k, v in kwargs.items():
