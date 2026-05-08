@@ -147,11 +147,12 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
         input_dtype = q_nope.dtype
 
         # Einsum selects 'n' as the batch axis and emits it as the major-most physical dimension.
-        q_nope = jnp.einsum("bnp,npl->nbl",
-                            q_nope,
-                            jax_view(layer.W_UK_T), # torch nn param
-                            preferred_element_type=jnp.float32)
-        scale = jax_view(layer.W_UK_T_scale) # torch nn param
+        q_nope = jnp.einsum(
+            "bnp,npl->nbl",
+            q_nope,
+            jax_view(layer.W_UK_T),  # torch nn param
+            preferred_element_type=jnp.float32)
+        scale = jax_view(layer.W_UK_T_scale)  # torch nn param
         # (1, N, L) -> (N, 1, L)
         scale = scale.reshape(scale.shape[1], 1, scale.shape[-1])
         q_nope = (q_nope * scale).astype(input_dtype)
@@ -195,7 +196,7 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             v_scale=v_scale,
             sm_scale=self.scale,
         )
-        
+
         # einsum selects 'n' as the major-most physical dimension again.
         outputs = outputs.reshape(self.num_heads, -1, self.kv_lora_rank)
         outputs = (jnp.einsum("nbl,nlv->bnv",

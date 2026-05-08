@@ -23,9 +23,8 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from tpu_inference.kernels.custom_calls.kernel import (pin_vmem_custom_call,
-                                                       xpose_pipeline,
-                                                       prev_closest_divisor)
+from tpu_inference.kernels.custom_calls.kernel import (prev_closest_divisor,
+                                                       xpose_pipeline)
 
 
 def cdiv_on_kv_packing(a, kv_packing):
@@ -1389,13 +1388,13 @@ def prepare_outputs(
     actual_head_dim: int,
 ):
     # Physical transpose: (T, N, D) -> (N, T, D), pipelined over T
-    out = xpose_pipeline(out,
-                         transpose_axes=(1, 0, 2),
-                         # Tile to maximum of 160 (multi host bsz) 
-                         # or nearest clean divisor of the number of tokens.
-                         n_tile=min(160, prev_closest_divisor(
-                                    out.shape[0], 160)),
-                         m_tile=64)[0]
+    out = xpose_pipeline(
+        out,
+        transpose_axes=(1, 0, 2),
+        # Tile to maximum of 160 (multi host bsz)
+        # or nearest clean divisor of the number of tokens.
+        n_tile=min(160, prev_closest_divisor(out.shape[0], 160)),
+        m_tile=64)[0]
     return out[:actual_num_q_heads, :, :actual_head_dim]
 
 
@@ -1553,8 +1552,6 @@ def mla_ragged_paged_attention(
     _, page_size_per_kv_packing, kv_packing, _ = cache_kv.shape
     page_size = page_size_per_kv_packing * kv_packing
     _, num_q_heads, _ = ql_nope.shape
-    q_packing = get_dtype_packing(ql_nope.dtype)
-    num_q_heads_per_q_packing = num_q_heads // q_packing
     max_num_seqs = kv_lens.shape[0]
     num_page_indices = page_indices.shape[0]
     assert num_page_indices % max_num_seqs == 0
