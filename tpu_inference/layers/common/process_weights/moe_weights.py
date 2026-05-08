@@ -237,6 +237,12 @@ def process_moe_weights(
 
     num_experts, hidden_size, intermediate_size = w2_weight.shape
 
+    # Cast to BF16 for structural transformations to avoid XLA layout issues
+    # with FP8. We will cast back to the original target_dtype at the very end.
+    target_dtype = w13_weight.dtype
+    w13_weight = w13_weight.astype(jnp.bfloat16)
+    w2_weight = w2_weight.astype(jnp.bfloat16)
+
     if w13_interleave:
         w1_weight = w13_weight[:, ::2, :]
         w3_weight = w13_weight[:, 1::2, :]
@@ -411,11 +417,13 @@ def process_moe_weights(
                 "process_moe_weights is not yet implemented for megablox gmm backend"
             )
 
+    # Return weights in the target dtype (e.g. FP8). Structural transformations
+    # were performed in BF16 to avoid XLA layout issues.
     return FusedMoEWeights(
-        w13_weight=w13_weight,
+        w13_weight=w13_weight.astype(target_dtype),
         w13_weight_scale=w13_weight_scale,
         w13_bias=w13_bias,
-        w2_weight=w2_weight,
+        w2_weight=w2_weight.astype(target_dtype),
         w2_weight_scale=w2_weight_scale,
         w2_bias=w2_bias,
     )
@@ -497,6 +505,12 @@ def shard_moe_weights(
         if (weight := getattr(weights, key, None)) is not None:
             layout = getattr(weight_layouts, key)
             sharding = getattr(weight_shardings, key)
+
+            # Disable layout constraint for FP8 tensors as it can trigger
+            # XLA layout emitter bugs during backbone compilation.
+            if hasattr(weight, "dtype") and weight.dtype == jnp.float8_e4m3fn:
+                layout = None
+
             weight = general_device_put(weight, sharding, layout=layout)
             setattr(weights, key, weight)
     return weights

@@ -13,6 +13,8 @@ from flax import nnx
 from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from qwix._src import flax_util
+from qwix._src.core import numerics
 from qwix._src.core.qarray import QArray
 from qwix._src.providers import ptq
 
@@ -26,6 +28,32 @@ from tpu_inference.logger import init_logger
 from tpu_inference.runner.kv_cache import (DEFAULT_KV_CACHE_DTYPE,
                                            create_kv_caches)
 from tpu_inference.utils import device_array
+
+
+# Monkey-patch Qwix to allow "quantizing" already-quantized FP8 weights.
+# This prevents ValueErrors during einsum interception.
+def should_quantize_patch(dtype: jax.typing.DTypeLike) -> bool:
+    return jnp.dtype(dtype) in [jnp.bfloat16, jnp.float32, jnp.float8_e4m3fn]
+
+
+ptq.should_quantize = should_quantize_patch
+numerics.should_quantize = should_quantize_patch
+
+original_update_boxed = flax_util.update_boxed
+
+
+def update_boxed_patch(boxed, **kwargs):
+    # If the target 'boxed' object is actually a WithAux, we need to handle it.
+    if isinstance(boxed, ptq.WithAux):
+        # If the inner part is a Variable, update that.
+        if isinstance(boxed.array, nnx.Variable):
+            return original_update_boxed(boxed.array, **kwargs)
+        # Otherwise, just return the value (it will be re-wrapped by WithAux map)
+        return kwargs.get("value")
+    return original_update_boxed(boxed, **kwargs)
+
+
+flax_util.update_boxed = update_boxed_patch
 
 logger = init_logger(__name__)
 
@@ -676,23 +704,6 @@ def manually_quantize_qwix_weight(name: str, weight: jax.Array,
 
     unboxed = ptq.WithAux(ptq.qarray.quantize(weight, how_to_quantize),
                           how_to_quantize)
-
-    # The following code is about replacing the saved param with WithAux, with
-    # correct metadata. This part is copied from ptq.create_quantized_param
-    # but made safer for cases where the attribute does not exist yet (e.g. Gemma4 MoE fusion).
-    try:
-        from qwix._src import flax_util
-        module = flax_util.get_current_module()
-        if isinstance(module, nnx.Module) and hasattr(module, name):
-            param = getattr(module, name)
-            boxed = jax.tree.map(
-                lambda value: flax_util.update_boxed(param, value=value),
-                unboxed)
-            setattr(module, name, boxed)
-    except Exception:
-        # If we can't find the module or the attribute, just return the unboxed quantized weight.
-        # This happens during Gemma4 MoE weight loading where we are fusing weights.
-        pass
 
     return unboxed
 

@@ -41,20 +41,48 @@ class UnquantizedLinearMethod(QuantizeMethodBase,
 
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
         assert isinstance(layer, JaxEinsum)
-        jax.debug.print(
-            "UnquantizedLinearMethod.apply_jax: layer={p}, x.dtype={xd}, weight.dtype={wd}",
-            p=layer.prefix,
-            xd=x.dtype,
-            wd=layer.weight.value.dtype)
+
+        # Safely unwrap Qwix WithAux or QArray objects
+        weight_val = layer.weight.value
+
+        # Robustly drill down through Qwix wrappers (WithAux, QArray, etc)
+        # We must prioritize qvalue/array over dtype because QArray has a .dtype property.
+        for _ in range(10):
+            if hasattr(weight_val, "qvalue"):
+                weight_val = weight_val.qvalue
+            elif hasattr(weight_val, "array"):
+                weight_val = weight_val.array
+            elif hasattr(weight_val,
+                         "value") and not hasattr(weight_val, "dtype"):
+                weight_val = weight_val.value
+            else:
+                break
+
+        # Ensure we return a raw JAX array
+        if hasattr(weight_val, "dtype"):
+            weight_val = jnp.asarray(weight_val)
+
+            # Break the link to model parameters to bypass Qwix re-quantization
+            # interception. We use a low-level lax op (add 0) that Qwix doesn't
+            # typically hook. This prevents ValueErrors when weight_val is
+            # already FP8.
+            weight_val = jax.lax.add(weight_val,
+                                     jnp.zeros((), dtype=weight_val.dtype))
+
+        weight_dtype = weight_val.dtype
 
         with jax.named_scope(layer._get_name()):
             if self.linear_config.fuse_matmuls:
-                out = self._apply_fused(
-                    x.astype(layer.weight.value.dtype),
-                    layer.weight.value,
-                    layer.bias.value.astype(layer.weight.value.dtype)
-                    if layer.bias else None,
-                    einsum_str=layer.einsum_str)
+                # Perform downcast to FP8 at the very last moment
+                w_fp8 = jax.lax.convert_element_type(
+                    weight_val, jnp.float8_e4m3fn
+                ) if weight_dtype == jnp.float8_e4m3fn else weight_val
+
+                out = self._apply_fused(x.astype(w_fp8.dtype),
+                                        w_fp8,
+                                        layer.bias.value.astype(w_fp8.dtype)
+                                        if layer.bias else None,
+                                        einsum_str=layer.einsum_str)
             else:
                 raise NotImplementedError(
                     "Non-fused matmuls not implemented yet.")

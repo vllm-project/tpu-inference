@@ -57,11 +57,23 @@ class UnquantizedLinearMethod:
         Returns:
             Output array of shape [..., total_output_dim].
         """
+        # If weight is already FP8, Qwix's einsum interception will crash
+        # trying to re-quantize it. We cast to BF16 to allow Qwix to handle
+        # it normally.
+        if weight_jax.dtype == jnp.float8_e4m3fn:
+            weight_jax = weight_jax.astype(jnp.bfloat16)
+
         # Ensure input and weight dtypes match to avoid JAX TypePromotionErrors.
         x_jax = x_jax.astype(weight_jax.dtype)
         outs = jnp.einsum(einsum_str, x_jax, weight_jax)
+
+        # Cast to high precision before complex slicing/concatenation to avoid
+        # XLA layout issues with FP8 reshapes on TPU.
+        # This also preserves accumulation precision.
+        outs = outs.astype(jnp.bfloat16)
+
         if bias_jax is not None:
-            outs += bias_jax
+            outs += bias_jax.astype(jnp.bfloat16)
 
         outs = slice_sharded_tensor_for_concatenation(
             outs, self.linear_config.output_sizes, self.linear_config.n_shards)
@@ -88,11 +100,17 @@ class UnquantizedLinearMethod:
         """
         outs = []
         for i, weight_jax in enumerate(weights):
-            out = jnp.einsum("...n,pn->...p", x_jax, weight_jax)
-            if bias_jax is not None:
-                out += bias_jax[i]
+            # Safe upcast for Qwix compatibility
+            w_in = weight_jax.astype(
+                jnp.bfloat16) if weight_jax.dtype == jnp.float8_e4m3fn \
+                else weight_jax
 
-            outs.append(out)
+            out = jnp.einsum("...n,pn->...p", x_jax.astype(w_in.dtype), w_in)
+
+            if bias_jax is not None:
+                out += bias_jax[i].astype(out.dtype)
+
+            outs.append(out.astype(jnp.bfloat16))
         out = jnp.concatenate(outs, axis=-1)
         return out
 

@@ -725,6 +725,7 @@ class MMMUProDataset(BenchmarkDataset):
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
         output_len: Optional[int] = None,
+        chat_template_system_prompt: Optional[str] = None,
         **kwargs,
     ) -> list:
         samples: list = []
@@ -736,7 +737,15 @@ class MMMUProDataset(BenchmarkDataset):
 
             # Build message content: images first, then question text.
             content: list = mm_content
-            content.append({"type": "text", "text": question_text})
+
+            # Append the system prompt directly to the user's text block
+            # because Gemma chat templates typically do not support a "system" role.
+            final_text = question_text
+            if chat_template_system_prompt:
+                final_text = f"{chat_template_system_prompt}\n\n{question_text}"
+
+            content.append({"type": "text", "text": final_text})
+
             messages = [{
                 "role": "user",
                 "content": content,

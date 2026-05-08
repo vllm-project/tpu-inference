@@ -35,6 +35,9 @@ def main():
                         default="standard (10 options)")
     parser.add_argument("--output-len", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--chat-template-system-prompt",
+                        type=str,
+                        default=None)
     args = parser.parse_args()
 
     # 1. Initialize the LLM engine
@@ -42,7 +45,8 @@ def main():
     # We filter out the custom args we added above
     engine_args_dict = vars(args).copy()
     custom_args = [
-        "num_prompts", "mmmu_pro_subset", "output_len", "temperature"
+        "num_prompts", "mmmu_pro_subset", "output_len", "temperature",
+        "chat_template_system_prompt"
     ]
     for arg in custom_args:
         engine_args_dict.pop(arg, None)
@@ -66,6 +70,7 @@ def main():
         tokenizer=tokenizer,
         num_requests=args.num_prompts,
         output_len=args.output_len,
+        chat_template_system_prompt=args.chat_template_system_prompt,
     )
 
     # 3. Prepare inputs and perform generation

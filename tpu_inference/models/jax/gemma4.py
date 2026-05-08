@@ -88,27 +88,81 @@ class Gemma4MoEMethod(UnquantizedFusedMoEMethod):
             FusedMoEWeights
 
         def unwrap(x):
-            # Robust check for QArray to handle different import paths or abstract objects
-            if hasattr(x, "qvalue") and hasattr(x, "scale"):
-                s = x.scale
-                # If scale is an NNX Variable, extract its value
-                if hasattr(s, "value"):
-                    s = s.value
-                return x.qvalue, s
-            return x, None
+            # Robustly drill down through Qwix wrappers (WithAux, QArray, etc)
+            curr = x
+            scale = None
+            for _ in range(10):
+                # Check for scale if it's a QArray or WithAux
+                if hasattr(curr, "scale"):
+                    scale = curr.scale
+                    if hasattr(scale, "value"):
+                        scale = scale.value
+
+                if hasattr(curr, "qvalue"):
+                    curr = curr.qvalue
+                elif hasattr(curr, "array"):
+                    curr = curr.array
+                elif hasattr(curr, "value") and not hasattr(curr, "dtype"):
+                    curr = curr.value
+                else:
+                    break
+
+            # Ensure we return a raw JAX array for the weight values
+            if hasattr(curr, "dtype"):
+                curr = jnp.asarray(curr)
+                # Break the link to model parameters to bypass Qwix re-quantization.
+                curr = jax.lax.add(curr, jnp.zeros((), dtype=curr.dtype))
+
+            # Robustly unwrap the scale as well if it's still boxed
+            if scale is not None:
+                for _ in range(5):
+                    if hasattr(scale, "qvalue"):
+                        scale = scale.qvalue
+                    elif hasattr(scale, "array"):
+                        scale = scale.array
+                    elif hasattr(scale,
+                                 "value") and not hasattr(scale, "dtype"):
+                        scale = scale.value
+                    else:
+                        break
+                if hasattr(scale, "dtype"):
+                    scale = jnp.asarray(scale).astype(jnp.float32)
+                    # Break the link to model parameters to bypass Qwix re-quantization.
+                    scale = jax.lax.add(scale, jnp.zeros((),
+                                                         dtype=scale.dtype))
+
+                # Ensure scales are 4D [E, 1, 1, C] for Pallas GMM kernel
+                scale = jnp.squeeze(scale)
+                if scale.ndim == 1:
+                    scale = scale[None, None, None, :]
+                elif scale.ndim == 2:
+                    scale = scale[:, None, None, :]
+
+            return curr, scale
 
         if hasattr(layer, "kernel_gating_upproj_EDF"):
             # Path for Concrete model (after weights are loaded and fused)
             w13_val, w13_scale = unwrap(layer.kernel_gating_upproj_EDF.value)
             if w13_scale is None and hasattr(
                     layer, "kernel_gating_upproj_EDF_weight_scale"):
-                w13_scale = layer.kernel_gating_upproj_EDF_weight_scale.value
+                # Try to unwrap if the scale itself is boxed or WithAux
+                _, w13_scale = unwrap(
+                    layer.kernel_gating_upproj_EDF_weight_scale.value)
+                if w13_scale is None:
+                    w13_scale = jnp.asarray(
+                        layer.kernel_gating_upproj_EDF_weight_scale.value
+                    ).astype(jnp.float32)
+
             w2_val, w2_scale = unwrap(layer.kernel_down_proj_EFD.value)
             if w2_scale is None and hasattr(
                     layer, "kernel_down_proj_EFD_weight_scale"):
-                w2_scale = layer.kernel_down_proj_EFD_weight_scale.value
-            jax.debug.print("w13_scale is {}, shape {}", w13_scale is None,
-                            w13_scale.shape if w13_scale is not None else None)
+                # Try to unwrap if the scale itself is boxed or WithAux
+                _, w2_scale = unwrap(
+                    layer.kernel_down_proj_EFD_weight_scale.value)
+                if w2_scale is None:
+                    w2_scale = jnp.asarray(
+                        layer.kernel_down_proj_EFD_weight_scale.value).astype(
+                            jnp.float32)
         else:
             # Path for Abstract model (during Qwix tracing)
             # FusedMoEWeights expects fused W1/W3 (W13)
@@ -122,16 +176,18 @@ class Gemma4MoEMethod(UnquantizedFusedMoEMethod):
             w2_val, w2_scale = unwrap(w2)
 
         weights = FusedMoEWeights(
-            w13_weight=w13_val,
+            w13_weight=jax.lax.convert_element_type(w13_val, w13_val.dtype),
             w13_weight_scale=w13_scale,
             w13_bias=None,
-            w2_weight=w2_val,
+            w2_weight=jax.lax.convert_element_type(w2_val, w2_val.dtype),
             w2_weight_scale=w2_scale,
             w2_bias=None,
         )
-        return moe_apply(layer, x_TD, router_logits, weights,
-                         layer.moe_backend, layer.mesh,
-                         self.extra_backend_kwargs)
+        out = moe_apply(layer, x_TD, router_logits, weights, layer.moe_backend,
+                        layer.mesh, self.extra_backend_kwargs)
+        # Cast to high precision to avoid XLA layout issues during subsequent
+        # residual additions or sharded reshapes.
+        return out.astype(jnp.bfloat16)
 
 
 # MLP arch is the same as Gemma3
