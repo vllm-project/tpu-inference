@@ -625,7 +625,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
-
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         runner_type = self.model_config.runner_type
         if runner_type == "generate":
@@ -1181,15 +1180,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             
             routed_experts_dict = {}
             current_token_offset = 0
-            for req_id, num_tokens_scheduled in scheduler_output.num_scheduled_tokens.items():
+            for req_id in self.input_batch.req_ids[:num_reqs]:
+                req_state = self.requests[req_id]
+                num_tokens_scheduled = scheduler_output.num_scheduled_tokens[req_id]
                 start_idx = current_token_offset
                 end_idx = start_idx + num_tokens_scheduled
                 current_token_offset = end_idx
                 
-                # Slicing the correct part of the batch for this request
                 # Shape: (num_tokens_scheduled, num_layers, top_k)
                 step_experts = expert_indices_cpu[:, start_idx:end_idx, :].transpose(1, 0, 2)
-                routed_experts_dict[req_id] = step_experts
+                
+                if not hasattr(req_state, "_accumulated_experts"):
+                    req_state._accumulated_experts = []
+                req_state._accumulated_experts.append(step_experts)
+                
+                # Send the FULL accumulated history for every request in the batch
+                routed_experts_dict[req_id] = np.concatenate(
+                    req_state._accumulated_experts, axis=0)
                 
             model_runner_output.routed_experts_dict = routed_experts_dict
 
