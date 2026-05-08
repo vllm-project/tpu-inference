@@ -157,15 +157,15 @@ class TestUnquantizedJaxMoe:
         jax.clear_caches()
 
         w13, w2 = self._make_inputs()
-        with jax.set_mesh(mesh):
-            weights = process_unquantized_moe_weights(
-                moe_backend=MoEBackend.GMM_EP,
-                activation=MoEActivation.SILU,
-                w13_weight=w13,
-                w13_bias=None,
-                w2_weight=w2,
-                w2_bias=None,
-            )
+        weights = process_unquantized_moe_weights(
+            mesh=mesh,
+            moe_backend=MoEBackend.GMM_EP,
+            activation=MoEActivation.SILU,
+            w13_weight=w13,
+            w13_bias=None,
+            w2_weight=w2,
+            w2_bias=None,
+        )
 
         assert weights.w13_weight.dtype == expect_w_dtype
         assert weights.w2_weight.dtype == expect_w_dtype

@@ -1022,9 +1022,8 @@ def validate_inputs(
         num_lanes = pltpu.get_tpu_info().num_lanes
         if size_n % (2 * num_lanes) != 0:
             raise ValueError(
-                f"{size_n=} should be divisible by 2 * num_lanes ({num_lanes=}) when fuse_act is "
-                f"enabled since we need to split n dimension for gate and up. {rhs.shape=}"
-            )
+                f"{size_n=} should be divisible by 2 * num_lanes when fuse_act is "
+                "enabled since we need to split n dimension for gate and up.")
 
     return Dimensions(
         size_m=size_m,

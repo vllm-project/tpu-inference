@@ -133,7 +133,9 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             w13_val = jnp.concatenate([w_gate, w_up], axis=1)
             del w_gate, w_up
 
+            mesh = jax.sharding.get_mesh()
             weights = process_unquantized_moe_weights(
+                mesh=mesh,
                 moe_backend=layer.moe_backend,
                 activation=layer.activation,
                 w13_weight=w13_val,
@@ -144,7 +146,7 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
 
             sharded_weights = shard_moe_weights(weights,
                                                 moe_backend=layer.moe_backend,
-                                                mesh=jax.sharding.get_mesh())
+                                                mesh=mesh)
 
             layer.kernel_gating_upproj_EDF = nnx.Param(
                 sharded_weights.w13_weight)

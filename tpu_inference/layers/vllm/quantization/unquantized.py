@@ -342,7 +342,8 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         else:
             w13_bias = w2_bias = None
 
-        weights = process_unquantized_moe_weights(moe_backend=self.moe_backend,
+        weights = process_unquantized_moe_weights(mesh=self.mesh,
+                                                  moe_backend=self.moe_backend,
                                                   activation=layer.activation,
                                                   w13_weight=w13_weight,
                                                   w13_bias=w13_bias,

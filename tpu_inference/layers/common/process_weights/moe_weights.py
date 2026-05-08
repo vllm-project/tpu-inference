@@ -677,7 +677,7 @@ def process_fp8_moe_weights(
                                   if requant_block_size_from_env else None)
 
         moe_logging_str = (
-            f"[MoE requantization]: re-quantizing MoE weights to "
+            "[MoE requantization]: re-quantizing MoE weights to "
             f"{desired_quant_dtype}")
         if requant_block_size is not None:
             moe_logging_str += f" with block size {requant_block_size}"
@@ -714,9 +714,10 @@ def process_fp8_moe_weights(
     )
 
 
-@jax.jit(static_argnames=('activation', 'moe_backend'))
+@jax.jit(static_argnames=('mesh', 'activation', 'moe_backend'))
 def process_unquantized_moe_weights(
     *,
+    mesh: Mesh,
     moe_backend: MoEBackend,
     activation: MoEActivation,
     w13_weight: jax.Array,
@@ -738,7 +739,7 @@ def process_unquantized_moe_weights(
             requant_block_size = (int(requant_block_size_from_env)
                                   if requant_block_size_from_env else None)
         moe_logging_str = (
-            f"[MoE requantization]: re-quantizing MoE weights to "
+            "[MoE requantization]: re-quantizing MoE weights to "
             f"{desired_quant_dtype}")
         if requant_block_size is not None:
             moe_logging_str += f" with block size {requant_block_size}"
@@ -767,9 +768,7 @@ def process_unquantized_moe_weights(
         )
 
     w13_interleave = activation == MoEActivation.SWIGLUOAI
-    # Inside jax.jit only the abstract mesh is accessible; that's enough since
-    # get_mesh_shape_product only needs axis sizes.
-    w13_reorder_size = get_mesh_shape_product(jax.sharding.get_abstract_mesh(),
+    w13_reorder_size = get_mesh_shape_product(mesh,
                                               ShardingAxisName.MLP_TENSOR)
 
     return process_moe_weights(
