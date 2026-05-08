@@ -60,7 +60,6 @@ from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
-from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
@@ -577,6 +576,33 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.mesh,
             )
 
+            # Only pre-warm torchax for pooling tasks to prevent JIT during inference
+            # while avoiding unnecessary overhead for standard generative models.
+            if self.is_pooling_model:
+                import torchax
+                from torchax.interop import torch_view
+
+                h_size = self.model_config.get_hidden_size()
+                # Use the actual model mesh and ATTN_DATA axis for sharding alignment
+                pooling_sharding = NamedSharding(
+                    self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+
+                logger.info(
+                    f"Pre-warming StepPooler for shapes: {self.num_tokens_paddings}"
+                )
+                with torchax.default_env():
+                    for max_tokens in self.num_tokens_paddings:
+                        # Create a dummy JAX array with exact shape and sharding metadata
+                        dummy_jax = jnp.zeros((max_tokens, h_size),
+                                              dtype=jnp.bfloat16)
+                        # Shard the array to match real-time hidden_states
+                        dummy_jax = jax.device_put(dummy_jax, pooling_sharding)
+
+                        # Trigger the casting and host-transfer kernels
+                        # Using non_blocking=False to ensure AOT compilation completes during load
+                        _ = torch_view(dummy_jax).to('cpu', non_blocking=False)
+                logger.debug("Universal StepPooler pre-warming successful.")
+
         self.model_fn = model.model_fn
         self.compute_logits_fn = model.compute_logits_fn
         self.pooler_fn = model.pooler_fn
@@ -904,43 +930,47 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 hidden_states.expert_indices = expert_indices
                 return hidden_states
 
-            if self.is_pooling_model:
-                seq_lens_view = self.device_buffer.get_view(
-                    (self.max_num_reqs, ), key="seq_lens")
-                seq_lens = seq_lens_view[:self.input_batch.num_reqs]
-                pooling_metadata = self.input_batch.get_pooling_metadata()
+        if self.is_pooling_model:
+            num_reqs = self.input_batch.num_reqs
 
-                # Extract actual scheduled token counts for the current step
-                num_scheduled_tokens = np.array([
-                    scheduler_output.num_scheduled_tokens[req_id]
-                    for req_id in self.input_batch.req_ids
-                ],
-                                                dtype=np.int32)
+            # Retrieve sequence lengths
+            seq_lens_view = self.device_buffer.get_view((self.max_num_reqs, ),
+                                                        key="seq_lens")
+            seq_lens = seq_lens_view[:num_reqs]
 
-                pooler_fn: PoolerFunc = self.pooler_fn
-                pooler_output = pooler_fn(
-                    hidden_states,
-                    pooling_metadata,
-                    seq_lens,
-                    num_scheduled_tokens,
-                )
+            pooling_metadata = self.input_batch.get_pooling_metadata()
 
-                return ModelRunnerOutput(
-                    req_ids=self.input_batch.req_ids,
-                    req_id_to_index=self.input_batch.req_id_to_index,
-                    sampled_token_ids=[],
-                    logprobs=None,
-                    prompt_logprobs_dict={},
-                    pooler_output=pooler_output,
-                )
+            # Extract scheduled token counts for the current chunk
+            num_scheduled_tokens = np.array([
+                scheduler_output.num_scheduled_tokens[req_id]
+                for req_id in self.input_batch.req_ids[:num_reqs]
+            ],
+                                            dtype=np.int32)
 
-            hidden_states = self._select_from_array_fn(hidden_states,
-                                                       logits_indices)
-            logits = self.compute_logits_fn(
-                self.state,
+            # Call the pooler with the decoupled interface
+            pooler_output = self.pooler_fn(
                 hidden_states,
-                lora_metadata,
+                pooling_metadata,
+                seq_lens,
+                num_scheduled_tokens,
             )
+
+            return ModelRunnerOutput(
+                req_ids=self.input_batch.req_ids,
+                req_id_to_index=self.input_batch.req_id_to_index,
+                sampled_token_ids=[],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=pooler_output,
+            )
+
+        hidden_states = self._select_from_array_fn(hidden_states,
+                                                   logits_indices)
+        logits = self.compute_logits_fn(
+            self.state,
+            hidden_states,
+            lora_metadata,
+        )
 
         self.execute_model_state = ExecuteModelState(
             scheduler_output=scheduler_output,
