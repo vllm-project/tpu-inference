@@ -43,11 +43,23 @@ def run_test(model_name, expected_value, more_args=None):
     if more_args is not None:
         model_args = "{},{}".format(model_args, more_args)
 
+    # Gemma-4 -it variants require chat-template formatting. Without it,
+    # raw prompts skip BOS (per vllm PR #39842) and the model produces
+    # garbage tokens. Detected experimentally on torchax (build #359).
+    apply_chat_template = model_name.startswith("google/gemma-4")
+
+    extra_kwargs = {}
+    if apply_chat_template:
+        extra_kwargs["apply_chat_template"] = True
+        extra_kwargs["fewshot_as_multiturn"] = True
+        print(f"Enabling chat template for {model_name}.")
+
     results = lm_eval.simple_evaluate(
         model="vllm",
         model_args=model_args,
         tasks="gsm8k",
         batch_size="auto",
+        **extra_kwargs,
     )
 
     measured_value = results["results"][TASK][FILTER]

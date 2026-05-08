@@ -54,6 +54,7 @@ Wire via `maybe_apply_gemma4_patches(vllm_model)` from
 """
 
 import torch
+from torchax.interop import jax_view, torch_view
 
 from tpu_inference.logger import init_logger
 
@@ -117,12 +118,20 @@ def _patched_embed_input_ids(
         cur_tokens = inputs_embeds.size(0)
         ple_slice = per_layer_inputs[:cur_tokens]
         # Reshape: [N, num_layers, ple_dim] -> [N, num_layers*ple_dim]
-        packed = ple_slice.reshape(cur_tokens, -1).to(inputs_embeds.device)
+        packed = ple_slice.reshape(cur_tokens, -1)
+        # Avoid torch/torchax type mixing in torch.cat: bring `packed` into
+        # the same tensor world as `inputs_embeds`. inputs_embeds is a
+        # torchax tensor (since the runner handed jax arrays in); packed
+        # is whatever get_per_layer_inputs returned. Force both through
+        # torchax view.
+        if not packed.__class__.__module__.startswith("torchax"):
+            packed = torch_view(jax_view(packed))
         inputs_embeds = torch.cat([inputs_embeds, packed], dim=-1)
         logger.warning_once(
             "Gemma-4 patcher: packed PLE into inputs_embeds; "
-            "shape now %s (text=%d + ple_packed=%d).", str(inputs_embeds.shape),
-            text_config.hidden_size, packed.shape[-1])
+            "shape now %s (text=%d + ple_packed=%d).",
+            str(inputs_embeds.shape), text_config.hidden_size,
+            packed.shape[-1])
 
     return inputs_embeds
 

@@ -80,6 +80,32 @@ steps:
           bash -c 'MODEL_IMPL_TYPE=vllm SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python3 /workspace/tpu_inference/examples/offline_inference.py --model=google/gemma-4-31B-it --tensor-parallel-size=8 --max-model-len=4096 --max-num-batched-tokens=4096 --use-chat-template'
 
   # -----------------------------------------------------------------
+  # 31B Accuracy via torchax (validates lm_eval + chat template fix on
+  # a model with PLE off). If this passes ≥ 0.5, we know gemma-4 works
+  # on torchax for the non-PLE path; remaining work is E2B-specific PLE.
+  # -----------------------------------------------------------------
+  - label: "tpu6e Sanity: torchax 31B accuracy (MODEL_IMPL_TYPE=vllm, chat-template)"
+    key: tpu6e_gemma4_31B_torchax_accuracy
+    depends_on: tpu6e_gemma4_31B_torchax_sanity
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_8_queue
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu6e"
+      TEST_MODEL: google/gemma-4-31B-it
+      TENSOR_PARALLEL_SIZE: 8
+      MINIMUM_ACCURACY_THRESHOLD: 0.4
+      MODEL_IMPL_TYPE: vllm
+    commands:
+      - |
+        if pip install "transformers>=5.5.0" --dry-run | grep -q "Would install transformers-"; then
+          echo "transformers version too low; skipping"
+          exit 0
+        fi
+        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
+
+  # -----------------------------------------------------------------
   # E2B Unit test (Phase 1 step 1)
   # -----------------------------------------------------------------
   - label: "tpu6e E2B Unit + chat-template (MODEL_IMPL_TYPE=vllm, TP=1)"
