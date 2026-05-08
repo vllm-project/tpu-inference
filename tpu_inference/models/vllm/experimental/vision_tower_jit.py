@@ -48,6 +48,12 @@ def is_jittable_architecture(vllm_model) -> bool:
     return is_jittable
 
 
+def has_jittable_vision(vllm_model) -> bool:
+    """Check if the model has any JIT-compiled vision component (either whole or submodule)."""
+    from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import is_qwen3_vl
+    return is_jittable_architecture(vllm_model) or is_qwen3_vl(vllm_model)
+
+
 def maybe_jit_embed_multimodal_func(embed_multimodal_func_jax: Callable,
                                     vllm_model) -> Callable:
     """Conditionally wrap `embed_multimodal_func_jax` with jax.jit based on the VllmConfig.
@@ -119,7 +125,7 @@ def maybe_precompile_vision_encoder_fn(
     if embed_multimodal_fn is None:
         return None
 
-    if not is_jittable_architecture(vllm_model):
+    if not has_jittable_vision(vllm_model):
         return None
 
     # patch_input_dim is the flattened input feature dimension per raw patch:
@@ -170,8 +176,7 @@ def maybe_prepare_for_jit(kwargs: dict, vllm_model) -> dict:
     Specifically, convert "image_grid_thw", "video_grid_thw", and "grid_thw" to
     GridTHW instances, which are tuple subclasses that can be hashed in jax.jit.
     """
-    is_qwen3_vl = type(vllm_model).__name__ == "Qwen3VLForConditionalGeneration"
-    if not (is_jittable_architecture(vllm_model) or is_qwen3_vl):
+    if not has_jittable_vision(vllm_model):
         return kwargs
 
     for k, v in kwargs.items():
