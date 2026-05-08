@@ -336,6 +336,32 @@ def apply_gemma4_patches(vllm_model):
                 _patch_self_decoder_methods(sub)
         _coerce_scale_buffers_to_torchax(text_model)
 
+    orig_embed = getattr(vllm_model, "embed_input_ids", None)
+    orig_forward = getattr(vllm_model, "forward", None)
+    if orig_embed is None or orig_forward is None:
+        logger.warning(
+            "Gemma-4 patcher: vllm_model missing embed_input_ids/forward; "
+            "skipping patch.")
+        return
+
+    vllm_model.embed_input_ids = (
+        lambda input_ids, multimodal_embeddings=None, *, is_multimodal=None:
+        _patched_embed_input_ids(
+            vllm_model,
+            orig_embed,
+            input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        ))
+
+    vllm_model.forward = (lambda *args, **kwargs: _patched_forward(
+        vllm_model, orig_forward, *args, **kwargs))
+
+    logger.info(
+        "Gemma-4 patcher: applied PLE pack/unpack via inputs_embeds "
+        "(hidden_size_per_layer_input=%d, num_hidden_layers=%d).", ple_dim,
+        text_cfg.num_hidden_layers)
+
 
 def _patch_self_decoder_methods(self_decoder):
     """Replace Gemma4SelfDecoderLayers.get_per_layer_inputs and
@@ -402,32 +428,6 @@ def _patch_self_decoder_methods(self_decoder):
         "Gemma-4 patcher: monkey-patched self_decoder methods with float "
         "scales (embed_scale=%.6f, proj_scale=%.6f, input_scale=%.6f).",
         embed_scale, proj_scale, input_scale)
-
-    orig_embed = getattr(vllm_model, "embed_input_ids", None)
-    orig_forward = getattr(vllm_model, "forward", None)
-    if orig_embed is None or orig_forward is None:
-        logger.warning(
-            "Gemma-4 patcher: vllm_model missing embed_input_ids/forward; "
-            "skipping patch.")
-        return
-
-    vllm_model.embed_input_ids = (
-        lambda input_ids, multimodal_embeddings=None, *, is_multimodal=None:
-        _patched_embed_input_ids(
-            vllm_model,
-            orig_embed,
-            input_ids,
-            multimodal_embeddings=multimodal_embeddings,
-            is_multimodal=is_multimodal,
-        ))
-
-    vllm_model.forward = (lambda *args, **kwargs: _patched_forward(
-        vllm_model, orig_forward, *args, **kwargs))
-
-    logger.info(
-        "Gemma-4 patcher: applied PLE pack/unpack via inputs_embeds "
-        "(hidden_size_per_layer_input=%d, num_hidden_layers=%d).", ple_dim,
-        text_cfg.num_hidden_layers)
 
 
 def maybe_apply_gemma4_patches(vllm_model):
