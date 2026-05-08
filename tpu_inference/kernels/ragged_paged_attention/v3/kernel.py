@@ -80,6 +80,7 @@ def ref_ragged_paged_attention(
     skip_kv_mask: bool = False,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
+    mm_prefix_range: jax.Array | None = None,
     soft_cap: float | None = None,
     out_dtype: Any = None,
     mask_value: float | None = None,
@@ -192,6 +193,24 @@ def ref_ragged_paged_attention(
             mask = q_span >= kv_span
             if sliding_window is not None:
                 mask = jnp.logical_and(mask, q_span < kv_span + sliding_window)
+            if mm_prefix_range is not None:
+                max_mm_prefix_ranges = mm_prefix_range.shape[0] // (
+                    max_num_seqs * 2)
+                mm_mask = jnp.zeros(mask.shape, dtype=jnp.bool_)
+                for r in range(max_mm_prefix_ranges):
+                    start = mm_prefix_range[i * max_mm_prefix_ranges * 2 +
+                                            r * 2]
+                    end = mm_prefix_range[i * max_mm_prefix_ranges * 2 +
+                                          r * 2 + 1]
+                    is_valid = start != -1
+                    doc_mask_q = jnp.logical_and(start <= q_span, q_span
+                                                 <= end)
+                    doc_mask_kv = jnp.logical_and(start <= kv_span, kv_span
+                                                  <= end)
+                    current_mm_mask = jnp.logical_and(doc_mask_q, doc_mask_kv)
+                    mm_mask = jnp.logical_or(
+                        mm_mask, jnp.logical_and(is_valid, current_mm_mask))
+                mask = jnp.logical_or(mask, mm_mask)
             attn = jnp.where(mask, attn, mask_value)
         attn = jax.nn.softmax(attn, axis=-1).astype(v.dtype)
 
@@ -205,7 +224,9 @@ def ref_ragged_paged_attention(
     return result, kv_cache
 
 
-def get_smem_estimate_bytes(max_num_seqs, pages_per_seq):
+def get_smem_estimate_bytes(max_num_seqs,
+                            pages_per_seq,
+                            max_mm_prefix_ranges=0):
     total_bits = (
         # kv_lens_ref: i32[max_num_seqs]
         align_to(max_num_seqs, 128) * 32 +
@@ -220,7 +241,9 @@ def get_smem_estimate_bytes(max_num_seqs, pages_per_seq):
         # bo_ids_ref: i32[4]
         128 * 32 +
         # bkv_update_ids_ref: i32[6]
-        128 * 32)
+        128 * 32 +
+        # mm_prefix_range_ref: i32[max_num_seqs * max_mm_prefix_ranges * 2]
+        align_to(max_num_seqs * max_mm_prefix_ranges * 2, 128) * 32)
     return cdiv(total_bits, 8)
 
 
@@ -299,6 +322,7 @@ def _ragged_paged_attention_kernel_loop(
     sem_ids_ref,  # [3] (bq_sem_idx, bkv_sem_idx, bo_sem_idx)
     bo_ids_ref,  # [4] (bo_sem_0_seq_idx, bo_sem_1_seq_idx, bo_sem_0_bo_idx, bo_sem_1_bo_idx)
     bkv_update_ids_ref,  # [6] (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz)
+    mm_prefix_range_ref,  # [max_num_seqs * max_mm_prefix_ranges * 2]
     # Input
     q_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
     kv_hbm_ref,  # [max_num_tokens, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
@@ -397,6 +421,24 @@ def _ragged_paged_attention_kernel_loop(
         next_seq_start_bkv_idx = (
             jnp.maximum(next_kv_q_gap - sliding_window, 0) // bkv_sz)
 
+        if mm_prefix_range_ref is not None:
+            max_mm_prefix_ranges = mm_prefix_range_ref.shape[0] // (
+                max_num_seqs * 2)
+            for r in range(max_mm_prefix_ranges):
+                r_start = mm_prefix_range_ref[seq_idx * max_mm_prefix_ranges *
+                                              2 + r * 2]
+                cur_seq_start_bkv_idx = jnp.where(
+                    r_start != -1,
+                    jnp.minimum(cur_seq_start_bkv_idx, r_start // bkv_sz),
+                    cur_seq_start_bkv_idx)
+                nr_start = mm_prefix_range_ref[next_seq_idx *
+                                               max_mm_prefix_ranges * 2 +
+                                               r * 2]
+                next_seq_start_bkv_idx = jnp.where(
+                    nr_start != -1,
+                    jnp.minimum(next_seq_start_bkv_idx, nr_start // bkv_sz),
+                    next_seq_start_bkv_idx)
+
     def debug_print(msg, *args):
         if debug_mode:
             pl.debug_print(msg, *args)
@@ -489,6 +531,21 @@ def _ragged_paged_attention_kernel_loop(
 
         if sliding_window is not None:
             mask = mask_and(mask, q_span < k_span + sliding_window)
+
+        if mm_prefix_range_ref is not None and mask is not None:
+            max_mm_prefix_ranges = mm_prefix_range_ref.shape[0] // (
+                max_num_seqs * 2)
+            mm_mask = jnp.zeros(mask.shape, dtype=jnp.bool_)
+            for r in range(max_mm_prefix_ranges):
+                start = mm_prefix_range_ref[seq_idx * max_mm_prefix_ranges * 2
+                                            + r * 2].astype(int_ty)
+                end = mm_prefix_range_ref[seq_idx * max_mm_prefix_ranges * 2 +
+                                          r * 2 + 1].astype(int_ty)
+                doc_mask_q = jnp.logical_and(start <= q_span, q_span <= end)
+                doc_mask_kv = jnp.logical_and(start <= k_span, k_span <= end)
+                current_mm_mask = jnp.logical_and(doc_mask_q, doc_mask_kv)
+                mm_mask = jnp.logical_or(mm_mask, current_mm_mask)
+            mask = jnp.logical_or(mask, mm_mask)
 
         if mask is not None:
             s = jnp.where(mask, s, mask_value)
@@ -905,6 +962,18 @@ def _ragged_paged_attention_kernel_loop(
                 next_bq_start_bkv_idx = (jnp.maximum(
                     kv_q_gap +
                     (bq_idx + 1) * actual_bq_sz - sliding_window, 0) // bkv_sz)
+                if mm_prefix_range_ref is not None:
+                    max_mm_prefix_ranges = mm_prefix_range_ref.shape[0] // (
+                        max_num_seqs * 2)
+                    for r in range(max_mm_prefix_ranges):
+                        r_start = mm_prefix_range_ref[
+                            seq_idx * max_mm_prefix_ranges * 2 + r * 2]
+                        next_bq_start_bkv_idx = jnp.where(
+                            r_start != -1,
+                            jnp.minimum(next_bq_start_bkv_idx,
+                                        r_start // bkv_sz),
+                            next_bq_start_bkv_idx)
+
             next_bkv_idx = lax.select(is_last_bkv, next_bq_start_bkv_idx,
                                       next_bkv_idx)
             next_bkv_idx = lax.select(is_last_bq, next_seq_start_bkv_idx,
@@ -928,6 +997,16 @@ def _ragged_paged_attention_kernel_loop(
                 # Recalculate the start_bkv_idx based on the processed_q_len.
                 start_bkv_idx = (
                     jnp.maximum(processed_q_len - sliding_window, 0) // bkv_sz)
+                if mm_prefix_range_ref is not None:
+                    max_mm_prefix_ranges = mm_prefix_range_ref.shape[0] // (
+                        max_num_seqs * 2)
+                    for r in range(max_mm_prefix_ranges):
+                        r_start = mm_prefix_range_ref[
+                            seq_idx * max_mm_prefix_ranges * 2 + r * 2]
+                        start_bkv_idx = jnp.where(
+                            r_start != -1,
+                            jnp.minimum(start_bkv_idx, r_start // bkv_sz),
+                            start_bkv_idx)
             if use_causal_mask:
                 effective_kv_len = jnp.minimum(kv_len,
                                                processed_q_len + actual_bq_sz)
@@ -1223,6 +1302,7 @@ def dynamic_validate_inputs(
     skip_kv_mask: bool = False,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
+    mm_prefix_range: jax.Array | None = None,
     soft_cap: float | None = None,
     out_dtype: Any = None,
     mask_value: float | None = None,
@@ -1251,6 +1331,7 @@ def dynamic_validate_inputs(
         skip_kv_mask=skip_kv_mask,
         sm_scale=sm_scale,
         sliding_window=sliding_window,
+        mm_prefix_range=mm_prefix_range,
         soft_cap=soft_cap,
         out_dtype=out_dtype,
         mask_value=mask_value,
@@ -1318,6 +1399,7 @@ def static_validate_inputs(
     skip_kv_mask: bool = False,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
+    mm_prefix_range: jax.Array | None = None,
     soft_cap: float | None = None,
     out_dtype: Any = None,
     mask_value: float | None = None,
@@ -1431,7 +1513,15 @@ def static_validate_inputs(
             f"Expected {cu_q_lens.shape=} to be ({max_num_seqs + 1},).")
     if distribution.shape != (3, ):
         raise ValueError(f"Expected {distribution.shape=} to be (3,).")
-
+    if mm_prefix_range is not None:
+        if mm_prefix_range.dtype != jnp.int32:
+            raise ValueError(
+                f"Expected int32 dtype for {mm_prefix_range.dtype=}")
+        if (len(mm_prefix_range.shape) != 1
+                or mm_prefix_range.shape[0] % (max_num_seqs * 2) != 0):
+            raise ValueError(
+                f"Expected mm_prefix_range to be 1D with size a multiple of "
+                f"{max_num_seqs * 2}, got {mm_prefix_range.shape}")
     if page_size % kv_packing != 0:
         raise ValueError(f"{page_size=} must be divisible by {kv_packing=}.")
     if sliding_window is not None and sliding_window <= 0:
@@ -1582,6 +1672,7 @@ def ragged_paged_attention(
     skip_kv_mask: bool = False,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
+    mm_prefix_range: jax.Array | None = None,
     soft_cap: float | None = None,
     out_dtype: Any = None,
     mask_value: float | None = None,
@@ -1624,6 +1715,9 @@ def ragged_paged_attention(
       kv_len % bkv_csz == 0. Set to true can improve performance.
     sm_scale: the softmax scale which will be applied to the Q@K^T.
     sliding_window: the sliding window size for the attention.
+    mm_prefix_range: 1D array of shape (max_num_seqs * max_mm_prefix_ranges * 2)
+     containing padded [start, end] token index ranges of vision soft tokens. Used
+      to apply bidirectional square masking over vision tokens.
     soft_cap: the logit soft cap for the attention.
     out_dtype: the dtype of the output and the accumulator for matmul. Set
       lower for better performance, set higher for better accuracy. If None, it
@@ -1673,6 +1767,7 @@ def ragged_paged_attention(
         skip_kv_mask=skip_kv_mask,
         sm_scale=sm_scale,
         sliding_window=sliding_window,
+        mm_prefix_range=mm_prefix_range,
         soft_cap=soft_cap,
         out_dtype=out_dtype,
         mask_value=mask_value,
@@ -1784,6 +1879,7 @@ def ragged_paged_attention(
             init_sem_ids,
             init_bo_ids,
             init_bkv_update_ids,
+            mm_prefix_range,
         )
 
         scope_name = f"RPA{case.symbol}-p_{page_size}-bq_{bq_sz}_{bq_csz}-bkv_{bkv_sz}_{bkv_csz}"
@@ -1837,8 +1933,8 @@ def ragged_paged_attention(
                                      dtype=kv_cache.dtype),
             ],
             input_output_aliases={
-                7: 0,
-                9: 1
+                8 if mm_prefix_range is not None else 7: 0,
+                10 if mm_prefix_range is not None else 9: 1,
             },
             name=scope_name,
         )
