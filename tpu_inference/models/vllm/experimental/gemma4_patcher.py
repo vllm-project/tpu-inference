@@ -319,17 +319,22 @@ def apply_gemma4_patches(vllm_model):
     text_model = getattr(getattr(vllm_model, "language_model", None),
                          "model", None)
     if text_model is not None:
-        _coerce_scale_buffers_to_torchax(text_model)
-        # Walk into self_decoder / cross_decoder if present.
+        # IMPORTANT order:
+        # (1) Patch the self_decoder methods FIRST. Inside `_to_float`
+        #     we read tensor values via .item(), which requires the
+        #     buffers to still be regular torch.Tensors (not torchax).
+        #     If we converted buffers to torchax first, _to_float would
+        #     fail with "torchax Tensors can only do math within the
+        #     torchax environment".
+        # (2) THEN convert any buffers that vllm-tpu's path still
+        #     reads (Gemma4Model's registered buffer). The patched
+        #     methods on self_decoder don't read buffers anymore — they
+        #     use Python floats baked in via closure.
         for sub_name in ("self_decoder", "cross_decoder"):
             sub = getattr(text_model, sub_name, None)
             if sub is not None:
-                _coerce_scale_buffers_to_torchax(sub)
-                # Belt-and-suspenders: monkey-patch the methods that USE
-                # these scales so the multiplication uses Python-float
-                # scalars baked in at patch time. This avoids any
-                # late-binding of the attribute reference.
                 _patch_self_decoder_methods(sub)
+        _coerce_scale_buffers_to_torchax(text_model)
 
 
 def _patch_self_decoder_methods(self_decoder):
