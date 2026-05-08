@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: Qwen/Qwen3.5-9B
-# pipeline-type: multimodal
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen3.5-9B"
     key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-9B_UnitTest"

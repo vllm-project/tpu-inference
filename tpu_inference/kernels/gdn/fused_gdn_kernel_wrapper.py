@@ -57,12 +57,16 @@ def _dispatch_with_distribution(
     before it can decode), so masking is unnecessary on the decode path.
     """
     # ── Decode kernel → updates state in-place ──
+    # NOTE: pass `initial_state` through as-is. The kernels upcast to fp32
+    # on VMEM load for compute precision; HBM storage stays at the array's
+    # dtype. An `astype(jnp.float32)` here would materialize an fp32 copy
+    # of a bf16 state and undo the storage win before the kernel runs.
     o_d, state_1 = fused_decoding_gdn(
         q,
         k,
         v,
         g.astype(jnp.float32),
-        initial_state.astype(jnp.float32),
+        initial_state,
         state_indices,
         distribution,
         b,

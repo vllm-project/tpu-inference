@@ -56,7 +56,8 @@ def test_correctness_jax_uni_proc_executor(
     Compare the outputs of a model loaded from GCS via runai_model_streamer
     and a model loaded from Hugging Face. The outputs should be the same.
     These tests attempt to use tensor_parallel_size=1. The model is 16GB,
-    # and v6e has 32GB of HBM, so it will fit.
+    # and v6e has 32GB of HBM, so it will fit. This test uses the default 
+    HTTP GCS RunAI model streamer client.
     '''
     # TODO(amacaskill): Replace with GKE owned GCS bucket.
     gcs_model_name = "gs://vertex-model-garden-public-us/llama3/llama3-8b-hf"
@@ -68,6 +69,7 @@ def test_correctness_jax_uni_proc_executor(
     monkeypatch.setenv("RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS", "true")
     monkeypatch.setenv("CLOUD_STORAGE_EMULATOR_ENDPOINT",
                        "https://storage.googleapis.com")
+    monkeypatch.setenv("MODEL_IMPL_TYPE", "flax_nnx")
     gcs_llm = LLM(model=gcs_model_name,
                   load_format="runai_streamer",
                   max_model_len=128,
@@ -99,7 +101,8 @@ def test_correctness_torchax_uni_proc_executor(
 ):
     """
     Compare the outputs of a codegemma model loaded from GCS via runai_model_streamer
-    and a model loaded from Hugging Face. The outputs should be the same.
+    and a model loaded from Hugging Face. The outputs should be the same. This test
+    uses the GRPC GCS RunAI model streamer client by setting RUNAI_STREAMER_GCS_USE_GRPC.
     """
     # TODO(amacaskill): Replace with GKE owned GCS bucket.
     gcs_model_name = "gs://vertex-model-garden-public-us/codegemma/codegemma-2b"
@@ -111,6 +114,12 @@ def test_correctness_torchax_uni_proc_executor(
     monkeypatch.setenv("RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS", "true")
     monkeypatch.setenv("CLOUD_STORAGE_EMULATOR_ENDPOINT",
                        "https://storage.googleapis.com")
+    monkeypatch.setenv("MODEL_IMPL_TYPE", "vllm")
+    # All 3 of these env variables are needed to see the log that confirms gRPC
+    # is being used: 'GCS client initialized with gRPC transport.'
+    monkeypatch.setenv("RUNAI_STREAMER_GCS_USE_GRPC", "1")
+    monkeypatch.setenv("RUNAI_STREAMER_LOG_LEVEL", "DEBUG")
+    monkeypatch.setenv("RUNAI_STREAMER_LOG_TO_STDERR", "1")
 
     gcs_llm = LLM(model=gcs_model_name,
                   load_format="runai_streamer",
@@ -146,11 +155,12 @@ def test_correctness_torchax_ray_distributed_executor(
     runai_model_streamer, and a model loaded from
     Hugging Face, both using RayDistributedExecutor. The outputs should be the same.
     Note that these are run on the same node since a multi-node TPU setup would
-    require additional changes to the CI pipeline.
+    require additional changes to the CI pipeline. This test uses the default 
+    HTTP GCS RunAI model streamer client.
     """
     # TODO(amacaskill): Replace with GKE owned GCS bucket.
-    gcs_model_name = "gs://vertex-model-garden-public-us/llama3/llama3-8b-hf"
-    hf_model_name = "meta-llama/Meta-Llama-3-8B"
+    gcs_model_name = "gs://vertex-model-garden-public-us/codegemma/codegemma-2b"
+    hf_model_name = "google/codegemma-2b"
     prompt = "def fibonacci("
 
     # Set ENV variables so that runai_model_streamer uses anonymous GCS access.
@@ -158,6 +168,9 @@ def test_correctness_torchax_ray_distributed_executor(
     monkeypatch.setenv("RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS", "true")
     monkeypatch.setenv("CLOUD_STORAGE_EMULATOR_ENDPOINT",
                        "https://storage.googleapis.com")
+    monkeypatch.setenv("MODEL_IMPL_TYPE", "vllm")
+    monkeypatch.setenv("TPU_MULTIHOST_BACKEND", "ray")
+    monkeypatch.setenv("TPU_BACKEND_TYPE", "jax")
 
     gcs_llm = LLM(model=gcs_model_name,
                   load_format="runai_streamer",

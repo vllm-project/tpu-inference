@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: google/gemma-4-26B-A4B-it
-# pipeline-type: multimodal
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for google/gemma-4-26B-A4B-it"
     key: "${TPU_VERSION:-tpu6e}_google_gemma-4-26B-A4B-it_UnitTest"

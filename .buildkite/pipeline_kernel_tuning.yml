@@ -1,0 +1,91 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Dev pipeline for tpu-inference-kernel-tuning.
+# Demo/sample steps showing how to run custom tests on tpu7x.
+# Copy and adapt any step for your own experiments.
+#
+# HOW TO TRIGGER THIS PIPELINE
+# ─────────────────────────────
+# Option A — Buildkite UI:
+#   Go to https://buildkite.com/tpu-commons/tpu-inference-kernel-tuning
+#   Click "New Build", set branch to your branch, click "Create Build".
+#
+# Option B — Buildkite API (requires BUILDKITE_API_TOKEN in your env):
+#   curl -s -X POST \
+#     -H "Authorization: Bearer $BUILDKITE_API_TOKEN" \
+#     -H "Content-Type: application/json" \
+#     "https://api.buildkite.com/v2/organizations/tpu-commons/pipelines/tpu-inference-kernel-tuning/builds" \
+#     -d "{\"commit\": \"$(git rev-parse HEAD)\", \"branch\": \"$(git rev-parse --abbrev-ref HEAD)\", \"message\": \"my test\"}"
+#
+
+steps:
+
+  # -----------------------------------------------------------------
+  # Build Step
+  # -----------------------------------------------------------------
+  - label: ":docker: Build and Push Base Image (${TPU_VERSION:-tpu6e})"
+    key: ${TPU_VERSION:-tpu6e}_build_docker
+    agents:
+      queue: cpu_64_core 
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+    commands:
+      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+
+  # -----------------------------------------------------------------
+  # -----------------------------------------------------------------
+  - label: ":docker: Tuning Cases Generation and Pipeline Upload (${TPU_VERSION:-tpu6e})"
+    key: generate_tuning_cases_and_yml
+    depends_on: ${TPU_VERSION:-tpu6e}_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+    agents:
+      queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
+    commands:
+      - |
+        # remove the existing generated pipeline YAML in the temp dir on the host. 
+        rm -f "/tmp/kernel_tuning/generated_pipeline.yml"
+      - |
+        .buildkite/scripts/run_in_docker.sh bash -c "
+          if [ -z \"\${KERNEL_TUNING_RUN_ID}\" ] || [ -z \"\${KERNEL_TUNING_CASE_SET_ID}\" ]; then
+            echo \"Error: KERNEL_TUNING_RUN_ID or KERNEL_TUNING_CASE_SET_ID not set\"
+            exit 1
+          fi && \
+          pip install --upgrade google-cloud-spanner && \
+          pip install --upgrade google-api-core && \
+          pip install --upgrade google-auth && \
+          pip install --upgrade absl-py && \
+          echo \"tuning_kernel_name = \${KERNEL_TUNING_KERNEL_NAME}\" && \
+          echo \"case_set_desc = \${KERNEL_TUNING_CASE_SET_DESC}\" && \
+          echo \"case_set_id = \${KERNEL_TUNING_CASE_SET_ID}\" && \
+          echo \"run_id = \${KERNEL_TUNING_RUN_ID}\" && \
+          echo \"Python version: $(python --version)\" && \
+          python -m pip install --upgrade absl-py && \
+          python -m tools.kernel.tuner.v1.kernel_tuner_runner \
+          --kernel_tuner_name=\${KERNEL_TUNING_KERNEL_NAME} \
+          --case_set_desc=\${KERNEL_TUNING_CASE_SET_DESC} \
+          --generate_buildkite_pipeline=True \
+          --case_set_id=\${KERNEL_TUNING_CASE_SET_ID} \
+          --run_id=\${KERNEL_TUNING_RUN_ID} \
+          --tpu_version=\${TPU_VERSION} "
+      - |
+        # Upload the generated pipeline YAML from the temp dir on the host.
+        buildkite-agent artifact upload "/tmp/kernel_tuning/generated_pipeline.yml"
+        echo "Upload generated pipeline YAML to Buildkite artifacts with priority ${PRIORITY_KERNEL_TUNING}"
+        { 
+          echo "priority: ${PRIORITY_KERNEL_TUNING}"; 
+          cat /tmp/kernel_tuning/generated_pipeline.yml; 
+        } | buildkite-agent pipeline upload

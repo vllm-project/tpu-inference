@@ -14,6 +14,7 @@
 import jax.numpy as jnp
 import torch
 import torchax
+import vllm.model_executor.layers.attention.mla_attention as vllm_mla_attn
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 from torch.nn import Parameter
@@ -36,6 +37,19 @@ from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
 
 
+# Provides a no-op implementation for upstream MLA prefill backend.
+# This is used since upstream vllm has moved prefill backend ownership
+# to the MLAAttention __init__ method:
+# https://github.com/vllm-project/vllm/pull/41744.
+class DummyMLAPrefillBackend:
+
+    def __init__(self, **kwargs):
+        pass
+
+    def forward(self, *args, **kwargs):
+        pass
+
+
 class VllmMLAAttention(MLAAttention):
 
     def __init__(
@@ -56,6 +70,7 @@ class VllmMLAAttention(MLAAttention):
         **extra_impl_args,
     ):
         torch.nn.Module.__init__(self)
+        vllm_mla_attn.get_mla_prefill_backend = lambda config: DummyMLAPrefillBackend
         super().__init__(num_heads, scale, qk_nope_head_dim, qk_rope_head_dim,
                          v_head_dim, q_lora_rank, kv_lora_rank, kv_b_proj,
                          cache_config, quant_config, prefix, use_sparse,
@@ -167,6 +182,7 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        skip_topk: bool = False,
     ) -> None:
         torch.nn.Module.__init__(self)
 
@@ -190,8 +206,9 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         self.indexer = mla_modules.indexer
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
+        self.skip_topk = skip_topk
 
-        if self.indexer is not None:
+        if self.indexer is not None and not self.skip_topk:
             assert hasattr(self.indexer, "topk_tokens")
             self.topk_tokens = self.indexer.topk_tokens
             self.topk_indices_buffer = mla_modules.topk_indices_buffer

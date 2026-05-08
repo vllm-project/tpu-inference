@@ -506,14 +506,14 @@ def mla_attention(
         keyvalue_skh_sharding or P(ShardingAxisName.MLP_TENSOR, None),  # k
         keyvalue_skh_sharding
         or P(ShardingAxisName.MLP_TENSOR, None),  # k_rope
-        P(ShardingAxisName.MLP_TENSOR),  # kv_cache
+        P(ShardingAxisName.BATCH),  # kv_cache
         P(ShardingAxisName.ATTN_DATA),  # md.seq_lens
         P(ShardingAxisName.ATTN_DATA),  # md.page_indices_flat
         P(ShardingAxisName.ATTN_DATA),  # md.query_start_loc
         P(ShardingAxisName.ATTN_DATA),  # md.distribution
     )
     out_specs = (
-        P(ShardingAxisName.MLP_TENSOR),  # kv cache
+        P(ShardingAxisName.BATCH),  # kv cache
         attn_o_tnh_sharding
         or P(ShardingAxisName.MLP_TENSOR, None, None)  # attn output
     )

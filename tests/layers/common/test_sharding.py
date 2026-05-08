@@ -28,6 +28,7 @@ class TestShardingConfigManager(unittest.TestCase):
         vllm_config = MagicMock()
         vllm_config.parallel_config.tensor_parallel_size = 8
         vllm_config.parallel_config.data_parallel_size = 2
+        vllm_config.parallel_config.decode_context_parallel_size = 1
         vllm_config.model_config.use_mla = True
         vllm_config.model_config.get_total_num_kv_heads.return_value = 1
         vllm_config.speculative_config = None
@@ -48,6 +49,7 @@ class TestShardingConfigManager(unittest.TestCase):
         vllm_config = MagicMock()
         vllm_config.parallel_config.tensor_parallel_size = 8
         vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.decode_context_parallel_size = 1
         vllm_config.model_config.use_mla = True
         vllm_config.model_config.get_total_num_kv_heads.return_value = 1
         vllm_config.speculative_config = None
@@ -83,6 +85,7 @@ class TestShardingConfigManager(unittest.TestCase):
         vllm_config = MagicMock()
         vllm_config.parallel_config.tensor_parallel_size = 1
         vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.decode_context_parallel_size = 1
         vllm_config.model_config.use_mla = False
         vllm_config.model_config.get_total_num_kv_heads.return_value = 4
         vllm_config.speculative_config = None
@@ -118,6 +121,7 @@ class TestShardingConfigManager(unittest.TestCase):
         vllm_config = MagicMock()
         vllm_config.parallel_config.tensor_parallel_size = 8
         vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.decode_context_parallel_size = 1
         vllm_config.model_config.use_mla = False
         vllm_config.model_config.get_total_num_kv_heads.return_value = 4
         vllm_config.speculative_config = None
@@ -154,6 +158,7 @@ class TestShardingConfigManager(unittest.TestCase):
         vllm_config = MagicMock()
         vllm_config.parallel_config.tensor_parallel_size = 2
         vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.decode_context_parallel_size = 1
         vllm_config.model_config.use_mla = False
         vllm_config.model_config.get_total_num_kv_heads.return_value = 4
         vllm_config.speculative_config = None
@@ -190,6 +195,7 @@ class TestShardingConfigManager(unittest.TestCase):
         vllm_config = MagicMock()
         vllm_config.parallel_config.tensor_parallel_size = 4
         vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.decode_context_parallel_size = 1
         vllm_config.model_config.use_mla = False
         vllm_config.model_config.get_total_num_kv_heads.return_value = 4
         vllm_config.speculative_config = None
@@ -224,6 +230,7 @@ class TestShardingConfigManager(unittest.TestCase):
         vllm_config = MagicMock()
         vllm_config.parallel_config.tensor_parallel_size = 1
         vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.decode_context_parallel_size = 1
         vllm_config.model_config.use_mla = True
         vllm_config.speculative_config = None
 
@@ -242,6 +249,7 @@ class TestShardingConfigManager(unittest.TestCase):
         vllm_config = MagicMock()
         vllm_config.parallel_config.tensor_parallel_size = 8
         vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.decode_context_parallel_size = 1
         vllm_config.model_config.use_mla = True
         vllm_config.speculative_config = None
 
@@ -262,6 +270,7 @@ class TestShardingConfigManager(unittest.TestCase):
         vllm_config = MagicMock()
         vllm_config.parallel_config.tensor_parallel_size = 8
         vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.decode_context_parallel_size = 1
         vllm_config.model_config.use_mla = True
         vllm_config.speculative_config = None
 
@@ -282,6 +291,7 @@ class TestShardingConfigManager(unittest.TestCase):
         vllm_config = MagicMock()
         vllm_config.parallel_config.tensor_parallel_size = 8
         vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.decode_context_parallel_size = 1
         vllm_config.model_config.use_mla = True
         vllm_config.speculative_config = None
 
