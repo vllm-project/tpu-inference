@@ -368,8 +368,27 @@ def _patch_self_decoder_methods(self_decoder):
     project_per_layer_inputs with versions that bake the scale values in
     as Python float closures. This bypasses the buffer-vs-attribute issue
     entirely — Python scalar * torchax tensor always works.
+
+    Gemma4CrossDecoderLayers has a different structure (no config /
+    hidden_size_per_layer_input / per_layer_model_projection of the same
+    form). Guard against it.
     """
-    cfg = self_decoder.config
+    cfg = getattr(self_decoder, "config", None)
+    if cfg is None:
+        logger.info(
+            "Gemma-4 patcher: %s has no .config; skipping method patch.",
+            type(self_decoder).__name__)
+        return
+    if not hasattr(self_decoder, "hidden_size_per_layer_input"):
+        logger.info(
+            "Gemma-4 patcher: %s missing hidden_size_per_layer_input; "
+            "skipping method patch.", type(self_decoder).__name__)
+        return
+    if not hasattr(self_decoder, "per_layer_model_projection"):
+        logger.info(
+            "Gemma-4 patcher: %s missing per_layer_model_projection; "
+            "skipping method patch.", type(self_decoder).__name__)
+        return
     num_layers = cfg.num_hidden_layers
     ple_dim = self_decoder.hidden_size_per_layer_input
 
