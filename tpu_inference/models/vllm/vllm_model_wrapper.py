@@ -249,7 +249,8 @@ class VllmModelWrapper:
             # Hardcode "model.visual" for Qwen3-VL vision encoder JIT
             jitted_keys = list(envs.JITTED_MM_MODULE_KEYS)
             extra_jit_args = {}
-            maybe_update_qwen3_vl_patching_configs(self.model.vllm_model, jitted_keys, extra_jit_args)
+            maybe_update_qwen3_vl_patching_configs(self.model.vllm_model,
+                                                   jitted_keys, extra_jit_args)
 
             # NOTE: It patch mm models to be JITtable within some submodule.
             # Caution: the submodule params_and_buffers would be put into

@@ -118,9 +118,8 @@ def patch_mm_model(
         # Resolve custom JIT arguments if provided, otherwise default to an empty dict.
         module_extra_jit_args = extra_jit_args.get(module_key, {})
 
-        jitted_module = JittableModule(
-            getattr(cur_module, target_module_name),
-            extra_jit_args=module_extra_jit_args)
+        jitted_module = JittableModule(getattr(cur_module, target_module_name),
+                                       extra_jit_args=module_extra_jit_args)
         setattr(cur_module, target_module_name, jitted_module)
 
         # params_and_buffers is a dict. for each key with prefix of the module,
