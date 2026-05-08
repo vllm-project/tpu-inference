@@ -1,0 +1,125 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# google/gemma-4-E2B-it — Stage 1 bringup via torchax (vllm-native).
+# MODEL_IMPL_TYPE=vllm forces dispatch to the vllm pytorch impl, which
+# already supports E2B's PLE / KV-share / use_double_wide_mlp.
+# The JAX-native path (Stage 2) lifts the num_kv_shared_layers
+# assertion and implements those features in tpu_inference/models/jax/gemma4.py.
+steps:
+  - label: "${TPU_VERSION:-tpu6e} Unit tests for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_UnitTest"
+    soft_fail: true
+    agents:
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    # transformers >= 5.5.0 is required for Gemma-4. If the dev image hasn't
+    # caught up, the dry-run pip check below short-circuits the step.
+    commands:
+      - |
+        if pip install "transformers>=5.5.0" --dry-run | grep -q "Would install transformers-"; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_UnitTest" "transformers version too low"
+          exit 0
+        fi
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'MODEL_IMPL_TYPE=vllm SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python3 /workspace/tpu_inference/examples/offline_inference.py --model=google/gemma-4-E2B-it --tensor-parallel-size=1 --max-model-len=4096 --max-num-batched-tokens=4096'
+
+  - label: "${TPU_VERSION:-tpu6e} Record unit test result for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_UnitTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_UnitTest"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-E2B-it"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "multimodal"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_UnitTest
+
+  - label: "${TPU_VERSION:-tpu6e} Accuracy for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_UnitTest"
+    soft_fail: true
+    agents:
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      TEST_MODEL: google/gemma-4-E2B-it
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
+      # V1 placeholder threshold; lock to measured value after first green
+      # build. Floor 0.5 (per plan.md §1.3); below = file issue + ship at
+      # measured value (mirrors 26B's 0.41 + TODO #2332 pattern).
+      MINIMUM_ACCURACY_THRESHOLD: 0.5
+      MODEL_IMPL_TYPE: vllm
+    commands:
+      - |
+        if pip install "transformers>=5.5.0" --dry-run | grep -q "Would install transformers-"; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Accuracy" "transformers version too low"
+          exit 0
+        fi
+        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
+
+  - label: "${TPU_VERSION:-tpu6e} Record accuracy result for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Accuracy"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-E2B-it"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "multimodal"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Accuracy
+
+  - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_Accuracy"
+    soft_fail: true
+    agents:
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      TEST_MODEL: google/gemma-4-E2B-it
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
+      # V1: no minimum throughput requirement — just record measured value.
+      MINIMUM_THROUGHPUT_THRESHOLD: 0.1
+      INPUT_LEN: 1800
+      OUTPUT_LEN: 128
+      PREFIX_LEN: 0
+      MAX_MODEL_LEN: 2048
+      MAX_NUM_SEQS: 64
+      MAX_NUM_BATCHED_TOKENS: 4096
+      MODEL_IMPL_TYPE: vllm
+    commands:
+      - |
+        if pip install "transformers>=5.5.0" --dry-run | grep -q "Would install transformers-"; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Benchmark" "transformers version too low"
+          exit 0
+        fi
+        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
+
+  - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Benchmark"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-E2B-it"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "multimodal"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Benchmark

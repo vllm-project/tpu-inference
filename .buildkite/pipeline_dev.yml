@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,137 +12,124 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Dev pipeline for tpu-inference-dev.
-# Demo/sample steps showing how to run custom tests on tpu7x.
-# Copy and adapt any step for your own experiments.
+# Dev pipeline scoped to gemma-4 E2B bringup (Stage 1 — torchax).
+# Per CLAUDE.md "Dev Pipeline Testing": demos stripped, only the steps
+# needed for this bringup remain.
 #
-# HOW TO TRIGGER THIS PIPELINE
-# ─────────────────────────────
-# Option A — Buildkite UI:
-#   Go to https://buildkite.com/tpu-commons/tpu-inference-dev
-#   Click "New Build", set branch to your branch, click "Create Build".
+# Sanity: a single 31B torchax unit-test step verifies the vllm-native
+# (torchax) path still works for Gemma-4 on the current LKG (last
+# exercised Apr 18, 2026). Runs in parallel with E2B steps.
 #
-# Option B — Buildkite API (requires BUILDKITE_API_TOKEN in your env):
-#   curl -s -X POST \
-#     -H "Authorization: Bearer $BUILDKITE_API_TOKEN" \
-#     -H "Content-Type: application/json" \
-#     "https://api.buildkite.com/v2/organizations/tpu-commons/pipelines/tpu-inference-dev/builds" \
-#     -d "{\"commit\": \"$(git rev-parse HEAD)\", \"branch\": \"$(git rev-parse --abbrev-ref HEAD)\", \"message\": \"my test\"}"
-#
-# HOW TO CUSTOMIZE
-# ─────────────────
-# 1. On your branch, edit this file — use any demo step below as a starting point.
-# 2. Change the command, model, env vars, or queue as needed.
-# 3. Trigger the pipeline — only your branch's file is used.
+# This file will be reverted to upstream demos before opening the PR.
 
 steps:
 
   # -----------------------------------------------------------------
-  # Build Step (required by all demo steps below)
+  # Build base docker image for tpu6e
   # -----------------------------------------------------------------
-  - label: ":docker: Build and Push Base Image (tpu7x)"
-    key: tpu7x_build_docker
+  - label: ":docker: Build and Push Base Image (tpu6e)"
+    key: tpu6e_build_docker
     agents:
       queue: cpu_64_core
     env:
-      TPU_VERSION: "tpu7x"
+      TPU_VERSION: "tpu6e"
     commands:
       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
   # -----------------------------------------------------------------
-  # Demo 1: offline_inference.py
-  # Shows the simplest pattern: run a Python script inside Docker.
-  # Use this as a starting point for any offline batch inference test.
+  # Sanity: 31B torchax (Phase 0 step 3)
+  # Confirms vllm-native gemma-4 still works on TPU after vllm LKG drift
+  # since Apr 18, 2026 (when 26B/31B switched to flax_nnx).
   # -----------------------------------------------------------------
-  - label: "tpu7x [demo] offline_inference.py"
-    key: tpu7x_demo_offline_inference
-    depends_on: tpu7x_build_docker
+  - label: "tpu6e Sanity: torchax 31B unit (MODEL_IMPL_TYPE=vllm)"
+    key: tpu6e_gemma4_31B_torchax_sanity
+    depends_on: tpu6e_build_docker
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_8_queue
     env:
       USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu7x"
-    agents:
-      queue: tpu_v7x_2_queue
+      TPU_VERSION: "tpu6e"
     commands:
       - |
-        # Run offline inference with a small model.
-        # --tensor-parallel-size 2: tp=1 is currently unsupported on tpu7x.
-        # Customize --model, --max-model-len, --max-tokens as needed.
-        .buildkite/scripts/run_in_docker.sh bash -c '
-          python3 examples/offline_inference.py \
-            --model Qwen/Qwen3-0.6B \
-            --tensor-parallel-size 2 \
-            --max-model-len 1024 \
-            --max-tokens 128'
+        if pip install "transformers>=5.5.0" --dry-run | grep -q "Would install transformers-"; then
+          echo "transformers version too low; skipping"
+          exit 0
+        fi
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'MODEL_IMPL_TYPE=vllm SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python3 /workspace/tpu_inference/examples/offline_inference.py --model=google/gemma-4-31B-it --tensor-parallel-size=8 --max-model-len=4096 --max-num-batched-tokens=4096'
 
   # -----------------------------------------------------------------
-  # Demo 2: vllm serve + vllm bench serve
-  # Shows how to start a server and run a benchmark against it.
-  # Uses --dataset-name random so no dataset file is needed.
+  # E2B Unit test (Phase 1 step 1)
   # -----------------------------------------------------------------
-  - label: "tpu7x [demo] vllm serve + vllm bench serve"
-    key: tpu7x_demo_serve_bench
-    depends_on: tpu7x_build_docker
+  - label: "tpu6e E2B Unit (MODEL_IMPL_TYPE=vllm, TP=1)"
+    key: tpu6e_gemma4_E2B_unit
+    depends_on: tpu6e_build_docker
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
     env:
       USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu7x"
-    agents:
-      queue: tpu_v7x_2_queue
+      TPU_VERSION: "tpu6e"
     commands:
       - |
-        # Customize behaviour via env vars: MODEL, PORT, TENSOR_PARALLEL_SIZE,
-        # MAX_MODEL_LEN, RANDOM_INPUT_LEN, RANDOM_OUTPUT_LEN, NUM_PROMPTS, NUM_WARMUPS.
-        .buildkite/scripts/run_in_docker.sh bash .buildkite/scripts/run_benchmark_demo.sh
+        if pip install "transformers>=5.5.0" --dry-run | grep -q "Would install transformers-"; then
+          echo "transformers version too low; skipping"
+          exit 0
+        fi
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'MODEL_IMPL_TYPE=vllm SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python3 /workspace/tpu_inference/examples/offline_inference.py --model=google/gemma-4-E2B-it --tensor-parallel-size=1 --max-model-len=4096 --max-num-batched-tokens=4096'
 
   # -----------------------------------------------------------------
-  # Demo 3: DCN-based P/D disaggregation
-  # Mirrors test_25 in pipeline_jax.yml.
-  # Uses run_disagg.sh which delegates to examples/disagg/.
-  # Requires a multi-chip queue (tpu_v7x_8_queue).
+  # E2B Accuracy
   # -----------------------------------------------------------------
-  - label: "tpu7x [demo] E2E disaggregation (DCN P/D)"
-    key: tpu7x_demo_disagg
-    depends_on: tpu7x_build_docker
+  - label: "tpu6e E2B Accuracy (MODEL_IMPL_TYPE=vllm, TP=1)"
+    key: tpu6e_gemma4_E2B_accuracy
+    depends_on: tpu6e_gemma4_E2B_unit
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
     env:
       USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu7x"
-      # Customize these to change the disagg benchmark behaviour.
-      MODEL: "Qwen/Qwen3-0.6B"
-      INPUT_LEN: 1024
+      TPU_VERSION: "tpu6e"
+      TEST_MODEL: google/gemma-4-E2B-it
+      TENSOR_PARALLEL_SIZE: 1
+      MINIMUM_ACCURACY_THRESHOLD: 0.5
+      MODEL_IMPL_TYPE: vllm
+    commands:
+      - |
+        if pip install "transformers>=5.5.0" --dry-run | grep -q "Would install transformers-"; then
+          echo "transformers version too low; skipping"
+          exit 0
+        fi
+        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
+
+  # -----------------------------------------------------------------
+  # E2B Performance benchmark
+  # -----------------------------------------------------------------
+  - label: "tpu6e E2B Benchmark (MODEL_IMPL_TYPE=vllm, TP=1)"
+    key: tpu6e_gemma4_E2B_benchmark
+    depends_on: tpu6e_gemma4_E2B_accuracy
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu6e"
+      TEST_MODEL: google/gemma-4-E2B-it
+      TENSOR_PARALLEL_SIZE: 1
+      MINIMUM_THROUGHPUT_THRESHOLD: 0.1
+      INPUT_LEN: 1800
       OUTPUT_LEN: 128
-      NUM_PROMPTS: 5
-      RANDOM_SEED: 10
-      MAX_CONCURRENCY: 4
-      TEST_MODE: 1
-    agents:
-      queue: tpu_v7x_8_queue
-    commands:
-      - .buildkite/scripts/run_disagg.sh
-
-  # -----------------------------------------------------------------
-  # Demo 4: Ray-based multi-host inference
-  # Mirrors test_26 in pipeline_jax.yml.
-  # Uses run_multihost.sh to serve a large model across 16 chips (2 hosts).
-  # Requires a 16-chip queue (tpu_v7x_16_queue).
-  # -----------------------------------------------------------------
-  - label: "tpu7x [demo] Ray-based multi-host"
-    key: tpu7x_demo_multihost
-    env:
-      TPU_VERSION: "tpu7x"
-    agents:
-      queue: tpu_v7x_16_queue
+      PREFIX_LEN: 0
+      MAX_MODEL_LEN: 2048
+      MAX_NUM_SEQS: 64
+      MAX_NUM_BATCHED_TOKENS: 4096
+      MODEL_IMPL_TYPE: vllm
     commands:
       - |
-        MODEL="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
-        .buildkite/scripts/run_multihost.sh \
-          "vllm serve \${MODEL} \
-            --port 8000 \
-            --tensor-parallel-size 16 \
-            --trust-remote-code \
-            --max-model-len 1024 \
-            --no-async-scheduling \
-            --load-format=runai_streamer \
-            --no-enable-prefix-caching" \
-          "curl http://localhost:8000/v1/completions \
-            -X POST \
-            -H 'Content-Type: application/json' \
-            -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'"
+        if pip install "transformers>=5.5.0" --dry-run | grep -q "Would install transformers-"; then
+          echo "transformers version too low; skipping"
+          exit 0
+        fi
+        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
