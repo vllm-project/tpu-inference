@@ -62,6 +62,34 @@ class JaxModule(nnx.Module):
             elif isinstance(value, list) or isinstance(value, nnx.List):
                 yield name, JaxModuleList(value)
 
+    def named_modules(
+        self,
+        memo: set | None = None,
+        prefix: str = "",
+        remove_duplicate: bool = True,
+    ) -> Iterator[tuple[str, "JaxModule | JaxModuleList"]]:
+        """Yields (name, module) for self and every descendant module.
+
+        Mirrors ``torch.nn.Module.named_modules`` semantics so vLLM's
+        upstream loader code (which calls ``model.named_modules()`` from
+        ``track_weights_loading``) works against JAX models.
+
+        Note: traversal goes through ``named_children``, which walks
+        ``self.__dict__`` and only recognises ``JaxModule`` /
+        list / ``nnx.List`` attributes. Submodules registered inside
+        dicts, tuples, or non-``JaxModule`` containers are not visible.
+        """
+        if memo is None:
+            memo = set()
+        if remove_duplicate and id(self) in memo:
+            return
+        memo.add(id(self))
+        yield prefix, self
+        for name, child in self.named_children():
+            child_prefix = f"{prefix}.{name}" if prefix else name
+            yield from child.named_modules(memo, child_prefix,
+                                           remove_duplicate)
+
 
 class JaxModuleList(nnx.List):
     """A list container for JaxModule objects."""
@@ -101,3 +129,25 @@ class JaxModuleList(nnx.List):
                 yield str(idx), item
             elif isinstance(item, list):
                 yield str(idx), JaxModuleList(item)
+
+    def named_modules(
+        self,
+        memo: set | None = None,
+        prefix: str = "",
+        remove_duplicate: bool = True,
+    ) -> Iterator[tuple[str, "JaxModule | JaxModuleList"]]:
+        """Yields (name, module) for self, every module in the list, and their descendants.
+
+        Mirrors ``torch.nn.ModuleList.named_modules``: the list itself
+        is yielded first, then each contained module recursively.
+        """
+        if memo is None:
+            memo = set()
+        if remove_duplicate and id(self) in memo:
+            return
+        memo.add(id(self))
+        yield prefix, self
+        for idx, module in enumerate(self):
+            module_prefix = f"{prefix}.{idx}" if prefix else str(idx)
+            yield from module.named_modules(memo, module_prefix,
+                                            remove_duplicate)

@@ -612,6 +612,9 @@ class KVCacheManager:
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
                 "for more details.")
+            num_speculative_tokens = 0
+            if self.runner.vllm_config.speculative_config:
+                num_speculative_tokens = self.runner.vllm_config.speculative_config.num_speculative_tokens
             new_input_batch = InputBatch(
                 max_num_reqs=self.runner.max_num_reqs,
                 max_model_len=self.runner.max_model_len,
@@ -619,6 +622,7 @@ class KVCacheManager:
                 pin_memory=False,
                 vocab_size=self.runner.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
+                num_speculative_tokens=num_speculative_tokens,
             )
             self.runner.input_batch = new_input_batch
             self.runner.persistent_batch_manager.input_batch = new_input_batch
@@ -677,14 +681,18 @@ class KVCacheManager:
                         "MambaSpec does not support shared layers for now, defaulting to single KV cache per layer..."
                     )
                     duplicate_shared_layers = True
-                    # assert that each kv_cache_tensor in kv_cache_config.kv_cache_tensors has the same number of shared layers
-                    # This is needed for models like Qwen3.5 where every 4 layers share the same KV cache (3 linear attn and 1 full attn)
-                    num_shared_layers = len(
-                        kv_cache_config.kv_cache_tensors[0].shared_by)
-                    for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                        assert len(
-                            kv_cache_tensor.shared_by
-                        ) == num_shared_layers, f"Expected all kv_cache_tensors to have the same number of shared layers {num_shared_layers}, but found {len(kv_cache_tensor.shared_by)}"
+                    non_mtp_tensors = [
+                        t for t in kv_cache_config.kv_cache_tensors
+                        if not any("mtp" in name for name in t.shared_by)
+                    ]
+                    if non_mtp_tensors:
+                        # assert that each kv_cache_tensor in kv_cache_config.kv_cache_tensors has the same number of shared layers
+                        # This is needed for models like Qwen3.5 where every 4 layers share the same KV cache (3 linear attn and 1 full attn)
+                        num_shared_layers = len(non_mtp_tensors[0].shared_by)
+                        for kv_cache_tensor in non_mtp_tensors:
+                            assert len(
+                                kv_cache_tensor.shared_by
+                            ) == num_shared_layers, f"Expected all non-MTP kv_cache_tensors to have the same number of shared layers {num_shared_layers}, but found {len(kv_cache_tensor.shared_by)}"
                     break
 
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):

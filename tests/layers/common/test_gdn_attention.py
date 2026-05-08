@@ -35,7 +35,8 @@ class GDNAttentionTest(parameterized.TestCase):
             q_loc=[0, 8192],
             distribution=[0, 0, 3],
             test_config=GdnAttentionConfig(
-                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.CHUNKED),
+                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.
+                CHUNKED_JAX_PD),
             ref_config=GdnAttentionConfig(
                 ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.REF),
         ),
@@ -46,7 +47,8 @@ class GDNAttentionTest(parameterized.TestCase):
             q_loc=[0, 256, 384, 512],
             distribution=[0, 3, 3],
             test_config=GdnAttentionConfig(
-                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.CHUNKED),
+                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.
+                CHUNKED_JAX_PD),
             ref_config=GdnAttentionConfig(
                 ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.REF),
         ),
@@ -57,7 +59,8 @@ class GDNAttentionTest(parameterized.TestCase):
             q_loc=list(range(65)),
             distribution=[64, 64, 64],
             test_config=GdnAttentionConfig(
-                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.CHUNKED),
+                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.
+                CHUNKED_JAX_PD),
             ref_config=GdnAttentionConfig(
                 ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.REF),
         ),
@@ -68,7 +71,8 @@ class GDNAttentionTest(parameterized.TestCase):
             q_loc=[0, 1, 2, 3, 4, 5, 6, 7, 8, 136, 264, 520],
             distribution=[8, 11, 11],
             test_config=GdnAttentionConfig(
-                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.CHUNKED),
+                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.
+                CHUNKED_JAX_PD),
             ref_config=GdnAttentionConfig(
                 ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.REF),
         ),
@@ -79,7 +83,8 @@ class GDNAttentionTest(parameterized.TestCase):
             q_loc=[0, 128, 192, 224, 240, 248] + [1] * 11,
             distribution=[0, 5, 5],
             test_config=GdnAttentionConfig(
-                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.CHUNKED),
+                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.
+                CHUNKED_JAX_PD),
             ref_config=GdnAttentionConfig(
                 ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.REF),
         ),
@@ -90,7 +95,8 @@ class GDNAttentionTest(parameterized.TestCase):
             q_loc=list(range(65)) + [1] * 448,
             distribution=[64, 64, 64],
             test_config=GdnAttentionConfig(
-                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.CHUNKED),
+                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.
+                CHUNKED_JAX_PD),
             ref_config=GdnAttentionConfig(
                 ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.REF),
         ),
@@ -214,7 +220,8 @@ class GDNAttentionTest(parameterized.TestCase):
         dict(
             testcase_name="chunked",
             test_config=GdnAttentionConfig(
-                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.CHUNKED),
+                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.
+                CHUNKED_JAX_PD),
         ),
         dict(
             testcase_name="ref",
@@ -224,7 +231,8 @@ class GDNAttentionTest(parameterized.TestCase):
         dict(
             testcase_name="fused",
             test_config=GdnAttentionConfig(
-                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.FUSED),
+                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.
+                CHUNKED_KERNEL_PD),
         ),
     )
     def test_has_initial_state_zeros_stale_slot(self, test_config):
@@ -349,7 +357,8 @@ class GDNAttentionTest(parameterized.TestCase):
         dict(
             testcase_name="chunked",
             test_config=GdnAttentionConfig(
-                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.CHUNKED),
+                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.
+                CHUNKED_JAX_PD),
         ),
         dict(
             testcase_name="ref",
@@ -359,7 +368,8 @@ class GDNAttentionTest(parameterized.TestCase):
         dict(
             testcase_name="fused",
             test_config=GdnAttentionConfig(
-                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.FUSED),
+                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.
+                RECURRENT_KERNEL_PD),
         ),
     )
     def test_has_initial_state_preserves_continuation(self, test_config):

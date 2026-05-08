@@ -84,6 +84,14 @@ class RequestFuncOutput:
     success: bool = False
     latency: float = 0.0
     output_tokens: int = 0
+    prompt_tokens: int = 0
+    """Server-reported prompt tokens (from `usage.prompt_tokens`).
+
+    0 if the backend did not report it. When non-zero, this is preferred over
+    `input_request.prompt_len` for input-token accounting, since it reflects
+    the actual tokenization done server-side (chat template, image tokens,
+    etc.).
+    """
     ttft: float = 0.0  # Time to first token
     itl: list[float] = field(
         default_factory=list)  # list of inter-token latencies

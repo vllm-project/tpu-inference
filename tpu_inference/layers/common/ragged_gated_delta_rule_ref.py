@@ -152,6 +152,7 @@ def ragged_gated_delta_rule(
         n_v, d_k, d_v)`.
       - output: The output tensor of shape `(num_tokens, n_v * d_v)`.
     """
+    mixed_qkv = jax.nn.silu(mixed_qkv)
     num_tokens = mixed_qkv.shape[0]
     key_dim = n_kq * d_k
     query = mixed_qkv[..., :key_dim]

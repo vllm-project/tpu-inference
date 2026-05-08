@@ -38,20 +38,19 @@ def _create_proposer(
         num_speculative_tokens=num_speculative_tokens,
     )
 
-    vllm_config = VllmConfig(
-        model_config=model_config,
-        cache_config=CacheConfig(block_size=16),
-        speculative_config=speculative_config,
-        device_config=DeviceConfig(device="tpu"),
-        parallel_config=ParallelConfig(pipeline_parallel_size=1,
-                                       tensor_parallel_size=1),
-        load_config=LoadConfig(
-            model_loader_extra_config={"enable_weights_track": False}),
-        scheduler_config=SchedulerConfig(
-            max_num_batched_tokens=8192,
-            max_num_seqs=128,
-            max_model_len=model_config.max_model_len,
-            is_encoder_decoder=False))
+    vllm_config = VllmConfig(model_config=model_config,
+                             cache_config=CacheConfig(block_size=16),
+                             speculative_config=speculative_config,
+                             device_config=DeviceConfig(device="tpu"),
+                             parallel_config=ParallelConfig(
+                                 pipeline_parallel_size=1,
+                                 tensor_parallel_size=1),
+                             load_config=LoadConfig(),
+                             scheduler_config=SchedulerConfig(
+                                 max_num_batched_tokens=8192,
+                                 max_num_seqs=128,
+                                 max_model_len=model_config.max_model_len,
+                                 is_encoder_decoder=False))
 
     # Mock the runner, as the proposer needs it for initialization
     mock_runner = mock.MagicMock()
@@ -143,9 +142,7 @@ def test_prepare_inputs():
     expected_new_seq_lens = np.zeros(max_num_seqs, dtype=np.int32)
     expected_new_seq_lens[:num_reqs] = [3, 4, 3]
 
-    expected_total_tokens = int(expected_new_qsl[-1])
-    expected_total_tokens = runner_utils.get_padded_token_len(
-        proposer.runner.num_tokens_paddings, expected_total_tokens)
+    expected_total_tokens = input_ids.shape[0]
 
     expected_last_token_indices = jnp.array(expected_new_qsl[1:] - 1)
 

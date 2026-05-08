@@ -29,7 +29,6 @@ from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.common.utils import get_env_block_sizes
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.rope_interface import apply_rope
 
@@ -241,8 +240,6 @@ class Attention(nnx.Module):
 
         out_specs = (self.attn_o_tnh, kv_cache_spec)
 
-        d_block_sizes, p_block_sizes, m_block_sizes = get_env_block_sizes()
-
         def _ragged_paged_attention(*args):
             return ragged_paged_attention(
                 *args,
@@ -250,9 +247,6 @@ class Attention(nnx.Module):
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
-                d_block_sizes=d_block_sizes,
-                p_block_sizes=p_block_sizes,
-                m_block_sizes=m_block_sizes,
             )
 
         output_TNH, kv_cache = jax.jit(

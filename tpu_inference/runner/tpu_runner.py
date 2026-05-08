@@ -60,7 +60,6 @@ from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
-from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
@@ -492,16 +491,27 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # padded max value to pre-allocate data structures and pre-compile.
         self.max_num_tokens = self.num_tokens_paddings[-1]
 
-        # Request states.
         self.requests: dict[str, CachedRequestState] = {}
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, jax.Array] = {}
+
+        # Use parallel_config as the primary source of truth during initialization
+        # to avoid AttributeError when self.mesh is not yet assigned (common in unit tests).
+        tp_size = 1
+        if self.vllm_config.parallel_config is not None:
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        elif hasattr(self, 'mesh') and self.mesh is not None:
+            tp_size = self.mesh.shape.get(ShardingAxisName.MODEL, 1)
+
+        self.vocab_size = common_utils.align_to(model_config.get_vocab_size(),
+                                                tp_size)
+
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
             max_num_batched_tokens=self.max_num_tokens,
             pin_memory=False,
-            vocab_size=self.model_config.get_vocab_size(),
+            vocab_size=self.vocab_size,
             block_sizes=[self.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
         )
@@ -531,7 +541,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.num_logits_paddings = None
 
         # tensors for structured decoding
-        self.vocab_size = self.model_config.get_vocab_size()
         self.grammar_bitmask_cpu = np.zeros(
             (self.max_num_reqs, cdiv(self.vocab_size, 32)),
             dtype=np.int32,
@@ -566,6 +575,33 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.rng_key,
                 self.mesh,
             )
+
+            # Only pre-warm torchax for pooling tasks to prevent JIT during inference
+            # while avoiding unnecessary overhead for standard generative models.
+            if self.is_pooling_model:
+                import torchax
+                from torchax.interop import torch_view
+
+                h_size = self.model_config.get_hidden_size()
+                # Use the actual model mesh and ATTN_DATA axis for sharding alignment
+                pooling_sharding = NamedSharding(
+                    self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+
+                logger.info(
+                    f"Pre-warming StepPooler for shapes: {self.num_tokens_paddings}"
+                )
+                with torchax.default_env():
+                    for max_tokens in self.num_tokens_paddings:
+                        # Create a dummy JAX array with exact shape and sharding metadata
+                        dummy_jax = jnp.zeros((max_tokens, h_size),
+                                              dtype=jnp.bfloat16)
+                        # Shard the array to match real-time hidden_states
+                        dummy_jax = jax.device_put(dummy_jax, pooling_sharding)
+
+                        # Trigger the casting and host-transfer kernels
+                        # Using non_blocking=False to ensure AOT compilation completes during load
+                        _ = torch_view(dummy_jax).to('cpu', non_blocking=False)
+                logger.debug("Universal StepPooler pre-warming successful.")
 
         self.model_fn = model.model_fn
         self.compute_logits_fn = model.compute_logits_fn
@@ -857,7 +893,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # it will embed the text tokens and merge with the existing modality embeds
         # Later, the multi-modality model will take the embedding as the input.
         # For text-only model, this does nothing. It will input the input_ids and
-        # leave the mebedding job inside the forward pass
+        # leave the embedding job inside the forward pass
         input_ids, inputs_embeds = self._get_input_ids_embeds(
             input_ids, mm_embeds, is_mm_embed)
 
@@ -894,33 +930,47 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 hidden_states.expert_indices = expert_indices
                 return hidden_states
 
-            if self.is_pooling_model:
-                seq_lens = self.seq_lens_cpu[:self.input_batch.num_reqs]
-                pooling_metadata = self.input_batch.get_pooling_metadata()
+        if self.is_pooling_model:
+            num_reqs = self.input_batch.num_reqs
 
-                pooler_fn: PoolerFunc = self.pooler_fn
-                pooler_output = pooler_fn(
-                    hidden_states,
-                    pooling_metadata,
-                    seq_lens,
-                )
+            # Retrieve sequence lengths
+            seq_lens_view = self.device_buffer.get_view((self.max_num_reqs, ),
+                                                        key="seq_lens")
+            seq_lens = seq_lens_view[:num_reqs]
 
-                return ModelRunnerOutput(
-                    req_ids=self.input_batch.req_ids,
-                    req_id_to_index=self.input_batch.req_id_to_index,
-                    sampled_token_ids=[],
-                    logprobs=None,
-                    prompt_logprobs_dict={},
-                    pooler_output=pooler_output,
-                )
+            pooling_metadata = self.input_batch.get_pooling_metadata()
 
-            hidden_states = self._select_from_array_fn(hidden_states,
-                                                       logits_indices)
-            logits = self.compute_logits_fn(
-                self.state,
+            # Extract scheduled token counts for the current chunk
+            num_scheduled_tokens = np.array([
+                scheduler_output.num_scheduled_tokens[req_id]
+                for req_id in self.input_batch.req_ids[:num_reqs]
+            ],
+                                            dtype=np.int32)
+
+            # Call the pooler with the decoupled interface
+            pooler_output = self.pooler_fn(
                 hidden_states,
-                lora_metadata,
+                pooling_metadata,
+                seq_lens,
+                num_scheduled_tokens,
             )
+
+            return ModelRunnerOutput(
+                req_ids=self.input_batch.req_ids,
+                req_id_to_index=self.input_batch.req_id_to_index,
+                sampled_token_ids=[],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=pooler_output,
+            )
+
+        hidden_states = self._select_from_array_fn(hidden_states,
+                                                   logits_indices)
+        logits = self.compute_logits_fn(
+            self.state,
+            hidden_states,
+            lora_metadata,
+        )
 
         self.execute_model_state = ExecuteModelState(
             scheduler_output=scheduler_output,
@@ -1158,10 +1208,31 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if expert_indices is not None:
             expert_indices_cpu = np.asarray(jax.device_get(expert_indices))
-            # Slice to actual scheduled tokens
-            actual_t = scheduler_output.total_num_scheduled_tokens
-            expert_indices_cpu = expert_indices_cpu[:, :actual_t, :]
-            model_runner_output.expert_indices = expert_indices_cpu
+
+            routed_experts_dict = {}
+            current_token_offset = 0
+            for req_id in self.input_batch.req_ids[:num_reqs]:
+                req_state = self.requests[req_id]
+                num_tokens_scheduled = scheduler_output.num_scheduled_tokens[
+                    req_id]
+                start_idx = current_token_offset
+                end_idx = start_idx + num_tokens_scheduled
+                current_token_offset = end_idx
+
+                # Shape: (num_tokens_scheduled, num_layers, top_k)
+                step_experts = expert_indices_cpu[:, start_idx:
+                                                  end_idx, :].transpose(
+                                                      1, 0, 2)
+
+                if not hasattr(req_state, "_accumulated_experts"):
+                    req_state._accumulated_experts = []
+                req_state._accumulated_experts.append(step_experts)
+
+                # Send the FULL accumulated history for every request in the batch
+                routed_experts_dict[req_id] = np.concatenate(
+                    req_state._accumulated_experts, axis=0)
+
+            model_runner_output.routed_experts_dict = routed_experts_dict
 
         return model_runner_output
 
@@ -1968,7 +2039,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 padded_num_reqs)
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
-                              mm_embeds: jax.Array | None,
+                              mm_embeds: list[jax.Array] | None,
                               is_mm_embed: jax.Array | None):
         # Prevent the cost of calling additional function.
         if self.is_multimodal_model and mm_embeds is not None:

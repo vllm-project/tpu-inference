@@ -37,12 +37,11 @@ if TYPE_CHECKING:
     JAX_PROFILER_SERVER_PORT: int = 9999
     USE_BATCHED_RPA_KERNEL: bool = False
     FORCE_MOE_RANDOM_ROUTING: bool = False
-    SC_KERNEL_THRESHOLD: int = 16777216
-    SC_KERNEL_COL_CHUNK_SIZE: int = 1024
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
-    RAGGED_GATED_DELTA_RULE_IMPL: str = "ragged_gated_delta_rule_chunked"
+    RAGGED_GATED_DELTA_RULE_IMPL: str = "chunked_jax_pd"
     MOE_ALL_GATHER_ACTIVATION_DTYPE: str = ""
+    TPU_MAMBA_SSM_CACHE_DTYPE: str = "bfloat16"
     TPU_OFFLOAD_SKIP_JAX_PRECOMPILE: bool = False
     TPU_OFFLOAD_DECODE_SAVE: bool = False
     TPU_OFFLOAD_NUM_CPU_CHUNKS: int = 1024
@@ -50,10 +49,9 @@ if TYPE_CHECKING:
     TPU_OFFLOAD_SAVE_THREADS: int = 1
     TPU_OFFLOAD_BATCHED_SAVE: bool = False
     TPU_OFFLOAD_METRICS_LOG_INTERVAL: int = 5
-    # RPA kernel block size overrides (format: "bq_sz,bkv_sz,bq_csz,bkv_csz")
-    RPA_D_BLOCK_SIZES: str | None = None
-    RPA_P_BLOCK_SIZES: str | None = None
-    RPA_M_BLOCK_SIZES: str | None = None
+    TPU_OFFLOAD_USE_UNPINNED_HOST: bool = False
+    MOE_APPROX_TOPK: bool = False
+    MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
 
 
 def env_with_choices(
@@ -248,22 +246,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Force random expert routing in MoE layers (for testing purposes only)
     "FORCE_MOE_RANDOM_ROUTING":
     env_bool("FORCE_MOE_RANDOM_ROUTING", default=False),
-    "SC_KERNEL_THRESHOLD":
-    lambda: int(os.getenv("SC_KERNEL_THRESHOLD") or "16777216"),
-    "SC_KERNEL_COL_CHUNK_SIZE":
-    lambda: int(os.getenv("SC_KERNEL_COL_CHUNK_SIZE") or "3072"),
     "JITTED_MM_MODULE_KEYS":
     env_str_list("JITTED_MM_MODULE_KEYS"),
     "REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES":
     env_str_list("REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES"),
     "RAGGED_GATED_DELTA_RULE_IMPL":
-    env_with_choices("RAGGED_GATED_DELTA_RULE_IMPL",
-                     "ragged_gated_delta_rule_chunked", [
-                         "ragged_gated_delta_rule_ref",
-                         "ragged_gated_delta_rule_chunked", "fused_gdn_kernel"
-                     ]),
+    env_with_choices("RAGGED_GATED_DELTA_RULE_IMPL", "chunked_jax_pd", [
+        "ref", "chunked_jax_pd", "chunked_kernel_pd", "chunked_kernel_p_jax_d",
+        "chunked_kernel_p_recurrent_kernel_d", "recurrent_kernel_pd"
+    ]),
     "MOE_ALL_GATHER_ACTIVATION_DTYPE":
     lambda: os.getenv("MOE_ALL_GATHER_ACTIVATION_DTYPE", ""),
+    # Override cache_config.mamba_ssm_cache_dtype on TPU. Default "bfloat16"
+    # halves SSM state HBM; set "float32" to opt out, "" to defer to vLLM.
+    # TODO: remove once vLLM MambaDType includes bfloat16
+    # (https://github.com/vllm-project/vllm/pull/41680).
+    "TPU_MAMBA_SSM_CACHE_DTYPE":
+    lambda: os.getenv("TPU_MAMBA_SSM_CACHE_DTYPE", "bfloat16"),
     # kv offload to dram: skip pre-compiling swap-related jax functions
     "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE":
     lambda: bool(int(os.getenv("TPU_OFFLOAD_SKIP_JAX_PRECOMPILE", "0"))),
@@ -285,16 +284,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # kv offload to dram: prometheus metrics log interval in seconds
     "TPU_OFFLOAD_METRICS_LOG_INTERVAL":
     lambda: int(os.getenv("TPU_OFFLOAD_METRICS_LOG_INTERVAL", "10")),
-    # RPA kernel block size overrides (format: "bq_sz,bkv_sz,bq_csz,bkv_csz")
-    # e.g. RPA_D_BLOCK_SIZES="1,4096,1,256"
-    "RPA_D_BLOCK_SIZES":
-    lambda: os.getenv("RPA_D_BLOCK_SIZES", None),
-    # e.g. RPA_P_BLOCK_SIZES="32,4096,32,256"
-    "RPA_P_BLOCK_SIZES":
-    lambda: os.getenv("RPA_P_BLOCK_SIZES", None),
-    # e.g. RPA_M_BLOCK_SIZES="32,4096,32,256"
-    "RPA_M_BLOCK_SIZES":
-    lambda: os.getenv("RPA_M_BLOCK_SIZES", None),
+    # kv offload to dram: Whether to use unpinned_host for KV cache tensors on host dram.
+    "TPU_OFFLOAD_USE_UNPINNED_HOST":
+    lambda: bool(int(os.getenv("TPU_OFFLOAD_USE_UNPINNED_HOST", "0"))),
+    # MoE: whether to use approximate top-k for expert selection.
+    # Enabling this may speedup the expert selection at the risk of accuracy loss.
+    "MOE_APPROX_TOPK":
+    env_bool("MOE_APPROX_TOPK", default=False),
+    # MoE: the target recall rate for approximate top-k expert selection.
+    # A higher rate increases accuracy at the cost of slower speed.
+    # A lower rate can speedup expert selection at the risk of higher accuracy loss.
+    "MOE_APPROX_TOPK_RECALL_TARGET":
+    lambda: float(os.getenv("MOE_APPROX_TOPK_RECALL_TARGET", "0.9")),
+    "DISABLE_WEIGHT_REQUANTIZATION":
+    env_bool("DISABLE_WEIGHT_REQUANTIZATION", default=False),
 }
 
 

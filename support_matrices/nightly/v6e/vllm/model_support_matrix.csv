@@ -1,4 +1,5 @@
 Model,Type,UnitTest,Accuracy/Correctness,Benchmark
+"Qwen/Qwen3-Embedding-8B",Embedding,✅ Passing,✅ Passing,❓ Untested
 "Qwen/Qwen2.5-VL-7B-Instruct",Multimodal,✅ Passing,✅ Passing,✅ Passing
 "Qwen/Qwen3-Omni-30B-A3B-Instruct",Multimodal,❓ Untested,❓ Untested,❓ Untested
 "Qwen/Qwen3-VL-8B-Instruct",Multimodal,❓ Untested,❓ Untested,❓ Untested

@@ -407,8 +407,21 @@ def test_get_pooling_metadata(input_batch: InputBatch):
         return all(checks)
 
     def meta_eq(a: PoolingMetadata, b: PoolingMetadata):
-        assert a.prompt_token_ids is None and b.prompt_token_ids is None
+
+        def is_none_or_empty(t):
+            return t is None or (torch.is_tensor(t) and t.numel() == 0)
+
+        if is_none_or_empty(a.prompt_token_ids) and is_none_or_empty(
+                b.prompt_token_ids):
+            token_ids_eq = True
+        elif not is_none_or_empty(a.prompt_token_ids) and not is_none_or_empty(
+                b.prompt_token_ids):
+            token_ids_eq = torch.equal(a.prompt_token_ids, b.prompt_token_ids)
+        else:
+            token_ids_eq = False
+
         checks = [
+            token_ids_eq,
             torch.equal(a.prompt_lens, b.prompt_lens),
             len(a.pooling_params) == len(b.pooling_params),
             len(a.pooling_states) == len(b.pooling_states),
@@ -445,7 +458,8 @@ def test_get_pooling_metadata(input_batch: InputBatch):
         input_batch.get_pooling_metadata(),
         PoolingMetadata(
             prompt_lens=torch.tensor([10], dtype=torch.int32),
-            prompt_token_ids=None,
+            prompt_token_ids=torch.tensor([[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]],
+                                          dtype=torch.int32),
             prompt_token_ids_cpu=None,
             pooling_params=[pooling_param],
             pooling_states=[pooling_state],

@@ -20,6 +20,7 @@ indices, sums them up, and scatters the results.
 
 import array
 import functools
+import math
 from typing import Any
 
 import jax
@@ -31,6 +32,16 @@ from jax.experimental.mosaic.dialects import tpu
 from jax.interpreters import mlir
 from jaxlib.mlir import ir
 from jaxlib.mlir.dialects import arith, func, memref, scf, vector
+
+
+def get_valid_col_chunk_size(hidden_size: int) -> int:
+    i = math.ceil(hidden_size / 3584)
+    sc_kernel_col_chunk_size = 3584
+    for target_i in range(i, hidden_size + 1):
+        if hidden_size % target_i == 0:
+            sc_kernel_col_chunk_size = hidden_size // target_i
+            break
+    return sc_kernel_col_chunk_size
 
 
 class VectorTypeHelper:

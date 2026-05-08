@@ -24,14 +24,19 @@ from vllm.model_executor.layers.mamba.gdn_linear_attn import \
     GatedDeltaNetAttention
 
 from tpu_inference import envs
-from tpu_inference.layers.common.gdn_attention import (
-    GdnAttentionConfig, RaggedGatedDeltaRuleImpl, run_jax_gdn_attention)
+from tpu_inference.layers.common.gdn_attention import (GdnAttentionConfig,
+                                                       run_jax_gdn_attention)
+from tpu_inference.layers.common.ragged_gated_delta_rule_wrapper import \
+    RaggedGatedDeltaRuleImpl
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     reorder_concatenated_tensor_for_sharding
+from tpu_inference.logger import init_logger
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
 from tpu_inference.utils import get_mesh_shape_product
+
+logger = init_logger(__name__)
 
 
 def gdn_attention_core_tpu(
@@ -92,6 +97,11 @@ def gdn_attention_core_tpu(
 
     layer_idx = vllm_context.layer_name_to_kvcache_index[layer_name]
     conv_state, recurrent_state = vllm_context.kv_caches[layer_idx]
+    state_len = conv_state.shape[1]
+    if state_len > kernel_size - 1:
+        conv_state_in = conv_state[:, :kernel_size - 1, :]
+    else:
+        conv_state_in = conv_state
 
     # Index mamba state by the per-request slot id from
     # `InputBatch.mamba_state_indices_cpu`, not by `block_tables[:, 0]`
@@ -117,12 +127,13 @@ def gdn_attention_core_tpu(
     config = GdnAttentionConfig(
         ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl(
             envs.RAGGED_GATED_DELTA_RULE_IMPL))
+    logger.info_once(f"GDN Attention Config: {config}")
 
-    (new_conv_state,
+    (new_conv_state_extracted,
      new_recurrent_state), j_output = run_jax_gdn_attention(j_mixed_qkv,
                                                             j_b,
                                                             j_a,
-                                                            conv_state,
+                                                            conv_state_in,
                                                             recurrent_state,
                                                             j_conv_weight,
                                                             j_conv_bias,
@@ -139,6 +150,12 @@ def gdn_attention_core_tpu(
                                                             kernel_size,
                                                             mesh=mesh,
                                                             config=config)
+    if state_len > kernel_size - 1:
+        remaining_old_state = conv_state[:, kernel_size - 1:, :]
+        new_conv_state = jnp.concatenate(
+            [new_conv_state_extracted, remaining_old_state], axis=1)
+    else:
+        new_conv_state = new_conv_state_extracted
 
     vllm_context.kv_caches[layer_idx] = (new_conv_state, new_recurrent_state)
 
