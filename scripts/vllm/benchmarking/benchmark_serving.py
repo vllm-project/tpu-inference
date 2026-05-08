@@ -146,8 +146,9 @@ def calculate_metrics(
     tokenizer: PreTrainedTokenizerBase,
     selected_percentiles: list[float],
     goodput_config_dict: dict[str, float],
-) -> tuple[BenchmarkMetrics, list[int]]:
+) -> tuple[BenchmarkMetrics, list[int], list[int]]:
     actual_output_lens: list[int] = []
+    actual_input_lens: list[int] = []
     total_input = 0
     completed = 0
     good_completed = 0
@@ -171,7 +172,12 @@ def calculate_metrics(
                     tokenizer(outputs[i].generated_text,
                               add_special_tokens=False).input_ids)
             actual_output_lens.append(output_len)
-            total_input += input_requests[i].prompt_len
+            # Prefer server-reported prompt_tokens (accounts for chat template
+            # and multimodal tokens); fall back to client-side prompt_len.
+            input_len = (outputs[i].prompt_tokens
+                         or input_requests[i].prompt_len)
+            actual_input_lens.append(input_len)
+            total_input += input_len
             tpot = 0
             if output_len > 1:
                 latency_minus_ttft = outputs[i].latency - outputs[i].ttft
@@ -185,6 +191,7 @@ def calculate_metrics(
             completed += 1
         else:
             actual_output_lens.append(0)
+            actual_input_lens.append(0)
 
     if goodput_config_dict:
         valid_metrics = []
@@ -245,7 +252,7 @@ def calculate_metrics(
                              for p in selected_percentiles],
     )
 
-    return metrics, actual_output_lens
+    return metrics, actual_output_lens, actual_input_lens
 
 
 async def benchmark(
@@ -342,7 +349,7 @@ async def benchmark(
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
-    metrics, actual_output_lens = calculate_metrics(
+    metrics, actual_output_lens, input_lens = calculate_metrics(
         input_requests=input_requests,
         outputs=outputs,
         dur_s=benchmark_duration,
@@ -378,7 +385,7 @@ async def benchmark(
         metrics.request_goodput if goodput_config_dict else None,
         "output_throughput": metrics.output_throughput,
         "total_token_throughput": metrics.total_token_throughput,
-        "input_lens": [output.input_request.prompt_len for output in outputs],
+        "input_lens": input_lens,
         "output_lens": actual_output_lens,
         "ttfts": [output.ttft for output in outputs],
         "itls": [output.itl for output in outputs],
