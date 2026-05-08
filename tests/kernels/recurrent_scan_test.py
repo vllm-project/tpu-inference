@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import pytest
 from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 
@@ -27,6 +28,7 @@ from tpu_inference.layers.common.ragged_gated_delta_rule_ref import \
 jax.config.parse_flags_with_absl()
 
 
+@pytest.mark.skip(reason="Need jax 0.10.0")
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
 class RecurrentScanKernelTest(jtu.JaxTestCase):
 
