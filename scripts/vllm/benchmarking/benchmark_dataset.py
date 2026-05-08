@@ -345,7 +345,25 @@ class MLPerfDataset(BenchmarkDataset):
         self.load_data()
 
     def load_data(self) -> None:
-        dataset = pd.read_pickle(self.dataset_path)
+        # Handle conversion from Pickle to Parquet if necessary
+        if self.dataset_path and self.dataset_path.endswith(".pkl"):
+            parquet_path = self.dataset_path.rsplit(".", 1)[0] + ".parquet"
+
+            if not os.path.exists(parquet_path):
+                temp_df = pd.read_pickle(self.dataset_path)
+                temp_df.to_parquet(parquet_path)
+
+            self.dataset_path = parquet_path
+
+        # Load the data from the path
+        if self.dataset_path and self.dataset_path.endswith(".parquet"):
+            dataset = pd.read_parquet(self.dataset_path)
+        elif self.dataset_path and self.dataset_path.endswith(".pkl"):
+            dataset = pd.read_pickle(self.dataset_path)
+        else:
+            raise ValueError(
+                f"Unsupported dataset format for path: {self.dataset_path}")
+
         mlperf_data = []
         print(f"Loaded {len(dataset)} data from mlperf dataset")
         # NOTE: an example row (entry in the dataset) looks like:
