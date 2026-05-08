@@ -579,13 +579,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Only pre-warm torchax for pooling tasks to prevent JIT during inference
             # while avoiding unnecessary overhead for standard generative models.
             if self.is_pooling_model:
-                import jax.numpy as jnp
                 import torchax
-                from jax.sharding import NamedSharding, PartitionSpec
                 from torchax.interop import torch_view
-
-                from tpu_inference.layers.common.sharding import \
-                    ShardingAxisName
 
                 h_size = self.model_config.get_hidden_size()
                 # Use the actual model mesh and ATTN_DATA axis for sharding alignment
