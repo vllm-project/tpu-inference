@@ -23,7 +23,7 @@ from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
 from tpu_inference.kernels.custom_calls.kernel import (xpose_full,
-                                                       xpose_pipelined)
+                                                       xpose_pipeline)
 
 
 def benchmark_op(name, op_func, input_data, number=10):
@@ -58,28 +58,25 @@ def xpose_full_wrapper(x, transpose_axes):
 class CustomCallsTest(parameterized.TestCase):
 
     @parameterized.parameters(
-        dict(shape=(1024, 1024), transpose_axes=(1, 0), reshape_axes=None),
-        dict(shape=(32, 64, 128), transpose_axes=(2, 0, 1), reshape_axes=None),
+        dict(shape=(1024, 1024), transpose_axes=(1, 0)),
+        dict(shape=(32, 64, 128), transpose_axes=(2, 0, 1)),
         dict(shape=(8, 16, 32, 64),
-             transpose_axes=(3, 2, 1, 0),
-             reshape_axes=None),
-        dict(shape=(128, 256), transpose_axes=(1, 0), reshape_axes=(-1, )),
+             transpose_axes=(3, 2, 1, 0)),
+        dict(shape=(128, 256), transpose_axes=(1, 0)),
         dict(shape=(16, 32, 64),
-             transpose_axes=(2, 0, 1),
-             reshape_axes=(64, 512)),
+             transpose_axes=(2, 0, 1)),
     )
-    def test_xpose_full(self, shape, transpose_axes, reshape_axes):
-        input_data = jnp.ones(shape, dtype=jnp.float32)
+    def test_xpose_full(self, shape, transpose_axes):
+        key = jax.random.PRNGKey(42)
+        input_data = jax.random.normal(key, shape, dtype=jnp.float8_e4m3fn)
 
         name = f"xpose_full_{len(shape)}d"
         result = benchmark_op(
             name, lambda x: xpose_full(
-                x, transpose_axes=transpose_axes, reshape_axes=reshape_axes),
+                x, transpose_axes=transpose_axes),
             input_data)
 
         expected = jnp.transpose(input_data, transpose_axes)
-        if reshape_axes is not None:
-            expected = expected.reshape(*reshape_axes)
 
         # Validation
         self.assertEqual(result[0].shape, expected.shape)
@@ -89,48 +86,58 @@ class CustomCallsTest(parameterized.TestCase):
         dict(shape=(1024, 2048),
              transpose_axes=(1, 0),
              n_tile=128,
-             m_tile=128,
-             reshape_axes=None),
+             m_tile=128),
         dict(shape=(2048, 1024),
              transpose_axes=(1, 0),
              n_tile=256,
-             m_tile=256,
-             reshape_axes=None),
+             m_tile=256),
         dict(shape=(512, 1024, 16),
              transpose_axes=(1, 0, 2),
              n_tile=64,
-             m_tile=128,
-             reshape_axes=None),
-        dict(shape=(1024, 2048),
-             transpose_axes=(1, 0),
+             m_tile=128),
+        # Grid iterates axis 1 (parallel, 512//128=4 steps) and axis 0 (pipeline, 256//128=2 steps).
+        dict(shape=(256, 512, 128),
+             transpose_axes=(1, 0, 2),
              n_tile=128,
              m_tile=128,
-             reshape_axes=(-1, 2)),
-        dict(shape=(512, 1024, 16),
+             parallel_axis=1,
+             pipeline_axis=0),
+        # 64MB (would OOM loading everything into VMEM)
+        dict(shape=(128, 2048, 256),
              transpose_axes=(1, 0, 2),
-             n_tile=64,
+             n_tile=128,
              m_tile=128,
-             reshape_axes=(-1, 8, 2)),
+             parallel_axis=1,
+             pipeline_axis=0),
+        # index maps that put grid-dim-0 (parallel, axis 2) into output axis 1 and
+        # grid-dim-1 (pipeline, axis 1) into output axis 2.
+        dict(shape=(4, 256, 512, 128),
+             transpose_axes=(0, 2, 1, 3),
+             n_tile=64,
+             m_tile=64,
+             parallel_axis=2,
+             pipeline_axis=1),
     )
-    def test_xpose_pipelined(self, shape, transpose_axes, n_tile, m_tile,
-                             reshape_axes):
-        input_data = jnp.ones(shape, dtype=jnp.float32)
+    def test_xpose_pipeline(self, shape, transpose_axes, n_tile, m_tile, parallel_axis=0, pipeline_axis=1):
+        key = jax.random.PRNGKey(42)
+        input_data = jax.random.normal(key, shape, dtype=jnp.float8_e4m3fn)
 
-        name = f"xpose_pipelined_{len(shape)}d"
+        name = f"xpose_pipeline_{len(shape)}d"
         result = benchmark_op(
-            name, lambda x: xpose_pipelined(x,
+            name, lambda x: xpose_pipeline(x,
                                             transpose_axes=transpose_axes,
-                                            reshape_axes=reshape_axes,
                                             n_tile=n_tile,
-                                            m_tile=m_tile), input_data)
+                                            m_tile=m_tile,
+                                            parallel_axis=parallel_axis,
+                                            pipeline_axis=pipeline_axis),
+                                            input_data)
 
         expected = jnp.transpose(input_data, transpose_axes)
-        if reshape_axes is not None:
-            expected = expected.reshape(*reshape_axes)
 
         # Validation
         self.assertEqual(result[0].shape, expected.shape)
-        self.assertTrue(jnp.allclose(result[0], expected))
+        self.assertTrue(jnp.allclose(result[0], expected, atol=1e-5))
+
 
     def test_xpose_sharded_mla(self):
         # Mimic q_nope scenario from flash_attn_mla.py
@@ -138,13 +145,12 @@ class CustomCallsTest(parameterized.TestCase):
         num_devices = len(jax.devices())
         N, B, L = 16, 128 * num_devices, 512
         shape = (N, B, L)
-        input_data = jnp.ones(shape, dtype=jnp.float32)
+        key = jax.random.PRNGKey(42)
+        input_data = jax.random.normal(key, shape, dtype=jnp.float8_e4m3fn)
 
         mesh = Mesh(jax.devices(), ('model', ))
         transpose_axes = (1, 0, 2)
 
-        # Define the sharded operation using partial instead of lambda
-        # to be more JAX-idiomatic and avoid potential recompilation issues.
         sharded_xpose_fn = shard_map(partial(xpose_full_wrapper,
                                              transpose_axes=transpose_axes),
                                      mesh=mesh,
@@ -162,12 +168,6 @@ class CustomCallsTest(parameterized.TestCase):
         expected = jnp.transpose(input_data, transpose_axes)
         self.assertEqual(result.shape, expected.shape)
         self.assertTrue(jnp.allclose(result, expected))
-
-    def test_native_comparison(self):
-        shape = (1024, 1024)
-        input_data = jnp.ones(shape, dtype=jnp.float32)
-        benchmark_op("native_jax_transpose",
-                     lambda x: jnp.transpose(x, (1, 0)), input_data)
 
 
 if __name__ == "__main__":
