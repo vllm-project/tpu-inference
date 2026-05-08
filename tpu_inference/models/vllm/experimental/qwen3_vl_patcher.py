@@ -231,16 +231,13 @@ def apply_qwen3_vl_patches(vllm_model):
     vllm_model.forward = lambda *args, **kwargs: _patched_forward(
         vllm_model, orig_forward, *args, **kwargs)
 
-
 def is_qwen3_vl(vllm_model) -> bool:
     """Check if the given vLLM model is of architecture Qwen3VLForConditionalGeneration."""
     return isinstance(vllm_model, Qwen3VLForConditionalGeneration)
 
-
 def maybe_apply_qwen3_vl_patches(vllm_model):
     if is_qwen3_vl(vllm_model):
         apply_qwen3_vl_patches(vllm_model)
-
 
 def maybe_update_qwen3_vl_patching_configs(vllm_model, jitted_keys: list, extra_jit_args: dict):
     """Populates JIT-keys and extra JIT arguments if the model is Qwen3-VL."""
