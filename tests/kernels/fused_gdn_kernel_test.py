@@ -173,9 +173,9 @@ class FusedGdnKernelTest(jtu.JaxTestCase):
 
         # ── Kernel ──
         pallas_o, pallas_state = fused_gdn(
-            q,
-            k,
-            v,
+            jax.nn.silu(q),
+            jax.nn.silu(k),
+            jax.nn.silu(v),
             cu_seqlens,
             a,  # [T, H_v] — broadcast to [T, H_v, K] inside fused_gdn
             h0,

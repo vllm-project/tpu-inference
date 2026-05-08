@@ -24,14 +24,19 @@ from vllm.model_executor.layers.mamba.gdn_linear_attn import \
     GatedDeltaNetAttention
 
 from tpu_inference import envs
-from tpu_inference.layers.common.gdn_attention import (
-    GdnAttentionConfig, RaggedGatedDeltaRuleImpl, run_jax_gdn_attention)
+from tpu_inference.layers.common.gdn_attention import (GdnAttentionConfig,
+                                                       run_jax_gdn_attention)
+from tpu_inference.layers.common.ragged_gated_delta_rule_wrapper import \
+    RaggedGatedDeltaRuleImpl
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     reorder_concatenated_tensor_for_sharding
+from tpu_inference.logger import init_logger
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
 from tpu_inference.utils import get_mesh_shape_product
+
+logger = init_logger(__name__)
 
 
 def gdn_attention_core_tpu(
@@ -122,6 +127,7 @@ def gdn_attention_core_tpu(
     config = GdnAttentionConfig(
         ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl(
             envs.RAGGED_GATED_DELTA_RULE_IMPL))
+    logger.info(f"GDN Attention Config: {config}")
 
     (new_conv_state_extracted,
      new_recurrent_state), j_output = run_jax_gdn_attention(j_mixed_qkv,
