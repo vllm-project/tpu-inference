@@ -102,18 +102,25 @@ def quantize_moe_weights(
     hidden_size = align_to(orig_hidden_size, w13_block_size)
     intermediate_size = align_to(orig_intermediate_size, w2_block_size)
 
-    w13_pad_widths = [[0, 0] for _ in range(3)]
-    w13_pad_widths[1][1] = 2 * (intermediate_size - orig_intermediate_size)
-    w13_pad_widths[2][1] = hidden_size - orig_hidden_size
-    w2_pad_widths = [[0, 0] for _ in range(3)]
-    w2_pad_widths[1][1] = hidden_size - orig_hidden_size
-    w2_pad_widths[2][1] = intermediate_size - orig_intermediate_size
+    inter_pad = intermediate_size - orig_intermediate_size
+    hidden_pad = hidden_size - orig_hidden_size
 
-    w13_weight = jnp.pad(w13_weight, w13_pad_widths)
+    w1 = w13_weight[:, :orig_intermediate_size, :]
+    w3 = w13_weight[:, orig_intermediate_size:, :]
+    w13_pad_widths = [[0, 0], [0, inter_pad], [0, hidden_pad]]
+    w1 = jnp.pad(w1, w13_pad_widths)
+    w3 = jnp.pad(w3, w13_pad_widths)
+    w13_weight = jnp.concatenate([w1, w3], axis=1)
+
+    w2_pad_widths = [[0, 0], [0, hidden_pad], [0, inter_pad]]
     w2_weight = jnp.pad(w2_weight, w2_pad_widths)
 
     if (w13_bias := weights.w13_bias) is not None:
-        weights.w13_bias = jnp.pad(w13_bias, w13_pad_widths[:2])
+        b1 = w13_bias[:, :orig_intermediate_size]
+        b3 = w13_bias[:, orig_intermediate_size:]
+        b1 = jnp.pad(b1, w13_pad_widths[:2])
+        b3 = jnp.pad(b3, w13_pad_widths[:2])
+        weights.w13_bias = jnp.concatenate([b1, b3], axis=1)
     if (w2_bias := weights.w2_bias) is not None:
         weights.w2_bias = jnp.pad(w2_bias, w2_pad_widths[:2])
 
