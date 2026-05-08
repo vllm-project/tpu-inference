@@ -81,6 +81,11 @@ class DFlashProposer:
         # We must match this: cache_len = prev_seq_len, not current seq_len.
         self._prev_seq_len: int = 0
 
+        # Track the request currently occupying the single proposer slot;
+        # state must be reset when it changes so the previous request's
+        # hidden states do not leak into the next request's prefix.
+        self._last_req_id: Optional[str] = None
+
     def load_model(self, target_model: Any) -> None:
         """Load the DFlash draft model and share embeddings from target."""
         draft_mi = get_model(self.vllm_config,
@@ -186,6 +191,15 @@ class DFlashProposer:
     ) -> tuple[jax.Array, jax.Array, jax.Array, AttentionMetadata]:
         """Prepare DFlash inputs with on-device KV cache."""
         assert aux_hidden_states is not None and len(aux_hidden_states) > 0
+
+        # Reset proposer state when the single slot's request changes.
+        req_ids = self.runner.input_batch.req_ids
+        current_req_id = req_ids[0] if req_ids else None
+        if current_req_id != self._last_req_id:
+            self._ctx_len = 0
+            self._cache_len = 0
+            self._prev_seq_len = 0
+            self._last_req_id = current_req_id
 
         # 1. Current sequence length
         seq_len_jax = attn_metadata.seq_lens[0]
