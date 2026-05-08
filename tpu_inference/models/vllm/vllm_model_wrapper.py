@@ -58,8 +58,8 @@ from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.vllm.experimental.model_patcher import patch_mm_model
-from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
-    maybe_apply_qwen3_vl_patches
+from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import (
+    maybe_apply_qwen3_vl_patches, maybe_update_qwen3_vl_jitted_keys)
 from tpu_inference.models.vllm.experimental.vision_tower_jit import (
     maybe_jit_embed_multimodal_func, maybe_precompile_vision_encoder_fn,
     maybe_prepare_for_jit)
@@ -249,11 +249,7 @@ class VllmModelWrapper:
         if self.vllm_config.model_config.is_multimodal_model:
             # Hardcode "model.visual" for Qwen3-VL vision encoder JIT
             jitted_keys = list(envs.JITTED_MM_MODULE_KEYS)
-            if hasattr(self.model.vllm_model, "config") and hasattr(self.model.vllm_model.config, "architectures"):
-                if "Qwen3VLForConditionalGeneration" in self.model.vllm_model.config.architectures:
-                    if "model.visual" not in jitted_keys:
-                        jitted_keys.append("model.visual")
-                        logger.info("Hardcoded model.visual to jitted_mm_module_keys for Qwen3-VL")
+            maybe_update_qwen3_vl_jitted_keys(self.model.vllm_model, jitted_keys)
 
             # NOTE: It patch mm models to be JITtable within some submodule.
             # Caution: the submodule params_and_buffers would be put into
