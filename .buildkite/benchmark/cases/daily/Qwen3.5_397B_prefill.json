@@ -28,13 +28,13 @@
         "args": {
           "model": "Qwen/Qwen3.5-397B-A17B-FP8",
           "max-num-seqs": 1,
-          "max-num-batched-tokens": 8192,
+          "max-num-batched-tokens": 16384,
           "tensor-parallel-size": {
             "v7x-8": 8
           },
           "max-model-len": 10240,
           "kv-cache-dtype": "fp8",
-          "gpu-memory-utilization": 0.9,
+          "gpu-memory-utilization": 0.8,
           "enable-expert-parallel": true,
           "async-scheduling": true
         }
@@ -82,7 +82,7 @@
           },
           "max-model-len": 10240,
           "kv-cache-dtype": "fp8",
-          "gpu-memory-utilization": 0.85,
+          "gpu-memory-utilization": 0.8,
           "enable-expert-parallel": true,
           "async-scheduling": true
         }
@@ -130,7 +130,7 @@
           },
           "max-model-len": 10240,
           "kv-cache-dtype": "fp8",
-          "gpu-memory-utilization": 0.75,
+          "gpu-memory-utilization": 0.6,
           "enable-expert-parallel": true,
           "async-scheduling": true
         }
@@ -171,14 +171,14 @@
         },
         "args": {
           "model": "Qwen/Qwen3.5-397B-A17B-FP8",
-          "max-num-seqs": 8,
-          "max-num-batched-tokens": 65536,
+          "max-num-seqs": 4,
+          "max-num-batched-tokens": 32768,
           "tensor-parallel-size": {
             "v7x-8": 8
           },
           "max-model-len": 10240,
           "kv-cache-dtype": "fp8",
-          "gpu-memory-utilization": 0.55,
+          "gpu-memory-utilization": 0.6,
           "enable-expert-parallel": true,
           "async-scheduling": true
         }
@@ -219,14 +219,14 @@
         },
         "args": {
           "model": "Qwen/Qwen3.5-397B-A17B-FP8",
-          "max-num-seqs": 16,
-          "max-num-batched-tokens": 65536,
+          "max-num-seqs": 4,
+          "max-num-batched-tokens": 32768,
           "tensor-parallel-size": {
             "v7x-8": 8
           },
           "max-model-len": 10240,
           "kv-cache-dtype": "fp8",
-          "gpu-memory-utilization": 0.55,
+          "gpu-memory-utilization": 0.6,
           "enable-expert-parallel": true,
           "async-scheduling": true
         }
@@ -267,14 +267,14 @@
         },
         "args": {
           "model": "Qwen/Qwen3.5-397B-A17B-FP8",
-          "max-num-seqs": 16,
-          "max-num-batched-tokens": 65536,
+          "max-num-seqs": 4,
+          "max-num-batched-tokens": 32768,
           "tensor-parallel-size": {
             "v7x-8": 8
           },
           "max-model-len": 10240,
           "kv-cache-dtype": "fp8",
-          "gpu-memory-utilization": 0.55,
+          "gpu-memory-utilization": 0.6,
           "enable-expert-parallel": true,
           "async-scheduling": true
         }
