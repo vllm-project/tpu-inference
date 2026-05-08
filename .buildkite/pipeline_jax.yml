@@ -47,7 +47,7 @@ steps:
           - |
             if [[ "$$TPU_VERSION" == "tpu7x" ]]; then
               MODEL="gs://tpu-commons-ci/deepseek/r1"
-              .buildkite/scripts/run_multihost.sh '\
+              .buildkite/scripts/run_multihost.sh "\
                 VLLM_ENGINE_READY_TIMEOUT_S=10800 \
                 MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8 \
                 MOE_REQUANTIZE_WEIGHT_DTYPE=fp4 \
@@ -68,12 +68,12 @@ steps:
                   --load-format=runai_streamer \
                   --async-scheduling \
                   --enable-expert-parallel \
-                  --additional_config='\''{"compilation_sizes": [2560], "sharding": {"sharding_strategy": {"enable_dp_attention": true}}}'\'' \
-                  --trust-remote-code \
-                  --generation-config "/tmp/DeepSeek-R1-Configs/DeepSeek-R1" && \
+                  --additional_config='{\"compilation_sizes\": [2560], \"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}' \
+                  --trust-remote-code --generation-config /tmp/DeepSeek-R1-Configs/DeepSeek-R1 "
+                "
                 curl http://localhost:8000/v1/completions \
                       -X POST \
-                      -d '\''{\"model\": \"gs://tpu-commons-ci/deepseek/r1\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'\'' 
+                      -d '{\"model\": \"gs://tpu-commons-ci/deepseek/r1\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}' \
                       -H "Content-Type: application/json" \
-                  '
+                "
             fi
