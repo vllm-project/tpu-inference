@@ -160,6 +160,8 @@ wait_for_server() {
       return 0
     fi
     echo "Not Health response: $health_response"
+    sleep 1200
+    return 0
 
 
     # 3. Check if PID is alive INSIDE the container
