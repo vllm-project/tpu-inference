@@ -214,21 +214,30 @@ def _patched_forward(
     )
 
 
-def _coerce_scale_buffers_to_floats(text_model):
+def _coerce_scale_buffers_to_torchax(text_model):
     """vllm gemma4 registers persistent=False scalar buffers
     (per_layer_input_scale, per_layer_projection_scale,
     embed_scale_per_layer). These buffers are torch.Tensor scalars that
-    do NOT get shipped through torchax sharding. At inference, when they
-    multiply a torchax tensor (e.g., per_layer_projection +
-    per_layer_inputs * scale), torchax raises:
+    do NOT get shipped through torchax sharding (because persistent=False
+    means they're NOT in state_dict, so shard_model_to_tpu skips them).
+
+    At inference, when they multiply a torchax tensor (e.g.,
+    per_layer_projection + per_layer_inputs * scale), torchax raises:
 
       AssertionError: Expect a Tensor or a View but got
         <class 'torch.Tensor'>; usually this means there is a mixed
         math between XLATensor and torch.Tensor
 
-    Replacing the buffers with plain Python floats avoids the type-mix
-    (Python scalar * torchax tensor is fine).
+    Fix: convert each buffer's value into a torchax tensor (via
+    jax.device_put + torch_view). The result IS a torch.Tensor (so
+    torch.func.functional_call's buffer-swap machinery still works) AND
+    it's torchax-compatible (so forward math doesn't crash).
+
+    Replacing buffers with plain Python floats does NOT work — it breaks
+    torch.func.functional_call which requires buffers to be torch.Tensor.
     """
+    import jax
+
     for attr in (
             "per_layer_input_scale",
             "per_layer_projection_scale",
@@ -239,21 +248,28 @@ def _coerce_scale_buffers_to_floats(text_model):
             continue
         if not isinstance(buf, torch.Tensor):
             continue
+        # Already torchax? Nothing to do.
+        if buf.__class__.__module__.startswith("torchax"):
+            continue
         try:
-            scalar = float(buf.detach().cpu().item())
+            arr = buf.detach().cpu().numpy()
+            jax_arr = jax.device_put(arr)
+            new_buf = torch_view(jax_arr)
         except Exception as e:  # noqa: BLE001
             logger.warning(
-                "Gemma-4 patcher: could not coerce %s to scalar: %s", attr, e)
+                "Gemma-4 patcher: could not convert %s to torchax: %s", attr, e)
             continue
-        # `register_buffer` puts buffer in module._buffers; deregister
-        # before attribute reassignment, otherwise nn.Module forwards
-        # attribute access to the buffer dict.
+
+        # Replace via _buffers dict. nn.Module.register_buffer would
+        # also work but might trigger validation checks.
         if attr in getattr(text_model, "_buffers", {}):
-            del text_model._buffers[attr]
-        setattr(text_model, attr, scalar)
+            text_model._buffers[attr] = new_buf
+        else:
+            # Not in _buffers? Try plain attribute set as fallback.
+            setattr(text_model, attr, new_buf)
         logger.info(
-            "Gemma-4 patcher: coerced %s buffer to Python float %.6f",
-            attr, scalar)
+            "Gemma-4 patcher: converted %s buffer to torchax (was %s, now %s)",
+            attr, buf.__class__.__module__, new_buf.__class__.__module__)
 
 
 def apply_gemma4_patches(vllm_model):
@@ -274,12 +290,12 @@ def apply_gemma4_patches(vllm_model):
             ple_dim)
         return
 
-    # Coerce non-persistent scale buffers to Python floats so they
-    # interoperate with torchax tensors at math time.
+    # Convert non-persistent scale buffers to torchax tensors so they
+    # interoperate with the torchax tensor world at math time.
     text_model = getattr(getattr(vllm_model, "language_model", None),
                          "model", None)
     if text_model is not None:
-        _coerce_scale_buffers_to_floats(text_model)
+        _coerce_scale_buffers_to_torchax(text_model)
 
     orig_embed = getattr(vllm_model, "embed_input_ids", None)
     orig_forward = getattr(vllm_model, "forward", None)
