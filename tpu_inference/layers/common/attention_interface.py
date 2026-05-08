@@ -42,22 +42,6 @@ MAX_ALLOWED_PAGE_INDICES_N = (
     128 * 1024
 )  # Based on experiments on v5e, 256x1024 results in smem oom but 128x1024 not. TODO: Adjust this based on TPU version.
 
-# NOTE: this kernel is experimental and not fully tested.  See
-# tpu-inference/tpu_inference/kernels/experimental/batched_rpa/wrapper.py
-# for details
-if envs.USE_BATCHED_RPA_KERNEL:
-    import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa
-    logger.info_once("Using experimental batched RPA kernel")
-else:
-    import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
-    logger.info_once("Using default RPA kernel")
-
-ragged_paged_attention = rpa.ragged_paged_attention
-get_kv_cache_shape = rpa.get_kv_cache_shape
-
-ragged_paged_attention_hd64 = rpa_hd64.ragged_paged_attention_hd64
-get_kv_cache_shape_hd64 = rpa_hd64.get_kv_cache_shape
-
 
 def sharded_flash_attention(
     mesh: Mesh,
@@ -374,7 +358,20 @@ def sharded_ragged_paged_attention(
     args = (q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, distribution)
 
     use_hd64 = q.shape[-1] == 64
-    func = ragged_paged_attention_hd64 if use_hd64 else ragged_paged_attention
+    # NOTE: this import is late such that we can mock the env var in tests to
+    # switch between different kernel implementations. Some models prefers
+    # batched RPA kernel while some models prefers default RPA kernel.
+    if envs.USE_BATCHED_RPA_KERNEL:
+        # NOTE: this kernel is experimental and not fully tested.  See
+        # tpu-inference/tpu_inference/kernels/experimental/batched_rpa/wrapper.py
+        # for details
+        import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa
+        logger.info_once("Using experimental batched RPA kernel")
+    else:
+        import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
+        logger.info_once("Using default RPA kernel")
+
+    func = rpa_hd64.ragged_paged_attention_hd64 if use_hd64 else rpa.ragged_paged_attention
 
     if attention_sink is not None:
         if not use_hd64:
