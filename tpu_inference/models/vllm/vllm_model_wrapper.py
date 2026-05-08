@@ -56,6 +56,8 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.models.vllm.experimental.gemma4_patcher import \
+    maybe_apply_gemma4_patches
 from tpu_inference.models.vllm.experimental.model_patcher import patch_mm_model
 from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
     maybe_apply_qwen3_vl_patches
@@ -260,6 +262,11 @@ class VllmModelWrapper:
 
         # NOTE: Apply Qwen3-VL model specific patches
         maybe_apply_qwen3_vl_patches(self.model.vllm_model)
+
+        # NOTE: Apply Gemma-4 specific patches (PLE in-place-copy avoidance
+        # for E2B / E4B variants — the 26B / 31B variants have PLE off
+        # so the patcher is a no-op for them).
+        maybe_apply_gemma4_patches(self.model.vllm_model)
 
         loading_end = time.time()
         total_loading_time = loading_end - loading_start
