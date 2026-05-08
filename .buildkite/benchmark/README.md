@@ -104,4 +104,6 @@ Case JSON files should be placed under `.buildkite/benchmark/cases/${BM_CASE_TYP
 
 Buildkite CI schedules are configured to execute cases under `daily` at fixed times every day, and cases under `hourly` every hour. `ci` is used for pipeline `tpu_inference_ci` validation, while `dev` can be used by developers when adding new cases.
 
-When triggering a manual New Build, you need to set the value of `BM_CASE_TYPE`, otherwise only the cases under `daily` will be executed. During development, using `BM_CASE_TYPE=DEV` allows you to execute only the cases in the `dev` folder. The `dev` folder is for temporary use; once development is complete, please move the cases to `daily` or `hourly` before checking in. There should be no case JSON files under the `dev` folder in the `main` branch.
+During development, place the case JSON files currently being developed under `.buildkite/benchmark/cases/dev`. When clicking "New Build" on Buildkite, set `BM_CASE_TYPE=DEV` so that this build will only upload the case JSON files from the `dev` folder.
+
+The `dev` folder is for temporary use; once development is complete, please move the cases to `daily` or `hourly` before checking in. There should be no case JSON files under the `dev` folder in the `main` branch.
