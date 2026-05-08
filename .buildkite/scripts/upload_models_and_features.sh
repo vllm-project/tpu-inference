@@ -50,8 +50,9 @@ add_kernel_microbenchmarks() {
 
 case "${MODEL_IMPL_TYPE}" in
   "auto")
-    TARGET_FOLDERS=("parallelism" "models" "features" "rl")
-    add_kernel_microbenchmarks
+    # TARGET_FOLDERS=("parallelism" "models" "features" "rl")
+    TARGET_FOLDERS=("models")
+    # add_kernel_microbenchmarks
     ;;
   "flax_nnx")
     TARGET_FOLDERS=("quantization" "parallelism" "features")

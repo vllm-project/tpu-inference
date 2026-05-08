@@ -169,8 +169,8 @@ upload_pipeline() {
       set_jax_envs unset
 
       # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
-      upload_with_priority .buildkite/nightly_releases.yml "$JOB_PRIORITY"
-      upload_with_priority .buildkite/pipeline_pypi.yml "$JOB_PRIORITY"
+      # upload_with_priority .buildkite/nightly_releases.yml "$JOB_PRIORITY"
+      # upload_with_priority .buildkite/pipeline_pypi.yml "$JOB_PRIORITY"
     fi
 
     upload_with_priority .buildkite/nightly_verify.yml "$JOB_PRIORITY"
