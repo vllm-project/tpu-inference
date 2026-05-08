@@ -214,6 +214,48 @@ def _patched_forward(
     )
 
 
+def _coerce_scale_buffers_to_floats(text_model):
+    """vllm gemma4 registers persistent=False scalar buffers
+    (per_layer_input_scale, per_layer_projection_scale,
+    embed_scale_per_layer). These buffers are torch.Tensor scalars that
+    do NOT get shipped through torchax sharding. At inference, when they
+    multiply a torchax tensor (e.g., per_layer_projection +
+    per_layer_inputs * scale), torchax raises:
+
+      AssertionError: Expect a Tensor or a View but got
+        <class 'torch.Tensor'>; usually this means there is a mixed
+        math between XLATensor and torch.Tensor
+
+    Replacing the buffers with plain Python floats avoids the type-mix
+    (Python scalar * torchax tensor is fine).
+    """
+    for attr in (
+            "per_layer_input_scale",
+            "per_layer_projection_scale",
+            "embed_scale_per_layer",
+    ):
+        buf = getattr(text_model, attr, None)
+        if buf is None:
+            continue
+        if not isinstance(buf, torch.Tensor):
+            continue
+        try:
+            scalar = float(buf.detach().cpu().item())
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Gemma-4 patcher: could not coerce %s to scalar: %s", attr, e)
+            continue
+        # `register_buffer` puts buffer in module._buffers; deregister
+        # before attribute reassignment, otherwise nn.Module forwards
+        # attribute access to the buffer dict.
+        if attr in getattr(text_model, "_buffers", {}):
+            del text_model._buffers[attr]
+        setattr(text_model, attr, scalar)
+        logger.info(
+            "Gemma-4 patcher: coerced %s buffer to Python float %.6f",
+            attr, scalar)
+
+
 def apply_gemma4_patches(vllm_model):
     """Apply Gemma-4 specific patches for stateless PLE handling."""
     cfg = getattr(vllm_model, "config", None)
@@ -231,6 +273,13 @@ def apply_gemma4_patches(vllm_model):
             "Gemma-4 patcher: hidden_size_per_layer_input=%s, no PLE patch needed.",
             ple_dim)
         return
+
+    # Coerce non-persistent scale buffers to Python floats so they
+    # interoperate with torchax tensors at math time.
+    text_model = getattr(getattr(vllm_model, "language_model", None),
+                         "model", None)
+    if text_model is not None:
+        _coerce_scale_buffers_to_floats(text_model)
 
     orig_embed = getattr(vllm_model, "embed_input_ids", None)
     orig_forward = getattr(vllm_model, "forward", None)
