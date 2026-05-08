@@ -70,10 +70,8 @@ steps:
                   --enable-expert-parallel \
                   --additional_config='{\"compilation_sizes\": [2560], \"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}' \
                   --trust-remote-code --generation-config /tmp/DeepSeek-R1-Configs/DeepSeek-R1 "
-                "
-                curl http://localhost:8000/v1/completions \
+                "curl http://localhost:8000/v1/completions \
                       -X POST \
                       -d '{\"model\": \"gs://tpu-commons-ci/deepseek/r1\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}' \
-                      -H "Content-Type: application/json" \
-                "
+                      -H 'Content-Type: application/json' "
             fi
