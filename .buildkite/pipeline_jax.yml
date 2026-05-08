@@ -73,7 +73,7 @@ steps:
               --generation-config "/tmp/DeepSeek-R1-Configs/DeepSeek-R1" && \
              curl http://localhost:8000/v1/completions \
                   -X POST \
-                  -d '\''{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'\'' 
+                  -d '\''{\"model\": \"gs://tpu-commons-ci/deepseek/r1\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'\'' 
                   -H "Content-Type: application/json" \
               '
         fi
