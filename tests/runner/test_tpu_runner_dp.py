@@ -1253,6 +1253,7 @@ class TestSamplingMetadataPassthrough:
         # Set the specific field we want to trace; other fields are auto-mocked.
         runner.execute_model_state.sampling_metadata = mock_sampling_metadata
         runner._sample_from_logits = MagicMock(return_value=MagicMock())
+        runner._continue_decode_output = None
 
         TPUModelRunner.sample_tokens(runner, grammar_output=None)
 
