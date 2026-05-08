@@ -119,6 +119,10 @@ def _patched_embed_input_ids(
         # Reshape: [N, num_layers, ple_dim] -> [N, num_layers*ple_dim]
         packed = ple_slice.reshape(cur_tokens, -1).to(inputs_embeds.device)
         inputs_embeds = torch.cat([inputs_embeds, packed], dim=-1)
+        logger.warning_once(
+            "Gemma-4 patcher: packed PLE into inputs_embeds; "
+            "shape now %s (text=%d + ple_packed=%d).", str(inputs_embeds.shape),
+            text_config.hidden_size, packed.shape[-1])
 
     return inputs_embeds
 
@@ -170,6 +174,10 @@ def _patched_forward(
         # We've split out PLE; call the language model directly with
         # the unpacked per_layer_inputs to avoid the upstream forward's
         # `self.per_layer_embeddings[:N]` read.
+        logger.warning_once(
+            "Gemma-4 patcher: forward unpacked PLE; "
+            "inputs_embeds=%s, per_layer_inputs=%s.",
+            str(inputs_embeds.shape), str(per_layer_inputs.shape))
         hidden_states = vllm_model.language_model.model(
             input_ids,
             positions,
@@ -183,6 +191,11 @@ def _patched_forward(
     # No PLE in this call (e.g., 26B/31B variants without PLE, or
     # decode steps that don't pass inputs_embeds). Defer to the
     # original forward.
+    logger.warning_once(
+        "Gemma-4 patcher: forward fallback to orig_forward "
+        "(intermediate=%s, inputs_embeds=%s).",
+        intermediate_tensors is not None,
+        None if inputs_embeds is None else str(inputs_embeds.shape))
     return orig_forward(
         input_ids=input_ids,
         positions=positions,
