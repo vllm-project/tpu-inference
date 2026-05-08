@@ -325,6 +325,78 @@ def apply_gemma4_patches(vllm_model):
             sub = getattr(text_model, sub_name, None)
             if sub is not None:
                 _coerce_scale_buffers_to_torchax(sub)
+                # Belt-and-suspenders: monkey-patch the methods that USE
+                # these scales so the multiplication uses Python-float
+                # scalars baked in at patch time. This avoids any
+                # late-binding of the attribute reference.
+                _patch_self_decoder_methods(sub)
+
+
+def _patch_self_decoder_methods(self_decoder):
+    """Replace Gemma4SelfDecoderLayers.get_per_layer_inputs and
+    project_per_layer_inputs with versions that bake the scale values in
+    as Python float closures. This bypasses the buffer-vs-attribute issue
+    entirely — Python scalar * torchax tensor always works.
+    """
+    cfg = self_decoder.config
+    num_layers = cfg.num_hidden_layers
+    ple_dim = self_decoder.hidden_size_per_layer_input
+
+    def _to_float(buf, default):
+        if buf is None:
+            return default
+        if isinstance(buf, torch.Tensor):
+            return float(buf.detach().cpu().float().item())
+        if isinstance(buf, (int, float)):
+            return float(buf)
+        return default
+
+    embed_scale = _to_float(getattr(self_decoder, "embed_scale_per_layer",
+                                    None), 1.0)
+    proj_scale = _to_float(
+        getattr(self_decoder, "per_layer_projection_scale", None),
+        cfg.hidden_size**-0.5)
+    input_scale = _to_float(getattr(self_decoder, "per_layer_input_scale",
+                                    None), 0.7071067811865476)
+    vocab_size_per_layer_input = self_decoder.vocab_size_per_layer_input
+
+    def patched_get_per_layer_inputs(s, input_ids):
+        if s.embed_tokens_per_layer is None:
+            return None
+        per_layer_inputs_mask = torch.logical_and(
+            input_ids >= 0, input_ids < vocab_size_per_layer_input)
+        per_layer_inputs_tokens = torch.where(per_layer_inputs_mask,
+                                              input_ids,
+                                              torch.zeros_like(input_ids))
+        per_layer_embeds = s.embed_tokens_per_layer(per_layer_inputs_tokens)
+        # Use Python float for the scale.
+        per_layer_embeds = per_layer_embeds * embed_scale
+        return per_layer_embeds.reshape(
+            *input_ids.shape, num_layers, ple_dim)
+
+    def patched_project_per_layer_inputs(s, inputs_embeds, per_layer_inputs):
+        if s.per_layer_model_projection is None:
+            return None
+        per_layer_projection = s.per_layer_model_projection(inputs_embeds)
+        per_layer_projection = per_layer_projection * proj_scale
+        per_layer_projection = per_layer_projection.reshape(
+            *inputs_embeds.shape[:-1], num_layers, ple_dim)
+        per_layer_projection = s.per_layer_projection_norm(per_layer_projection)
+        if per_layer_inputs is None:
+            return per_layer_projection
+        return (per_layer_projection + per_layer_inputs) * input_scale
+
+    # Bind to the instance via lambdas (avoid descriptor protocol issues).
+    self_decoder.get_per_layer_inputs = (
+        lambda input_ids: patched_get_per_layer_inputs(self_decoder, input_ids))
+    self_decoder.project_per_layer_inputs = (
+        lambda inputs_embeds, per_layer_inputs:
+        patched_project_per_layer_inputs(self_decoder, inputs_embeds,
+                                          per_layer_inputs))
+    logger.info(
+        "Gemma-4 patcher: monkey-patched self_decoder methods with float "
+        "scales (embed_scale=%.6f, proj_scale=%.6f, input_scale=%.6f).",
+        embed_scale, proj_scale, input_scale)
 
     orig_embed = getattr(vllm_model, "embed_input_ids", None)
     orig_forward = getattr(vllm_model, "forward", None)
