@@ -40,6 +40,20 @@ steps:
         .buildkite/scripts/run_in_docker.sh \
           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_gemma4_ple.py'
 
+  - label: "tpu7x Gemma-4 KV-share structural (test_gemma4_kv_share.py)"
+    key: tpu7x_gemma4_kv_share
+    depends_on: tpu7x_build_docker
+    soft_fail: true
+    agents:
+      queue: tpu_v7x_2_queue
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_gemma4_kv_share.py'
+
   - label: "tpu7x Gemma-4 existing tests (regression check, test_gemma4.py)"
     key: tpu7x_gemma4_existing
     depends_on: tpu7x_build_docker

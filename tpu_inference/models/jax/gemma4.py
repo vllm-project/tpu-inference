@@ -414,9 +414,32 @@ class Gemma4Attention(JaxModule):
             self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
                 kv_cache_dtype)
 
+        # KV-cache sharing (kb_kv_share.md §5; vllm reference at
+        # vllm/model_executor/models/gemma4.py:459-485). Layers in the last
+        # `num_kv_shared_layers` reuse K/V from earlier layers of matching
+        # attention type. The runner side populates the redirect mapping;
+        # this layer just needs to set is_kv_shared_layer +
+        # kv_sharing_target_layer_name.
         num_kv_shared_layers = getattr(config, "num_kv_shared_layers", 0)
-        assert num_kv_shared_layers == 0, "Expect no shared layers"
         self.is_kv_shared_layer = False
+        self.kv_sharing_target_layer_name: Optional[str] = None
+        if num_kv_shared_layers > 0:
+            first_kv_shared_layer_idx = (config.num_hidden_layers -
+                                         num_kv_shared_layers)
+            if layer_idx >= first_kv_shared_layer_idx:
+                self.is_kv_shared_layer = True
+                prev_layer_types = list(
+                    config.layer_types[:first_kv_shared_layer_idx])
+                current_layer_type = config.layer_types[layer_idx]
+                # Last preceding layer of the same attention type.
+                kv_shared_layer_index = (
+                    len(prev_layer_types) - 1 -
+                    prev_layer_types[::-1].index(current_layer_type))
+                if kv_shared_layer_index >= 0:
+                    # The runner uses unprefixed "layer.{i}" keys (see
+                    # gemma4.py:740, kv_cache_manager.py:454).
+                    self.kv_sharing_target_layer_name = (
+                        f"layer.{kv_shared_layer_index}")
 
     def __call__(
         self,
@@ -453,7 +476,34 @@ class Gemma4Attention(JaxModule):
 
             v = self.v_norm(v)
         else:
-            raise NotImplementedError("Expect no shared layers")
+            # KV-shared: only Q gets RoPE; K/V come from the cache slot
+            # (redirected by the runner per kb_kv_share.md §3-§4) which
+            # was written by the source layer earlier in this forward pass.
+            #
+            # Known limitation: sharded_ragged_paged_attention always writes
+            # input k,v to cache (no skip-write flag). Calling attention with
+            # the freshly-projected k,v would corrupt source's cache slot. We
+            # need either a kernel-level skip-write flag (mirror vllm rocm_attn
+            # PagedAttention.write_to_paged_cache gating) or a save/restore
+            # wrapper. Tracked as Stage 2 follow-up commit.
+            #
+            # For now: structural Phase 2 only (lift the assertion, set
+            # is_kv_shared_layer + kv_sharing_target_layer_name + skip the
+            # expected K/V projections). Forward through shared layers will
+            # fail loudly here; non-shared layers (and unit tests for layer 0)
+            # are unaffected.
+            q = apply_rope(q,
+                           md.input_positions,
+                           self.head_dim_original,
+                           self.rope_theta,
+                           self.rope_scaling,
+                           rope_proportion=self.rope_proportion)
+            raise NotImplementedError(
+                "KV-shared attention forward not yet implemented for the JAX "
+                "path. The attention kernel needs a 'skip cache write' flag "
+                "(mirror vllm rocm_attn.py:321-333 gating on "
+                "kv_sharing_target_layer_name) before shared layers can run. "
+                "See plan_stage2.md.")
 
         q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
