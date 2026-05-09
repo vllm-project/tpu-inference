@@ -1,11 +1,11 @@
 Model,Type,UnitTest,Accuracy/Correctness,Benchmark
-"Qwen/Qwen3-Embedding-8B",Embedding,✅ Passing,❌ Failing,❓ Untested
+"Qwen/Qwen3-Embedding-8B",Embedding,✅ Passing,✅ Passing,❓ Untested
 "Qwen/Qwen2.5-VL-7B-Instruct",Multimodal,✅ Passing,✅ Passing,✅ Passing
 "Qwen/Qwen3-Omni-30B-A3B-Instruct",Multimodal,❓ Untested,❓ Untested,❓ Untested
 "Qwen/Qwen3-VL-8B-Instruct",Multimodal,❓ Untested,❓ Untested,❓ Untested
 "Qwen/Qwen3.5-9B",Multimodal,❓ Untested,❓ Untested,❓ Untested
 "deepseek-ai/DeepSeek-OCR",Multimodal,❓ Untested,❓ Untested,❓ Untested
-"google/gemma-4-26B-A4B-it",Multimodal,✅ Passing,✅ Passing,✅ Passing
+"google/gemma-4-26B-A4B-it",Multimodal,✅ Passing,❌ Failing,❓ Untested
 "google/gemma-4-31B-it",Multimodal,✅ Passing,✅ Passing,✅ Passing
 "MiniMaxAI/MiniMax-M2.5",Text,❓ Untested,❓ Untested,❓ Untested
 "Qwen/Qwen3-30B-A3B",Text,✅ Passing,✅ Passing,✅ Passing
@@ -22,7 +22,7 @@ Model,Type,UnitTest,Accuracy/Correctness,Benchmark
 "meta-llama/Llama-3.1-8B-Instruct",Text,✅ Passing,✅ Passing,✅ Passing
 "meta-llama/Llama-3.3-70B-Instruct",Text,✅ Passing,✅ Passing,✅ Passing
 "moonshotai/Kimi-K2-Thinking",Text,❓ Untested,❓ Untested,❓ Untested
-"moonshotai/Kimi-K2.6",Text,✅ Passing,❓ Untested,❓ Untested
+"moonshotai/Kimi-K2.6",Text,❌ Failing,❓ Untested,❓ Untested
 "openai/gpt-oss-120b",Text,✅ Passing,✅ Passing,❓ Untested
 "openai/gpt-oss-20b",Text,❓ Untested,❓ Untested,❓ Untested
 "zai-org/GLM-5",Text,❓ Untested,❓ Untested,❓ Untested
