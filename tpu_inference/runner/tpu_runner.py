@@ -439,6 +439,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _init_mm(self) -> None:
         self.is_multimodal_model = None
         self.uses_mrope = self.model_config.uses_mrope
+        mm_config = getattr(self.model_config, "multimodal_config", {})
+        limits = mm_config.get("limit_per_prompt", {})
+        image_limit = limits.get("image", 0)
+        self.max_mm_prefix_ranges = getattr(image_limit, "count",
+                                            image_limit) or 0
         self.supports_mm_inputs = True
 
     def _init_speculative_decoding(self) -> None:
@@ -1438,6 +1443,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.uses_mrope:
             self.mm_manager.calc_mrope_positions(scheduler_output)
 
+        mm_prefix_range_cpu = None
+        if self.is_multimodal_model:
+            mm_prefix_range_cpu = self.mm_manager.calc_mm_prefix_ranges(
+                self.max_mm_prefix_ranges)
+
         # Async scheduling: prepare token substitution indices for DP
         token_in_tpu_cur_input_indices_dp = {}
         token_in_tpu_pre_next_tokens_indices_dp = {}
@@ -1641,6 +1651,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                      positions,
                                      sharding=data_parallel_attn_sharding)
 
+        mm_prefix_range = None
+        if mm_prefix_range_cpu is not None:
+            mm_prefix_range = device_array(
+                self.mesh,
+                (mm_prefix_range_cpu),
+                sharding=data_parallel_attn_sharding,
+            )
+
         # Collect block tables host arrays loops zone presence zones legality
         def build_block_table_host(kv_cache_gid: int) -> None:
 
@@ -1712,6 +1730,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
+                mm_prefix_range=mm_prefix_range,
             )
 
             # This is for making these cpu buffers hidden during tracing
@@ -1878,6 +1897,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.uses_mrope:
             self.mm_manager.calc_mrope_positions(scheduler_output)
 
+        mm_prefix_range_cpu = None
+        if self.is_multimodal_model:
+            mm_prefix_range_cpu = self.mm_manager.calc_mm_prefix_ranges(
+                self.max_mm_prefix_ranges)
+
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
@@ -1941,6 +1965,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                      positions,
                                      sharding=data_parallel_attn_sharding)
 
+        mm_prefix_range = None
+        if mm_prefix_range_cpu is not None:
+            mm_prefix_range = device_array(self.mesh, (mm_prefix_range_cpu))
+
         request_distribution = np.array(self.input_batch.request_distribution)
 
         def build_block_table_host(kv_cache_gid: int) -> None:
@@ -2000,6 +2028,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
+                mm_prefix_range=mm_prefix_range,
             )
             # This is for making these cpu buffers hidden during tracing
             attention_metadata_gid.query_start_loc_cpu = query_start_loc_view

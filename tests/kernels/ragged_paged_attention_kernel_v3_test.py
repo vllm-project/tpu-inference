@@ -48,6 +48,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         max_num_batched_tokens=512,
         max_num_seq=8,
         sliding_window: int | None = None,
+        mm_prefix_range: jnp.ndarray | None = None,
         soft_cap: float | None = None,
         q_scale: float | None = None,
         k_scale: float | None = None,
@@ -148,6 +149,16 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         kv_lens = jnp.array(kv_lens, dtype=jnp.int32)
         kv_lens = jnp.pad(kv_lens, (0, max_num_seq - kv_lens.shape[0]))
         distribution = jnp.array([0, 0, len(seq_lens)], dtype=jnp.int32)
+        if mm_prefix_range is not None:
+            max_mm_prefix_ranges = mm_prefix_range.shape[0] // (len(seq_lens) *
+                                                                2)
+            pad_len = (max_num_seq - len(seq_lens)) * max_mm_prefix_ranges * 2
+            if pad_len > 0:
+                mm_prefix_range = jnp.pad(
+                    mm_prefix_range,
+                    (0, pad_len),
+                    constant_values=-1,
+                )
 
         args = (
             q,
@@ -167,6 +178,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             "q_scale": q_scale,
             "k_scale": k_scale,
             "v_scale": v_scale,
+            "mm_prefix_range": mm_prefix_range,
         }
 
         expected, expected_kv_cache = ref_ragged_paged_attention(
@@ -528,6 +540,73 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
                 num_pages,
                 soft_cap=0.0,
             )
+
+    @parameterized.product(dtype=[jnp.float32, jnp.bfloat16])
+    def test_ragged_paged_attention_mm_prefix_range(self, dtype):
+        seq_lens = [(192, 328), (128, 180), (64, 255)]
+        num_heads = (32, 8)
+        head_dim = 128
+        page_size = 16
+        num_pages = 1000
+
+        # Shape: [max_num_seqs, max_mm_prefix_ranges, 2]
+        mm_prefix_range = jnp.array(
+            [
+                [[0, 50], [100, 150]],  # Seq 0: 2 bidirectional ranges
+                [[0, 100], [-1, -1]],  # Seq 1: 1 bidirectional range
+                [[-1, -1], [-1, -1]
+                 ],  # Seq 2: 0 bidirectional ranges (causal only)
+            ],
+            dtype=jnp.int32).reshape(-1)
+
+        self._test_ragged_paged_attention(
+            seq_lens,
+            num_heads,
+            head_dim,
+            page_size,
+            dtype,
+            dtype,
+            num_pages,
+            mm_prefix_range=mm_prefix_range,
+        )
+
+    @parameterized.product(
+        dtype=[jnp.float32, jnp.bfloat16],
+        sliding_window=[None, 5, 128],
+    )
+    def test_ragged_paged_attention_sliding_window_with_mm_prefix(
+        self,
+        dtype,
+        sliding_window,
+    ):
+        seq_lens = [(192, 328), (128, 180), (64, 255)]
+        num_heads = (32, 8)
+        head_dim = 128
+        page_size = 16
+        num_pages = 1000
+
+        # Shape: [max_num_seqs, max_mm_prefix_ranges, 2]
+        mm_prefix_range = jnp.array(
+            [
+                [[0, 50], [100, 150]],  # Seq 0: 2 bidirectional ranges
+                [[0, 100], [-1, -1]],  # Seq 1: 1 bidirectional range
+                [
+                    [-1, -1], [-1, -1]
+                ],  # Seq 2: 0 bidirectional ranges (causal + sliding window only)
+            ],
+            dtype=jnp.int32).reshape(-1)
+
+        self._test_ragged_paged_attention(
+            seq_lens,
+            num_heads,
+            head_dim,
+            page_size,
+            dtype,
+            dtype,
+            num_pages,
+            sliding_window=sliding_window,
+            mm_prefix_range=mm_prefix_range,
+        )
 
 
 if __name__ == "__main__":

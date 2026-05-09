@@ -28,6 +28,7 @@ import jax
         "query_start_loc",
         "request_distribution",
         "mamba_state_indices",
+        "mm_prefix_range",
     ],
     meta_fields=[],
     drop_fields=["query_start_loc_cpu", "seq_lens_cpu"],
@@ -53,6 +54,8 @@ class AttentionMetadata(object):
     # None for models without mamba layers; pure-mamba models would also
     # use this field, only hybrid models exercise it today.
     mamba_state_indices: jax.Array | None = None
+    # (max_num_seqs * max_mm_prefix_ranges * 2)
+    mm_prefix_range: jax.Array | None = None
 
     query_start_loc_cpu: Any = field(init=False)
     seq_lens_cpu: Any = field(init=False)
