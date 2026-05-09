@@ -76,7 +76,7 @@ _TPU_VERSION = flags.DEFINE_string(
 
 _TPU_CORES = flags.DEFINE_integer(
     'tpu_cores', 0,
-    'The number of TPU cores to use for tuning. Default is 8. TPU v6e has 1 core per chip, TPU v7x has 2 cores per chip.'
+    'The number of TPU cores to use for tuning. Default is 0. TPU tpu6e has 1 core per chip, TPU tpu7x has 2 cores per chip.'
 )
 
 _TPU_QUEUE_MULTI = flags.DEFINE_string(
@@ -100,6 +100,25 @@ KERNEL_TUNER_REGISTRY = {
     'example_kernel_tuner': ExampleKernelTuner,
     'rpa_v3_kernel_tuner': RpaV3KernelTuner,
 }
+
+
+# Keep in sync with the logic in bootstrap_kernel_tuning.sh:set_jax_envs
+def get_tpu_queue_by_version_and_cores(tpu_version, tpu_cores,
+                                       tpu_queue_multi):
+    """Gets and validates TPU queue based on version and core configuration."""
+    _queue_by_version_and_cores = {
+        ('tpu6e', 1): 'tpu_v6e_queue',
+        ('tpu6e', 8): 'tpu_v6e_8_queue',
+        ('tpu7x', 2): 'tpu_v7x_2_queue',
+        ('tpu7x', 8): 'tpu_v7x_8_queue',
+        ('tpu7x', 16): 'tpu_v7x_16_queue',
+    }
+    assert (
+        tpu_version, tpu_cores
+    ) in _queue_by_version_and_cores, f'Unsupported combination of TPU version {tpu_version} and cores {tpu_cores}. Supported combinations are: {list(_queue_by_version_and_cores.keys())}'
+    expected_queue = _queue_by_version_and_cores[(tpu_version, tpu_cores)]
+    assert not tpu_queue_multi or tpu_queue_multi == expected_queue, f'Inconsistent TPU queue {tpu_queue_multi} for version {tpu_version} and cores {tpu_cores}. Expected queue is {expected_queue}. Please check your flags.'
+    return tpu_queue_multi or expected_queue
 
 
 def main(argv):
@@ -135,27 +154,8 @@ def main(argv):
     tpu_cores = _TPU_CORES.value
     tpu_queue_multi = _TPU_QUEUE_MULTI.value
 
-    assert tpu_version in [
-        'tpu6e', 'tpu7x'
-    ], f'Unsupported TPU version: {tpu_version}. Supported versions are "tpu6e" and "tpu7x".'
-    assert tpu_cores > 0 or tpu_queue_multi != '', f'TPU cores must be a positive integer or TPU queue must be specified. Got {tpu_cores=} and {tpu_queue_multi=}.'
-    if tpu_cores > 0:
-        assert tpu_cores in (
-            [1, 8] if tpu_version == 'tpu6e' else [2, 8, 16]
-        ), f'Unsupported TPU cores: {tpu_cores} for TPU version {tpu_version}.'
-        ensure_tpu_queue_multi = f'tpu_v{tpu_version.replace("tpu", "")}_{tpu_cores}_queue'
-        if tpu_queue_multi and tpu_queue_multi != ensure_tpu_queue_multi:
-            raise ValueError(
-                f'TPU queue {tpu_queue_multi} does not match the expected queue {ensure_tpu_queue_multi} for TPU version {tpu_version} and cores {tpu_cores}. Please check your flags.'
-            )
-        tpu_queue_multi = tpu_queue_multi or ensure_tpu_queue_multi
-
-    tpu_queue_multi = tpu_queue_multi.replace("_1_queue", "_queue")
-    if tpu_queue_multi:
-        assert tpu_queue_multi in (
-            ['tpu_v6e_queue', 'tpu_v6e_8_queue'] if tpu_version == 'tpu6e' else
-            ['tpu_v7x_2_queue', 'tpu_v7x_8_queue', 'tpu_v7x_16_queue']
-        ), f'Unsupported TPU queue: {tpu_queue_multi} for TPU version {tpu_version}.'
+    tpu_queue_multi = get_tpu_queue_by_version_and_cores(
+        tpu_version, tpu_cores, tpu_queue_multi)
 
     kernel_tuner = kernel_tuner_cls(
         storage_manager,
@@ -168,7 +168,7 @@ def main(argv):
         run_locally=_RUN_LOCALLY.value,
         kernel_tuning_job_priority=_KERNEL_TUNING_JOB_PRIORITY.value)
 
-    if kernel_tuner.run_locally:
+    if _RUN_LOCALLY.value:
         logger.info(
             'Running in locally mode. Skipping Buildkite pipeline generation and running tuning jobs directly.'
         )
