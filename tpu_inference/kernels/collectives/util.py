@@ -24,7 +24,7 @@ def local_barrier(left_neighbor, right_neighbor, double_barrier=True):
             barrier_sem,
             inc=1,
             device_id=(neighbor, ),
-            device_id_type=pltpu.DeviceIdType.MESH,
+            device_id_type=pl.DeviceIdType.MESH,
         )
     pltpu.semaphore_wait(barrier_sem, 2)
     if double_barrier:
@@ -42,6 +42,6 @@ def local_barrier(left_neighbor, right_neighbor, double_barrier=True):
                     second_barrier,
                     inc=1,
                     device_id=(neighbor, ),
-                    device_id_type=pltpu.DeviceIdType.MESH,
+                    device_id_type=pl.DeviceIdType.MESH,
                 )
             pltpu.semaphore_wait(second_barrier, 2)
