@@ -37,7 +37,7 @@ from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, shard_moe_weights)
+    FusedMoEWeights, process_unquantized_moe_weights, shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import UNQUANTIZED
 from tpu_inference.layers.common.quantization import \
     unquantized as common_unquantized
@@ -342,14 +342,13 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         else:
             w13_bias = w2_bias = None
 
-        weights = common_unquantized.process_unquantized_moe_weights(
-            mesh=self.mesh,
-            moe_backend=self.moe_backend,
-            activation=layer.activation,
-            w13_weight=w13_weight,
-            w13_bias=w13_bias,
-            w2_weight=w2_weight,
-            w2_bias=w2_bias)
+        weights = process_unquantized_moe_weights(mesh=self.mesh,
+                                                  moe_backend=self.moe_backend,
+                                                  activation=layer.activation,
+                                                  w13_weight=w13_weight,
+                                                  w13_bias=w13_bias,
+                                                  w2_weight=w2_weight,
+                                                  w2_bias=w2_bias)
 
         del w13_weight, w2_weight, w13_bias, w2_bias
 
