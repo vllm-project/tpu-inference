@@ -82,7 +82,9 @@ steps:
     commands:
       - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
 
-  # Accuracy: Qwen3-Coder-480B-A35B-Instruct-NVFP4
+  # Accuracy: Qwen3-Coder-480B-A35B-Instruct-NVFP4 (~240GB at NVFP4 — needs
+  # extra time to download + load the checkpoint; 397B passed in 120 min,
+  # 480B is ~20% larger so we budget 180 min.)
   - label: "tpu7x Accuracy for nvidia/Qwen3-Coder-480B-A35B-Instruct-NVFP4"
     key: tpu7x_qwen3_coder_480b_nvfp4_accuracy
     depends_on: tpu7x_build_docker
@@ -91,7 +93,7 @@ steps:
       TPU_VERSION: "tpu7x"
     agents:
       queue: tpu_v7x_8_queue
-    timeout_in_minutes: 120
+    timeout_in_minutes: 180
     soft_fail: true
     commands:
       - |
