@@ -56,7 +56,6 @@ steps:
                 NEW_MODEL_DESIGN=1 \
                 MODEL_IMPL_TYPE=vllm \
                 vllm serve gs://tpu-commons-ci/deepseek/r1 \
-                  --served-model-name deepseek-ai/DeepSeek-R1 \
                   --api-server-count=3 \
                   --max-model-len=9216 \
                   --max-num-batched-tokens=512 \
