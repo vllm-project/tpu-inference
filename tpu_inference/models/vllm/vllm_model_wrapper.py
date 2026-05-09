@@ -286,7 +286,17 @@ class VllmModelWrapper:
                 "xla_tpu_all_gather_collective_matmul_mode":
                 "post_spmd_conservative",
                 "xla_tpu_reduce_scatter_collective_matmul_mode":
-                "post_spmd_conservative"
+                "post_spmd_conservative",
+                # Add below 3 XLA flags to pipeline gather / all-reduce.
+                # 1: Prevent XLA from undoing all-reduce tiling.
+                "xla_jf_crs_combiner_threshold_in_bytes": 0,
+                # 2: Enforce all-reduce to be done in tensor core.
+                "xla_tpu_enable_sparse_core_collective_offload_all_reduce":
+                False,
+                # 3. Increase memory limit to allow extra memory usage from
+                # pipeline.
+                # TODO(kyuyeunk): Investigate XLA scheduler memory limit.
+                "xla_tpu_scheduler_percent_shared_memory_limit": 1000,
             },
             static_argnames=(
                 "layer_name_to_kvcache_index",
