@@ -17,6 +17,9 @@ os.environ["LIBTPU_INIT_ARGS"] = "--xla_tpu_use_tc_device_shape_on_sc=true " + o
 # for TPU
 os.environ["VLLM_USE_AOT_COMPILE"] = "0"
 
+# Handle XLA CPU compilation warning.
+os.environ["XLA_FLAGS"] = "--xla_cpu_max_isa=AVX2 " + os.environ.get("XLA_FLAGS", "")
+
 # Monkeypatch vLLM to avoid ImportError: cannot import name 'SamplingParams' from 'vllm'
 # in vllm/v1/... submodules due to circular imports or lazy loading failures.
 try:
