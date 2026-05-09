@@ -12,7 +12,8 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 os.environ["VLLM_USE_AOT_COMPILE"] = "0"
 
 # Handle XLA CPU compilation warning.
-os.environ["XLA_FLAGS"] = "--xla_cpu_max_isa=AVX2 " + os.environ.get("XLA_FLAGS", "")
+os.environ["XLA_FLAGS"] = "--xla_cpu_max_isa=AVX2 " + os.environ.get(
+    "XLA_FLAGS", "")
 
 # Monkeypatch vLLM to avoid ImportError: cannot import name 'SamplingParams' from 'vllm'
 # in vllm/v1/... submodules due to circular imports or lazy loading failures.
