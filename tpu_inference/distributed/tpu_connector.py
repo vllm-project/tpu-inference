@@ -497,6 +497,8 @@ class TPUConnectorWorker:
         self.kv_transfer_server = None
         self.zmq_cxt = zmq.Context()
         self.transfer_stats = TpuKVConnectorStats()
+        # PERF: uuid -> wall-clock ts when await_pull was registered
+        self._send_start_ts: dict[int, float] = {}
         if self.is_producer:
             self.kv_d2h_executor = ThreadPoolExecutor(max_workers=128)
             ready_event = threading.Event()
@@ -511,6 +513,8 @@ class TPUConnectorWorker:
             self.pull_executor = ThreadPoolExecutor(max_workers=128)
             self.pull_conns: dict[str, Any] = {}
             self.notif_sockets: dict[str, zmq.Socket] = {}
+            # PERF: req_id -> uuid on the consumer side
+            self._consumer_req_uuid: dict[str, int] = {}
 
         logger.info(f"TPUConnector Worker --> init | "
                     f"ip={self.host_ip} | "
@@ -593,6 +597,12 @@ class TPUConnectorWorker:
         while True:
             client_id, uuid_bytes = sock.recv_multipart()
             uuid = int(uuid_bytes.decode('utf-8'))
+            now = time.time()
+            send_start = self._send_start_ts.pop(uuid, None)
+            dur_ms = (now - send_start) * 1000.0 if send_start else -1.0
+            logger.info(
+                f"PERF P send_done ch=0 uuid={uuid} ts={now:.6f} dur_ms={dur_ms:.2f}"
+            )
             if uuid in self.kv_pull_uuid_to_req_id_map:
                 req_id = self.kv_pull_uuid_to_req_id_map[uuid]
                 logger.info(
@@ -640,12 +650,16 @@ class TPUConnectorWorker:
             if req_meta.remote_block_ids is not None:
                 # The request requires to pull KV from P, build the connection and pull
                 # the data asyncly.
+                logger.info(
+                    f"PERF D handle_new_load req_id={req_id} uuid={req_meta.uuid} ts={time.time():.6f} drain=False"
+                )
 
                 # We execute device_array here so JAX sees the exact same sequence
                 # of local_block_ids across all TPU nodes simultaneously.
                 # TODO(xiang): pad block_ids to avoid recompilation
                 conn = self._maybe_build_kv_connection(req_meta)
                 if req_id not in self.reqs_pulling:
+                    self._consumer_req_uuid[req_id] = req_meta.uuid
                     self.reqs_pulling[req_id] = [
                         self.pull_executor.submit(self._pull_kv, req_id, conn,
                                                   req_meta), None,
@@ -655,10 +669,16 @@ class TPUConnectorWorker:
                     # Update the local block ids as the pre-allocated blocks may get preempted
                     self.reqs_pulling[req_id][2] = req_meta.local_block_ids
             else:
+                logger.info(
+                    f"PERF D handle_new_load req_id={req_id} uuid={req_meta.uuid} ts={time.time():.6f} drain=True"
+                )
                 if req_id in self.reqs_pulling:
                     assert self.reqs_pulling[req_id][1] is not None
                     _, kv, block_numbers = self.reqs_pulling.pop(req_id)
                     if len(block_numbers) > 0:
+                        logger.info(
+                            f"PERF D drain_start rank=0 req_id={req_id} uuid={req_meta.uuid} ts={time.time():.6f}"
+                        )
                         start_time = time.perf_counter()
                         self.runner.kv_caches = insert_kv_chunks(
                             self.runner.kv_caches, kv, block_numbers,
@@ -667,10 +687,16 @@ class TPUConnectorWorker:
                         logger.info(
                             f"TPUConnector Worker {self.node_id} --> req_id={req_id}, takes {(end_time - start_time)*1000:.2f}ms for insert_kv_chunks"
                         )
+                        logger.info(
+                            f"PERF D drain_done rank=0 req_id={req_id} uuid={req_meta.uuid} ts={time.time():.6f}"
+                        )
                     # The request has finished pulling the KV from remote, or it has full local
                     # prefix cache, need to notify P to let it free blocks.
                     socket = self._maybe_build_notif_socket(req_meta)
                     self._notify_pull_done(socket, req_id, req_meta.uuid)
+                    logger.info(
+                        f"PERF D scatter_complete req_id={req_id} uuid={req_meta.uuid} ts={time.time():.6f}"
+                    )
                 else:
                     logger.info(
                         f"TPUConnector Worker {self.node_id} --> req_id={req_id}, skip insert_kv_chunks."
@@ -686,11 +712,15 @@ class TPUConnectorWorker:
         return None
 
     def _prepare_kv_and_wait(self, req_id: str, req_meta: SendMeta):
+        logger.info(
+            f"PERF P handle_new_send req_id={req_id} uuid={req_meta.uuid} ts={time.time():.6f}"
+        )
         local_block_ids = req_meta.local_block_ids
         # TODO(xiang): pad block_ids to avoid recompilation
         indices = device_array(self.mesh, np.array(local_block_ids))
         kv = select_from_kv_caches(self.runner.kv_caches, indices)
         if dist_utils.get_enable_d2h_transfer() and not self.multi_host:
+            self._send_start_ts[req_meta.uuid] = time.time()
             self.kv_d2h_executor.submit(self._async_d2h_and_transfer, req_id,
                                         req_meta, kv, len(local_block_ids))
         else:
@@ -704,6 +734,15 @@ class TPUConnectorWorker:
                 kv, req_meta.expiration_time, buffer_idx
             ]
             self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
+            # No D2H staging path: stage_complete is effectively immediate.
+            now = time.time()
+            logger.info(
+                f"PERF P stage_complete uuid={req_meta.uuid} ts={now:.6f}"
+            )
+            logger.info(
+                f"PERF P send_start ch=0 uuid={req_meta.uuid} ts={now:.6f}"
+            )
+            self._send_start_ts[req_meta.uuid] = now
             self.kv_transfer_server.await_pull(req_meta.uuid, kv)
 
     def _async_d2h_and_transfer(self, req_id: str, req_meta: SendMeta,
@@ -748,6 +787,14 @@ class TPUConnectorWorker:
         )
         self.transfer_stats.record_d2h_transfer(d2h_slice_time,
                                                 d2h_transfer_time)
+        now = time.time()
+        logger.info(
+            f"PERF P stage_complete uuid={req_meta.uuid} ts={now:.6f}"
+        )
+        logger.info(
+            f"PERF P send_start ch=0 uuid={req_meta.uuid} ts={now:.6f}"
+        )
+        self._send_start_ts[req_meta.uuid] = now
 
         # 4. Network transfer
         self.reqs_wait_pull[req_id] = [
@@ -786,6 +833,9 @@ class TPUConnectorWorker:
         logger.info(
             f"Worker {self.node_id} --> kv transfer | start pull req_id={req_id} | uuid={req_meta.uuid}"
         )
+        logger.info(
+            f"PERF D pull_send ch=0 uuid={req_meta.uuid} ts={time.time():.6f}"
+        )
         start_time = time.perf_counter()
         kv = conn.pull(req_meta.uuid, kv_spec)
         kv_size_mb = sum(k.nbytes for k in kv) / (1024 * 1024)
@@ -802,6 +852,13 @@ class TPUConnectorWorker:
                 time.sleep(0.001)
             pull_time_ms = (end_time_1 - end_time_0) * 1000
             if all(chunk.is_ready() for chunk in kv):
+                now = time.time()
+                logger.info(
+                    f"PERF D wire_done ch=0 uuid={req_meta.uuid} ts={now:.6f}"
+                )
+                logger.info(
+                    f"PERF D pull_complete req_id={req_id} uuid={req_meta.uuid} ts={now:.6f} pull_ok=True"
+                )
                 logger.info(
                     f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | "
                     f"uuid={req_meta.uuid} | prepare time={prepare_time_ms:.2f}ms | "
@@ -816,6 +873,13 @@ class TPUConnectorWorker:
                     f"size={kv_size_mb:.2f}MB")
                 self.transfer_stats.record_failed_transfer()
         else:
+            now = time.time()
+            logger.info(
+                f"PERF D wire_done ch=0 uuid={req_meta.uuid} ts={now:.6f}"
+            )
+            logger.info(
+                f"PERF D pull_complete req_id={req_id} uuid={req_meta.uuid} ts={now:.6f} pull_ok=True"
+            )
             logger.info(
                 f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | "
                 f"uuid={req_meta.uuid} | prepare time={prepare_time_ms:.2f}ms | "
@@ -874,6 +938,10 @@ class TPUConnectorWorker:
                     kv = future.result()
                     self.reqs_pulling[req_id][1] = kv
                     done_recving.add(req_id)
+                    uuid = self._consumer_req_uuid.pop(req_id, -1)
+                    logger.info(
+                        f"PERF D done_recving req_id={req_id} uuid={uuid} ts={time.time():.6f}"
+                    )
 
         # Mark a req as done seding when it's expired.
         # This req can then be released blocks in the current scheduler step.
