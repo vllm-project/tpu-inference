@@ -643,6 +643,12 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             for name, weight in weights_iterator:
                 mapped_name = map_name(name)
 
+                # Skip audio tower weights — audio path is deferred for
+                # E-family (kb_ple.md/summary.md). Audio re-introduction is
+                # a separate Stage 2 follow-up.
+                if "audio_tower" in mapped_name or "embed_audio" in mapped_name:
+                    continue
+
                 # Handle packed QKV weights for the text tower
                 if "qkv_proj" in mapped_name:
                     m = re.search(r"layers\.(\d+)\.", mapped_name)
