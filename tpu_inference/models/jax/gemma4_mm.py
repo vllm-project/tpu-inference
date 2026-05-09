@@ -655,22 +655,29 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                             kv_size = jax_attn.num_kv_heads * jax_attn.head_dim_original
 
                             q_weight = weight[:q_size]
-                            k_weight = weight[q_size:q_size + kv_size]
-                            v_weight = weight[q_size + kv_size:q_size +
-                                              2 * kv_size]
-
                             yield mapped_name.replace(
                                 "qkv_proj", "q_proj"), process_tensor(
                                     mapped_name.replace("qkv_proj", "q_proj"),
                                     q_weight)
-                            yield mapped_name.replace(
-                                "qkv_proj", "k_proj"), process_tensor(
-                                    mapped_name.replace("qkv_proj", "k_proj"),
-                                    k_weight)
-                            yield mapped_name.replace(
-                                "qkv_proj", "v_proj"), process_tensor(
-                                    mapped_name.replace("qkv_proj", "v_proj"),
-                                    v_weight)
+
+                            # KV-shared layers don't have K/V weights in the
+                            # checkpoint (kb_kv_share.md §5, §7.5). The model
+                            # still constructs k_proj/v_proj/k_norm/v_norm
+                            # (random init), but they're never used since the
+                            # shared-layer __call__ raises NotImplementedError
+                            # pending kernel skip-write support. Skip yields.
+                            if not jax_attn.is_kv_shared_layer:
+                                k_weight = weight[q_size:q_size + kv_size]
+                                v_weight = weight[q_size + kv_size:q_size +
+                                                  2 * kv_size]
+                                yield mapped_name.replace(
+                                    "qkv_proj", "k_proj"), process_tensor(
+                                        mapped_name.replace(
+                                            "qkv_proj", "k_proj"), k_weight)
+                                yield mapped_name.replace(
+                                    "qkv_proj", "v_proj"), process_tensor(
+                                        mapped_name.replace(
+                                            "qkv_proj", "v_proj"), v_weight)
                             continue
 
                 yield mapped_name, process_tensor(mapped_name, weight)

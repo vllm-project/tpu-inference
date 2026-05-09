@@ -32,10 +32,13 @@ from tpu_inference.models.jax.gemma4_mm import Gemma4ForConditionalGeneration
 
 class TestGemma4ForConditionalGeneration:
 
-    @pytest.mark.parametrize("model_name", [
-        "google/gemma-4-31B-it",
-        "google/gemma-4-26B-A4B-it",
-    ])
+    @pytest.mark.parametrize(
+        "model_name",
+        [
+            "google/gemma-4-31B-it",
+            "google/gemma-4-26B-A4B-it",
+            "google/gemma-4-E2B-it",  # Stage 2: PLE + KV-share + double-wide MLP
+        ])
     @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
                                                        (3, 4)])
     @pytest.mark.parametrize(
