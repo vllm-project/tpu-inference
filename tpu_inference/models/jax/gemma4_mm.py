@@ -797,12 +797,20 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         layer_name_to_kv_cache = dict(
             _layer_name_to_kv_cache) if _layer_name_to_kv_cache else None
 
+        # PLE multimodal mask (kb_ple.md §3.4): mark image-token positions
+        # so embed_tokens_per_layer redirects them to slot 0. None when not
+        # PLE-active or first rank where input_ids isn't reliable. Cheap to
+        # always compute; the PLE compute path is the only consumer.
+        is_multimodal = (input_ids == self.image_token_id
+                         ) if input_ids is not None else None
+
         kv_caches, x, expert_indices = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
             inputs_embeds,
             layer_name_to_kv_cache=layer_name_to_kv_cache,
+            is_multimodal=is_multimodal,
         )
 
         if not is_last_rank:

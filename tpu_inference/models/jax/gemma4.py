@@ -504,6 +504,11 @@ class Gemma4DecoderLayer(JaxModule):
 
         self.is_sliding = self.layer_type == "sliding_attention"
 
+        # PLE (Per-Layer Embedding) — see kb_ple.md §3.2 + §4.2.
+        # Active when hidden_size_per_layer_input > 0 (E2B/E4B: 256; 26B/31B: 0).
+        self.hidden_size_per_layer_input = getattr(
+            text_config, "hidden_size_per_layer_input", 0) or 0
+
         self.layer_scalar = nnx.Param(jnp.ones((1, ), dtype=dtype))
 
         self.input_layernorm = JaxRmsNorm(
@@ -561,6 +566,45 @@ class Gemma4DecoderLayer(JaxModule):
             prefix=prefix + ".post_feedforward_layernorm",
         )
 
+        # PLE per-layer modules (kb_ple.md §4.2). Constructed only when
+        # hidden_size_per_layer_input > 0; otherwise these stay None and
+        # the PLE block in __call__ is gated off.
+        if self.hidden_size_per_layer_input > 0:
+            P = self.hidden_size_per_layer_input
+            self.per_layer_input_gate = JaxEinsum(
+                "TD,DP->TP",
+                (hidden_size, P),
+                bias_shape=None,
+                param_dtype=dtype,
+                kernel_init=nnx.with_partitioning(init_fn, (None, None)),
+                rngs=rng,
+                quant_config=quant_config,
+                prefix=prefix + ".per_layer_input_gate",
+            )
+            self.per_layer_projection = JaxEinsum(
+                "TP,PD->TD",
+                (P, hidden_size),
+                bias_shape=None,
+                param_dtype=dtype,
+                kernel_init=nnx.with_partitioning(init_fn, (None, None)),
+                rngs=rng,
+                quant_config=quant_config,
+                prefix=prefix + ".per_layer_projection",
+            )
+            self.post_per_layer_input_norm = JaxRmsNorm(
+                hidden_size,
+                epsilon=rms_norm_eps,
+                param_dtype=dtype,
+                scale_init=nnx.with_partitioning(init_fn, (None, )),
+                rngs=rng,
+                quant_config=quant_config,
+                prefix=prefix + ".post_per_layer_input_norm",
+            )
+        else:
+            self.per_layer_input_gate = None
+            self.per_layer_projection = None
+            self.post_per_layer_input_norm = None
+
         # MoE (Mixture of Experts) — router + expert block parallel to MLP
         self.enable_moe_block = getattr(text_config, "enable_moe_block", False)
         if self.enable_moe_block:
@@ -613,6 +657,7 @@ class Gemma4DecoderLayer(JaxModule):
         kv_cache: jax.Array,
         x: jax.Array,
         attention_metadata: AttentionMetadata,
+        per_layer_input: Optional[jax.Array] = None,
     ) -> Tuple[jax.Array, jax.Array, Optional[jax.Array]]:
         residual = x
         hidden_states = self.input_layernorm(x)
@@ -652,6 +697,18 @@ class Gemma4DecoderLayer(JaxModule):
         mlp_output = self.post_feedforward_layernorm(hidden_states)
         outputs = residual + mlp_output
 
+        # PLE per-layer block (kb_ple.md §3.2). Gated on having both a
+        # per_layer_input AND the modules being constructed (the latter
+        # is governed by hidden_size_per_layer_input > 0 in __init__).
+        if per_layer_input is not None and self.per_layer_input_gate is not None:
+            gate = self.per_layer_input_gate(outputs)
+            gate = nnx.gelu(gate, approximate=True)
+            gated_per_layer = gate * per_layer_input
+            per_layer_contribution = self.per_layer_projection(gated_per_layer)
+            per_layer_contribution = self.post_per_layer_input_norm(
+                per_layer_contribution)
+            outputs = outputs + per_layer_contribution
+
         outputs = outputs * self.layer_scalar.value
 
         return kv_cache, outputs, expert_ids
@@ -678,6 +735,14 @@ class Gemma4Model(JaxModule):
         # Gemma 4: Embeddings are scaled by sqrt(hidden_size)
         self.embedding_scale = hidden_size**0.5
 
+        # PLE (Per-Layer Embedding) — kb_ple.md §3.1, §4.1.
+        # Active when hidden_size_per_layer_input > 0 (E2B/E4B).
+        self.hidden_size_per_layer_input = getattr(
+            text_config, "hidden_size_per_layer_input", 0) or 0
+        self.vocab_size_per_layer_input = getattr(
+            text_config, "vocab_size_per_layer_input", vocab_size)
+        self.num_hidden_layers = text_config.num_hidden_layers
+
         if self.is_first_rank or (hf_config.tie_word_embeddings
                                   and self.is_last_rank):
             self.embed_tokens = JaxEmbed(
@@ -691,6 +756,59 @@ class Gemma4Model(JaxModule):
             )
         else:
             self.embed_tokens = PPMissingLayer()
+
+        # Model-level PLE modules. Constructed only on first rank when
+        # PLE is active, since they're consumed in __call__ before the
+        # decoder loop.
+        if self.hidden_size_per_layer_input > 0 and self.is_first_rank:
+            P = self.hidden_size_per_layer_input
+            L = self.num_hidden_layers
+            # embed_tokens_per_layer: vocab_size_per_layer_input -> L*P.
+            # Replicated across model axis (small enough; gather_output
+            # at use site).
+            self.embed_tokens_per_layer = JaxEmbed(
+                num_embeddings=self.vocab_size_per_layer_input,
+                features=L * P,
+                param_dtype=dtype,
+                embedding_init=nnx.with_partitioning(init_fn, (None, None)),
+                rngs=rng,
+                quant_config=vllm_config.quant_config,
+                prefix=prefix + ".embed_tokens_per_layer",
+            )
+            # per_layer_model_projection: H -> L*P. ColumnParallelLinear
+            # with gather_output=True in vllm; we replicate output.
+            self.per_layer_model_projection = JaxEinsum(
+                "TD,DM->TM",
+                (hidden_size, L * P),
+                bias_shape=None,
+                param_dtype=dtype,
+                kernel_init=nnx.with_partitioning(init_fn, (None, None)),
+                rngs=rng,
+                quant_config=vllm_config.quant_config,
+                prefix=prefix + ".per_layer_model_projection",
+            )
+            # RMSNorm over P (last dim of [T, L, P]).
+            self.per_layer_projection_norm = JaxRmsNorm(
+                P,
+                epsilon=rms_norm_eps,
+                param_dtype=dtype,
+                scale_init=nnx.with_partitioning(init_fn, (None, )),
+                rngs=rng,
+                quant_config=vllm_config.quant_config,
+                prefix=prefix + ".per_layer_projection_norm",
+            )
+            # Constants per kb_ple.md §6 — single-ownership Python floats.
+            # NOTE: gemma-4 uses H^-0.5 (gemma-3n flipped to H^0.5).
+            self.embed_scale_per_layer = float(P)**0.5
+            self.per_layer_input_scale = 1.0 / (2.0**0.5)
+            self.per_layer_projection_scale = float(hidden_size)**-0.5
+        else:
+            self.embed_tokens_per_layer = None
+            self.per_layer_model_projection = None
+            self.per_layer_projection_norm = None
+            self.embed_scale_per_layer = 0.0
+            self.per_layer_input_scale = 0.0
+            self.per_layer_projection_scale = 0.0
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             text_config.num_hidden_layers,
@@ -718,6 +836,63 @@ class Gemma4Model(JaxModule):
         else:
             self.norm = PPMissingLayer()
 
+    def compute_per_layer_inputs(
+        self,
+        input_ids: Optional[jax.Array],
+        inputs_embeds: jax.Array,
+        is_multimodal: Optional[jax.Array] = None,
+    ) -> Optional[jax.Array]:
+        """Compute per_layer_inputs of shape [T, L, P] per kb_ple.md §3.1.
+
+        Returns None when PLE is disabled (hidden_size_per_layer_input=0)
+        or when the model-level PLE modules aren't constructed (non-first
+        pp rank).
+
+        Args:
+          input_ids: [T] token ids; required when PLE is active.
+          inputs_embeds: [T, H] post-scaling residual stream (already
+            multiplied by embedding_scale + multimodal-merged).
+          is_multimodal: [T] bool. Multimodal positions are masked to
+            slot 0 in the embed_tokens_per_layer lookup.
+        """
+        if (self.hidden_size_per_layer_input == 0
+                or self.embed_tokens_per_layer is None):
+            return None
+        assert input_ids is not None, (
+            "input_ids required when PLE is active "
+            "(needed for embed_tokens_per_layer lookup)")
+        T = input_ids.shape[0]
+        L = self.num_hidden_layers
+        P = self.hidden_size_per_layer_input
+
+        # Multimodal masking (kb_ple.md §3.4): MM positions look up slot 0.
+        if is_multimodal is not None:
+            ple_input_ids = jnp.where(is_multimodal, 0, input_ids)
+        else:
+            ple_input_ids = input_ids
+
+        # Out-of-vocab masking (kb_ple.md §9.2): when vocab_size_per_layer_input
+        # < vocab_size, mask high token ids to 0.
+        ple_input_ids = jnp.where(
+            ple_input_ids < self.vocab_size_per_layer_input, ple_input_ids, 0)
+
+        # Track A — embedding lookup (kb_ple.md §3.1).
+        per_layer_embeds = self.embed_tokens_per_layer(ple_input_ids)
+        per_layer_embeds = per_layer_embeds * self.embed_scale_per_layer
+        per_layer_embeds = per_layer_embeds.reshape(T, L, P)
+
+        # Track B — projection of inputs_embeds.
+        per_layer_projection = self.per_layer_model_projection(inputs_embeds)
+        per_layer_projection = (per_layer_projection *
+                                self.per_layer_projection_scale)
+        per_layer_projection = per_layer_projection.reshape(T, L, P)
+        per_layer_projection = self.per_layer_projection_norm(
+            per_layer_projection)
+
+        # Combine.
+        return ((per_layer_projection + per_layer_embeds) *
+                self.per_layer_input_scale)
+
     def __call__(
         self,
         kv_caches: List[jax.Array],
@@ -725,6 +900,7 @@ class Gemma4Model(JaxModule):
         attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
         layer_name_to_kv_cache: Optional[dict] = None,
+        is_multimodal: Optional[jax.Array] = None,
     ) -> Tuple[List[jax.Array], jax.Array, Optional[jax.Array]]:
 
         if inputs_embeds is not None:
@@ -734,10 +910,17 @@ class Gemma4Model(JaxModule):
             # Gemma4: Apply embedding scaling
             x = x * self.embedding_scale
 
+        # PLE: compute per_layer_inputs once; slice [T, layer_idx, :] per layer.
+        # Returns None for non-PLE configs (e.g. 26B/31B), in which case each
+        # decoder layer gates the PLE block off via its own per_layer_input=None.
+        per_layer_inputs = self.compute_per_layer_inputs(
+            input_ids, x, is_multimodal=is_multimodal)
+
         all_expert_ids = []
         for i, layer in enumerate(
                 islice(self.layers, self.start_layer, self.end_layer)):
-            layer_name = f"layer.{i + self.start_layer}"
+            layer_idx = i + self.start_layer
+            layer_name = f"layer.{layer_idx}"
             if isinstance(attention_metadata, dict):
                 layer_attn_metadata = attention_metadata[layer_name]
             else:
@@ -746,13 +929,16 @@ class Gemma4Model(JaxModule):
             if layer_name_to_kv_cache and layer_name in layer_name_to_kv_cache:
                 cache_idx = layer_name_to_kv_cache[layer_name]
             else:
-                cache_idx = i + self.start_layer
+                cache_idx = layer_idx
 
             kv_cache = kv_caches[cache_idx]
+            layer_per_input = (per_layer_inputs[:, layer_idx, :]
+                               if per_layer_inputs is not None else None)
             kv_cache, x, expert_ids = layer(
                 kv_cache,
                 x,
                 layer_attn_metadata,
+                per_layer_input=layer_per_input,
             )
             if expert_ids is not None:
                 all_expert_ids.append(expert_ids)
@@ -836,12 +1022,14 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
 
         layer_name_to_kv_cache = dict(
             _layer_name_to_kv_cache) if _layer_name_to_kv_cache else None
+        # Text-only causal LM has no multimodal tokens; pass None.
         kv_caches, x, expert_indices = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
             inputs_embeds,
             layer_name_to_kv_cache=layer_name_to_kv_cache,
+            is_multimodal=None,
         )
 
         if not is_last_rank:
