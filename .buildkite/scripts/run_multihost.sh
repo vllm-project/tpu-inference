@@ -317,5 +317,7 @@ else
     -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'
   "
 fi
+echo "Displaying logs from $container_name:$log_path"
+docker exec "$container_name" cat "$log_path" || true
 
 echo "--- Tests completed successfully"
