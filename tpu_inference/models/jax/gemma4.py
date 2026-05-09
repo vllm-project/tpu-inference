@@ -58,9 +58,16 @@ class Gemma4MLP(JaxModule):
                  dtype: jnp.dtype,
                  rng: nnx.Rngs,
                  quant_config: VllmQuantConfig,
-                 prefix: str = ""):
+                 prefix: str = "",
+                 intermediate_size_override: Optional[int] = None):
         hidden_size = config.hidden_size
-        intermediate_size = config.intermediate_size
+        # Double-wide MLP support (kb_ple-orthogonal; vllm reference at
+        # vllm/model_executor/models/gemma4.py:599-610). When set,
+        # intermediate_size_override replaces config.intermediate_size for
+        # this layer — used by KV-shared layers when use_double_wide_mlp=True.
+        intermediate_size = (intermediate_size_override
+                             if intermediate_size_override is not None else
+                             config.intermediate_size)
 
         self.gate_proj = JaxLinear(
             hidden_size,
@@ -598,12 +605,24 @@ class Gemma4DecoderLayer(JaxModule):
             quant_config=quant_config,
             prefix=prefix + ".pre_feedforward_layernorm",
         )
+        # Double-wide MLP: KV-shared layers get 2x intermediate_size when
+        # the config flag is set (vllm reference: gemma4.py:599-610).
+        num_kv_shared_layers = getattr(text_config, "num_kv_shared_layers", 0)
+        is_kv_shared = (num_kv_shared_layers > 0
+                        and layer_idx >= text_config.num_hidden_layers -
+                        num_kv_shared_layers)
+        use_double_wide_mlp = (getattr(text_config, "use_double_wide_mlp",
+                                       False) and is_kv_shared)
+        layer_intermediate_size = (text_config.intermediate_size *
+                                   (2 if use_double_wide_mlp else 1))
+
         self.mlp = Gemma4MLP(
             config=text_config,
             dtype=dtype,
             rng=rng,
             quant_config=quant_config,
             prefix=prefix + ".mlp",
+            intermediate_size_override=layer_intermediate_size,
         )
         self.post_feedforward_layernorm = JaxRmsNorm(
             hidden_size,

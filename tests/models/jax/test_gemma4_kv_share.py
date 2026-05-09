@@ -202,3 +202,54 @@ def test_kv_share_with_ple_active(mesh, rng=jax.random.PRNGKey(0)):
     # Model-level PLE present.
     assert model.embed_tokens_per_layer is not None
     assert model.per_layer_model_projection is not None
+
+
+def test_double_wide_mlp(mesh, rng=jax.random.PRNGKey(0)):
+    """use_double_wide_mlp=True doubles intermediate_size on KV-shared layers."""
+    intermediate_size = 64
+    text_config = Gemma4TextConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=intermediate_size,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        global_head_dim=8,
+        rms_norm_eps=1e-6,
+        rope_theta=10000.0,
+        rope_local_base_freq=10000.0,
+        layer_types=["full_attention"] * 4,
+        num_kv_shared_layers=2,
+        use_double_wide_mlp=True,
+        hidden_size_per_layer_input=0,
+        attention_bias=False,
+    )
+    vllm_config = _make_vllm_config(text_config)
+    with jax.set_mesh(mesh):
+        model = Gemma4Model(vllm_config, nnx.Rngs(rng), mesh)
+
+    # Non-shared layers (0, 1) keep the regular size.
+    # Shared layers (2, 3) get 2x.
+    expected_regular = intermediate_size
+    expected_double = intermediate_size * 2
+
+    # gate_proj.weight is [hidden_size, intermediate_size]
+    assert model.layers[0].mlp.gate_proj.weight.shape == (32, expected_regular)
+    assert model.layers[1].mlp.gate_proj.weight.shape == (32, expected_regular)
+    assert model.layers[2].mlp.gate_proj.weight.shape == (32, expected_double)
+    assert model.layers[3].mlp.gate_proj.weight.shape == (32, expected_double)
+
+
+def test_double_wide_mlp_off(mesh, rng=jax.random.PRNGKey(0)):
+    """use_double_wide_mlp=False (or absent): all layers use regular size."""
+    intermediate_size = 64
+    text_config = _make_text_config(num_hidden_layers=4,
+                                    num_kv_shared_layers=2,
+                                    layer_types=["full_attention"] * 4)
+    vllm_config = _make_vllm_config(text_config)
+    with jax.set_mesh(mesh):
+        model = Gemma4Model(vllm_config, nnx.Rngs(rng), mesh)
+
+    for layer in model.layers:
+        assert layer.mlp.gate_proj.weight.shape == (32, intermediate_size)
