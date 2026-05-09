@@ -4,7 +4,7 @@ Feature,CorrectnessTest,PerformanceTest
 "KV Cache Offload",✅ Passing,✅ Passing
 "LoRA_Torch",✅ Passing,✅ Passing
 "Multimodal Inputs",❌ Failing,❓ Untested
-"Out-of-tree model support",✅ Passing,✅ Passing
+"Out-of-tree model support",✅ Passing,❌ Failing
 "Prefix Caching",✅ Passing,✅ Passing
 "Single Program Multi Data",✅ Passing,✅ Passing
 "Single-Host-P-D-disaggregation",✅ Passing,❓ Untested
@@ -14,6 +14,6 @@ Feature,CorrectnessTest,PerformanceTest
 "async scheduler",✅ Passing,✅ Passing
 "hybrid kv cache",✅ Passing,❓ Untested
 "multi-host",❓ Untested,❓ Untested
-"runai_model_streamer_loader",❌ Failing,❓ Untested
+"runai_model_streamer_loader",✅ Passing,❓ Untested
 "sampling_params",✅ Passing,❓ Untested
 "structured_decoding",✅ Passing,❓ Untested
