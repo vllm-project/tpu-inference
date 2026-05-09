@@ -69,7 +69,7 @@ steps:
                   --async-scheduling \
                   --enable-expert-parallel \
                   --additional_config='{\"compilation_sizes\": [2560], \"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}' \
-                  --trust-remote-code "
+                  --trust-remote-code " \
                 "curl http://localhost:8000/v1/completions \
                       -X POST \
                       -d '{\"model\": \"gs://tpu-commons-ci/deepseek/r1\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}' \

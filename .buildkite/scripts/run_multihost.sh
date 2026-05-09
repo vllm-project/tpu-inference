@@ -307,6 +307,8 @@ if [ "$#" -gt 0 ]; then
   docker exec \
     -e HF_HOME=/root/.cache/huggingface \
     node bash -c "${COMMAND_ARGS[*]}"
+  echo "Displaying logs from $container_name:$log_path"
+  docker exec "$container_name" cat "$log_path" || true
 else
   # Default: Run the curl test to verify the endpoint
   echo "--- Running default curl test"
@@ -316,8 +318,8 @@ else
     -H 'Content-Type: application/json' \
     -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'
   "
+  echo "Displaying logs from $container_name:$log_path"
+  docker exec "$container_name" cat "$log_path" || true
 fi
-echo "Displaying logs from $container_name:$log_path"
-docker exec "$container_name" cat "$log_path" || true
 
 echo "--- Tests completed successfully"
