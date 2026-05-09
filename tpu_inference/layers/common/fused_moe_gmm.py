@@ -477,7 +477,7 @@ def fused_moe_func(
 
         return x, group_sizes_local, topk_argsort_revert_indices
 
-    if True:
+    if all_gather_fp8:
         hidden_states = _apply_all_gather_fp8(hidden_states, mesh, dtype)
 
     x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
