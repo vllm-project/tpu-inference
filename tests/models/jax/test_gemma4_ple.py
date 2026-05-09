@@ -120,7 +120,7 @@ def test_ple_off_returns_none(mesh, rng=jax.random.PRNGKey(0)):
     text_config = _make_text_config(hidden_size_per_layer_input=0)
     vllm_config = _make_vllm_config(text_config)
 
-    with mesh:
+    with jax.set_mesh(mesh):
         model = Gemma4Model(vllm_config, nnx.Rngs(rng), mesh)
 
     assert model.embed_tokens_per_layer is None
@@ -148,7 +148,7 @@ def test_ple_on_shape_and_dtype(mesh, rng=jax.random.PRNGKey(0)):
                                     vocab_size_per_layer_input=V)
     vllm_config = _make_vllm_config(text_config)
 
-    with mesh:
+    with jax.set_mesh(mesh):
         model = Gemma4Model(vllm_config, nnx.Rngs(rng), mesh)
 
     assert model.embed_tokens_per_layer is not None
@@ -158,7 +158,7 @@ def test_ple_on_shape_and_dtype(mesh, rng=jax.random.PRNGKey(0)):
     T = 5
     input_ids = jnp.array([0, 1, 2, 3, V - 1], dtype=jnp.int32)
     inputs_embeds = jnp.ones((T, H), dtype=jnp.float32)
-    with mesh:
+    with jax.set_mesh(mesh):
         out = model.compute_per_layer_inputs(input_ids, inputs_embeds)
 
     assert out is not None
@@ -180,7 +180,7 @@ def test_ple_multimodal_masking(mesh, rng=jax.random.PRNGKey(0)):
                                     vocab_size_per_layer_input=V)
     vllm_config = _make_vllm_config(text_config)
 
-    with mesh:
+    with jax.set_mesh(mesh):
         model = Gemma4Model(vllm_config, nnx.Rngs(rng), mesh)
 
     # Two "tokens": one normal (id=5), one MM (id=10).
@@ -190,7 +190,7 @@ def test_ple_multimodal_masking(mesh, rng=jax.random.PRNGKey(0)):
     input_ids = jnp.array([0, 10], dtype=jnp.int32)
     inputs_embeds = jnp.zeros((T, H), dtype=jnp.float32)
 
-    with mesh:
+    with jax.set_mesh(mesh):
         out_no_mask = model.compute_per_layer_inputs(input_ids,
                                                      inputs_embeds,
                                                      is_multimodal=None)
@@ -224,7 +224,7 @@ def test_ple_oov_masking(mesh, rng=jax.random.PRNGKey(0)):
                                     vocab_size_per_layer_input=V_ple)
     vllm_config = _make_vllm_config(text_config)
 
-    with mesh:
+    with jax.set_mesh(mesh):
         model = Gemma4Model(vllm_config, nnx.Rngs(rng), mesh)
 
     # Tokens beyond V_ple-1 are OOV for embed_tokens_per_layer.
@@ -233,7 +233,7 @@ def test_ple_oov_masking(mesh, rng=jax.random.PRNGKey(0)):
     input_ids = jnp.array([0, V_ple - 1, V_ple, V - 1], dtype=jnp.int32)
     inputs_embeds = jnp.zeros((4, H), dtype=jnp.float32)
 
-    with mesh:
+    with jax.set_mesh(mesh):
         out = model.compute_per_layer_inputs(input_ids, inputs_embeds)
 
     assert out is not None
@@ -266,14 +266,14 @@ def test_ple_numpy_oracle_parity(mesh, rng=jax.random.PRNGKey(0)):
                                     vocab_size_per_layer_input=V)
     vllm_config = _make_vllm_config(text_config)
 
-    with mesh:
+    with jax.set_mesh(mesh):
         model = Gemma4Model(vllm_config, nnx.Rngs(rng), mesh)
 
     T = 4
     input_ids = jnp.array([0, 1, 2, 3], dtype=jnp.int32)
     inputs_embeds = jax.random.normal(jax.random.PRNGKey(7), (T, H),
                                       dtype=jnp.float32)
-    with mesh:
+    with jax.set_mesh(mesh):
         out = model.compute_per_layer_inputs(input_ids, inputs_embeds)
 
     # Numpy oracle (kb_ple.md §3.1 verbatim).
@@ -314,7 +314,7 @@ def test_ple_per_layer_modules_present_in_decoder(mesh,
     text_config = _make_text_config(hidden_size_per_layer_input=P,
                                     num_hidden_layers=2)
     vllm_config = _make_vllm_config(text_config)
-    with mesh:
+    with jax.set_mesh(mesh):
         model = Gemma4Model(vllm_config, nnx.Rngs(rng), mesh)
 
     for layer in model.layers:
@@ -331,7 +331,7 @@ def test_ple_off_decoder_modules_absent(mesh, rng=jax.random.PRNGKey(0)):
     text_config = _make_text_config(hidden_size_per_layer_input=0,
                                     num_hidden_layers=2)
     vllm_config = _make_vllm_config(text_config)
-    with mesh:
+    with jax.set_mesh(mesh):
         model = Gemma4Model(vllm_config, nnx.Rngs(rng), mesh)
 
     for layer in model.layers:
