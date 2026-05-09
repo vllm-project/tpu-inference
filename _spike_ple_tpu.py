@@ -81,19 +81,26 @@ class PerLayerInputCompute(nnx.Module):
         self.eps = 1e-6
         self.dtype = dtype
 
+        # Repo convention (see tpu_inference/models/jax/gemma4.py:70,135):
+        #   - sharding spec attached via nnx.with_partitioning on the initializer
+        #   - eager_sharding=False on the Param to defer sharding to JIT
         init = nnx.initializers.normal(stddev=0.02)
+        embed_init = nnx.with_partitioning(init, (None, None))  # replicated
+        proj_init = nnx.with_partitioning(init, ("model", None))  # H sharded
+        norm_init = nnx.with_partitioning(nnx.initializers.ones_init(),
+                                          (None, ))  # replicated
 
         self.embed_tokens_per_layer = nnx.Param(
-            init(rngs.params(), (V, L * P_), dtype),
-            sharding=(None, None),  # replicated
+            embed_init(rngs.params(), (V, L * P_), dtype),
+            eager_sharding=False,
         )
         self.per_layer_model_projection = nnx.Param(
-            init(rngs.params(), (H, L * P_), dtype),
-            sharding=("model", None),  # H sharded, L*P replicated
+            proj_init(rngs.params(), (H, L * P_), dtype),
+            eager_sharding=False,
         )
         self.per_layer_projection_norm_w = nnx.Param(
-            jnp.ones((P_, ), dtype=dtype),
-            sharding=(None, ),  # replicated
+            norm_init(rngs.params(), (P_, ), dtype),
+            eager_sharding=False,
         )
 
         # Constants per kb_ple §6 — Python floats (single-ownership, §11 lesson 3).
