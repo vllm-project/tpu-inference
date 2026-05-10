@@ -70,3 +70,34 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh \
           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_gemma4.py'
+
+  # Phase 6: real E2B end-to-end serve via offline_inference. This
+  # exercises the full PLE + KV-share + double-wide MLP + skip-write
+  # kernel path. TP=1 single-chip; default MODEL_IMPL_TYPE=auto routes
+  # Gemma4ForConditionalGeneration to flax_nnx (not in
+  # _VLLM_PREFERRED_ARCHITECTURES).
+  - label: "tpu6e Gemma-4 E2B offline_inference (Phase 6 smoke)"
+    key: tpu6e_gemma4_E2B_offline
+    depends_on: tpu6e_build_docker
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu6e"
+    commands:
+      - |
+        if pip install "transformers>=5.5.0" --dry-run | grep -q "Would install transformers-"; then
+          echo "transformers version too low; skipping"
+          exit 0
+        fi
+        .buildkite/scripts/run_in_docker.sh bash -c '
+          JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" \
+          REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" \
+          SKIP_JAX_PRECOMPILE=1 \
+          VLLM_XLA_CHECK_RECOMPILATION=0 \
+          python3 /workspace/tpu_inference/examples/offline_inference.py \
+            --model=google/gemma-4-E2B-it \
+            --tensor-parallel-size=1 \
+            --max-model-len=4096 \
+            --max-num-batched-tokens=4096'
