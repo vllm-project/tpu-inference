@@ -285,6 +285,15 @@ def get_default_maps(model_config, mesh: Mesh,
         "k_proj": (2, 0, 1),
         "v_proj": (2, 0, 1),
         "o_proj": (1, 2, 0),
+        # Gemma-4 PLE (E-family). HF stores both as Linear-style (out, in);
+        # JAX expects (in, out).
+        "per_layer_model_projection": (1, 0),
+        "per_layer_input_gate": (1, 0),
+        "per_layer_projection": (1, 0),
+        # `embed_tokens_per_layer` is HF-encoded as nn.Linear (out, in) =
+        # (L*P, V_ple), unlike standard nn.Embedding which is (V, embed_dim).
+        # Transpose so JaxEmbed's (V_ple, L*P) shape matches.
+        "embed_tokens_per_layer": (1, 0),
     }
 
     # # get vision config
