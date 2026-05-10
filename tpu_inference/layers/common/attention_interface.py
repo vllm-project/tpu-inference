@@ -339,6 +339,7 @@ def sharded_ragged_paged_attention(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    update_kv_cache: bool = True,
 ):
     """Shards along KV heads."""
     # Handle GQA/MQA where num_kv_heads < tp_size
@@ -385,14 +386,19 @@ def sharded_ragged_paged_attention(
         args += (attention_sink, )
 
     def _ragged_paged_attention(*args):
-        return func(
-            *args,
+        kwargs = dict(
             sm_scale=sm_scale,
             sliding_window=attention_chunk_size,
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
         )
+        # update_kv_cache is only supported by the non-hd64 path. hd64 (head
+        # dim 64) doesn't need KV-share for any current model; pass the kwarg
+        # only when present in the underlying kernel signature.
+        if not use_hd64:
+            kwargs["update_kv_cache"] = update_kv_cache
+        return func(*args, **kwargs)
 
     return jax.shard_map(
         _ragged_paged_attention,
@@ -417,6 +423,7 @@ def attention(
     k_scale: float | None = None,
     v_scale: float | None = None,
     sinks: jax.Array | None = None,
+    update_kv_cache: bool = True,
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads
@@ -455,6 +462,7 @@ def attention(
         q_scale=q_scale,
         k_scale=k_scale,
         v_scale=v_scale,
+        update_kv_cache=update_kv_cache,
     )
 
     return kv_cache, output

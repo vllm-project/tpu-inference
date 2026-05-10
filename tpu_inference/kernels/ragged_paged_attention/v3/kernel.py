@@ -288,6 +288,12 @@ def _ragged_paged_attention_kernel(*args, **kwargs):
         )
 
 
+# update_kv_cache=False is the KV-share path: kernel computes attention
+# using input k,v for current-step contributions, but does NOT write input
+# k,v back to the cache. Mirrors vllm rocm_attn.py:321-333 gating on
+# kv_sharing_target_layer_name. See plan_stage2.md §3 Phase 8 / kb_kv_share §5.
+
+
 def _ragged_paged_attention_kernel_loop(
     seq_idx,
     # Prefetch
@@ -317,6 +323,7 @@ def _ragged_paged_attention_kernel_loop(
     acc_ref,  # [actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, head_dim],
     *,
     use_causal_mask: bool = True,
+    update_kv_cache: bool = True,  # KV-share: False = skip cache writes
     skip_kv_mask: bool = False,
     sm_scale: float,
     sliding_window: int | None = None,
@@ -969,10 +976,15 @@ def _ragged_paged_attention_kernel_loop(
 
                 # Start updating bkv to kv cache if applicable.
                 # Only needed in last bq loop.
-                @pl.when(jnp.logical_and(update_sz > 0, bq_idx == num_bq - 1))
-                def update_cur_bkv_to_cache():
-                    start_update_kv_cache(seq_idx, bkv_sem_idx, offset,
-                                          update_sz)
+                # KV-share: skip the cache write when update_kv_cache=False
+                # so shared layers don't overwrite the source layer's slot.
+                if update_kv_cache:
+
+                    @pl.when(
+                        jnp.logical_and(update_sz > 0, bq_idx == num_bq - 1))
+                    def update_cur_bkv_to_cache():
+                        start_update_kv_cache(seq_idx, bkv_sem_idx, offset,
+                                              update_sz)
 
                 debug_print(
                     "[RPA debug] -----------flash attention-----------")
@@ -1545,6 +1557,7 @@ def get_default_block_sizes(
 @jax.jit(
     static_argnames=(
         "use_causal_mask",
+        "update_kv_cache",
         "skip_kv_mask",
         "sm_scale",
         "sliding_window",
@@ -1579,6 +1592,7 @@ def ragged_paged_attention(
     distribution: jax.Array,  # i32[3]
     *,
     use_causal_mask: bool = True,
+    update_kv_cache: bool = True,
     skip_kv_mask: bool = False,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
@@ -1793,6 +1807,7 @@ def ragged_paged_attention(
             functools.partial(
                 _ragged_paged_attention_kernel,
                 use_causal_mask=use_causal_mask,
+                update_kv_cache=update_kv_cache,
                 skip_kv_mask=skip_kv_mask,
                 sm_scale=sm_scale,
                 sliding_window=sliding_window,

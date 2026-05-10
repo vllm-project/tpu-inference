@@ -483,34 +483,20 @@ class Gemma4Attention(JaxModule):
 
             v = self.v_norm(v)
         else:
-            # KV-shared: only Q gets RoPE; K/V come from the cache slot
-            # (redirected by the runner per kb_kv_share.md §3-§4) which
-            # was written by the source layer earlier in this forward pass.
-            #
-            # Known limitation: sharded_ragged_paged_attention always writes
-            # input k,v to cache (no skip-write flag). Calling attention with
-            # the freshly-projected k,v would corrupt source's cache slot. We
-            # need either a kernel-level skip-write flag (mirror vllm rocm_attn
-            # PagedAttention.write_to_paged_cache gating) or a save/restore
-            # wrapper. Tracked as Stage 2 follow-up commit.
-            #
-            # For now: structural Phase 2 only (lift the assertion, set
-            # is_kv_shared_layer + kv_sharing_target_layer_name + skip the
-            # expected K/V projections). Forward through shared layers will
-            # fail loudly here; non-shared layers (and unit tests for layer 0)
-            # are unaffected.
+            # KV-shared (kb_kv_share.md §5; vllm reference at gemma4.py:524-540):
+            # Only Q gets RoPE. K and V are NOT normalized and NOT RoPE-rotated
+            # — they're passed through to attention so the kernel can use them
+            # for the current step's attention contribution. The cache slot
+            # (redirected by the runner per kb_kv_share.md §3-§4) holds the
+            # source layer's K/V for past tokens. We pass update_kv_cache=False
+            # to attention() so the kernel does NOT overwrite source's slot
+            # with shared's k,v (which would corrupt the cache).
             q = apply_rope(q,
                            md.input_positions,
                            self.head_dim_original,
                            self.rope_theta,
                            self.rope_scaling,
                            rope_proportion=self.rope_proportion)
-            raise NotImplementedError(
-                "KV-shared attention forward not yet implemented for the JAX "
-                "path. The attention kernel needs a 'skip cache write' flag "
-                "(mirror vllm rocm_attn.py:321-333 gating on "
-                "kv_sharing_target_layer_name) before shared layers can run. "
-                "See plan_stage2.md.")
 
         q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
@@ -532,6 +518,7 @@ class Gemma4Attention(JaxModule):
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
+            update_kv_cache=not self.is_kv_shared_layer,
         )
         # (T, D)
         o = self.o_proj(outputs)
