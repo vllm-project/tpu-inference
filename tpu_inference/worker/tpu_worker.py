@@ -443,15 +443,29 @@ class TPUWorker(WorkerBase):
     def profile(self,
                 is_start: bool = True,
                 profile_prefix: str | None = None):
+        profiler = self.model_runner.phase_based_profiler
+        # NOTE: We have two paths for profiling here:
+        # 1. Phased-based profiler (Recommended): If `PHASED_PROFILING_DIR` is set,
+        #    we use the custom manual profiling mode which respects step boundaries
+        #    and supports multi-host directory merging.
+        # 2. Fallback path: If not set, we fallback to directly calling JAX profiler
+        #    using vLLM's configured `torch_profiler_dir`. This PyTorch-based
+        #    profiling path is considered legacy and will be deprecated soon.
         if is_start:
-            options = jax.profiler.ProfileOptions()
-            # default: https://docs.jax.dev/en/latest/profiling.html#general-options
-            options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
-            options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 1)
-            jax.profiler.start_trace(self.profile_dir,
-                                     profiler_options=options)
+            if profiler is not None:
+                profiler.start_manual_profile()
+            else:
+                options = jax.profiler.ProfileOptions()
+                # default: https://docs.jax.dev/en/latest/profiling.html#general-options
+                options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
+                options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 1)
+                jax.profiler.start_trace(self.profile_dir,
+                                         profiler_options=options)
         else:
-            jax.profiler.stop_trace()
+            if profiler is not None:
+                profiler.stop_manual_profile()
+            else:
+                jax.profiler.stop_trace()
 
     def load_model(self) -> None:
         self.model_runner.load_model()

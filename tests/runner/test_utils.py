@@ -382,6 +382,7 @@ def test_phased_profiler_full_cycle(profiler_fixture):
     assert profiler.profiling_n_steps_left == PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
     assert profiler.current_phase == "prefill_heavy"
     assert profiler.inference_phase_seen[InferencePhase.PREFILL_HEAVY]
+    time.sleep(0.5)  # Wait for async file write
     assert mock_file().write.call_count == 1  # Wrote stats on start
 
     # 2. Step profiling (N-1 steps)
@@ -396,6 +397,7 @@ def test_phased_profiler_full_cycle(profiler_fixture):
     mock_stop.assert_called_once()
     assert profiler.profiling_n_steps_left == 0
     assert profiler.current_phase == ""
+    time.sleep(0.5)  # Wait for async file writes
     assert mock_file(
     ).write.call_count == PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR + 1
 
@@ -603,3 +605,83 @@ def test_merge_multihost_profile_directories(tmp_path):
             "node-1-0.xplane.pb").read_text() == "dummy_trace_data_1"
     assert (dir_early /
             "node-0-0.xplane.pb").read_text() == "dummy_trace_data_0"
+
+
+def test_manual_profiler_bypassed_if_already_profiling(profiler_fixture):
+    """Tests that manual profiling is bypassed if another phase is running."""
+    profiler = profiler_fixture["profiler"]
+    mock_start = profiler_fixture["mock_start"]
+    mock_determine_phase = profiler_fixture["mock_determine_phase"]
+
+    stats = {"num_reqs": 2, "total_num_scheduled_tokens": 100}
+
+    # 1. Start an automatic profile (e.g., PREFILL_HEAVY)
+    mock_determine_phase.return_value = InferencePhase.PREFILL_HEAVY
+    profiler.step(stats)
+    assert profiler.current_phase == "prefill_heavy"
+    mock_start.assert_called_once()
+
+    # 2. Try to trigger manual profile
+    profiler.start_manual_profile()
+    # It should not change current_phase
+    assert profiler.current_phase == "prefill_heavy"
+
+
+def test_manual_profiler_can_run_multiple_times(profiler_fixture):
+    """Tests that manual profiling can be triggered multiple times."""
+    profiler = profiler_fixture["profiler"]
+    mock_start = profiler_fixture["mock_start"]
+    mock_stop = profiler_fixture["mock_stop"]
+
+    stats = {"num_reqs": 2, "total_num_scheduled_tokens": 100}
+
+    # 1. First manual run
+    profiler.start_manual_profile()
+    assert profiler.current_phase == "manual"
+
+    # Step to start it in the runner loop
+    profiler.step(stats)
+    assert mock_start.call_count == 1
+
+    # Stop it
+    profiler.stop_manual_profile()
+    # Step to stop it in the runner loop
+    profiler.step(stats)
+    assert mock_stop.call_count == 1
+    assert profiler.current_phase == ""
+
+    # 2. Second manual run
+    profiler.start_manual_profile()
+    assert profiler.current_phase == "manual"
+
+    # Step to start it again
+    profiler.step(stats)
+    assert mock_start.call_count == 2
+
+    # Stop it again
+    profiler.stop_manual_profile()
+    profiler.step(stats)
+    assert mock_stop.call_count == 2
+    assert profiler.current_phase == ""
+
+
+def test_manual_profiler_duplicate_stop_ignored(profiler_fixture):
+    """Tests that duplicate stop calls are ignored after it has stopped."""
+    profiler = profiler_fixture["profiler"]
+    mock_stop = profiler_fixture["mock_stop"]
+    stats = {"num_reqs": 2, "total_num_scheduled_tokens": 100}
+
+    # 1. Start and stop normally
+    profiler.start_manual_profile()
+    profiler.step(stats)
+    profiler.stop_manual_profile()
+    profiler.step(stats)
+
+    assert mock_stop.call_count == 1
+    assert profiler.current_phase == ""
+
+    # 2. Call stop again
+    profiler.stop_manual_profile()
+    # Should not increment stop count
+    assert mock_stop.call_count == 1
+    assert profiler.current_phase == ""
