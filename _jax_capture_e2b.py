@@ -122,8 +122,8 @@ def main():
         model="google/gemma-4-E2B-it",
         enforce_eager=True,
         dtype="bfloat16",
-        max_model_len=512,
-        max_num_batched_tokens=512,
+        max_model_len=4096,
+        max_num_batched_tokens=4096,  # E2B vision tower needs 2496 tokens/image
         tensor_parallel_size=1,
     )
     print(f"[load] {time.time() - t0:.1f}s", flush=True)
