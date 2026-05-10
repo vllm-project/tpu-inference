@@ -13,13 +13,11 @@
 # limitations under the License.
 """JAX-side hidden-state capture for E2B oracle-diff debugging.
 
-Runs E2B end-to-end via vllm + JAX path, intercepts intermediate tensors via
-monkey-patching `Gemma4Model.compute_per_layer_inputs` and `__call__`, and
-writes them to /tmp/hf_home/jax_e2b_hidden.npz so a Buildkite step can
-upload it as an artifact.
+Runs E2B end-to-end via vllm + JAX path. Uses jax.debug.callback to push
+intermediate tensors out of the jit trace into a Python `captures` dict.
+Writes /tmp/hf_home/jax_e2b_hidden.npz for buildkite-agent artifact upload.
 
-Invoke via .buildkite/pipeline_dev.yml — see the "JAX hidden-state capture"
-step on cuiq-bringup-gemma4-e2b-jax.
+Invoke via .buildkite/pipeline_dev.yml (see "JAX hidden-state capture" step).
 
 THROWAWAY. Reverted before opening any production PR.
 """
@@ -28,11 +26,27 @@ import os
 import time
 from itertools import islice
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
 OUTPUT_PATH = "/tmp/hf_home/jax_e2b_hidden.npz"
 captures: dict = {}
+
+
+def _store(name: str, value: np.ndarray) -> None:
+    """Python-side callback. Records the first occurrence per name."""
+    if name not in captures:
+        captures[name] = np.asarray(value).astype(np.float32)
+
+
+def _push(name: str, x):
+    """Schedule a host callback inside the jit trace to record `x` as `name`.
+
+    `ordered=True` ensures the callback fires in program order; without it the
+    runtime can reorder side effects.
+    """
+    jax.debug.callback(lambda v, n=name: _store(n, v), x, ordered=True)
 
 
 def install_hooks():
@@ -41,13 +55,10 @@ def install_hooks():
     orig_compute = gemma4.Gemma4Model.compute_per_layer_inputs
 
     def patched_compute(self, input_ids, inputs_embeds, is_multimodal=None):
+        _push("inputs_embeds", inputs_embeds)
         out = orig_compute(self, input_ids, inputs_embeds, is_multimodal)
-        if "inputs_embeds" not in captures:
-            captures["inputs_embeds"] = np.asarray(
-                jnp.asarray(inputs_embeds, dtype=jnp.float32))
-        if out is not None and "per_layer_inputs" not in captures:
-            captures["per_layer_inputs"] = np.asarray(
-                jnp.asarray(out, dtype=jnp.float32))
+        if out is not None:
+            _push("per_layer_inputs", out)
         return out
 
     gemma4.Gemma4Model.compute_per_layer_inputs = patched_compute
@@ -89,13 +100,9 @@ def install_hooks():
             if expert_ids is not None:
                 all_expert_ids.append(expert_ids)
             kv_caches[cache_idx] = kv_cache
-            key = f"layer_{layer_idx}"
-            if key not in captures:
-                captures[key] = np.asarray(jnp.asarray(x, dtype=jnp.float32))
+            _push(f"layer_{layer_idx}", x)
         x = self.norm(x)
-        if "final_norm" not in captures:
-            captures["final_norm"] = np.asarray(
-                jnp.asarray(x, dtype=jnp.float32))
+        _push("final_norm", x)
         stacked = jnp.stack(all_expert_ids, axis=0) if all_expert_ids else None
         return kv_caches, x, stacked
 
@@ -132,7 +139,9 @@ def main():
     out = llm.generate([prompt], SamplingParams(max_tokens=4, temperature=0.0))
     print(f"[output] {out[0].outputs[0].text!r}", flush=True)
     print(f"[captures] count: {len(captures)}", flush=True)
-    print(f"[captures] keys: {sorted(captures.keys())[:6]} ...", flush=True)
+    if captures:
+        print(f"[captures] keys: {sorted(captures.keys())[:6]} ...",
+              flush=True)
 
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     np.savez_compressed(OUTPUT_PATH, **captures)
