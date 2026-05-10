@@ -649,10 +649,16 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                 if "audio_tower" in mapped_name or "embed_audio" in mapped_name:
                     continue
 
-                # Skip input_max activation-calibration metadata that ships
-                # in E2B/E4B HF checkpoints (vision tower) but isn't a JAX
-                # parameter. The JAX vision module doesn't track these.
-                if mapped_name.endswith(".input_max"):
+                # Skip activation-calibration metadata that ships in E2B/E4B
+                # HF checkpoints (vision tower) but isn't a JAX parameter.
+                # The JAX vision module doesn't track these min/max scalars.
+                if any(
+                        mapped_name.endswith(suffix) for suffix in (
+                            ".input_max",
+                            ".input_min",
+                            ".output_max",
+                            ".output_min",
+                        )):
                     continue
 
                 # Handle packed QKV weights for the text tower.
