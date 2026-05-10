@@ -61,16 +61,18 @@ def main():
     )
     print(f"[load] {time.time() - t0:.1f}s", flush=True)
 
-    raw_prompt = "The capital of France is"
-    tok = llm.get_tokenizer()
-    prompt = tok.apply_chat_template(
-        [{"role": "user", "content": raw_prompt}],
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    print(f"[generate] raw_prompt: {raw_prompt!r}", flush=True)
-    print(f"[generate] templated: {prompt!r}", flush=True)
-    out = llm.generate([prompt], SamplingParams(max_tokens=4, temperature=0.0))
+    # Hardcoded token IDs for the chat-templated prompt
+    #   "<bos><|turn>user\nThe capital of France is<turn|>\n<|turn>model\n"
+    # Captured once via tokenizer.apply_chat_template() on a vllm-pytorch
+    # GPU run; reused verbatim on both sides so the GPU and TPU captures
+    # see byte-identical input_ids regardless of transformers/vllm drift.
+    PROMPT_IDS = [
+        2, 105, 2364, 107, 818, 5279, 529, 7001, 563, 106, 107, 105, 4368, 107
+    ]
+    print(f"[generate] input_ids ({len(PROMPT_IDS)}): {PROMPT_IDS}",
+          flush=True)
+    out = llm.generate([{"prompt_token_ids": PROMPT_IDS}],
+                       SamplingParams(max_tokens=4, temperature=0.0))
     print(f"[output] {out[0].outputs[0].text!r}", flush=True)
 
     # Bundle .npy files into one .npz.
