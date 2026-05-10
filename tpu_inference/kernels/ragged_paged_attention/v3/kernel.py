@@ -288,10 +288,12 @@ def _ragged_paged_attention_kernel(*args, **kwargs):
         )
 
 
-# update_kv_cache=False is the KV-share path: kernel computes attention
-# using input k,v for current-step contributions, but does NOT write input
-# k,v back to the cache. Mirrors vllm rocm_attn.py:321-333 gating on
-# kv_sharing_target_layer_name. See plan_stage2.md §3 Phase 8 / kb_kv_share §5.
+# update_kv_cache=False is the KV-share path: shared layers read the
+# entire kv_len from the (redirected) cache slot — their own input k,v
+# is unused. The cache slot already contains the source layer's K,V
+# (source's call ran first in the same step and wrote them). Mirrors
+# vllm-pytorch where unified_attention reads only from key_cache /
+# value_cache regardless of the input k,v. See kb_kv_share §5.
 
 
 def _ragged_paged_attention_kernel_loop(
@@ -566,7 +568,16 @@ def _ragged_paged_attention_kernel_loop(
         q_len = q_end - q_start
 
         kv_left = kv_len - kv_len_start
-        kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
+        if update_kv_cache:
+            kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
+        else:
+            # KV-share: source layer already wrote the full K/V for the
+            # current step into the (redirected) cache slot before this
+            # layer's call, so read everything from cache. The shared
+            # layer's input k,v is unused. Mirrors vllm-pytorch behavior
+            # where unified_attention reads from key_cache/value_cache
+            # only, regardless of the layer's own k,v projections.
+            kv_left_frm_cache = kv_left
         kv_left_frm_new = kv_left - kv_left_frm_cache
 
         bkv_sz_frm_cache = jnp.minimum(kv_left_frm_cache, bkv_sz)

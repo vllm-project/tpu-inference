@@ -508,13 +508,16 @@ class Gemma4Attention(JaxModule):
             v = self.v_norm(v)
         else:
             # KV-shared (kb_kv_share.md §5; vllm reference at gemma4.py:524-540):
-            # Only Q gets RoPE. K and V are NOT normalized and NOT RoPE-rotated
-            # — they're passed through to attention so the kernel can use them
-            # for the current step's attention contribution. The cache slot
-            # (redirected by the runner per kb_kv_share.md §3-§4) holds the
-            # source layer's K/V for past tokens. We pass update_kv_cache=False
-            # to attention() so the kernel does NOT overwrite source's slot
-            # with shared's k,v (which would corrupt the cache).
+            # Only Q gets RoPE. K and V are NOT normalized and NOT RoPE-rotated.
+            # The cache slot (redirected by the runner per kb_kv_share.md §3-§4)
+            # holds the source layer's already-normed-and-roped K/V for ALL
+            # positions (source's call ran first in the same step and wrote
+            # them). We pass update_kv_cache=False so the kernel both (a) does
+            # not overwrite the source slot with our raw k,v and (b) reads
+            # everything from cache rather than mixing in the layer's own
+            # input k,v. Shared's input k,v is therefore unused for attention
+            # math; we still allocate q_proj/k_proj/v_proj because gemma-4's
+            # checkpoint stores full Q/K/V weights for shared layers.
             q = apply_rope(q,
                            md.input_positions,
                            self.head_dim_original,
