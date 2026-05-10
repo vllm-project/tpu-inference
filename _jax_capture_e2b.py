@@ -23,12 +23,23 @@ THROWAWAY. Reverted before opening any production PR.
 """
 
 import os
-import time
-from itertools import islice
 
-import jax
-import jax.numpy as jnp
-import numpy as np
+# Set env vars BEFORE any vllm / tpu_inference imports — the monkey-patched
+# Gemma4Model.__call__ has a different identity than the cached compile, so
+# the runner's recompilation watchdog would reject it. run_in_docker.sh hard-
+# codes VLLM_XLA_CHECK_RECOMPILATION=1; override here at module load time.
+os.environ["VLLM_XLA_CHECK_RECOMPILATION"] = "0"
+os.environ["JITTED_MM_MODULE_KEYS"] = "model.vision_tower.encoder"
+os.environ["REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES"] = (
+    "transformers.modeling_outputs.BaseModelOutputWithPast")
+os.environ["SKIP_JAX_PRECOMPILE"] = "1"
+
+import time  # noqa: E402
+from itertools import islice  # noqa: E402
+
+import jax  # noqa: E402
+import jax.numpy as jnp  # noqa: E402
+import numpy as np  # noqa: E402
 
 OUTPUT_PATH = "/tmp/hf_home/jax_e2b_hidden.npz"
 captures: dict = {}
@@ -110,15 +121,6 @@ def install_hooks():
 
 
 def main():
-    os.environ.setdefault("JITTED_MM_MODULE_KEYS",
-                          "model.vision_tower.encoder")
-    os.environ.setdefault(
-        "REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES",
-        "transformers.modeling_outputs.BaseModelOutputWithPast",
-    )
-    os.environ.setdefault("SKIP_JAX_PRECOMPILE", "1")
-    os.environ.setdefault("VLLM_XLA_CHECK_RECOMPILATION", "0")
-
     install_hooks()
     print("[hooks] installed", flush=True)
 
