@@ -61,7 +61,15 @@ def main():
     )
     print(f"[load] {time.time() - t0:.1f}s", flush=True)
 
-    prompt = "The capital of France is"
+    raw_prompt = "The capital of France is"
+    tok = llm.get_tokenizer()
+    prompt = tok.apply_chat_template(
+        [{"role": "user", "content": raw_prompt}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    print(f"[generate] raw_prompt: {raw_prompt!r}", flush=True)
+    print(f"[generate] templated: {prompt!r}", flush=True)
     out = llm.generate([prompt], SamplingParams(max_tokens=4, temperature=0.0))
     print(f"[output] {out[0].outputs[0].text!r}", flush=True)
 
