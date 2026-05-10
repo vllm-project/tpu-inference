@@ -57,6 +57,24 @@ steps:
         .buildkite/scripts/run_in_docker.sh \
           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_gemma4_kv_share.py'
 
+  # Kernel-level regression for the KV-share fix (kernel.py _fetch_bkv).
+  # Gates the cleanup commits in steps 2c-2d of plan_stage2_post_debug.md:
+  # if anyone accidentally re-introduces the "current step from input k,v"
+  # split, this test fails immediately on the next dev-pipeline run.
+  - label: "tpu6e RPA v3 kernel KV-share (ragged_paged_attention_kernel_v3_kv_share_test.py)"
+    key: tpu6e_rpa_v3_kv_share_kernel
+    depends_on: tpu6e_build_docker
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu6e"
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels/ragged_paged_attention_kernel_v3_kv_share_test.py'
+
   - label: "tpu6e Gemma-4 existing tests (regression check, test_gemma4.py)"
     key: tpu6e_gemma4_existing
     depends_on: tpu6e_build_docker
