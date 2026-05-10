@@ -139,27 +139,32 @@ class KvShareKernelTest(jtu.JaxTestCase):
         pre-populated cache and same q produce bit-identical outputs."""
         args1 = self._build_inputs(q_len=16, kv_len=16, kv_input_seed=11)
         args2 = self._build_inputs(q_len=16, kv_len=16, kv_input_seed=99)
-        # Sanity
+        # Sanity (must happen BEFORE the kernel call — the kernel donates
+        # queries/keys/values/kv_cache, so args1[3]/args2[3] are deleted
+        # after the call).
         np.testing.assert_array_equal(args1[0], args2[0])  # q
         np.testing.assert_array_equal(args1[3], args2[3])  # kv_cache
         self.assertFalse(np.array_equal(args1[1], args2[1]))  # k differs
         self.assertFalse(np.array_equal(args1[2], args2[2]))  # v differs
+        cache_before = np.asarray(args1[3])
 
         out1, cache_after_1 = ragged_paged_attention(*args1, **self._kwargs())
         out2, cache_after_2 = ragged_paged_attention(*args2, **self._kwargs())
 
         # Output invariant to input k,v.
         self.assertArraysEqual(out1, out2)
-        # Cache unchanged in both runs.
-        c0 = args1[3]
-        mask = ~jnp.isnan(c0)
-        self.assertArraysEqual(cache_after_1[mask], c0[mask])
-        self.assertArraysEqual(cache_after_2[mask], c0[mask])
+        # Cache unchanged in both runs (use the pre-donation snapshot).
+        mask = ~np.isnan(cache_before)
+        np.testing.assert_array_equal(
+            np.asarray(cache_after_1)[mask], cache_before[mask])
+        np.testing.assert_array_equal(
+            np.asarray(cache_after_2)[mask], cache_before[mask])
 
     def test_decode_input_kv_is_ignored(self):
         """q_len == 1, kv_len > 1 (decode step). Same invariance."""
         args1 = self._build_inputs(q_len=1, kv_len=33, kv_input_seed=11)
         args2 = self._build_inputs(q_len=1, kv_len=33, kv_input_seed=99)
+        cache_before = np.asarray(args1[3])
 
         out1, cache_after_1 = ragged_paged_attention(*args1, **self._kwargs())
         out2, cache_after_2 = ragged_paged_attention(*args2, **self._kwargs())
@@ -167,9 +172,9 @@ class KvShareKernelTest(jtu.JaxTestCase):
         # Decode emits q_len = 1 token. Compare just that token (the rest of
         # the max_num_batched_tokens buffer is junk padding).
         self.assertArraysEqual(out1[:1], out2[:1])
-        c0 = args1[3]
-        mask = ~jnp.isnan(c0)
-        self.assertArraysEqual(cache_after_1[mask], c0[mask])
+        mask = ~np.isnan(cache_before)
+        np.testing.assert_array_equal(
+            np.asarray(cache_after_1)[mask], cache_before[mask])
 
     def test_prefill_default_update_kv_cache_still_writes(self):
         """Sanity: the fix only changes the `update_kv_cache=False` branch.
