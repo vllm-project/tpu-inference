@@ -14,7 +14,6 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from typing import Any, Optional
 
@@ -58,6 +57,7 @@ class InferencePhase(Enum):
     AMBIGUOUS = 3
     PREFILL_ONLY = 4
     DECODE_ONLY = 5
+    MANUAL = 6
 
 
 def get_padded_num_reqs_with_upper_limit(x: int, upper_limit: int) -> int:
@@ -501,7 +501,8 @@ class PhasedBasedProfiler:
             InferencePhase.PREFILL_HEAVY: False,
             InferencePhase.DECODE_ONLY: False,
             InferencePhase.DECODE_HEAVY: False,
-            InferencePhase.BALANCED: False
+            InferencePhase.BALANCED: False,
+            InferencePhase.MANUAL: False
         }
         self.default_profiling_options = jax.profiler.ProfileOptions()
         self.default_profiling_options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
@@ -566,10 +567,15 @@ class PhasedBasedProfiler:
                     num_reqs: The number of requests in the batch.
                     phase: The phase of the inference the batch is in.
         """
-        current_determined_phase = determine_phase_from_batch_composition_stats(
-            batch_composition_stats)
+        if self.current_phase == "manual":
+            current_determined_phase = InferencePhase.MANUAL
+        else:
+            current_determined_phase = determine_phase_from_batch_composition_stats(
+                batch_composition_stats)
+
         for phase, has_been_seen in self.inference_phase_seen.items():
-            if has_been_seen or phase != current_determined_phase:
+            if (has_been_seen and phase != InferencePhase.MANUAL
+                ) or phase != current_determined_phase:
                 continue
 
             # Skip a configurable number of decode-heavy steps before profiling
@@ -594,6 +600,7 @@ class PhasedBasedProfiler:
             self.inference_phase_seen[phase] = True
             self.profiling_n_steps_left = self.num_steps_to_profile_for
 
+            # Manual phase will keep reset itself to manual.
             self.current_phase = phase.name.lower()
 
             logger.info(f"Starting profiling for {self.current_phase} phase")
@@ -692,6 +699,37 @@ class PhasedBasedProfiler:
             logger.warning(
                 "Failed to merge multi-host profile directories: %s", e)
 
+    def start_manual_profile(self) -> None:
+        """Manually requests starting profiling."""
+        if self.current_phase != "":
+            logger.warning(
+                "Profiler is already running in phase %s. Skipping.",
+                self.current_phase)
+            return
+        self.current_phase = InferencePhase.MANUAL.name.lower()
+        logger.info("Manual profiling requested. Will start on next step.")
+
+    def stop_manual_profile(self) -> None:
+        """Manually stops profiling by setting steps left to 0."""
+        if self.current_phase != InferencePhase.MANUAL.name.lower():
+            logger.warning("Current phase is not MANUAL. It is %s. Skipping.",
+                           self.current_phase)
+            return
+        logger.info("Stopping current %s phase profile", self.current_phase)
+        self.profiling_n_steps_left = 1
+
+    def _should_profile(self, batch_composition_stats: dict) -> bool:
+        """Checks if we should start profiling."""
+        if self.current_phase == "manual":
+            return True
+        have_seen_all_phases = all(self.inference_phase_seen.values())
+        # We want to start profiling only after the first trial request
+        is_past_initial_request = batch_composition_stats[
+            "num_reqs"] > 1 and batch_composition_stats[
+                "total_num_scheduled_tokens"] > 1
+        return is_past_initial_request and (not have_seen_all_phases
+                                            or self.current_phase != "")
+
     def step(self, batch_composition_stats: dict) -> None:
         """
         Steps the profiler and logs batch composition stats.
@@ -707,19 +745,19 @@ class PhasedBasedProfiler:
                     num_reqs: The number of requests in the batch.
                     phase: The phase of the inference the batch is in.
         """
+        if self.aggregated_stats_logger is not None and batch_composition_stats[
+                "total_num_scheduled_tokens"] > 1:
+            self.aggregated_stats_logger.log(batch_composition_stats)
 
-        have_seen_all_phases = all(self.inference_phase_seen.values())
-        # We want to start profiling only after the first trial request
-        is_past_initial_request = batch_composition_stats[
-            "total_num_scheduled_tokens"] > 1
-        if is_past_initial_request and (not have_seen_all_phases
-                                        or self.current_phase != ""):
-            # We haven't started profiling yet
-            if self.profiling_n_steps_left <= 0:
-                self._start_profiling(batch_composition_stats)
-            # We are in the middle of profiling a given phase
-            else:
-                self._step_or_stop_profiling(batch_composition_stats)
+        if not self._should_profile(batch_composition_stats):
+            return
+
+        # We haven't started profiling yet
+        if self.profiling_n_steps_left <= 0:
+            self._start_profiling(batch_composition_stats)
+        # We are in the middle of profiling a given phase
+        else:
+            self._step_or_stop_profiling(batch_composition_stats)
 
 
 @functools.partial(
