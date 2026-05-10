@@ -272,6 +272,7 @@ def get_batch_composition_stats(
 
     stats = {
         "batch_id": batch_id,
+        "timestamp_us": int(time.time() * 1_000_000),
         "total_num_scheduled_tokens": total_num_scheduled_tokens,
         "num_prefill_tokens": num_prefill_tokens,
         "num_decode_tokens": num_decode_tokens,
@@ -280,6 +281,45 @@ def get_batch_composition_stats(
         "min_kv_len": min_kv_len if min_kv_len != float('inf') else 0
     }
     stats["phase"] = determine_phase_from_batch_composition_stats(stats).name
+
+    # Per-rank breakdown for DP attention runs. DPSchedulerOutput attaches
+    # req_ids_per_rank; regular SchedulerOutput doesn't, so we skip.
+    req_ids_per_rank = getattr(scheduler_output, "req_ids_per_rank", None)
+    if req_ids_per_rank:
+        rid_to_computed = {
+            rid: int(num_computed_tokens_per_req[i])
+            for i, rid in enumerate(input_batch.req_ids[:num_reqs])
+            if rid is not None
+        }
+        ranks_sorted = sorted(req_ids_per_rank.keys())
+        tokens_per_rank: list[int] = []
+        prefill_per_rank: list[int] = []
+        decode_per_rank: list[int] = []
+        reqs_per_rank: list[int] = []
+        for rank in ranks_sorted:
+            rank_tokens = 0
+            rank_prefill = 0
+            rank_decode = 0
+            for rid in req_ids_per_rank[rank]:
+                n = scheduler_output.num_scheduled_tokens[rid]
+                rank_tokens += n
+                computed = rid_to_computed.get(rid, 0)
+                if computed == 0 or n > 1:
+                    rank_prefill += n
+                else:
+                    rank_decode += 1
+            tokens_per_rank.append(rank_tokens)
+            prefill_per_rank.append(rank_prefill)
+            decode_per_rank.append(rank_decode)
+            reqs_per_rank.append(len(req_ids_per_rank[rank]))
+        stats["tokens_per_rank"] = tokens_per_rank
+        stats["prefill_per_rank"] = prefill_per_rank
+        stats["decode_per_rank"] = decode_per_rank
+        stats["reqs_per_rank"] = reqs_per_rank
+        # Imbalance metric: bigger = more wasted padding under DP lockstep.
+        stats["max_tokens_imbalance"] = (
+            max(tokens_per_rank) - min(tokens_per_rank)
+            if tokens_per_rank else 0)
     return stats
 
 

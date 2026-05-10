@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
     ENABLE_RS_KERNEL: bool = False
     DP_SCHED_BATCH_PREFILL: bool = False
+    VLLM_LOG_BATCH_COMPOSITION: bool = False
 
 
 def env_with_choices(
@@ -291,6 +292,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("JAX_PROFILER_SERVER_PORT") or "9999"),
     "USE_BATCHED_RPA_KERNEL":
     env_bool("USE_BATCHED_RPA_KERNEL"),
+    "VLLM_LOG_BATCH_COMPOSITION":
+    env_bool("VLLM_LOG_BATCH_COMPOSITION", default=True),
     # Force random expert routing in MoE layers (for testing purposes only)
     "FORCE_MOE_RANDOM_ROUTING":
     env_bool("FORCE_MOE_RANDOM_ROUTING", default=False),

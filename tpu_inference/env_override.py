@@ -15,6 +15,10 @@ os.environ["VLLM_USE_AOT_COMPILE"] = "0"
 os.environ["XLA_FLAGS"] = "--xla_cpu_max_isa=AVX2 " + os.environ.get(
     "XLA_FLAGS", "")
 
+# Fix RAGGED_GATED_DELTA_RULE_IMPL compatibility for older scripts
+if os.environ.get("RAGGED_GATED_DELTA_RULE_IMPL") == "fused_gdn_kernel":
+    os.environ["RAGGED_GATED_DELTA_RULE_IMPL"] = "recurrent_kernel_pd"
+
 # Monkeypatch vLLM to avoid ImportError: cannot import name 'SamplingParams' from 'vllm'
 # in vllm/v1/... submodules due to circular imports or lazy loading failures.
 try:

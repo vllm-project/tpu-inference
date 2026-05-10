@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+import json
 import logging
 import random
 from contextlib import nullcontext
@@ -338,6 +339,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self._substitute_placeholder_token_fn = _substitute_placeholder_token
         self.execute_model_state: ExecuteModelState | None = None
         self.batch_counter = 0
+        self.log_batch_composition = envs.VLLM_LOG_BATCH_COMPOSITION
 
         self.kv_caches: list[jax.Array] = []
         self.layer_name_to_kvcache_index: dict[str, int] = {}
@@ -1742,14 +1744,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices_cpu[_num_reqs:] = -1
 
         # Please see runner_utils.PhasedBasedProfiler for details
-        if self.phase_based_profiler:
+        if self.phase_based_profiler or self.log_batch_composition:
             self.batch_counter += 1
             batch_composition_stats = runner_utils.get_batch_composition_stats(
                 self.batch_counter, self.input_batch,
                 total_num_scheduled_tokens, num_reqs,
                 padded_total_num_scheduled_tokens, scheduler_output)
 
-            self.phase_based_profiler.step(batch_composition_stats)
+            if self.log_batch_composition:
+                logger.info("JSON_BATCH_STATS: %s",
+                            json.dumps(batch_composition_stats))
+
+            if self.phase_based_profiler:
+                self.phase_based_profiler.step(batch_composition_stats)
 
         positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
         mrope_positions = self.mrope_positions_cpu[:, :
