@@ -68,6 +68,7 @@ def quantize_moe_weights(
     weights: FusedMoEWeights,
     dtype: jnp.dtype,
     block_size: int | None,
+    w13_interleave: bool = False,
 ) -> FusedMoEWeights:
     """Quantize fused moe weights into a given dtype and block size.
 
@@ -78,6 +79,9 @@ def quantize_moe_weights(
             quantization. If contracting dim is not divisible by block size,
             the dim will be automatically padded and corresponding dim on bias
             and the other weight (w13_weight <-> w2_weight) is also padded.
+        w13_interleave: used when loaded w13_weight is stored in interleaved
+            pattern where even index element is w1 and odd index element is w3
+            we uninterleave so that first half is w1 and second half is w3.
 
     Returns:
         Quantized fused moe weights that may have also been padded.
@@ -103,18 +107,32 @@ def quantize_moe_weights(
     hidden_size = align_to(orig_hidden_size, w13_block_size)
     intermediate_size = align_to(orig_intermediate_size, w2_block_size)
 
-    w13_pad_widths = [[0, 0] for _ in range(3)]
-    w13_pad_widths[1][1] = 2 * (intermediate_size - orig_intermediate_size)
-    w13_pad_widths[2][1] = hidden_size - orig_hidden_size
-    w2_pad_widths = [[0, 0] for _ in range(3)]
-    w2_pad_widths[1][1] = hidden_size - orig_hidden_size
-    w2_pad_widths[2][1] = intermediate_size - orig_intermediate_size
+    inter_pad = intermediate_size - orig_intermediate_size
+    hidden_pad = hidden_size - orig_hidden_size
 
-    w13_weight = jnp.pad(w13_weight, w13_pad_widths)
+    if w13_interleave:
+        w13_pad_widths = [[0, 0] for _ in range(3)]
+        w13_pad_widths[1][1] = 2 * inter_pad
+        w13_pad_widths[2][1] = hidden_pad
+        w13_weight = jnp.pad(w13_weight, w13_pad_widths)
+        if (w13_bias := weights.w13_bias) is not None:
+            weights.w13_bias = jnp.pad(w13_bias, w13_pad_widths[:2])
+    else:
+        w1 = w13_weight[:, :orig_intermediate_size, :]
+        w3 = w13_weight[:, orig_intermediate_size:, :]
+        w13_pad_widths = [[0, 0], [0, inter_pad], [0, hidden_pad]]
+        w1 = jnp.pad(w1, w13_pad_widths)
+        w3 = jnp.pad(w3, w13_pad_widths)
+        w13_weight = jnp.concatenate([w1, w3], axis=1)
+        if (w13_bias := weights.w13_bias) is not None:
+            b1 = w13_bias[:, :orig_intermediate_size]
+            b3 = w13_bias[:, orig_intermediate_size:]
+            b1 = jnp.pad(b1, w13_pad_widths[:2])
+            b3 = jnp.pad(b3, w13_pad_widths[:2])
+            weights.w13_bias = jnp.concatenate([b1, b3], axis=1)
+
+    w2_pad_widths = [[0, 0], [0, hidden_pad], [0, inter_pad]]
     w2_weight = jnp.pad(w2_weight, w2_pad_widths)
-
-    if (w13_bias := weights.w13_bias) is not None:
-        weights.w13_bias = jnp.pad(w13_bias, w13_pad_widths[:2])
     if (w2_bias := weights.w2_bias) is not None:
         weights.w2_bias = jnp.pad(w2_bias, w2_pad_widths[:2])
 
@@ -704,6 +722,7 @@ def process_fp8_moe_weights(
             ),
             desired_quant_dtype,
             requant_block_size,
+            w13_interleave=w13_interleave,
         )
     return process_moe_weights(
         weights,
