@@ -61,46 +61,23 @@ def main():
     )
     print(f"[load] {time.time() - t0:.1f}s", flush=True)
 
-    # First prompt: hardcoded chat-templated token IDs for
+    # Hardcoded token IDs for the chat-templated prompt
     #   "<bos><|turn>user\nThe capital of France is<turn|>\n<|turn>model\n"
     # Captured once via tokenizer.apply_chat_template() on a vllm-pytorch
-    # GPU run; reused verbatim on both sides so the GPU and TPU oracle
-    # captures see byte-identical input_ids. This is the prompt the
-    # in-source _e2b_capture hooks dump per-layer hidden states for.
+    # GPU run; reused verbatim on both sides so the GPU and TPU captures
+    # see byte-identical input_ids regardless of transformers/vllm drift.
+    # max_tokens=20 gives a long-form completion ("...**Paris**.") that
+    # exercises 20 decode steps (including 4 shared-layer decode steps in
+    # the prefill→decode transition) — the kernel KV-share fix is needed
+    # for any of these to be coherent.
     PROMPT_IDS = [
         2, 105, 2364, 107, 818, 5279, 529, 7001, 563, 106, 107, 105, 4368, 107
     ]
-    print(f"[generate] capture-prompt input_ids ({len(PROMPT_IDS)}): "
-          f"{PROMPT_IDS}",
+    print(f"[generate] input_ids ({len(PROMPT_IDS)}): {PROMPT_IDS}",
           flush=True)
     out = llm.generate([{"prompt_token_ids": PROMPT_IDS}],
                        SamplingParams(max_tokens=20, temperature=0.0))
-    print(f"[output] capture-prompt -> {out[0].outputs[0].text!r}", flush=True)
-
-    # Two extra coherence-sanity prompts (chat-templated at runtime, no need
-    # for byte-identical tokens — these don't feed the per-layer diff). If
-    # the kernel fix is correct we expect coherent English completions
-    # matching the GPU smoke set:
-    #   rainbow colors -> "...red, orange, yellow..."
-    #   CPU acronym    -> "...Central Processing Unit..."
-    tok = llm.get_tokenizer()
-
-    def _to_ids(text):
-        out = tok.apply_chat_template(
-            [{"role": "user", "content": text}],
-            tokenize=True,
-            add_generation_prompt=True,
-        )
-        return out["input_ids"] if isinstance(out, dict) else out
-
-    sanity_prompts = [
-        "The colors of the rainbow are",
-        "What does CPU stand for?",
-    ]
-    inputs = [{"prompt_token_ids": _to_ids(p)} for p in sanity_prompts]
-    out = llm.generate(inputs, SamplingParams(max_tokens=20, temperature=0.0))
-    for p, o in zip(sanity_prompts, out):
-        print(f"[output] sanity {p!r} -> {o.outputs[0].text!r}", flush=True)
+    print(f"[output] {out[0].outputs[0].text!r}", flush=True)
 
     # Bundle .npy files into one .npz.
     files = sorted(glob.glob(os.path.join(CAPTURE_DIR, "*.npy")))
