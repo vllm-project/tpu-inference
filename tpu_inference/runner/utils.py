@@ -246,6 +246,7 @@ def get_batch_composition_stats(
 
     stats = {
         "batch_id": batch_id,
+        "timestamp_us": int(time.time() * 1_000_000),
         "total_num_scheduled_tokens": total_num_scheduled_tokens,
         "num_prefill_tokens": num_prefill_tokens,
         "num_decode_tokens": num_decode_tokens,
