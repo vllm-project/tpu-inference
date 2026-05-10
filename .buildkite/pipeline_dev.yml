@@ -123,5 +123,7 @@ steps:
         fi
         .buildkite/scripts/run_in_docker.sh bash -c '
           python3 /workspace/tpu_inference/_jax_capture_e2b.py'
-      - ls -la /tmp/hf_home/jax_e2b_hidden.npz || true
-      - buildkite-agent artifact upload "/tmp/hf_home/jax_e2b_hidden.npz"
+      # /tmp/hf_home inside docker = /mnt/disks/persist/models on host
+      # (run_in_docker.sh:86,92).
+      - ls -la /mnt/disks/persist/models/jax_e2b_hidden.npz || true
+      - buildkite-agent artifact upload "/mnt/disks/persist/models/jax_e2b_hidden.npz"
