@@ -241,12 +241,10 @@ def maybe_apply_qwen3_vl_patches(vllm_model):
         apply_qwen3_vl_patches(vllm_model)
 
 
-def maybe_update_qwen3_vl_patching_configs(vllm_model, jitted_keys: list,
+def maybe_update_qwen3_vl_patching_configs(vllm_model,
                                            extra_jit_args: dict):
-    """Populates JIT-keys and extra JIT arguments if the model is Qwen3-VL."""
+    """Populates extra JIT arguments if the model is Qwen3-VL."""
     if is_qwen3_vl(vllm_model):
-        if "model.visual" not in jitted_keys:
-            jitted_keys.append("model.visual")
         extra_jit_args["model.visual"] = {
             "static_argnums": (3, ),
             "static_argnames": ("grid_thw", ),
