@@ -211,7 +211,7 @@ class CompilationManager:
                                             sharding=dp_sharding)
         # Dummy mamba_state_indices for compile-cache pre-tracing. Only
         # populate for hybrid attn+mamba models — for pure-attention models we
-        # pass None at runtime (see `_prepare_inputs_*`), and the precompile
+        # pass None at runtime (see `_prepare_inputs`), and the precompile
         # primer must match that shape so the cached HLO is reused.
         if self.runner.kv_cache_config.has_mamba_layers:
             mamba_state_indices = device_array(self.runner.mesh,
