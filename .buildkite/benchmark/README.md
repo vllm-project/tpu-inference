@@ -93,3 +93,17 @@ When supplying a custom dataset file via `dataset-path`:
 
 #### D. Implicit DB Tracking Variables
 While variables like `EXPECTED_ETEL`, `INPUT_LEN`, `OUTPUT_LEN`, and `PREFIX_LEN` might not be directly passed to the `vllm` CLI, they are rigorously parsed and injected into the GCP Spanner `RunRecord` table by `report_result.sh` to track historical performance variations. Please ensure that the values of these variables remain consistent with the corresponding parameter settings in the args of the Case JSON file.
+
+## 4. **Test Case File Hierarchy**
+
+Case JSON files should be placed under `.buildkite/benchmark/cases/${BM_CASE_TYPE}`. Four case type folders have been designed here. During test execution, setting `BM_CASE_TYPE` determines which folder's cases are uploaded, with the default being `DAILY`. The following is the mapping between folder names and `BM_CASE_TYPE`:
+* `daily`: `BM_CASE_TYPE=DAILY`
+* `hourly`: `BM_CASE_TYPE=HOURLY`
+* `ci`: `BM_CASE_TYPE=CI`
+* `dev`: `BM_CASE_TYPE=DEV`
+
+Buildkite CI schedules are configured to execute cases under `daily` at fixed times every day, and cases under `hourly` every hour. `ci` is used for pipeline `tpu_inference_ci` validation, while `dev` can be used by developers when adding new cases.
+
+During development, place the case JSON files currently being developed under `.buildkite/benchmark/cases/dev`. When clicking "New Build" on Buildkite, set `BM_CASE_TYPE=DEV` so that this build will only upload the case JSON files from the `dev` folder.
+
+The `dev` folder is for temporary use; once development is complete, please move the cases to `daily` or `hourly` before checking in. There should be no case JSON files under the `dev` folder in the `main` branch.
