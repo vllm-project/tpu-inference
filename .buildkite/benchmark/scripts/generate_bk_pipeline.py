@@ -26,9 +26,14 @@ import yaml
 def clean_key_string(key: str) -> str:
     """
     Sanitizes the string and ensures the length does not exceed 100 characters.
+    Buildkite keys may only contain alphanumeric characters, underscores, dashes and colons.
     """
     # Replace invalid characters with '-'
-    sanitized = re.sub(r'[^a-zA-Z0-9/-_]', '-', key)
+    # Note: We allow a-z, A-Z, 0-9, _, :, and -. Everything else becomes -
+    sanitized = re.sub(r"[^a-zA-Z0-9_:\-]", "-", key)
+
+    # Collapse multiple dashes into one and strip leading/trailing dashes
+    sanitized = re.sub(r"-+", "-", sanitized).strip("-")
 
     # If length exceeds 100, truncate and append a hash for uniqueness
     if len(sanitized) > 100:
