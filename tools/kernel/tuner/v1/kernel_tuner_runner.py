@@ -84,6 +84,16 @@ _TPU_QUEUE_MULTI = flags.DEFINE_string(
     'The TPU queue to use for tuning. This will be automatically determined based on the TPU version and cores if not specified. Supported values are "tpu_v6e_queue", "tpu_v6e_8_queue", "tpu_v7x_2_queue", "tpu_v7x_8_queue", and "tpu_v7x_16_queue".'
 )
 
+_KERNEL_TUNING_JOB_PRIORITY = flags.DEFINE_integer(
+    'priority_kernel_job_tuning', -10,
+    'The priority to use for kernel tuning jobs. Higher priority jobs will be scheduled before lower priority ones. Default is -10, which is lower than typical user jobs to avoid impacting them.'
+)
+
+_MAX_EXECUTION_MINUTES = flags.DEFINE_integer(
+    'kernel_tuning_max_execution_minutes', 20,
+    'Only used when the kernel tuning job is scheduled through Buildkite. The maximum execution time in minutes for each kernel tuning job. If the job exceeds this time, it will save the job progresss, generate a new job to be scheduled by Buildkite and exit.'
+)
+
 # Note: For simplicity, we are directly referencing the kernel tuner class
 # here. In the future, we can consider a more flexible plugin-based system
 # if we have more kernel tuners. For example, we can define an interface for
@@ -152,19 +162,26 @@ def main(argv):
     tpu_queue_multi = get_tpu_queue_by_version_and_cores(
         tpu_version, tpu_cores, tpu_queue_multi)
 
-    kernel_tuner = kernel_tuner_cls(storage_manager,
-                                    tpu_queue_multi=tpu_queue_multi)
+    kernel_tuner = kernel_tuner_cls(
+        storage_manager,
+        case_set_id=case_set_id,
+        run_id=run_id,
+        case_set_desc=case_set_desc,
+        tpu_version=tpu_version,
+        tpu_cores=tpu_cores,
+        tpu_queue_multi=tpu_queue_multi,
+        run_locally=_RUN_LOCALLY.value,
+        kernel_tuning_job_priority=_KERNEL_TUNING_JOB_PRIORITY.value,
+        max_execution_minutes=_MAX_EXECUTION_MINUTES.value)
 
-    if _RUN_LOCALLY.value:
+    if kernel_tuner.run_locally:
         logger.info(
             'Running in locally mode. Skipping Buildkite pipeline generation and running tuning jobs directly.'
         )
-        buckets = kernel_tuner._generate_tuning_jobs(case_set_id,
-                                                     desc=case_set_desc)
+        buckets = kernel_tuner._generate_tuning_jobs()
         for bucket in buckets:
             begin_case_id, end_case_id = bucket
-            kernel_tuner.measure_latency(case_set_id, run_id, begin_case_id,
-                                         end_case_id)
+            kernel_tuner.measure_latency(begin_case_id, end_case_id)
     else:
         logger.info(
             'Running in cloud mode. Generating Buildkite pipeline YAML or running tuning jobs directly.'
@@ -174,20 +191,14 @@ def main(argv):
                 'Generating Buildkite pipeline YAML. No tuning jobs will be run.'
             )
 
-            kernel_tuner.generate_buildkite_pipeline(case_set_id=case_set_id,
-                                                     run_id=run_id,
-                                                     desc=case_set_desc,
-                                                     tpu_version=tpu_version,
-                                                     tpu_cores=tpu_cores)
+            kernel_tuner.generate_buildkite_pipeline()
         else:
             begin_case_id = _BEGIN_CASE_ID.value
             end_case_id = _END_CASE_ID.value
             logger.debug(
                 'Running tuning jobs directly. Skipping Buildkite pipeline generation. Bucket [%d, %d)',
                 begin_case_id, end_case_id)
-            kernel_tuner.measure_latency(case_set_id,
-                                         run_id=run_id,
-                                         begin_case_id=begin_case_id,
+            kernel_tuner.measure_latency(begin_case_id=begin_case_id,
                                          end_case_id=end_case_id)
 
 

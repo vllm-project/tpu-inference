@@ -159,13 +159,31 @@ class RpaV3KernelTuner(KernelTunerBase):
     # not based on any real computation, but rather is just a placeholder to
     # demonstrate the tuning pipeline.
 
-    def __init__(self, storage_manager, tpu_queue_multi=None):
+    def __init__(self,
+                 storage_manager,
+                 case_set_id=None,
+                 run_id=None,
+                 case_set_desc=None,
+                 tpu_version=None,
+                 tpu_cores=None,
+                 tpu_queue_multi=None,
+                 run_locally=None,
+                 kernel_tuning_job_priority=-10,
+                 max_execution_minutes=20):
         super().__init__(tuning_key_class=TuningKey,
                          tunable_params_class=TunableParams,
                          storage_manager=storage_manager,
                          job_bucket_size=100,
+                         tpu_version=tpu_version,
+                         tpu_cores=tpu_cores,
                          kernel_tuner_name="rpa_v3_kernel_tuner",
-                         tpu_queue_multi=tpu_queue_multi
+                         tpu_queue_multi=tpu_queue_multi,
+                         case_set_id=case_set_id,
+                         run_id=run_id,
+                         case_set_desc=case_set_desc,
+                         run_locally=run_locally,
+                         kernel_tuning_job_priority=kernel_tuning_job_priority,
+                         max_execution_minutes=max_execution_minutes
                          )  # Use a small bucket size for testing
         self.max_num_tokens = 128
         self.max_model_len = 2048

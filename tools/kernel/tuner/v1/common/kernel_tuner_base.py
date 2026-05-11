@@ -33,6 +33,17 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
+class LiteralString(str):
+    pass
+
+
+def _literal_representer(dumper, data):
+    return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='|')
+
+
+yaml.add_representer(LiteralString, _literal_representer)
+
+
 @dataclass
 class TuningKey:
     # Specify the key for tuning case
@@ -96,7 +107,15 @@ class KernelTunerBase(ABC):
                  storage_manager: StorageManager = None,
                  job_bucket_size: int = 100,
                  kernel_tuner_name: str = None,
-                 tpu_queue_multi: str = None):
+                 case_set_id: str = None,
+                 run_id: str = None,
+                 case_set_desc: str = None,
+                 tpu_version: str = None,
+                 tpu_cores: int = None,
+                 tpu_queue_multi: str = None,
+                 run_locally: bool = False,
+                 kernel_tuning_job_priority: int = -10,
+                 max_execution_minutes: int = 20):
         assert tuning_key_class is not None, "tuning_key_class must be specified"
         assert tunable_params_class is not None, "tunable_params_class must be specified"
         assert storage_manager is not None, "storage_manager must be specified"
@@ -108,62 +127,60 @@ class KernelTunerBase(ABC):
         self._TUNING_KEY = None
         self.job_bucket_size = job_bucket_size
         self.kernel_tuner_name = kernel_tuner_name
+        self.case_set_id = case_set_id
+        self.run_id = run_id
+        self.case_set_desc = case_set_desc
         self.tpu_queue_multi = tpu_queue_multi
+        self.tpu_version = tpu_version
+        self.tpu_cores = tpu_cores
+        self.run_locally = run_locally
+        self.max_execution_minutes = max_execution_minutes
+        self.kernel_tuning_job_priority = kernel_tuning_job_priority
 
-    def _init_case_set(self, case_set_id: str, desc: str) -> bool:
-        """Initialize the case set with the given case_set_id and description. This will be called when the caseset_id is new or the caseset_id is not specified.
-
-        Args:
-            case_set_id: Identifies a set of tuning cases. If specified when running the tuning
-                pipeline, the caseset will only be regenerated when the caseset_id changes.
-            desc: A description for this case set, which will be persisted in local file or database using storage_management module.
+    def _init_case_set(self) -> bool:
+        """Initialize the case set which will be used for tuning. The case set will be written to the storage manager. This will be called when the caseset_id is new.
 
         Returns:
             True if tuning cases were initialized so in _generate_tuning_jobs we don't need to regenerate them, False otherwise.
 
         """
-        if case_set_id is None:
-            case_set_id = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        if self.case_set_id is None:
+            self.case_set_id = datetime.now().strftime("%Y-%m-%d_%H-%M")
         # check case_set_id exists in storage manager, if not exist, create a new case set with the given case_set_id and desc.
         # if exist, check whether the desc is the same as the existing one, if not, raise an error.
-        if self.storage_manager.case_set_id_exists(case_set_id):
-            existing_desc = self.storage_manager.get_case_set_desc(case_set_id)
-            if existing_desc != desc:
+        if self.storage_manager.case_set_id_exists(self.case_set_id):
+            existing_desc = self.storage_manager.get_case_set_desc(
+                self.case_set_id)
+            if existing_desc != self.case_set_desc:
                 raise ValueError(
-                    f"CaseSetId {case_set_id} already exists with a different description. Existing desc: {existing_desc}, new desc: {desc}. If you intend to create new case set, please use a new case set id. Updating comment of an existing case set is not allowed. Please use a different CaseSetId or update the description to match the existing one."
+                    f"CaseSetId {self.case_set_id} already exists with a different description. Existing desc: {existing_desc}, new desc: {self.case_set_desc}. If you intend to create new case set, please use a new case set id. Updating comment of an existing case set is not allowed. Please use a different CaseSetId or update the description to match the existing one."
                 )
             else:
                 logger.info(
-                    f"CaseSetId {case_set_id} already exists with the same description. Proceeding with the existing case set."
+                    f"CaseSetId {self.case_set_id} already exists with the same description. Proceeding with the existing case set."
                 )
         else:
-            self.storage_manager.init_case_set(case_set_id,
+            self.storage_manager.init_case_set(self.case_set_id,
                                                scan_space=0,
-                                               desc=desc)
+                                               desc=self.case_set_desc)
             logger.info(
-                f"Initialized new CaseSet with ID: {case_set_id} and description: {desc}"
+                f"Initialized new CaseSet with ID: {self.case_set_id} and description: {self.case_set_desc}"
             )
             return True
         return False
 
     @abstractmethod
     def generate_cases(self) -> list[TuningCase]:
-        """Generate the cases for the given case_set_id. This will be called when the caseset_id is new or the caseset_id is not specified.
+        """Generate the cases for the given case_set_id.
         This should not raise any exception, all exceptions should be caught and handled internally. The generated cases will be persisted in local file or database using storage_management module, where each case is represented as a TuningCase object and stored as a string. The case_id is the index of the case in the generated case list.
 
-        Args:
-            case_set_id: Identifies a set of tuning cases. If specified when running the tuning
-                pipeline, the caseset will only be regenerated when the caseset_id changes.
-            desc: A description for this case set, which will be persisted in local file or database using storage_management module."""
+        Returns: A list of TuningCase objects representing the tuning cases to be processed.
+        """
         raise NotImplementedError(
             "Specific kernel should implement this to generate the cases for the given case_set_id and desc, and return a list of TuningCase objects representing the tuning cases."
         )
 
-    def _generate_tuning_jobs(
-        self,
-        case_set_id: str,
-        desc: str,
-    ) -> list[tuple[int, int]]:
+    def _generate_tuning_jobs(self) -> list[tuple[int, int]]:
         """Partitions the full case set into fixed-size work buckets.
 
         Calls `generate_cases` to determine the total number of cases, then
@@ -172,74 +189,117 @@ class KernelTunerBase(ABC):
         ordering is not guaranteed. Each bucket is identified by a half-open
         interval [begin_case_id, end_case_id).
 
-        Args:
-            case_set_id: Identifies a set of tuning cases. If specified when running the tuning
-                pipeline, the caseset will only be regenerated when the caseset_id changes.
-            desc: A description for this case set, which will be persisted in local file or database using storage_management module.
-
         Returns:
             A list of [begin_case_id, end_case_id] pairs covering all cases.
         """
         try:
-            if self._init_case_set(case_set_id, desc=desc):
+            if self._init_case_set():
                 start_time = time.perf_counter()
                 cases = self.generate_cases()
                 total_cases = len(cases)
                 for case_id, case_str in enumerate(map(str, cases)):
                     self.storage_manager.add_tuner_case(
-                        case_set_id,
+                        self.case_set_id,
                         case_id,
                         case_str,
                         tpu=self.tpu_queue_multi)
                 self.storage_manager.flush()
                 duration_sec = int(time.perf_counter() - start_time)
                 self.storage_manager.finish_case_set(
-                    case_set_id,
+                    self.case_set_id,
                     total_cases,
                     0,  # invalid case count, doesn't matter here
                     duration_sec * 1.0)
                 logger.info(
-                    f"\nComplete Generate Tuning Cases for {case_set_id}, Valid Cases: {total_cases} | Duration: {duration_sec}s"
+                    f"\nComplete Generate Tuning Cases for {self.case_set_id}, Valid Cases: {total_cases} | Duration: {duration_sec}s"
                 )
             else:
                 # If the case set already exists, we assume the cases have been generated and we just need to generate the buckets for tuning jobs.
                 total_cases = self.storage_manager.get_total_cases_in_case_set(
-                    case_set_id)
+                    self.case_set_id)
             buckets = [(i, min(i + self.job_bucket_size, total_cases))
                        for i in range(0, total_cases, self.job_bucket_size)]
             return buckets
         except Exception as e:
-            logger.error(f"Error initializing case set {case_set_id}: {e}")
+            logger.error(
+                f"Error initializing case set {self.case_set_id}: {e}")
             raise e
 
-    def generate_buildkite_pipeline(
-        self,
-        case_set_id: str,
-        run_id: str,
-        desc: str,
-        tpu_version: str,
-        tpu_cores: int,
-    ) -> str:
-        """Generate the Buildkite pipeline for the given tuning jobs. Each tuning job will be represented as a Buildkite step that calls the measure_latency function with the corresponding case_id range.
+    def _build_step(self, case_id_start: int, case_id_end: int) -> dict:
+        return {
+            "label":
+            f"cs_id={self.case_set_id} rid={self.run_id} Bucket([{case_id_start}, {case_id_end}))",
+            "depends_on":
+            f"{self.tpu_version}_build_docker",
+            "agents": {
+                "queue": self.tpu_queue_multi
+            },
+            "env": {
+                "USE_PREBUILT_IMAGE": "1",
+                "TPU_VERSION": self.tpu_version
+            },
+            "commands": [
+                f"- |"
+                f"  rm -f \"/tmp/kernel_tuning/generated_pipeline.yml\""
+                f"- |"
+                f"  .buildkite/scripts/run_in_docker.sh bash -c \""
+                f"  pip install --upgrade google-cloud-spanner && "
+                f"  pip install --upgrade google-api-core && "
+                f"  pip install --upgrade google-auth && "
+                f"  pip install --upgrade absl-py && "
+                f"  python -m tools.kernel.tuner.v1.kernel_tuner_runner "
+                f"  --kernel_tuner_name={self.kernel_tuner_name} "
+                f"  --case_set_id={self.case_set_id} --run_id={self.run_id} "
+                f"  --tpu_version={self.tpu_version} "
+                f"  --tpu_cores={self.tpu_cores} "
+                f"  --case_set_desc=\"{self.case_set_desc}\" "
+                f"  --run_locally={self.run_locally} "
+                f"  --tpu_queue_multi={self.tpu_queue_multi} "
+                f"  --max_execution_minutes={self.max_execution_minutes} "
+                f"  --begin_case_id={case_id_start} --end_case_id={case_id_end}\""
+                f"- |"
+                f"  if [ -f /tmp/kernel_tuning/generated_pipeline.yml ]; then "
+                f"    buildkite-agent artifact upload \"/tmp/kernel_tuning/generated_pipeline.yml\" && "
+                f"    echo \"Upload generated pipeline YAML to Buildkite artifacts with priority {self.kernel_tuning_job_priority}\" && "
+                f"    {{ "
+                f"      echo \"priority: {self.kernel_tuning_job_priority}\"; "
+                f"      cat /tmp/kernel_tuning/generated_pipeline.yml; "
+                f"    }} | buildkite-agent pipeline upload; "
+                f"  else "
+                f"    echo \"File /tmp/kernel_tuning/generated_pipeline.yml does not exist. Exiting successfully.\"; "
+                f"  fi"
+            ]
+        }
+
+    def generate_buildkite_pipeline_subbucket(self, start: int, end: int):
+        """Generate the Buildkite pipeline for a sub-bucket of tuning jobs.
 
         Args:
-            case_set_id: Identifies a set of tuning cases. If specified when running the tuning
-                pipeline, the caseset will only be regenerated when the caseset_id changes.
-            run_id: Identifies a run of the tuning pipeline. Can be used to distinguish different
-                runs of the tuning pipeline with the same caseset_id — useful when the caseset has
-                not changed but the KernelTunerRunner class has changed.
-            desc: A description for this case set, which will be persisted in local file or database using storage_management module.
-            tpu_version: The version of TPU to run the tuning jobs on, which will determine the TPU queue to use for the tuning jobs.
-            tpu_cores: The number of TPU cores to run the tuning jobs on, which will determine the TPU queue to use for the tuning jobs
-
-        Returns:
-            A string representing the Buildkite pipeline configuration in YAML format.
+            start: The starting case_id of the sub-bucket (inclusive).
+            end: The ending case_id of the sub-bucket (exclusive).
         """
         output_path = "/tmp/kernel_tuning/generated_pipeline.yml"
         if os.path.exists(output_path):
             # clean up the existing one
             os.remove(output_path)
-        buckets = self._generate_tuning_jobs(case_set_id, desc=desc)
+        next_group_label = f"Tune Case ID [{start}, {end})"
+        step = self._build_step(start, end)
+        pipeline = {"group": next_group_label, "steps": [step]}
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w") as f:
+            yaml.dump(pipeline, f, default_flow_style=False, sort_keys=False)
+        logger.info(
+            f"Generated Buildkite pipeline YAML for sub-bucket [{start}, {end}) saved to {output_path} in Docker"
+        )
+
+    def generate_buildkite_pipeline(self, ) -> str:
+        """Generate the Buildkite pipeline for the given tuning jobs. Each tuning job will be represented as a Buildkite step that calls the measure_latency function with the corresponding case_id range.
+        """
+        output_path = "/tmp/kernel_tuning/generated_pipeline.yml"
+        if os.path.exists(output_path):
+            # clean up the existing one
+            os.remove(output_path)
+        buckets = self._generate_tuning_jobs()
         # The Buildkite pipeline YAML will be generated in the format of:
         # steps:
         #   - label: "Measure latency for cases [begin_case_id, end_case_id)"
@@ -247,26 +307,11 @@ class KernelTunerBase(ABC):
         pipeline = {"steps": []}
 
         for bucket_id, (case_id_start, case_id_end) in enumerate(buckets):
-            step = {
-                "label":
-                f"cs_id={case_set_id} rid={run_id} Bucket([{case_id_start}, {case_id_end}))",
-                "depends_on":
-                f"{tpu_version}_build_docker",
-                "agents": {
-                    "queue": self.tpu_queue_multi
-                },
-                "env": {
-                    "USE_PREBUILT_IMAGE": "1",
-                    "TPU_VERSION": tpu_version
-                },
-                "commands": [
-                    f".buildkite/scripts/run_in_docker.sh bash -c \"pip install --upgrade google-cloud-spanner && pip install --upgrade google-api-core && pip install --upgrade google-auth && pip install --upgrade absl-py && python -m tools.kernel.tuner.v1.kernel_tuner_runner --kernel_tuner_name={self.kernel_tuner_name} --case_set_id={case_set_id} --run_id={run_id} --tpu_version={tpu_version} --tpu_cores={tpu_cores} --tpu_queue_multi={self.tpu_queue_multi} --begin_case_id={case_id_start} --end_case_id={case_id_end}\""
-                ]
-            }
+            step = self._build_step(case_id_start, case_id_end)
             pipeline["steps"].append(step)
             self.storage_manager.create_bucket_for_run(
-                case_set_id,
-                run_id,
+                self.case_set_id,
+                self.run_id,
                 bucket_id,
                 case_id_start,
                 case_id_end,
@@ -355,34 +400,46 @@ class KernelTunerBase(ABC):
             "Specific kernel should implement this to call the kernl with the inputs from generate_inputs"
         )
 
-    def measure_latency(self, caseset_id: str, run_id: str, begin_case_id: int,
-                        end_case_id: int):
+    def measure_latency(self, begin_case_id: int, end_case_id: int):
         """Measure the latency of cases in the caseset with case_id in [begin_case_id, end_case_id). The latency of each case will be persisted in local file or database using storage_management module.
 
         Args:
-            caseset_id: Identifies a set of tuning cases. If specified when running the tuning
-                pipeline, the caseset will only be regenerated when the caseset_id changes.
-            run_id: Identifies a run of the tuning pipeline. Can be used to distinguish different
-                runs of the tuning pipeline with the same caseset_id — useful when the caseset has
-                not changed but the KernelTunerRunner class has changed.
             begin_case_id: Start of the case_id range (inclusive) within the caseset to measure.
             end_case_id: End of the case_id range (exclusive) within the caseset to measure.
         """
         bucket_id = begin_case_id // self.job_bucket_size
         logger.info(
-            f"Worker [{FLAGS.worker_id}] Claimed CaseSetId: {caseset_id}, RunId: {run_id}, Bucket {bucket_id} ({begin_case_id}-{end_case_id}) for processing."
+            f"Worker [{FLAGS.worker_id}] Claimed CaseSetId: {self.case_set_id}, RunId: {self.run_id}, Bucket {bucket_id} ({begin_case_id}-{end_case_id}) for processing."
         )
-        self.storage_manager.mark_bucket_in_progress(caseset_id, run_id,
-                                                     bucket_id)
+        self.storage_manager.mark_bucket_in_progress(self.case_set_id,
+                                                     self.run_id, bucket_id)
 
         processed_ids = self.storage_manager.get_already_processed_ids(
-            caseset_id, run_id, begin_case_id, end_case_id)
+            self.case_set_id, self.run_id, begin_case_id, end_case_id)
         all_configs = self.storage_manager.get_bucket_configs(
-            caseset_id, begin_case_id, end_case_id)
+            self.case_set_id, begin_case_id, end_case_id)
 
         bucket_start_perf = time.perf_counter()
         results_buffer = []
+        bucket_fully_processed = True
+        last_processed_case_id = None
         for cid in range(begin_case_id, end_case_id):
+            time_elapsed_minutes = (time.perf_counter() -
+                                    bucket_start_perf) / 60
+            logger.info(
+                f"Worker [{FLAGS.worker_id}] Processing CaseId: {cid} in Bucket {bucket_id}, [{begin_case_id}-{end_case_id}) with elapsed time {time_elapsed_minutes:.2f} minutes."
+            )
+            if not self.run_locally and (time_elapsed_minutes
+                                         > self.max_execution_minutes):
+                logger.warning(
+                    f"Worker [{FLAGS.worker_id}] has been processing bucket {bucket_id} for {time_elapsed_minutes:.2f} minutes, which exceeds the limit of {self.max_execution_minutes} minutes. Stopping processing more cases in this bucket to allow other jobs(like CICD jobs) in the queue to proceed."
+                )
+                parent_step_key = f'{self.kernel_tuner_name}_{self.case_set_id}_{self.run_id}_{begin_case_id}_{end_case_id}'
+                self.generate_buildkite_pipeline_subbucket(
+                    cid, end_case_id, parent_step_key=parent_step_key)
+                bucket_fully_processed = False
+                break
+            last_processed_case_id = cid
             if cid in processed_ids:
                 continue
             config = all_configs.get(cid)
@@ -400,8 +457,9 @@ class KernelTunerBase(ABC):
                                             iters=1)
             if status != TuningStatus.SUCCESS:
                 results_buffer.append(
-                    (caseset_id, run_id, cid, status.value, FLAGS.worker_id, 0,
-                     0, 0, self.storage_manager.get_timestamp_sec(),
+                    (self.case_set_id, self.run_id, cid, status.value,
+                     FLAGS.worker_id, 0, 0, 0,
+                     self.storage_manager.get_timestamp_sec(),
                      self.tpu_queue_multi))
                 logger.warning(
                     f"Case {cid} failed during warmup with status: {status}. Skipping to next case."
@@ -416,8 +474,9 @@ class KernelTunerBase(ABC):
             total_time = end_time - begin_case_id_time
             if status != TuningStatus.SUCCESS:
                 results_buffer.append(
-                    (caseset_id, run_id, cid, status.value, FLAGS.worker_id,
-                     warmup_us, 0, 0, self.storage_manager.get_timestamp_sec(),
+                    (self.case_set_id, self.run_id, cid, status.value,
+                     FLAGS.worker_id, warmup_us, 0, 0,
+                     self.storage_manager.get_timestamp_sec(),
                      self.tpu_queue_multi))
                 logger.warning(
                     f"Case {cid} failed during main run with status: {status}. Total time spent: {total_time/1e9:.2f}s."
@@ -427,8 +486,8 @@ class KernelTunerBase(ABC):
             average_latency_us = int(average_latency_ns // 1000)
             total_time_us = int(total_time // 1000)
             results_buffer.append(
-                (caseset_id, run_id, cid, status.value, FLAGS.worker_id,
-                 average_latency_us, warmup_us, total_time_us,
+                (self.case_set_id, self.run_id, cid, status.value,
+                 FLAGS.worker_id, average_latency_us, warmup_us, total_time_us,
                  self.storage_manager.get_timestamp_sec(),
                  self.tpu_queue_multi))
 
@@ -445,9 +504,11 @@ class KernelTunerBase(ABC):
 
         bucket_total_time_us = int(
             (time.perf_counter() - bucket_start_perf) * 1_000_000)
-        self.storage_manager.mark_bucket_completed(caseset_id, run_id,
-                                                   bucket_id,
-                                                   bucket_total_time_us)
+        self.storage_manager.add_bucket_processed_time_us(
+            self.case_set_id, self.run_id, bucket_id, bucket_total_time_us)
+        if bucket_fully_processed:
+            self.storage_manager.mark_bucket_completed(self.case_set_id,
+                                                       self.run_id, bucket_id)
         logger.info(
-            f"Worker [{FLAGS.worker_id}] Completed Bucket {bucket_id} ({begin_case_id}-{end_case_id}) for CaseSetId: {caseset_id}, RunId: {run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
+            f"Worker [{FLAGS.worker_id}] Completed Bucket {bucket_id} ({begin_case_id}-{last_processed_case_id + 1}] for CaseSetId: {self.case_set_id}, RunId: {self.run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
         )
