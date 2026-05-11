@@ -908,7 +908,12 @@ class Gemma4Model(JaxModule):
         pp rank).
 
         Args:
-          input_ids: [T] token ids; required when PLE is active.
+          input_ids: [T] token ids. Real inference always provides this;
+            the precompile path
+            (compilation_manager._precompile_backbone_with_inputs_embeds)
+            passes None. In that case we synthesize zeros so the JIT trace
+            shape matches real inference — the precompile output is
+            discarded.
           inputs_embeds: [T, H] post-scaling residual stream (already
             multiplied by embedding_scale + multimodal-merged).
           is_multimodal: [T] bool. Multimodal positions are masked to
@@ -917,9 +922,11 @@ class Gemma4Model(JaxModule):
         if (self.hidden_size_per_layer_input == 0
                 or self.embed_tokens_per_layer is None):
             return None
-        assert input_ids is not None, (
-            "input_ids required when PLE is active "
-            "(needed for embed_tokens_per_layer lookup)")
+        if input_ids is None:
+            # Precompile path with inputs_embeds-only entry. Zeros produce
+            # a shape-identical compute (all PLE lookups hit slot 0) so the
+            # JIT cache key matches the real-inference trace.
+            input_ids = jnp.zeros((inputs_embeds.shape[0], ), dtype=jnp.int32)
         T = input_ids.shape[0]
         L = self.num_hidden_layers
         P = self.hidden_size_per_layer_input
