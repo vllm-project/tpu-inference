@@ -239,4 +239,3 @@ def is_qwen3_vl(vllm_model) -> bool:
 def maybe_apply_qwen3_vl_patches(vllm_model):
     if is_qwen3_vl(vllm_model):
         apply_qwen3_vl_patches(vllm_model)
-

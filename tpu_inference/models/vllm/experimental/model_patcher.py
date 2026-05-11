@@ -113,8 +113,8 @@ def patch_mm_model(
         target_module_name = module_names[-1]
         # Pass static JIT arguments for Qwen3-VL visual submodule
         extra_jit_args = {
-                "static_argnums": (3, ),
-                "static_argnames": ("grid_thw", ),
+            "static_argnums": (3, ),
+            "static_argnames": ("grid_thw", ),
         }
 
         jitted_module = JittableModule(getattr(cur_module, target_module_name),
