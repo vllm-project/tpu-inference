@@ -28,6 +28,7 @@ import jax
 import torchax
 from torchax.interop import JittableModule, torch_view
 
+from tpu_inference import envs
 from tpu_inference.logger import init_logger
 
 if TYPE_CHECKING:
@@ -66,6 +67,59 @@ def patch_mm_model(
     Returns:
         The patched model and the updated parameters and buffers.
     """
+    # Monkey patch vLLM's _merge_multimodal_embeddings to support JAX/torchax
+    # broadcasting limitations with boolean masks.
+    if envs.VLLM_TPU_PATCH_MM_EMBEDDINGS:
+        try:
+            import vllm.model_executor.models.utils as vllm_utils
+
+            # Save the original to avoid recursion if patched multiple times
+            if not hasattr(vllm_utils,
+                           "_original_merge_multimodal_embeddings"):
+                vllm_utils._original_merge_multimodal_embeddings = vllm_utils._merge_multimodal_embeddings
+
+                def _jax_compatible_merge_multimodal_embeddings(
+                        inputs_embeds, multimodal_embeddings, is_multimodal):
+                    if len(multimodal_embeddings) == 0:
+                        return inputs_embeds
+
+                    import torch
+
+                    mm_embeds_flat = vllm_utils._flatten_embeddings(
+                        multimodal_embeddings)
+                    input_dtype = inputs_embeds.dtype
+                    mm_embeds_flat = mm_embeds_flat.to(dtype=input_dtype)
+
+                    # PyTorch boolean indexing (inputs[mask] = values) requires dynamic
+                    # host-synchronization. We use static math ops (cumsum, where)
+                    # which trace perfectly via torchax into JAX without deadlocking.
+
+                    # Create a dummy row to handle indices for non-multimodal tokens.
+                    dummy_row = torch.zeros_like(mm_embeds_flat[0:1])
+                    # Prepend the dummy row.
+                    flattened_padded = torch.cat([dummy_row, mm_embeds_flat],
+                                                 dim=0)
+
+                    # For non-multimodal tokens, cumsum points to 0.
+                    # For multimodal tokens, it points to their 1-based index in the padded array.
+                    gather_indices = is_multimodal.to(
+                        torch.int64).cumsum(dim=0)
+                    update_values = flattened_padded[gather_indices]
+
+                    condition = is_multimodal.unsqueeze(-1)
+                    new_embeds = torch.where(condition, update_values,
+                                             inputs_embeds)
+
+                    return new_embeds
+
+                vllm_utils._merge_multimodal_embeddings = _jax_compatible_merge_multimodal_embeddings
+                logger.info(
+                    "Patched vLLM's _merge_multimodal_embeddings with static JAX logic."
+                )
+        except Exception as e:
+            logger.warning(
+                f"Failed to patch vLLM's _merge_multimodal_embeddings: {e}")
+
     if not jitted_mm_module_keys:
         return model, params_and_buffers
 

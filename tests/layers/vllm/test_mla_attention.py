@@ -122,7 +122,8 @@ class TestVllmTPUMLAAttention:
                                             env=torchax.default_env())
         attn.W_UV = torchax.tensor.Tensor(jnp.ones((10, 10)),
                                           env=torchax.default_env())
-        attn.kv_b_proj = MagicMock()
+        attn.kv_b_proj = MagicMock(spec=torch.nn.Module)
+        attn.kv_b_proj.quant_method = MagicMock()
         attn.kv_b_proj.quant_method.linear_config.mesh = mesh
         attn.kv_b_proj.named_parameters.return_value = {}
 

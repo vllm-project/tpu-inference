@@ -114,6 +114,8 @@ def process_linear_weights(
     else:
 
         def slice_tensor(tensor):
+            if tensor is None:
+                return None
             tensors = []
             start = 0
             for size in output_sizes:

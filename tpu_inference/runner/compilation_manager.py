@@ -156,7 +156,7 @@ class CompilationManager:
             dummy_input_ids = self._create_dummy_tensor(
                 (num_tokens, ), jnp.int32, sharding=input_sharding)
             dummy_is_multimodal = self._create_dummy_tensor(
-                (num_tokens, ), jnp.int32, sharding=input_sharding)
+                (num_tokens, ), jnp.bool_, sharding=input_sharding)
 
             self._run_compilation(
                 "input_embeddings_merger",

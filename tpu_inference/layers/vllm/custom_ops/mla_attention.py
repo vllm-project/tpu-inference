@@ -92,10 +92,25 @@ class VllmMLAAttention(MLAAttention):
 
             # NOTE: vLLM dequantizes kv_b_proj weights which causes more memory
             # usage than expected.
-
             # quantize W_UK_T, W_UV back to cache type and transfer
             # `W_UK_T`, `W_UV` to TPUs
-            mesh = self.kv_b_proj.quant_method.linear_config.mesh
+            # Try to get the mesh from the first possible path.
+            quant_method = getattr(self.kv_b_proj, 'quant_method', None)
+            linear_config = getattr(quant_method, 'linear_config', None)
+            mesh = getattr(linear_config, 'mesh', None)
+            if mesh is None:
+                # If the first path failed, mesh will be None. Try the second path.
+                scheme = getattr(self.kv_b_proj, 'scheme', None)
+                linear_config = getattr(scheme, 'linear_config', None)
+                mesh = getattr(linear_config, 'mesh', None)
+
+            if mesh is None:
+                # If mesh is still None after trying all paths, raise an error.
+                raise ValueError(
+                    "Could not find JAX Mesh. Failed to access "
+                    "'.quant_method.linear_config.mesh' or "
+                    "'.scheme.linear_config.mesh' on the kv_b_proj layer.")
+
             sharding = NamedSharding(mesh, P(ShardingAxisName.ATTN_HEAD, ))
             self.W_UK_T, self.W_UK_T_scale = quantize_tensor(
                 self.kv_cache_quantized_dtype, jax_view(self.W_UK_T), axis=1)

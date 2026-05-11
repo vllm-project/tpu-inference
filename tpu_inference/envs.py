@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     TPU_OFFLOAD_USE_UNPINNED_HOST: bool = False
     MOE_APPROX_TOPK: bool = False
     MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
+    VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
 
 
 def env_with_choices(
@@ -298,6 +299,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: float(os.getenv("MOE_APPROX_TOPK_RECALL_TARGET", "0.9")),
     "DISABLE_WEIGHT_REQUANTIZATION":
     env_bool("DISABLE_WEIGHT_REQUANTIZATION", default=False),
+    "VLLM_TPU_PATCH_MM_EMBEDDINGS":
+    env_bool("VLLM_TPU_PATCH_MM_EMBEDDINGS", default=False),
 }
 
 
