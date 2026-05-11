@@ -50,6 +50,49 @@ logger = init_logger(__name__)
 init_fn = nnx.initializers.uniform()
 
 
+def gemma4_kv_share_map(text_config) -> dict:
+    """Compute the gemma-4 KV-share layer mapping.
+
+    Returns `{shared_layer_idx: source_layer_idx}` for each layer in the
+    last `num_kv_shared_layers` of the model. Source is the last preceding
+    layer of the same attention type (sliding vs full). Mirrors the
+    algorithm at `vllm/model_executor/models/gemma4.py:459-485`.
+
+    Returns an empty dict when `num_kv_shared_layers == 0` (e.g. 26B/31B)
+    or when `layer_types` is missing from the config.
+
+    Raises:
+      ValueError: if a layer's attention type has no preceding same-type
+        layer to share K/V with — a configuration error that would
+        silently mis-route the cache at the layer call site otherwise.
+    """
+    num_kv_shared_layers = getattr(text_config, "num_kv_shared_layers", 0)
+    # Be defensive against mocked configs (e.g. MagicMock auto-creates
+    # attributes as Mock objects — truthy but not int — which would
+    # silently break the `> 0` check).
+    if not isinstance(num_kv_shared_layers, int) or num_kv_shared_layers <= 0:
+        return {}
+    num_hidden_layers = text_config.num_hidden_layers
+    raw_layer_types = getattr(text_config, "layer_types", None)
+    if not isinstance(raw_layer_types, (list, tuple)) or not raw_layer_types:
+        return {}
+    layer_types = list(raw_layer_types)
+    first_shared = num_hidden_layers - num_kv_shared_layers
+    prev_types = layer_types[:first_shared]
+    mapping: dict = {}
+    for i in range(first_shared, num_hidden_layers):
+        ctype = layer_types[i]
+        if ctype not in prev_types:
+            raise ValueError(
+                f"gemma-4 KV-share: layer {i} of type {ctype!r} has no "
+                f"preceding same-type layer in {prev_types!r}. "
+                f"num_kv_shared_layers={num_kv_shared_layers}, "
+                f"num_hidden_layers={num_hidden_layers}.")
+        src = len(prev_types) - 1 - prev_types[::-1].index(ctype)
+        mapping[i] = src
+    return mapping
+
+
 # MLP arch is the same as Gemma3
 class Gemma4MLP(JaxModule):
 
@@ -427,26 +470,14 @@ class Gemma4Attention(JaxModule):
         # attention type. The runner side populates the redirect mapping;
         # this layer just needs to set is_kv_shared_layer +
         # kv_sharing_target_layer_name.
-        num_kv_shared_layers = getattr(config, "num_kv_shared_layers", 0)
-        self.is_kv_shared_layer = False
+        kv_share_map = gemma4_kv_share_map(config)
+        self.is_kv_shared_layer = layer_idx in kv_share_map
         self.kv_sharing_target_layer_name: Optional[str] = None
-        if num_kv_shared_layers > 0:
-            first_kv_shared_layer_idx = (config.num_hidden_layers -
-                                         num_kv_shared_layers)
-            if layer_idx >= first_kv_shared_layer_idx:
-                self.is_kv_shared_layer = True
-                prev_layer_types = list(
-                    config.layer_types[:first_kv_shared_layer_idx])
-                current_layer_type = config.layer_types[layer_idx]
-                # Last preceding layer of the same attention type.
-                kv_shared_layer_index = (
-                    len(prev_layer_types) - 1 -
-                    prev_layer_types[::-1].index(current_layer_type))
-                if kv_shared_layer_index >= 0:
-                    # The runner uses unprefixed "layer.{i}" keys (see
-                    # gemma4.py:740, kv_cache_manager.py:454).
-                    self.kv_sharing_target_layer_name = (
-                        f"layer.{kv_shared_layer_index}")
+        if self.is_kv_shared_layer:
+            # The runner uses unprefixed "layer.{i}" keys (see
+            # gemma4.py:740, kv_cache_manager.py:454).
+            self.kv_sharing_target_layer_name = (
+                f"layer.{kv_share_map[layer_idx]}")
 
     def __call__(
         self,
@@ -597,10 +628,7 @@ class Gemma4DecoderLayer(JaxModule):
         )
         # Double-wide MLP: KV-shared layers get 2x intermediate_size when
         # the config flag is set (vllm reference: gemma4.py:599-610).
-        num_kv_shared_layers = getattr(text_config, "num_kv_shared_layers", 0)
-        is_kv_shared = (num_kv_shared_layers > 0
-                        and layer_idx >= text_config.num_hidden_layers -
-                        num_kv_shared_layers)
+        is_kv_shared = layer_idx in gemma4_kv_share_map(text_config)
         use_double_wide_mlp = (getattr(text_config, "use_double_wide_mlp",
                                        False) and is_kv_shared)
         layer_intermediate_size = (text_config.intermediate_size *

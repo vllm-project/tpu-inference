@@ -453,33 +453,18 @@ class KVCacheManager:
 
             # KV-share (kb_kv_share.md §3-§4): for the JAX-path (no
             # vllm-side Attention modules to scan), populate the shared
-            # mapping directly from text_config. Mirror the algorithm at
-            # vllm/model_executor/models/gemma4.py:459-485 — last
-            # num_kv_shared_layers reuse the K/V of the last preceding
-            # layer of matching attention type.
-            num_kv_shared_layers = getattr(text_config, "num_kv_shared_layers",
-                                           0)
-            jax_layer_types = list(getattr(text_config, "layer_types", []))
-            first_kv_shared_layer_idx = (
-                model_config.get_num_layers(parallel_config) -
-                num_kv_shared_layers) if num_kv_shared_layers > 0 else None
+            # mapping directly from text_config via the shared helper.
+            from tpu_inference.models.jax.gemma4 import gemma4_kv_share_map
+            kv_share_map = gemma4_kv_share_map(text_config)
 
             for i in range(model_config.get_num_layers(parallel_config)):
                 # If this layer is KV-shared, register the redirect and skip
                 # spec creation (so no slot is allocated). The forward-time
                 # remap at line ~835 picks the source layer's slot.
-                if (num_kv_shared_layers > 0 and i >= first_kv_shared_layer_idx
-                        and jax_layer_types):
-                    prev_layer_types = jax_layer_types[:
-                                                       first_kv_shared_layer_idx]
-                    current_layer_type = jax_layer_types[i]
-                    if current_layer_type in prev_layer_types:
-                        src_idx = (
-                            len(prev_layer_types) - 1 -
-                            prev_layer_types[::-1].index(current_layer_type))
-                        self.shared_kv_cache_layers[
-                            f"layer.{i}"] = f"layer.{src_idx}"
-                        continue
+                if i in kv_share_map:
+                    self.shared_kv_cache_layers[
+                        f"layer.{i}"] = f"layer.{kv_share_map[i]}"
+                    continue
 
                 if self.use_mla:
                     kv_cache_spec[f"layer.{i}"] = self._create_attention_spec(

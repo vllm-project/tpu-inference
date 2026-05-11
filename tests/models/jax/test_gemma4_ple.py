@@ -167,6 +167,47 @@ def test_ple_on_shape_and_dtype(mesh, rng=jax.random.PRNGKey(0)):
     assert jnp.all(jnp.isfinite(out))
 
 
+def test_ple_input_ids_none_precompile_path(mesh, rng=jax.random.PRNGKey(0)):
+    """compute_per_layer_inputs with input_ids=None must synthesize zeros so
+    the JIT trace shape matches real inference.
+
+    vllm's compilation_manager._precompile_backbone_with_inputs_embeds calls
+    the model with input_ids=None and a dummy inputs_embeds. PLE needs an
+    input_ids tensor for the embed_tokens_per_layer lookup; the code path
+    must handle None gracefully (zeros → all lookups hit slot 0 → same
+    shape compute as real inference) so the precompiled cache key matches.
+    """
+    P = 8
+    L = 3
+    H = 32
+    V = 64
+    text_config = _make_text_config(hidden_size=H,
+                                    hidden_size_per_layer_input=P,
+                                    num_hidden_layers=L,
+                                    vocab_size=V,
+                                    vocab_size_per_layer_input=V)
+    vllm_config = _make_vllm_config(text_config)
+    with jax.set_mesh(mesh):
+        model = Gemma4Model(vllm_config, nnx.Rngs(rng), mesh)
+
+    T = 5
+    inputs_embeds = jnp.ones((T, H), dtype=jnp.float32)
+    with jax.set_mesh(mesh):
+        out = model.compute_per_layer_inputs(None, inputs_embeds)
+
+    assert out is not None, "PLE active path should still return a tensor"
+    assert out.shape == (T, L, P), f"got {out.shape}, expected ({T}, {L}, {P})"
+    assert jnp.all(jnp.isfinite(out))
+
+    # Sanity: result equals what you get if you pass an explicit zeros
+    # tensor. Demonstrates the synthesis is purely cosmetic for the JIT
+    # trace and produces no surprise different-trajectory output.
+    with jax.set_mesh(mesh):
+        out_zeros = model.compute_per_layer_inputs(
+            jnp.zeros((T, ), dtype=jnp.int32), inputs_embeds)
+    np.testing.assert_array_equal(np.asarray(out), np.asarray(out_zeros))
+
+
 def test_ple_multimodal_masking(mesh, rng=jax.random.PRNGKey(0)):
     """is_multimodal=True positions look up vocab slot 0 in embed_tokens_per_layer."""
     P = 4
