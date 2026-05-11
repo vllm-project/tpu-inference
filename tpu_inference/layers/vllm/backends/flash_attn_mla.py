@@ -153,8 +153,6 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             jax_view(layer.W_UK_T),  # torch nn param
             preferred_element_type=jnp.float32)
         scale = jax_view(layer.W_UK_T_scale)  # torch nn param
-        # (1, N, L) -> (N, 1, L)
-        scale = scale.reshape(scale.shape[1], 1, scale.shape[-1])
         q_nope = (q_nope * scale).astype(input_dtype)
 
         q_scale = k_scale = v_scale = None
@@ -190,7 +188,7 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             query_nth_sharding=None,
             query_tnh_sharding=None,
             keyvalue_skh_sharding=None,
-            attn_o_tnh_sharding=None,
+            attn_o_nth_sharding=None,
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,

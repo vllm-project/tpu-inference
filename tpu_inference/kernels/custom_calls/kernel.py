@@ -21,8 +21,6 @@ import jax.experimental.pallas.tpu as pltpu
 import jax.numpy as jnp
 from sympy import divisors
 
-min_pipeline = 3
-
 
 @jax.jit(static_argnames=[
     'transpose_axes',
@@ -192,7 +190,7 @@ def xpose_pipeline(input: jax.Array,
     ]
     shape_str = "x".join([str(i) for i in input.shape])
     transpose_str = "x".join([str(i) for i in transpose_axes])
-    scope_name = f"xpose_full_shape_{shape_str}_xpose_{transpose_str}_n_tile_{n_tile}_m_tile_{m_tile}_pa_{parallel_axis}_pi_{pipeline_axis}"
+    scope_name = f"xpose_pipeline_shape_{shape_str}_xpose_{transpose_str}_n_tile_{n_tile}_m_tile_{m_tile}_pa_{parallel_axis}_pi_{pipeline_axis}"
     return pl.pallas_call(xpose_kernel,
                           grid=grid,
                           compiler_params=pltpu.CompilerParams(

@@ -473,7 +473,7 @@ def mla_attention(
         query_nth_sharding: Sharding | None = None,
         query_tnh_sharding: Sharding | None = None,
         keyvalue_skh_sharding: Sharding | None = None,
-        attn_o_tnh_sharding: Sharding | None = None,
+        attn_o_nth_sharding: Sharding | None = None,
         q_scale: float | None = None,
         k_scale: float | None = None,
         v_scale: float | None = None,
@@ -495,7 +495,7 @@ def mla_attention(
         query_nth_sharding: sharding to use for q_nope for the shard map (MLA kernel)
         query_tnh_sharding: sharding to use for q_rope for the shard map (MLA kernel)
         keyvalue_skh_sharding: sharding to use for k/k_rope for the shard map (MLA kernel)
-        attn_o_tnh_sharding: sharding to use for the attention output for the shard map (MLA kernel)
+        attn_o_nth_sharding: sharding to use for the attention output for the shard map (MLA kernel)
         q_scale: scale to apply to q (if quantized)
         k_scale: scale to apply to k (if quantized)
         v_scale: scale to apply to v (if quantized)
@@ -517,7 +517,7 @@ def mla_attention(
     )
     out_specs = (
         P(ShardingAxisName.BATCH),  # kv cache
-        attn_o_tnh_sharding
+        attn_o_nth_sharding
         or P(None, ShardingAxisName.MLP_TENSOR, None)  # attn output
     )
 

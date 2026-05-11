@@ -236,7 +236,7 @@ class TestPallasMLAttentionBackendImpl:
                                   dtype=jnp.bfloat16),
                 env=torchax.default_env())
             layer.W_UK_T_scale = torchax.tensor.Tensor(
-                jnp.ones((1, NUM_HEADS, KV_LORA_RANK), dtype=jnp.float32),
+                jnp.ones((NUM_HEADS, 1, KV_LORA_RANK), dtype=jnp.float32),
                 env=torchax.default_env())
             layer.W_UV_scale = torchax.tensor.Tensor(jnp.ones(
                 (1, NUM_HEADS, V_HEAD_DIM), dtype=jnp.float32),
@@ -288,7 +288,7 @@ class TestPallasMLAttentionBackendImpl:
                                   dtype=jnp.bfloat16),
                 env=torchax.default_env())
             layer.W_UK_T_scale = torchax.tensor.Tensor(
-                jnp.ones((1, NUM_HEADS, KV_LORA_RANK), dtype=jnp.float32),
+                jnp.ones((NUM_HEADS, 1, KV_LORA_RANK), dtype=jnp.float32),
                 env=torchax.default_env())
             layer.W_UV_scale = torchax.tensor.Tensor(jnp.ones(
                 (1, NUM_HEADS, V_HEAD_DIM), dtype=jnp.float32),
@@ -341,7 +341,7 @@ class TestPallasMLAttentionBackendImpl:
                                   dtype=jnp.bfloat16),
                 env=torchax.default_env())
             layer.W_UK_T_scale = torchax.tensor.Tensor(
-                jnp.ones((1, NUM_HEADS, KV_LORA_RANK), dtype=jnp.float32),
+                jnp.ones((NUM_HEADS, 1, KV_LORA_RANK), dtype=jnp.float32),
                 env=torchax.default_env())
             layer.W_UV_scale = torchax.tensor.Tensor(jnp.ones(
                 (1, NUM_HEADS, V_HEAD_DIM), dtype=jnp.float32),
