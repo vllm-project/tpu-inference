@@ -92,6 +92,7 @@ from tpu_inference.distributed.utils import (get_host_ip, get_kv_ips,
                                              get_side_channel_port)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
+from tpu_inference.runner.utils import trim_request_id_suffix
 from tpu_inference.utils import device_array
 
 ReqId = str
@@ -601,7 +602,8 @@ class TPUConnectorWorker:
         if jax.profiler.TraceAnnotation.is_enabled():
             total_bytes = sum(x.nbytes for x in kv)
             logger.debug(f"TPUConnector: Awaiting pull for req_id={req_id}, uuid={req_meta.uuid}, size={total_bytes}")
-            with jax.profiler.TraceAnnotation("KV_Cache_Await_Pull", req_id=req_id, uuid=req_meta.uuid, size=total_bytes):
+            clean_req_id = trim_request_id_suffix(req_id)
+            with jax.profiler.TraceAnnotation("KV_Cache_Await_Pull", req_id=req_id, request_id=clean_req_id, uuid=req_meta.uuid, size=total_bytes):
                 self.kv_transfer_server.await_pull(req_meta.uuid, kv)
         else:
             logger.debug(f"TPUConnector: Awaiting pull for req_id={req_id}, uuid={req_meta.uuid} (Profiling disabled)")
@@ -654,16 +656,16 @@ class TPUConnectorWorker:
         if jax.profiler.TraceAnnotation.is_enabled():
             logger.info(f"TPUConnector: Pulling KV for req_id={req_meta.request_id} (Trace enabled)")
             logger.info(f"TPUConnector: TraceAnnotation KV_Cache_Pull_Flow#_pt=10,_p={req_meta.uuid}#")
+            clean_req_id = trim_request_id_suffix(req_meta.request_id)
             with jax.profiler.TraceAnnotation(f"KV_Cache_Pull_Flow#_pt=10,_p={req_meta.uuid}#"):
                 with jax.profiler.TraceAnnotation(
                     "KV_Cache_Pull", 
-                    request_id=req_meta.request_id,
+                    req_id=req_meta.request_id,
+                    request_id=clean_req_id,
                     uuid=req_meta.uuid,
                     source=source_address,
                     bytes=total_bytes,
-                    dimensions=dimensions,
-                    local_blocks=str(req_meta.local_block_ids),
-                    remote_blocks=str(req_meta.remote_block_ids)
+                    dimensions=dimensions
                 ):
                     kv = conn.pull(req_meta.uuid, kv_spec)
         else:

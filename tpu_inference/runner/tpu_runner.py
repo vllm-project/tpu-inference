@@ -66,6 +66,7 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
 from tpu_inference.models.jax.utils.weight_utils import (
     shard_put, transfer_state_with_mappings)
 from tpu_inference.runner import utils as runner_utils
+from tpu_inference.runner.utils import trim_request_id_suffix
 from tpu_inference.runner.compilation_manager import CompilationManager
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
@@ -715,17 +716,30 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             return DUMMY_METADATA, EMPTY_MODEL_RUNNER_OUTPUT
 
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
-        # ---------------- DRAFT CODE START ----------------
         is_decode_only = True
         for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
             if num_tokens > 1:
                 is_decode_only = False
                 break
         
-        role_str = "DECODE" if is_decode_only else "PREFILL"
+        if self.vllm_config.kv_transfer_config:
+            if self.vllm_config.kv_transfer_config.is_kv_producer:
+                role_str = "PREFILL"
+            else:
+                role_str = "DECODE"
+        else:
+            role_str = "DECODE" if is_decode_only else "PREFILL"
         
-        with jax.profiler.TraceAnnotation(f"vLLM_{role_str}_PrepareInputs"):
-        # ---------------- DRAFT CODE END ------------------
+        req_id_kwargs = {}
+        try:
+            num_reqs = self.input_batch.num_reqs
+            active_req_ids = [str(rid) for rid in self.input_batch.req_ids[:num_reqs] if rid is not None]
+            for i, rid in enumerate(active_req_ids):
+                req_id_kwargs[f"req_id{i+1}"] = trim_request_id_suffix(rid)
+        except Exception as e:
+            logger.warning(f"Failed to extract req_ids: {e}")
+        
+        with jax.profiler.TraceAnnotation(f"vLLM_{role_str}_PrepareInputs", **req_id_kwargs):
             (
                 input_ids,
                 input_positions,
@@ -786,9 +800,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 
                 # ---------------- DRAFT CODE START ----------------
                 try:
-                    num_reqs = self.input_batch.num_reqs
-                    active_req_ids = [str(rid) for rid in self.input_batch.req_ids[:num_reqs] if rid is not None]
-                    req_ids_str = ";".join(active_req_ids)
+                    trimmed_req_ids = [trim_request_id_suffix(rid) for rid in active_req_ids]
+                    req_ids_str = ";".join(trimmed_req_ids)
                     
                     flow_meta = ""
                     if active_req_ids:
@@ -807,7 +820,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 if flow_meta:
                     logger.info(f"TPUConnector: TraceAnnotation vLLM_{role_str}_ModelForward_Flow{flow_meta}")
                     with jax.profiler.TraceAnnotation(f"vLLM_{role_str}_ModelForward_Flow{flow_meta}"):
-                        with jax.profiler.TraceAnnotation(f"vLLM_{role_str}_ModelForward", requests=req_ids_str):
+                        with jax.profiler.TraceAnnotation(f"vLLM_{role_str}_ModelForward", requests=req_ids_str, **req_id_kwargs):
                             # ---------------- DRAFT CODE END ------------------
                             (self.kv_caches, hidden_states,
                              aux_hidden_states) = self.model_fn(
@@ -824,7 +837,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                  self.is_last_rank,
                              )
                 else:
-                    with jax.profiler.TraceAnnotation(f"vLLM_{role_str}_ModelForward", requests=req_ids_str):
+                    with jax.profiler.TraceAnnotation(f"vLLM_{role_str}_ModelForward", requests=req_ids_str, **req_id_kwargs):
                         # ---------------- DRAFT CODE END ------------------
                         (self.kv_caches, hidden_states,
                          aux_hidden_states) = self.model_fn(

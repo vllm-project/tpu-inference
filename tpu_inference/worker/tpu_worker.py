@@ -344,10 +344,31 @@ class TPUWorker:
 
     def profile(self, is_start: bool = True):
         if is_start:
+            try:
+                logger.info(f"JAX version: {jax.__version__}")
+                logger.info(f"JAX file path: {jax.__file__}")
+                logger.info(f"Jaxlib file path: {jaxlib.__file__}")
+            except Exception as e:
+                logger.warning(f"Could not log JAX versions: {e}")
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
             options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
             options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 1)
+            # # options.device_tracer_level = 1
+            # # options.device_type = 2
+            # # Hardcode options for proof of concept
+            # advanced_config = {
+            #     # "tpu_power_trace_level": "1",
+            #     # "e2e_enable_fw_throttle_event": "true",
+            #     "e2e_enable_fw_power_level_event": True,
+            #     "e2e_enable_fw_thermal_event": True,
+            #     # "tpu_tc_perf_counter_sampling_options": "interval_us:1 scaling:0 counter_size_bits:2 indices:1 indices:3 indices:4 indices:10 indices:11 indices:31 indices:32",
+            #     "enable_fw_pcie_utilization_event": True,
+            # }
+            # options.advanced_configuration = advanced_config
+            # logger.info("Setting advanced configuration for XProf:")
+            # for key, value in advanced_config.items():
+            #     logger.info(f"  {key}: {value}")
             jax.profiler.start_trace(self.profile_dir,
                                      profiler_options=options)
         else:

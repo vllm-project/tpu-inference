@@ -4,6 +4,7 @@ Implements a few utility functions for the various runners.
 """
 import bisect
 import datetime
+import re
 import functools
 import json
 import os
@@ -429,3 +430,26 @@ class PhasedBasedProfiler:
             # We are in the middle of profiling a given phase
             else:
                 self._step_or_stop_profiling(batch_composition_stats)
+
+
+def trim_request_id_suffix(req_id: str) -> str:
+    """Trims the batching and proxy suffixes from the request ID."""
+    # Pattern for cmpl- + standard UUID (8-4-4-4-12 hex chars)
+    pattern = r"(cmpl-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+    match = re.match(pattern, req_id)
+    if match:
+        return match.group(1)
+        
+    # Fallback for just standard UUID without prefix
+    pattern_uuid = r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+    match = re.match(pattern_uuid, req_id)
+    if match:
+        return match.group(1)
+        
+    # Fallback for simple generated IDs (e.g., "hex-0" or "int-0")
+    # Split by hyphen and remove the last part if it's a digit (batch index)
+    parts = req_id.split("-")
+    if len(parts) > 1 and parts[-1].isdigit():
+        return "-".join(parts[:-1])
+        
+    return req_id
