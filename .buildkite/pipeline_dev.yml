@@ -40,31 +40,6 @@ steps:
   # -----------------------------------------------------------------
   # Build Step (required by all demo steps below)
   # -----------------------------------------------------------------
-  - label: ":docker: Build and Push Base Image (tpu6e)"
-    key: tpu6e_build_docker
-    agents:
-      queue: cpu_64_core
-    env:
-      TPU_VERSION: "tpu6e"
-    commands:
-      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
-
-  # TEMP — verify the kv_share tests still pass after being folded into
-  # the existing v3 kernel test file. Remove before opening for review.
-  - label: "tpu6e RPA v3 kernel tests (incl. kv_share)"
-    key: tpu6e_rpa_v3_kernel
-    depends_on: tpu6e_build_docker
-    soft_fail: true
-    agents:
-      queue: tpu_v6e_queue
-    env:
-      USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu6e"
-    commands:
-      - |
-        .buildkite/scripts/run_in_docker.sh \
-          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels/ragged_paged_attention_kernel_v3_test.py -k "kv_share"'
-
   - label: ":docker: Build and Push Base Image (tpu7x)"
     key: tpu7x_build_docker
     agents:
