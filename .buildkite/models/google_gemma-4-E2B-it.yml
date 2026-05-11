@@ -18,9 +18,10 @@
 # correctness bug in our path).
 #
 # JAX path correctness was verified by per-layer hidden-state diff vs
-# vllm-pytorch GPU within BF16 noise across all 35 layers (BK
-# tpu-inference-dev build #397, kernel KV-share fix commit 0f1ea649).
-# Regression-guarded by tests/kernels/ragged_paged_attention_kernel_v3_kv_share_test.py.
+# vllm-pytorch GPU within BF16 noise across all 35 layers.
+# KV-share kernel behavior regression-guarded by the new
+# test_kv_share_* methods in
+# tests/kernels/ragged_paged_attention_kernel_v3_test.py.
 
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for google/gemma-4-E2B-it"
