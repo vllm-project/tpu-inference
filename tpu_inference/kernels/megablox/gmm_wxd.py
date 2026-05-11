@@ -108,15 +108,9 @@ def compute_metadata(group_sizes):
         lhs_pointer += gs
     return gm_expert_ids, gm_lhs_start, gm_lhs_end
 
-def gmm_native(lhs, rhs, group_sizes):
+@jax.jit
+def gmm_native(lhs, rhs, group_sizes, gm_expert_ids, gm_lhs_start, gm_lhs_end):
     # assume lhs is already sorted by experts
-
-        
-    gm_expert_ids, gm_lhs_start, gm_lhs_end = compute_metadata(group_sizes)
-    
-    gm_expert_ids_arr = jnp.asarray(gm_expert_ids, dtype=jnp.int32)
-    gm_lhs_start_arr  = jnp.asarray(gm_lhs_start,  dtype=jnp.int32)
-    gm_lhs_end_arr    = jnp.asarray(gm_lhs_end,    dtype=jnp.int32)
   
     grid = ( h // tile_h, len(gm_expert_ids), d // tile_d) 
 
@@ -137,7 +131,7 @@ def gmm_native(lhs, rhs, group_sizes):
                         grid=grid,
                         scratch_shapes=[pltpu.VMEM((tile_b, tile_h), jnp.float32)],
                     )
-                   )(gm_lhs_start_arr, gm_lhs_end_arr, gm_expert_ids_arr, lhs, rhs) 
+                   )(gm_lhs_start, gm_lhs_end, gm_expert_ids, lhs, rhs) 
     
 
 
@@ -158,8 +152,14 @@ timings = collections.defaultdict(list)
 
 def run_test_timed(group_sizes_list, label):
     group_sizes = jnp.asarray(group_sizes_list, dtype=jnp.int32)
+    gm_expert_ids, gm_lhs_start, gm_lhs_end = compute_metadata(group_sizes)
+    
+    gm_expert_ids_arr = jnp.asarray(gm_expert_ids, dtype=jnp.int32)
+    gm_lhs_start_arr  = jnp.asarray(gm_lhs_start,  dtype=jnp.int32)
+    gm_lhs_end_arr    = jnp.asarray(gm_lhs_end,    dtype=jnp.int32)
+
     start_time = time.time()
-    gmm_out = gmm_native(lhs, rhs, group_sizes)
+    gmm_out = gmm_native(lhs, rhs, group_sizes, gm_expert_ids_arr, gm_lhs_start_arr, gm_lhs_end_arr)
     gmm_out.block_until_ready()
     timings[label].append(time.time() - start_time)
 N = 10
@@ -208,3 +208,12 @@ for label, times in timings.items():
 # PASSED [one empty expert (128, 0)] avg 204.95 ms
 # PASSED [one empty expert (0, 128)] avg 197.88 ms
 # PASSED [extreme skew (1, 127)] avg 198.32 ms
+
+# v4 . jitted 
+
+# PASSED [even routing (64, 64)] avg 23.03 ms
+# PASSED [uneven routing (96, 32)] avg 0.21 ms
+# PASSED [uneven routing (32, 96)] avg 0.22 ms
+# PASSED [one empty expert (128, 0)] avg 27.42 ms
+# PASSED [one empty expert (0, 128)] avg 0.23 ms
+# PASSED [extreme skew (1, 127)] avg 0.20 ms
