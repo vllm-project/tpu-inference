@@ -98,6 +98,8 @@ def inner_kernel(
     schedule_table,
     # SMEM: (max_reqs,). State indices
     state_indices,
+    # SMEM: (max_reqs,). Whether each request has prior recurrent state
+    has_initial_state,
     *,
     # HBM: (B, n_v, d_k, d_v). All recurrent states
     recurrent_state_in,
@@ -376,12 +378,28 @@ def inner_kernel(
         prefill_slot = prefill_req_id % 2
 
         def process_regular_prefill():
-            # 1. Initialize state to zero if first chunk
-            # Initialize state only if it's the first chunk of the request
+            # 1. Initialize state if first chunk of the request in this step
             @pl.when(is_first_chunk > 0)
             def init_state():
-                prefill_scratch[prefill_slot] = jnp.zeros(
-                    (n_v, d_k, d_v), dtype=prefill_scratch.dtype)
+                has_init = has_initial_state[prefill_req_id][...]
+
+                def load_from_hbm():
+                    state_idx = state_indices[prefill_req_id][...]
+                    copy_op = pltpu.make_async_copy(
+                        src_ref=recurrent_state_in.at[pl.ds(state_idx, 1)],
+                        dst_ref=state_commit_scratch,
+                        sem=prefill_semaphore.at[prefill_slot],
+                    )
+                    copy_op.start()
+                    copy_op.wait()
+                    prefill_scratch[prefill_slot] = state_commit_scratch[
+                        0].astype(prefill_scratch.dtype)
+
+                def zero_state():
+                    prefill_scratch[prefill_slot] = jnp.zeros(
+                        (n_v, d_k, d_v), dtype=prefill_scratch.dtype)
+
+                jax.lax.cond(has_init > 0, load_from_hbm, zero_state)
                 return None
 
             ### Preparataion for chunk wise math,
@@ -614,8 +632,24 @@ def inner_kernel(
             first_req_id = schedule_table[step, 11][...]
             first_is_first = schedule_table[step, 11 + C_trans][...]
             first_slot = first_req_id % 2
+            first_has_init = has_initial_state[first_req_id][...]
+
+            @pl.when((first_is_first > 0) & (first_has_init > 0))
+            def load_first_state():
+                state_idx = state_indices[first_req_id][...]
+                copy_op = pltpu.make_async_copy(
+                    src_ref=recurrent_state_in.at[pl.ds(state_idx, 1)],
+                    dst_ref=state_commit_scratch,
+                    sem=prefill_semaphore.at[first_slot],
+                )
+                copy_op.start()
+                copy_op.wait()
+                prefill_scratch[first_slot] = state_commit_scratch[0].astype(
+                    prefill_scratch.dtype)
+
             h = prefill_scratch[first_slot]
-            h = jnp.where(first_is_first > 0, jnp.zeros_like(h), h)
+            h = jnp.where((first_is_first > 0) & (first_has_init == 0),
+                          jnp.zeros_like(h), h)
 
             current_r = first_req_id
             sequence_valid = True
@@ -665,11 +699,29 @@ def inner_kernel(
                 jax.lax.cond(should_write, do_write, lambda: None)
 
                 t_slot = t_req % 2
+                t_has_init = has_initial_state[t_req][...]
+
+                def load_t_state():
+                    state_idx = state_indices[t_req][...]
+                    copy_op = pltpu.make_async_copy(
+                        src_ref=recurrent_state_in.at[pl.ds(state_idx, 1)],
+                        dst_ref=state_commit_scratch,
+                        sem=prefill_semaphore.at[t_slot],
+                    )
+                    copy_op.start()
+                    copy_op.wait()
+                    prefill_scratch[t_slot] = state_commit_scratch[0].astype(
+                        prefill_scratch.dtype)
+
+                should_load_t = (t_is_first > 0) & (t_has_init > 0)
+                jax.lax.cond(should_load_t, load_t_state, lambda: None)
+
                 h0_new = prefill_scratch[0]
                 h1_new = prefill_scratch[1]
                 new_h = jnp.where(t_slot == 0, h0_new, h1_new)
 
-                new_h = jnp.where(t_is_first > 0, jnp.zeros_like(new_h), new_h)
+                new_h = jnp.where((t_is_first > 0) & (t_has_init == 0),
+                                  jnp.zeros_like(new_h), new_h)
                 h = new_h
 
                 current_r = t_req
@@ -783,17 +835,17 @@ def get_qkv_index_map_v2(
     offset_col,
     count_col,
     alignment=16,
+    block_size=64,
+    sink_offset=0,
 ):
     valid = schedule_table[step, valid_col][...]
     offset = schedule_table[step, offset_col][...]
     offset = pl.multiple_of(offset, alignment)
-    count = schedule_table[step, count_col][...]
 
-    safe_offset = jnp.where(valid > 0, offset, 0)
+    safe_offset = jnp.where(valid > 0, offset, sink_offset)
     safe_offset = pl.multiple_of(safe_offset, alignment)
 
-    safe_count = pl.cdiv(count, alignment) * alignment
-    return (pl.ds(safe_offset, safe_count), 0)
+    return (pl.ds(safe_offset, block_size), 0)
 
 
 def create_block_specs(
@@ -804,6 +856,7 @@ def create_block_specs(
     n_v,
     d_v,
     alignment=16,
+    sink_offset=0,
 ):
     """Creates block specs for recurrent scan kernel."""
 
@@ -814,6 +867,8 @@ def create_block_specs(
         offset_col=1,
         count_col=3,
         alignment=alignment,
+        block_size=chunk_size,
+        sink_offset=sink_offset,
     )
 
     decode_qkv_index_map = functools.partial(
@@ -823,6 +878,8 @@ def create_block_specs(
         offset_col=5,
         count_col=7,
         alignment=alignment,
+        block_size=BT,
+        sink_offset=sink_offset,
     )
 
     prefill_qkv_spec = pl.BlockSpec(
@@ -878,6 +935,7 @@ def fused_kernel(
     mixed_qkv_ref,
     aliased_recurrent_state_ref,
     state_indices_ref,
+    has_initial_state_ref,
     a_raw_ref,
     b_raw_ref,
     a_log_ref,
@@ -902,6 +960,8 @@ def fused_kernel(
     total_blocks = total_blocks_ref[0]
 
     d = mixed_qkv_ref.shape[-1]
+    pad_size = max(C, BT)
+    sink_offset = mixed_qkv_ref.shape[0] - pad_size
 
     in_specs, out_specs = create_block_specs(
         schedule_table_ref,
@@ -911,6 +971,7 @@ def fused_kernel(
         n_v,
         d_v,
         alignment=sublanesize,
+        sink_offset=sink_offset,
     )
 
     def _run_with_scratch(
@@ -961,7 +1022,9 @@ def fused_kernel(
             dt_bias_ref,
             output_ref,
             output_ref,
-            scratches=[schedule_table_ref, state_indices_ref],
+            scratches=[
+                schedule_table_ref, state_indices_ref, has_initial_state_ref
+            ],
         )
 
     pl.run_scoped(
@@ -1010,6 +1073,7 @@ def recurrent_scan(
     chunk_size: int = 128,
     BT: int = 128,
     use_qk_norm_in_gdn: bool = True,
+    has_initial_state: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Fused recurrent scan kernel for GDN on TPU v7.
 
@@ -1041,23 +1105,36 @@ def recurrent_scan(
       - Updated recurrent state of shape [max_reqs, n_v, d_k, d_v].
       - The mixed_qkv array of shape [num_tokens, 2 * n_kq * d_k + n_v * d_v].
   """
-    # Pad raw a and b to (num_tokens, 128) for sublanes
-    a_padded = jnp.pad(a, ((0, 0), (0, 128 - n_v)))
-    b_padded = jnp.pad(b, ((0, 0), (0, 128 - n_v)))
+    if has_initial_state is None:
+        has_initial_state = jnp.zeros(state_indices.shape[0], dtype=jnp.int32)
+    else:
+        has_initial_state = has_initial_state.astype(jnp.int32)
+
+    num_tokens = mixed_qkv.shape[0]
+    tpu_info = pltpu.get_tpu_info()
+    sublanesize = 4 // mixed_qkv.itemsize * tpu_info.num_sublanes
+
+    # Pad token dimension so invalid pipeline steps DMA into a safe sink area.
+    # Sink offset must be aligned to sublanesize for Mosaic tile compatibility.
+    block_size = max(chunk_size, BT)
+    sink_offset = ((num_tokens + sublanesize - 1) // sublanesize) * sublanesize
+    pad_rows = sink_offset + block_size - num_tokens
+    mixed_qkv = jnp.pad(mixed_qkv, ((0, pad_rows), (0, 0)))
+
+    # Pad raw a and b to (num_tokens + pad_rows, 128) for sublanes
+    a_padded = jnp.pad(a, ((0, pad_rows), (0, 128 - n_v)))
+    b_padded = jnp.pad(b, ((0, pad_rows), (0, 128 - n_v)))
 
     # decode_tokens: scalar, number of decode tokens.
     # Assuming length 1 per decode request, this is also the number of decode
     # requests.
     decode_tokens = distribution[0]
-
-    tpu_info = pltpu.get_tpu_info()
-    sublanesize = 4 // mixed_qkv.itemsize * tpu_info.num_sublanes
     schedule_table, total_blocks = (
         compute_schedule_table_v2.compute_schedule_table_v2(
             query_start_loc,
             decode_tokens,
             distribution[2],
-            mixed_qkv.shape[0],
+            num_tokens,
             chunk_size,
             BT,
             alignment=sublanesize,
@@ -1073,6 +1150,7 @@ def recurrent_scan(
             pl.BlockSpec(memory_space=pltpu.HBM),
             pl.BlockSpec(memory_space=pltpu.HBM),
             pl.BlockSpec(memory_space=pltpu.SMEM),
+            pl.BlockSpec(memory_space=pltpu.SMEM),
             pl.BlockSpec(memory_space=pltpu.HBM),
             pl.BlockSpec(memory_space=pltpu.HBM),
             pl.BlockSpec(memory_space=pltpu.HBM),
@@ -1087,7 +1165,7 @@ def recurrent_scan(
         ],
     )
 
-    updated_recurrent_state, output = pl.pallas_call(
+    updated_recurrent_state, output_padded = pl.pallas_call(
         functools.partial(
             fused_kernel,
             C=chunk_size,
@@ -1101,7 +1179,7 @@ def recurrent_scan(
         ),
         out_shape=(
             jax.ShapeDtypeStruct(recurrent_state.shape, recurrent_state.dtype),
-            jax.ShapeDtypeStruct((mixed_qkv.shape[0], n_v * d_v),
+            jax.ShapeDtypeStruct((sink_offset + block_size, n_v * d_v),
                                  mixed_qkv.dtype),
         ),
         grid_spec=grid_spec,
@@ -1111,6 +1189,7 @@ def recurrent_scan(
         mixed_qkv,
         recurrent_state,
         state_indices,
+        has_initial_state,
         a_padded,
         b_padded,
         A_log,
@@ -1119,4 +1198,4 @@ def recurrent_scan(
         decode_tokens_arr,
         total_blocks_arr,
     )
-    return updated_recurrent_state, output
+    return updated_recurrent_state, output_padded[:num_tokens]

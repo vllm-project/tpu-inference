@@ -258,6 +258,7 @@ def ragged_gated_delta_rule_wrapper(
                 chunk_size=chunk_size,
                 BT=chunk_size,
                 use_qk_norm_in_gdn=config.use_qk_norm_in_gdn,
+                has_initial_state=has_initial_state,
             )
         elif impl == 'fused':
             qkv_in = jax.nn.silu(mixed_qkv)
