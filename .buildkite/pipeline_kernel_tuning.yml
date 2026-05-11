@@ -68,18 +68,13 @@ steps:
           pip install --upgrade google-api-core && \
           pip install --upgrade google-auth && \
           pip install --upgrade absl-py && \
-          echo \"tuning_kernel_name = \${KERNEL_TUNING_KERNEL_NAME}\" && \
-          echo \"case_set_desc = \${KERNEL_TUNING_CASE_SET_DESC}\" && \
-          echo \"case_set_id = \${KERNEL_TUNING_CASE_SET_ID}\" && \
-          echo \"run_id = \${KERNEL_TUNING_RUN_ID}\" && \
-          echo \"Python version: $(python --version)\" && \
-          python -m pip install --upgrade absl-py && \
           python -m tools.kernel.tuner.v1.kernel_tuner_runner \
           --kernel_tuner_name=\${KERNEL_TUNING_KERNEL_NAME} \
           --case_set_desc=\${KERNEL_TUNING_CASE_SET_DESC} \
           --generate_buildkite_pipeline=True \
           --case_set_id=\${KERNEL_TUNING_CASE_SET_ID} \
           --run_id=\${KERNEL_TUNING_RUN_ID} \
+          --tpu_cores=\${KERNEL_TUNING_TPU_CORES} \
           --tpu_version=\${TPU_VERSION} "
       - |
         # Upload the generated pipeline YAML from the temp dir on the host.

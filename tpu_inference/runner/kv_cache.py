@@ -134,7 +134,7 @@ def create_kv_caches(
                           ShardingAxisName.KV_CACHE_HEAD))
 
     def _allocate() -> jax.Array:
-        return jnp.empty(
+        return jnp.zeros(
             shape=cache_shape,
             dtype=cache_dtype,
         )

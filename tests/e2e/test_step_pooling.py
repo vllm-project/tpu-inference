@@ -12,6 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import multiprocessing as mp
+
+try:
+    if mp.get_start_method(allow_none=True) != 'spawn':
+        mp.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass
+
 import pytest
 
 
@@ -32,7 +40,8 @@ def test_step_pooling_e2e():
                   max_num_batched_tokens=max_num_batched_tokens,
                   dtype="bfloat16",
                   trust_remote_code=True,
-                  load_format="dummy")
+                  load_format="dummy",
+                  tensor_parallel_size=1)
     except Exception as e:
         pytest.skip(f"Skipping test: {e}")
 
