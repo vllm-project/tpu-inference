@@ -108,6 +108,7 @@ def _test_correctness_helper(
             max_num_seqs=4,
             tensor_parallel_size=_get_tensor_parallel_size(),
             model_loader_extra_config={"enable_weights_track": False},
+            download_dir="/mnt/pd",
             async_scheduling=0)
         ref_outputs = ref_llm.generate(test_prompts, sampling_config)
 
@@ -123,6 +124,7 @@ def _test_correctness_helper(
             max_num_seqs=4,
             tensor_parallel_size=_get_tensor_parallel_size(),
             model_loader_extra_config={"enable_weights_track": False},
+            download_dir="/mnt/pd",
             async_scheduling=0)
         spec_outputs = spec_llm.generate(test_prompts, sampling_config)
 
@@ -210,6 +212,7 @@ def _test_performance_helper(
             enable_prefix_caching=False,
             model_loader_extra_config={"enable_weights_track": False},
             disable_log_stats=False,
+            download_dir="/mnt/pd",
             async_scheduling=0)
 
         _ = spec_llm.generate(test_prompts, sampling_config)
