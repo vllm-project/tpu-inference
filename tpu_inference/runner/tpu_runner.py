@@ -1694,7 +1694,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Per-request mamba state slot ids; copy to keep the InputBatch's
             # CPU buffer free for the next step's bookkeeping.
             mamba_state_indices_cpu = self.input_batch.mamba_state_indices_cpu.copy(
-            )[:attn_padded_num_reqs]
+            )
             (request_distribution, mamba_state_indices,
              dev_arrays_payload) = device_array(
                  self.mesh, (request_distribution, mamba_state_indices_cpu,
@@ -1985,7 +1985,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Per-request mamba state slot ids; copy to keep the InputBatch's
             # CPU buffer free for the next step's bookkeeping.
             mamba_state_indices_cpu = self.input_batch.mamba_state_indices_cpu.copy(
-            )[:attn_padded_num_reqs]
+            )
             (request_distribution, mamba_state_indices,
              dev_arrays_payload) = device_array(
                  self.mesh, (request_distribution, mamba_state_indices_cpu,
