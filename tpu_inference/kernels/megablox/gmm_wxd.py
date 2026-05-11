@@ -1,3 +1,4 @@
+import functools
 import jax
 import jax.numpy as jnp 
 from jax.experimental import pallas as pl
@@ -58,14 +59,13 @@ def run_test(group_sizes_list, label):
         f"FAILED [{label}]: max diff = {max_diff}"
     print(f"PASSED [{label}]")
 
-def kernel(
-    gm_start_ref,
-    gm_end_ref,
-    gm_expert_ids_ref,
+def kernel_inner(
     lhs_ref,
     rhs_ref,
     out_ref,
+    # Scratch
     acc_ref,  # scratch: [tile_b, tile_h] float32
+    gm_lhs_start_ref,
 ):
     h_idx = pl.program_id(0)
     gm_idx = pl.program_id(1)
@@ -74,8 +74,8 @@ def kernel(
     is_first_k = d_idx == 0
     is_last_k = d_idx == (d // tile_d - 1)
 
-    gm_start = gm_start_ref[gm_idx]
-    gm_end = gm_end_ref[gm_idx]
+    gm_start = gm_lhs_start_ref[gm_idx]
+    gm_end = gm_lhs_start_ref[gm_idx + 1]
     row = (gm_start // tile_b) * tile_b + jnp.arange(tile_b)[:, None]  # [tile_b, 1]
     mask = (row >= gm_start) & (row < gm_end)  # [tile_b, 1]
     
@@ -108,30 +108,82 @@ def compute_metadata(group_sizes):
         lhs_pointer += gs
     return gm_expert_ids, gm_lhs_start, gm_lhs_end
 
+def fill_metadata(group_sizes_ref, gm_expert_ids_ref, gm_lhs_start_ref):
+    
+    gm_lhs_start_ref[0] = 0
+    
+    def inner_tm_loop(tm_id, curr_m_offset, *, end_m, group_id):
+        tile_size = jnp.minimum(tile_b, end_m - curr_m_offset)
+        gm_expert_ids_ref[tm_id] = group_id
+        gm_lhs_start_ref[tm_id] = curr_m_offset
+        gm_lhs_start_ref[tm_id + 1] = curr_m_offset + tile_size
+        return curr_m_offset + tile_size
+    
+    def outer_group_loop(group_id, carry):
+        num_gm, m_offset = carry
+        group_size = group_sizes_ref[group_id]
+        end_m = m_offset + group_size
+
+        num_tiles = pl.cdiv(group_size, tile_b)
+        num_tiles = jnp.where(group_size == 0, 0, num_tiles)
+        next_num_gm = num_gm + num_tiles
+
+        tm_fn = functools.partial(inner_tm_loop, end_m=end_m, group_id=group_id)
+        jax.lax.fori_loop(num_gm, next_num_gm, tm_fn, m_offset)
+
+        return next_num_gm, end_m    
+    
+    num_gm, _ = jax.lax.fori_loop(0, g, outer_group_loop, (0, 0))
+    return num_gm
+
+def kernel_outer(group_sizes_ref, 
+                 lhs_ref, 
+                 rhs_ref, 
+                 out_ref, 
+                 acc_ref,
+                 gm_expert_ids_ref, 
+                 gm_lhs_start_ref):
+    
+    
+    num_gm = fill_metadata(group_sizes_ref, gm_expert_ids_ref, gm_lhs_start_ref)
+    
+    grid = ( h // tile_h, num_gm, d // tile_d) 
+    in_specs = [
+        pl.BlockSpec(block_shape=(tile_b, tile_d), index_map=lambda  h_idx, gm_idx, d_idx: (gm_lhs_start_ref[gm_idx] // tile_b, d_idx)),
+        pl.BlockSpec(block_shape=(1, tile_d, tile_h), index_map=lambda  h_idx, gm_idx, d_idx: (gm_expert_ids_ref[gm_idx], d_idx, h_idx)),
+    ]
+    out_specs = pl.BlockSpec(block_shape=(tile_b, tile_h), index_map=lambda  h_idx, gm_idx,  d_idx: (gm_lhs_start_ref[gm_idx] // tile_b, h_idx))
+
+    return pltpu.emit_pipeline(
+        kernel_inner, 
+        grid = grid, 
+        in_specs = in_specs, 
+        out_specs = out_specs
+    )(lhs_ref, rhs_ref, out_ref, scratches = [acc_ref, gm_lhs_start_ref]) 
+
 @jax.jit
-def gmm_native(lhs, rhs, group_sizes, gm_expert_ids, gm_lhs_start, gm_lhs_end):
+def gmm_native(lhs, rhs, group_sizes):
     # assume lhs is already sorted by experts
   
-    grid = ( h // tile_h, len(gm_expert_ids), d // tile_d) 
-
     in_specs = [
-        pl.BlockSpec(block_shape=(tile_b, tile_d), index_map=lambda  h_idx, gm_idx, d_idx, lhs_start_ref, lhs_end_ref, gm_expert_ids_ref: (lhs_start_ref[gm_idx] // tile_b, d_idx)),
-        pl.BlockSpec(block_shape=(1, tile_d, tile_h), index_map=lambda  h_idx, gm_idx, d_idx, lhs_start_ref, lhs_end_ref, gm_expert_ids_ref: (gm_expert_ids_ref[gm_idx], d_idx, h_idx)),
+        pl.BlockSpec(memory_space = pltpu.HBM), #lhs
+        pl.BlockSpec(memory_space = pltpu.HBM), #rhs
     ]
-
-    out_specs = pl.BlockSpec(block_shape=(tile_b, tile_h), index_map=lambda  h_idx, gm_idx,  d_idx, lhs_start_ref, lhs_end_ref, gm_expert_ids_ref: (lhs_start_ref[gm_idx] // tile_b, h_idx))
-    
-    return pl.pallas_call(kernel, 
-                   
+    out_specs = pl.BlockSpec(memory_space = pltpu.HBM) #out
+    max_number_of_gm = len(group_sizes) - 1 + b//tile_b
+    return pl.pallas_call(kernel_outer, 
                    out_shape = jax.ShapeDtypeStruct((b, h), lhs.dtype),
                    grid_spec=pltpu.PrefetchScalarGridSpec(
-                        num_scalar_prefetch=3,          # how many leading args are scalar prefetch
+                        num_scalar_prefetch=1,          
                         in_specs = in_specs, 
                         out_specs = out_specs, 
-                        grid=grid,
-                        scratch_shapes=[pltpu.VMEM((tile_b, tile_h), jnp.float32)],
+                        grid=(),
+                        scratch_shapes=[pltpu.VMEM((tile_b, tile_h), jnp.float32), # acc 
+                                        pltpu.SMEM((max_number_of_gm, ), jnp.int32), # gm_expert_ids, 
+                                        pltpu.SMEM((max_number_of_gm + 1, ), jnp.int32), #gm_lhs_start
+                                        ],
                     )
-                   )(gm_lhs_start, gm_lhs_end, gm_expert_ids, lhs, rhs) 
+                   )(group_sizes, lhs, rhs) 
     
 
 
@@ -139,30 +191,37 @@ def gmm_native(lhs, rhs, group_sizes, gm_expert_ids, gm_lhs_start, gm_lhs_end):
 
 ## Accuracy 
 
-# run_test([128, 0],   "one empty expert (128, 0)")
-# run_test([0, 128],   "one empty expert (0, 128)")
-# run_test([64, 64],   "even routing (64, 64)")
-# run_test([96, 32],   "uneven routing (96, 32)")
-# run_test([32, 96],   "uneven routing (32, 96)")
-# run_test([1, 127],   "extreme skew (1, 127)")
+run_test([128, 0],   "one empty expert (128, 0)")
+run_test([0, 128],   "one empty expert (0, 128)")
+run_test([64, 64],   "even routing (64, 64)")
+run_test([96, 32],   "uneven routing (96, 32)")
+run_test([32, 96],   "uneven routing (32, 96)")
+run_test([1, 127],   "extreme skew (1, 127)")
 
 
 import collections
 timings = collections.defaultdict(list)
 
-def run_test_timed(group_sizes_list, label):
-    group_sizes = jnp.asarray(group_sizes_list, dtype=jnp.int32)
-    gm_expert_ids, gm_lhs_start, gm_lhs_end = compute_metadata(group_sizes)
-    
-    gm_expert_ids_arr = jnp.asarray(gm_expert_ids, dtype=jnp.int32)
-    gm_lhs_start_arr  = jnp.asarray(gm_lhs_start,  dtype=jnp.int32)
-    gm_lhs_end_arr    = jnp.asarray(gm_lhs_end,    dtype=jnp.int32)
+WARMUP = 5
+N = 5
 
+def run_test_timed(group_sizes_list, label, warmup=False):
+    group_sizes = jnp.asarray(group_sizes_list, dtype=jnp.int32)
+    
     start_time = time.time()
-    gmm_out = gmm_native(lhs, rhs, group_sizes, gm_expert_ids_arr, gm_lhs_start_arr, gm_lhs_end_arr)
+    gmm_out = gmm_native(lhs, rhs, group_sizes)
     gmm_out.block_until_ready()
-    timings[label].append(time.time() - start_time)
-N = 10
+    if not warmup:
+        timings[label].append(time.time() - start_time)
+
+for _ in range(WARMUP):
+    run_test_timed([64, 64],   "even routing (64, 64)", warmup=True)
+    run_test_timed([96, 32],   "uneven routing (96, 32)", warmup=True)
+    run_test_timed([32, 96],   "uneven routing (32, 96)", warmup=True)
+    run_test_timed([128, 0],   "one empty expert (128, 0)", warmup=True)
+    run_test_timed([0, 128],   "one empty expert (0, 128)", warmup=True)
+    run_test_timed([1, 127],   "extreme skew (1, 127)", warmup=True)
+
 for _ in range(N):
     run_test_timed([64, 64],   "even routing (64, 64)")
     run_test_timed([96, 32],   "uneven routing (96, 32)")
@@ -170,6 +229,7 @@ for _ in range(N):
     run_test_timed([128, 0],   "one empty expert (128, 0)")
     run_test_timed([0, 128],   "one empty expert (0, 128)")
     run_test_timed([1, 127],   "extreme skew (1, 127)")
+
 
 print(f"\n--- Average over {N} runs ---")
 for label, times in timings.items():
@@ -217,3 +277,13 @@ for label, times in timings.items():
 # PASSED [one empty expert (128, 0)] avg 27.42 ms
 # PASSED [one empty expert (0, 128)] avg 0.23 ms
 # PASSED [extreme skew (1, 127)] avg 0.20 ms
+
+
+# v5 emit pipeline
+
+# PASSED [even routing (64, 64)] avg 0.27 ms
+# PASSED [uneven routing (96, 32)] avg 0.26 ms
+# PASSED [uneven routing (32, 96)] avg 0.27 ms
+# PASSED [one empty expert (128, 0)] avg 0.26 ms
+# PASSED [one empty expert (0, 128)] avg 0.28 ms
+# PASSED [extreme skew (1, 127)] avg 0.26 ms
