@@ -18,6 +18,7 @@ import jax.numpy as jnp
 from jax.experimental.layout import Layout, with_layout_constraint
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.tensor import Tensor
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 import tpu_inference.envs as envs
 from tpu_inference.layers.common.moe import MoEBackend
@@ -67,6 +68,7 @@ def quantize_moe_weights(
     weights: FusedMoEWeights,
     dtype: jnp.dtype,
     block_size: int | None,
+    w13_interleave: bool = False,
 ) -> FusedMoEWeights:
     """Quantize fused moe weights into a given dtype and block size.
 
@@ -77,6 +79,9 @@ def quantize_moe_weights(
             quantization. If contracting dim is not divisible by block size,
             the dim will be automatically padded and corresponding dim on bias
             and the other weight (w13_weight <-> w2_weight) is also padded.
+        w13_interleave: used when loaded w13_weight is stored in interleaved
+            pattern where even index element is w1 and odd index element is w3
+            we uninterleave so that first half is w1 and second half is w3.
 
     Returns:
         Quantized fused moe weights that may have also been padded.
@@ -102,18 +107,32 @@ def quantize_moe_weights(
     hidden_size = align_to(orig_hidden_size, w13_block_size)
     intermediate_size = align_to(orig_intermediate_size, w2_block_size)
 
-    w13_pad_widths = [[0, 0] for _ in range(3)]
-    w13_pad_widths[1][1] = 2 * (intermediate_size - orig_intermediate_size)
-    w13_pad_widths[2][1] = hidden_size - orig_hidden_size
-    w2_pad_widths = [[0, 0] for _ in range(3)]
-    w2_pad_widths[1][1] = hidden_size - orig_hidden_size
-    w2_pad_widths[2][1] = intermediate_size - orig_intermediate_size
+    inter_pad = intermediate_size - orig_intermediate_size
+    hidden_pad = hidden_size - orig_hidden_size
 
-    w13_weight = jnp.pad(w13_weight, w13_pad_widths)
+    if w13_interleave:
+        w13_pad_widths = [[0, 0] for _ in range(3)]
+        w13_pad_widths[1][1] = 2 * inter_pad
+        w13_pad_widths[2][1] = hidden_pad
+        w13_weight = jnp.pad(w13_weight, w13_pad_widths)
+        if (w13_bias := weights.w13_bias) is not None:
+            weights.w13_bias = jnp.pad(w13_bias, w13_pad_widths[:2])
+    else:
+        w1 = w13_weight[:, :orig_intermediate_size, :]
+        w3 = w13_weight[:, orig_intermediate_size:, :]
+        w13_pad_widths = [[0, 0], [0, inter_pad], [0, hidden_pad]]
+        w1 = jnp.pad(w1, w13_pad_widths)
+        w3 = jnp.pad(w3, w13_pad_widths)
+        w13_weight = jnp.concatenate([w1, w3], axis=1)
+        if (w13_bias := weights.w13_bias) is not None:
+            b1 = w13_bias[:, :orig_intermediate_size]
+            b3 = w13_bias[:, orig_intermediate_size:]
+            b1 = jnp.pad(b1, w13_pad_widths[:2])
+            b3 = jnp.pad(b3, w13_pad_widths[:2])
+            weights.w13_bias = jnp.concatenate([b1, b3], axis=1)
+
+    w2_pad_widths = [[0, 0], [0, hidden_pad], [0, inter_pad]]
     w2_weight = jnp.pad(w2_weight, w2_pad_widths)
-
-    if (w13_bias := weights.w13_bias) is not None:
-        weights.w13_bias = jnp.pad(w13_bias, w13_pad_widths[:2])
     if (w2_bias := weights.w2_bias) is not None:
         weights.w2_bias = jnp.pad(w2_bias, w2_pad_widths[:2])
 
@@ -629,6 +648,9 @@ def process_fp8_moe_weights(
 
     if envs.DISABLE_WEIGHT_REQUANTIZATION:
         logger.info_once("Disabled weight requantization")
+        assert not envs.MOE_REQUANTIZE_WEIGHT_DTYPE, (
+            "MOE_REQUANTIZE_WEIGHT_DTYPE should not be set when weight "
+            "requantization is disabled.")
 
         assert weight_block_size is not None
         in_block_size = weight_block_size[1]
@@ -677,7 +699,7 @@ def process_fp8_moe_weights(
             f"{desired_quant_dtype}")
         if requant_block_size is not None:
             moe_logging_str += f" with block size {requant_block_size}"
-        logger.info(moe_logging_str)
+        logger.info_once(moe_logging_str)
 
         # Dequantize fp8 2d block quantized weights into fp32.
         w13_weight = dequantize_tensor(w13_weight,
@@ -700,7 +722,73 @@ def process_fp8_moe_weights(
             ),
             desired_quant_dtype,
             requant_block_size,
+            w13_interleave=w13_interleave,
         )
+    return process_moe_weights(
+        weights,
+        moe_backend=moe_backend,
+        w13_reorder_size=w13_reorder_size,
+        w13_interleave=w13_interleave,
+        disable_weight_requantization=envs.DISABLE_WEIGHT_REQUANTIZATION,
+    )
+
+
+@jax.jit(static_argnames=('mesh', 'activation', 'moe_backend'))
+def process_unquantized_moe_weights(
+    *,
+    mesh: Mesh,
+    moe_backend: MoEBackend,
+    activation: MoEActivation,
+    w13_weight: jax.Array,
+    w13_bias: jax.Array | None,
+    w2_weight: jax.Array,
+    w2_bias: jax.Array | None,
+) -> FusedMoEWeights:
+    """Jit'ed version to process unquantized moe weights. See `process_moe_weights` for details.
+    """
+    if envs.DISABLE_WEIGHT_REQUANTIZATION:
+        logger.info_once("Disabled weight requantization")
+        assert not envs.MOE_REQUANTIZE_WEIGHT_DTYPE, (
+            "MOE_REQUANTIZE_WEIGHT_DTYPE should not be set when weight "
+            "requantization is disabled.")
+    if desired_quant_dtype_from_env := envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
+        desired_quant_dtype = to_jax_dtype(desired_quant_dtype_from_env)
+        requant_block_size = None
+        if requant_block_size_from_env := envs.MOE_REQUANTIZE_BLOCK_SIZE:
+            requant_block_size = (int(requant_block_size_from_env)
+                                  if requant_block_size_from_env else None)
+        moe_logging_str = (
+            "[MoE requantization]: re-quantizing MoE weights to "
+            f"{desired_quant_dtype}")
+        if requant_block_size is not None:
+            moe_logging_str += f" with block size {requant_block_size}"
+        logger.info_once(moe_logging_str)
+
+        weights = quantize_moe_weights(
+            FusedMoEWeights(
+                w13_weight=w13_weight,
+                w13_weight_scale=None,
+                w13_bias=None,
+                w2_weight=w2_weight,
+                w2_weight_scale=None,
+                w2_bias=None,
+            ),
+            desired_quant_dtype,
+            requant_block_size,
+        )
+    else:
+        weights = FusedMoEWeights(
+            w13_weight=w13_weight,
+            w13_weight_scale=None,
+            w13_bias=w13_bias,
+            w2_weight=w2_weight,
+            w2_weight_scale=None,
+            w2_bias=w2_bias,
+        )
+
+    w13_interleave = activation == MoEActivation.SWIGLUOAI
+    w13_reorder_size = get_mesh_shape_product(mesh,
+                                              ShardingAxisName.MLP_TENSOR)
 
     return process_moe_weights(
         weights,

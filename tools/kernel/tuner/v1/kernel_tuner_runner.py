@@ -74,6 +74,16 @@ _TPU_VERSION = flags.DEFINE_string(
     'The TPU version to use for tuning. Supported values are "tpu6e" and "tpu7x".'
 )
 
+_TPU_CORES = flags.DEFINE_integer(
+    'tpu_cores', 0,
+    'The number of TPU cores to use for tuning. Default is 0. TPU tpu6e has 1 core per chip, TPU tpu7x has 2 cores per chip.'
+)
+
+_TPU_QUEUE_MULTI = flags.DEFINE_string(
+    'tpu_queue_multi', '',
+    'The TPU queue to use for tuning. This will be automatically determined based on the TPU version and cores if not specified. Supported values are "tpu_v6e_queue", "tpu_v6e_8_queue", "tpu_v7x_2_queue", "tpu_v7x_8_queue", and "tpu_v7x_16_queue".'
+)
+
 # Note: For simplicity, we are directly referencing the kernel tuner class
 # here. In the future, we can consider a more flexible plugin-based system
 # if we have more kernel tuners. For example, we can define an interface for
@@ -85,6 +95,25 @@ KERNEL_TUNER_REGISTRY = {
     'example_kernel_tuner': ExampleKernelTuner,
     'rpa_v3_kernel_tuner': RpaV3KernelTuner,
 }
+
+
+# Keep in sync with the logic in bootstrap_kernel_tuning.sh:set_jax_envs
+def get_tpu_queue_by_version_and_cores(tpu_version, tpu_cores,
+                                       tpu_queue_multi):
+    """Gets and validates TPU queue based on version and core configuration."""
+    _queue_by_version_and_cores = {
+        ('tpu6e', 1): 'tpu_v6e_queue',
+        ('tpu6e', 8): 'tpu_v6e_8_queue',
+        ('tpu7x', 2): 'tpu_v7x_2_queue',
+        ('tpu7x', 8): 'tpu_v7x_8_queue',
+        ('tpu7x', 16): 'tpu_v7x_16_queue',
+    }
+    assert (
+        tpu_version, tpu_cores
+    ) in _queue_by_version_and_cores, f'Unsupported combination of TPU version {tpu_version} and cores {tpu_cores}. Supported combinations are: {list(_queue_by_version_and_cores.keys())}'
+    expected_queue = _queue_by_version_and_cores[(tpu_version, tpu_cores)]
+    assert not tpu_queue_multi or tpu_queue_multi == expected_queue, f'Inconsistent TPU queue {tpu_queue_multi} for version {tpu_version} and cores {tpu_cores}. Expected queue is {expected_queue}. Please check your flags.'
+    return tpu_queue_multi or expected_queue
 
 
 def main(argv):
@@ -116,7 +145,15 @@ def main(argv):
     # Initialize kernel tuner
     kernel_tuner_cls = KERNEL_TUNER_REGISTRY.get(_KERNEL_TUNER_NAME.value)
 
-    kernel_tuner = kernel_tuner_cls(storage_manager)
+    tpu_version = _TPU_VERSION.value
+    tpu_cores = _TPU_CORES.value
+    tpu_queue_multi = _TPU_QUEUE_MULTI.value
+
+    tpu_queue_multi = get_tpu_queue_by_version_and_cores(
+        tpu_version, tpu_cores, tpu_queue_multi)
+
+    kernel_tuner = kernel_tuner_cls(storage_manager,
+                                    tpu_queue_multi=tpu_queue_multi)
 
     if _RUN_LOCALLY.value:
         logger.info(
@@ -136,18 +173,12 @@ def main(argv):
             logger.info(
                 'Generating Buildkite pipeline YAML. No tuning jobs will be run.'
             )
-            tpu_version = _TPU_VERSION.value
-            assert tpu_version in [
-                'tpu6e', 'tpu7x'
-            ], f'Unsupported TPU version: {tpu_version}. Supported versions are "tpu6e" and "tpu7x".'
-            tpu_queue_multi = 'tpu_v6e_8_queue' if tpu_version == 'tpu6e' else 'tpu_v7x_8_queue'
 
-            kernel_tuner.generate_buildkite_pipeline(
-                case_set_id=case_set_id,
-                run_id=run_id,
-                desc=case_set_desc,
-                tpu_version=tpu_version,
-                tpu_queue_multi=tpu_queue_multi)
+            kernel_tuner.generate_buildkite_pipeline(case_set_id=case_set_id,
+                                                     run_id=run_id,
+                                                     desc=case_set_desc,
+                                                     tpu_version=tpu_version,
+                                                     tpu_cores=tpu_cores)
         else:
             begin_case_id = _BEGIN_CASE_ID.value
             end_case_id = _END_CASE_ID.value

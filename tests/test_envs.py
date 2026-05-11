@@ -242,7 +242,7 @@ def test_string_env_vars_defaults(monkeypatch: pytest.MonkeyPatch):
     assert envs.DECODE_SLICES == ""
     assert envs.PHASED_PROFILING_DIR == ""
     assert envs.REQUANTIZE_WEIGHT_DTYPE == "float8_e4m3fn"
-    assert envs.MOE_REQUANTIZE_WEIGHT_DTYPE == "float8_e4m3fn"
+    assert envs.MOE_REQUANTIZE_WEIGHT_DTYPE == ""
 
 
 def test_none_default_env_vars(monkeypatch: pytest.MonkeyPatch):

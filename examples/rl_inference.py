@@ -114,25 +114,34 @@ def main(args: dict):
         P = len(output.prompt_token_ids)
         print(f"Prompt token count (P): {P}")
 
+        prompt_experts_len = 0
+        if hasattr(output, 'prompt_routed_experts'
+                   ) and output.prompt_routed_experts is not None:
+            print(
+                f"Prompt routed experts shape: {output.prompt_routed_experts.shape}"
+            )
+            prompt_experts_len = output.prompt_routed_experts.shape[0]
+
         for completion in output.outputs:
+            gen_experts_len = 0
             if completion.routed_experts is not None:
-                # Shape will be [len(completion.token_ids), num_layers, top_k]
+                # Shape will be [len(completion.token_ids) - 1, num_layers, top_k] in vLLM V1
                 print(
-                    f"Routed experts shape: {completion.routed_experts.shape}")
-                print(
-                    f"First token expert selection: {completion.routed_experts[0]}"
+                    f"Gen routed experts shape: {completion.routed_experts.shape}"
                 )
+                gen_experts_len = completion.routed_experts.shape[0]
 
             G = len(completion.token_ids)
             print(f"Generated token count (G): {G}")
-            if completion.routed_experts is not None:
+
+            total_experts_len = prompt_experts_len + gen_experts_len
+            if total_experts_len > 0:
                 expected_len = P + G - 1
                 print(
-                    f"Expected routed experts 0-th dim (P + G - 1): {expected_len}"
+                    f"Expected total routed experts (P + G - 1): {expected_len}"
                 )
-                print(
-                    f"Actual routed experts shape: {completion.routed_experts.shape}"
-                )
+                print(f"Actual total routed experts: {total_experts_len}")
+                assert expected_len == total_experts_len, "Actual total routed experts does not match expected (P + G - 1)"
 
             if completion.logprobs is not None:
                 print(f"Logprobs for first token: {completion.logprobs[0]}")
