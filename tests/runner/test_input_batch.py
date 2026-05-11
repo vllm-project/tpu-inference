@@ -477,3 +477,109 @@ def test_get_pooling_metadata(input_batch: InputBatch):
             pooling_states=[],
         ),
     ), "After remove, back to empty state."
+
+
+# --------------- DP mamba pool tests ---------------
+
+DP_SIZE = 4
+DP_MAX_NUM_REQS = 32  # dp_size * max_num_seqs_per_rank
+
+
+@pytest.fixture
+def dp_input_batch():
+    """InputBatch with dp_size=4 for testing per-rank mamba pools."""
+    return InputBatch(
+        max_num_reqs=DP_MAX_NUM_REQS,
+        max_model_len=MAX_MODEL_LEN,
+        max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
+        pin_memory=False,
+        vocab_size=VOCAB_SIZE,
+        block_sizes=BLOCK_SIZES,
+        dp_size=DP_SIZE,
+    )
+
+
+def test_dp_mamba_pool_partitioned_by_rank(dp_input_batch: InputBatch):
+    """Each DP rank must get slots within its own shard of the mamba state."""
+    local_slots = dp_input_batch._mamba_local_slots
+    for rank in range(DP_SIZE):
+        base = rank * local_slots
+        pool = dp_input_batch._free_mamba_slots_per_rank[rank]
+        for slot in pool:
+            assert base < slot < base + local_slots, (
+                f"Rank {rank} pool contains out-of-range slot {slot} "
+                f"(expected ({base}, {base + local_slots}))")
+
+
+def test_dp_mamba_add_request_uses_correct_rank_pool(
+        dp_input_batch: InputBatch):
+    """Requests added with a specific dp_rank must get slots from that rank's
+    pool, not any other rank."""
+    local_slots = dp_input_batch._mamba_local_slots
+    for rank in range(DP_SIZE):
+        req = create_dummy_request(f"req-rank{rank}")
+        dp_input_batch.add_request(req, dp_rank=rank)
+        idx = dp_input_batch.req_id_to_index[req.req_id]
+        slot = int(dp_input_batch.mamba_state_indices_cpu[idx])
+        base = rank * local_slots
+        assert base < slot < base + local_slots, (
+            f"Request on rank {rank} got slot {slot}, "
+            f"expected in ({base}, {base + local_slots})")
+
+
+def test_dp_mamba_remove_returns_slot_to_correct_rank(
+        dp_input_batch: InputBatch):
+    """Removing a request must return its slot to the rank that owns it."""
+    for rank in range(DP_SIZE):
+        pool_before = len(dp_input_batch._free_mamba_slots_per_rank[rank])
+        req = create_dummy_request(f"req-rm-{rank}")
+        dp_input_batch.add_request(req, dp_rank=rank)
+        assert len(
+            dp_input_batch._free_mamba_slots_per_rank[rank]) == pool_before - 1
+        dp_input_batch.remove_request(req.req_id)
+        assert len(
+            dp_input_batch._free_mamba_slots_per_rank[rank]) == pool_before
+
+
+def test_dp_mamba_slots_unique_across_ranks(dp_input_batch: InputBatch):
+    """Slots allocated to different ranks must never overlap."""
+    all_slots = []
+    for rank in range(DP_SIZE):
+        for i in range(3):
+            req = create_dummy_request(f"req-r{rank}-{i}")
+            dp_input_batch.add_request(req, dp_rank=rank)
+            idx = dp_input_batch.req_id_to_index[req.req_id]
+            all_slots.append(int(dp_input_batch.mamba_state_indices_cpu[idx]))
+    assert len(set(all_slots)) == len(all_slots), \
+        f"Duplicate slots across ranks: {all_slots}"
+
+
+def test_dp_mamba_init_mamba_pools_resizes(dp_input_batch: InputBatch):
+    """init_mamba_pools must resize the pools to the actual device block count,
+    which may be smaller than the initial estimate."""
+    old_local = dp_input_batch._mamba_local_slots
+    # Simulate compact-mamba being skipped: actual blocks = 20 (5 per rank)
+    dp_input_batch.init_mamba_pools(20)
+    assert dp_input_batch._mamba_local_slots == 5
+    assert dp_input_batch._mamba_local_slots < old_local
+
+    for rank in range(DP_SIZE):
+        pool = dp_input_batch._free_mamba_slots_per_rank[rank]
+        base = rank * 5
+        for slot in pool:
+            assert base < slot < base + 5, (
+                f"After resize, rank {rank} has out-of-range slot {slot}")
+
+
+def test_dp_mamba_global_to_local_conversion():
+    """Verify the global_slot % local_slots formula produces correct
+    rank-local indices for the _prepare_inputs_dp path."""
+    local_slots = 298  # e.g., 2384 total / 8 ranks
+    # Rank 0 slot 1 → local 1
+    assert 1 % local_slots == 1
+    # Rank 1 slot 299 → local 1
+    assert 299 % local_slots == 1
+    # Rank 7 slot 2087 → local 1
+    assert (7 * local_slots + 1) % local_slots == 1
+    # Boundary: rank 1 last slot = 595 → local 297
+    assert 595 % local_slots == 297

@@ -514,6 +514,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             vocab_size=self.vocab_size,
             block_sizes=[self.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
+            dp_size=self.dp_size,
         )
 
         self.positions_cpu = np.zeros(self.max_num_tokens, dtype=np.int32)
@@ -673,6 +674,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.kv_cache_config = kv_cache_config
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
+
+        if self.kv_cache_manager.actual_mamba_num_blocks is not None:
+            self.input_batch.init_mamba_pools(
+                self.kv_cache_manager.actual_mamba_num_blocks)
 
         # This buffer grows dynamically to accommodate metadata and block tables.
         # We re-initialize with a precise capacity now that kv_cache_config is known.
@@ -1682,10 +1687,22 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # byte-identical to the pre-compact-mamba layout (so the model_fn
         # signature on those models is unchanged).
         if self.kv_cache_config.has_mamba_layers:
-            # Per-request mamba state slot ids; copy to keep the InputBatch's
-            # CPU buffer free for the next step's bookkeeping.
-            mamba_state_indices_cpu = self.input_batch.mamba_state_indices_cpu.copy(
-            )
+            # Reorder mamba_state_indices per DP rank (like block_tables)
+            # and convert global slot ids to rank-local indices so they
+            # index correctly into the per-rank shard of the mamba state.
+            local_slots = self.input_batch._mamba_local_slots
+            mamba_state_indices_cpu = np.zeros(self.max_num_reqs,
+                                               dtype=np.int32)
+            for dp_rank in range(dp_size):
+                _num_reqs = num_req_per_dp_rank[dp_rank]
+                if _num_reqs == 0:
+                    continue
+                req_offset = dp_rank * max_num_reqs_per_dp_rank
+                global_slots = self.input_batch.mamba_state_indices_cpu[
+                    req_indices_dp[dp_rank]]
+                mamba_state_indices_cpu[req_offset:req_offset +
+                                        _num_reqs] = (global_slots %
+                                                      local_slots)
             (request_distribution, mamba_state_indices,
              dev_arrays_payload) = device_array(
                  self.mesh, (request_distribution, mamba_state_indices_cpu,
