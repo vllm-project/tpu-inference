@@ -355,6 +355,7 @@ class TestSpeculativeDecodingManager:
         discard_sampled_tokens_req_indices = []
         scheduler_output = MagicMock()
         input_ids = MagicMock()
+        hidden_states = MagicMock()
 
         # 2. ===== Act =====
         with patch(
@@ -370,6 +371,7 @@ class TestSpeculativeDecodingManager:
                 scheduler_output,
                 input_ids,
                 async_scheduling=False,
+                hidden_states=hidden_states,
             )
 
         # 3. ===== Assert =====

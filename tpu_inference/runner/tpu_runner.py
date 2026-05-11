@@ -184,6 +184,7 @@ class ExecuteModelState:
     logits_indices_selector: Optional[List[int]] = None
     padded_num_reqs: Optional[int] = None
     expert_indices: Optional[jax.Array] = None
+    full_hidden_states: Optional[jax.Array] = None
 
 
 @jax.jit(donate_argnums=(0, 1, 2))
@@ -476,7 +477,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.speculative_config:
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
-            elif self.speculative_config.method == "eagle3":
+            elif self.speculative_config.use_eagle():
                 self.drafter = Eagle3Proposer(self.vllm_config, self)
             else:
                 raise NotImplementedError(
@@ -535,6 +536,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.vocab_size = common_utils.align_to(model_config.get_vocab_size(),
                                                 tp_size)
+        num_speculative_tokens = 0
+        if self.vllm_config.speculative_config:
+            num_speculative_tokens = self.vllm_config.speculative_config.num_speculative_tokens
 
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
@@ -544,6 +548,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             vocab_size=self.vocab_size,
             block_sizes=[self.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
+            num_speculative_tokens=num_speculative_tokens,
             dp_size=self.dp_size,
         )
 
@@ -781,18 +786,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         (scheduler_output, attn_metadata, sampling_metadata, input_ids,
          hidden_states, logits, aux_hidden_states, spec_decode_metadata,
          kv_connector_output, logits_indices_selector, padded_num_reqs,
-         expert_indices) = (self.execute_model_state.scheduler_output,
-                            self.execute_model_state.attn_metadata,
-                            self.execute_model_state.sampling_metadata,
-                            self.execute_model_state.input_ids,
-                            self.execute_model_state.hidden_states,
-                            self.execute_model_state.logits,
-                            self.execute_model_state.aux_hidden_states,
-                            self.execute_model_state.spec_decode_metadata,
-                            self.execute_model_state.kv_connector_output,
-                            self.execute_model_state.logits_indices_selector,
-                            self.execute_model_state.padded_num_reqs,
-                            self.execute_model_state.expert_indices)
+         expert_indices, full_hidden_states) = (
+             self.execute_model_state.scheduler_output,
+             self.execute_model_state.attn_metadata,
+             self.execute_model_state.sampling_metadata,
+             self.execute_model_state.input_ids,
+             self.execute_model_state.hidden_states,
+             self.execute_model_state.logits,
+             self.execute_model_state.aux_hidden_states,
+             self.execute_model_state.spec_decode_metadata,
+             self.execute_model_state.kv_connector_output,
+             self.execute_model_state.logits_indices_selector,
+             self.execute_model_state.padded_num_reqs,
+             self.execute_model_state.expert_indices,
+             self.execute_model_state.full_hidden_states)
         self.execute_model_state = None
 
         if grammar_output is not None:
@@ -810,7 +817,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             scheduler_output, attn_metadata, sampling_metadata, input_ids,
             hidden_states, logits, aux_hidden_states, spec_decode_metadata,
             kv_connector_output, logits_indices_selector, padded_num_reqs,
-            expert_indices)
+            expert_indices, full_hidden_states)
 
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
@@ -1024,6 +1031,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 pooler_output=pooler_output,
             )
 
+        full_hidden_states = hidden_states
         hidden_states = self._select_from_array_fn(hidden_states,
                                                    logits_indices)
         logits = self.compute_logits_fn(
@@ -1044,7 +1052,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             kv_connector_output=kv_connector_output,
             logits_indices_selector=logits_indices_selector,
             padded_num_reqs=padded_num_reqs,
-            expert_indices=expert_indices)
+            expert_indices=expert_indices,
+            full_hidden_states=full_hidden_states)
         return None
 
     def _sample_from_logits(
@@ -1061,6 +1070,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logits_indices_selector: Optional[List[int]] = None,
         padded_num_reqs: Optional[int] = None,
         expert_indices: Optional[jax.Array] = None,
+        full_hidden_states: Optional[jax.Array] = None,
     ) -> ModelRunnerOutput | AsyncTPUModelRunnerOutput:
         if padded_num_reqs is None:
             padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
@@ -1176,6 +1186,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     spec_decode_metadata,
                     scheduler_output,
                     input_ids,
+                    full_hidden_states,
                 )
                 spec_decode_last_sampled_token_id = last_sampled_token_id
                 spec_decode_num_rejected_tokens = num_rejected_tokens
