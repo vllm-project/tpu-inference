@@ -85,7 +85,7 @@ _TPU_QUEUE_MULTI = flags.DEFINE_string(
 )
 
 _KERNEL_TUNING_JOB_PRIORITY = flags.DEFINE_integer(
-    'priority_kernel_job_tuning', -10,
+    'kernel_tuning_job_priority', -10,
     'The priority to use for kernel tuning jobs. Higher priority jobs will be scheduled before lower priority ones. Default is -10, which is lower than typical user jobs to avoid impacting them.'
 )
 
