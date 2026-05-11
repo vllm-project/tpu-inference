@@ -7,6 +7,7 @@ import datetime
 import functools
 import json
 import os
+import shutil
 import time
 from enum import Enum
 from typing import Any
@@ -34,6 +35,9 @@ DECODE_HEAVY_RATIO_THRESHOLD = 0.2
 BALANCED_RATIO_THRESHOLD = (0.4, 0.6)
 PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR = 15
 PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP = 0
+# For decode only batches, start capturing traces after all requests in the
+# batch has KV caches that have reached this length threshold
+PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD = -1
 
 logger = init_logger(__name__)
 
@@ -215,6 +219,7 @@ def get_batch_composition_stats(
     num_computed_tokens_per_req = input_batch.num_computed_tokens_cpu[:
                                                                       num_reqs]
 
+    min_kv_len = float('inf') if num_reqs > 0 else 0
     for i, req_id in enumerate(input_batch.req_ids[:num_reqs]):
         assert req_id is not None
 
@@ -223,7 +228,9 @@ def get_batch_composition_stats(
         num_scheduled_tokens_per_req_list.append(num_scheduled_for_req)
 
         # This is the number of tokens already processed for this request (before this step)
-        num_already_computed = num_computed_tokens_per_req[i]
+        num_already_computed = int(
+            num_computed_tokens_per_req[i])  # Cast from np.int32
+        min_kv_len = min(min_kv_len, num_already_computed)
 
         if num_already_computed == 0:
             # Prefill
@@ -243,7 +250,8 @@ def get_batch_composition_stats(
         "num_prefill_tokens": num_prefill_tokens,
         "num_decode_tokens": num_decode_tokens,
         "padded_total_num_scheduled_tokens": padded_total_num_scheduled_tokens,
-        "num_reqs": num_reqs
+        "num_reqs": num_reqs,
+        "min_kv_len": min_kv_len if min_kv_len != float('inf') else 0
     }
     stats["phase"] = determine_phase_from_batch_composition_stats(stats).name
     return stats
@@ -317,6 +325,9 @@ class PhasedBasedProfiler:
             os.getenv("PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP",
                       PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP))
         self.decode_steps_skipped: int = 0
+        self.decode_kv_len_threshold: int = int(
+            os.getenv("PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD",
+                      PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD))
         self.profile_dir: str = profile_dir
         # NOTE: we purposely don't have AMBIGUOUS here
         self.inference_phase_seen: dict = {
@@ -338,6 +349,9 @@ class PhasedBasedProfiler:
             logger.info(
                 "Will skip %d decode-heavy steps before profiling decode_heavy phase.",
                 self.num_decode_steps_to_skip)
+        if self.decode_kv_len_threshold >= 0:
+            logger.info("Will skip decode-only steps until min KV len >= %d.",
+                        self.decode_kv_len_threshold)
 
     def _write_batch_composition_stats_to_file_helper(
             self, batch_composition_stats: dict) -> None:
@@ -383,6 +397,16 @@ class PhasedBasedProfiler:
                     self.decode_steps_skipped, self.num_decode_steps_to_skip)
                 break
 
+            # Skip decode-only steps until min KV len reaches threshold
+            if phase == InferencePhase.DECODE_ONLY and \
+                    self.decode_kv_len_threshold >= 0:
+                min_kv_len = batch_composition_stats.get("min_kv_len", 0)
+                if min_kv_len < self.decode_kv_len_threshold:
+                    logger.debug(
+                        "Skipping decode-only step as min KV len %d < threshold %d.",
+                        min_kv_len, self.decode_kv_len_threshold)
+                    break
+
             self.inference_phase_seen[phase] = True
             self.profiling_n_steps_left = self.num_steps_to_profile_for
 
@@ -427,9 +451,60 @@ class PhasedBasedProfiler:
             self.profiling_n_steps_left -= 1
             if self.profiling_n_steps_left <= 0:
                 jax.profiler.stop_trace()
+                if envs.TPU_MULTIHOST_BACKEND == "ray":
+                    self._merge_multihost_profile_directories()
                 logger.info(
                     f"Profiling for {self.current_phase} phase finished")
                 self.current_phase = ""
+
+    def _merge_multihost_profile_directories(self) -> None:
+        """
+        Merges multi-host JAX profiler timestamp subdirectories that drift due to asynchronous step trigger times.
+
+        Fixes issues where separate host nodes create disjoint timestamp folders due to 1-2 seconds startup
+        skew, which blocks downstream multi-host profile analysis tools (e.g., c2xprof or TensorBoard profile plugins)
+        from recognizing them as a single concurrent distributed profiling session.
+
+        Example split state before merge:
+          .../plugins/profile/2026_05_06_04_47_36/j-1b8d22de-2250-4697-9dfc-ray-node-1-0.xplane.pb
+          .../plugins/profile/2026_05_06_04_47_38/j-1b8d22de-2250-4697-9dfc-ray-node-0-0.xplane.pb
+
+        After merge:
+          All host trace artifacts are consolidated under the earliest timestamp folder (2026_05_06_04_47_36/).
+        """
+        profile_path = os.path.join(self.profile_dir_with_phase_suffix,
+                                    "plugins", "profile")
+        if not os.path.exists(profile_path):
+            return
+        try:
+            # Get all timestamp subdirectories sorted by time
+            dirs = sorted([
+                d for d in os.listdir(profile_path)
+                if os.path.isdir(os.path.join(profile_path, d))
+            ])
+            if len(dirs) <= 1:
+                return
+
+            # Use the earliest directory as the canonical destination target
+            target_dir = os.path.join(profile_path, dirs[0])
+
+            # Move all files from trailing directories into the canonical target directory
+            for src in dirs[1:]:
+                src_dir = os.path.join(profile_path, src)
+                for f in os.listdir(src_dir):
+                    src_file = os.path.join(src_dir, f)
+                    dst_file = os.path.join(target_dir, f)
+                    shutil.move(src_file, dst_file)
+                try:
+                    os.rmdir(src_dir)
+                except Exception:
+                    pass
+            logger.info(
+                "Successfully merged multi-host profile directories into: %s",
+                dirs[0])
+        except Exception as e:
+            logger.warning(
+                "Failed to merge multi-host profile directories: %s", e)
 
     def step(self, batch_composition_stats: dict) -> None:
         """

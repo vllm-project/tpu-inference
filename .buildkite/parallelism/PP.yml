@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: PP
-# pipeline-type: parallelism support matrix
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for PP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Single_Host"

@@ -38,17 +38,19 @@ def get_default_block_sizes(
     use_gate_in_kernel: bool,
     has_dt_bias: bool,
     vmem_bytes_limit: int,
+    state_dtype=jnp.float32,
 ) -> int:
     """Choose bt to maximize VMEM utilization.
 
     The recurrent kernel uses a fixed ``(2, H_v, K, V)`` state double
-    buffer regardless of bt.  Only pipeline tiles scale with bt.
+    buffer of ``state_dtype`` regardless of bt.  Only pipeline tiles scale with bt.
     """
     ibits = dtypes.itemsize_bits(dtype)
+    sbits = dtypes.itemsize_bits(state_dtype)
 
-    # Fixed (in bits): h_bufs (2, H_v, K, V) float32 — always 2 buffers
+    # Fixed (in bits): h_bufs (2, H_v, K, V) of state_dtype — always 2 buffers
     num_lanes = pltpu.get_tpu_info().num_lanes
-    fixed_bits = 2 * H_v * K * V * 32
+    fixed_bits = 2 * H_v * K * V * sbits
     if use_gate_in_kernel:
         fixed_bits += 2 * H_v * num_lanes * 32  # a_log: (H_v, num_lanes) f32
     if has_dt_bias:
@@ -198,6 +200,7 @@ def _recurrent_gdn_main(
     a_log_hbm,  # [H_v, num_lanes] or None
     dt_bias_hbm,  # [H_v, num_lanes] or None
     _state_init_ref,  # [num_states, H_v, K, V] aliased to state_hbm
+    has_initial_state_ref,  # [max_num_req] int32 (SMEM); 0 = zero out h0
     o_hbm,  # [T, H_v, V]
     state_hbm,  # [num_states, H_v, K, V]
     h_bufs,  # [2, H_v, K, V] VMEM scratch (double buffer)
@@ -253,6 +256,7 @@ def _recurrent_gdn_main(
             h_bufs_s,  # [2, H_v, K, V] VMEM scratch
             meta_s,  # GDNChunkIndices (SMEM)
             state_indices_s,  # [max_num_req] int32 (SMEM)
+            has_initial_state_s,  # [max_num_req] int32 (SMEM)
             h_load_sems_s,  # [2] DMA semaphores
             h_store_sems_s,  # [2] DMA semaphores
     ):
@@ -298,6 +302,19 @@ def _recurrent_gdn_main(
         @pl.when(is_new_seq)
         def _wait_h0():
             load_wait_cp.wait()
+
+        # If the request has no prior recurrent state (brand-new prefill
+        # landing on a freshly-allocated mamba slot), the DMA-loaded h0
+        # is stale data from a previous tenant. Overwrite with zeros so
+        # the recurrent update starts from zero, mirroring the chunked
+        # path's `init_states_for_seqs = jnp.where(has_initial_state,
+        # ..., 0)` and GPU's `initial_state[~has_initial_state, ...] = 0`
+        # in `gdn_linear_attn._forward_core`.
+        has_init = has_initial_state_s[seq_idx]
+
+        @pl.when(is_new_seq & (has_init == 0))
+        def _zero_h0():
+            h_bufs_s[buf_idx] = jnp.zeros((H_v, K, V), dtype=h_bufs_s.dtype)
 
         # ── Step 2: Compute ──
         h = h_bufs_s[buf_idx].astype(jnp.float32)
@@ -351,22 +368,28 @@ def _recurrent_gdn_main(
             else:
                 gk = g_t
 
-            h = h * jnp.exp(gk[:, :, None])
+            # Same algebraic identity as fused_gdn_decode_kernel.py:
+            # o = q @ h_pre + (q . k) * b_v
+            # Lets MXU(o) and VPU(rank-1 update) run in parallel.
+            h_pre = h * jnp.exp(gk[:, :, None])
             kh = jax.lax.dot_general(
                 k_t.reshape(H_v, 1, K),
-                h,
+                h_pre,
                 (((2, ), (1, )), ((0, ), (0, ))),
                 preferred_element_type=jnp.float32,
             ).reshape(H_v, V)
             v_diff = v_t - kh
             b_v = beta_t * v_diff if b_ref is not None else v_diff
-            h = h + k_t[:, :, None] * b_v[:, None, :]
-            o_t = jax.lax.dot_general(
+
+            o_step1 = jax.lax.dot_general(
                 q_t.reshape(H_v, 1, K),
-                h,
+                h_pre,
                 (((2, ), (1, )), ((0, ), (0, ))),
                 preferred_element_type=jnp.float32,
             ).reshape(H_v, V)
+            qk_dot = jnp.sum(q_t * k_t, axis=-1, keepdims=True)
+            o_t = o_step1 + qk_dot * b_v
+            h = h_pre + k_t[:, :, None] * b_v[:, None, :]
 
             o_ref[local_t] = o_t.astype(o_ref.dtype)
             return h
@@ -418,7 +441,10 @@ def _recurrent_gdn_main(
         a_log_hbm,
         dt_bias_hbm,
         o_hbm,
-        scratches=[h_bufs, meta, state_indices_ref, h_load_sems, h_store_sems],
+        scratches=[
+            h_bufs, meta, state_indices_ref, has_initial_state_ref,
+            h_load_sems, h_store_sems
+        ],
     )
 
     # ── Epilogue: wait for outstanding stores ──
@@ -455,6 +481,7 @@ def fused_recurrent_gdn(
         initial_state,  # [num_states, H_v, K, V] float32
         state_indices,  # [max_num_req] int32
         b,  # [T, H_v, num_lanes] or None
+        has_initial_state,  # [max_num_req] int32 (0/1)
         *,
         scale,  # float
         use_qk_l2norm,  # bool
@@ -465,6 +492,15 @@ def fused_recurrent_gdn(
         distribution,  # [2] int32
 ):
     """Run the pre-computed-metadata recurrent GDN pallas kernel.
+
+    ``has_initial_state[i]`` indicates whether request ``i``'s recurrent
+    slot already holds a valid prior state (continuation, prefix-cache
+    hit) or whether the slot is freshly allocated and its contents must
+    be treated as zeros for this call. Mirrors the chunked path's
+    `init_states_for_seqs = jnp.where(has_initial_state, ..., 0)` and
+    GPU's `initial_state[~has_initial_state, ...] = 0` in
+    ``gdn_linear_attn._forward_core``. Pass an all-ones array if the
+    caller wants the previous (no-op) behaviour.
     """
     T, H_qk, H_v, K, V, dtype, num_states, num_lanes, _ = (validate_gdn_inputs(
         q,
@@ -480,8 +516,15 @@ def fused_recurrent_gdn(
     max_num_req = cu_seqlens.shape[0] - 1
 
     vmem_bytes_limit = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9)
-    bt = get_default_block_sizes(H_qk, H_v, K, V, dtype, use_gate_in_kernel,
-                                 dt_bias is not None, vmem_bytes_limit)
+    bt = get_default_block_sizes(H_qk,
+                                 H_v,
+                                 K,
+                                 V,
+                                 dtype,
+                                 use_gate_in_kernel,
+                                 dt_bias is not None,
+                                 vmem_bytes_limit,
+                                 state_dtype=initial_state.dtype)
 
     # Worst case: cdiv(T, bt) base blocks + up to max_num_req-1 boundary splits
     max_num_blocks = (T + bt - 1) // bt + max_num_req - 1
@@ -490,7 +533,8 @@ def fused_recurrent_gdn(
     smem_spec = pl.BlockSpec(memory_space=pltpu.SMEM)
 
     o_shape = jax.ShapeDtypeStruct((T, H_v, V), dtype)
-    state_shape = jax.ShapeDtypeStruct((num_states, H_v, K, V), jnp.float32)
+    state_shape = jax.ShapeDtypeStruct((num_states, H_v, K, V),
+                                       initial_state.dtype)
 
     meta = calculate_chunk_indices(cu_seqlens, distribution, max_num_blocks,
                                    bt)
@@ -530,16 +574,26 @@ def fused_recurrent_gdn(
                 any_spec if A_log is not None else None,
                 any_spec if dt_bias is not None else None,
                 any_spec,  # state_init (= initial_state)
+                smem_spec,  # has_initial_state
             ],
             out_specs=[any_spec, any_spec],
             grid=(grid_dim, ),
             scratch_shapes=[
+                # h_bufs match HBM dtype so the DMAs don't need conversion.
+                # The compute path upcasts h_bufs to fp32 once per block
+                # (h = h_bufs_s[buf_idx].astype(fp32) above) and carries it
+                # as fp32 across the per-token fori_loop, so on-chip math is
+                # fp32 regardless of HBM storage dtype.
                 pltpu.VMEM((2, H_v, K, V),
-                           jnp.float32),  # h_bufs (double buffer)
+                           initial_state.dtype),  # h_bufs (double buffer)
                 pltpu.SemaphoreType.DMA((2, )),  # h_load_sems
                 pltpu.SemaphoreType.DMA((2, )),  # h_store_sems
             ],
         ),
+        # Aliases reference flat positional inputs. `meta` is a 3-leaf
+        # pytree, so the absolute index of `v` is 5 (3 meta leaves + q, k)
+        # and the absolute index of `initial_state` is 8 + n_b + n_gate.
+        # `has_initial_state` is appended to the end and is not aliased.
         input_output_aliases={
             5: 0,
             8 + n_b + n_gate: 1
@@ -561,6 +615,7 @@ def fused_recurrent_gdn(
         A_log,
         dt_bias,
         initial_state,
+        has_initial_state,
     )
 
     return o, state

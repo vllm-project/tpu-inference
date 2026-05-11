@@ -74,7 +74,7 @@ if [ "$RUN_MODELS" == "true" ]; then
         echo "Generating: $MODEL_NAME"
         
         # Capture error without exiting immediately
-        if ! "$PYTHON_EXEC" "$ADD_MODEL_SCRIPT" --model-name "$MODEL_NAME" --type "$t" --host-scale "single"; then
+        if ! "$PYTHON_EXEC" "$ADD_MODEL_SCRIPT" --model-name "$MODEL_NAME" --type "$t" --host-scale "small"; then
             echo "+++ ❌ Failed to generate Model: $MODEL_NAME"
             FAILED_CASES+=("$MODEL_NAME (Model Gen Failed)")
         fi
@@ -92,7 +92,7 @@ if [ "$RUN_FEATURES" == "true" ]; then
         echo "Generating: $FEATURE_NAME"
 
         # Prepare arguments based on category
-        ARGS=("--feature-name" "$FEATURE_NAME" "--category" "$cat" "--host-scale" "single")
+        ARGS=("--feature-name" "$FEATURE_NAME" "--category" "$cat" "--host-scale" "small")
         [[ "$cat" == *"microbenchmarks"* ]] && ARGS+=("--group" "test_group")
 
         # Capture error without exiting immediately

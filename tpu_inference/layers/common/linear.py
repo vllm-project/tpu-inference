@@ -79,7 +79,12 @@ def sharded_quantized_matmul(x: jax.Array,
             out_axis,
         )
     else:
-        scale_sharding = P(out_axis, )
+        # 2D-Blockwise case (e.g. from skipped re-quantization)
+        if len(w_s.shape) == 2:
+            scale_sharding = weight_spec
+        else:
+            # 1D (channelwise) case
+            scale_sharding = P(out_axis, )
     out_sharding = P(ShardingAxisName.ATTN_DATA, out_axis)
 
     if x_q_dtype is None:

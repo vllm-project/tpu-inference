@@ -39,9 +39,6 @@ RUN apt-get update && apt-get install -y \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Suppress noisy XLA CPU AOT loader warnings
-ENV TF_CPP_MIN_LOG_LEVEL=3
-
 # Conditionally install google-cloud-cli for benchmarking infrastructure
 RUN if [ "$BM_INFRA" = "true" ]; then \
         apt-get update && apt-get install -y gnupg curl \

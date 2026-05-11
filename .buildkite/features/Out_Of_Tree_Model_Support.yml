@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: Out-of-tree model support
-# pipeline-type: feature support matrix
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for Out-of-tree model support"
     key: "${TPU_VERSION:-tpu6e}_out_of_tree_model_support_CorrectnessTest"

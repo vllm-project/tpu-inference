@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import functools
 import time
 from collections import defaultdict
 from collections.abc import Sequence
@@ -489,12 +488,10 @@ class DeviceBuffer:
         self._sizes = []
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnums=(1, ))
     def unpack_arrays(blob: jax.Array,
                       metadata: DeviceBufferMetadata) -> Dict[str, jax.Array]:
         """
         Unpack a 1D blob into a dictionary of arrays based on provided metadata.
-        Uses JIT and jnp.split to minimize dispatch overhead.
         """
         indices = tuple(np.cumsum(metadata.sizes)[:-1])
         parts = jnp.split(blob, indices)

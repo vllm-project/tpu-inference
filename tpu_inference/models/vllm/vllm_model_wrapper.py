@@ -28,7 +28,7 @@ import vllm.envs as vllm_envs
 from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
-from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
+from torchax.ops.mappings import TORCH_DTYPE_TO_JAX, t2j
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.ir import enable_torch_wrap
@@ -59,6 +59,9 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
 from tpu_inference.models.vllm.experimental.model_patcher import patch_mm_model
 from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
     maybe_apply_qwen3_vl_patches
+from tpu_inference.models.vllm.experimental.vision_tower_jit import (
+    maybe_jit_embed_multimodal_func, maybe_precompile_vision_encoder_fn,
+    maybe_prepare_for_jit)
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_inference.runner.lora_utils import replace_lora_metadata
@@ -126,7 +129,6 @@ class VllmModelWrapper:
 
         self.vllm_config.quant_config = get_tpu_quantization_config(
             self.vllm_config, self.mesh)
-        self.model_config = vllm_config.speculative_config.draft_model_config if is_draft_model else vllm_config.model_config
         self._apply_pp_patch()
 
     def _apply_pp_patch(self):
@@ -215,9 +217,9 @@ class VllmModelWrapper:
 
         with load_context, jax_context, set_current_vllm_config(
                 self.vllm_config):
+            model_config_for_load = vllm_config_for_load.speculative_config.draft_model_config if self.is_draft_model else vllm_config_for_load.model_config
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load,
-                                        model_config=self.model_config)
-
+                                        model_config=model_config_for_load)
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:
             # Replace layers in the model with LoRA layers.
@@ -278,6 +280,7 @@ class VllmModelWrapper:
                 NamedSharding(self.mesh,
                               PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
                 None,  # empty list
+                None,  # expert ids
             ),
             compiler_options={
                 "xla_tpu_all_gather_collective_matmul_mode":
@@ -304,15 +307,17 @@ class VllmModelWrapper:
             is_first_rank: bool = True,
             is_last_rank: bool = True,
             *args,
-        ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
+        ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
+                List[jax.Array], jax.Array, List[jax.Array], jax.Array]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
             lora_metadata = torch_view(lora_metadata)
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
                     mesh=self.mesh,
-                    layer_name_to_kvcache_index=layer_name_to_kvcache_index
-            ), set_forward_context(attn_metadata=attn_metadata,
-                                   vllm_config=self.vllm_config):
+                    layer_name_to_kvcache_index=layer_name_to_kvcache_index,
+                    vllm_config=self.vllm_config), set_forward_context(
+                        attn_metadata=attn_metadata,
+                        vllm_config=self.vllm_config):
                 # We need to wrap args from jax land into TorchValue with
                 # torch_view in order to call the Torch function.
                 original_lora_metadata = replace_lora_metadata(
@@ -334,6 +339,10 @@ class VllmModelWrapper:
                                       self.vllm_config.lora_config)
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
+
+                expert_indices_list = getattr(vllm_model_wrapper_context,
+                                              "expert_indices_list", [])
+
             # Wrap the output(hidden states or intermediate tensor)
             # from torch land into a JaxValue for the jax code to consume.
             aux_hidden_states = []
@@ -344,7 +353,13 @@ class VllmModelWrapper:
                     output, aux_hidden_states = jax_view(output_from_torch)
                 else:
                     output = jax_view(output_from_torch)
-            return new_kv_caches, output, aux_hidden_states
+
+            if expert_indices_list:
+                import jax.numpy as jnp
+                expert_indices = jnp.stack(expert_indices_list, axis=0)
+            else:
+                expert_indices = None
+            return new_kv_caches, output, aux_hidden_states, expert_indices
 
         @jax.jit(
             donate_argnames=("kv_caches", ),
@@ -353,13 +368,8 @@ class VllmModelWrapper:
                 NamedSharding(self.mesh,
                               PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
                 None,  # list of aux hidden states
+                None,  # expert ids
             ),
-            compiler_options={
-                "xla_tpu_all_gather_collective_matmul_mode":
-                "post_spmd_conservative",
-                "xla_tpu_reduce_scatter_collective_matmul_mode":
-                "post_spmd_conservative"
-            },
             static_argnames=("layer_name_to_kvcache_index", ),
         )
         def draft_step_fun(
@@ -369,7 +379,8 @@ class VllmModelWrapper:
             hidden_states: jax.Array,
             attn_metadata: AttentionMetadata,
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
-        ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
+        ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array],
+                   Optional[jax.Array]]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
@@ -394,27 +405,61 @@ class VllmModelWrapper:
             hidden_states, hidden_prenorm = output_from_torch
             hidden_states = jax_view(hidden_states)
             hidden_prenorm = jax_view(hidden_prenorm)
-            return new_kv_caches, hidden_states, [hidden_prenorm]
+            return new_kv_caches, hidden_states, [hidden_prenorm], None
 
         return draft_step_fun if self.is_draft_model else step_fun
+
+    def wrap_precompile_vision_encoder_fn(
+        self,
+        params: Any,
+    ) -> Optional[Any]:
+        """Return a precompile function for the vision encoder, or None."""
+        if not self.vllm_config.model_config.is_multimodal_model:
+            return None
+        embed_multimodal_fn = self.wrap_embed_multimodal_func()
+        return maybe_precompile_vision_encoder_fn(params, embed_multimodal_fn,
+                                                  self.model.vllm_model,
+                                                  self.vllm_config)
 
     def wrap_embed_multimodal_func(self):
         if not self.vllm_config.model_config.is_multimodal_model:
             return None
 
-        # The function cannot be JITted directly due to its dynamic implementation
-        def embed_multimodal_func(
+        def embed_multimodal_func_jax(
             params_and_buffers: Any,
             **kwargs,
         ) -> Any:
+            call_kwargs = {
+                k: jax.tree.map(torch_view, v)
+                for k, v in kwargs.items()
+            }
 
+            output_from_torch = torch.func.functional_call(
+                self.model,
+                torch_view(params_and_buffers),
+                kwargs={
+                    "call_method": "embed_multimodal",
+                    "call_args": (),
+                    "call_kwargs": call_kwargs,
+                },
+                tie_weights=False,
+            )
+
+            return jax_view(output_from_torch)
+
+        def embed_multimodal_func_torch(params_and_buffers: Any,
+                                        **kwargs) -> Any:
+            # embed_multimodal_func_jax requires kwargs to be jax.Array such that jit can work
+            # Here we move_to_jax, then call (maybe jit'ed) embed_multimodal_func_jax.
             with torchax.default_env(), enable_torch_wrap(False):
+
+                kwargs = maybe_prepare_for_jit(kwargs, self.model.vllm_model)
 
                 def move(v: torch.Tensor) -> torch.Tensor:
                     if not isinstance(v, torch.Tensor):
                         logger.warning(f"Expect torch.Tensor, got {type(v)}")
                         return v
-                    return v.to(device="jax")
+                    return t2j(v, use_dlpack=False)
 
                 # Ensure all tensors are moved into accelerator so the
                 # computation with weights can work properly.
@@ -422,20 +467,11 @@ class VllmModelWrapper:
                     k: jax.tree.map(move, v)
                     for k, v in kwargs.items()
                 }
-                output_from_torch = torch.func.functional_call(
-                    self.model,
-                    torch_view(params_and_buffers),
-                    kwargs={
-                        "call_method": "embed_multimodal",
-                        "call_args": (),
-                        "call_kwargs": call_kwargs,
-                    },
-                    tie_weights=False,
-                )
+                return maybe_jit_embed_multimodal_func(
+                    embed_multimodal_func_jax,
+                    self.model.vllm_model)(params_and_buffers, **call_kwargs)
 
-                return jax_view(output_from_torch)
-
-        return embed_multimodal_func
+        return embed_multimodal_func_torch
 
     def wrap_embed_input_ids_func(self):
         if not self.vllm_config.model_config.is_multimodal_model:
@@ -455,8 +491,6 @@ class VllmModelWrapper:
                         torch_mm_embeds = [torch_view(x) for x in mm_embeds]
                     else:
                         torch_mm_embeds = torch_view(mm_embeds)
-                    assert is_multimodal is not None
-                    torch_mm_embeds = torch_mm_embeds[is_multimodal]
                     call_args = (torch_view(input_ids), torch_mm_embeds)
                 else:
                     call_args = (torch_view(input_ids), )
@@ -541,14 +575,22 @@ class VllmModelWrapper:
             hidden_states: jax.Array,
             pooling_metadata: PoolingMetadata,
             seq_lens: np.ndarray,
+            num_scheduled_tokens: np.ndarray | None = None,
         ) -> PoolerOutput:
             assert self._pooler is not None, "Model does not support pooling"
+
+            # Fallback assignment: for pooling-only models running outside chunked prefill pipelines,
+            # we ensure the pooler receives the complete set of hidden states by using seq_lens.
+            if num_scheduled_tokens is None:
+                num_scheduled_tokens = seq_lens
 
             torch_states: torch.Tensor = torch_view(hidden_states)
             with torchax.default_env():
                 torch_states = torch_states.to('cpu', non_blocking=True)
+
+                # Ensure correct alignment for chunked prefill
                 pooling_metadata.build_pooling_cursor(
-                    seq_lens,
+                    num_scheduled_tokens,
                     torch.tensor(seq_lens),
                     device=torch_states.device,
                 )
@@ -556,6 +598,7 @@ class VllmModelWrapper:
                     torch_states,
                     pooling_metadata,
                 )
+
                 return outputs
 
         return compute_pooler_output

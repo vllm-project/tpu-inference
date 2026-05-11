@@ -293,6 +293,7 @@ class VllmCompressedTensorsW4A8MoEMethod(CompressedTensorsMoEMethod,
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         weights = FusedMoEWeights(
             w13_weight=jax_view(layer.w13_weight).astype(jnp.int4),

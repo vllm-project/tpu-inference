@@ -321,12 +321,12 @@ def _fused_ep_moe_kernel(
     def sync_barrier():
         barrier_sem = pltpu.get_barrier_semaphore()
         for i in range(num_devices):
-            pltpu.semaphore_signal(
+            pl.semaphore_signal(
                 barrier_sem,
                 device_id=get_mesh_device_id(i),
-                device_id_type=pltpu.DeviceIdType.MESH,
+                device_id_type=pl.DeviceIdType.MESH,
             )
-        pltpu.semaphore_wait(barrier_sem, num_devices)
+        pl.semaphore_wait(barrier_sem, num_devices)
 
     def start_fetch_b_gating(bt_id, priority=0):
         is_valid = jnp.logical_and(0 <= bt_id, bt_id < num_bt)
@@ -428,7 +428,7 @@ def _fused_ep_moe_kernel(
                     send_sem=send_sem,
                     recv_sem=recv_sem,
                     device_id=get_mesh_device_id(right_id),
-                    device_id_type=pltpu.DeviceIdType.MESH,
+                    device_id_type=pl.DeviceIdType.MESH,
                 ).wait()
                 row_id = (row_id + num_devices - 1) % num_devices
                 new_sizes = d2e_count_vmem[row_id]
@@ -510,7 +510,7 @@ def _fused_ep_moe_kernel(
                     send_sem=send_sems.at[e_sem_id],
                     recv_sem=recv_sems.at[e_sem_id],
                     device_id=get_mesh_device_id(recv_id),
-                    device_id_type=pltpu.DeviceIdType.MESH,
+                    device_id_type=pl.DeviceIdType.MESH,
                 ).start()
         a2a_s_sends_x2_smem[e_sem_id] = send_sz
 
@@ -555,7 +555,7 @@ def _fused_ep_moe_kernel(
                 send_sem=send_sems.at[e_sem_id],
                 recv_sem=a2a_gather_sem,
                 device_id=get_mesh_device_id(recv_id),
-                device_id_type=pltpu.DeviceIdType.MESH,
+                device_id_type=pl.DeviceIdType.MESH,
             ).start()
             start += sz
 

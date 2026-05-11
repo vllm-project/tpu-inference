@@ -142,9 +142,7 @@ def test_prepare_inputs():
     expected_new_seq_lens = np.zeros(max_num_seqs, dtype=np.int32)
     expected_new_seq_lens[:num_reqs] = [3, 4, 3]
 
-    expected_total_tokens = int(expected_new_qsl[-1])
-    expected_total_tokens = runner_utils.get_padded_token_len(
-        proposer.runner.num_tokens_paddings, expected_total_tokens)
+    expected_total_tokens = input_ids.shape[0]
 
     expected_last_token_indices = jnp.array(expected_new_qsl[1:] - 1)
 
@@ -231,8 +229,9 @@ def test_propose(method, num_speculative_tokens):
             residual_hidden_states = residual_hidden_states.at[:, 0].set(
                 next_token_ids_encoded)
 
-        # Return (kv_caches, hidden_states, residual_tuple)
-        return kv_caches, hidden_states_for_logits, (residual_hidden_states, )
+        # Return (kv_caches, hidden_states, residual_tuple, None)
+        return kv_caches, hidden_states_for_logits, (
+            residual_hidden_states, ), None
 
     def mock_compute_logits_fn(state, hidden_states, lora_metadata):
         # Create deterministic logits from hidden_states.

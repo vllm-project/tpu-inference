@@ -111,7 +111,14 @@ def patch_mm_model(
             cur_module = getattr(cur_module, name)
 
         target_module_name = module_names[-1]
-        jitted_module = JittableModule(getattr(cur_module, target_module_name))
+        # Pass static JIT arguments for Qwen3-VL visual submodule
+        extra_jit_args = {
+            "static_argnums": (3, ),
+            "static_argnames": ("grid_thw", ),
+        }
+
+        jitted_module = JittableModule(getattr(cur_module, target_module_name),
+                                       extra_jit_args=extra_jit_args)
         setattr(cur_module, target_module_name, jitted_module)
 
         # params_and_buffers is a dict. for each key with prefix of the module,

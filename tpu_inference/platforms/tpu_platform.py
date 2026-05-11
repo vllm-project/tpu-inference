@@ -247,6 +247,16 @@ class TpuPlatform(Platform):
             logger.info(
                 f"Using KV cache block size: {cache_config.block_size}")
 
+        if cache_config and envs.TPU_MAMBA_SSM_CACHE_DTYPE:
+            override = envs.TPU_MAMBA_SSM_CACHE_DTYPE
+            current = cache_config.mamba_ssm_cache_dtype
+            if current != override:
+                logger.info(
+                    "TPU_MAMBA_SSM_CACHE_DTYPE=%s overriding "
+                    "cache_config.mamba_ssm_cache_dtype (was %r)", override,
+                    current)
+                cache_config.mamba_ssm_cache_dtype = override
+
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         parallel_config.worker_cls = \
@@ -285,7 +295,8 @@ class TpuPlatform(Platform):
 
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
-            allowed = ("TPUConnector", "TPUConnectorHMA")
+            allowed = ("TPUConnector", "TPUConnectorHMA",
+                       "TPUOffloadConnector")
             if kv_transfer_config.kv_connector not in allowed:
                 raise ValueError(
                     f"Unsupported kv_connector "

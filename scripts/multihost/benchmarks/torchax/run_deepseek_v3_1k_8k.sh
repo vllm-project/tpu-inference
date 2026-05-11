@@ -33,4 +33,5 @@ bash "${NIGHTLY_SCRIPT}" \
   --moe-requantize-weight-dtype "fp4" \
   --api-server-count 3 \
   --moe-all-gather-activation-dtype "fp8" \
-  --run-accuracy "mmlu"
+  --run-accuracy "mmlu" \
+  --mmlu-output-len "4"

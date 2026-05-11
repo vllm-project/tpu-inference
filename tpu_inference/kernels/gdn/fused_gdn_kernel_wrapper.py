@@ -36,6 +36,7 @@ def _dispatch_with_distribution(
     initial_state,
     state_indices,
     b,
+    has_initial_state,
     *,
     scale,
     use_qk_l2norm,
@@ -50,14 +51,22 @@ def _dispatch_with_distribution(
     Both kernels update the state cache in-place via ``input_output_aliases``.
     The decode kernel runs first, then its updated state and output are
     chained to the recurrent kernel.
+
+    ``has_initial_state`` is consumed only by the recurrent kernel: decode
+    tokens always have a valid prior state (a request must finish prefill
+    before it can decode), so masking is unnecessary on the decode path.
     """
     # ── Decode kernel → updates state in-place ──
+    # NOTE: pass `initial_state` through as-is. The kernels upcast to fp32
+    # on VMEM load for compute precision; HBM storage stays at the array's
+    # dtype. An `astype(jnp.float32)` here would materialize an fp32 copy
+    # of a bf16 state and undo the storage win before the kernel runs.
     o_d, state_1 = fused_decoding_gdn(
         q,
         k,
         v,
         g.astype(jnp.float32),
-        initial_state.astype(jnp.float32),
+        initial_state,
         state_indices,
         distribution,
         b,
@@ -79,6 +88,7 @@ def _dispatch_with_distribution(
         state_1,
         state_indices,
         b,
+        has_initial_state,
         scale=scale,
         use_qk_l2norm=use_qk_l2norm,
         use_gate_in_kernel=use_gate_in_kernel,
@@ -114,6 +124,7 @@ def fused_gdn(
     state_indices: jax.Array,  # [max_num_req] int32
     distribution: jax.Array,  # [2] int32
     b: jax.Array | None = None,  # [T, H_v] or None
+    has_initial_state: jax.Array | None = None,  # [max_num_req] bool
     scale: float | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     use_gate_in_kernel: bool = False,
@@ -138,6 +149,14 @@ def fused_gdn(
         distribution: ``i32[2]`` — ``(decode_end, total)``.
         b: Raw betas ``[T, H_v]`` (sigmoid applied inside kernel).
             ``None`` means beta=1 (no beta gating).
+        has_initial_state: Boolean tensor of shape ``[max_num_req]``.
+            ``True`` when the request's recurrent slot already holds a
+            valid prior state (chunked-prefill continuation, prefix-cache
+            hit, or running decode). ``False`` for brand-new prefills,
+            whose slot is zeroed inside the recurrent kernel before the
+            update so stale data from a previous tenant doesn't leak.
+            ``None`` (default) is treated as all-True, preserving the
+            pre-fix behaviour for callers that don't manage slot reuse.
         scale: Scale factor.  Default ``K ** -0.5``.
         use_qk_l2norm_in_kernel: L2-normalize q, k inside the kernel.
         use_gate_in_kernel: Apply gate transformation inside kernel.
@@ -187,6 +206,16 @@ def fused_gdn(
         A_log = jnp.broadcast_to(A_log[:, None], (H_v, num_lanes)).astype(
             jnp.float32)  # [H_v, num_lanes]
 
+    # Public contract is Boolean (matching the chunked / ref impls);
+    # cast to int32 here for SMEM compatibility — the recurrent kernel
+    # checks `has_init == 0` to decide whether to zero h0. Default to
+    # all-True (no masking), matching the pre-fix behaviour.
+    max_num_req = state_indices.shape[0]
+    if has_initial_state is None:
+        has_initial_state = jnp.ones((max_num_req, ), dtype=jnp.int32)
+    else:
+        has_initial_state = has_initial_state.astype(jnp.int32)
+
     o, state = _dispatch_with_distribution(
         q,
         k,
@@ -196,6 +225,7 @@ def fused_gdn(
         initial_state,
         state_indices,
         b,
+        has_initial_state,
         scale=scale,
         use_qk_l2norm=use_qk_l2norm_in_kernel,
         use_gate_in_kernel=use_gate_in_kernel,
@@ -218,6 +248,7 @@ def ragged_gated_delta_rule(
     query_start_loc,
     state_indices,
     distribution,
+    has_initial_state=None,
     *,
     n_kq,
     n_v,
@@ -238,6 +269,14 @@ def ragged_gated_delta_rule(
         query_start_loc: ``(num_seqs+1,)`` int32.
         state_indices: ``(num_seqs,)`` int32.
         distribution: ``(3,)`` int32 — ``(decode_end, prefill_end, mixed_end)``.
+        has_initial_state: Optional Boolean tensor of shape
+            ``(max_reqs,)``. ``True`` when the request's slot already
+            holds a valid prior recurrent state; ``False`` for brand-new
+            prefills (the recurrent kernel zeros h0 for those slots so
+            stale data from a reused mamba slot doesn't leak). ``None``
+            (default) is treated as all-True, preserving the
+            pre-PR-#2408 behaviour. Pass it when you want the same
+            stale-slot guard the chunked and ref impls already enforce.
         n_kq: Number of key/query heads.
         n_v: Number of value heads.
         d_k: Key dimension.
@@ -270,6 +309,7 @@ def ragged_gated_delta_rule(
         state_indices=state_indices,
         distribution=fused_distribution,
         b=b,
+        has_initial_state=has_initial_state,
         use_qk_l2norm_in_kernel=True,
         use_gate_in_kernel=True,
         A_log=A_log,
