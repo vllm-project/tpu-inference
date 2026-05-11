@@ -13,7 +13,7 @@
 # limitations under the License.
 """Implements the Eagle3 proposer for speculative decoding on JAX/TPU."""
 from dataclasses import replace
-from typing import Any, Optional
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -231,8 +231,10 @@ class Eagle3Proposer:
         attn_metadata: AttentionMetadata,
         input_ids: jax.Array,
         aux_hidden_states: tuple[jax.Array, ...],
-        next_token_ids: jax.Array,
-        num_rejected_tokens: Optional[jax.Array] = None,
+        last_sampled_token_id: jax.Array,
+        next_prompt_token_id: jax.Array,
+        is_in_prefill: jax.Array,
+        num_rejected_tokens: jax.Array,
     ) -> tuple[jax.Array, jax.Array, jax.Array, AttentionMetadata]:
         """Prepare drafter inputs based on target forward outputs.
 
@@ -258,14 +260,17 @@ class Eagle3Proposer:
         num_reqs = self.runner.input_batch.num_reqs
         num_reqs, block_tables = device_array(
             self.mesh, (np.asarray([num_reqs], dtype=jnp.int32), block_tables))
-        return self._prepare_inputs(state=self.state,
-                                    num_reqs=num_reqs,
-                                    block_tables=block_tables,
-                                    attn_metadata=attn_metadata,
-                                    input_ids=input_ids,
-                                    aux_hidden_states=aux_hidden_states,
-                                    next_token_ids=next_token_ids,
-                                    num_rejected_tokens=num_rejected_tokens)
+        return self._prepare_inputs(
+            state=self.state,
+            num_reqs=num_reqs,
+            block_tables=block_tables,
+            attn_metadata=attn_metadata,
+            input_ids=input_ids,
+            aux_hidden_states=aux_hidden_states,
+            last_sampled_token_id=last_sampled_token_id,
+            next_prompt_token_id=next_prompt_token_id,
+            is_in_prefill=is_in_prefill,
+            num_rejected_tokens=num_rejected_tokens)
 
     @jax.jit(static_argnums=(0, ))
     def _prepare_inputs(
@@ -276,8 +281,10 @@ class Eagle3Proposer:
         attn_metadata: AttentionMetadata,
         input_ids: jax.Array,
         aux_hidden_states: tuple[jax.Array, ...],
-        next_token_ids: jax.Array,
-        num_rejected_tokens: Optional[jax.Array] = None,
+        last_sampled_token_id: jax.Array,
+        next_prompt_token_id: jax.Array,
+        is_in_prefill: jax.Array,
+        num_rejected_tokens: jax.Array,
     ) -> tuple[jax.Array, jax.Array, jax.Array, AttentionMetadata]:
         """Prepare drafter inputs based on target forward outputs.
 
@@ -294,13 +301,8 @@ class Eagle3Proposer:
         assert aux_hidden_states is not None and len(aux_hidden_states) > 0, (
             "EAGLE3 requires auxiliary hidden states from the target model.")
 
-        if num_rejected_tokens is None:
-            # block_tables = device_array(self.mesh, block_tables)
-            attn_metadata = replace(attn_metadata, block_tables=block_tables)
-            target_hidden_states, input_ids, last_token_indices = self._prepare_hidden_states_and_input_ids(
-                state, aux_hidden_states, attn_metadata.query_start_loc,
-                input_ids, next_token_ids, num_reqs)
-            return target_hidden_states, input_ids, last_token_indices, attn_metadata
+        next_token_ids = jnp.where(is_in_prefill, next_prompt_token_id,
+                                   last_sampled_token_id)
 
         query_start_loc = attn_metadata.query_start_loc
         seq_lens = attn_metadata.seq_lens

@@ -31,6 +31,8 @@ from tpu_inference.layers.jax.sample.sampling_metadata import \
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.runner.utils import SpecDecodeMetadata
+from tpu_inference.spec_decode.jax.utils import extract_last_sampled_tokens
 from tpu_inference.utils import device_array, to_jax_dtype
 
 if TYPE_CHECKING:
@@ -689,7 +691,65 @@ class CompilationManager:
             "Compiling speculative_decoding with different input shapes.")
         self._precompile_rejection_sampler()
         if self.runner.speculative_config.method == "eagle3":
+            self._precompile_extract_last_sampled_tokens()
             self._precompile_eagle3_helpers()
+
+    def _precompile_extract_last_sampled_tokens(self) -> None:
+        logger.info(
+            "Compiling extract_last_sampled_tokens with different input shapes."
+        )
+        vocab_size = self.runner.vocab_size
+        num_speculative_tokens = (
+            self.runner.speculative_config.num_speculative_tokens)
+        max_num_seq = self.runner.max_num_reqs
+
+        # Case 1: spec_decode_metadata is None. sampled_token_ids has shape
+        # (num_reqs,) from the regular sample() path on the previous step.
+        for num_reqs in self.runner.num_reqs_paddings:
+            sampled_token_ids = self._create_dummy_tensor((num_reqs, ),
+                                                          jnp.int32)
+            self._run_compilation(
+                f"worker{self.runner.rank} extract_last_sampled_tokens "
+                f"(no spec_decode_metadata)",
+                extract_last_sampled_tokens,
+                None,
+                sampled_token_ids,
+                num_speculative_tokens,
+                vocab_size,
+                max_num_seq,
+                num_reqs=num_reqs,
+            )
+
+        # Case 2: spec_decode_metadata is not None. sampled_token_ids has
+        # shape (num_logits + num_reqs,) from the rejection_sampler output
+        # — [main_tokens (num_logits), bonus_tokens (num_reqs)].
+        for num_logits in self.runner.num_logits_paddings:
+            for num_reqs in self.runner.num_reqs_paddings:
+                sampled_token_ids = self._create_dummy_tensor(
+                    (num_logits + num_reqs, ), jnp.int32)
+                spec_decode_metadata = SpecDecodeMetadata(
+                    draft_token_ids=self._create_dummy_tensor((num_logits, ),
+                                                              jnp.int32),
+                    draft_lengths=self._create_dummy_tensor((num_reqs, ),
+                                                            jnp.int32),
+                    target_logits_indices=self._create_dummy_tensor(
+                        (num_logits, ), jnp.int32),
+                    bonus_logits_indices=self._create_dummy_tensor(
+                        (num_reqs, ), jnp.int32),
+                    final_logits_indices=self._create_dummy_tensor(
+                        (num_logits, ), jnp.int32),
+                )
+                self._run_compilation(
+                    f"worker{self.runner.rank} extract_last_sampled_tokens",
+                    extract_last_sampled_tokens,
+                    spec_decode_metadata,
+                    sampled_token_ids,
+                    num_speculative_tokens,
+                    vocab_size,
+                    max_num_seq,
+                    num_logits=num_logits,
+                    num_reqs=num_reqs,
+                )
 
     def _precompile_rejection_sampler(self) -> None:
         logger.info("Compiling rejection_sampler with different input shapes.")
@@ -795,8 +855,6 @@ class CompilationManager:
         else:
             eagle3_mamba_state_indices = None
 
-        next_token_ids = self._create_dummy_tensor(
-            (self.runner.max_num_reqs, ), jnp.int32)
         last_token_indices = self._create_dummy_tensor(
             (self.runner.max_num_reqs, ), jnp.int32)
         for num_tokens in self.runner.num_tokens_paddings:
@@ -849,35 +907,41 @@ class CompilationManager:
                 num_tokens=num_tokens,
             )
 
-            for num_rejected_tokens in [
-                    None,
-                    self._create_dummy_tensor((self.runner.max_num_reqs, ),
-                                              jnp.int32)
-            ]:
-                aux_hidden_states = [
-                    self._create_dummy_tensor(
-                        (num_tokens, target_hidden_size), jnp.bfloat16,
-                        NamedSharding(self.runner.mesh,
-                                      PartitionSpec(None, None))),
-                    self._create_dummy_tensor(
-                        (num_tokens, target_hidden_size), jnp.bfloat16,
-                        NamedSharding(self.runner.mesh,
-                                      PartitionSpec(None, None))),
-                    self._create_dummy_tensor(
-                        (num_tokens, target_hidden_size), jnp.bfloat16,
-                        NamedSharding(self.runner.mesh,
-                                      PartitionSpec(None, None))),
-                ]
-                self._run_compilation(
-                    "drafter_prepare_inputs",
-                    self.runner.drafter.prepare_inputs,
-                    attention_metadata,
-                    input_ids,
-                    aux_hidden_states,
-                    next_token_ids,
-                    num_rejected_tokens,
-                    num_tokens=num_tokens,
-                )
+            aux_hidden_states = [
+                self._create_dummy_tensor(
+                    (num_tokens, target_hidden_size), jnp.bfloat16,
+                    NamedSharding(self.runner.mesh, PartitionSpec(None,
+                                                                  None))),
+                self._create_dummy_tensor(
+                    (num_tokens, target_hidden_size), jnp.bfloat16,
+                    NamedSharding(self.runner.mesh, PartitionSpec(None,
+                                                                  None))),
+                self._create_dummy_tensor(
+                    (num_tokens, target_hidden_size), jnp.bfloat16,
+                    NamedSharding(self.runner.mesh, PartitionSpec(None,
+                                                                  None))),
+            ]
+            last_sampled_token_id = self._create_dummy_tensor(
+                (self.runner.max_num_reqs, ), jnp.int32)
+            next_prompt_token_id = self._create_dummy_tensor(
+                (self.runner.max_num_reqs, ), jnp.int32)
+            is_in_prefill = self._create_dummy_tensor(
+                (self.runner.max_num_reqs, ), jnp.int32)
+            num_rejected_tokens = self._create_dummy_tensor(
+                (self.runner.max_num_reqs, ), jnp.int32)
+
+            self._run_compilation(
+                "drafter_prepare_inputs",
+                self.runner.drafter.prepare_inputs,
+                attention_metadata,
+                input_ids,
+                aux_hidden_states,
+                last_sampled_token_id,
+                next_prompt_token_id,
+                is_in_prefill,
+                num_rejected_tokens,
+                num_tokens=num_tokens,
+            )
 
     def _precompile_structured_decoding(self) -> None:
         logger.info(

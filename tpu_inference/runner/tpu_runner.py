@@ -1066,6 +1066,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         for req_id in self.input_batch.req_ids[:num_reqs]:
             prompt_logprobs_dict[req_id] = None
 
+        if self.speculative_config:
+            with self.maybe_forbid_compile, jax.set_mesh(self.mesh):
+                self.speculative_decoding_manager.propose_draft_token_ids(
+                    next_tokens,
+                    logits_indices_selector,
+                    discard_sampled_tokens_req_indices,
+                    aux_hidden_states,
+                    attn_metadata,
+                    spec_decode_metadata,
+                    scheduler_output,
+                    input_ids,
+                )
+
         # If async scheduler enabled
         if self.scheduler_config.async_scheduling:
             # Get previous results from TPU and replace the placeholder.
@@ -1113,22 +1126,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 total_num_scheduled_tokens)
             return async_model_runner_output
 
-        if spec_decode_metadata is None:
-            next_tokens = np.asarray(jax.device_get(next_tokens))
-            # Map tokens back to the pre-dp shuffling order
-            if logits_indices_selector is not None:
-                next_tokens = next_tokens[logits_indices_selector]
-            selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
-            valid_sampled_token_ids = selected_token_ids.tolist()
-        else:
-            valid_sampled_token_ids = self.rejection_sampler.parse_output(
-                next_tokens, self.input_batch.vocab_size,
-                spec_decode_metadata.draft_lengths_cpu, num_reqs,
-                spec_decode_metadata.draft_token_ids.shape[0])
+        valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(
+            self, spec_decode_metadata, next_tokens, logits_indices_selector,
+            discard_sampled_tokens_req_indices)
 
-        # Mask out the sampled tokens that should not be sampled.
-        for i in discard_sampled_tokens_req_indices:
-            valid_sampled_token_ids[i].clear()
         # Append sampled tokens
         for req_idx, req_state, _ in request_seq_lens:
             sampled_ids = valid_sampled_token_ids[req_idx]
@@ -1154,17 +1155,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 logprobs, logits_indices_selector)
         else:
             logprobs_lists = None
-
-        if self.speculative_config:
-            with self.maybe_forbid_compile, jax.set_mesh(self.mesh):
-                self.speculative_decoding_manager.propose_draft_token_ids(
-                    valid_sampled_token_ids,
-                    aux_hidden_states,
-                    attn_metadata,
-                    spec_decode_metadata,
-                    scheduler_output,
-                    input_ids,
-                )
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,

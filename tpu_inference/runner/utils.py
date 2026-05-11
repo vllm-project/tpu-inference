@@ -9,10 +9,13 @@ import json
 import os
 import shutil
 import time
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 import jax
+import jax.numpy as jnp
+import numpy as np
 from jax._src.interpreters import pxla
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
@@ -532,3 +535,54 @@ class PhasedBasedProfiler:
             # We are in the middle of profiling a given phase
             else:
                 self._step_or_stop_profiling(batch_composition_stats)
+
+
+@functools.partial(
+    jax.tree_util.register_dataclass,
+    data_fields=[
+        "draft_token_ids",
+        "draft_lengths",
+        "target_logits_indices",
+        "bonus_logits_indices",
+        "final_logits_indices",
+    ],
+    meta_fields=[],
+    drop_fields=["draft_lengths_cpu"],
+)
+@dataclass
+class SpecDecodeMetadata:
+    """Metadata for speculative decoding on JAX/TPU, containing all necessary indices."""
+    draft_token_ids: jnp.ndarray
+    draft_lengths: jnp.ndarray
+    target_logits_indices: jnp.ndarray
+    bonus_logits_indices: jnp.ndarray
+    final_logits_indices: jnp.ndarray
+
+    draft_lengths_cpu: Any = field(init=False)
+
+
+def host_extract_sampled_tokens(
+        runner, spec_decode_metadata: Optional[SpecDecodeMetadata],
+        sampled_output: jnp.ndarray, logits_indices_selector: np.ndarray,
+        discard_sampled_tokens_req_indices: list):
+    """host retrieve the sampled tokens for the current step."""
+
+    num_reqs = runner.input_batch.num_reqs
+    next_tokens = sampled_output
+    if spec_decode_metadata is None:
+        next_tokens = np.asarray(jax.device_get(next_tokens))
+        # Map tokens back to the pre-dp shuffling order
+        if logits_indices_selector is not None:
+            next_tokens = next_tokens[logits_indices_selector]
+        selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
+        valid_sampled_token_ids = selected_token_ids.tolist()
+    else:
+        valid_sampled_token_ids = runner.rejection_sampler.parse_output(
+            next_tokens, runner.input_batch.vocab_size,
+            spec_decode_metadata.draft_lengths_cpu, num_reqs,
+            spec_decode_metadata.draft_token_ids.shape[0])
+    # Mask out the sampled tokens that should not be sampled.
+    for i in discard_sampled_tokens_req_indices:
+        valid_sampled_token_ids[i].clear()
+
+    return valid_sampled_token_ids
