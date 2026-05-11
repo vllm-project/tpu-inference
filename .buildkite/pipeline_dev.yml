@@ -89,6 +89,56 @@ steps:
         .buildkite/scripts/run_in_docker.sh \
           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_gemma4.py'
 
+  # Step 4 of plan_stage2_post_debug.md: pre-flight the main-CI yml
+  # (.buildkite/models/google_gemma-4-E2B-it.yml) via the dev pipeline.
+  # These two steps mirror the Accuracy + Benchmark steps from that yml
+  # so any infra/threshold issue is caught before the yml is exposed to
+  # main CI. Removed before the PR ships to main; the main-CI yml stays.
+  - label: "tpu6e Gemma-4 E2B Accuracy (dev pre-flight)"
+    key: tpu6e_gemma4_E2B_accuracy_dev
+    depends_on: tpu6e_build_docker
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu6e"
+      TEST_MODEL: google/gemma-4-E2B-it
+      TENSOR_PARALLEL_SIZE: "1"
+      MINIMUM_ACCURACY_THRESHOLD: "0.5"
+    commands:
+      - |
+        if pip install "transformers>=5.5.0" --dry-run | grep -q "Would install transformers-"; then
+          echo "transformers version too low; skipping"
+          exit 0
+        fi
+        .buildkite/scripts/run_in_docker.sh bash -c '
+          bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh'
+
+  - label: "tpu6e Gemma-4 E2B Benchmark (dev pre-flight)"
+    key: tpu6e_gemma4_E2B_benchmark_dev
+    depends_on: tpu6e_build_docker
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu6e"
+      TEST_MODEL: google/gemma-4-E2B-it
+      TENSOR_PARALLEL_SIZE: "1"
+      MINIMUM_THROUGHPUT_THRESHOLD: "0.0"
+    commands:
+      - |
+        if pip install "transformers>=5.5.0" --dry-run | grep -q "Would install transformers-"; then
+          echo "transformers version too low; skipping"
+          exit 0
+        fi
+        .buildkite/scripts/run_in_docker.sh bash -c '
+          TIMEOUT_SECONDS=960 \
+          JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" \
+          REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" \
+          /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh'
+
   # Phase 6: real E2B end-to-end serve via offline_inference. This
   # exercises the full PLE + KV-share + double-wide MLP + skip-write
   # kernel path. TP=1 single-chip; default MODEL_IMPL_TYPE=auto routes
