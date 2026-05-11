@@ -104,7 +104,7 @@ class Gemma4MLP(JaxModule):
                  prefix: str = "",
                  intermediate_size_override: Optional[int] = None):
         hidden_size = config.hidden_size
-        # Double-wide MLP support (kb_ple-orthogonal; vllm reference at
+        # Double-wide MLP support (vllm reference at
         # vllm/model_executor/models/gemma4.py:599-610). When set,
         # intermediate_size_override replaces config.intermediate_size for
         # this layer — used by KV-shared layers when use_double_wide_mlp=True.
@@ -464,7 +464,7 @@ class Gemma4Attention(JaxModule):
             self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
                 kv_cache_dtype)
 
-        # KV-cache sharing (kb_kv_share.md §5; vllm reference at
+        # KV-cache sharing (vllm reference at
         # vllm/model_executor/models/gemma4.py:459-485). Layers in the last
         # `num_kv_shared_layers` reuse K/V from earlier layers of matching
         # attention type. The runner side populates the redirect mapping;
@@ -514,9 +514,9 @@ class Gemma4Attention(JaxModule):
 
             v = self.v_norm(v)
         else:
-            # KV-shared (kb_kv_share.md §5; vllm reference at gemma4.py:524-540):
+            # KV-shared (vllm reference at gemma4.py:524-540):
             # Only Q gets RoPE. K and V are NOT normalized and NOT RoPE-rotated.
-            # The cache slot (redirected by the runner per kb_kv_share.md §3-§4)
+            # The cache slot (redirected by the runner)
             # holds the source layer's already-normed-and-roped K/V for ALL
             # positions (source's call ran first in the same step and wrote
             # them). We pass update_kv_cache=False so the kernel both (a) does
@@ -582,7 +582,7 @@ class Gemma4DecoderLayer(JaxModule):
 
         self.is_sliding = self.layer_type == "sliding_attention"
 
-        # PLE (Per-Layer Embedding) — see kb_ple.md §3.2 + §4.2.
+        # PLE (Per-Layer Embedding) — per-layer modules in the decoder.
         # Active when hidden_size_per_layer_input > 0 (E2B/E4B: 256; 26B/31B: 0).
         self.hidden_size_per_layer_input = getattr(
             text_config, "hidden_size_per_layer_input", 0) or 0
@@ -653,7 +653,7 @@ class Gemma4DecoderLayer(JaxModule):
             prefix=prefix + ".post_feedforward_layernorm",
         )
 
-        # PLE per-layer modules (kb_ple.md §4.2). Constructed only when
+        # PLE per-layer modules. Constructed only when
         # hidden_size_per_layer_input > 0; otherwise these stay None and
         # the PLE block in __call__ is gated off.
         if self.hidden_size_per_layer_input > 0:
@@ -784,7 +784,7 @@ class Gemma4DecoderLayer(JaxModule):
         mlp_output = self.post_feedforward_layernorm(hidden_states)
         outputs = residual + mlp_output
 
-        # PLE per-layer block (kb_ple.md §3.2). Gated on having both a
+        # PLE per-layer block. Gated on having both a
         # per_layer_input AND the modules being constructed (the latter
         # is governed by hidden_size_per_layer_input > 0 in __init__).
         if per_layer_input is not None and self.per_layer_input_gate is not None:
@@ -822,7 +822,7 @@ class Gemma4Model(JaxModule):
         # Gemma 4: Embeddings are scaled by sqrt(hidden_size)
         self.embedding_scale = hidden_size**0.5
 
-        # PLE (Per-Layer Embedding) — kb_ple.md §3.1, §4.1.
+        # PLE (Per-Layer Embedding) — model-level modules.
         # Active when hidden_size_per_layer_input > 0 (E2B/E4B).
         self.hidden_size_per_layer_input = getattr(
             text_config, "hidden_size_per_layer_input", 0) or 0
@@ -884,7 +884,7 @@ class Gemma4Model(JaxModule):
                 quant_config=vllm_config.quant_config,
                 prefix=prefix + ".per_layer_projection_norm",
             )
-            # Constants per kb_ple.md §6 — single-ownership Python floats.
+            # Constants as Python floats (single-ownership).
             # NOTE: gemma-4 uses H^-0.5 (gemma-3n flipped to H^0.5).
             self.embed_scale_per_layer = float(P)**0.5
             self.per_layer_input_scale = 1.0 / (2.0**0.5)
@@ -929,7 +929,15 @@ class Gemma4Model(JaxModule):
         inputs_embeds: jax.Array,
         is_multimodal: Optional[jax.Array] = None,
     ) -> Optional[jax.Array]:
-        """Compute per_layer_inputs of shape [T, L, P] per kb_ple.md §3.1.
+        """Compute per_layer_inputs of shape [T, L, P].
+
+        See vllm/model_executor/models/gemma4.py:Gemma4SelfDecoderLayers.
+        get_per_layer_inputs / project_per_layer_inputs for the reference
+        algorithm: Track A is an embed_tokens_per_layer lookup scaled by
+        sqrt(P) and reshaped to (T, L, P); Track B is a linear projection
+        of inputs_embeds (post embedding-scale) scaled by 1/sqrt(H), reshaped
+        to (T, L, P) and RMSNorm'd over P. The result is
+        `(track_a + track_b) * 1/sqrt(2)`.
 
         Returns None when PLE is disabled (hidden_size_per_layer_input=0)
         or when the model-level PLE modules aren't constructed (non-first
@@ -959,18 +967,18 @@ class Gemma4Model(JaxModule):
         L = self.num_hidden_layers
         P = self.hidden_size_per_layer_input
 
-        # Multimodal masking (kb_ple.md §3.4): MM positions look up slot 0.
+        # Multimodal masking: MM positions look up slot 0.
         if is_multimodal is not None:
             ple_input_ids = jnp.where(is_multimodal, 0, input_ids)
         else:
             ple_input_ids = input_ids
 
-        # Out-of-vocab masking (kb_ple.md §9.2): when vocab_size_per_layer_input
+        # Out-of-vocab masking: when vocab_size_per_layer_input
         # < vocab_size, mask high token ids to 0.
         ple_input_ids = jnp.where(
             ple_input_ids < self.vocab_size_per_layer_input, ple_input_ids, 0)
 
-        # Track A — embedding lookup (kb_ple.md §3.1).
+        # Track A — embedding lookup.
         per_layer_embeds = self.embed_tokens_per_layer(ple_input_ids)
         per_layer_embeds = per_layer_embeds * self.embed_scale_per_layer
         per_layer_embeds = per_layer_embeds.reshape(T, L, P)

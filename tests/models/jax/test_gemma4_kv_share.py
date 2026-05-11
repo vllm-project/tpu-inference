@@ -11,18 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""KV-share structural tests for Gemma-4 — kb_kv_share.md §5.
+"""KV-share structural tests for Gemma-4.
 
-Stage 2 commit-3 verification gate (per plan_stage2.md §4):
-  - Assertion at gemma4.py:417-418 lifted.
+Covers:
   - is_kv_shared_layer correctly computed per layer index + num_kv_shared_layers.
   - kv_sharing_target_layer_name points at the last preceding layer of the
-    same attention type (kb_kv_share.md §5 algorithm; vllm gemma4.py:459-485).
+    same attention type (vllm reference: gemma4.py:459-485).
   - For shared layers, the source index is correct.
+  - gemma4_kv_share_map() helper edge cases (no shared layers, missing
+    layer_types, unmatched type → ValueError).
 
-Forward-through-shared-layers is intentionally NOT tested at this commit;
-the kernel needs a 'skip cache write' flag before that path is correct.
-See plan_stage2.md.
+Forward-pass numerics through shared layers are exercised by the kernel
+KV-share unit tests in tests/kernels/ragged_paged_attention_kernel_v3_test.py.
 """
 from unittest.mock import MagicMock, patch
 

@@ -293,7 +293,7 @@ def _ragged_paged_attention_kernel(*args, **kwargs):
 # is unused. The cache slot already contains the source layer's K,V
 # (source's call ran first in the same step and wrote them). Mirrors
 # vllm-pytorch where unified_attention reads only from key_cache /
-# value_cache regardless of the input k,v. See kb_kv_share §5.
+# value_cache regardless of the input k,v.
 
 
 def _ragged_paged_attention_kernel_loop(

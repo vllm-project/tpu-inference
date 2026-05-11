@@ -451,7 +451,7 @@ class KVCacheManager:
             base_num_kv_heads = model_config.get_total_num_kv_heads()
             base_head_size = model_config.get_head_size()
 
-            # KV-share (kb_kv_share.md §3-§4): for the JAX-path (no
+            # KV-share (JAX path): for the JAX-path (no
             # vllm-side Attention modules to scan), populate the shared
             # mapping directly from text_config via the shared helper.
             from tpu_inference.models.jax.gemma4 import gemma4_kv_share_map

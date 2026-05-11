@@ -11,14 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""PLE (Per-Layer Embedding) tests for Gemma-4 — kb_ple.md §3.1, §3.4.
+"""PLE (Per-Layer Embedding) tests for Gemma-4.
 
-Stage 2 commit-2 verification gate (per plan_stage2.md §4):
+Covers:
   - PLE-off parity: hidden_size_per_layer_input=0 -> compute_per_layer_inputs returns None
   - Shape: per_layer_inputs.shape == (T, L, P)
   - Multimodal mask: is_multimodal redirects to vocab slot 0
   - Out-of-vocab mask: token id >= vocab_size_per_layer_input -> slot 0
-  - Numerical parity vs numpy oracle implementing kb_ple.md §3.1 verbatim
+  - Numerical parity vs an inline numpy oracle for the PLE compute spec
+    (matches vllm/model_executor/models/gemma4.py:Gemma4SelfDecoderLayers.
+    get_per_layer_inputs / project_per_layer_inputs).
 
 Synthetic tiny config — does not require an HF gated model. Constructs a
 Gemma4TextConfig directly with toy dims so the test is fast.
@@ -293,7 +295,7 @@ def test_ple_oov_masking(mesh, rng=jax.random.PRNGKey(0)):
 def test_ple_numpy_oracle_parity(mesh, rng=jax.random.PRNGKey(0)):
     """Numerical parity: production compute_per_layer_inputs vs numpy oracle.
 
-    Implements kb_ple.md §3.1 verbatim in numpy and asserts the production
+    Inline numpy implementation of the PLE compute spec; asserts production
     JAX output matches at float32 precision.
     """
     P = 4
@@ -317,7 +319,8 @@ def test_ple_numpy_oracle_parity(mesh, rng=jax.random.PRNGKey(0)):
     with jax.set_mesh(mesh):
         out = model.compute_per_layer_inputs(input_ids, inputs_embeds)
 
-    # Numpy oracle (kb_ple.md §3.1 verbatim).
+    # Numpy oracle for the PLE compute spec (Track A embed lookup + scale,
+    # Track B linear projection + RMSNorm, combined with 1/sqrt(2)).
     et = np.asarray(model.embed_tokens_per_layer.weight[...])  # [V, L*P]
     pm = np.asarray(model.per_layer_model_projection.weight[...])  # [H, L*P]
     norm_w = np.asarray(model.per_layer_projection_norm.weight[...])  # [P]
@@ -350,7 +353,7 @@ def test_ple_numpy_oracle_parity(mesh, rng=jax.random.PRNGKey(0)):
 
 def test_ple_per_layer_modules_present_in_decoder(mesh,
                                                   rng=jax.random.PRNGKey(0)):
-    """Per-layer modules per kb_ple.md §4.2 are constructed when PLE is on."""
+    """Per-layer PLE modules are constructed in each decoder layer when PLE is on."""
     P = 4
     text_config = _make_text_config(hidden_size_per_layer_input=P,
                                     num_hidden_layers=2)

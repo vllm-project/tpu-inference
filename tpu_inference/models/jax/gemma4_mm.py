@@ -644,8 +644,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                 mapped_name = map_name(name)
 
                 # Skip audio tower weights — audio path is deferred for
-                # E-family (kb_ple.md/summary.md). Audio re-introduction is
-                # a separate Stage 2 follow-up.
+                # E-family. Audio re-introduction is a separate follow-up.
                 if "audio_tower" in mapped_name or "embed_audio" in mapped_name:
                     continue
 
@@ -820,7 +819,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         layer_name_to_kv_cache = dict(
             _layer_name_to_kv_cache) if _layer_name_to_kv_cache else None
 
-        # PLE multimodal mask (kb_ple.md §3.4): mark image-token positions
+        # PLE multimodal mask: mark image-token positions
         # so embed_tokens_per_layer redirects them to slot 0. None when not
         # PLE-active or first rank where input_ids isn't reliable. Cheap to
         # always compute; the PLE compute path is the only consumer.
