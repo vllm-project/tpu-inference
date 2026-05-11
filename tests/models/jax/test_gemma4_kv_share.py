@@ -34,7 +34,7 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import Gemma4TextConfig
 
-from tpu_inference.models.jax.gemma4 import Gemma4Model
+from tpu_inference.models.jax.gemma4 import Gemma4Model, gemma4_kv_share_map
 
 
 @pytest.fixture(scope="module")
@@ -102,6 +102,66 @@ def _make_vllm_config(text_config):
     vllm_config.cache_config = MagicMock(cache_dtype="auto")
     vllm_config.quant_config = None
     return vllm_config
+
+
+def test_gemma4_kv_share_map_no_shared_layers():
+    """num_kv_shared_layers=0 → empty dict (26B/31B path)."""
+    cfg = _make_text_config(num_hidden_layers=4,
+                            num_kv_shared_layers=0,
+                            layer_types=["full_attention"] * 4)
+    assert gemma4_kv_share_map(cfg) == {}
+
+
+def test_gemma4_kv_share_map_e2b_alternating_pattern():
+    """num_hidden=4, num_shared=2, alternating types → {2:0, 3:1}."""
+    cfg = _make_text_config(num_hidden_layers=4,
+                            num_kv_shared_layers=2,
+                            layer_types=[
+                                "sliding_attention",
+                                "full_attention",
+                                "sliding_attention",
+                                "full_attention",
+                            ])
+    assert gemma4_kv_share_map(cfg) == {2: 0, 3: 1}
+
+
+def test_gemma4_kv_share_map_picks_last_preceding_same_type():
+    """When the source range has multiple same-type layers, picks the LAST
+    preceding match (vllm reference at gemma4.py:467-468)."""
+    cfg = _make_text_config(num_hidden_layers=5,
+                            num_kv_shared_layers=2,
+                            layer_types=[
+                                "sliding_attention",
+                                "sliding_attention",  # idx 1: last sliding before shared range
+                                "full_attention",
+                                "sliding_attention",  # idx 3: shared → src=1, not 0
+                                "full_attention",  # idx 4: shared → src=2
+                            ])
+    assert gemma4_kv_share_map(cfg) == {3: 1, 4: 2}
+
+
+def test_gemma4_kv_share_map_raises_on_unmatched_type():
+    """A shared-layer type with no preceding same-type layer is a config bug
+    — surface it loudly rather than silently mis-routing the cache."""
+    cfg = _make_text_config(num_hidden_layers=3,
+                            num_kv_shared_layers=1,
+                            layer_types=[
+                                "sliding_attention",
+                                "sliding_attention",
+                                "full_attention",
+                            ])
+    with pytest.raises(ValueError, match="full_attention"):
+        gemma4_kv_share_map(cfg)
+
+
+def test_gemma4_kv_share_map_missing_layer_types():
+    """Defensive: if a (mocked) config lacks layer_types, return {} instead
+    of crashing. kv_cache_manager.py needs this for tests with MagicMock."""
+    cfg = MagicMock()
+    cfg.num_kv_shared_layers = 4
+    cfg.num_hidden_layers = 8
+    cfg.layer_types = None  # explicit None, not MagicMock
+    assert gemma4_kv_share_map(cfg) == {}
 
 
 def test_no_assertion_when_kv_share_active(mesh, rng=jax.random.PRNGKey(0)):

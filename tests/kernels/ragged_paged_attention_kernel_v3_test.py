@@ -661,12 +661,52 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
 
         # Output invariant to input k,v.
         self.assertArraysEqual(out1, out2)
+        # Sanity: outputs are real attention values, not all-zero / NaN
+        # (regression catch for a kernel that silently fails closed).
+        out1_np = np.asarray(out1[:16]).astype(np.float32)
+        assert np.all(np.isfinite(out1_np)), "outputs contain non-finite"
+        assert float(np.abs(out1_np).max()) > 0.0, (
+            "outputs are all zero — kernel likely failed closed")
         # Cache unchanged in both runs (use the pre-donation snapshot).
         mask = ~np.isnan(cache_before)
         np.testing.assert_array_equal(
             np.asarray(cache_after_1)[mask], cache_before[mask])
         np.testing.assert_array_equal(
             np.asarray(cache_after_2)[mask], cache_before[mask])
+
+    def test_kv_share_chunked_prefill_input_kv_is_ignored(self):
+        """q_len < kv_len (chunked / continued prefill). This is the regime
+        the pre-fix kernel got wrong: cache holds source's normed/roped
+        K,V for the past portion, and the kernel must NOT mix in the
+        layer's own raw input k,v for the 'current step' portion."""
+        if not jtu.is_device_tpu_at_least(version=4):
+            self.skipTest("Expect TPUv4+")
+        args1 = self._build_kv_share_inputs(q_len=8,
+                                            kv_len=24,
+                                            kv_input_seed=11)
+        args2 = self._build_kv_share_inputs(q_len=8,
+                                            kv_len=24,
+                                            kv_input_seed=99)
+        cache_before = np.asarray(args1[3])
+
+        out1, cache_after_1 = ragged_paged_attention(*args1,
+                                                     **self._kv_share_kwargs())
+        out2, cache_after_2 = ragged_paged_attention(*args2,
+                                                     **self._kv_share_kwargs())
+
+        # Output invariant to input k,v. The pre-fix kernel would mix
+        # source K,V (past 16 positions from cache) with shared raw K,V
+        # (current 8 positions from input k,v), so different input k,v
+        # would give different outputs.
+        self.assertArraysEqual(out1[:8], out2[:8])
+        # Sanity: outputs are real (not all-zero / NaN).
+        out1_np = np.asarray(out1[:8]).astype(np.float32)
+        assert np.all(np.isfinite(out1_np))
+        assert float(np.abs(out1_np).max()) > 0.0
+        # Cache unchanged.
+        mask = ~np.isnan(cache_before)
+        np.testing.assert_array_equal(
+            np.asarray(cache_after_1)[mask], cache_before[mask])
 
     def test_kv_share_decode_input_kv_is_ignored(self):
         """q_len == 1, kv_len > 1 (decode step). Same invariance."""
@@ -688,6 +728,10 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         # Decode emits q_len = 1 token. Compare just that token (the rest of
         # the max_num_batched_tokens buffer is junk padding).
         self.assertArraysEqual(out1[:1], out2[:1])
+        # Sanity: output is real.
+        out1_np = np.asarray(out1[:1]).astype(np.float32)
+        assert np.all(np.isfinite(out1_np))
+        assert float(np.abs(out1_np).max()) > 0.0
         mask = ~np.isnan(cache_before)
         np.testing.assert_array_equal(
             np.asarray(cache_after_1)[mask], cache_before[mask])
