@@ -80,6 +80,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 from vllm.utils.math_utils import round_down
 from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
@@ -136,7 +137,9 @@ class TPUConnectorMetadata(KVConnectorMetadata):
 
 class TPUConnector(KVConnectorBase_V1):
 
-    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
+    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole,
+                 kv_cache_config: KVCacheConfig):
+        super().__init__(vllm_config, role, kv_cache_config)
         assert vllm_config.kv_transfer_config is not None
         self._connector_metadata = None
 

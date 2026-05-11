@@ -19,11 +19,16 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
 
 from tpu_inference.distributed import tpu_connector
 from tpu_inference.distributed.tpu_connector_stats import (
     TpuKVConnectorPromMetrics, TpuKVConnectorStats)
+
+
+def _make_test_kv_cache_config() -> KVCacheConfig:
+    return KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
 
 
 class MockVllmConfig:
@@ -49,7 +54,8 @@ class TestTPUConnector(unittest.TestCase):
         SCHEDULER role.
         """
         connector = tpu_connector.TPUConnector(self.vllm_config,
-                                               KVConnectorRole.SCHEDULER)
+                                               KVConnectorRole.SCHEDULER,
+                                               _make_test_kv_cache_config())
         mock_scheduler_cls.assert_called_once_with(self.vllm_config)
         mock_worker_cls.assert_not_called()
         self.assertIsNotNone(connector.connector_scheduler)
@@ -61,7 +67,8 @@ class TestTPUConnector(unittest.TestCase):
         role.
         """
         connector = tpu_connector.TPUConnector(self.vllm_config,
-                                               KVConnectorRole.WORKER)
+                                               KVConnectorRole.WORKER,
+                                               _make_test_kv_cache_config())
         mock_worker_cls.assert_called_once_with(self.vllm_config)
         mock_scheduler_cls.assert_not_called()
         self.assertIsNone(connector.connector_scheduler)
@@ -72,7 +79,8 @@ class TestTPUConnector(unittest.TestCase):
         """Tests that scheduler-side methods are correctly delegated."""
         mock_scheduler_instance = mock_scheduler_cls.return_value
         connector = tpu_connector.TPUConnector(self.vllm_config,
-                                               KVConnectorRole.SCHEDULER)
+                                               KVConnectorRole.SCHEDULER,
+                                               _make_test_kv_cache_config())
 
         mock_request = MagicMock()
         mock_blocks = MagicMock()
@@ -98,7 +106,8 @@ class TestTPUConnector(unittest.TestCase):
         """Tests that worker-side methods are correctly delegated."""
         mock_worker_instance = mock_worker_cls.return_value
         connector = tpu_connector.TPUConnector(self.vllm_config,
-                                               KVConnectorRole.WORKER)
+                                               KVConnectorRole.WORKER,
+                                               _make_test_kv_cache_config())
         connector._connector_metadata = tpu_connector.TPUConnectorMetadata(
         )  # need to set this for start_load_kv
 
