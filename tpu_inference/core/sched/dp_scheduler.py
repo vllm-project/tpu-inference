@@ -23,7 +23,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from enum import Enum
 from multiprocessing import Process
-from multiprocessing.connection import Connection
+from multiprocessing.connection import Connection, wait
 from time import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -359,6 +359,15 @@ class DPScheduler(SchedulerInterface):
         self._schedule_step_count = 0
         self._prev_schedule_start = 0.0
 
+        # Lightweight load tracking to avoid IPC in _find_best_rank_for_request.
+        # Tracks total prompt tokens assigned to each rank (approximates pending
+        # prefill work). Decremented when requests finish.
+        self._rank_prompt_tokens: Dict[int, int] = {
+            r: 0
+            for r in range(self.dp_size)
+        }
+        self._req_prompt_len: Dict[str, int] = {}  # req_id -> prompt_len
+
         # Initialize NONE_HASH global before forking worker processes
         # This ensures all workers inherit the initialized value
         if vllm_config.cache_config.enable_prefix_caching:
@@ -416,6 +425,12 @@ class DPScheduler(SchedulerInterface):
             output_child_conn.close()
             self.processes.append(process)
 
+        # Reverse mapping from output connection to rank for wait()-based collection.
+        self._output_conn_to_rank: Dict[int, int] = {
+            id(conn): rank
+            for rank, conn in enumerate(self.output_conns)
+        }
+
         logger.info(
             f"DPScheduler (Async = {self.vllm_config.scheduler_config.async_scheduling}) "
             f"started {self.dp_size} worker processes with cloudpickle. "
@@ -443,9 +458,9 @@ class DPScheduler(SchedulerInterface):
     def _create_per_rank_configs(self, kv_cache_config: KVCacheConfig) -> None:
         self.per_rank_kv_cache_configs: List[KVCacheConfig] = []
         for _ in range(self.dp_size):
-            rank_config = copy.deepcopy(kv_cache_config)
-            rank_config.num_blocks = kv_cache_config.num_blocks // self.dp_size
-            self.per_rank_kv_cache_configs.append(rank_config)
+            rank_kv_config = copy.deepcopy(kv_cache_config)
+            rank_kv_config.num_blocks = kv_cache_config.num_blocks // self.dp_size
+            self.per_rank_kv_cache_configs.append(rank_kv_config)
 
     def _send_command(self,
                       rank: int,
@@ -528,6 +543,25 @@ class DPScheduler(SchedulerInterface):
             raise result
         return result
 
+    def _collect_results_unordered(
+        self,
+        command: SchedulerCommand,
+    ) -> List[Any]:
+        """Collect results from all ranks using wait() to avoid HOL blocking."""
+        results: List[Any] = [None] * self.dp_size
+        pending = list(self.output_conns)
+        collected = 0
+
+        while collected < self.dp_size:
+            ready = wait(pending)
+            for conn in ready:
+                rank = self._output_conn_to_rank[id(conn)]
+                results[rank] = self._get_result(rank, command)
+                pending.remove(conn)
+                collected += 1
+
+        return results
+
     def _get_rank_token_counts(self) -> Dict[int, int]:
         """Calculate total tokens currently assigned to each DP rank."""
         for rank in range(self.dp_size):
@@ -541,27 +575,37 @@ class DPScheduler(SchedulerInterface):
         return rank_tokens
 
     def _find_best_rank_for_request(self, request: Request) -> int:
-        """Find the best DP rank for a new request based on load balancing."""
-        rank_tokens = self._get_rank_token_counts()
+        """Find the best DP rank for a new request based on load balancing.
 
+        Uses a two-tier strategy:
+        1. Prefix cache hit: assign to rank with best cache hit (unchanged).
+        2. Lightweight prompt-token balance: assign to rank with least total
+           assigned prompt tokens. This avoids expensive IPC round-trips to
+           per-rank scheduler processes and directly minimizes prefill workload
+           imbalance across DP ranks — reducing per-step padding waste when
+           input lengths vary (e.g. random-range-ratio benchmarks).
+        """
         # First, try to find a rank with prefix cache hit.
-        for rank in range(self.dp_size):
-            self._send_command(rank, SchedulerCommand.PROBE_COMPUTED_BLOCKS,
-                               request)
+        if self.vllm_config.cache_config.enable_prefix_caching:
+            for rank in range(self.dp_size):
+                self._send_command(rank,
+                                   SchedulerCommand.PROBE_COMPUTED_BLOCKS,
+                                   request)
 
-        best_cache_rank = None
-        best_cache_tokens = 0
-        for rank in range(self.dp_size):
-            cached_tokens = self._get_result(
-                rank, SchedulerCommand.PROBE_COMPUTED_BLOCKS)
-            if cached_tokens > best_cache_tokens:
-                best_cache_tokens = cached_tokens
-                best_cache_rank = rank
-        if best_cache_tokens > 0:
-            return best_cache_rank
+            best_cache_rank = None
+            best_cache_tokens = 0
+            for rank in range(self.dp_size):
+                cached_tokens = self._get_result(
+                    rank, SchedulerCommand.PROBE_COMPUTED_BLOCKS)
+                if cached_tokens > best_cache_tokens:
+                    best_cache_tokens = cached_tokens
+                    best_cache_rank = rank
+            if best_cache_tokens > 0:
+                return best_cache_rank
 
-        # Otherwise, find rank with least tokens
-        selected_rank = min(rank_tokens, key=rank_tokens.get)
+        # Use local prompt-token tracking (no IPC needed).
+        selected_rank = min(self._rank_prompt_tokens,
+                            key=self._rank_prompt_tokens.get)
         return selected_rank
 
     def add_request(self, request: Request) -> None:
@@ -578,6 +622,11 @@ class DPScheduler(SchedulerInterface):
             f"assigned to rank {self.assigned_dp_rank[request.request_id]})")
         rank = self._find_best_rank_for_request(request)
         self.assigned_dp_rank[request.request_id] = rank
+
+        # Track prompt tokens for lightweight load balancing.
+        prompt_len = request.num_tokens
+        self._req_prompt_len[request.request_id] = prompt_len
+        self._rank_prompt_tokens[rank] += prompt_len
 
         self._send_command(rank, SchedulerCommand.ADD_REQUEST, request)
         self._get_result(rank, SchedulerCommand.ADD_REQUEST)
@@ -605,11 +654,9 @@ class DPScheduler(SchedulerInterface):
         for rank in range(self.dp_size):
             self._send_command(rank, SchedulerCommand.SCHEDULE)
 
-        # Collect outputs from all workers (blocking)
-        rank_outputs = []
-        for rank in range(self.dp_size):
-            output = self._get_result(rank, SchedulerCommand.SCHEDULE)
-            rank_outputs.append(output)
+        # Collect outputs from all workers (unordered to avoid HOL blocking)
+        rank_outputs = self._collect_results_unordered(
+            SchedulerCommand.SCHEDULE)
 
         # Cache scheduler outputs to use in `update_from_output`
         self.cached_schedulers_output.append(rank_outputs)
@@ -851,11 +898,13 @@ class DPScheduler(SchedulerInterface):
             self._send_command(rank, SchedulerCommand.UPDATE_FROM_OUTPUT,
                                rank_output)
 
+        all_results = self._collect_results_unordered(
+            SchedulerCommand.UPDATE_FROM_OUTPUT)
+
         combined_engine_outputs = defaultdict(list)
         rank_scheduler_stats: List[Optional[SchedulerStats]] = []
         for rank in range(self.dp_size):
-            rank_engine_outputs = self._get_result(
-                rank, SchedulerCommand.UPDATE_FROM_OUTPUT)
+            rank_engine_outputs = all_results[rank]
             rank_stats = None
             for client_idx, engine_output in rank_engine_outputs.items():
                 combined_engine_outputs[client_idx].append(engine_output)
@@ -999,7 +1048,13 @@ class DPScheduler(SchedulerInterface):
         """Remove finished requests from our DP rank assignment tracking."""
         for req_id in finished_req_ids:
             if req_id in self.assigned_dp_rank:
+                rank = self.assigned_dp_rank[req_id]
                 del self.assigned_dp_rank[req_id]
+                # Decrement prompt-token tracking.
+                if req_id in self._req_prompt_len:
+                    self._rank_prompt_tokens[rank] -= self._req_prompt_len[
+                        req_id]
+                    del self._req_prompt_len[req_id]
 
     def finish_requests(self, request_ids, finished_status) -> None:
         """Forward request finish signals to the appropriate DP rank schedulers."""
