@@ -12,14 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os as _os
 from functools import partial
 from itertools import islice
 from typing import Any, Iterable, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-import numpy as _np
 from flax import nnx
 from jax.sharding import Mesh
 from transformers import Gemma4TextConfig
@@ -50,28 +48,6 @@ from tpu_inference.models.jax.utils.weight_utils import (
 logger = init_logger(__name__)
 
 init_fn = nnx.initializers.uniform()
-
-# E2B oracle-diff capture (throwaway, gated). When E2B_CAPTURE_DIR is set,
-# `_e2b_capture(name, x)` writes the FIRST occurrence of `x` as
-# `<E2B_CAPTURE_DIR>/<name>.npy` via jax.debug.callback. Used to record
-# per-layer hidden states for diffing against vllm-pytorch. Reverted before
-# any production PR.
-_E2B_CAPTURE_DIR = _os.environ.get("E2B_CAPTURE_DIR")
-if _E2B_CAPTURE_DIR:
-    _os.makedirs(_E2B_CAPTURE_DIR, exist_ok=True)
-
-
-def _e2b_capture(name: str, x):
-    """No-op when env var unset; otherwise saves first occurrence to disk."""
-    if not _E2B_CAPTURE_DIR:
-        return
-
-    def _save(v, n=name):
-        path = _os.path.join(_E2B_CAPTURE_DIR, f"{n}.npy")
-        if not _os.path.exists(path):
-            _np.save(path, _np.asarray(v).astype(_np.float32))
-
-    jax.debug.callback(_save, x, ordered=True)
 
 
 # MLP arch is the same as Gemma3
@@ -925,7 +901,6 @@ class Gemma4Model(JaxModule):
         inputs_embeds: jax.Array,
         is_multimodal: Optional[jax.Array] = None,
     ) -> Optional[jax.Array]:
-        _e2b_capture("inputs_embeds", inputs_embeds)
         """Compute per_layer_inputs of shape [T, L, P] per kb_ple.md §3.1.
 
         Returns None when PLE is disabled (hidden_size_per_layer_input=0)
@@ -974,10 +949,8 @@ class Gemma4Model(JaxModule):
             per_layer_projection)
 
         # Combine.
-        out = ((per_layer_projection + per_layer_embeds) *
-               self.per_layer_input_scale)
-        _e2b_capture("per_layer_inputs", out)
-        return out
+        return ((per_layer_projection + per_layer_embeds) *
+                self.per_layer_input_scale)
 
     def __call__(
         self,
@@ -1026,12 +999,10 @@ class Gemma4Model(JaxModule):
                 layer_attn_metadata,
                 per_layer_input=layer_per_input,
             )
-            _e2b_capture(f"layer_{layer_idx}", x)
             if expert_ids is not None:
                 all_expert_ids.append(expert_ids)
             kv_caches[cache_idx] = kv_cache
         x = self.norm(x)
-        _e2b_capture("final_norm", x)
         stacked_expert_ids = jnp.stack(all_expert_ids,
                                        axis=0) if all_expert_ids else None
         return kv_caches, x, stacked_expert_ids
