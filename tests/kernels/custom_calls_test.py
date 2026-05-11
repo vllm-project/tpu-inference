@@ -14,6 +14,7 @@
 
 import timeit
 from functools import partial
+from unittest.mock import patch
 
 import jax
 import jax.numpy as jnp
@@ -22,7 +23,8 @@ from jax import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference.kernels.custom_calls.kernel import (xpose_full,
+from tpu_inference.kernels.custom_calls.kernel import (prev_closest_divisor,
+                                                       xpose_full,
                                                        xpose_pipeline)
 
 
@@ -88,14 +90,13 @@ class CustomCallsTest(parameterized.TestCase):
              transpose_axes=(1, 0, 2),
              n_tile=64,
              m_tile=128),
-        # Grid iterates axis 1 (parallel, 512//128=4 steps) and axis 0 (pipeline, 256//128=2 steps).
         dict(shape=(256, 512, 128),
              transpose_axes=(1, 0, 2),
              n_tile=128,
              m_tile=128,
              parallel_axis=1,
              pipeline_axis=0),
-        # 64MB (would OOM loading everything into VMEM)
+        # ~64MB (would OOM loading everything into VMEM)
         dict(shape=(128, 2048, 256),
              transpose_axes=(1, 0, 2),
              n_tile=128,
@@ -110,6 +111,14 @@ class CustomCallsTest(parameterized.TestCase):
              m_tile=64,
              parallel_axis=2,
              pipeline_axis=1),
+        dict(shape=(192, 256, 64),
+             transpose_axes=(1, 0, 2),
+             n_tile=160,
+             m_tile=64),
+        dict(shape=(320, 256, 64),
+             transpose_axes=(1, 0, 2),
+             n_tile=160,
+             m_tile=64),
     )
     def test_xpose_pipeline(self,
                             shape,
@@ -133,7 +142,6 @@ class CustomCallsTest(parameterized.TestCase):
 
         expected = jnp.transpose(input_data, transpose_axes)
 
-        # Validation
         self.assertEqual(result[0].shape, expected.shape)
         self.assertTrue(jnp.allclose(result[0], expected, atol=1e-5))
 
@@ -166,6 +174,125 @@ class CustomCallsTest(parameterized.TestCase):
         expected = jnp.transpose(input_data, transpose_axes)
         self.assertEqual(result.shape, expected.shape)
         self.assertTrue(jnp.allclose(result, expected))
+
+
+class TestXposePipelineTiling(parameterized.TestCase):
+    """Verifies that xpose_pipeline uses the expected tile sizes at runtime."""
+
+    def test_non_divisible_n_tile(self):
+        # shape[0]=448, n_tile=160: 448 % 160 != 0.
+        # For fp8, n_tile needs to be divisible by:
+        # sublane_multiple = get_dtype_packing(fp8) * 8 = 32.
+        # prev_closest_divisor(448, 160, multiple_of=32) = 64 (largest divisor
+        # of 448 that is <= 160 and % 32 == 0
+        shape = (448, 192, 128)
+        input_data = jax.random.normal(jax.random.PRNGKey(0), shape,
+                                       dtype=jnp.float8_e4m3fn)
+
+        # We patch the module-level logger and force a JIT retrace so the
+        # warning fires regardless of absltest's logging capture behavior.
+        with patch('tpu_inference.kernels.custom_calls.kernel.logger') as mock_logger:
+            result = xpose_pipeline(input_data,
+                                    transpose_axes=(1, 0, 2),
+                                    n_tile=160,
+                                    m_tile=64)[0]
+
+        # Warning should name the requested tile (160) and the chosen tile (64).
+        mock_logger.warning.assert_called()
+        warning_text = mock_logger.warning.call_args[0][0]
+        self.assertIn('160', warning_text)
+        self.assertIn('64', warning_text)
+
+        # Output should still be numerically correct.
+        expected = jnp.transpose(input_data, (1, 0, 2))
+        self.assertTrue(jnp.allclose(result, expected))
+
+    def test_no_aligned_divisor_raises(self):
+        # shape[0]=300: no divisor of 300 is both <= 160 and % 32 == 0
+        # xpose_pipeline should raise ValueError rather than silently using a
+        # non-divisor tile that would leave rows unprocessed or cause VMEM OOM.
+        shape = (300, 192, 128)
+        input_data = jax.random.normal(jax.random.PRNGKey(0), shape,
+                                       dtype=jnp.float8_e4m3fn)
+        with self.assertRaises(ValueError):
+            xpose_pipeline(input_data,
+                           transpose_axes=(1, 0, 2),
+                           n_tile=160,
+                           m_tile=64)
+
+    def test_clamped_n_tile(self):
+        # shape[0]=128, n_tile=160: 160 > 128, so n_tile is clamped to 128.
+        # For fp8, sublane_multiple=32; prev_closest_divisor(128, 128, multiple_of=32) = 128,
+        # which evenly divides 128, so no warning should be emitted.
+        # NOTE: need to keep shape distinct from other test cases to emit
+        # logging at compilation time.
+        shape = (128, 192, 128)
+        input_data = jax.random.normal(jax.random.PRNGKey(0), shape,
+                                       dtype=jnp.float8_e4m3fn)
+        with self.assertNoLogs('tpu_inference.kernels.custom_calls.kernel',
+                               level='WARNING'):
+            result = xpose_pipeline(input_data,
+                                    transpose_axes=(1, 0, 2),
+                                    n_tile=160,
+                                    m_tile=64)[0]
+
+        expected = jnp.transpose(input_data, (1, 0, 2))
+        self.assertTrue(jnp.allclose(result, expected))
+
+
+class TestPrevClosestDivisor(parameterized.TestCase):
+
+    @parameterized.parameters(
+        dict(number=112, divider=160, expected=112),
+        # Largest divisor of 300 <= 160 is 150.
+        dict(number=300, divider=160, expected=150),
+        # Exact match: divider equals the number itself.
+        dict(number=128, divider=128, expected=128),
+        dict(number=160, divider=160, expected=160),
+        # Common TPU tile sizes (powers of 2): 256 and 512 both reduce to 128.
+        dict(number=256, divider=160, expected=128),
+        dict(number=512, divider=160, expected=128),
+        dict(number=1024, divider=160, expected=128),
+        # Non-power-of-2: divisors of 160 are [...,40,80,160]; largest <= 128 is 80.
+        dict(number=160, divider=128, expected=80),
+        # divider=1 always returns 1 (smallest possible divisor).
+        dict(number=128, divider=1, expected=1),
+        # divider larger than number: returns the number itself.
+        dict(number=64, divider=1000, expected=64),
+    )
+    def test_prev_closest_divisor(self, number, divider, expected):
+        self.assertEqual(prev_closest_divisor(number, divider), expected)
+
+    @parameterized.parameters(
+        # Exact match: 128 is a divisor and % 8 -> hits valid path.
+        dict(number=128, divider=160, multiple_of=8, expected=128),
+        # 512: largest divisor <=160 that is %8 is 128 -> hits valid path.
+        dict(number=512, divider=160, multiple_of=8, expected=128),
+        # 120: largest divisor <=100 that is %8 is 40 -> hits valid path.
+        dict(number=120, divider=100, multiple_of=8, expected=40),
+        # 256: largest divisor <=128 that is %8 is 128 itself -> hits valid path.
+        dict(number=256, divider=128, multiple_of=8, expected=128),
+        # divider larger than number: 64 is a divisor of itself and %8 -> hits valid path.
+        dict(number=64, divider=1000, multiple_of=8, expected=64),
+        # multiple_of=1 behaves identically to no multiple_of argument.
+        dict(number=300, divider=160, multiple_of=1, expected=150),
+        # 300: no divisor <=160 is %8; highest divisor < 160 = 150; cdiv(150,8)=152 -> candidate path.
+        dict(number=300, divider=160, multiple_of=8, expected=152),
+        # 150: no divisor <=100 is %8; highest divisor < 100 = 75; cdiv(75,8)=80 -> candidate path.
+        dict(number=150, divider=100, multiple_of=8, expected=80),
+        # number < multiple_of and divider >= number: returns number (full-dim tile).
+        dict(number=4, divider=10, multiple_of=8, expected=4),
+    )
+    def test_prev_closest_divisor_multiple_of(self, number, divider,
+                                              multiple_of, expected):
+        self.assertEqual(
+            prev_closest_divisor(number, divider, multiple_of=multiple_of),
+            expected)
+
+    def test_prev_closest_divisor_multiple_of_raises(self):
+        # divider=2 < number=4, both < multiple_of=8: no valid tile -> ValueError.
+        with self.assertRaises(ValueError):
+            prev_closest_divisor(4, 2, multiple_of=8)
 
 
 if __name__ == "__main__":
