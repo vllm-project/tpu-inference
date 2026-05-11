@@ -213,8 +213,7 @@ def sharded_quantized_batched_matmul(x: jax.Array,
 
     # Input sharding: activation takes precedence; fall back to weight sharding
     # for shared (batch) axes where activation info is absent.
-    x_spec = tuple(
-        act_shard.get(c, axis_shard.get(c, None)) for c in x_axis)
+    x_spec = tuple(act_shard.get(c, axis_shard.get(c, None)) for c in x_axis)
     x_sharding = P(*x_spec)
 
     # Scale sharding: scale is 1D (out_features) for tensorwise.
@@ -252,11 +251,12 @@ def sharded_quantized_batched_matmul(x: jax.Array,
 
     def wrapper(x, w_q, w_s):
         _should_quantize_act = x.dtype.itemsize > 1
-        output = xla_quantized_batched_matmul(x,
-                                              w_q,
-                                              w_s,
-                                              dimension_numbers,
-                                              quantize_activation=_should_quantize_act)
+        output = xla_quantized_batched_matmul(
+            x,
+            w_q,
+            w_s,
+            dimension_numbers,
+            quantize_activation=_should_quantize_act)
         for axis_name in contract_axis_names:
             output = jax.lax.psum(output, axis_name=axis_name)
         # Transpose from dot_general output order to einsum output order.

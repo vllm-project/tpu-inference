@@ -725,8 +725,7 @@ class TestDeepseekV3Attention(unittest.TestCase):
                                            None)
             query_tnh_spec = PartitionSpec(ShardingAxisName.ATTN_DATA, None,
                                            None)
-            keyvalue_skh_spec = PartitionSpec(ShardingAxisName.ATTN_DATA,
-                                              None)
+            keyvalue_skh_spec = PartitionSpec(ShardingAxisName.ATTN_DATA, None)
             attn_o_nth_spec = PartitionSpec(None, ShardingAxisName.ATTN_DATA,
                                             None)
 

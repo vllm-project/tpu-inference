@@ -36,9 +36,8 @@ from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
 from tpu_inference.layers.common.attention_interface import mla_attention
 from tpu_inference.layers.common.moe import MoEBackend
-from tpu_inference.layers.common.quantization import (dequantize_tensor,
-                                                      quantize_kv,
-                                                      static_per_tensor_quantize_tensor)
+from tpu_inference.layers.common.quantization import (
+    dequantize_tensor, quantize_kv, static_per_tensor_quantize_tensor)
 from tpu_inference.layers.common.sharding import \
     ShardingAxisNameBase as ShardingAxisName
 from tpu_inference.layers.common.utils import cpu_mesh_context
