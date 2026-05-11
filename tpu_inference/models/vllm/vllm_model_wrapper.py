@@ -57,8 +57,8 @@ from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.vllm.experimental.model_patcher import patch_mm_model
-from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import (
-    maybe_apply_qwen3_vl_patches)
+from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
+    maybe_apply_qwen3_vl_patches
 from tpu_inference.models.vllm.experimental.vision_tower_jit import (
     maybe_jit_embed_multimodal_func, maybe_precompile_vision_encoder_fn,
     maybe_prepare_for_jit)
@@ -246,9 +246,6 @@ class VllmModelWrapper:
         self._pooler: Pooler | None = self.model.pooler
 
         if self.vllm_config.model_config.is_multimodal_model:
-            # Set up JIT compilation keys for multimodal modules
-            jitted_keys = list(envs.JITTED_MM_MODULE_KEYS)
-
             # NOTE: It patch mm models to be JITtable within some submodule.
             # Caution: the submodule params_and_buffers would be put into
             # the wrapper directly. params_and_buffers should be sharded to tpu
@@ -256,7 +253,7 @@ class VllmModelWrapper:
             self.model, params_and_buffers = patch_mm_model(
                 self.model,
                 params_and_buffers,
-                jitted_mm_module_keys=jitted_keys,
+                jitted_mm_module_keys=envs.JITTED_MM_MODULE_KEYS,
                 register_mm_module_custom_pytree_classes=envs.
                 REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES,
             )
