@@ -172,7 +172,7 @@ def run_jax_gdn_attention_local(
             d_k=d_k,
             d_v=d_v,
             config=wrapper_config,
-            chunk_size=64,
+            chunk_size=32,
             has_initial_state=has_initial_state,
         )
 
