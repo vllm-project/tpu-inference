@@ -22,7 +22,8 @@ from jax.sharding import PartitionSpec as P
 
 import tpu_inference.envs as envs
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
-from tpu_inference.kernels.sparse_core.ragged_gather import ragged_gather
+# from tpu_inference.kernels.sparse_core.ragged_gather import ragged_gather
+from tpu_inference.kernels.sparse_core.ragged_gather_v2 import ragged_gather_v2 as ragged_gather
 from tpu_inference.kernels.sparse_core.ragged_gather_reduce import \
     ragged_gather_reduce
 from tpu_inference.layers.common.quantization import quantize_tensor
