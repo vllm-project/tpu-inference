@@ -171,7 +171,9 @@ def _scheduler_worker_process(
                     _send_result(None)  # Signal completion
 
                 case SchedulerCommand.SCHEDULE:
-                    output = scheduler.schedule()
+                    allow_new_prefills = data if data is not None else True
+                    output = scheduler.schedule(
+                        allow_new_prefills=allow_new_prefills)
                     _cached_scheduler_outputs.append(output)
                     _send_result(output)
 
@@ -601,9 +603,13 @@ class DPScheduler(SchedulerInterface):
                          self._schedule_step_count - 1, e2e_step_time)
         self._prev_schedule_start = now
 
+        total_running, _ = self.get_request_counts()
+        allow_new_prefills = (total_running == 0)
+
         # Run each scheduler independently
         for rank in range(self.dp_size):
-            self._send_command(rank, SchedulerCommand.SCHEDULE)
+            self._send_command(rank, SchedulerCommand.SCHEDULE,
+                               allow_new_prefills)
 
         # Collect outputs from all workers (blocking)
         rank_outputs = []

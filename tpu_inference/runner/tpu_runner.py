@@ -1554,12 +1554,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Please see runner_utils.PhasedBasedProfiler for details
         if self.phase_based_profiler:
             self.batch_counter += 1
-            batch_composition_stats = runner_utils.get_batch_composition_stats(
-                self.batch_counter, self.input_batch,
-                total_num_scheduled_tokens, num_reqs,
-                padded_total_num_scheduled_tokens, scheduler_output)
+        batch_composition_stats = runner_utils.get_batch_composition_stats(
+            self.batch_counter, self.input_batch, total_num_scheduled_tokens,
+            num_reqs, padded_total_num_scheduled_tokens, scheduler_output)
+        print(batch_composition_stats)
 
-            self.phase_based_profiler.step(batch_composition_stats)
+        # self.phase_based_profiler.step(batch_composition_stats)
 
         positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
         mrope_positions = self.mrope_positions_cpu[:, :
