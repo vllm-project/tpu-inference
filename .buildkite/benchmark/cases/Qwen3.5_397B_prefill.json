@@ -49,7 +49,7 @@
           "random-input-len": 8192,
           "random-output-len": 1,
           "num-prompts": 1000,
-          "percentile-metrics": "ttft,e2el",
+          "percentile-metrics": "ttft,tpot,itl,e2el",
           "ignore-eos": true,
           "max-concurrency": 1
         }
@@ -97,7 +97,7 @@
           "random-input-len": 8192,
           "random-output-len": 1,
           "num-prompts": 1000,
-          "percentile-metrics": "ttft,e2el",
+          "percentile-metrics": "ttft,tpot,itl,e2el",
           "ignore-eos": true,
           "max-concurrency": 2
         }
@@ -145,7 +145,7 @@
           "random-input-len": 8192,
           "random-output-len": 1,
           "num-prompts": 1000,
-          "percentile-metrics": "ttft,e2el",
+          "percentile-metrics": "ttft,tpot,itl,e2el",
           "ignore-eos": true,
           "max-concurrency": 4
         }
@@ -193,7 +193,7 @@
           "random-input-len": 8192,
           "random-output-len": 1,
           "num-prompts": 1000,
-          "percentile-metrics": "ttft,e2el",
+          "percentile-metrics": "ttft,tpot,itl,e2el",
           "ignore-eos": true,
           "max-concurrency": 8
         }
@@ -241,7 +241,7 @@
           "random-input-len": 8192,
           "random-output-len": 1,
           "num-prompts": 1000,
-          "percentile-metrics": "ttft,e2el",
+          "percentile-metrics": "ttft,tpot,itl,e2el",
           "ignore-eos": true,
           "max-concurrency": 16
         }
@@ -289,7 +289,7 @@
           "random-input-len": 8192,
           "random-output-len": 1,
           "num-prompts": 1000,
-          "percentile-metrics": "ttft,e2el",
+          "percentile-metrics": "ttft,tpot,itl,e2el",
           "ignore-eos": true,
           "max-concurrency": 32
         }
