@@ -20,7 +20,7 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.gdn import \
-    compute_schedule_v2 as compute_schedule_table_v2
+    compute_schedule_v3 as compute_schedule_table_v3
 
 
 def invert_triangular_matrix(A, block_size=16):
@@ -1130,7 +1130,7 @@ def recurrent_scan(
     # requests.
     decode_tokens = distribution[0]
     schedule_table, total_blocks = (
-        compute_schedule_table_v2.compute_schedule_table_v2(
+        compute_schedule_table_v3.compute_schedule_table_v3(
             query_start_loc,
             decode_tokens,
             distribution[2],
