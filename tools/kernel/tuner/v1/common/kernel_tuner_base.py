@@ -114,7 +114,7 @@ class KernelTunerBase(ABC):
                  tpu_cores: int = None,
                  tpu_queue_multi: str = None,
                  run_locally: bool = False,
-                 kernel_tuning_job_priority: int = -10,
+                 job_priority: int = -10,
                  max_execution_minutes: int = 20):
         assert tuning_key_class is not None, "tuning_key_class must be specified"
         assert tunable_params_class is not None, "tunable_params_class must be specified"
@@ -135,7 +135,7 @@ class KernelTunerBase(ABC):
         self.tpu_cores = tpu_cores
         self.run_locally = run_locally
         self.max_execution_minutes = max_execution_minutes
-        self.kernel_tuning_job_priority = kernel_tuning_job_priority
+        self.job_priority = job_priority
 
     def _init_case_set(self) -> bool:
         """Initialize the case set which will be used for tuning. The case set will be written to the storage manager. This will be called when the caseset_id is new.
@@ -256,13 +256,14 @@ class KernelTunerBase(ABC):
                 f"  --run_locally={self.run_locally} "
                 f"  --tpu_queue_multi={self.tpu_queue_multi} "
                 f"  --max_execution_minutes={self.max_execution_minutes} "
+                f"  --job_priority={self.job_priority} "
                 f"  --begin_case_id={case_id_start} --end_case_id={case_id_end}\""
                 f"- |"
                 f"  if [ -f /tmp/kernel_tuning/generated_pipeline.yml ]; then "
                 f"    buildkite-agent artifact upload \"/tmp/kernel_tuning/generated_pipeline.yml\" && "
-                f"    echo \"Upload generated pipeline YAML to Buildkite artifacts with priority {self.kernel_tuning_job_priority}\" && "
+                f"    echo \"Upload generated pipeline YAML to Buildkite artifacts with priority {self.job_priority}\" && "
                 f"    {{ "
-                f"      echo \"priority: {self.kernel_tuning_job_priority}\"; "
+                f"      echo \"priority: {self.job_priority}\"; "
                 f"      cat /tmp/kernel_tuning/generated_pipeline.yml; "
                 f"    }} | buildkite-agent pipeline upload; "
                 f"  else "

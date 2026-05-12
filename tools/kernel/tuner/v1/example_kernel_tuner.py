@@ -60,7 +60,7 @@ class ExampleKernelTuner(KernelTunerBase):
                  tpu_cores=None,
                  tpu_queue_multi=None,
                  run_locally=None,
-                 kernel_tuning_job_priority=-10,
+                 job_priority=-10,
                  max_execution_minutes=20):
         super().__init__(tuning_key_class=TuningKey,
                          tunable_params_class=TunableParams,
@@ -74,7 +74,7 @@ class ExampleKernelTuner(KernelTunerBase):
                          tpu_cores=tpu_cores,
                          tpu_queue_multi=tpu_queue_multi,
                          run_locally=run_locally,
-                         kernel_tuning_job_priority=kernel_tuning_job_priority,
+                         job_priority=job_priority,
                          max_execution_minutes=max_execution_minutes
                          )  # Use a small bucket size for testing
 

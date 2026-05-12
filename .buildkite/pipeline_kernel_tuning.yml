@@ -75,7 +75,7 @@ steps:
           --case_set_id=\${KERNEL_TUNING_CASE_SET_ID} \
           --run_id=\${KERNEL_TUNING_RUN_ID} \
           --tpu_cores=\${KERNEL_TUNING_TPU_CORES} \
-          --kernel_tuning_job_priority=\${KERNEL_TUNING_JOB_PRIORITY:-10} \
+          --job_priority=\${KERNEL_TUNING_JOB_PRIORITY:-10} \
           --max_execution_minutes=\${KERNEL_TUNING_MAX_EXECUTION_MINUTES:-20} \
           --tpu_version=\${TPU_VERSION} "
       - |

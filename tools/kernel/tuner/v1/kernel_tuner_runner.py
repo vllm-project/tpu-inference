@@ -84,13 +84,13 @@ _TPU_QUEUE_MULTI = flags.DEFINE_string(
     'The TPU queue to use for tuning. This will be automatically determined based on the TPU version and cores if not specified. Supported values are "tpu_v6e_queue", "tpu_v6e_8_queue", "tpu_v7x_2_queue", "tpu_v7x_8_queue", and "tpu_v7x_16_queue".'
 )
 
-_KERNEL_TUNING_JOB_PRIORITY = flags.DEFINE_integer(
-    'kernel_tuning_job_priority', -10,
+_JOB_PRIORITY = flags.DEFINE_integer(
+    'job_priority', -10,
     'The priority to use for kernel tuning jobs. Higher priority jobs will be scheduled before lower priority ones. Default is -10, which is lower than typical user jobs to avoid impacting them.'
 )
 
 _MAX_EXECUTION_MINUTES = flags.DEFINE_integer(
-    'kernel_tuning_max_execution_minutes', 20,
+    'max_execution_minutes', 20,
     'Only used when the kernel tuning job is scheduled through Buildkite. The maximum execution time in minutes for each kernel tuning job. If the job exceeds this time, it will save the job progresss, generate a new job to be scheduled by Buildkite and exit.'
 )
 
@@ -171,7 +171,7 @@ def main(argv):
         tpu_cores=tpu_cores,
         tpu_queue_multi=tpu_queue_multi,
         run_locally=_RUN_LOCALLY.value,
-        kernel_tuning_job_priority=_KERNEL_TUNING_JOB_PRIORITY.value,
+        job_priority=_JOB_PRIORITY.value,
         max_execution_minutes=_MAX_EXECUTION_MINUTES.value)
 
     if kernel_tuner.run_locally:
