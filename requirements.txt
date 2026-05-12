@@ -5,9 +5,9 @@ pytest-mock
 absl-py
 numpy
 google-cloud-storage
-jax==0.10.1.dev20260422
-jaxlib==0.10.1.dev20260422
-libtpu==0.0.41.dev20260422+nightly
+jax @ https://us-python.pkg.dev/ml-oss-artifacts-published/jax/jax/jax-0.10.1.dev20260422-py3-none-any.whl
+jaxlib @ https://us-python.pkg.dev/ml-oss-artifacts-published/jax/jaxlib/jaxlib-0.10.1.dev20260422-cp312-cp312-manylinux_2_27_x86_64.whl
+libtpu @ https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu/libtpu-0.0.41.dev20260422%2Bnightly-cp312-cp312-manylinux_2_31_x86_64.whl
 jaxtyping
 flax==0.12.4
 torchax==0.0.11
