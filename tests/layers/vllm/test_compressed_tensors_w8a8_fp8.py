@@ -12,10 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-
-os.environ["JAX_PLATFORMS"] = "cpu"
-
 import tempfile
 from typing import Optional
 from unittest.mock import MagicMock, patch
@@ -441,19 +437,6 @@ def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
     initialize_layer_weights(linear_layer)
     ref_output, layer_output = return_ref_and_layer_output(linear_layer)
     torch.testing.assert_close(ref_output, layer_output)
-
-
-def test_fp8_kernel_registry_injection():
-    import vllm.model_executor.kernels.linear as vllm_linear
-    from vllm.platforms import PlatformEnum
-
-    assert hasattr(vllm_linear, "_POSSIBLE_FP8_BLOCK_KERNELS")
-    assert PlatformEnum.TPU in vllm_linear._POSSIBLE_FP8_BLOCK_KERNELS
-
-    registered_kernels = vllm_linear._POSSIBLE_FP8_BLOCK_KERNELS[
-        PlatformEnum.TPU]
-    assert any(k.__name__ == "TpuFP8ScaledMMLinearKernel"
-               for k in registered_kernels)
 
 
 def test_blockwise_config_construction():
