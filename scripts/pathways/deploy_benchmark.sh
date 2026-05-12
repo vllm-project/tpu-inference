@@ -79,7 +79,7 @@ COMPLETIONS_PARALLELISM="${DP_COMPLETIONS[${DATA_PARALLEL_SIZE}]}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-YAML_TEMPLATE="${SCRIPT_DIR}/pathways_job_new_cluster.yaml"
+YAML_TEMPLATE="${SCRIPT_DIR}/pathways_job_alpha.yaml"
 
 # Total DP size: DP if not using attn_dp, DP*(TP/4) if using attn_dp
 if [[ "${ENABLE_ATTN_DP}" == "true" ]]; then
