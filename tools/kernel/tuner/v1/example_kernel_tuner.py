@@ -19,6 +19,8 @@ import random
 import time
 
 from tools.kernel.tuner.v1.common.kernel_tuner_base import (KernelTunerBase,
+                                                            RunConfig,
+                                                            TunerConfig,
                                                             TuningCase,
                                                             TuningStatus)
 
@@ -51,32 +53,15 @@ class ExampleKernelTuner(KernelTunerBase):
     # not based on any real computation, but rather is just a placeholder to
     # demonstrate the tuning pipeline.
 
-    def __init__(self,
-                 storage_manager,
-                 case_set_id=None,
-                 run_id=None,
-                 case_set_desc=None,
-                 tpu_version=None,
-                 tpu_cores=None,
-                 tpu_queue_multi=None,
-                 run_locally=None,
-                 job_priority=-10,
-                 max_execution_minutes=20):
-        super().__init__(tuning_key_class=TuningKey,
-                         tunable_params_class=TunableParams,
-                         storage_manager=storage_manager,
-                         job_bucket_size=2,
-                         kernel_tuner_name="example_kernel_tuner",
-                         case_set_id=case_set_id,
-                         run_id=run_id,
-                         case_set_desc=case_set_desc,
-                         tpu_version=tpu_version,
-                         tpu_cores=tpu_cores,
-                         tpu_queue_multi=tpu_queue_multi,
-                         run_locally=run_locally,
-                         job_priority=job_priority,
-                         max_execution_minutes=max_execution_minutes
-                         )  # Use a small bucket size for testing
+    def __init__(self, run_config: RunConfig):
+        self.tuner_config = TunerConfig(
+            tuning_key_class=TuningKey,
+            tunable_params_class=TunableParams,
+            kernel_tuner_name="example_kernel_tuner")
+        self.run_config = run_config
+        super().__init__(
+            tuner_config=self.tuner_config,
+            run_config=self.run_config)  # Use a small bucket size for testing
 
     def generate_cases(self) -> list[TuningCase]:
         # Generate some mock tuning cases based on the case_set_id and desc.

@@ -18,12 +18,9 @@ import os
 
 from absl import app, flags
 
+from tools.kernel.tuner.v1.common.kernel_tuner_base import RunConfig
 from tools.kernel.tuner.v1.example_kernel_tuner import ExampleKernelTuner
 from tools.kernel.tuner.v1.rpa_v3_kernel_tuner import RpaV3KernelTuner
-from tools.kernel.tuner.v1.storage_management.local_db_manager import \
-    LocalDbManager
-from tools.kernel.tuner.v1.storage_management.spanner_database_manager import \
-    SpannerStorageManager
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -146,15 +143,6 @@ def main(argv):
         f'Using case_set_id: {case_set_id}, run_id: {run_id}, case_set_desc: {case_set_desc} for this tuning run.'
     )
 
-    # Initialize storage manager
-    if _RUN_LOCALLY.value:
-        storage_manager = LocalDbManager()
-    else:
-        storage_manager = SpannerStorageManager()
-
-    # Initialize kernel tuner
-    kernel_tuner_cls = KERNEL_TUNER_REGISTRY.get(_KERNEL_TUNER_NAME.value)
-
     tpu_version = _TPU_VERSION.value
     tpu_cores = _TPU_CORES.value
     tpu_queue_multi = _TPU_QUEUE_MULTI.value
@@ -162,17 +150,17 @@ def main(argv):
     tpu_queue_multi = get_tpu_queue_by_version_and_cores(
         tpu_version, tpu_cores, tpu_queue_multi)
 
-    kernel_tuner = kernel_tuner_cls(
-        storage_manager,
-        case_set_id=case_set_id,
-        run_id=run_id,
-        case_set_desc=case_set_desc,
-        tpu_version=tpu_version,
-        tpu_cores=tpu_cores,
-        tpu_queue_multi=tpu_queue_multi,
-        run_locally=_RUN_LOCALLY.value,
-        job_priority=_JOB_PRIORITY.value,
-        max_execution_minutes=_MAX_EXECUTION_MINUTES.value)
+    run_config = RunConfig(case_set_id=case_set_id,
+                           run_id=run_id,
+                           case_set_desc=case_set_desc,
+                           tpu_version=tpu_version,
+                           tpu_cores=tpu_cores,
+                           tpu_queue_multi=tpu_queue_multi,
+                           run_locally=_RUN_LOCALLY.value,
+                           job_priority=_JOB_PRIORITY.value,
+                           max_execution_minutes=_MAX_EXECUTION_MINUTES.value)
+    kernel_tuner_cls = KERNEL_TUNER_REGISTRY.get(_KERNEL_TUNER_NAME.value)
+    kernel_tuner = kernel_tuner_cls(run_config=run_config)
 
     if kernel_tuner.run_locally:
         logger.info(
