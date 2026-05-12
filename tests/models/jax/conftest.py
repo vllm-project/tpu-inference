@@ -59,8 +59,7 @@ def mesh():
         yield m
 
 
-@pytest.fixture
-def mock_vllm_config():
+def _make_hf_mock_vllm_config_class():
 
     class MockVllmConfig:
 
@@ -75,6 +74,22 @@ def mock_vllm_config():
             self.parallel_config = None
 
     return MockVllmConfig
+
+
+@pytest.fixture
+def mock_vllm_config():
+    return _make_hf_mock_vllm_config_class()
+
+
+@pytest.fixture
+def mock_vllm_config_factory():
+    """Factory fixture that creates a VllmConfig from a real HF model name.
+
+    Unlike mock_vllm_config (which may be overridden per-module with a
+    toy-config instance), this fixture always returns the HF-backed factory
+    class and is intended for integration tests that load real model weights.
+    """
+    return _make_hf_mock_vllm_config_class()
 
 
 @register_model_loader("skip_layers_model_loader_for_test")

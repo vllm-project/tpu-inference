@@ -14,8 +14,8 @@
 
 import math
 from functools import partial
-from typing import (Callable, List, Literal, NamedTuple, Optional, TypedDict,
-                    Union)
+from typing import (Callable, Iterable, List, Literal, NamedTuple, Optional,
+                    TypedDict, Union)
 
 import jax
 import jax.numpy as jnp
@@ -34,6 +34,7 @@ from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer
@@ -44,7 +45,8 @@ from tpu_inference.models.jax.qwen2 import Qwen2Model
 # from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from tpu_inference.models.jax.utils.multi_modal_utils import (
     MultiModalEmbeddings, merge_multimodal_embeddings)
-from tpu_inference.models.jax.utils.weight_utils import StandardWeightLoader
+from tpu_inference.models.jax.utils.weight_utils import (LoadableWithIterator,
+                                                         StandardWeightLoader)
 
 logger = init_logger(__name__)
 
@@ -757,7 +759,7 @@ class Qwen2_5_VisionTransformer(nnx.Module):
             return self.encode_jit(x, grid_thw)
 
 
-class Qwen2_5_VLForConditionalGeneration(nnx.Module):
+class Qwen2_5_VLForConditionalGeneration(JaxModule, LoadableWithIterator):
     WeightLoader = StandardWeightLoader
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
@@ -766,7 +768,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.vllm_config = vllm_config
-        self.rng = nnx.Rngs(rng_key)
+        rng = nnx.Rngs(rng_key)
         self.mesh = mesh
         self.is_first_rank = get_pp_group().is_first_rank
 
@@ -778,7 +780,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         if self.is_first_rank:
             self.visual = Qwen2_5_VisionTransformer(
                 vllm_config=vllm_config,
-                rngs=self.rng,
+                rngs=rng,
                 mesh=mesh,
                 norm_eps=getattr(config, "rms_norm_eps",
                                  config.text_config.rms_norm_eps),
@@ -786,19 +788,22 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         else:
             self.visual = PPMissingLayer()
 
-        self.model = Qwen2Model(vllm_config, self.rng, mesh)
-        model_config = vllm_config.model_config
-        if not model_config.hf_config.tie_word_embeddings:
+        # Qwen2Model handles new-transformers text_config nesting internally.
+        self.model = Qwen2Model(vllm_config, rng, mesh)
+        # For lm_head, read hidden_size from text_config if present (new
+        # transformers nests language attrs there); tie_word_embeddings lives
+        # on the outer config in both transformers versions.
+        text_cfg = getattr(config, 'text_config', config)
+        tie_word_embeddings = getattr(config, 'tie_word_embeddings', False)
+        if not tie_word_embeddings:
             if self.is_last_rank:
-                vocab_size = model_config.get_vocab_size()
-                hidden_size = getattr(
-                    model_config.hf_config, 'hidden_size',
-                    model_config.hf_config.text_config.hidden_size)
+                vocab_size = vllm_config.model_config.get_vocab_size()
+                hidden_size = text_cfg.hidden_size
                 self.lm_head = JaxEinsum(
                     einsum_str="TD,DV->TV",
                     kernel_shape=(hidden_size, vocab_size),
-                    dtype=model_config.dtype,
-                    rngs=self.rng,
+                    dtype=vllm_config.model_config.dtype,
+                    rngs=rng,
                     quant_config=vllm_config.quant_config,
                 )
             else:
@@ -1151,11 +1156,8 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
 
         return self.model.embed_tokens.decode(hidden_states)
 
-    def load_weights(self, rng_key: jax.Array) -> None:
-        self.rng = nnx.Rngs(rng_key)
-        # Key: path to a HF layer weight
-        # Value: a tuple of (path to a nnx layer weight, nnx weight sharding)
-
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> None:
         self.pp_missing_layers = []
         for path, module in nnx.iter_graph(self):
             if isinstance(module, PPMissingLayer):
@@ -1197,7 +1199,8 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         loader.load_weights(
             self,
             mappings,
-            keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match)
+            keep_hf_weight_suffix_when_match=keep_hf_weight_suffix_when_match,
+            weights_iterator=weights)
 
     def precompile_vision_encoder(
         self,
@@ -1206,7 +1209,7 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         if not self.is_first_rank:
             return
 
-        vc = self.vllm_config.model_config.hf_config.vision_config
+        vc = self.config.vision_config
         patch_input_dim = vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size
         if self.visual.enable_dynamic_image_sizes:
             spatial_merge_unit = vc.spatial_merge_size**2
