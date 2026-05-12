@@ -31,7 +31,7 @@
           "max-num-seqs": 256,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
+            "v6e-8": 4,
             "v7x-2": 2,
             "default": 1
           },
@@ -81,7 +81,7 @@
           "max-num-seqs": 256,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
+            "v6e-8": 4,
             "v7x-2": 2,
             "default": 1
           },
