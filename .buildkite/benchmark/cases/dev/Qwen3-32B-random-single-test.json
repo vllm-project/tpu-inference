@@ -51,7 +51,9 @@
           "random-output-len": 1024,
           "max-concurrency": 64,
           "random-range-ratio": 0.8,
-          "request-rate": "inf"
+          "request-rate": "inf",
+          "ignore-eos": true,
+          "percentile-metrics": "ttft,tpot,itl,e2el"
         }
       }
     }
