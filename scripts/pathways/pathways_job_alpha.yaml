@@ -66,14 +66,13 @@ spec:
                     # Environment variables
                     export VLLM_ENABLE_V1_MULTIPROCESSING=0
                     export HF_TOKEN=${HF_TOKEN}
-                    export PHASED_PROFILING_DIR=gs://wenxindong-multipod-dev/profiling/vllm_qwen3_235b_a22b_instruct_2507/__PROFILING_DIR_SUFFIX__
+                    # export PHASED_PROFILING_DIR=gs://wenxindong-multipod-dev/profiling/vllm_qwen3_235b_a22b_instruct_2507/__PROFILING_DIR_SUFFIX__
                     export PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=50
                     # export PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=2000
                     export VLLM_ENGINE_READY_TIMEOUT_S=72000
                     export MODEL_IMPL_TYPE=vllm
                     export NEW_MODEL_DESIGN=1
                     # export SKIP_JAX_PRECOMPILE=1
-                    export RPA_D_BLOCK_SIZES="1,1024,1,512"
 
                     # Clear potentially corrupted model streamer cache
                     # rm -rf /root/.cache/vllm/assets/model_streamer
@@ -81,16 +80,19 @@ spec:
                     # Launch vllm serve via Pathways
                     JAX_PLATFORMS=proxy,cpu \
                     JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 \
-                    vllm serve Qwen/Qwen3-235B-A22B \
-                    --tensor-parallel-size __TENSOR_PARALLEL_SIZE__ \
-                    --data-parallel-size __DATA_PARALLEL_SIZE__ \
-                    --max-model-len 5120 \
-                    --gpu-memory-utilization 0.95 \
-                    --no-enable-prefix-caching \
-                    --max-num-seqs 256 \
-                    --max-num-batched-tokens 4096 \
-                    --load-format dummy \
-                    __ADDITIONAL_CONFIG__
+                    python /workspace/tpu_inference/examples/offline_inference.py --model Qwen/Qwen3-235B-A22B --tensor-parallel-size 8 --load-format dummy --additional_config='{"sharding":{"sharding_strategy": {"enable_dp_attention":1}}}' --data-parallel-size 8
+
+                    # vllm serve Qwen/Qwen3-235B-A22B \
+                    # --tensor-parallel-size __TENSOR_PARALLEL_SIZE__ \
+                    # --data-parallel-size __DATA_PARALLEL_SIZE__ \
+                    # --max-model-len 5120 \
+                    # --gpu-memory-utilization 0.95 \
+                    # --no-enable-prefix-caching \
+                    # --max-num-seqs 256 \
+                    # --max-num-batched-tokens 4096 \
+                    # --load-format dummy \
+                    # __ADDITIONAL_CONFIG__
+
                   ) & PID=$!
                   
                   #  --enable-expert-parallel \
@@ -127,7 +129,7 @@ spec:
             # ── Pathways Resource Manager (sidecar initContainer) ──
             initContainers:
             - name: pathways-rm
-              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_server@sha256:bea35fb014edf250718ce32820777ceb943dfdcf08a593b3fb762ad9ea433fdc
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
               imagePullPolicy: Always
               args:
               - --server_port=29001
@@ -162,7 +164,7 @@ spec:
               restartPolicy: Always
             # ── Pathways Proxy Server (sidecar initContainer, port 29000) ──
             - name: pathways-proxy
-              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_proxy_server@sha256:e5ad4ef0ec907ba2378394f59c4ba074a82231112c03d7f80d7c4a38b19c043c
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest
               imagePullPolicy: Always
               args:
               - --server_port=29000
@@ -238,7 +240,7 @@ spec:
             dnsPolicy: ClusterFirstWithHostNet
             containers:
             - name: pathways-worker
-              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_server@sha256:bea35fb014edf250718ce32820777ceb943dfdcf08a593b3fb762ad9ea433fdc
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
               imagePullPolicy: Always
               restartPolicy: OnFailure
               args:
