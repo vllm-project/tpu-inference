@@ -82,6 +82,37 @@ steps:
             --max-num-batched-tokens=4096 \
             --use-chat-template'
 
+  # E4B follow-up on the vllm/torchax path. Same fix surface as E2B
+  # (PLE + KV-share via the v3 RPA kernel's update_kv_cache plumbing).
+  # E4B is larger (~4B params); single-chip v6e (32GB HBM) should fit.
+  - label: "tpu6e Gemma-4 E4B vllm-path follow-up"
+    key: tpu6e_gemma4_E4B_vllm
+    depends_on: tpu6e_build_docker
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu6e"
+    commands:
+      - |
+        if pip install "transformers>=5.5.0" --dry-run | grep -q "Would install transformers-"; then
+          echo "transformers version too low; skipping"
+          exit 0
+        fi
+        .buildkite/scripts/run_in_docker.sh bash -c '
+          MODEL_IMPL_TYPE=vllm \
+          JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" \
+          REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" \
+          SKIP_JAX_PRECOMPILE=1 \
+          VLLM_XLA_CHECK_RECOMPILATION=0 \
+          python3 /workspace/tpu_inference/examples/offline_inference.py \
+            --model=google/gemma-4-E4B-it \
+            --tensor-parallel-size=1 \
+            --max-model-len=4096 \
+            --max-num-batched-tokens=4096 \
+            --use-chat-template'
+
   - label: ":docker: Build and Push Base Image (tpu7x)"
     key: tpu7x_build_docker
     agents:
