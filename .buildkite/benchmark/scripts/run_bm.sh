@@ -29,6 +29,11 @@ on_crash() {
         return
     fi
 
+    # Ignore explicit 'exit' commands as these are controlled intentional exits
+    if [[ "$command" == exit* ]]; then
+        return
+    fi
+
     echo ""
     echo "================================================================"
     echo "🚨 [FATAL ERROR] Bash Script Crashed Unexpectedly!"
