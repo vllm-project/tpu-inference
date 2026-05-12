@@ -111,6 +111,14 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
       exit 1
     fi
 
+    # Validate modified benchmark JSON cases for syntax and key uniqueness
+    if .buildkite/scripts/validate_benchmark_cases.sh "$NON_SKIPPABLE_FILES"; then
+      echo "Benchmark cases validation passed."
+    else
+      echo "Benchmark cases validation failed. Failing build."
+      exit 1
+    fi
+
 
     MODEL_FILES="add_model_to_ci\.py|tpu_optimized_model_template\.yml|vllm_native_model_template\.yml"
     FEATURE_FILES="add_feature_to_ci\.py|feature_template\.yml|parallelism_template\.yml"
