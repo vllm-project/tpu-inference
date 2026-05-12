@@ -41,46 +41,47 @@ spec:
                 trap _sigterm SIGTERM;
 
                 (
-                  # # Patch local tpu-inference changes from GCS
-                  # echo "Installing tpu-inference patch from GCS..."
-                  # TOKEN=$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
-                  # curl -s -H "Authorization: Bearer ${TOKEN}" \
-                  #   -o /tmp/tpu-inference.tar.gz \
-                  #   "https://storage.googleapis.com/wenxindong-multipod-dev/patches/tpu-inference.tar.gz"
-                  # mkdir -p /tmp/tpu-inference && tar xzf /tmp/tpu-inference.tar.gz -C /tmp/tpu-inference
-                  # # Overwrite the pre-installed /workspace/tpu_inference in-place
-                  # # (editable installs there take precedence over site-packages)
-                  # if [ -d /workspace/tpu_inference ]; then
-                  #   cp -a /tmp/tpu-inference/. /workspace/tpu_inference/
-                  # fi
-                  # pip install --no-deps /tmp/tpu-inference
-                  # echo "tpu-inference patch installed."
+                  # Patch local tpu-inference changes from GCS
+                  echo "Installing tpu-inference patch from GCS..."
+                  TOKEN=$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+                  curl -s -H "Authorization: Bearer ${TOKEN}" \
+                    -o /tmp/tpu-inference.tar.gz \
+                    "https://storage.googleapis.com/wenxindong-multipod-dev/patches/tpu-inference.tar.gz"
+                  mkdir -p /tmp/tpu-inference && tar xzf /tmp/tpu-inference.tar.gz -C /tmp/tpu-inference
+                  # Overwrite the pre-installed /workspace/tpu_inference in-place
+                  # (editable installs there take precedence over site-packages)
+                  if [ -d /workspace/tpu_inference ]; then
+                    cp -a /tmp/tpu-inference/. /workspace/tpu_inference/
+                  fi
+                  pip install --no-deps /tmp/tpu-inference
+                  echo "tpu-inference patch installed."
                 
                   # Environment variables
                   export VLLM_ENABLE_V1_MULTIPROCESSING=0
                   export HF_TOKEN=${HF_TOKEN}
-                  export PHASED_PROFILING_DIR=gs://wenxindong-cloud-tpu-inference-test/profiling/vllm_qwen3_235b_a22b_instruct_2507/mar30/30b/dp8/2
+                  export PHASED_PROFILING_DIR=gs://wenxindong-cloud-tpu-inference-test/profiling/
                   export VLLM_ENGINE_READY_TIMEOUT_S=7200
                   export MODEL_IMPL_TYPE=vllm
                   export NEW_MODEL_DESIGN=1
                   # export SKIP_JAX_PRECOMPILE=1
 
-                  # pip install jax==0.9.1 jaxlib==0.9.1
-
                   # Launch vllm serve via Pathways
                   JAX_PLATFORMS=proxy,cpu \
                   JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 \
-                  vllm serve Qwen/Qwen3-30B-A3B \
-                    --tensor-parallel-size 2 \
-                    --data-parallel-size 8 \
-                    --api-server-count 1 \
-                    --max-model-len 8704 \
-                    --gpu-memory-utilization 0.95 \
-                    --no-enable-prefix-caching \
-                    --max-num-seqs 128 \
-                    --max-num-batched-tokens 4096 \
-                    --enable-expert-parallel \
-                    --load-format dummy
+                  /workspace/tpu_inference/examples/offline_inference.py
+                  # vllm serve Qwen/Qwen3-30B-A3B \
+                  #   --tensor-parallel-size 2 \
+                  #   --data-parallel-size 8 \
+                  #   --api-server-count 1 \
+                  #   --max-model-len 8704 \
+                  #   --gpu-memory-utilization 0.95 \
+                  #   --no-enable-prefix-caching \
+                  #   --max-num-seqs 128 \
+                  #   --max-num-batched-tokens 4096 \
+                  #   --enable-expert-parallel \
+                  #   --load-format dummy
+
+                
                 ) & PID=$!;
                 while kill -0 $PID 2>/dev/null;
                     do sleep 5;
@@ -140,7 +141,7 @@ spec:
                     fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
               - name: TPU_SKIP_MDS_QUERY
                 value: "true"
-              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_server@sha256:bea35fb014edf250718ce32820777ceb943dfdcf08a593b3fb762ad9ea433fdc
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest 
               imagePullPolicy: Always
               name: pathways-rm
               ports:
@@ -163,7 +164,7 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
-              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_proxy_server@sha256:e5ad4ef0ec907ba2378394f59c4ba074a82231112c03d7f80d7c4a38b19c043c
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest
               imagePullPolicy: Always
               name: pathways-proxy
               ports:
@@ -234,7 +235,7 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
-              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_server@sha256:bea35fb014edf250718ce32820777ceb943dfdcf08a593b3fb762ad9ea433fdc
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest 
               imagePullPolicy: Always
               name: pathways-worker
               ports:
