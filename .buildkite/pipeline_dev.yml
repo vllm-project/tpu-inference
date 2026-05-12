@@ -40,6 +40,48 @@ steps:
   # -----------------------------------------------------------------
   # Build Step (required by all demo steps below)
   # -----------------------------------------------------------------
+  - label: ":docker: Build and Push Base Image (tpu6e)"
+    key: tpu6e_build_docker
+    agents:
+      queue: cpu_64_core
+    env:
+      TPU_VERSION: "tpu6e"
+    commands:
+      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+
+  # Phase 0 of enable_vllm_path_plan.md — baseline measurement, no patcher.
+  # Goal: does the v3 RPA KV-share kernel fix from PR #2572 alone make E2B
+  # coherent on the vllm/torchax path? Stage 1 builds #354-#369 saw
+  # bit-identical garbage across 14 patcher iterations under the OLD kernel.
+  # This step has NO patcher; just the kernel fix.
+  - label: "tpu6e Gemma-4 E2B vllm-path baseline (Phase 0, no patcher)"
+    key: tpu6e_gemma4_E2B_vllm_baseline
+    depends_on: tpu6e_build_docker
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu6e"
+    commands:
+      - |
+        if pip install "transformers>=5.5.0" --dry-run | grep -q "Would install transformers-"; then
+          echo "transformers version too low; skipping"
+          exit 0
+        fi
+        .buildkite/scripts/run_in_docker.sh bash -c '
+          MODEL_IMPL_TYPE=vllm \
+          JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" \
+          REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" \
+          SKIP_JAX_PRECOMPILE=1 \
+          VLLM_XLA_CHECK_RECOMPILATION=0 \
+          python3 /workspace/tpu_inference/examples/offline_inference.py \
+            --model=google/gemma-4-E2B-it \
+            --tensor-parallel-size=1 \
+            --max-model-len=4096 \
+            --max-num-batched-tokens=4096 \
+            --use-chat-template'
+
   - label: ":docker: Build and Push Base Image (tpu7x)"
     key: tpu7x_build_docker
     agents:
