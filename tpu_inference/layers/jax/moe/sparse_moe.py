@@ -261,7 +261,7 @@ def sparse_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
                              mesh=mesh,
                              in_specs=in_specs,
                              out_specs=out_specs,
-                             check_rep=False)(sparse_moe_distributed_fwd)
+                             check_vma=False)(sparse_moe_distributed_fwd)
 
     # TODO (jacobplatin): this is needed because of issues with Qwix quantizing the `shard_map` in SpraseMatmul
     # Basically, during the abstract pass, we need to manually quantize the weights here for Qwix, but we'll
