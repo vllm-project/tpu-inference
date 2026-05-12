@@ -249,7 +249,7 @@ fi
 # Database Reporting Logic (ON CONFLICT (RecordId) DO UPDATE SET)
 if [[ -n "${GCP_DATABASE_ID:-}" && -n "${GCP_PROJECT_ID:-}" && -n "${GCP_INSTANCE_ID:-}" ]]; then
   if [ "$EXIT_CODE" -ne 0 ]; then
-    echo "--- Run failed with exit code $EXIT_CODE. Skipping DB reporting as requested."
+    echo "--- run_bm.sh failed with exit code $EXIT_CODE. Skipping DB reporting."
     exit 0
   fi
   BUILDKITE_AGENT_NAME="${BUILDKITE_AGENT_NAME:-local-test}"
