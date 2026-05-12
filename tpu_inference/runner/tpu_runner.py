@@ -553,6 +553,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
         self.structured_decode_arange = np.arange(0, 32, dtype=np.int32)
 
+        self._cached_expert_indices_shape = None
+        self._cached_expert_indices_dtype = None
+
         # multi-modal support
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
 
@@ -941,6 +944,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      self.is_first_rank,
                      self.is_last_rank,
                  )
+                if expert_indices is not None:
+                    self._cached_expert_indices_shape = expert_indices.shape
+                    self._cached_expert_indices_dtype = expert_indices.dtype
             if not self.is_last_rank:
                 assert isinstance(hidden_states, JaxIntermediateTensors)
                 hidden_states.kv_connector_output = kv_connector_output
@@ -1076,17 +1082,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Limit max_decode_steps to not cross block boundaries
         max_decode_steps = min(user_max_decode_steps, min_remaining)
-
         if max_decode_steps <= 0:
             max_decode_steps = 1
-
-        def loop_sample_fn(step_rng, logits):
-            return sample(
-                step_rng,
-                self.mesh,
-                logits,
-                sampling_metadata,
-            )
 
         lora_metadata = self.lora_utils.extract_lora_metadata()
 
@@ -1096,13 +1093,36 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Pass max_decode_steps as a Python int to allow loop static bounds.
         # This avoids nested JIT compilation overhead and runtime buffer OOM errors
         # on tight HBM constraints, while still launching steps asynchronously (no sync).
+        expert_indices_shape = getattr(self, '_cached_expert_indices_shape',
+                                       None)
+        expert_indices_dtype = getattr(self, '_cached_expert_indices_dtype',
+                                       None)
+        if expert_indices_shape is None and hasattr(
+                self.vllm_config, 'compilation_config') and len(
+                    self.vllm_config.compilation_config.static_all_moe_layers
+                ) > 0:
+            num_layers = len(
+                self.vllm_config.compilation_config.static_all_moe_layers)
+            top_k = getattr(self.model_config.hf_config, 'num_experts_per_tok',
+                            2)
+            expert_indices_shape = (num_layers, top_k)
+            expert_indices_dtype = jnp.int32
+        elif expert_indices_shape is not None:
+            expert_indices_shape = (expert_indices_shape[0],
+                                    expert_indices_shape[-1])
+
+        bound_model_fn = functools.partial(self.model_fn, self.state)
+        bound_compute_logits_fn = functools.partial(self.compute_logits_fn,
+                                                    self.state)
+
         generated_tokens, final_kv_caches, final_state, final_rng, all_expert_indices = continue_decode(
-            state=self.state,
-            model_fn=self.model_fn,
-            compute_logits_fn=self.compute_logits_fn,
-            sample_fn=loop_sample_fn,
+            model_fn=bound_model_fn,
+            compute_logits_fn=bound_compute_logits_fn,
+            sample_fn=sample,
+            mesh=self.mesh,
             init_state=init_state,
             kv_caches=self.kv_caches,
+            sampling_metadata=sampling_metadata,
             max_decode_steps=max_decode_steps,
             eos_token_id=eos_token_id,
             padding_token_id=padding_token_id,
@@ -1116,6 +1136,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             is_first_rank=self.is_first_rank,
             is_last_rank=self.is_last_rank,
             dp_size=self.dp_size,
+            expert_indices_static_shape=expert_indices_shape,
+            expert_indices_dtype=expert_indices_dtype,
         )
         self.rng_params_for_sampling = final_rng
 
@@ -1125,7 +1147,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # transfer here since step_counter is statically known (max_decode_steps).
         generated_tokens_cpu = np.asarray(jax.device_get(generated_tokens))
 
-        # Expose request dimension as axis 0 after transpose: shape (batch_size, max_decode_steps)
+        # Expose request dimension as axis 0 after transpose: shape (batch_size, actual_steps)
         generated_tokens_cpu = generated_tokens_cpu.T
 
         actual_steps = max_decode_steps
