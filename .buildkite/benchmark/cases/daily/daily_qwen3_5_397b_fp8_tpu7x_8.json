@@ -37,7 +37,9 @@
           "max-model-len": 2048,
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.9,
-          "block-size": 256
+          "block-size": 256,
+          "no-enable-prefix-caching": true,
+          "async-scheduling": true
         }
       },
       "client_command_options": {
@@ -49,10 +51,7 @@
           "num-prompts": 320,
           "random-input-len": 1024,
           "random-output-len": 1024,
-          "max-concurrency": 320,
-          "request-rate": "inf",
-          "ignore-eos": true,
-          "percentile-metrics": "ttft,tpot,itl,e2el"
+          "max-concurrency": 320
         }
       }
     },
@@ -85,7 +84,9 @@
           "max-model-len": 9216,
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.9,
-          "block-size": 256
+          "block-size": 256,
+          "no-enable-prefix-caching": true,
+          "async-scheduling": true
         }
       },
       "client_command_options": {
@@ -97,10 +98,7 @@
           "num-prompts": 320,
           "random-input-len": 8192,
           "random-output-len": 1024,
-          "max-concurrency": 320,
-          "request-rate": "inf",
-          "ignore-eos": true,
-          "percentile-metrics": "ttft,tpot,itl,e2el"
+          "max-concurrency": 320
         }
       }
     },
@@ -133,7 +131,9 @@
           "max-model-len": 9216,
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.9,
-          "block-size": 256
+          "block-size": 256,
+          "no-enable-prefix-caching": true,
+          "async-scheduling": true
         }
       },
       "client_command_options": {
@@ -145,10 +145,7 @@
           "num-prompts": 320,
           "random-input-len": 1024,
           "random-output-len": 8192,
-          "max-concurrency": 320,
-          "request-rate": "inf",
-          "ignore-eos": true,
-          "percentile-metrics": "ttft,tpot,itl,e2el"
+          "max-concurrency": 320
         }
       }
     }
