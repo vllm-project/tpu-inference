@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import jax
 import jax.numpy as jnp
@@ -349,6 +349,63 @@ class TestPallasMLAttentionBackendImpl:
             outputs, new_kv_cache = impl.forward(q, kv_c_normed, k_pe,
                                                  kv_cache, metadata, mesh,
                                                  layer)
+
+        assert outputs is not None
+        assert new_kv_cache is not None
+
+    def test_forward_with_fp8_kv_cache_DISABLE_MLA_Q_ACTIVATION_QUANTIZATION(
+            self, mesh):
+        impl = PallasMLAttentionBackendImpl(
+            num_heads=NUM_HEADS,
+            head_size=KV_LORA_RANK + QK_ROPE_HEAD_DIM,
+            scale=0.088,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="fp8",
+            logits_soft_cap=None,
+            attn_type=AttentionType.DECODER,
+            kv_sharing_target_layer_name=None,
+            q_lora_rank=Q_LORA_RANK,
+            kv_lora_rank=KV_LORA_RANK,
+            qk_nope_head_dim=QK_NOPE_HEAD_DIM,
+            qk_rope_head_dim=QK_ROPE_HEAD_DIM,
+            qk_head_dim=QK_NOPE_HEAD_DIM + QK_ROPE_HEAD_DIM,
+            v_head_dim=V_HEAD_DIM,
+        )
+
+        layer = MagicMock()
+        layer.kv_cache_quantized_dtype = jnp.float8_e4m3fn
+        layer._q_scale_float = 1.0
+        layer._k_scale_float = 1.0
+        layer._v_scale_float = 1.0
+
+        q, kv_c_normed, k_pe, kv_cache, metadata = create_mla_inputs(
+            mesh, kv_dtype=jnp.float8_e4m3fn)
+
+        with torchax.default_env():
+            key = jax.random.key(0)
+            layer.W_UK_T = torchax.tensor.Tensor(jax.random.normal(
+                key, (NUM_HEADS, QK_NOPE_HEAD_DIM, KV_LORA_RANK),
+                dtype=jnp.bfloat16),
+                                                 env=torchax.default_env())
+            layer.W_UV = torchax.tensor.Tensor(
+                jax.random.normal(key, (NUM_HEADS, KV_LORA_RANK, V_HEAD_DIM),
+                                  dtype=jnp.bfloat16),
+                env=torchax.default_env())
+            layer.W_UK_T_scale = torchax.tensor.Tensor(
+                jnp.ones((NUM_HEADS, 1, KV_LORA_RANK), dtype=jnp.float32),
+                env=torchax.default_env())
+            layer.W_UV_scale = torchax.tensor.Tensor(jnp.ones(
+                (1, NUM_HEADS, V_HEAD_DIM), dtype=jnp.float32),
+                                                     env=torchax.default_env())
+
+            with patch(
+                    "tpu_inference.layers.vllm.backends.flash_attn_mla.envs.DISABLE_MLA_Q_ACTIVATION_QUANTIZATION",
+                    True):
+                outputs, new_kv_cache = impl.forward(q, kv_c_normed, k_pe,
+                                                     kv_cache, metadata, mesh,
+                                                     layer)
 
         assert outputs is not None
         assert new_kv_cache is not None

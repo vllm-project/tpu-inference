@@ -301,6 +301,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("DISABLE_WEIGHT_REQUANTIZATION", default=False),
     "VLLM_TPU_PATCH_MM_EMBEDDINGS":
     env_bool("VLLM_TPU_PATCH_MM_EMBEDDINGS", default=False),
+    "DISABLE_MLA_Q_ACTIVATION_QUANTIZATION":
+    env_bool("DISABLE_MLA_Q_ACTIVATION_QUANTIZATION", default=False),
 }
 
 
