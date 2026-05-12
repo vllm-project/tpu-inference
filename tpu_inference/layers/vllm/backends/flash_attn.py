@@ -193,6 +193,13 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
         sinks = jax_view(self.sinks)
 
+        # KV-share: for layers whose K/V comes from a previous layer
+        # (kv_sharing_target_layer_name is set), don't overwrite the parent's
+        # cache with this layer's locally-computed K/V. The kernel reads the
+        # parent's cached K/V and ignores the K/V we pass in. Requires the
+        # v3 RPA kernel's update_kv_cache=False support (PR #2572).
+        update_kv_cache = self.kv_sharing_target_layer_name is None
+
         new_kv_cache, outputs = _jax_attn_func(
             kv_cache,
             query,
@@ -209,6 +216,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             k_scale,
             v_scale,
             self.sliding_window,
+            update_kv_cache,
         )
         vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
 
@@ -229,6 +237,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         "k_scale",
         "v_scale",
         "sliding_window",
+        "update_kv_cache",
     ),
     donate_argnames=("kv_cache"),
 )
@@ -248,6 +257,7 @@ def _jax_attn_func(
     k_scale: float | None = None,
     v_scale: float | None = None,
     sliding_window: int | None = None,
+    update_kv_cache: bool = True,
 ) -> Tuple[jax.Array, jax.Array]:
     # Get shapes from vllm
     q_len = q.shape[0]
@@ -271,6 +281,7 @@ def _jax_attn_func(
         v_scale=v_scale,
         sinks=sinks,
         attention_chunk_size=sliding_window,
+        update_kv_cache=update_kv_cache,
     )
 
     # Convert the shape back to vLLM's convention
