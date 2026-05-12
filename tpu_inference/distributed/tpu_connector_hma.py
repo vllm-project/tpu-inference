@@ -31,7 +31,6 @@ if TYPE_CHECKING:
 
 import tpu_inference.distributed.utils as dist_utils
 from tpu_inference.distributed.host_kv_pool_hma import HostKVPoolHMA
-from tpu_inference.distributed.kv_transfer import copy_to_host
 
 # isort: off
 from tpu_inference.distributed.tpu_connector import (
@@ -258,25 +257,8 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
             f"got {attn_specs}")
         self.attn_sharding_spec = attn_specs[0] if attn_specs else None
 
-        # Build D2H host pool.
+        # Build D2H host pool (not needed since we use device_put directly).
         self.host_kv_pool: Optional[HostKVPoolHMA] = None
-        if (self.is_producer and dist_utils.get_enable_d2h_transfer()
-                and not self.multi_host):
-            max_blocks_per_group = self._compute_max_blocks_per_group()
-            kv_array_inner_shapes = [
-                tuple(s[1:]) for s in self.kv_array_shapes
-            ]
-            kv_array_max_blocks = [
-                max_blocks_per_group[self.kv_array_to_group_id[i]]
-                for i in range(self.num_kv_arrays)
-            ]
-            self.host_kv_pool = HostKVPoolHMA(
-                pool_size=dist_utils.get_max_host_kv_buffer_size(),
-                per_array_max_blocks=kv_array_max_blocks,
-                per_array_inner_shape=kv_array_inner_shapes,
-                per_array_dtype=self.kv_array_dtypes,
-                per_array_host_sharding=self.kv_array_host_shardings,
-            )
 
         self._maybe_start_p2p_server()
         logger.info(f"TPUConnectorHMA Worker {self.node_id} {role} --> init | "
@@ -389,35 +371,23 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
     def _async_d2h_and_transfer(self, req_id: str, req_meta: SendMeta,
                                 kv_src: list[jax.Array],
                                 local_block_ids: list[list[int]]):
-        buffer_idx, dest_buffer = self.host_kv_pool.get_buffer()
-
         start_time = time.perf_counter()
-        sliced_dest_buffer = []
-        for idx, array in enumerate(dest_buffer):
-            group_id = self.kv_array_to_group_id[idx]
-            num_blocks = len(local_block_ids[group_id])
-            sliced_dest_buffer.append(
-                jax.lax.slice_in_dim(array, 0, num_blocks))
-        end_slice_time = time.perf_counter()
-
         updated_dest_buffer = []
-        for idx, (src, dest) in enumerate(zip(kv_src, sliced_dest_buffer)):
-            updated_dest = copy_to_host(
-                src=src,
-                dest=dest,
-                mesh=self.mesh,
-                sharding_spec=self.kv_array_shardings[idx].spec)
+        for idx, src in enumerate(kv_src):
+            updated_dest = jax.device_put(src,
+                                          self.kv_array_host_shardings[idx])
             updated_dest_buffer.append(updated_dest)
 
         while True:
             end_copy_time = time.perf_counter()
             if all(chunk.is_ready() for chunk in updated_dest_buffer) or \
-                    end_copy_time - end_slice_time > dist_utils.get_p2p_wait_pull_timeout():
+                    end_copy_time - start_time > dist_utils.get_p2p_wait_pull_timeout():
                 break
             time.sleep(0.001)
 
+        buffer_idx = -1
         self.reqs_wait_pull[req_id] = [
-            dest_buffer, req_meta.expiration_time, buffer_idx
+            updated_dest_buffer, req_meta.expiration_time, buffer_idx
         ]
         self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
         self.kv_transfer_server.await_pull(req_meta.uuid, updated_dest_buffer)
@@ -426,8 +396,7 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
         logger.info(
             f"TPUConnectorHMA Worker {self.node_id} Prefill --> d2h send done | "
             f"req_id={req_id} | uuid={req_meta.uuid} | "
-            f"slice_ms={(end_slice_time-start_time)*1000:.2f} | "
-            f"copy_ms={(end_copy_time-end_slice_time)*1000:.2f} | "
+            f"copy_ms={(end_copy_time-start_time)*1000:.2f} | "
             f"bytes={total_bytes}")
         self.stats.increment_send(total_bytes)
 
