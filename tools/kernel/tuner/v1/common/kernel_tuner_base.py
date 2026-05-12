@@ -88,13 +88,13 @@ class TuningCase:
 
 @dataclass
 class TunerConfig:
-    tuning_key_class = None
-    tunable_params_class = None
+    tuning_key_class: any = None
+    tunable_params_class: any = None
     kernel_tuner_name: str = None
 
 
 @dataclass
-class RunConifg:
+class RunConfig:
     case_set_id: str = None
     run_id: str = None
     case_set_desc: str = None
@@ -119,14 +119,14 @@ class KernelTunerBase(ABC):
     - generate_inputs: Generate the kernel inputs for the given tuning key with caching, and return a dictionary of kernel inputs.
     - run: Execute the kernel with the given tuning key and tunable params for a certain number of iterations, measure the latency, and return the tuning status, average latency, and total latency.
 
-    Subclass must call super().__init__(config=config) in the __init__ method to initialize the base class.
+    Subclass must call super().__init__(tuner_config=tuner_config, run_config=run_config) in the __init__ method to initialize the base class.
 
     """
 
     def __init__(self,
                  *,
                  tuner_config: TunerConfig = TunerConfig(),
-                 run_config: RunConifg = RunConifg()):
+                 run_config: RunConfig = RunConfig()):
         assert tuner_config.tuning_key_class is not None, "tuning_key_class must be specified"
         assert tuner_config.tunable_params_class is not None, "tunable_params_class must be specified"
         assert tuner_config.kernel_tuner_name is not None, "kernel_tuner_name must be specified, which will be used as the identifier for this kernel tuner in the Buildkite pipeline generation and execution. It should match the key in the KERNEL_TUNER_REGISTRY in kernel_tuner_runner.py to ensure the correct kernel tuner is called during execution."

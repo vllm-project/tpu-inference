@@ -162,7 +162,7 @@ def main(argv):
     kernel_tuner_cls = KERNEL_TUNER_REGISTRY.get(_KERNEL_TUNER_NAME.value)
     kernel_tuner = kernel_tuner_cls(run_config=run_config)
 
-    if kernel_tuner.run_locally:
+    if kernel_tuner.run_config.run_locally:
         logger.info(
             'Running in locally mode. Skipping Buildkite pipeline generation and running tuning jobs directly.'
         )
