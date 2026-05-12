@@ -39,7 +39,8 @@
           "gpu-memory-utilization": 0.9,
           "block-size": 256,
           "no-enable-prefix-caching": true,
-          "async-scheduling": true
+          "async-scheduling": true,
+          "limit-mm-per-prompt": "{\"image\":0,\"video\":0}"
         }
       },
       "client_command_options": {
@@ -86,7 +87,8 @@
           "gpu-memory-utilization": 0.9,
           "block-size": 256,
           "no-enable-prefix-caching": true,
-          "async-scheduling": true
+          "async-scheduling": true,
+          "limit-mm-per-prompt": "{\"image\":0,\"video\":0}"
         }
       },
       "client_command_options": {
@@ -133,7 +135,8 @@
           "gpu-memory-utilization": 0.9,
           "block-size": 256,
           "no-enable-prefix-caching": true,
-          "async-scheduling": true
+          "async-scheduling": true,
+          "limit-mm-per-prompt": "{\"image\":0,\"video\":0}"
         }
       },
       "client_command_options": {

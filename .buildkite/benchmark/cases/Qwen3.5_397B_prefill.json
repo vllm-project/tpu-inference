@@ -36,7 +36,8 @@
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.9,
           "enable-expert-parallel": true,
-          "async-scheduling": true
+          "async-scheduling": true,
+          "limit-mm-per-prompt": "{\"image\":0,\"video\":0}"
         }
       },
       "client_command_options": {
@@ -84,7 +85,8 @@
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.85,
           "enable-expert-parallel": true,
-          "async-scheduling": true
+          "async-scheduling": true,
+          "limit-mm-per-prompt": "{\"image\":0,\"video\":0}"
         }
       },
       "client_command_options": {
@@ -132,7 +134,8 @@
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.75,
           "enable-expert-parallel": true,
-          "async-scheduling": true
+          "async-scheduling": true,
+          "limit-mm-per-prompt": "{\"image\":0,\"video\":0}"
         }
       },
       "client_command_options": {
@@ -180,7 +183,8 @@
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.55,
           "enable-expert-parallel": true,
-          "async-scheduling": true
+          "async-scheduling": true,
+          "limit-mm-per-prompt": "{\"image\":0,\"video\":0}"
         }
       },
       "client_command_options": {
@@ -228,7 +232,8 @@
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.55,
           "enable-expert-parallel": true,
-          "async-scheduling": true
+          "async-scheduling": true,
+          "limit-mm-per-prompt": "{\"image\":0,\"video\":0}"
         }
       },
       "client_command_options": {
@@ -276,7 +281,8 @@
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.55,
           "enable-expert-parallel": true,
-          "async-scheduling": true
+          "async-scheduling": true,
+          "limit-mm-per-prompt": "{\"image\":0,\"video\":0}"
         }
       },
       "client_command_options": {
