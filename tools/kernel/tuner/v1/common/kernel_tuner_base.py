@@ -225,12 +225,19 @@ class KernelTunerBase(ABC):
                 f"Error initializing case set {self.case_set_id}: {e}")
             raise e
 
-    def _build_step(self, case_id_start: int, case_id_end: int) -> dict:
+    def _build_step(self,
+                    case_id_start: int,
+                    case_id_end: int,
+                    parent_step_key: str = None) -> dict:
+        step_key = f'{self.kernel_tuner_name}_{self.case_set_id}_{self.run_id}_{case_id_start}_{case_id_end}'
+        parent_step_key = parent_step_key or 'generate_tuning_cases_and_yml'
         return {
             "label":
             f"cs_id={self.case_set_id} rid={self.run_id} Bucket([{case_id_start}, {case_id_end}))",
+            "key":
+            step_key,
             "depends_on":
-            f"{self.tpu_version}_build_docker",
+            parent_step_key,
             "agents": {
                 "queue": self.tpu_queue_multi
             },
@@ -239,53 +246,57 @@ class KernelTunerBase(ABC):
                 "TPU_VERSION": self.tpu_version
             },
             "commands": [
-                f"- |"
-                f"  rm -f \"/tmp/kernel_tuning/generated_pipeline.yml\""
-                f"- |"
-                f"  .buildkite/scripts/run_in_docker.sh bash -c \""
-                f"  pip install --upgrade google-cloud-spanner && "
-                f"  pip install --upgrade google-api-core && "
-                f"  pip install --upgrade google-auth && "
-                f"  pip install --upgrade absl-py && "
-                f"  python -m tools.kernel.tuner.v1.kernel_tuner_runner "
-                f"  --kernel_tuner_name={self.kernel_tuner_name} "
-                f"  --case_set_id={self.case_set_id} --run_id={self.run_id} "
-                f"  --tpu_version={self.tpu_version} "
-                f"  --tpu_cores={self.tpu_cores} "
-                f"  --case_set_desc=\"{self.case_set_desc}\" "
-                f"  --run_locally={self.run_locally} "
-                f"  --tpu_queue_multi={self.tpu_queue_multi} "
-                f"  --max_execution_minutes={self.max_execution_minutes} "
-                f"  --job_priority={self.job_priority} "
-                f"  --begin_case_id={case_id_start} --end_case_id={case_id_end}\""
-                f"- |"
-                f"  if [ -f /tmp/kernel_tuning/generated_pipeline.yml ]; then "
-                f"    buildkite-agent artifact upload \"/tmp/kernel_tuning/generated_pipeline.yml\" && "
-                f"    echo \"Upload generated pipeline YAML to Buildkite artifacts with priority {self.job_priority}\" && "
-                f"    {{ "
-                f"      echo \"priority: {self.job_priority}\"; "
-                f"      cat /tmp/kernel_tuning/generated_pipeline.yml; "
-                f"    }} | buildkite-agent pipeline upload; "
-                f"  else "
-                f"    echo \"File /tmp/kernel_tuning/generated_pipeline.yml does not exist. Exiting successfully.\"; "
-                f"  fi"
+                LiteralString(
+                    'rm -f /tmp/kernel_tuning/generated_pipeline.yml'),
+                LiteralString(
+                    '.buildkite/scripts/run_in_docker.sh bash -c \''
+                    'pip install --upgrade google-cloud-spanner && '
+                    'pip install --upgrade google-api-core && '
+                    'pip install --upgrade google-auth && '
+                    'pip install --upgrade absl-py && '
+                    'python -m tools.kernel.tuner.v1.kernel_tuner_runner '
+                    f'--kernel_tuner_name={self.kernel_tuner_name} '
+                    f'  --case_set_id={self.case_set_id} --run_id={self.run_id} '
+                    f'  --tpu_version={self.tpu_version} '
+                    f'  --tpu_cores={self.tpu_cores} '
+                    f'  --case_set_desc=\"{self.case_set_desc}\" '
+                    f'  --run_locally=False '
+                    f'  --tpu_queue_multi={self.tpu_queue_multi} '
+                    f'  --max_execution_minutes={self.max_execution_minutes} '
+                    f'  --job_priority={self.job_priority} '
+                    f'  --begin_case_id={case_id_start} --end_case_id={case_id_end}\''
+                ),
+                LiteralString(
+                    f'if [ -f /tmp/kernel_tuning/generated_pipeline.yml ]; then '
+                    f'  buildkite-agent artifact upload /tmp/kernel_tuning/generated_pipeline.yml && '
+                    f'  echo \"Upload generated pipeline YAML to Buildkite artifacts with priority {self.job_priority}\" && '
+                    f'  {{ '
+                    f'      echo \"priority: {self.job_priority}\"; '
+                    f'      cat /tmp/kernel_tuning/generated_pipeline.yml; '
+                    f'  }} | buildkite-agent pipeline upload; '
+                    f'  else '
+                    f'      echo \"File /tmp/kernel_tuning/generated_pipeline.yml does not exist. Exiting successfully.\"; '
+                    f'fi')
             ]
         }
 
-    def generate_buildkite_pipeline_subbucket(self, start: int, end: int):
+    def generate_buildkite_pipeline_subbucket(self, start: int, end: int,
+                                              parent_step_key: str):
         """Generate the Buildkite pipeline for a sub-bucket of tuning jobs.
 
         Args:
             start: The starting case_id of the sub-bucket (inclusive).
             end: The ending case_id of the sub-bucket (exclusive).
+            parent_step_key: The key of the parent step in the Buildkite pipeline.
         """
+        assert parent_step_key is not None, "parent_step_key must be specified for the sub-bucket pipeline generation to set the correct dependency in the Buildkite pipeline."
+        assert start < end, f"Invalid sub-bucket range: start {start} should be less than end {end}."
         output_path = "/tmp/kernel_tuning/generated_pipeline.yml"
         if os.path.exists(output_path):
             # clean up the existing one
             os.remove(output_path)
-        next_group_label = f"Tune Case ID [{start}, {end})"
-        step = self._build_step(start, end)
-        pipeline = {"group": next_group_label, "steps": [step]}
+        step = self._build_step(start, end, parent_step_key=parent_step_key)
+        pipeline = {"group": 'Kernel Sweeping Group', "steps": [step]}
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w") as f:
             yaml.dump(pipeline, f, default_flow_style=False, sort_keys=False)
@@ -293,7 +304,7 @@ class KernelTunerBase(ABC):
             f"Generated Buildkite pipeline YAML for sub-bucket [{start}, {end}) saved to {output_path} in Docker"
         )
 
-    def generate_buildkite_pipeline(self, ) -> str:
+    def generate_buildkite_pipeline(self) -> str:
         """Generate the Buildkite pipeline for the given tuning jobs. Each tuning job will be represented as a Buildkite step that calls the measure_latency function with the corresponding case_id range.
         """
         output_path = "/tmp/kernel_tuning/generated_pipeline.yml"
@@ -511,5 +522,5 @@ class KernelTunerBase(ABC):
             self.storage_manager.mark_bucket_completed(self.case_set_id,
                                                        self.run_id, bucket_id)
         logger.info(
-            f"Worker [{FLAGS.worker_id}] Completed Bucket {bucket_id} ({begin_case_id}-{last_processed_case_id + 1}] for CaseSetId: {self.case_set_id}, RunId: {self.run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
+            f"Worker [{FLAGS.worker_id}] Completed Bucket {bucket_id} [{begin_case_id}-{last_processed_case_id + 1}) for CaseSetId: {self.case_set_id}, RunId: {self.run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
         )
