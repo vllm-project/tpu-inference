@@ -7,6 +7,7 @@ numpy
 google-cloud-storage
 jax==0.10.0
 jaxlib==0.10.0
+--find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
 libtpu==0.0.40
 jaxtyping
 flax==0.12.4
