@@ -1188,12 +1188,11 @@ class DeepSeekV3(JaxModule):
         def _create_deepseek_attention(
                 i: int) -> Union[DeepseekV3MLA, DeepseekV3Attention]:
             if self.use_mla_kernel:
-                # q_NTA is [N, T, A] — N-major.  T is at axis 1, so ATTN_DATA goes on axis 1.
-                # (The old T-major layout had T at axis 0, hence the original P(ATTN_DATA, ..., ...).)
+                # q_NTA is [N, T, A].
                 query_nth_spec = P(None, ShardingAxisName.ATTN_DATA, None)
                 query_tnh_spec = P(ShardingAxisName.ATTN_DATA, None, None)
                 keyvalue_skh_spec = P(ShardingAxisName.ATTN_DATA, None)
-                # Kernel output is N-major [N, T, A]; T is at axis 1.
+                # Kernel output is [N, T, A]
                 attn_o_nth_spec = P(None, ShardingAxisName.ATTN_DATA, None)
                 anh_sharding = (None, ShardingAxisName.ATTN_HEAD, None)
             else:

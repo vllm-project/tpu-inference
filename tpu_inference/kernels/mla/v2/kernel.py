@@ -23,8 +23,7 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from tpu_inference.kernels.custom_calls.kernel import (xpose_pipeline,
-                                                       prev_closest_divisor)
+from tpu_inference.kernels.mla.v2.transpose import xpose_pipeline
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
@@ -1365,18 +1364,12 @@ def prepare_q_nope_inputs(
         ),
         constant_values=0,
     )
-    # Physical transpose: (N, T, D) -> (T, N, D), pipelined over T
-    # Sublane alignment = get_dtype_packing(dtype) * 8 (32 for fp8, 16 for bf16).
-    sublane_multiple = get_dtype_packing(q.dtype) * 8
+    # Physical transpose: (N, T, D) -> (T, N, D), pipelined over T.
     try:
-        m_tile = prev_closest_divisor(q.shape[1], 32,
-                                        multiple_of=sublane_multiple)
-        q = xpose_pipeline(
-            q,
-            transpose_axes=(1, 0, 2),
-            n_tile=128,
-            m_tile=m_tile)[0]
+        q = xpose_pipeline(q, transpose_axes=(1, 0, 2), n_tile=128,
+                           m_tile=32)[0]
     except ValueError as e:
+        sublane_multiple = get_dtype_packing(q.dtype) * 8
         logger.warning(
             f"xpose_pipeline failed for shape={q.shape} dtype={q.dtype} "
             f"(sublane_multiple={sublane_multiple}): {e}. "
@@ -1405,19 +1398,16 @@ def prepare_outputs(
     actual_num_q_heads: int,
     actual_head_dim: int,
 ):
-    # Physical transpose: (T, N, D) -> (N, T, D), pipelined over T
-    # Sublane alignment = get_dtype_packing(dtype) * 8 (32 for fp8, 16 for bf16).
-    sublane_multiple = get_dtype_packing(out.dtype) * 8
+    # Physical transpose: (T, N, D) -> (N, T, D), pipelined over T.
     try:
-        out = xpose_pipeline(
-            out,
-            transpose_axes=(1, 0, 2),
-            # Tile to maximum of 160 (multi host bsz)
-            # or nearest clean divisor of the number of tokens.
-            n_tile=prev_closest_divisor(out.shape[0], 160,
-                                        multiple_of=sublane_multiple),
-            m_tile=64)[0]
+        # Tile to maximum of 160 (multi host bsz)
+        # or nearest clean divisor of the number of tokens.
+        out = xpose_pipeline(out,
+                             transpose_axes=(1, 0, 2),
+                             n_tile=160,
+                             m_tile=64)[0]
     except ValueError as e:
+        sublane_multiple = get_dtype_packing(out.dtype) * 8
         logger.warning(
             f"xpose_pipeline failed for shape={out.shape} dtype={out.dtype} "
             f"(sublane_multiple={sublane_multiple}): {e}. "

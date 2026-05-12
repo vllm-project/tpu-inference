@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import bisect
 from collections.abc import Sequence
 
 import jax
@@ -20,10 +19,13 @@ import jax.experimental.pallas as pl
 import jax.experimental.pallas.tpu as pltpu
 import jax.numpy as jnp
 from sympy import divisors
-from tpu_inference.kernels.ragged_paged_attention.v3.util import get_dtype_packing
+
+from tpu_inference.kernels.ragged_paged_attention.v3.util import \
+    get_dtype_packing
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
+
 
 @jax.jit(static_argnames=[
     'transpose_axes',
@@ -50,41 +52,18 @@ def xpose_full(input, *, transpose_axes):
                           name=scope_name)(input)
 
 
-def prev_closest_divisor(number: int,
-                         divider: int,
-                         multiple_of: int = 1) -> int:
+def prev_closest_valid_divisor(number: int,
+                               divider: int,
+                               multiple_of: int = 1) -> int:
     """
     Finds the largest divisor of 'number' that is <= 'divider' and divisible
     by 'multiple_of'.
 
-    If no exact match exists, two fallbacks apply in order:
-
-    1. If min(number, divider) < multiple_of and number <= divider: return
-       'number' itself.  Pallas accepts a sublane tile equal to the full array
-       dimension even when it is not a multiple of 8.
-
-    2. Otherwise: let 'bound' = min(number, divider) and find the highest
-       divisor of 'number' that is strictly < 'bound'.  Return
-       cdiv(highest_sub, multiple_of) — the smallest multiple of
-       'multiple_of' that is >= highest_sub.  This may not divide 'number'
-       exactly, introducing a small amount of padding.
-
-    Raises ValueError if min(number, divider) < multiple_of and
-    divider < number, since neither fallback is valid.
-
-    Examples (Pallas TPU alignment, multiple_of=8):
-      prev_closest_divisor(120, 100, multiple_of=8)
-        → divisors of 120 <= 100 that are % 8: [8, 24, 40] → return 40
-      prev_closest_divisor(150, 100, multiple_of=8)
-        → no divisor of 150 <= 100 is % 8; highest divisor of 150 < 100 = 75
-        → cdiv(75, 8) = 80 → return 80  (introduces padding)
-      prev_closest_divisor(300, 160, multiple_of=8)
-        → no divisor of 300 <= 160 is % 8; highest divisor of 300 < 160 = 150
-        → cdiv(150, 8) = 152 → return 152
-      prev_closest_divisor(4, 10, multiple_of=8)
-        → min(4,10)=4 < 8 and divider >= number → return number=4
-      prev_closest_divisor(4, 2, multiple_of=8)
-        → min(4,2)=2 < 8 and divider < number → raises ValueError
+    Raises ValueError if no divisor of 'number' satisfies both constraints.
+    The exception is if min(number, divider) < multiple_of and number <= divider: return
+      'number' itself.  
+    This is because Pallas accepts a sublane tile equal to the full array
+    dimension.
     """
     if divider < 1:
         return 1
@@ -103,10 +82,9 @@ def prev_closest_divisor(number: int,
     if valid:
         return valid[-1]
 
-    # No divisor qualifies: use cdiv of the highest divisor strictly below bound.
-    sub_divisors = [d for d in all_divisors if d < bound]
-    highest_sub = sub_divisors[-1]  # always non-empty: 1 < bound since bound >= multiple_of >= 1
-    return ((highest_sub + multiple_of - 1) // multiple_of) * multiple_of
+    raise ValueError(
+        f"No divisor of {number} is both <= {divider} and divisible by "
+        f"{multiple_of}. A non-divisor tile would produce incorrect results.")
 
 
 def get_reshape_dimension(shape, reshape_axes, dtype=jnp.float32):
@@ -186,41 +164,40 @@ def xpose_pipeline(input: jax.Array,
         parallel_axis]
     m_tile = m_tile if m_tile <= input.shape[pipeline_axis] else input.shape[
         pipeline_axis]
-    # Find the best tile that (a) divides the axis and (b) satisfies Pallas's
-    # sublane alignment requirement: block dims must be divisible by
-    # get_dtype_packing(dtype) * 8 (e.g. 32 for fp8, 16 for bf16, 8 for f32).
-    # prev_closest_divisor may return a cdiv candidate that doesn't divide the
-    # array when no aligned divisor exists; raise in that case since padding
-    # would produce incorrect transpose results.
+    # Find the best tile that (a) divides the axis inclusively
+    # and (b) satisfies Pallas's sublane alignment
+    # requirement: block dims must be divisible by
+    # get_dtype_packing(dtype) * 8. If no such tiling exists,
+    # then throw a ValueError
     sublane_multiple = get_dtype_packing(input.dtype) * 8
-    n_tile_new = prev_closest_divisor(input.shape[parallel_axis], n_tile,
-                                      multiple_of=sublane_multiple)
+    n_tile_new = prev_closest_valid_divisor(input.shape[parallel_axis],
+                                            n_tile,
+                                            multiple_of=sublane_multiple)
     if input.shape[parallel_axis] % n_tile_new != 0:
         raise ValueError(
             f"No divisor of parallel axis size {input.shape[parallel_axis]} "
             f"is both <= {n_tile} and divisible by {sublane_multiple} "
-            f"(dtype={input.dtype}). Best candidate {n_tile_new} does not "
-            f"divide {input.shape[parallel_axis]}. Choose an n_tile whose "
-            f"nearest {sublane_multiple}-aligned divisor evenly divides the axis.")
-    m_tile_new = prev_closest_divisor(input.shape[pipeline_axis], m_tile,
-                                      multiple_of=sublane_multiple)
+            f"(dtype={input.dtype}). Consider increasing n_tile and/or padding your input to be "
+            f"suble-aligned (i.e. a multiple of {sublane_multiple}).")
+    m_tile_new = prev_closest_valid_divisor(input.shape[pipeline_axis],
+                                            m_tile,
+                                            multiple_of=sublane_multiple)
     if input.shape[pipeline_axis] % m_tile_new != 0:
         raise ValueError(
             f"No divisor of pipeline axis size {input.shape[pipeline_axis]} "
             f"is both <= {m_tile} and divisible by {sublane_multiple} "
-            f"(dtype={input.dtype}). Best candidate {m_tile_new} does not "
-            f"divide {input.shape[pipeline_axis]}. Choose an m_tile whose "
-            f"nearest {sublane_multiple}-aligned divisor evenly divides the axis.")
+            f"(dtype={input.dtype}). Consider increasing n_tile and/or padding your input to be "
+            f"suble-aligned (i.e. a multiple of {sublane_multiple}).")
     if n_tile_new != n_tile:
         logger.warning(
-            f"input.shape[parallel_axis]={input.shape[parallel_axis]} is not "
-            f"divisible by a {sublane_multiple}-aligned tile <= n_tile={n_tile} "
-            f"(dtype={input.dtype}). Adjusting n_tile to {n_tile_new}.")
+            f"Adjusting n_tile={n_tile} to new valid tiling={n_tile_new} "
+            f"which is <= n_tile={n_tile} and sublane-aligned (i.e a multiple of "
+            f"{sublane_multiple}).")
     if m_tile_new != m_tile:
         logger.warning(
-            f"input.shape[pipeline_axis]={input.shape[pipeline_axis]} is not "
-            f"divisible by a {sublane_multiple}-aligned tile <= m_tile={m_tile} "
-            f"(dtype={input.dtype}). Adjusting m_tile to {m_tile_new}.")
+            f"Adjusting m_tile={m_tile} to new valid tiling={m_tile_new} "
+            f"which is <= m_tile={m_tile} and sublane-aligned (i.e a multiple of "
+            f"{sublane_multiple}).")
     n_tile, m_tile = n_tile_new, m_tile_new
     grid = (input.shape[parallel_axis] // n_tile,
             input.shape[pipeline_axis] // m_tile)
