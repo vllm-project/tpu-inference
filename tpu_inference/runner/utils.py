@@ -558,16 +558,14 @@ class SpecDecodeMetadata:
     bonus_logits_indices: jnp.ndarray
     final_logits_indices: jnp.ndarray
 
-    draft_lengths_cpu: Any = field(init=False)
+    draft_lengths_cpu: Any = field(init=False, default=None)
 
 
 def host_extract_sampled_tokens(
         runner, spec_decode_metadata: Optional[SpecDecodeMetadata],
         sampled_output: jnp.ndarray, logits_indices_selector: np.ndarray,
-        discard_sampled_tokens_req_indices: list):
+        discard_sampled_tokens_req_indices: list, num_reqs):
     """host retrieve the sampled tokens for the current step."""
-
-    num_reqs = runner.input_batch.num_reqs
     next_tokens = sampled_output
     if spec_decode_metadata is None:
         next_tokens = np.asarray(jax.device_get(next_tokens))

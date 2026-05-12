@@ -119,6 +119,8 @@ class CompilationManager:
                 self._precompile_backbone_with_inputs_embeds()
             if self.runner.scheduler_config.async_scheduling:
                 self._precompile_substitute_placeholder_token()
+                if self.runner.speculative_config:
+                    self._precompile_subtract_num_rejected_tokens()
             if not self.runner.is_last_rank:
                 return
             self._precompile_select_from_array()
@@ -302,50 +304,90 @@ class CompilationManager:
             )
 
     def _precompile_substitute_placeholder_token(self) -> None:
-        """Precompiles the token substitution function for all expected input shapes.
+        dp_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
+        replicated_sharding = NamedSharding(self.runner.mesh, PartitionSpec())
+        indices_sharding = NamedSharding(self.runner.mesh, PartitionSpec(None))
 
-        It iterates through all potential padded token lengths
-        (`num_tokens_paddings`) and request batch sizes (`num_reqs_paddings`)
-        that the scheduler is expected to handle, ensuring a compiled version
-        is ready for each combination.
-        """
+        def _compile_one(input_padding: int, input_sharding: NamedSharding,
+                         next_tokens_size: int) -> None:
+            padded_token_in_tpu_cur_input_indices = np.zeros((input_padding, ),
+                                                             dtype=np.int32)
+            padded_token_in_tpu_pre_next_tokens_indices = np.zeros(
+                (input_padding, ), dtype=np.int32)
+            (padded_token_in_tpu_cur_input_indices,
+             padded_token_in_tpu_pre_next_tokens_indices) = device_array(
+                 self.runner.mesh,
+                 (padded_token_in_tpu_cur_input_indices,
+                  padded_token_in_tpu_pre_next_tokens_indices),
+                 sharding=indices_sharding)
+
+            input_ids = self._create_dummy_tensor((input_padding, ), jnp.int32,
+                                                  input_sharding)
+            next_tokens = self._create_dummy_tensor(
+                (next_tokens_size, ), jnp.int32, sharding=replicated_sharding)
+            placeholder_num = device_array(self.runner.mesh,
+                                           np.array([1], dtype=np.int32))
+            self._run_compilation(
+                "_substitute_placeholder_token_fn",
+                self.runner._substitute_placeholder_token_fn,
+                input_ids,
+                padded_token_in_tpu_cur_input_indices,
+                padded_token_in_tpu_pre_next_tokens_indices,
+                next_tokens,
+                placeholder_num,
+                num_tokens=input_padding,
+                next_tokens_size=next_tokens_size,
+            )
+
+        if self.runner.speculative_config:
+            num_spec_tokens = (
+                self.runner.speculative_config.num_speculative_tokens)
+            spec_next_tokens_size = self.runner.max_num_reqs * (
+                num_spec_tokens + 1)
+            for num_tokens in self.runner.num_tokens_paddings:
+                _compile_one(num_tokens, dp_sharding, spec_next_tokens_size)
+            for num_logits in self.runner.num_logits_paddings:
+                _compile_one(num_logits, replicated_sharding,
+                             spec_next_tokens_size)
+        else:
+            for num_tokens in self.runner.num_tokens_paddings:
+                for num_reqs in self.runner.num_reqs_paddings:
+                    _compile_one(num_tokens, dp_sharding, num_reqs)
+
+    def _precompile_subtract_num_rejected_tokens(self) -> None:
+        from tpu_inference.runner.tpu_runner import \
+            _subtract_num_rejected_tokens_fn
+
+        dp_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
+        replicated_sharding = NamedSharding(self.runner.mesh,
+                                            PartitionSpec(None))
 
         for num_tokens in self.runner.num_tokens_paddings:
-            dp_sharding = NamedSharding(
-                self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
+            # `_subtract_num_rejected_tokens_fn` donates seq_lens and positions
+            # (donate_argnums=(0, 1)) so a fresh pair must be created per call.
+            seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
+                                                 jnp.int32, dp_sharding)
+            positions = self._create_dummy_tensor((num_tokens, ), jnp.int32,
+                                                  dp_sharding)
+            num_rejected_tokens = self._create_dummy_tensor(
+                (self.runner.max_num_reqs, ), jnp.int32, replicated_sharding)
+            seq_lens_subtract_indices = self._create_dummy_tensor(
+                (self.runner.max_num_reqs, ), jnp.int32, replicated_sharding)
+            positions_subtract_indices = self._create_dummy_tensor(
+                (num_tokens, ), jnp.int32, replicated_sharding)
 
-            for num_reqs in self.runner.num_reqs_paddings:
-                padded_token_in_tpu_cur_input_indices = np.zeros(
-                    (num_tokens, ), dtype=np.int32)
-                padded_token_in_tpu_pre_next_tokens_indices = np.zeros(
-                    (num_tokens, ), dtype=jnp.int32)
-                (padded_token_in_tpu_cur_input_indices,
-                 padded_token_in_tpu_pre_next_tokens_indices) = device_array(
-                     self.runner.mesh,
-                     (padded_token_in_tpu_cur_input_indices,
-                      padded_token_in_tpu_pre_next_tokens_indices),
-                     sharding=NamedSharding(self.runner.mesh,
-                                            PartitionSpec(None)))
-
-                input_ids = self._create_dummy_tensor((num_tokens, ),
-                                                      jnp.int32, dp_sharding)
-                next_tokens = self._create_dummy_tensor(
-                    (num_reqs, ),
-                    jnp.int32,
-                    sharding=NamedSharding(self.runner.mesh, PartitionSpec()))
-
-                placeholder_num = jnp.asarray(1, dtype=jnp.int32)
-                self._run_compilation(
-                    "_substitute_placeholder_token_fn",
-                    self.runner._substitute_placeholder_token_fn,
-                    input_ids,
-                    padded_token_in_tpu_cur_input_indices,
-                    padded_token_in_tpu_pre_next_tokens_indices,
-                    next_tokens,
-                    placeholder_num,
-                    num_tokens=num_tokens,
-                    num_reqs=num_reqs,
-                )
+            self._run_compilation(
+                "_subtract_num_rejected_tokens_fn",
+                _subtract_num_rejected_tokens_fn,
+                seq_lens,
+                positions,
+                num_rejected_tokens,
+                seq_lens_subtract_indices,
+                positions_subtract_indices,
+                num_tokens=num_tokens,
+            )
 
     def _precompile_backbone_text_only(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
@@ -942,6 +984,7 @@ class CompilationManager:
                 num_rejected_tokens,
                 num_tokens=num_tokens,
             )
+            ##....
 
     def _precompile_structured_decoding(self) -> None:
         logger.info(

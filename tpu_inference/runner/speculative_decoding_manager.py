@@ -25,7 +25,6 @@ from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
-from tpu_inference.spec_decode.jax.utils import extract_last_sampled_tokens
 from tpu_inference.utils import device_array
 
 if TYPE_CHECKING:
@@ -53,13 +52,18 @@ class SpeculativeDecodingManager:
         self,
         sampled_output: jnp.ndarray,
         logits_indices_selector: np.ndarray,
+        last_sampled_token_id: jnp.ndarray,
+        num_rejected_tokens: jnp.ndarray,
         discard_sampled_tokens_req_indices: list,
         aux_hidden_states: Optional[tuple[jnp.ndarray, ...]],
         attn_metadata: AttentionMetadata,
+        async_scheduling: bool,
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         scheduler_output: Optional[VllmSchedulerOutput] = None,
         input_ids: Optional[jnp.ndarray] = None,
     ) -> None:
+        if async_scheduling:
+            assert self.runner.speculative_config.method == "eagle3", "async scheduling is only supported with eagle3 spec decoding"
         if self.runner.speculative_config.method == "ngram":
             assert isinstance(self.runner.drafter, NgramProposer)
             # For n-gram based proposer, the drafter run on host
@@ -67,16 +71,13 @@ class SpeculativeDecodingManager:
             # token ids from device to host, then run the ngram proposer.
             valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(
                 self.runner, spec_decode_metadata, sampled_output,
-                logits_indices_selector, discard_sampled_tokens_req_indices)
+                logits_indices_selector, discard_sampled_tokens_req_indices,
+                self.runner.input_batch.num_reqs)
             self._draft_token_ids = self.runner.drafter.propose(
                 valid_sampled_token_ids[:self.runner.input_batch.num_reqs],
                 self.runner.input_batch.num_tokens_no_spec,
                 self.runner.input_batch.token_ids_cpu)
         elif self.runner.speculative_config.method == "eagle3":
-            last_sampled_token_id, num_rejected_tokens = extract_last_sampled_tokens(
-                spec_decode_metadata, sampled_output,
-                self.runner.speculative_config.num_speculative_tokens,
-                self.runner.input_batch.vocab_size, self.runner.max_num_reqs)
             self._draft_token_ids = self.propose_eagle3_draft_token_ids(
                 spec_decode_metadata,
                 last_sampled_token_id,
@@ -86,6 +87,7 @@ class SpeculativeDecodingManager:
                 attn_metadata,
                 scheduler_output,
                 input_ids,
+                async_scheduling,
             )
         else:
             raise NotImplementedError(
@@ -93,16 +95,14 @@ class SpeculativeDecodingManager:
                 f"'{self.runner.speculative_config.method}' is not supported.")
 
     def propose_eagle3_draft_token_ids(
-        self,
-        spec_decode_metadata: Optional[SpecDecodeMetadata],
-        last_sampled_token_id: jnp.ndarray,
-        num_rejected_tokens: jnp.ndarray,
-        discard_sampled_tokens_req_indices: list[int],
-        aux_hidden_states: Optional[tuple[jnp.ndarray, ...]],
-        attn_metadata: AttentionMetadata,
-        scheduler_output: VllmSchedulerOutput,
-        input_ids: jnp.ndarray,
-    ) -> list[list[int]]:
+            self, spec_decode_metadata: Optional[SpecDecodeMetadata],
+            last_sampled_token_id: jnp.ndarray,
+            num_rejected_tokens: jnp.ndarray,
+            discard_sampled_tokens_req_indices: list[int],
+            aux_hidden_states: Optional[tuple[jnp.ndarray, ...]],
+            attn_metadata: AttentionMetadata,
+            scheduler_output: VllmSchedulerOutput, input_ids: jnp.ndarray,
+            async_scheduling: bool) -> list[list[int]] | jnp.ndarray:
         assert isinstance(self.runner.drafter, Eagle3Proposer)
         req_ids = self.runner.input_batch.req_ids
         max_num_seqs = attn_metadata.seq_lens.shape[0]
@@ -139,10 +139,16 @@ class SpeculativeDecodingManager:
             last_token_indices=last_token_indices,
             target_hidden_states=target_hidden_states,
         )
-        draft_token_ids = np.array(draft_token_ids)
-        if draft_token_ids.ndim == 1:
-            draft_token_ids = np.expand_dims(draft_token_ids, axis=-1)
-        return draft_token_ids.tolist()
+
+        if not async_scheduling:
+            draft_token_ids = np.array(draft_token_ids)
+            if draft_token_ids.ndim == 1:
+                draft_token_ids = np.expand_dims(draft_token_ids, axis=-1)
+            return draft_token_ids.tolist()
+        else:
+            if jnp.ndim(draft_token_ids) == 1:
+                draft_token_ids = jnp.expand_dims(draft_token_ids, 1)
+            return draft_token_ids
 
     def get_spec_decode_metadata(
         self,
