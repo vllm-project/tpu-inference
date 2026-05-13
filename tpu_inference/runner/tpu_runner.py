@@ -316,11 +316,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.is_pooling_model: bool = self.model_config.runner_type == "pooling"
         """Generative model or pooling model select different computations."""
-        self.enable_continue_decode = (self.vllm_config.additional_config.get(
-            "enable_continue_decode",
-            False) and not self.scheduler_config.async_scheduling
-                                       and self.is_last_rank
-                                       and not self.is_pooling_model)
+        self.enable_continue_decode = (
+            self.vllm_config.additional_config.get("enable_continue_decode",
+                                                   False)
+            and not self.scheduler_config.async_scheduling
+            and (self.parallel_config is None
+                 or self.parallel_config.pipeline_parallel_size == 1)
+            and not self.is_pooling_model)
         self.eos_token_id = runner_utils.get_eos_token_id(self.model_config)
         self.pad_token_id = runner_utils.get_pad_token_id(self.model_config)
 
