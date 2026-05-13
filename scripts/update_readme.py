@@ -16,6 +16,9 @@ import csv
 import datetime
 import os
 import re
+import json
+import urllib.request
+import urllib.parse
 
 # --- CONFIGURATION ---
 # This dictionary maps the "markers" in your README to your CSV files.
@@ -793,6 +796,80 @@ def _process_quantization(file_sources):
     return generate_html_quantization_table(headers, all_data)
 
 
+def _fetch_github_issue_counts():
+    """Dynamically fetches all pure open issues via Search API, counts frequencies across active labels, and returns top tags plus total count without any hardcoding."""
+    counts = {}
+    colors = {}
+    headers = {
+        "User-Agent": "vllm-tpu-inference-readme-updater"
+    }
+    
+    try:
+        # Query the Search API directly to fetch pure open issues (bypassing pull requests completely)
+        encoded_search = urllib.parse.quote("repo:vllm-project/tpu-inference is:issue is:open")
+        url = f"https://api.github.com/search/issues?q={encoded_search}&per_page=100"
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            
+            pure_issue_count = data.get("total_count", 0)
+            counts["total"] = pure_issue_count
+            
+            dynamic_counts = {}
+            dynamic_colors = {}
+            
+            for issue in data.get("items", []):
+                for label in issue.get("labels", []):
+                    lname = label.get("name")
+                    lcolor = label.get("color", "ededed")
+                    if lname:
+                        dynamic_counts[lname] = dynamic_counts.get(lname, 0) + 1
+                        dynamic_colors[lname] = lcolor
+                        
+            if dynamic_counts:
+                # Sort all found labels descending by count, take top 5
+                sorted_labels = sorted(dynamic_counts.items(), key=lambda x: (-x[1], x[0]))[:5]
+                
+                for lname, lcount in sorted_labels:
+                    counts[lname] = lcount
+                    colors[lname] = dynamic_colors.get(lname, "ededed")
+                    
+    except Exception as e:
+        print(f"⚠️ Warning: Could not fetch dynamic issues list from GitHub Search API ({e}).")
+
+    return counts, colors
+
+
+def _process_issue_badges():
+    """Fetches dynamic label counts and colors, filters out zeros, sorts descending, and returns the refreshed markdown badge line."""
+    counts, colors = _fetch_github_issue_counts()
+    
+    badges = []
+    
+    # Process all labels except 'total'
+    label_items = [(lname, lcount) for lname, lcount in counts.items() if lname != "total"]
+    
+    # Filter out any labels with a count of 0
+    filtered_items = [item for item in label_items if item[1] > 0]
+    
+    # Sort descending by count, and alphabetically on ties
+    filtered_items.sort(key=lambda item: (-item[1], item[0]))
+    
+    for lname, lcount in filtered_items:
+        lcolor = colors.get(lname, "ededed")
+        encoded_lname_badge = urllib.parse.quote(lname.replace("-", "--"))
+        encoded_lname_query = urllib.parse.quote(f'"{lname}"')
+        
+        badge_str = f'[![{lname}](https://img.shields.io/badge/{encoded_lname_badge}-{lcount}-{lcolor}?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A{encoded_lname_query})'
+        badges.append(badge_str)
+        
+    total_count = counts.get("total", 0)
+    if total_count > 0 or not badges:
+        badges.append(f'[![Total Open Issues](https://img.shields.io/badge/Total%20Open%20Issues-{total_count}-238636?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues)')
+    
+    return " ".join(badges)
+
+
 def update_readme():
     """Finds markers in README_dual.md and replaces content with fresh tables."""
     with open(README_PATH, "r", encoding="utf-8") as f:
@@ -838,6 +915,15 @@ def update_readme():
                                  replacement,
                                  content,
                                  flags=re.DOTALL)
+
+    print("Fetching live GitHub issues counts...")
+    new_badges = _process_issue_badges()
+    start_marker = "<!-- START: issue_badges -->"
+    end_marker = "<!-- END: issue_badges -->"
+    pattern = f"({re.escape(start_marker)})(.*?)({re.escape(end_marker)})"
+    if start_marker in content:
+        replacement = f"\\1\n{new_badges}\n\\3"
+        content = re.sub(pattern, replacement, content, flags=re.DOTALL)
 
     current_time = datetime.datetime.now(
         datetime.timezone.utc).strftime("%Y-%m-%d %I:%M %p UTC")
