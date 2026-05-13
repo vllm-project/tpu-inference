@@ -29,8 +29,8 @@ def compute_kv_share_map(text_config) -> dict:
     """Return `{shared_layer_idx: source_layer_idx}` for KV-shared layers.
 
     Source is the last preceding layer of the same attention type
-    (sliding vs full). Mirrors the algorithm at
-    `vllm/model_executor/models/gemma4.py:459-485`.
+    (sliding vs full). Mirrors the algorithm used by vllm-pytorch's
+    `Gemma4Attention.__init__` to derive `kv_sharing_target_layer_name`.
 
     Returns an empty dict when `num_kv_shared_layers == 0` (e.g. 26B/31B)
     or when `layer_types` is missing from the config.
@@ -57,11 +57,10 @@ def compute_kv_share_map(text_config) -> dict:
     for i in range(first_shared, num_hidden_layers):
         ctype = layer_types[i]
         if ctype not in prev_types:
-            raise ValueError(
-                f"KV-share: layer {i} of type {ctype!r} has no "
-                f"preceding same-type layer in {prev_types!r}. "
-                f"num_kv_shared_layers={num_kv_shared_layers}, "
-                f"num_hidden_layers={num_hidden_layers}.")
+            raise ValueError(f"KV-share: layer {i} of type {ctype!r} has no "
+                             f"preceding same-type layer in {prev_types!r}. "
+                             f"num_kv_shared_layers={num_kv_shared_layers}, "
+                             f"num_hidden_layers={num_hidden_layers}.")
         src = len(prev_types) - 1 - prev_types[::-1].index(ctype)
         mapping[i] = src
     return mapping

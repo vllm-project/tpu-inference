@@ -662,10 +662,10 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
                 # Handle packed QKV weights for the text tower.
                 # Note: KV-shared layers DO have full Q/K/V weights in the
-                # checkpoint (vllm gemma4.py:412-433 constructs qkv_proj
-                # unconditionally). K/V are still computed and used for the
-                # current step's attention; the kernel skips writing them to
-                # the cache via update_kv_cache=False (Phase 8).
+                # checkpoint — vllm-pytorch's Gemma4Attention constructs
+                # qkv_proj unconditionally. K/V are still computed and used
+                # for the current step's attention; the kernel skips writing
+                # them to the cache via update_kv_cache=False.
                 if "qkv_proj" in mapped_name:
                     m = re.search(r"layers\.(\d+)\.", mapped_name)
                     if m:

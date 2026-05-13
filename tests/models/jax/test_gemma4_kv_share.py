@@ -15,8 +15,9 @@
 
 Covers:
   - is_kv_shared_layer correctly computed per layer index + num_kv_shared_layers.
-  - kv_sharing_target_layer_name points at the last preceding layer of the
-    same attention type (vllm reference: gemma4.py:459-485).
+  - kv_sharing_target_layer_name points at the last preceding layer of
+    the same attention type (matches vllm-pytorch's `Gemma4Attention`
+    target-layer derivation).
   - For shared layers, the source index is correct.
   - compute_kv_share_map() helper edge cases (no shared layers, missing
     layer_types, unmatched type → ValueError).
@@ -128,7 +129,8 @@ def test_compute_kv_share_map_e2b_alternating_pattern():
 
 def test_compute_kv_share_map_picks_last_preceding_same_type():
     """When the source range has multiple same-type layers, picks the LAST
-    preceding match (vllm reference at gemma4.py:467-468)."""
+    preceding match (matches vllm-pytorch's
+    `len(prev) - 1 - prev[::-1].index(current_type)` formula)."""
     cfg = _make_text_config(
         num_hidden_layers=5,
         num_kv_shared_layers=2,

@@ -64,9 +64,10 @@ class Gemma4MLP(JaxModule):
         hidden_size = config.hidden_size
         # `intermediate_size` is the per-layer MLP width. KV-shared layers
         # use 2x config.intermediate_size when text_config.use_double_wide_mlp
-        # is set (vllm reference: vllm/model_executor/models/gemma4.py:599-610);
-        # otherwise it's just config.intermediate_size. The caller computes
-        # this in Gemma4DecoderLayer and passes it in explicitly.
+        # is set (matches vllm-pytorch `Gemma4DecoderLayer.__init__`'s
+        # `layer_intermediate_size` computation); otherwise it's just
+        # config.intermediate_size. The caller computes this in
+        # Gemma4DecoderLayer and passes it in explicitly.
 
         self.gate_proj = JaxLinear(
             hidden_size,
@@ -420,18 +421,18 @@ class Gemma4Attention(JaxModule):
             self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
                 kv_cache_dtype)
 
-        # KV-cache sharing (vllm reference at
-        # vllm/model_executor/models/gemma4.py:459-485). Layers in the last
-        # `num_kv_shared_layers` reuse K/V from earlier layers of matching
-        # attention type. The runner side populates the redirect mapping;
-        # this layer just needs to set is_kv_shared_layer +
-        # kv_sharing_target_layer_name.
+        # KV-cache sharing (mirrors vllm-pytorch `Gemma4Attention.__init__`
+        # KV-share derivation). Layers in the last `num_kv_shared_layers`
+        # reuse K/V from earlier layers of matching attention type. The
+        # runner side populates the redirect mapping; this layer just needs
+        # to set is_kv_shared_layer + kv_sharing_target_layer_name.
         kv_share_map = compute_kv_share_map(config)
         self.is_kv_shared_layer = layer_idx in kv_share_map
         self.kv_sharing_target_layer_name: Optional[str] = None
         if self.is_kv_shared_layer:
-            # The runner uses unprefixed "layer.{i}" keys (see
-            # gemma4.py:740, kv_cache_manager.py:454).
+            # The runner uses unprefixed "layer.{i}" keys; this string must
+            # match the keys produced by KVCacheManager's spec-creation loop
+            # and Gemma4Model's layer-name iteration.
             self.kv_sharing_target_layer_name = (
                 f"layer.{kv_share_map[layer_idx]}")
 
@@ -470,7 +471,8 @@ class Gemma4Attention(JaxModule):
 
             v = self.v_norm(v)
         else:
-            # KV-shared (vllm reference at gemma4.py:524-540):
+            # KV-shared branch (mirrors the `else: # Shared: only apply RoPE
+            # to Q` branch of vllm-pytorch `Gemma4Attention.forward`):
             # Only Q gets RoPE. K and V are NOT normalized and NOT RoPE-rotated.
             # The cache slot (redirected by the runner)
             # holds the source layer's already-normed-and-roped K/V for ALL
@@ -583,7 +585,8 @@ class Gemma4DecoderLayer(JaxModule):
             prefix=prefix + ".pre_feedforward_layernorm",
         )
         # Double-wide MLP: KV-shared layers get 2x intermediate_size when
-        # the config flag is set (vllm reference: gemma4.py:599-610).
+        # text_config.use_double_wide_mlp is set (mirrors vllm-pytorch's
+        # `Gemma4DecoderLayer.__init__` gating).
         is_kv_shared = layer_idx in compute_kv_share_map(text_config)
         use_double_wide_mlp = (getattr(text_config, "use_double_wide_mlp",
                                        False) and is_kv_shared)
