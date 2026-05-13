@@ -466,6 +466,9 @@ class KVCacheManager:
                     # Use `or` instead of getattr default so we also handle
                     # the case where the attribute is present but None
                     # (e.g. Gemma-4 E2B has num_global_key_value_heads=None).
+                    # `or` also coerces 0 → fallback, which is fine because
+                    # 0 num_kv_heads / head_dim is never a valid config and
+                    # would crash get_padded_num_heads downstream anyway.
                     if not is_sliding:
                         num_kv_heads = (getattr(
                             text_config, "num_global_key_value_heads", None)
