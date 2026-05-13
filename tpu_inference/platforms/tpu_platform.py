@@ -242,8 +242,9 @@ class TpuPlatform(Platform):
                             min_page_size,
                         )
                         cache_config.block_size = min_page_size  # type: ignore[assignment]
-            if envs.USE_BATCHED_RPA_KERNEL and cache_config.block_size < 256:
-                cache_config.block_size = 256
+            if envs.USE_BATCHED_RPA_KERNEL:
+                if cache_config.block_size < 256:
+                    cache_config.block_size = 256
                 if vllm_config.model_config.is_hybrid:
                     bs = cache_config.block_size
                     cache_config.block_size = 1 << (bs - 1).bit_length()
