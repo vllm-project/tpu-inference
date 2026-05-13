@@ -149,12 +149,12 @@ class Eagle3Proposer:
         # scatter update of a static size, using a mask to handle the dynamic part.
         max_num_reqs = last_token_indices.shape[0]
         mask = jnp.arange(max_num_reqs) < num_reqs
+        last_token_indices = jnp.where(mask, last_token_indices,
+                                       last_token_indices[num_reqs - 1])
 
-        # For padded requests (where mask is False), we use the original value from
-        # the rolled array, making the update a no-op for them.
-        original_values_at_indices = rolled_input_ids[last_token_indices]
+        # Mask out the update for the padded requests (where mask is False).
         values_to_set = jnp.where(mask, next_token_ids,
-                                  original_values_at_indices)
+                                  next_token_ids[num_reqs - 1])
 
         input_ids = rolled_input_ids.at[last_token_indices].set(values_to_set)
 
@@ -316,7 +316,10 @@ class Eagle3Proposer:
         # For padded requests, the query length should be 0.
         query_len_per_req = jnp.where(
             jnp.arange(query_len_per_req.shape[0]) < num_reqs,
-            query_len_per_req, 1)
+            query_len_per_req, 0)
+        num_rejected_tokens = jnp.where(
+            jnp.arange(num_rejected_tokens.shape[0]) < num_reqs,
+            num_rejected_tokens, 0)
         # num_tokens_per_req = [q1 - n1, q2 - n2, ...]
         num_tokens_per_req = (query_len_per_req - num_rejected_tokens)
 
