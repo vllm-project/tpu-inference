@@ -248,6 +248,7 @@ class TpuPlatform(Platform):
                 if vllm_config.model_config.is_hybrid:
                     bs = cache_config.block_size
                     cache_config.block_size = 1 << (bs - 1).bit_length()
+                    logger.info(f"Override block size from {bs}")
             logger.info(
                 f"Using KV cache block size: {cache_config.block_size}")
 
@@ -335,7 +336,8 @@ class TpuPlatform(Platform):
                         bs = vllm_config.cache_config.block_size
                         if bs < 256:
                             vllm_config.cache_config.block_size = 256
-                        vllm_config.cache_config.block_size = 1 << (bs - 1).bit_length()
+                        if vllm_config.model_config.is_hybrid:
+                            vllm_config.cache_config.block_size = 1 << (bs - 1).bit_length()
                         logger.info(
                             f"Using RPA block size: {vllm_config.cache_config.block_size}"
                         )
