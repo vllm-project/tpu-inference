@@ -301,7 +301,7 @@ class TestTpuPlatform:
 
     @pytest.mark.parametrize("enable_batch_rpa,expected_block_size", [
         (True, 2048),
-        (False, 1280),
+        (False, 2048),
     ])
     def test_update_block_size_for_backend_align_hybrid_block_size(
             self, vllm_config, enable_batch_rpa, expected_block_size):
