@@ -37,6 +37,8 @@ from __future__ import annotations
 import time
 
 import pytest
+import ray
+
 from vllm import LLM, SamplingParams
 
 
@@ -181,6 +183,10 @@ def test_correctness_torchax_ray_distributed_executor(
     gcs_outputs = gcs_llm.generate([prompt], sampling_config)
     gcs_output_text = gcs_outputs[0].outputs[0].text
     del gcs_llm
+    # `del` only drops the Python reference; Ray actors holding the TPU
+    # are torn down asynchronously. Explicitly shut Ray down so the next
+    # LLM doesn't race with the previous workers for the TPU device.
+    ray.shutdown()
     time.sleep(10)  # Wait for TPUs to be released
 
     # Test with Hugging Face model
@@ -192,6 +198,7 @@ def test_correctness_torchax_ray_distributed_executor(
     hf_outputs = hf_llm.generate([prompt], sampling_config)
     hf_output_text = hf_outputs[0].outputs[0].text
     del hf_llm
+    ray.shutdown()
     time.sleep(10)  # Wait for TPUs to be released
 
     assert gcs_output_text == hf_output_text, (
