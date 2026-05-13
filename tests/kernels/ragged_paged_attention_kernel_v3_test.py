@@ -593,10 +593,10 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
                              dtype=np.float32)).astype(dtype)
 
         cache_data = jnp.array(
-            rng_cache.random((pages_per_seq * page_size,
-                              num_kv_heads_x2 // kv_packing, kv_packing,
-                              padded_hd),
-                             dtype=np.float32)).astype(dtype)
+            rng_cache.random(
+                (pages_per_seq * page_size, num_kv_heads_x2 // kv_packing,
+                 kv_packing, padded_hd),
+                dtype=np.float32)).astype(dtype)
         cache_pages = cache_data.reshape(pages_per_seq, page_size,
                                          num_kv_heads_x2 // kv_packing,
                                          kv_packing, padded_hd)
