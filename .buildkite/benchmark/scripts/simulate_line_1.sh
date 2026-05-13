@@ -14,62 +14,93 @@
 # limitations under the License.
 
 # ----------------------------------------------------------------
-# 模擬 Buildkite 環境中的 Line 1 靈異現象
+# 完全依照 run_bm.sh 層級模擬 Line 1 靈異現象
 # ----------------------------------------------------------------
 set -Eeuo pipefail
 
-# 1. 崩潰處理器
+# 0. Panic Handler (與原腳本一致)
 on_crash() {
     local exit_code=$?
+    local line_no=$1
+    local command="$2"
+    
+    if [ "$exit_code" -eq 0 ]; then return; fi
+
     echo ""
     echo "================================================================"
-    echo "🚨 [FATAL ERROR] Trap Triggered!"
-    echo "File:     ${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}"
-    echo "Line:     $1"
-    echo "Command:  $BASH_COMMAND"
+    echo "🚨 [FATAL ERROR] Bash Script Crashed Unexpectedly!"
+    echo "================================================================"
+    echo "File:     $(basename "$0")"
+    echo "Line:     $line_no"
+    echo "Command:  $command"
     echo "ExitCode: $exit_code"
     echo "================================================================"
 }
 
-# 監聽 ERR
-trap 'on_crash ${LINENO}' ERR
+trap 'on_crash ${LINENO} "$BASH_COMMAND"' ERR
 
-# 2. 模擬 report_and_exit (故意不加 trap - ERR)
+# 模擬變數
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BM_LOG="./sim_bm_log.txt"
+RECORD_ID="repro-test"
+
+# 模擬 report_and_exit (關鍵點：不拔 trap，直接 exit)
 report_and_exit() {
-    local code=$1
-    echo "--- [DEBUG] Entering report_and_exit with code $code ---"
-    
-    # 這裡就是關鍵：在某些環境下，exit 1 會觸發 ERR trap，
-    # 但因為正在退出，Stack 已空，LINENO 會變成 1。
-    exit "$code"
+  local exit_code=${1:-0}
+  echo "--- Calling report_result.sh for RECORD_ID=${RECORD_ID}"
+  # 這裡模擬原腳本執行 report 並退出
+  exit "$exit_code"
 }
 
-# 3. 模擬 run_benchmark 失敗
-# 利用管道 (|) 誘發子 Shell 不穩定狀態
-run_benchmark_sim() {
-    echo "Simulating benchmark..."
-    # 故意讓 grep 失敗 (Exit 1)
-    grep "NON_EXISTENT_STRING" <(echo "data") | awk '{print $1}'
+# 模擬 run_benchmark (誘發 grep 失敗)
+run_benchmark(){
+  echo "running benchmark..." >&2
+  
+  # 模擬執行 client 指令並產生 log
+  echo "Some dummy vLLM output" > "$BM_LOG"
+  
+  # 模擬 grep 失敗 (因為 log 裡沒有這串字)
+  # 這會導致 grep 回傳 1
+  throughput=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
+  p99_e2el=$(grep "P99 E2EL (ms):" "$BM_LOG" | awk '{print $NF}')
+  
+  echo "throughput: $throughput, P99 E2EL:$p99_e2el"
+  echo "$throughput $p99_e2el"
 }
 
-# 4. 模擬 execute_benchmark_safely
-execute_safely() {
-    echo "--- [DEBUG] Starting execute_safely ---"
+# 模擬 execute_benchmark_safely
+execute_benchmark_safely() {
+    local rate_arg="${1:-}"
     local output
-    
-    # 模擬大腳本的管道賦值邏輯
-    # 這種結構在失敗時會將 Exit Code 傳遞給父層，觸發 || 
-    set +e
-    output=$(run_benchmark_sim | tail -n 1)
-    local bm_exit_code=$?
+    local bm_exit_code
+
+    set +e  
+    # 這裡模擬管道操作
+    output=$(run_benchmark "$rate_arg" | tail -n 1)
+    bm_exit_code=$?
     set -e
 
     if [[ "$bm_exit_code" -ne 0 ]]; then
-        echo "[DEBUG] Detected failure, calling report_and_exit..."
-        report_and_exit "$bm_exit_code"
+        echo "[ERROR] Benchmark client crashed with exit code $bm_exit_code!"
+        report_and_exit 1
+    fi
+
+    # 模擬後續解析失敗 (因為 grep 沒抓到東西，output 會是空的)
+    local temp_throughput
+    local temp_p99
+    read -r temp_throughput temp_p99 <<< "$output"
+
+    if ! [[ "$temp_throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "[ERROR] Failed to parse metrics! Output was: '$output'"
+        report_and_exit 1
     fi
 }
 
-# --- 主流程 ---
-echo "--- Buildkite Reproduction Start ---"
-execute_safely
+# --- 模擬 Main Flow ---
+
+# 1. 關鍵點：模擬 eval 汙染環境
+# 原腳本有這行，這會讓 Bash 的行號追蹤在 exit 時變得不穩定
+eval "echo 'Simulating Python Parser Output'"
+
+echo "Starting reproduction run..."
+execute_benchmark_safely
