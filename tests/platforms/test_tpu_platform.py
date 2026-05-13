@@ -276,7 +276,7 @@ class TestTpuPlatform:
         "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
     )
     @patch("tpu_inference.platforms.tpu_platform.logger")
-    def test_check_and_update_config_hybrid_model(self, mock_logger, mock_update,
+    def test_check_and_update_config_power_of_2_block_size(self, mock_logger, mock_update,
                                                 mock_sharding, vllm_config):
         mock_pallas = MagicMock()
         mock_pallas.get_page_size.return_value = 1000
