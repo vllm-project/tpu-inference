@@ -20,13 +20,16 @@ from datetime import datetime
 
 
 def fmt(val, is_str=False):
-    """Helper to safely format python values to SQL values"""
+    """Safely formats python values to SQL-compatible strings for file output."""
     if val is None or val == 'NULL':
         return 'NULL'
     if str(val).lower() == 'inf' or str(val) == 'Infinity':
         return "CAST('inf' AS FLOAT64)"
     if is_str:
-        return f"'{val}'"
+        # Prevent SQL injection by escaping single quotes
+        # 'Hello' becomes ''Hello'' (Standard SQL escaping)
+        safe_val = str(val).replace("'", "''")
+        return f"'{safe_val}'"
     return str(val)
 
 
@@ -61,8 +64,8 @@ def parse_and_dump(file_path, record_id):
                       file=sys.stderr)
                 continue
 
-            rate = data.get('request_rate')
-            concurrency = data.get('max_concurrency')
+            rate = data.get('request_rate', 'unknown')
+            concurrency = data.get('max_concurrency', 'unknown')
             short_suffix = uuid.uuid4().hex[:5]
             # Parse date from JSON
             # Example: "20260402-195133" -> "2026-04-02T19:51:33Z"
@@ -77,7 +80,10 @@ def parse_and_dump(file_path, record_id):
                         f"Warning: Could not parse date string: {date_str}. Using CURRENT_TIMESTAMP()",
                         file=sys.stderr)
 
-            unique_record_id = f"{record_id}_{rate}_c{concurrency}_{short_suffix}"
+            # Sanitize the components of the record ID
+            unique_record_id = fmt(
+                f"{record_id}_{rate}_c{concurrency}_{short_suffix}",
+                is_str=True)
 
             sql = f"""
             INSERT INTO RunRecord (
@@ -90,8 +96,8 @@ def parse_and_dump(file_path, record_id):
                 MeanTPOT, MedianTPOT, StdTPOT, P90TPOT, P99TPOT,
                 MeanITL, MedianITL, StdITL, P90ITL, P99ITL
             ) VALUES (
-                '{unique_record_id}', 'COMPLETED', {spanner_timestamp}, CURRENT_TIMESTAMP(),
-                'GKE', {fmt(data.get('model_id', 'N/A'), True)}, 'GKE_DISAGG', 'N/A', 'random', 'scheduler', {input_len}, {output_len},
+                {unique_record_id}, 'COMPLETED', {spanner_timestamp}, CURRENT_TIMESTAMP(),
+                'GKE', {fmt(data.get('model_id', 'N/A'), True)}, 'GKE_DISAGG', 'N/A', 'random', 'scheduler', {fmt(input_len)}, {fmt(output_len)},
                 {fmt(data.get('endpoint_type'), True)}, {fmt(data.get('backend'), True)}, {fmt(data.get('label'), True)}, {fmt(data.get('tokenizer_id'), True)}, 
                 {fmt(data.get('num_prompts'))}, {fmt(data.get('request_rate'))}, {fmt(data.get('burstiness'))}, {fmt(data.get('max_concurrency'))},
                 {fmt(data.get('duration'))}, {fmt(data.get('completed'))}, {fmt(data.get('failed'))}, {fmt(data.get('total_input_tokens'))}, {fmt(data.get('total_output_tokens'))}, {fmt(data.get('max_concurrent_requests'))},

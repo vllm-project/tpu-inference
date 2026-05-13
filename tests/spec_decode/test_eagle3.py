@@ -116,9 +116,13 @@ def test_prepare_inputs():
     num_rejected_tokens = jnp.array(num_rejected_tokens_cpu)
     # This is only used in the _prepare_input_ids helper
     # It must be padded to max_num_seqs (128) to match the mask in jnp.where
-    next_token_ids_cpu = np.zeros(max_num_seqs, dtype=np.int32)
-    next_token_ids_cpu[:num_reqs] = [1, 2, 3]  # Valid tokens for active reqs
-    next_token_ids = jnp.array(next_token_ids_cpu)
+    last_sampled_token_id_cpu = np.zeros(max_num_seqs, dtype=np.int32)
+    last_sampled_token_id_cpu[:num_reqs] = [1, 2,
+                                            3]  # Valid tokens for active reqs
+    last_sampled_token_id = jnp.array(last_sampled_token_id_cpu)
+    next_prompt_token_id = jnp.zeros(max_num_seqs, dtype=jnp.int32)
+    # All requests are in decode (not prefill), so last_sampled_token_id is used.
+    is_in_prefill = jnp.zeros(max_num_seqs, dtype=jnp.bool_)
 
     attn_metadata = AttentionMetadata(
         seq_lens=jnp.array(sl_cpu),
@@ -142,16 +146,15 @@ def test_prepare_inputs():
     expected_new_seq_lens = np.zeros(max_num_seqs, dtype=np.int32)
     expected_new_seq_lens[:num_reqs] = [3, 4, 3]
 
-    expected_total_tokens = int(expected_new_qsl[-1])
-    expected_total_tokens = runner_utils.get_padded_token_len(
-        proposer.runner.num_tokens_paddings, expected_total_tokens)
+    expected_total_tokens = input_ids.shape[0]
 
     expected_last_token_indices = jnp.array(expected_new_qsl[1:] - 1)
 
     # Execute
     target_hidden_states, input_ids, last_token_indices, updated_metadata = (
         proposer.prepare_inputs(attn_metadata, input_ids, aux_hidden_states,
-                                next_token_ids, num_rejected_tokens))
+                                last_sampled_token_id, next_prompt_token_id,
+                                is_in_prefill, num_rejected_tokens))
 
     # Assertions
     assert jnp.array_equal(updated_metadata.query_start_loc,

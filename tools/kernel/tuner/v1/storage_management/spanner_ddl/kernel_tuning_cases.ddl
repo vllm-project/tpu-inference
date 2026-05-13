@@ -1,0 +1,13 @@
+CREATE TABLE
+  KernelTuningCases ( ID STRING(128) NOT NULL,
+    CaseId INT64 NOT NULL,
+    CaseKeyValue STRING(256),
+    TPU STRING(32),
+    )
+PRIMARY KEY
+  (ID,
+    CaseId),
+  INTERLEAVE IN PARENT CaseSet
+ON
+DELETE
+  CASCADE;

@@ -320,7 +320,7 @@ def test_mla_attention(monkeypatch, mesh):
     q_lora_rank = 64
     kv_lora_rank = 64
 
-    q_TNA = jnp.ones((TOTAL_TOKENS, NUM_HEADS, q_lora_rank))
+    q_NTA = jnp.ones((NUM_HEADS, TOTAL_TOKENS, q_lora_rank))
     q_rope_TNH = jnp.ones((TOTAL_TOKENS, NUM_HEADS, qk_rope_dim))
     k_SA = jnp.ones((TOTAL_TOKENS, kv_lora_rank))
     k_rope_SH = jnp.ones((TOTAL_TOKENS, qk_rope_dim))
@@ -338,7 +338,7 @@ def test_mla_attention(monkeypatch, mesh):
         request_distribution=jnp.array([0, 0, NUM_SEQS], dtype=jnp.int32),
     )
 
-    expected_output = jnp.full(q_TNA.shape, 0.5)
+    expected_output = jnp.full(q_NTA.shape, 0.5)
     expected_new_cache = jnp.full(kv_cache_shape, 0.1)
 
     mock_mla_kernel = MagicMock(return_value=(expected_output,
@@ -348,7 +348,7 @@ def test_mla_attention(monkeypatch, mesh):
         mock_mla_kernel)
 
     final_kv_cache, output = mla_attention(
-        q_TNA=q_TNA,
+        q_NTA=q_NTA,
         q_rope_TNH=q_rope_TNH,
         k_SA=k_SA,
         k_rope_SH=k_rope_SH,

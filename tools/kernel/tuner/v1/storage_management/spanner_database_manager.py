@@ -143,11 +143,15 @@ class SpannerStorageManager(StorageManager):
             return
         with self.database.batch() as b:
             b.insert(table='KernelTuningCases',
-                     columns=('ID', 'CaseId', 'CaseKeyValue'),
+                     columns=('ID', 'CaseId', 'CaseKeyValue', 'TPU'),
                      values=self.buffer)
         self.buffer = []
 
-    def add_tuner_case(self, caseset_id: str, case_id: int, case: str):
+    def add_tuner_case(self,
+                       caseset_id: str,
+                       case_id: int,
+                       case: str,
+                       tpu: str = None):
         assert isinstance(
             caseset_id, str
         ), f'param caseset_id should be a string but got {type(caseset_id)}'
@@ -157,13 +161,18 @@ class SpannerStorageManager(StorageManager):
         assert isinstance(
             case, str
         ), f'param case should be a string representing the key:value but got {type(case)}'
-        self.buffer.append((caseset_id, case_id, case))
+        self.buffer.append((caseset_id, case_id, case, tpu))
         self.current_case_id += 1
         if len(self.buffer) >= BATCH_SIZE:
             self.flush()
 
-    def create_bucket_for_run(self, cs_id: str, r_id: int, bucket_id: int,
-                              start_case_id: int, end_case_id: int):
+    def create_bucket_for_run(self,
+                              cs_id: str,
+                              r_id: int,
+                              bucket_id: int,
+                              start_case_id: int,
+                              end_case_id: int,
+                              tpu: str = None):
         """Creates a new work bucket for a tuning run.
 
         Used by tuner agents to define discrete units of work (buckets) that can
@@ -175,15 +184,17 @@ class SpannerStorageManager(StorageManager):
             bucket_id: Unique integer identifier for the bucket within the run.
             start_case_id: Starting case ID (inclusive) for this bucket.
             end_case_id: Ending case ID (inclusive) for this bucket.
+            tpu: TPU queue identifier where this bucket will be executed.
         """
         if self.dry_run:
             return
         self.database.run_in_transaction(lambda tx: tx.insert(
             columns=('ID', 'RunId', 'BucketId', 'StartCaseId', 'EndCaseId',
-                     'Status', 'WorkerID', 'UpdatedAt'),
+                     'Status', 'WorkerID', 'UpdatedAt', 'TPU'),
             table='WorkBuckets',
             values=[(cs_id, r_id, bucket_id, start_case_id, end_case_id,
-                     'PENDING', self.worker_id, spanner.COMMIT_TIMESTAMP)]))
+                     'PENDING', self.worker_id, spanner.COMMIT_TIMESTAMP, tpu)
+                    ]))
 
     # tuner agents working on the a bucket will mark the bucket as IN_PROGRESS/COMPLETED
     def mark_bucket_in_progress(self, cs_id, r_id, b_id):
@@ -241,7 +252,7 @@ class SpannerStorageManager(StorageManager):
                                columns=('ID', 'RunId', 'CaseId',
                                         'ProcessedStatus', 'WorkerID',
                                         'Latency', 'WarmupTime', 'TotalTime',
-                                        'ProcessedAt'),
+                                        'ProcessedAt', 'TPU'),
                                values=results)
 
     # tuner agents will query from the KernelTuningCases table and run the cases

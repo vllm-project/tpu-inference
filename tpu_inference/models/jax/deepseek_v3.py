@@ -36,8 +36,8 @@ from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
 from tpu_inference.layers.common.attention_interface import mla_attention
 from tpu_inference.layers.common.moe import MoEBackend
-from tpu_inference.layers.common.quantization import (dequantize_tensor,
-                                                      quantize_kv)
+from tpu_inference.layers.common.quantization import (
+    dequantize_tensor, quantize_kv, static_per_tensor_quantize_tensor)
 from tpu_inference.layers.common.sharding import \
     ShardingAxisNameBase as ShardingAxisName
 from tpu_inference.layers.common.utils import cpu_mesh_context
@@ -139,9 +139,10 @@ class DeepseekV3BaseAttention(JaxModule):
     kv_da_sharding: P = P()
     activation_attention_td: P = P()
     activation_q_td: P = P()
+    query_nth: P = P()
     query_tnh: P = P()
     keyvalue_skh: P = P()
-    attn_o_tnh: P = P()
+    attn_o_nth: P = P()
     activation_attention_out_td: P = P()
     # Weight initialization
     random_init: bool = False
@@ -460,7 +461,7 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
             P(),  # distribution: Replicated
         )
 
-        out_specs = (self.attn_o_tnh, P(None, None,
+        out_specs = (self.attn_o_nth, P(None, None,
                                         ShardingAxisName.ATTN_HEAD))
 
         output_TNH, kv_cache = jax.jit(
@@ -554,7 +555,7 @@ class MLAEinsum(JaxEinsum):
         setattr(
             mla_layer, "k_up_proj",
             JaxEinsum(
-                einsum_str="TNH,ANH->TNA",
+                einsum_str="TNH,ANH->NTA",
                 kernel_shape=(A, N, qk_nope_head_dim),
                 rngs=nnx.Rngs(0),
                 prefix=mla_layer.prefix + ".k_up_proj",
@@ -563,7 +564,7 @@ class MLAEinsum(JaxEinsum):
         setattr(
             mla_layer, "v_up_proj",
             JaxEinsum(
-                einsum_str="TNA,ANH->TNH",
+                einsum_str="NTA,ANH->TNH",
                 kernel_shape=(A, N, v_head_dim),
                 rngs=nnx.Rngs(0),
                 prefix=mla_layer.prefix + ".v_up_proj",
@@ -626,10 +627,10 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
         q_rope_TNH = q_TNH[..., self.qk_nope_head_dim:]
         q_rope_TNH = self.rope.apply_rope(input_positions, q_rope_TNH)
 
-        q_TNA = self.k_up_proj(q_nope_TNH)
+        q_NTA = self.k_up_proj(q_nope_TNH)
 
-        q_TNA = lax.with_sharding_constraint(q_TNA, self.query_tnh)
-        return (q_TNA, q_rope_TNH)
+        q_NTA = lax.with_sharding_constraint(q_NTA, self.query_nth)
+        return (q_NTA, q_rope_TNH)
 
     def compute_kv_projection(
             self, x_SD: jax.Array,
@@ -678,7 +679,7 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
             A tuple of key-value cache and output tensor of shape `(tokens_query, num_query_heads, q_lora_rank)`.
         """
 
-        q_TNA, q_rope_TNH = q_data
+        q_NTA, q_rope_TNH = q_data
         k_SA, k_rope_SH = kv_data
 
         q_scale = k_scale = None
@@ -693,8 +694,12 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
                                        k_rope_SH,
                                        value=None,
                                        k_scale=k_scale)
+            q_NTA = static_per_tensor_quantize_tensor(
+                self.kv_cache_quantized_dtype, q_NTA, self._q_scale)
+            q_rope_TNH = static_per_tensor_quantize_tensor(
+                self.kv_cache_quantized_dtype, q_rope_TNH, self._q_scale)
 
-        return mla_attention(q_TNA,
+        return mla_attention(q_NTA,
                              q_rope_TNH,
                              k_SA,
                              k_rope_SH,
@@ -703,29 +708,30 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
                              self.mesh,
                              self.num_attention_heads,
                              self.qk_nope_head_dim,
+                             query_nth_sharding=self.query_nth,
                              query_tnh_sharding=self.query_tnh,
                              keyvalue_skh_sharding=self.keyvalue_skh,
-                             attn_o_tnh_sharding=self.attn_o_tnh,
+                             attn_o_nth_sharding=self.attn_o_nth,
                              q_scale=q_scale,
                              k_scale=k_scale,
                              v_scale=k_scale,
                              sm_scale=self.scale)
 
-    def process_output(self, outputs_TNA: jax.Array) -> jax.Array:
+    def process_output(self, outputs_NTA: jax.Array) -> jax.Array:
         """
         Processes output for MLA specifically.
 
         Args:
-            outputs_TNH: The output tensor of shape `(tokens_query, num_query_heads, q_lora_rank)`.
+            outputs_NTA: The output tensor of shape `(num_heads, tokens_query, q_lora_rank)`.
 
         Returns:
             The processed output tensor of shape `(tokens_query, num_query_heads, head_dim)`.
         """
 
         # MLA Specific: Apply V-Up Projection after attention
-        # Outputs from MLA kernel are in latent space (TNA), project to TNH
-        outputs_TNH = self.v_up_proj(outputs_TNA)
-        return outputs_TNH
+        # Outputs from MLA kernel are N-major [N, T, A]; project to T-major [T, N, H]
+        outputs_TNH = self.v_up_proj(outputs_NTA)
+        return outputs_TNH.astype(self.dtype)
 
 
 @dataclass(kw_only=True)
@@ -1182,14 +1188,17 @@ class DeepSeekV3(JaxModule):
         def _create_deepseek_attention(
                 i: int) -> Union[DeepseekV3MLA, DeepseekV3Attention]:
             if self.use_mla_kernel:
+                # q_NTA is [N, T, A].
+                query_nth_spec = P(None, ShardingAxisName.ATTN_DATA, None)
                 query_tnh_spec = P(ShardingAxisName.ATTN_DATA, None, None)
                 keyvalue_skh_spec = P(ShardingAxisName.ATTN_DATA, None)
-                attn_o_tnh_spec = P(ShardingAxisName.ATTN_DATA, None, None)
+                # Kernel output is [N, T, A]
+                attn_o_nth_spec = P(None, ShardingAxisName.ATTN_DATA, None)
                 anh_sharding = (None, ShardingAxisName.ATTN_HEAD, None)
             else:
                 query_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR)
                 keyvalue_skh_spec = P(None, ShardingAxisName.MLP_TENSOR)
-                attn_o_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR)
+                attn_o_nth_spec = P(None, ShardingAxisName.MLP_TENSOR)
             rd_sharding = P(ShardingAxisName.ATTN_HEAD, None)
             ap_sharding = P(None, ShardingAxisName.ATTN_HEAD)
             q_da_sharding = P(None, ShardingAxisName.ATTN_HEAD)
@@ -1224,11 +1233,12 @@ class DeepSeekV3(JaxModule):
                 quant_config=quant_config,
                 activation_attention_td=P(ShardingAxisName.ATTN_DATA, None),
                 activation_q_td=P(ShardingAxisName.ATTN_DATA, None),
+                query_nth=query_nth_spec,
                 query_tnh=query_tnh_spec,
                 keyvalue_skh=keyvalue_skh_spec,
                 activation_attention_out_td=P(ShardingAxisName.ATTN_DATA,
                                               None),
-                attn_o_tnh=attn_o_tnh_spec,
+                attn_o_nth=attn_o_nth_spec,
                 q_da_sharding=q_da_sharding,
                 ap_sharding=ap_sharding,
                 kv_da_sharding=kv_da_sharding,

@@ -65,6 +65,7 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("LAYOUT_Q_PROJ_AS_NDH", "0")
     monkeypatch.setenv("USE_BATCHED_RPA_KERNEL", "0")
     monkeypatch.setenv("ENABLE_AGGREGATED_STATS_LOGGER", "0")
+    monkeypatch.setenv("DISABLE_WEIGHT_REQUANTIZATION", "0")
 
     # Test SKIP_JAX_PRECOMPILE (default False)
     assert envs.SKIP_JAX_PRECOMPILE is False
@@ -72,6 +73,13 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert envs.SKIP_JAX_PRECOMPILE is True
     monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "0")
     assert envs.SKIP_JAX_PRECOMPILE is False
+
+    # Test DISABLE_WEIGHT_REQUANTIZATION (default False)
+    assert envs.DISABLE_WEIGHT_REQUANTIZATION is False
+    monkeypatch.setenv("DISABLE_WEIGHT_REQUANTIZATION", "1")
+    assert envs.DISABLE_WEIGHT_REQUANTIZATION is True
+    monkeypatch.setenv("DISABLE_WEIGHT_REQUANTIZATION", "0")
+    assert envs.DISABLE_WEIGHT_REQUANTIZATION is False
 
     # Test VLLM_XLA_CHECK_RECOMPILATION (default False)
     assert envs.VLLM_XLA_CHECK_RECOMPILATION is False
@@ -241,7 +249,7 @@ def test_string_env_vars_defaults(monkeypatch: pytest.MonkeyPatch):
     assert envs.DECODE_SLICES == ""
     assert envs.PHASED_PROFILING_DIR == ""
     assert envs.REQUANTIZE_WEIGHT_DTYPE == "float8_e4m3fn"
-    assert envs.MOE_REQUANTIZE_WEIGHT_DTYPE == "float8_e4m3fn"
+    assert envs.MOE_REQUANTIZE_WEIGHT_DTYPE == ""
 
 
 def test_none_default_env_vars(monkeypatch: pytest.MonkeyPatch):

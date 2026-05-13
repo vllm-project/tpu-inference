@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: gmm-w4a8
-# pipeline-type: kernel support matrix microbenchmarks
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for gmm-w4a8"
     key: "${TPU_VERSION:-tpu6e}_gmm-w4a8_CorrectnessTest"

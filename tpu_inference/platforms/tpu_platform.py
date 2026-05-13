@@ -92,7 +92,8 @@ class TpuPlatform(Platform):
     simple_compile_backend: str = "openxla"
 
     supported_quantization: list[str] = [
-        "tpu_int8", "compressed-tensors", "awq", "fp8", "gpt_oss_mxfp4"
+        "tpu_int8", "compressed-tensors", "awq", "fp8", "gpt_oss_mxfp4",
+        "modelopt_fp4"
     ]
 
     additional_env_vars: list[str] = [
@@ -109,6 +110,7 @@ class TpuPlatform(Platform):
         "MOE_REQUANTIZE_WEIGHT_DTYPE",
         "USE_JAX_PROFILER_SERVER",
         "JAX_PROFILER_SERVER_PORT",
+        "ENABLE_RS_KERNEL",
     ]
 
     @classmethod
@@ -306,10 +308,6 @@ class TpuPlatform(Platform):
         from tpu_inference.core.sched.dp_scheduler import \
             update_vllm_config_for_dp_scheduler
         update_vllm_config_for_dp_scheduler(vllm_config)
-
-        from tpu_inference.core.sched.utils import \
-            update_vllm_scheduler_for_exporting_expert_ids
-        update_vllm_scheduler_for_exporting_expert_ids()
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:

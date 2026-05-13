@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: multi-host
-# pipeline-type: feature support matrix
 steps: 
   - label: "${TPU_VERSION:-tpu7x} Correctness tests for multi-host"
     key: "${TPU_VERSION:-tpu7x}_multi-host_CorrectnessTest"

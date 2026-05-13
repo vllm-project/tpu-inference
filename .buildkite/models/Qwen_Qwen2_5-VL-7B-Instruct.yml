@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: Qwen/Qwen2.5-VL-7B-Instruct
-# pipeline-type: multimodal
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen2.5-VL-7B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_UnitTest"

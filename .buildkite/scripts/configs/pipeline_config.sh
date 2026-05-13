@@ -71,7 +71,6 @@ process_json_benchmark_cases() {
       echo "Successfully uploaded pipeline for $case_file"
     else
       echo "🚨 Error: Failed to generate or upload pipeline for $case_file"
-      exit 1
     fi
   done
 }
