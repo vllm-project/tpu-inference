@@ -475,7 +475,7 @@ class GmmTest(jtu.JaxTestCase):
         preferred_element_type=jnp.bfloat16,
     )
     self.assertEqual(actual.shape, (num_local_groups, in_size, out_size))
-    self.assertAllClose(actual, expected, rtol=1e-2, atol=6e-1)
+    self.assertAllClose(actual, expected, rtol=1e-2, atol=4e-1)
 
   def test_tgmm_with_rhs_scale_n_padding(self):
     # Pins tile_n=128 with out_size=300 so the kernel runs 3 n-tiles over an
@@ -514,7 +514,7 @@ class GmmTest(jtu.JaxTestCase):
         preferred_element_type=jnp.bfloat16,
     )
     self.assertEqual(actual.shape, (num_groups, in_size, out_size))
-    self.assertAllClose(actual, expected, rtol=1e-2, atol=6e-1)
+    self.assertAllClose(actual, expected, rtol=1e-2, atol=4e-1)
 
 
   @parameterized.product(
@@ -552,7 +552,9 @@ class GmmTest(jtu.JaxTestCase):
     rhs_q, rhs_scale = quantize_tensor(
         rhs, weight_dtype, axis=1, block_size=block_size
     )
+    print(f'xw32 line555 {rhs_scale.shape=}')
     rhs_scale = jnp.expand_dims(rhs_scale, axis=2)
+    print(f'xw32 line557 {rhs_scale.shape=}')
 
     rhs_bias = None
     if has_bias:
