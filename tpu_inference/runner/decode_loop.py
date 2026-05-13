@@ -44,6 +44,35 @@ class TpuSamplingState:
     step_counter: jax.Array
 
 
+@functools.partial(jax.jit, static_argnames=["dp_size", "pad_len"])
+def _update_loop_state(
+    next_tokens: jax.Array,
+    active_mask: jax.Array,
+    input_positions: jax.Array,
+    seq_lens: jax.Array,
+    eos_token_id: int,
+    padding_token_id: int,
+    dp_size: int,
+    pad_len: int,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    is_eos = next_tokens == eos_token_id
+    new_active_mask = jnp.logical_and(active_mask, jnp.logical_not(is_eos))
+    next_input_ids = jnp.where(new_active_mask, next_tokens, padding_token_id)
+    increment = new_active_mask.astype(jnp.int32)
+    new_positions = input_positions + increment
+
+    # Fix DP padding bug by exposing DP dimension as 2D before padding
+    increment_2d = increment.reshape(dp_size, -1)
+    seq_lens_2d = seq_lens.reshape(dp_size, -1)
+    padded_increment_2d = jnp.pad(increment_2d, ((0, 0), (0, pad_len)))
+    new_seq_lens = (seq_lens_2d + padded_increment_2d).ravel()
+
+    # Compute the token to record in generated_tokens
+    step_record_tokens = jnp.where(active_mask, next_tokens, padding_token_id)
+
+    return new_active_mask, next_input_ids, new_positions, new_seq_lens, step_record_tokens
+
+
 def continue_decode(
     state: Any,
     model_fn: Callable,
@@ -86,6 +115,9 @@ def continue_decode(
     """
 
     batch_size = init_state.current_tokens.shape[0]
+    seq_lens_size = init_state.attn_metadata.seq_lens.shape[0]
+    pad_len = (seq_lens_size - batch_size) // dp_size
+
     generated_tokens = jnp.full((max_decode_steps, batch_size),
                                 padding_token_id,
                                 dtype=jnp.int32)
@@ -132,26 +164,17 @@ def continue_decode(
         logits = logits.astype(jnp.float32)
         next_tokens, _ = sample_fn(step_rng, logits)
 
-        # 3. Check for EOS and update mask
-        is_eos = next_tokens == eos_token_id
-        new_active_mask = jnp.logical_and(active_mask, jnp.logical_not(is_eos))
-
-        # 4. Update tokens for next step (pad finished ones)
-        next_input_ids = jnp.where(new_active_mask, next_tokens,
-                                   padding_token_id)
-
-        # 5. Update AttentionMetadata for next step
-        increment = new_active_mask.astype(jnp.int32)
-        new_positions = attn_metadata.input_positions + increment
-
-        # Fix DP padding bug by exposing DP dimension as 2D before padding
-        increment_2d = increment.reshape(dp_size, -1)
-        seq_lens_2d = attn_metadata.seq_lens.reshape(dp_size, -1)
-
-        pad_len = seq_lens_2d.shape[1] - increment_2d.shape[1]
-        padded_increment_2d = jnp.pad(increment_2d, ((0, 0), (0, pad_len)))
-
-        new_seq_lens = (seq_lens_2d + padded_increment_2d).ravel()
+        # 3. Update loop state via fused JIT helper
+        new_active_mask, next_input_ids, new_positions, new_seq_lens, step_record_tokens = _update_loop_state(
+            next_tokens,
+            active_mask,
+            attn_metadata.input_positions,
+            attn_metadata.seq_lens,
+            eos_token_id,
+            padding_token_id,
+            dp_size,
+            pad_len,
+        )
 
         new_attn_metadata = AttentionMetadata(
             input_positions=new_positions,
@@ -162,9 +185,9 @@ def continue_decode(
             mamba_state_indices=attn_metadata.mamba_state_indices,
         )
 
-        # 6. Record generated tokens
+        # 4. Record generated tokens
         generated_tokens = generated_tokens.at[step_idx].set(
-            jnp.where(active_mask, next_tokens, padding_token_id))
+            step_record_tokens)
 
         # Update loop variables
         current_tokens = next_input_ids
