@@ -1,29 +1,18 @@
 #!/bin/bash
-# Copyright 2026 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# reproduce_line_1_bk.sh
+# 模擬 run_bm.sh 的完整呼叫層級以重現 Line 1 報錯
 
-# ----------------------------------------------------------------
-# 完全依照 run_bm.sh 層級模擬 Line 1 靈異現象
-# ----------------------------------------------------------------
 set -Eeuo pipefail
 
-# 0. Panic Handler (與原腳本一致)
+# ==============================================================================
+# 0. 全局崩潰攔截器 (與大腳本一致)
+# ==============================================================================
 on_crash() {
     local exit_code=$?
     local line_no=$1
     local command="$2"
     
+    # 正常退出不處理
     if [ "$exit_code" -eq 0 ]; then return; fi
 
     echo ""
@@ -35,72 +24,64 @@ on_crash() {
     echo "Command:  $command"
     echo "ExitCode: $exit_code"
     echo "================================================================"
+    echo ""
 }
 
+# 監聽 ERR 信號
 trap 'on_crash ${LINENO} "$BASH_COMMAND"' ERR
 
-# 模擬變數
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BM_LOG="./sim_bm_log.txt"
-RECORD_ID="repro-test"
-
-# 模擬 report_and_exit (關鍵點：不拔 trap，直接 exit)
+# ==============================================================================
+# 1. 核心退出函數
+# ==============================================================================
 report_and_exit() {
-  local exit_code=${1:-0}
-  echo "--- Calling report_result.sh for RECORD_ID=${RECORD_ID}"
-  # 這裡模擬原腳本執行 report 並退出
-  exit "$exit_code"
+    local exit_code=${1:-0}
+    echo "--- [DEBUG] Entering report_and_exit with code $exit_code ---"
+    
+    # 在大腳本中，這裡直接執行 exit 指令
+    # 當外部存在 eval 殘留且處於某些 Bash 版本時，
+    # 這裡的 exit 會被誤認為是執行失敗，進而觸發第二次 Trap (導致 Line 1)
+    exit "$exit_code"
 }
 
-# 模擬 run_benchmark (誘發 grep 失敗)
-run_benchmark(){
-  echo "running benchmark..." >&2
-  
-  # 模擬執行 client 指令並產生 log
-  echo "Some dummy vLLM output" > "$BM_LOG"
-  
-  # 模擬 grep 失敗 (因為 log 裡沒有這串字)
-  # 這會導致 grep 回傳 1
-  throughput=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
-  p99_e2el=$(grep "P99 E2EL (ms):" "$BM_LOG" | awk '{print $NF}')
-  
-  echo "throughput: $throughput, P99 E2EL:$p99_e2el"
-  echo "$throughput $p99_e2el"
+# ==============================================================================
+# 2. 模擬 Benchmark 邏輯
+# ==============================================================================
+run_benchmark() {
+    echo "running benchmark..." >&2
+    # 故意製造一個會讓後續 grep 失敗的內容
+    echo "vLLM is running, but metrics are missing"
 }
 
-# 模擬 execute_benchmark_safely
 execute_benchmark_safely() {
-    local rate_arg="${1:-}"
     local output
     local bm_exit_code
 
     set +e  
-    # 這裡模擬管道操作
-    output=$(run_benchmark "$rate_arg" | tail -n 1)
+    # 模擬大腳本的管道賦值：這會建立子 Shell (Subshell)
+    # 子 Shell 的失敗會傳遞給變數賦值動作
+    output=$(run_benchmark | tail -n 1)
     bm_exit_code=$?
     set -e
 
-    if [[ "$bm_exit_code" -ne 0 ]]; then
-        echo "[ERROR] Benchmark client crashed with exit code $bm_exit_code!"
-        report_and_exit 1
-    fi
-
-    # 模擬後續解析失敗 (因為 grep 沒抓到東西，output 會是空的)
-    local temp_throughput
-    local temp_p99
-    read -r temp_throughput temp_p99 <<< "$output"
-
-    if ! [[ "$temp_throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-        echo "[ERROR] Failed to parse metrics! Output was: '$output'"
+    # 模擬解析失敗 (因為 output 裡面沒有數字)
+    if ! [[ "$output" =~ [0-9] ]]; then
+        echo "[ERROR] Failed to parse valid metrics! Output was: '$output'"
+        # 這裡主動呼叫退出
         report_and_exit 1
     fi
 }
 
-# --- 模擬 Main Flow ---
+# ==============================================================================
+# 3. 主流程 (Main Flow)
+# ==============================================================================
 
-# 1. 關鍵點：模擬 eval 汙染環境
-# 原腳本有這行，這會讓 Bash 的行號追蹤在 exit 時變得不穩定
-eval "echo 'Simulating Python Parser Output'"
+# 🚨 關鍵步驟：模擬 eval 汙染環境
+# 大腳本一開始執行了 eval "$(python3 ...)"，這會改變 Bash 的內部行號偏移
+eval "export PYTHON_ENV_LOADED=true"
 
-echo "Starting reproduction run..."
+echo "--- Buildkite Reproduction Start ---"
+
+# 模擬深層嵌套呼叫
 execute_benchmark_safely
+
+echo "--- Reproduction End ---"
