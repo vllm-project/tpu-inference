@@ -55,4 +55,3 @@ class AttentionMetadata(object):
     mamba_state_indices: jax.Array | None = None
 
     query_start_loc_cpu: Any = field(init=False)
-    seq_lens_cpu: Any = field(init=False)
