@@ -52,7 +52,9 @@ if TYPE_CHECKING:
     TPU_OFFLOAD_USE_UNPINNED_HOST: bool = False
     MOE_APPROX_TOPK: bool = False
     MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
-
+    VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
+    ENABLE_RS_KERNEL: bool = False
+    DP_SCHED_BATCH_PREFILL: bool = False
 
 def env_with_choices(
     env_name: str,
@@ -298,6 +300,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: float(os.getenv("MOE_APPROX_TOPK_RECALL_TARGET", "0.9")),
     "DISABLE_WEIGHT_REQUANTIZATION":
     env_bool("DISABLE_WEIGHT_REQUANTIZATION", default=False),
+    "VLLM_TPU_PATCH_MM_EMBEDDINGS":
+    env_bool("VLLM_TPU_PATCH_MM_EMBEDDINGS", default=False),
+    "DISABLE_MLA_Q_ACTIVATION_QUANTIZATION":
+    env_bool("DISABLE_MLA_Q_ACTIVATION_QUANTIZATION", default=False),
+    # Enable hierarchical reduce-scatter kernel for MoE
+    "ENABLE_RS_KERNEL":
+    env_bool("ENABLE_RS_KERNEL", default=False),
+    # DP-scheduler: hold incoming requests (prefills) at the DP layer until
+    # `dp_size` of them have accumulated. The goal is to cluster new prefills.
+    "DP_SCHED_BATCH_PREFILL":
+    env_bool("DP_SCHED_BATCH_PREFILL", default=True),    
 }
 
 
