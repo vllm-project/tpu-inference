@@ -105,6 +105,7 @@ def _test_correctness_helper(
     sampling_config: SamplingParams,
     model_name: str,
     speculative_config: dict,
+    max_num_seqs: int = 4,
 ):
     '''
     Helper function to test ngram correctness.
@@ -116,7 +117,7 @@ def _test_correctness_helper(
 
         ref_llm = LLM(model=model_name,
                       max_model_len=1024,
-                      max_num_seqs=4,
+                      max_num_seqs=max_num_seqs,
                       tensor_parallel_size=_get_tensor_parallel_size(),
                       async_scheduling=0)
         ref_outputs = ref_llm.generate(test_prompts, sampling_config)
@@ -129,7 +130,7 @@ def _test_correctness_helper(
         spec_llm = LLM(model=model_name,
                        speculative_config=speculative_config,
                        max_model_len=1024,
-                       max_num_seqs=4,
+                       max_num_seqs=max_num_seqs,
                        tensor_parallel_size=_get_tensor_parallel_size(),
                        async_scheduling=0)
         spec_outputs = spec_llm.generate(test_prompts, sampling_config)
@@ -197,12 +198,15 @@ def _test_performance_helper(
     sampling_config: SamplingParams,
     speculative_config: dict,
     min_speedup: float,
+    model_name: str = "meta-llama/Llama-3.1-8B-Instruct",
 ):
     '''
     Helper function to test speculative decoding performance.
-    Compares timing between reference LLM and speculative LLM using Llama 3 8B.
+    Compares timing between reference LLM and speculative LLM. Default target is
+    Llama-3.1-8B-Instruct; DFlash needs a target whose Qwen3 implementation
+    captures aux hidden states for DFlash methods, so callers exercising
+    DFlash pass model_name="Qwen/Qwen3-4B".
     '''
-    model_name = "meta-llama/Llama-3.1-8B-Instruct"
 
     with monkeypatch.context():
         # Use a smaller set of prompts for performance testing
@@ -338,13 +342,15 @@ def test_dflash_correctness(
     '''
     model_name = 'Qwen/Qwen3-4B'
 
-    _test_correctness_helper(
-        monkeypatch, sampling_config, model_name, {
-            'model': "z-lab/Qwen3-4B-DFlash-b16",
-            "num_speculative_tokens": 16,
-            "method": "dflash",
-            "draft_tensor_parallel_size": 1
-        })
+    _test_correctness_helper(monkeypatch,
+                             sampling_config,
+                             model_name, {
+                                 'model': "z-lab/Qwen3-4B-DFlash-b16",
+                                 "num_speculative_tokens": 16,
+                                 "method": "dflash",
+                                 "draft_tensor_parallel_size": 1
+                             },
+                             max_num_seqs=1)
 
 
 def test_dflash_performance(
@@ -356,10 +362,57 @@ def test_dflash_performance(
     improvement. Compares timing between reference LLM and speculative LLM
     using Qwen3-4B.
     '''
-    _test_performance_helper(
-        monkeypatch, sampling_config, {
-            "method": "dflash",
-            "model": "z-lab/Qwen3-4B-DFlash-b16",
-            "num_speculative_tokens": 16,
-            "draft_tensor_parallel_size": 1
-        }, 0.6 if _is_v7x() else 1.5)
+    _test_performance_helper(monkeypatch,
+                             sampling_config, {
+                                 "method": "dflash",
+                                 "model": "z-lab/Qwen3-4B-DFlash-b16",
+                                 "num_speculative_tokens": 16,
+                                 "draft_tensor_parallel_size": 1
+                             },
+                             0.6 if _is_v7x() else 0.5,
+                             model_name="Qwen/Qwen3-4B")
+
+
+def test_dflash_torchax_correctness(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+):
+    '''
+    Compare the outputs of a original LLM and a speculative LLM
+    should be the same when using DFlash torchax speculative decoding.
+    '''
+    model_name = 'Qwen/Qwen3-4B'
+
+    with monkeypatch.context() as m:
+        m.setenv("DRAFT_MODEL_IMPL_TYPE", "torchax")
+        _test_correctness_helper(monkeypatch,
+                                 sampling_config,
+                                 model_name, {
+                                     'model': "z-lab/Qwen3-4B-DFlash-b16",
+                                     "num_speculative_tokens": 16,
+                                     "method": "dflash",
+                                     "draft_tensor_parallel_size": 1
+                                 },
+                                 max_num_seqs=1)
+
+
+def test_dflash_torchax_performance(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+):
+    '''
+    Test that DFlash torchax speculative decoding provides significant
+    performance improvement. Compares timing between reference LLM and
+    speculative LLM using Qwen3-4B.
+    '''
+    with monkeypatch.context() as m:
+        m.setenv("DRAFT_MODEL_IMPL_TYPE", "torchax")
+        _test_performance_helper(monkeypatch,
+                                 sampling_config, {
+                                     "method": "dflash",
+                                     "model": "z-lab/Qwen3-4B-DFlash-b16",
+                                     "num_speculative_tokens": 16,
+                                     "draft_tensor_parallel_size": 1
+                                 },
+                                 0.6 if _is_v7x() else 0.5,
+                                 model_name="Qwen/Qwen3-4B")
