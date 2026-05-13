@@ -370,7 +370,19 @@ run_benchmark(){
 
   throughput=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
   p99_e2el=$(grep "P99 E2EL (ms):" "$BM_LOG" | awk '{print $NF}')
-  echo "throughput: $throughput, P99 E2EL:$p99_e2el"
+
+  if [ -z "$throughput" ] || [ -z "$p99_e2el" ]; then
+    echo "[ERROR] Unable to extract metrics from the log. Please check if $BM_LOG is correctly formatted or if the test failed." >&2
+    return 1
+  fi
+
+  local re='^[0-9]+([.][0-9]+)?$'
+  if ! [[ $throughput =~ $re ]] || ! [[ $p99_e2el =~ $re ]]; then
+    echo "[ERROR] Extracted values are not valid numbers (Throughput: '$throughput', P99: '$p99_e2el')" >&2
+    return 1
+  fi
+
+  echo "throughput: $throughput, P99 E2EL: $p99_e2el" >&2
   echo "$throughput $p99_e2el"
 }
 
