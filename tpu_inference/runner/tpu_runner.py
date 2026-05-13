@@ -412,8 +412,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             elif self.speculative_config.method == "eagle3":
                 self.drafter = Eagle3Proposer(self.vllm_config, self)
             elif self.speculative_config.method == "dflash":
-                from tpu_inference.spec_decode.jax.dflash import DFlashProposer
-                self.drafter = DFlashProposer(self.vllm_config, self)
+                if envs.DRAFT_MODEL_IMPL_TYPE == "torchax":
+                    from tpu_inference.spec_decode.torchax.dflash import (
+                        DFlashTorchaxProposer)
+                    self.drafter = DFlashTorchaxProposer(
+                        self.vllm_config, self)
+                else:
+                    from tpu_inference.spec_decode.jax.dflash import \
+                        DFlashProposer
+                    self.drafter = DFlashProposer(self.vllm_config, self)
             else:
                 raise NotImplementedError(
                     "Unsupported speculative decoding method: "

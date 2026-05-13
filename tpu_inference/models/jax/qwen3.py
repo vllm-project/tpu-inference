@@ -331,25 +331,22 @@ class Qwen3Model(Qwen2Model):
         self.capture_aux_after_layer = False
         if vllm_config.speculative_config:
             method = getattr(vllm_config.speculative_config, "method", None)
+            # Aux layer indices are GLOBAL (over all PP ranks). The forward
+            # loop converts the local enumeration index `i` to global via
+            # `self.start_layer + i` before testing membership; using
+            # `hf_config.num_hidden_layers` (global) here keeps the IDs
+            # stable across ranks.
+            target_num_layers = (
+                vllm_config.model_config.hf_config.num_hidden_layers)
             if method == "eagle3":
-                num_layers = len(self.layers)
-                self.aux_hidden_state_layers = (2, num_layers // 2,
-                                                num_layers - 3)
+                self.aux_hidden_state_layers = (2, target_num_layers // 2,
+                                                target_num_layers - 3)
             elif method == "dflash":
-                draft_config = (
-                    vllm_config.speculative_config.draft_model_config)
-                dflash_cfg = getattr(draft_config.hf_config, "dflash_config",
-                                     {})
-                target_layer_ids = dflash_cfg.get("target_layer_ids", None)
-                if target_layer_ids is not None:
-                    self.aux_hidden_state_layers = tuple(target_layer_ids)
-                else:
-                    num_target = getattr(draft_config.hf_config,
-                                         "num_target_layers", 5)
-                    num_layers = len(self.layers)
-                    step = max(1, (num_layers - 4) // (num_target - 1))
-                    self.aux_hidden_state_layers = tuple(
-                        range(1, num_layers - 2, step))[:num_target]
+                draft_hf_config = (vllm_config.speculative_config.
+                                   draft_model_config.hf_config)
+                self.aux_hidden_state_layers = tuple(
+                    _get_dflash_target_layer_ids(target_num_layers,
+                                                 draft_hf_config))
                 self.capture_aux_after_layer = True
 
     def __call__(
@@ -367,8 +364,9 @@ class Qwen3Model(Qwen2Model):
         aux_hidden_states = []
         for i, layer in enumerate(
                 islice(self.layers, self.start_layer, self.end_layer)):
+            global_layer_idx = self.start_layer + i
             if (not self.capture_aux_after_layer
-                    and i in self.aux_hidden_state_layers):
+                    and global_layer_idx in self.aux_hidden_state_layers):
                 aux_hidden_states.append(x)
             kv_cache = kv_caches[i]
             kv_cache, x = layer(
@@ -378,7 +376,7 @@ class Qwen3Model(Qwen2Model):
             )
             kv_caches[i] = kv_cache
             if (self.capture_aux_after_layer
-                    and i in self.aux_hidden_state_layers):
+                    and global_layer_idx in self.aux_hidden_state_layers):
                 aux_hidden_states.append(x)
         x = self.norm(x)
         return kv_caches, x, aux_hidden_states

@@ -224,6 +224,18 @@ class SpeculativeDecodingManager:
                                                                        .shape[
                                                                            0]].copy(
                                                                            )
+        # DFlash tracks context length incrementally. attn_metadata.seq_lens
+        # includes unverified draft tokens from the previous round, but the
+        # proposer needs the ACCEPTED count (num_tokens_no_spec) to correctly
+        # track its context buffer. Subtract 1 per request that sampled a
+        # token this step, because the most recent sampled token has no
+        # hidden state in aux_hidden_states yet.
+        for i, token_ids in enumerate(sampled_token_ids):
+            if i >= len(accepted_seq_lens):
+                break
+            if token_ids:
+                accepted_seq_lens[i] -= 1
+
         accepted_attn_metadata = replace(
             attn_metadata,
             seq_lens=device_array(self.runner.mesh,

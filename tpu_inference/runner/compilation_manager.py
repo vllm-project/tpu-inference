@@ -609,6 +609,9 @@ class CompilationManager:
         self._precompile_rejection_sampler()
         if self.runner.speculative_config.method == "eagle3":
             self._precompile_eagle3_helpers()
+        elif (self.runner.speculative_config.method == "dflash"
+              and envs.DRAFT_MODEL_IMPL_TYPE == "torchax"):
+            self.runner.drafter.precompile()
 
     def _precompile_rejection_sampler(self) -> None:
         logger.info("Compiling rejection_sampler with different input shapes.")
