@@ -245,7 +245,6 @@ class TpuPlatform(Platform):
             if envs.USE_BATCHED_RPA_KERNEL and cache_config.block_size < 256:
                 cache_config.block_size = 256
                 if vllm_config.model_config.is_hybrid:
-                    logger.info("====here=====")
                     bs = cache_config.block_size
                     cache_config.block_size = 1 << (bs - 1).bit_length()
             logger.info(
@@ -331,7 +330,6 @@ class TpuPlatform(Platform):
                     # Align block/mamba sizes for hybrid model (may override
                     # user settings).
                     cls._align_hybrid_block_size(vllm_config, backend_cls)
-                    logger.info("here=============================", envs.USE_BATCHED_RPA_KERNEL)
                     if envs.USE_BATCHED_RPA_KERNEL and vllm_config.cache_config:
                         bs = vllm_config.cache_config.block_size
                         if bs < 256:
