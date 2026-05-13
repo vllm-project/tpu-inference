@@ -52,6 +52,8 @@ class VllmQuantLinearConfig(QuantLinearConfig):
 
         self.n_shards = get_mesh_shape_product(self.mesh,
                                                self.weight_sharding[0])
+        
+        print("PPPP: ", layer.prefix, " tp ", self.tp_size)
 
         if isinstance(layer, RowParallelLinear):
             self.weight_sharding = P(None, ShardingAxisName.ATTN_HEAD)
@@ -89,6 +91,13 @@ class VllmQuantLinearConfig(QuantLinearConfig):
         self.bias_sharding = P(self.weight_sharding[0])
         self.n_shards = get_mesh_shape_product(self.mesh,
                                                self.weight_sharding[0])
+        
+        if "shared_expert" in layer.prefix:
+            self.bias_sharding = P(None)
+            self.weight_sharding = P(None, None)
+            self.tp_size = 1
+            self.n_shards = 1
+
 
     def get_input_sharding(self, x: torchax.tensor.Tensor):
         if not self.enable_sp:
