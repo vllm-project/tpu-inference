@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     TPU_OFFLOAD_USE_UNPINNED_HOST: bool = False
     MOE_APPROX_TOPK: bool = False
     MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
-
+    DP_SCHED_BATCH_PREFILL: bool = False
 
 def env_with_choices(
     env_name: str,
@@ -298,6 +298,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: float(os.getenv("MOE_APPROX_TOPK_RECALL_TARGET", "0.9")),
     "DISABLE_WEIGHT_REQUANTIZATION":
     env_bool("DISABLE_WEIGHT_REQUANTIZATION", default=False),
+    # DP-scheduler: hold incoming requests (prefills) at the DP layer until
+    # `dp_size` of them have accumulated. The goal is to cluster new prefills.
+    "DP_SCHED_BATCH_PREFILL":
+    env_bool("DP_SCHED_BATCH_PREFILL", default=True),    
 }
 
 
