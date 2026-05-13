@@ -52,7 +52,10 @@
           "num-prompts": 320,
           "random-input-len": 1024,
           "random-output-len": 1024,
-          "max-concurrency": 320
+          "max-concurrency": 320,
+          "request-rate": "inf",
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
         }
       }
     },
@@ -100,7 +103,10 @@
           "num-prompts": 320,
           "random-input-len": 8192,
           "random-output-len": 1024,
-          "max-concurrency": 320
+          "max-concurrency": 320,
+          "request-rate": "inf",
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
         }
       }
     },
@@ -148,7 +154,10 @@
           "num-prompts": 320,
           "random-input-len": 1024,
           "random-output-len": 8192,
-          "max-concurrency": 320
+          "max-concurrency": 320,
+          "request-rate": "inf",
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
         }
       }
     }
