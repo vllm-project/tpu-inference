@@ -8,13 +8,9 @@ import datetime
 import functools
 import json
 import os
-<<<<<<< HEAD
-import subprocess
 import threading
 import tempfile
-=======
 import shutil
->>>>>>> main
 import time
 from dataclasses import dataclass, field
 from enum import Enum
