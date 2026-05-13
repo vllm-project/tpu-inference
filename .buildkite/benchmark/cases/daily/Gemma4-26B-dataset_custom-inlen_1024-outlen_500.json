@@ -53,6 +53,7 @@
           "random-input-len": 1024,
           "random-output-len": 500,
           "num-prompts": 1000,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
           "ignore-eos": true,
           "temperature": 0
         }
@@ -107,6 +108,7 @@
           "random-input-len": 1024,
           "random-output-len": 500,
           "num-prompts": 1000,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
           "ignore-eos": true,
           "temperature": 0
         }
