@@ -44,7 +44,8 @@ waitForServerReady() {
         fi
 
         if grep -Eq "$error_regex" "$LOG_FILE"; then
-            echo "FATAL ERROR DETECTED: The server log contains a fatal error pattern."
+            echo "FATAL ERROR DETECTED. Last 100 lines of log:"
+            tail -n 100 "$LOG_FILE"
             # Call cleanup and exit (cleanup must be handled by the calling script's trap)
             exit 1
         fi
