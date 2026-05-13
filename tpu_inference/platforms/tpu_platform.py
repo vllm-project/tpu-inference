@@ -245,10 +245,10 @@ class TpuPlatform(Platform):
             if envs.USE_BATCHED_RPA_KERNEL:
                 if cache_config.block_size < 256:
                     cache_config.block_size = 256
-                if vllm_config.model_config.is_hybrid:
-                    bs = cache_config.block_size
-                    cache_config.block_size = 1 << (bs - 1).bit_length()
-                    logger.info(f"Override block size from {bs}")
+            # Enforcing block_size to be power of 2 always (for MQA, MHA, GQA, etc.)
+            bs = cache_config.block_size
+            cache_config.block_size = 1 << (bs - 1).bit_length()
+            logger.info(f"Override block_size from {bs} to {cache_config.block_size}")
             logger.info(
                 f"Using KV cache block size: {cache_config.block_size}")
 
@@ -332,17 +332,14 @@ class TpuPlatform(Platform):
                     # Align block/mamba sizes for hybrid model (may override
                     # user settings).
                     cls._align_hybrid_block_size(vllm_config, backend_cls)
-                    if envs.USE_BATCHED_RPA_KERNEL and vllm_config.cache_config:
-                        bs = vllm_config.cache_config.block_size
-                        if bs < 256:
-                            vllm_config.cache_config.block_size = 256
-                        if vllm_config.model_config.is_hybrid:
-                            vllm_config.cache_config.block_size = 1 << (bs - 1).bit_length()
-                        logger.info(
-                            f"Using RPA block size: {vllm_config.cache_config.block_size}"
-                        )
+                    # Enforcing block_size to be power of 2 always (for MQA, MHA, GQA, etc.)
+                    bs = vllm_config.cache_config.block_size
+                    vllm_config.cache_config.block_size = 1 << (bs - 1).bit_length()
+                    logger.info(f"Using block_size: {vllm_config.cache_config.block_size} instead of {bs}")
+
         finally:
             vllm_config.parallel_config.tensor_parallel_size = orig_tp_size
+
 
     @classmethod
     def is_pin_memory_available(cls):
