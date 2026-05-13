@@ -199,6 +199,11 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
                                   common_unquantized.UnquantizedLinearMethod,
                                   VllmQuantizationMethod):
 
+    # Dynamically register this method to support weight_loader_v2 in vLLM.
+    if "VllmUnquantizedLinearMethod" not in vllm_linear.WEIGHT_LOADER_V2_SUPPORTED:
+        vllm_linear.WEIGHT_LOADER_V2_SUPPORTED.append(
+            "VllmUnquantizedLinearMethod")
+
     def __init__(self, linear_config: VllmQuantLinearConfig):
         super().__init__(linear_config)
 
