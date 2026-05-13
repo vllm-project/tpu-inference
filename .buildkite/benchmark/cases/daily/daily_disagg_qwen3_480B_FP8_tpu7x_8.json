@@ -55,8 +55,7 @@
           "random-input-len": 8192,
           "random-output-len": 1,
           "random-range-ratio": 0.8,
-          "max-concurrency": 64,
-          "metric_percentiles": "90,95"
+          "max-concurrency": 64
         }
       }
     },
@@ -105,8 +104,7 @@
           "random-input-len": 8192,
           "random-output-len": 1024,
           "random-range-ratio": 0.8,
-          "max-concurrency": 64,
-          "metric_percentiles": "90,95"
+          "max-concurrency": 64
         }
       }
     },
@@ -155,8 +153,7 @@
           "random-input-len": 1024,
           "random-output-len": 1,
           "random-range-ratio": 0.8,
-          "max-concurrency": 64,
-          "metric_percentiles": "90,95"
+          "max-concurrency": 64
         }
       }
     },
@@ -205,8 +202,7 @@
           "random-input-len": 1024,
           "random-output-len": 8192,
           "random-range-ratio": 0.8,
-          "max-concurrency": 64,
-          "metric_percentiles": "90,95"
+          "max-concurrency": 64
         }
       }
     },
@@ -255,8 +251,7 @@
           "random-input-len": 1024,
           "random-output-len": 1024,
           "random-range-ratio": 0.8,
-          "max-concurrency": 64,
-          "metric_percentiles": "90,95"
+          "max-concurrency": 64
         }
       }
     }

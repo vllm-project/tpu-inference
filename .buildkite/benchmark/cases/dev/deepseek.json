@@ -44,7 +44,8 @@
           "gpu-memory-utilization": 0.95,
           "enable-expert-parallel": true,
           "no-enable-prefix-caching": true,
-          "async-scheduling": true
+          "async-scheduling": true,
+          "additional-config": "{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}"
         }
       },
       "client_command_options": {
