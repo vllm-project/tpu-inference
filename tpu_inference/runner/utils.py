@@ -8,9 +8,9 @@ import datetime
 import functools
 import json
 import os
-import threading
-import tempfile
 import shutil
+import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -338,21 +338,25 @@ class AggregatedStatsLogger:
         os.makedirs(base_dir, exist_ok=True)
         return target, target
 
-    def _sync_to_gcs(self, local_file: str, target_file: str, blocking: bool = False) -> None:
+    def _sync_to_gcs(self,
+                     local_file: str,
+                     target_file: str,
+                     blocking: bool = False) -> None:
         """Helper to sync local file to GCS using the Python SDK."""
         if target_file.startswith("gs://") and os.path.exists(local_file):
+
             def _upload():
-                from google.cloud import storage    # type: ignore
+                from google.cloud import storage  # type: ignore
                 client = storage.Client()
                 # e.g., gs://my-bucket/path/to/file.txt -> ("my-bucket", "path/to/file.txt")
                 bucket_name, blob_name = target_file[5:].split("/", 1)
-                client.bucket(bucket_name).blob(blob_name).upload_from_filename(local_file)
+                client.bucket(bucket_name).blob(
+                    blob_name).upload_from_filename(local_file)
 
             if blocking:
                 _upload()
             else:
                 threading.Thread(target=_upload, daemon=True).start()
-
 
     def log(self, batch_composition_stats: dict) -> None:
         """
@@ -676,6 +680,7 @@ class PhasedBasedProfiler:
                 # We are in the middle of profiling a given phase
                 else:
                     self._step_or_stop_profiling(batch_composition_stats)
+
 
 @functools.partial(
     jax.tree_util.register_dataclass,
