@@ -288,14 +288,6 @@ def _ragged_paged_attention_kernel(*args, **kwargs):
         )
 
 
-# update_kv_cache=False is the KV-share path: shared layers read the
-# entire kv_len from the (redirected) cache slot — their own input k,v
-# is unused. The cache slot already contains the source layer's K,V
-# (source's call ran first in the same step and wrote them). Mirrors
-# vllm-pytorch where unified_attention reads only from key_cache /
-# value_cache regardless of the input k,v.
-
-
 def _ragged_paged_attention_kernel_loop(
     seq_idx,
     # Prefetch

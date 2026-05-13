@@ -385,6 +385,14 @@ def sharded_ragged_paged_attention(
         in_specs += (P(ShardingAxisName.ATTN_HEAD), )
         args += (attention_sink, )
 
+    # KV-share (update_kv_cache=False) is only supported by the non-hd64
+    # kernel. Fail loud if a caller tries to use it on the hd64 path so
+    # the bug surfaces immediately rather than silently writing to cache.
+    if use_hd64 and not update_kv_cache:
+        raise NotImplementedError(
+            "update_kv_cache=False (KV-share) is not supported on the "
+            "head_dim==64 RPA kernel.")
+
     def _ragged_paged_attention(*args):
         kwargs = dict(
             sm_scale=sm_scale,
@@ -393,9 +401,10 @@ def sharded_ragged_paged_attention(
             k_scale=k_scale,
             v_scale=v_scale,
         )
-        # update_kv_cache is only supported by the non-hd64 path. hd64 (head
-        # dim 64) doesn't need KV-share for any current model; pass the kwarg
-        # only when present in the underlying kernel signature.
+        # update_kv_cache is only supported by the non-hd64 path; the
+        # guard above rejects update_kv_cache=False on hd64. The default
+        # True is a no-op and we don't forward it to the hd64 signature
+        # (which doesn't accept it).
         if not use_hd64:
             kwargs["update_kv_cache"] = update_kv_cache
         return func(*args, **kwargs)
