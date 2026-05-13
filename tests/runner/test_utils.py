@@ -343,11 +343,14 @@ def test_determine_phase_from_batch_composition_stats(prefill_tokens,
 def aggregated_stats_logger_fixture(tmp_path):
     """Fixture to mock dependencies for AggregatedStatsLogger."""
     target_module = "tpu_inference.runner.utils"
+    mock_storage = MagicMock()
+    cloud_mock = MagicMock()
+    cloud_mock.storage = mock_storage
     with patch(f"{target_module}.datetime") as mock_datetime, \
          patch(f"{target_module}.atexit") as mock_atexit, \
-         patch(f"{target_module}.subprocess.run") as mock_subprocess_run, \
-         patch(f"{target_module}.subprocess.Popen") as mock_subprocess_popen, \
-         patch(f"{target_module}.tempfile.gettempdir", return_value=str(tmp_path)):
+         patch("threading.Thread") as mock_thread, \
+         patch.dict("sys.modules", {"google.cloud": cloud_mock, "google.cloud.storage": mock_storage}), \
+         patch("tempfile.gettempdir", return_value=str(tmp_path)):
 
         mock_now = MagicMock()
         mock_now.strftime.return_value = "2025_01_01_12_00_00"
@@ -356,8 +359,8 @@ def aggregated_stats_logger_fixture(tmp_path):
         yield {
             "mock_datetime": mock_datetime,
             "mock_atexit": mock_atexit,
-            "mock_subprocess_run": mock_subprocess_run,
-            "mock_subprocess_popen": mock_subprocess_popen,
+            "mock_thread": mock_thread,
+            "mock_storage": mock_storage,
             "tmp_path": tmp_path,
         }
 
@@ -426,19 +429,18 @@ def test_aggregated_stats_logger_auto_flush(aggregated_stats_logger_fixture):
     flush_interval = 3
     logger = AggregatedStatsLogger(profile_dir=profile_dir,
                                    flush_interval=flush_interval)
-    mock_subprocess_run = aggregated_stats_logger_fixture[
-        "mock_subprocess_run"]
-    mock_subprocess_popen = aggregated_stats_logger_fixture[
-        "mock_subprocess_popen"]
+    mock_thread = aggregated_stats_logger_fixture["mock_thread"]
+    mock_storage = aggregated_stats_logger_fixture["mock_storage"]
 
     for i in range(flush_interval - 1):
         logger.log({"step": i})
-    mock_subprocess_run.assert_not_called()
-    mock_subprocess_popen.assert_not_called()
+    mock_thread.assert_not_called()
+    mock_storage.Client.assert_not_called()
 
     logger.log({"step": flush_interval - 1})
-    mock_subprocess_run.assert_not_called()
-    mock_subprocess_popen.assert_called_once()
+    mock_thread.assert_called_once()
+    mock_thread.return_value.start.assert_called_once()
+    mock_storage.Client.assert_not_called()
 
 
 def test_aggregated_stats_logger_close_flushes_and_cleans_up_gcs(
@@ -446,15 +448,16 @@ def test_aggregated_stats_logger_close_flushes_and_cleans_up_gcs(
     """Test that close() flushes and removes the local temp file for GCS."""
     profile_dir = "gs://my-bucket/logs"
     logger = AggregatedStatsLogger(profile_dir=profile_dir)
-    mock_subprocess_run = aggregated_stats_logger_fixture[
-        "mock_subprocess_run"]
+    mock_thread = aggregated_stats_logger_fixture["mock_thread"]
+    mock_storage = aggregated_stats_logger_fixture["mock_storage"]
     logger.log({"step": 1})
     local_file_path = Path(logger.local_temp_file)
 
     assert local_file_path.exists()
 
     logger.close()
-    mock_subprocess_run.assert_called_once()
+    mock_thread.assert_not_called()
+    mock_storage.Client.assert_called_once()
     assert not local_file_path.exists()
 
 
