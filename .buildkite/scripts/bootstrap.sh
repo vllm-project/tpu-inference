@@ -16,12 +16,12 @@
 # # Exit on error, exit on unset variable, fail on pipe errors.
 # set -euo pipefail
 
-# # Resolve the absolute directory path of the current script.
-# SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve the absolute directory path of the current script.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# # Source the shared pipeline config file.
-# # shellcheck source=/dev/null
-# source "${SCRIPT_DIR}/configs/pipeline_config.sh"
+# Source the shared pipeline config file.
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/configs/pipeline_config.sh"
 
 # determine_job_priority() {
 #   local priority=""
@@ -301,4 +301,4 @@
 
 # echo "--- Buildkite Bootstrap Finished"
 
-.buildkite/benchmark/scripts/simulate_line_1.sh
+upload_with_priority .buildkite/scripts/dennis_test.yml 10

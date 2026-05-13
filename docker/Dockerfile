@@ -39,52 +39,52 @@ RUN apt-get update && apt-get install -y \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Conditionally install google-cloud-cli for benchmarking infrastructure
-RUN if [ "$BM_INFRA" = "true" ]; then \
-        apt-get update && apt-get install -y gnupg curl \
-        && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list \
-        && curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
-        && apt-get update && apt-get install -y google-cloud-cli \
-        && rm -rf /var/lib/apt/lists/*; \
-    fi
+# # Conditionally install google-cloud-cli for benchmarking infrastructure
+# RUN if [ "$BM_INFRA" = "true" ]; then \
+#         apt-get update && apt-get install -y gnupg curl \
+#         && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list \
+#         && curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
+#         && apt-get update && apt-get install -y google-cloud-cli \
+#         && rm -rf /var/lib/apt/lists/*; \
+#     fi
 
-# Build vLLM
-WORKDIR /workspace/vllm
-ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_COMMIT_HASH
+# # Build vLLM
+# WORKDIR /workspace/vllm
+# ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
+# ARG VLLM_COMMIT_HASH
 
-RUN git clone $VLLM_REPO . && \
-    if [ -n "$VLLM_COMMIT_HASH" ]; then \
-        git checkout $VLLM_COMMIT_HASH; \
-    fi
+# RUN git clone $VLLM_REPO . && \
+#     if [ -n "$VLLM_COMMIT_HASH" ]; then \
+#         git checkout $VLLM_COMMIT_HASH; \
+#     fi
 
-RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements/tpu.txt --retries 3
-RUN --mount=type=cache,target=/root/.cache/pip VLLM_TARGET_DEVICE="tpu" pip install -e .
+# RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements/tpu.txt --retries 3
+# RUN --mount=type=cache,target=/root/.cache/pip VLLM_TARGET_DEVICE="tpu" pip install -e .
 
-# Install test dependencies
-RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install -e tests/vllm_test_utils
-RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install \
-    git+https://github.com/thuml/depyf.git \
-    pytest-asyncio \
-    "lm-eval[api]==0.4.11" \
-    pytest-cov \
-    tblib
+# # Install test dependencies
+# RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install -e tests/vllm_test_utils
+# RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install \
+#     git+https://github.com/thuml/depyf.git \
+#     pytest-asyncio \
+#     "lm-eval[api]==0.4.11" \
+#     pytest-cov \
+#     tblib
 
 # Install tpu_inference
 WORKDIR /workspace/tpu_inference
 # Install requirements first and cache so we don't need to re-install on code change.
-COPY requirements.txt .
-RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt --retries 3
-COPY requirements_benchmarking.txt .
-# These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh)
-RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements_benchmarking.txt --retries 3
-# Install test requirements
-COPY requirements_test.txt .
-RUN  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then \
-        pip install -r requirements_test.txt --retries 3; \
-    fi
+# COPY requirements.txt .
+# RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt --retries 3
+# COPY requirements_benchmarking.txt .
+# # These are needed for the E2E benchmarking tests (i.e. tests/e2e/benchmarking/mlperf.sh)
+# RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements_benchmarking.txt --retries 3
+# # Install test requirements
+# COPY requirements_test.txt .
+# RUN  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then \
+#         pip install -r requirements_test.txt --retries 3; \
+#     fi
 COPY . .
-RUN --mount=type=cache,target=/root/.cache/pip pip install -e .
+# RUN --mount=type=cache,target=/root/.cache/pip pip install -e .
 
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
