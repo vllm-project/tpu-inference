@@ -349,6 +349,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.is_pooling_model: bool = self.model_config.runner_type == "pooling"
         """Generative model or pooling model select different computations."""
+        self.enable_continue_decode = (self.vllm_config.additional_config.get(
+            "enable_continue_decode",
+            False) and not self.scheduler_config.async_scheduling
+                                       and self.is_last_rank
+                                       and not self.is_pooling_model)
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -969,11 +974,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # request_distribution[0] tracks the number of decode requests.
         is_decode_only = self.input_batch.request_distribution[
             0] == self.input_batch.num_reqs
-        enable_continue_decode = self.vllm_config.additional_config.get(
-            "enable_continue_decode", False)
-        if (is_decode_only and enable_continue_decode
-                and not self.scheduler_config.async_scheduling
-                and self.is_last_rank and not self.is_pooling_model):
+        if is_decode_only and self.enable_continue_decode:
             return self._execute_continue_decode(scheduler_output)
 
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
@@ -1101,27 +1102,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             full_hidden_states=full_hidden_states)
         return None
 
-    def _get_remaining_slots(self) -> np.ndarray:
+    def _get_min_remaining_slots(self) -> int:
         # Iterate over all KV cache groups (e.g., for hybrid cache configurations)
         # and conservatively calculate the minimum remaining token capacity.
-        min_remaining = None
+        min_blocks = None
         for block_table in self.input_batch.block_table:
             num_blocks = block_table.num_blocks_per_row[:self.input_batch.
                                                         num_reqs]
-            block_size = self.block_size
-            num_tokens = self.input_batch.num_tokens[:self.input_batch.
-                                                     num_reqs]
-
-            allocated_capacity = num_blocks * block_size
-            remaining = allocated_capacity - num_tokens
-            if min_remaining is None:
-                min_remaining = remaining
+            if min_blocks is None:
+                min_blocks = num_blocks
             else:
-                min_remaining = np.minimum(min_remaining, remaining)
+                min_blocks = np.minimum(min_blocks, num_blocks)
 
-        if min_remaining is None:
-            return np.zeros(0, dtype=np.int32)
-        return min_remaining
+        if min_blocks is None or len(min_blocks) == 0:
+            return 0
+
+        num_tokens = self.input_batch.num_tokens[:self.input_batch.num_reqs]
+        remaining_slots = min_blocks * self.block_size - num_tokens
+        return int(np.min(remaining_slots))
 
     def _execute_continue_decode(
         self,
@@ -1167,9 +1165,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         user_max_decode_steps = self.vllm_config.additional_config.get(
             "max_decode_steps", 10)
-        remaining_slots = self._get_remaining_slots()
-        min_remaining = np.min(remaining_slots) if len(
-            remaining_slots) > 0 else 0
+        min_remaining = self._get_min_remaining_slots()
 
         # Limit max_decode_steps to not cross block boundaries
         max_decode_steps = min(user_max_decode_steps, min_remaining)
@@ -1187,6 +1183,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         lora_metadata = self.lora_utils.extract_lora_metadata()
 
+        # TODO: Implement terminate_on_any_eos
         terminate_on_any_eos = self.vllm_config.additional_config.get(
             "terminate_on_any_eos", False)
 
@@ -1225,44 +1222,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Expose request dimension as axis 0 after transpose: shape (batch_size, max_decode_steps)
         generated_tokens_cpu = generated_tokens_cpu.T
 
-        actual_steps = max_decode_steps
-        if terminate_on_any_eos:
-            # Since the TPU loop does not terminate early (to avoid dynamic step sync),
-            # we enforce terminate_on_any_eos by scanning CPU output and finding
-            # the minimum step K at which any request hit EOS.
-            for i, req_id in enumerate(
-                    scheduler_output.num_scheduled_tokens.keys()):
-                req_idx = self.input_batch.req_id_to_index.get(req_id, i)
-                tokens = generated_tokens_cpu[req_idx]
-                eos_indices = np.where(tokens == eos_token_id)[0]
-                if len(eos_indices) > 0:
-                    actual_steps = min(actual_steps, eos_indices[0] + 1)
-
-            # Slice the tokens to actual steps executed on CPU side
-            generated_tokens_cpu = generated_tokens_cpu[:, :actual_steps]
-
-        # Transfer, slice, and format expert indices if MoE routing is enabled
-        expert_indices_cpu = None
+        # 1. Pull raw expert indices to CPU once if present
+        all_expert_indices_cpu = None
         if all_expert_indices is not None:
             all_expert_indices_cpu = np.asarray(
                 jax.device_get(all_expert_indices))
-            # Slice step dimension to actual executed steps
-            all_expert_indices_cpu = all_expert_indices_cpu[:actual_steps]
-            # Slice batch_size dimension to active scheduled requests
-            num_reqs = self.input_batch.num_reqs
-            all_expert_indices_cpu = all_expert_indices_cpu[:, :, :num_reqs, :]
-
-            # Transpose from (actual_steps, num_layers, num_reqs, top_k) to (num_layers, num_reqs, actual_steps, top_k)
-            all_expert_indices_cpu = all_expert_indices_cpu.transpose(
-                1, 2, 0, 3)
-
-            # Reshape to (num_layers, num_reqs * actual_steps, top_k)
-            num_layers, _, _, top_k = all_expert_indices_cpu.shape
-            expert_indices_cpu = all_expert_indices_cpu.reshape(
-                num_layers, num_reqs * actual_steps, top_k)
 
         sampled_token_ids = []
         safe_req_id_to_index = {}
+        expert_indices_list = []
 
         for i, req_id in enumerate(
                 scheduler_output.num_scheduled_tokens.keys()):
@@ -1279,8 +1247,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             else:
                 valid_tokens = tokens.tolist()
 
-            # Return ALL generated tokens in this step
+            actual_len = len(valid_tokens)
             sampled_token_ids.append(valid_tokens)
+
+            # 2. Update scheduler_output directly to the true trimmed length
+            scheduler_output.num_scheduled_tokens[req_id] = actual_len
+
+            # 3. Extract exact valid expert indices for this request
+            if all_expert_indices_cpu is not None:
+                # Raw shape: (steps, layers, reqs, top_k) -> Slice to (actual_len, layers, top_k)
+                req_experts = all_expert_indices_cpu[:actual_len, :,
+                                                     req_idx, :]
+                # Transpose to (layers, actual_len, top_k) and collect
+                expert_indices_list.append(req_experts.transpose(1, 0, 2))
 
             if req_state is not None:
                 start_idx = self.input_batch.num_tokens_no_spec[req_idx]
@@ -1297,10 +1276,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     "seq_lens_cpu") and attn_metadata.seq_lens_cpu is not None:
                 attn_metadata.seq_lens_cpu[req_idx] += len(valid_tokens)
 
-        # Mutate scheduler_output.num_scheduled_tokens to match the actual multi-step tokens
-        # so the scheduler's update_from_output can cleanly slice expert indices.
-        for req_id in scheduler_output.num_scheduled_tokens.keys():
-            scheduler_output.num_scheduled_tokens[req_id] = actual_steps
+        # 4. Concatenate along the token dimension (axis 1)
+        expert_indices_cpu = None
+        if expert_indices_list:
+            expert_indices_cpu = np.concatenate(expert_indices_list, axis=1)
 
         output = ModelRunnerOutput(
             req_ids=cast(list[str],
