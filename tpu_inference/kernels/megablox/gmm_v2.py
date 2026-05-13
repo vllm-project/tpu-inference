@@ -405,26 +405,32 @@ def inner_kernel(
                 end_n = min(rhs_tile_n, start_n + mxu_size)
                 col_size = end_n - start_n
 
-                acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size),
-                                  dtype=acc_ref.dtype)
-                for b_id in range(cfgs.num_quant_blocks_per_tile_k):
-                    k_start = b_id * rhs_qbs
-                    k_end = k_start + rhs_qbs
-
-                    block_acc = jnp.matmul(
-                        tiled_lhs[:, k_start:k_end],
-                        tiled_rhs[k_start:k_end, start_n:end_n],
+                if cfgs.rhs_cfgs.should_dequantize_before_matmul:
+                    acc_n = jnp.matmul(
+                        tiled_lhs,
+                        tiled_rhs[:, start_n:end_n],
                         preferred_element_type=jnp.float32,
                     ).astype(acc_ref.dtype)
+                else:
+                    acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size),
+                                      dtype=acc_ref.dtype)
+                    for b_id in range(cfgs.num_quant_blocks_per_tile_k):
+                        k_start = b_id * rhs_qbs
+                        k_end = k_start + rhs_qbs
 
-                    if (cfgs.rhs_cfgs.has_scale and
-                            not cfgs.rhs_cfgs.should_dequantize_before_matmul):
-                        tiled_rhs_scale = tiled_rhs_ref.get_scale()
-                        block_acc *= tiled_rhs_scale[b_id, :,
-                                                     start_n:end_n].astype(
-                                                         acc_ref.dtype)
+                        block_acc = jnp.matmul(
+                            tiled_lhs[:, k_start:k_end],
+                            tiled_rhs[k_start:k_end, start_n:end_n],
+                            preferred_element_type=jnp.float32,
+                        ).astype(acc_ref.dtype)
 
-                    acc_n += block_acc
+                        if cfgs.rhs_cfgs.has_scale:
+                            tiled_rhs_scale = tiled_rhs_ref.get_scale()
+                            block_acc *= tiled_rhs_scale[
+                                b_id, :, start_n:end_n].astype(
+                                    acc_ref.dtype)
+
+                        acc_n += block_acc
                 acc_list.append(acc_n)
         else:
             # Quantized matmul path.
