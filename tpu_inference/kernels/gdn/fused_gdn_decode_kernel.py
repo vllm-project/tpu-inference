@@ -228,10 +228,13 @@ def _decode_kernel_main(
                         jnp.sum(k_t * k_t, axis=-1, keepdims=True) + 1e-6)
                 q_t = q_t * scale
 
+                qk_dot = jnp.sum(q_t * k_t, axis=-1, keepdims=True)
+
                 # GQA: repeat q/k from H_qk to H_v heads
                 if repeat_factor > 1:
                     q_t = jnp.repeat(q_t, repeat_factor, axis=0)
                     k_t = jnp.repeat(k_t, repeat_factor, axis=0)
+                    qk_dot = jnp.repeat(qk_dot, repeat_factor, axis=0)
 
                 if use_gate_in_kernel:
                     g_val = g_t
@@ -245,10 +248,11 @@ def _decode_kernel_main(
                 else:
                     gk = g_t
 
-                h_pre = h0 * jnp.exp(gk[:, :, None])
+                exp_gk = jnp.exp(gk)
+                k_t_scaled = k_t * exp_gk
                 kh = jax.lax.dot_general(
-                    k_t.reshape(H_v, 1, K),
-                    h_pre,
+                    k_t_scaled.reshape(H_v, 1, K),
+                    h0,
                     (((2, ), (1, )), ((0, ), (0, ))),
                     preferred_element_type=jnp.float32,
                 ).reshape(H_v, V)
@@ -261,15 +265,15 @@ def _decode_kernel_main(
                 # (q . k)[h] is a per-head scalar, so the second term is a
                 # cheap HV*V scaled-add instead of a full HV*K*V matmul.
                 # This lets MXU(o) and VPU(rank-1 update) run in parallel.
+                q_t_scaled = q_t * exp_gk
                 o_step1 = jax.lax.dot_general(
-                    q_t.reshape(H_v, 1, K),
-                    h_pre,
+                    q_t_scaled.reshape(H_v, 1, K),
+                    h0,
                     (((2, ), (1, )), ((0, ), (0, ))),
                     preferred_element_type=jnp.float32,
                 ).reshape(H_v, V)
-                qk_dot = jnp.sum(q_t * k_t, axis=-1, keepdims=True)
                 o_t = o_step1 + qk_dot * b_v
-                h_new = h_pre + k_t[:, :, None] * b_v[:, None, :]
+                h_new = h0 * exp_gk[:, :, None] + k_t[:, :, None] * b_v[:, None, :]
 
                 o_ref[i_t] = o_t.astype(o_ref.dtype)
                 h_bufs_s[buf_idx, i_t] = h_new.astype(h_bufs_s.dtype)
