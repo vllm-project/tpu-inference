@@ -129,15 +129,16 @@ def test_compute_kv_share_map_e2b_alternating_pattern():
 def test_compute_kv_share_map_picks_last_preceding_same_type():
     """When the source range has multiple same-type layers, picks the LAST
     preceding match (vllm reference at gemma4.py:467-468)."""
-    cfg = _make_text_config(num_hidden_layers=5,
-                            num_kv_shared_layers=2,
-                            layer_types=[
-                                "sliding_attention",
-                                "sliding_attention",  # idx 1: last sliding before shared range
-                                "full_attention",
-                                "sliding_attention",  # idx 3: shared → src=1, not 0
-                                "full_attention",  # idx 4: shared → src=2
-                            ])
+    cfg = _make_text_config(
+        num_hidden_layers=5,
+        num_kv_shared_layers=2,
+        layer_types=[
+            "sliding_attention",
+            "sliding_attention",  # idx 1: last sliding before shared range
+            "full_attention",
+            "sliding_attention",  # idx 3: shared → src=1, not 0
+            "full_attention",  # idx 4: shared → src=2
+        ])
     assert compute_kv_share_map(cfg) == {3: 1, 4: 2}
 
 
@@ -200,12 +201,11 @@ def test_kv_share_target_alternating_attention(mesh,
                                                rng=jax.random.PRNGKey(0)):
     """Alternating layer_types: shared layers map to last preceding match.
 
-    Layers 0,2 = sliding; 1,3 = full. Last 2 are shared (idx 4-5; here 2,3).
-    Wait — adjust to a 6-layer config so we have proper test:
-      idx 0: sliding   (source for any later sliding)
-      idx 1: full      (source for any later full)
-      idx 2: sliding   (source for any later sliding)
-      idx 3: full      (source for any later full)
+    6-layer config; last 2 are shared:
+      idx 0: sliding
+      idx 1: full
+      idx 2: sliding   (source for idx 4)
+      idx 3: full      (source for idx 5)
       idx 4: sliding (shared) -> last preceding sliding = idx 2
       idx 5: full    (shared) -> last preceding full    = idx 3
     """
