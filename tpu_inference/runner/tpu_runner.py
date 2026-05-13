@@ -615,6 +615,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.pooler_fn = model.pooler_fn
         self.combine_hidden_states_fn = model.combine_hidden_states_fn
         self.state = model.state
+        # For the flax_nnx path, `model_fn` (== `run_model`) accepts a flat
+        # tuple of array leaves and reconstructs the nnx.State inside the
+        # jit. Pre-flatten here so subsequent dispatches skip the per-call
+        # walk of `nnx.Variable` wrappers
+        if isinstance(self.state, nnx.State):
+            self.state_leaves = tuple(jax.tree_util.tree_leaves(self.state))
+        else:
+            self.state_leaves = self.state
         self.lora_manager = model.lora_manager
         self.model = model.model
 
@@ -919,7 +927,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 # but one of them would be `None`
                 (self.kv_caches, hidden_states, aux_hidden_states,
                  expert_indices) = self.model_fn(
-                     self.state,
+                     self.state_leaves,
                      self.kv_caches,
                      input_ids,
                      attn_metadata,
@@ -1814,6 +1822,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             mappings=mappings,
             transpose_keys=transpose_keys,
             shard=shard)
+        # Keep the dispatch-side view in sync with the updated state so
+        # subsequent jit dispatches see the new weights.
+        if isinstance(self.state, nnx.State):
+            self.state_leaves = tuple(jax.tree_util.tree_leaves(self.state))
+        else:
+            self.state_leaves = self.state
 
     def _get_padded_total_tokens(
             self, scheduler_output: "VllmSchedulerOutput") -> int:
