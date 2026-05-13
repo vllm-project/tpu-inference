@@ -354,6 +354,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             False) and not self.scheduler_config.async_scheduling
                                        and self.is_last_rank
                                        and not self.is_pooling_model)
+        self.eos_token_id = runner_utils.get_eos_token_id(self.model_config)
+        self.pad_token_id = runner_utils.get_pad_token_id(self.model_config)
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -1149,20 +1151,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         from tpu_inference.layers.jax.sample.sampling import sample
 
-        eos_token_id = self.model_config.get_vocab_size() - 1  # fallback
-        if hasattr(self.model_config, "hf_config"):
-            eos_token_id = getattr(self.model_config.hf_config, "eos_token_id",
-                                   eos_token_id)
-            if eos_token_id is None:
-                eos_token_id = self.model_config.get_vocab_size() - 1
-
-        padding_token_id = 0
-        if hasattr(self.model_config, "hf_config"):
-            padding_token_id = getattr(self.model_config.hf_config,
-                                       "pad_token_id", 0)
-            if padding_token_id is None:
-                padding_token_id = 0
-
         user_max_decode_steps = self.vllm_config.additional_config.get(
             "max_decode_steps", 10)
         min_remaining = self._get_min_remaining_slots()
@@ -1198,8 +1186,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             init_state=init_state,
             kv_caches=self.kv_caches,
             max_decode_steps=max_decode_steps,
-            eos_token_id=eos_token_id,
-            padding_token_id=padding_token_id,
+            eos_token_id=self.eos_token_id,
+            padding_token_id=self.pad_token_id,
             rng=self.rng_params_for_sampling,
             terminate_on_any_eos=terminate_on_any_eos,
             inputs_embeds=None,
@@ -1240,7 +1228,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             req_state = self.requests.get(req_id)
             tokens = generated_tokens_cpu[req_idx]
 
-            eos_indices = np.where(tokens == eos_token_id)[0]
+            eos_indices = np.where(tokens == self.eos_token_id)[0]
             if len(eos_indices) > 0:
                 first_eos_idx = eos_indices[0]
                 valid_tokens = tokens[:first_eos_idx + 1].tolist()
