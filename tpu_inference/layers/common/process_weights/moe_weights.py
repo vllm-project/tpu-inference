@@ -681,6 +681,9 @@ def shard_fp8_moe_weights_to_tpu(
         key = field.name
         weight = getattr(weights, key)
         if weight is not None:
+            print(
+                f"shard_fp8_moe_weights_to_tpu: Sharding field {key}, shape={weight.shape}, dtype={weight.dtype}"
+            )
             result_fields[key] = general_device_put(weight,
                                                     ep_sharding,
                                                     source_mesh=source_mesh)

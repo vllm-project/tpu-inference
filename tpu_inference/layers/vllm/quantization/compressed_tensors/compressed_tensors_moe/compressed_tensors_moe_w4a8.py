@@ -12,10 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dataclasses import fields
+
 import jax
 import jax.numpy as jnp
 import torch
 from compressed_tensors.quantization import QuantizationArgs
+from jax.sharding import PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
@@ -24,14 +27,15 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import \
     CompressedTensorsMoEMethod
-from vllm.model_executor.layers.quantization.utils.quant_utils import \
-    unpack_quantized_values_into_int32
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.scalar_type import scalar_types
 
+P = PartitionSpec
+
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_moe_weights, shard_moe_weights)
+    FusedMoEWeights, _get_moe_weight_shardings, process_moe_weights,
+    shard_fp8_moe_weights_to_tpu)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
@@ -201,15 +205,9 @@ class VllmCompressedTensorsW4A8MoEMethod(CompressedTensorsMoEMethod,
         # layer.w13_weight_scale: [num_experts, 2*moe_intermediate_size, 1]
         # layer.w2_weight: [num_experts, hidden_size, moe_intermediate_size]
         # layer.w2_weight_scale: [num_experts, hidden_size, 1]
-        w13_weight = t2j(
-            unpack_quantized_values_into_int32(layer.w13_weight_packed,
-                                               self.wtype,
-                                               packed_dim=2))
+        w13_weight_packed = t2j(layer.w13_weight_packed, use_dlpack=False)
         w13_weight_scale = t2j(layer.w13_weight_scale, use_dlpack=False)
-        w2_weight = t2j(
-            unpack_quantized_values_into_int32(layer.w2_weight_packed,
-                                               self.wtype,
-                                               packed_dim=2))
+        w2_weight_packed = t2j(layer.w2_weight_packed, use_dlpack=False)
         w2_weight_scale = t2j(layer.w2_weight_scale, use_dlpack=False)
 
         if self.moe.has_bias:
@@ -218,46 +216,126 @@ class VllmCompressedTensorsW4A8MoEMethod(CompressedTensorsMoEMethod,
         else:
             w13_bias = w2_bias = None
 
-        @jax.jit
-        def process_uint4_moe_weights(
-            w13_weight_uint4: jax.Array,
-            w13_weight_scale: jax.Array,
-            w13_bias: jax.Array | None,
-            w2_weight_uint4: jax.Array,
-            w2_weight_scale: jax.Array,
-            w2_bias: jax.Array | None,
-        ) -> FusedMoEWeights:
+        # Pack packed weights into FusedMoEWeights for sharding
+        input_weights = FusedMoEWeights(
+            w13_weight=w13_weight_packed,
+            w13_weight_scale=w13_weight_scale,
+            w13_bias=w13_bias,
+            w2_weight=w2_weight_packed,
+            w2_weight_scale=w2_weight_scale,
+            w2_bias=w2_bias,
+        )
+
+        # Shard packed weights to TPU before processing to avoid OOM
+        input_weights = shard_fp8_moe_weights_to_tpu(input_weights, self.mesh)
+
+        # Determine shard axis for shard_map
+        expert_axis = ShardingAxisName.EXPERT
+        if isinstance(expert_axis, str):
+            if expert_axis in self.mesh.axis_names:
+                shard_axis = expert_axis
+            else:
+                shard_axis = self.mesh.axis_names[0]
+        else:
+            if all(a in self.mesh.axis_names for a in expert_axis):
+                shard_axis = expert_axis
+            else:
+                shard_axis = self.mesh.axis_names[0]
+
+        expert_p = P(shard_axis)
+        bias_p = expert_p if self.moe.has_bias else None
+
+        def _process_local(w13_p, w13_s, w13_b, w2_p, w2_s, w2_b):
+            n_local = w13_p.shape[0]
+            scan_batch_size = 1  # Process 1 expert at a time to save memory
+            n_batches = n_local // scan_batch_size
+
+            def _process_expert_batch(carry, batch_inputs):
+                w13_p_b, w13_s_b, w13_b_b, w2_p_b, w2_s_b, w2_b_b = batch_inputs
+
+                # Unpack on TPU
+                w13_uint4 = jax.lax.bitcast_convert_type(w13_p_b, jnp.uint4)
+                w13_uint4 = w13_uint4.reshape(w13_uint4.shape[:-2] + (-1, ))
+
+                w2_uint4 = jax.lax.bitcast_convert_type(w2_p_b, jnp.uint4)
+                w2_uint4 = w2_uint4.reshape(w2_uint4.shape[:-2] + (-1, ))
+
+                w13_int4 = (w13_uint4 - 8).astype(jnp.int4)
+                w2_int4 = (w2_uint4 - 8).astype(jnp.int4)
+
+                out = process_moe_weights(
+                    weights=FusedMoEWeights(
+                        w13_weight=w13_int4,
+                        w13_weight_scale=w13_s_b,
+                        w13_bias=w13_b_b,
+                        w2_weight=w2_int4,
+                        w2_weight_scale=w2_s_b,
+                        w2_bias=w2_b_b,
+                    ),
+                    moe_backend=self.moe_backend,
+                    w13_reorder_size=w13_reorder_size,
+                    w13_interleave=w13_interleave,
+                )
+                return carry, (out.w13_weight, out.w13_weight_scale,
+                               out.w13_bias, out.w2_weight,
+                               out.w2_weight_scale, out.w2_bias)
+
+            def _reshape_to_batches(x):
+                if x is None:
+                    return None
+                return x.reshape(n_batches, scan_batch_size, *x.shape[1:])
+
+            def _reshape_from_batches(x):
+                if x is None:
+                    return None
+                return x.reshape(n_local, *x.shape[2:])
+
             w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
             w13_reorder_size = get_mesh_shape_product(
                 self.mesh, ShardingAxisName.MLP_TENSOR)
 
-            w13_weight_int4 = (w13_weight_uint4 - 8).astype(jnp.int4)
-            w2_weight_int4 = (w2_weight_uint4 - 8).astype(jnp.int4)
+            xs = jax.tree.map(_reshape_to_batches,
+                              (w13_p, w13_s, w13_b, w2_p, w2_s, w2_b))
+            _, (w13_q, w13_s, w13_b, w2_q, w2_s,
+                w2_b) = jax.lax.scan(_process_expert_batch, init=None, xs=xs)
 
-            return process_moe_weights(
-                weights=FusedMoEWeights(
-                    w13_weight=w13_weight_int4,
-                    w13_weight_scale=w13_weight_scale,
-                    w13_bias=w13_bias,
-                    w2_weight=w2_weight_int4,
-                    w2_weight_scale=w2_weight_scale,
-                    w2_bias=w2_bias,
-                ),
-                moe_backend=self.moe_backend,
-                w13_reorder_size=w13_reorder_size,
-                w13_interleave=w13_interleave,
-            )
+            w13_q, w13_s, w13_b, w2_q, w2_s, w2_b = jax.tree.map(
+                _reshape_from_batches, (w13_q, w13_s, w13_b, w2_q, w2_s, w2_b))
 
-        weights = process_uint4_moe_weights(
-            w13_weight,
-            w13_weight_scale,
-            w13_bias,
-            w2_weight,
-            w2_weight_scale,
-            w2_bias,
+            return (w13_q, w13_s, w13_b, w2_q, w2_s, w2_b)
+
+        # Apply shard_map
+        w13_q, w13_s, w13_b, w2_q, w2_s, w2_b = jax.shard_map(
+            _process_local,
+            mesh=self.mesh,
+            in_specs=(expert_p, expert_p, bias_p, expert_p, expert_p, bias_p),
+            out_specs=(expert_p, expert_p, bias_p, expert_p, expert_p, bias_p),
+            check_vma=False,
+        )(input_weights.w13_weight, input_weights.w13_weight_scale,
+          input_weights.w13_bias, input_weights.w2_weight,
+          input_weights.w2_weight_scale, input_weights.w2_bias)
+
+        out = FusedMoEWeights(
+            w13_weight=w13_q,
+            w13_weight_scale=w13_s,
+            w13_bias=w13_b,
+            w2_weight=w2_q,
+            w2_weight_scale=w2_s,
+            w2_bias=w2_b,
         )
-        weights = torch_view(
-            shard_moe_weights(weights, self.moe_backend, self.mesh))
+
+        # Apply sharding constraints
+        target_shardings = _get_moe_weight_shardings(out, self.moe_backend,
+                                                     self.mesh)
+        for field in fields(FusedMoEWeights):
+            key = field.name
+            weight = getattr(out, key)
+            if weight is not None:
+                sharding = getattr(target_shardings, key)
+                setattr(out, key,
+                        jax.lax.with_sharding_constraint(weight, sharding))
+
+        weights = torch_view(out)
 
         layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
         layer.w2_weight = Parameter(weights.w2_weight, requires_grad=False)
