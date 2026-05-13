@@ -732,8 +732,8 @@ class CompilationManager:
         logger.info(
             "Compiling speculative_decoding with different input shapes.")
         self._precompile_rejection_sampler()
+        self._precompile_extract_last_sampled_tokens()
         if self.runner.speculative_config.method == "eagle3":
-            self._precompile_extract_last_sampled_tokens()
             self._precompile_eagle3_helpers()
 
     def _precompile_extract_last_sampled_tokens(self) -> None:

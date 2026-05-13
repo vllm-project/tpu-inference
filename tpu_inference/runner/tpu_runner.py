@@ -1403,7 +1403,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             num_scheduled_tokens_per_req = scheduled_tokens_per_dp_rank[
                 dp_rank]
-            num_draft_tokens = num_draft_tokens_per_dp_rank[dp_rank]
+            num_draft_tokens = num_draft_tokens_per_dp_rank.get(dp_rank, {})
             token_in_tpu_cur_input_indices_list = token_in_tpu_cur_input_indices_dp[
                 dp_rank]
             token_in_tpu_pre_next_tokens_indices_list = token_in_tpu_pre_next_tokens_indices_dp[
@@ -1420,7 +1420,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             for i, req_id in enumerate(req_ids_dp[dp_rank]):
                 acc_cur_len += num_scheduled_tokens_per_req[i]
-                draft_tokens_acc_cur_len += num_draft_tokens[i]
+                if dp_rank == 0:
+                    draft_tokens_acc_cur_len += num_draft_tokens[i]
                 if req_id not in self._pre_async_results.placeholder_req_id_to_index:
                     continue
 
