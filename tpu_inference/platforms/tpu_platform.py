@@ -242,9 +242,8 @@ class TpuPlatform(Platform):
                             min_page_size,
                         )
                         cache_config.block_size = min_page_size  # type: ignore[assignment]
-            if envs.USE_BATCHED_RPA_KERNEL:
-                if cache_config.block_size < 256:
-                    cache_config.block_size = 256
+            if envs.USE_BATCHED_RPA_KERNEL and cache_config.block_size < 256:
+                cache_config.block_size = 256
             # Enforcing block_size to be power of 2 always (for MQA, MHA, GQA, etc.)
             bs = cache_config.block_size
             cache_config.block_size = 1 << (bs - 1).bit_length()
@@ -339,7 +338,6 @@ class TpuPlatform(Platform):
 
         finally:
             vllm_config.parallel_config.tensor_parallel_size = orig_tp_size
-
 
     @classmethod
     def is_pin_memory_available(cls):
