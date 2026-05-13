@@ -245,6 +245,7 @@ def get_batch_composition_stats(
     num_computed_tokens_per_req = input_batch.num_computed_tokens_cpu[:
                                                                       num_reqs]
 
+    scheduled_spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
     min_kv_len = float('inf') if num_reqs > 0 else 0
     for i, req_id in enumerate(input_batch.req_ids[:num_reqs]):
         assert req_id is not None
@@ -258,12 +259,20 @@ def get_batch_composition_stats(
             num_computed_tokens_per_req[i])  # Cast from np.int32
         min_kv_len = min(min_kv_len, num_already_computed)
 
+        # When speculative decoding is enabled for this request, the extra
+        # tokens are draft tokens being verified, not chunked prefill tokens.
+        num_spec_tokens = len(scheduled_spec_decode_tokens.get(req_id, ()))
+
         if num_already_computed == 0:
             # Prefill
             num_prefill_tokens += num_scheduled_for_req
         # This means the request is ongoing
         else:
-            if num_scheduled_for_req > 1:
+            if num_spec_tokens > 0:
+                # Verifying draft tokens for an ongoing request — count the
+                # target token plus the draft tokens as decode.
+                num_decode_tokens += num_scheduled_for_req
+            elif num_scheduled_for_req > 1:
                 # It's a multi-token request, so it's chunked prefill
                 num_prefill_tokens += num_scheduled_for_req
             else:
@@ -690,8 +699,7 @@ class PhasedBasedProfiler:
 
         # We want to start profiling only after the first trial request
         is_past_initial_request = batch_composition_stats[
-            "num_reqs"] > 1 and batch_composition_stats[
-                "total_num_scheduled_tokens"] > 1
+            "total_num_scheduled_tokens"] > 1
 
         if is_past_initial_request:
             if self.aggregated_stats_logger is not None:

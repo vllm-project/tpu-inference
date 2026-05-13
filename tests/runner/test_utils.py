@@ -260,39 +260,59 @@ class MockInputBatch:
 
 class MockSchedulerOutput:
 
-    def __init__(self, num_scheduled_tokens):
+    def __init__(self,
+                 num_scheduled_tokens,
+                 scheduled_spec_decode_tokens=None):
         self.num_scheduled_tokens = num_scheduled_tokens
+        self.scheduled_spec_decode_tokens = scheduled_spec_decode_tokens or {}
 
 
 @pytest.mark.parametrize(
-    "scenario, num_reqs, req_ids, computed, scheduled, expected_prefill, expected_decode, expected_phase",
+    "scenario, num_reqs, req_ids, computed, scheduled, spec_tokens, expected_prefill, expected_decode, expected_phase",
     [
         ("prefill_only", 2, [101, 102], [0, 0], {
             101: 50,
             102: 100
-        }, 150, 0, "PREFILL_ONLY"),
+        }, None, 150, 0, "PREFILL_ONLY"),
         ("decode_only", 3, [201, 202, 203], [10, 20, 5], {
             201: 1,
             202: 1,
             203: 1
-        }, 0, 3, "DECODE_ONLY"),
+        }, None, 0, 3, "DECODE_ONLY"),
         ("mixed_batch", 4, [301, 302, 303, 304], [0, 10, 0, 20], {
             301: 100,
             302: 1,
             303: 50,
             304: 1
-        }, 150, 2, "PREFILL_HEAVY"),
+        }, None, 150, 2, "PREFILL_HEAVY"),
         ("chunked_prefill", 2, [401, 402], [50, 10], {
             401: 50,
             402: 1
-        }, 50, 1, "PREFILL_HEAVY"),
+        }, None, 50, 1, "PREFILL_HEAVY"),
+        # Speculative decoding: 1 target token + 3 draft tokens per request
+        # should all count as decode tokens, not chunked prefill.
+        ("spec_decode_only", 2, [501, 502], [10, 20], {
+            501: 4,
+            502: 4
+        }, {
+            501: [1, 2, 3],
+            502: [4, 5, 6]
+        }, 0, 8, "DECODE_ONLY"),
+        # Mixed: one request is doing chunked prefill, the other is verifying
+        # draft tokens. Spec tokens must not be misclassified as prefill.
+        ("spec_decode_with_chunked_prefill", 2, [601, 602], [0, 10], {
+            601: 50,
+            602: 4
+        }, {
+            602: [1, 2, 3]
+        }, 50, 4, "PREFILL_HEAVY"),
     ])
 def test_get_batch_composition_stats(scenario, num_reqs, req_ids, computed,
-                                     scheduled, expected_prefill,
+                                     scheduled, spec_tokens, expected_prefill,
                                      expected_decode, expected_phase):
     """Tests get_batch_composition_stats for various scenarios."""
     input_batch = MockInputBatch(req_ids, computed)
-    scheduler_output = MockSchedulerOutput(scheduled)
+    scheduler_output = MockSchedulerOutput(scheduled, spec_tokens)
     total_tokens = sum(scheduled.values())
     batch_id = 42
 
@@ -560,7 +580,7 @@ def test_phased_profiler_full_cycle(profiler_fixture):
 
 
 def test_phased_profiler_ignores_initial_request(profiler_fixture):
-    """Tests that profiling is not triggered for initial small requests."""
+    """Tests that profiling is not triggered for initial single-token requests."""
     profiler = profiler_fixture["profiler"]
     mock_start = profiler_fixture["mock_start"]
     mock_determine_phase = profiler_fixture["mock_determine_phase"]
@@ -568,9 +588,6 @@ def test_phased_profiler_ignores_initial_request(profiler_fixture):
     mock_determine_phase.return_value = InferencePhase.PREFILL_HEAVY
 
     profiler.step({"num_reqs": 1, "total_num_scheduled_tokens": 1})
-    mock_start.assert_not_called()
-
-    profiler.step({"num_reqs": 1, "total_num_scheduled_tokens": 100})
     mock_start.assert_not_called()
 
     profiler.step({"num_reqs": 2, "total_num_scheduled_tokens": 1})
