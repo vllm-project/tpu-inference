@@ -643,7 +643,29 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             for name, weight in weights_iterator:
                 mapped_name = map_name(name)
 
-                # Handle packed QKV weights for the text tower
+                # Skip audio tower weights — audio path is deferred for
+                # E-family. Audio re-introduction is a separate follow-up.
+                if "audio_tower" in mapped_name or "embed_audio" in mapped_name:
+                    continue
+
+                # Skip activation-calibration metadata that ships in E2B/E4B
+                # HF checkpoints (vision tower) but isn't a JAX parameter.
+                # The JAX vision module doesn't track these min/max scalars.
+                if any(
+                        mapped_name.endswith(suffix) for suffix in (
+                            ".input_max",
+                            ".input_min",
+                            ".output_max",
+                            ".output_min",
+                        )):
+                    continue
+
+                # Handle packed QKV weights for the text tower.
+                # Note: KV-shared layers DO have full Q/K/V weights in the
+                # checkpoint (vllm gemma4.py:412-433 constructs qkv_proj
+                # unconditionally). K/V are still computed and used for the
+                # current step's attention; the kernel skips writing them to
+                # the cache via update_kv_cache=False (Phase 8).
                 if "qkv_proj" in mapped_name:
                     m = re.search(r"layers\.(\d+)\.", mapped_name)
                     if m:
@@ -797,12 +819,20 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         layer_name_to_kv_cache = dict(
             _layer_name_to_kv_cache) if _layer_name_to_kv_cache else None
 
+        # PLE multimodal mask: mark image-token positions
+        # so embed_tokens_per_layer redirects them to slot 0. None when not
+        # PLE-active or first rank where input_ids isn't reliable. Cheap to
+        # always compute; the PLE compute path is the only consumer.
+        is_multimodal = (input_ids == self.image_token_id
+                         ) if input_ids is not None else None
+
         kv_caches, x, expert_indices = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
             inputs_embeds,
             layer_name_to_kv_cache=layer_name_to_kv_cache,
+            is_multimodal=is_multimodal,
         )
 
         if not is_last_rank:

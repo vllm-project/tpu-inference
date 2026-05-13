@@ -909,6 +909,10 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                     permute_dims = (1, 2, 0)
                 elif "embed_tokens.weight" in name:
                     permute_dims = (0, 1)
+                elif "embed_tokens_per_layer.weight" in name:
+                    # Gemma-4 PLE: HF stores as nn.Embedding (V_ple, L*P);
+                    # JaxEmbed expects (V_ple, L*P). No transpose.
+                    permute_dims = (0, 1)
                 elif "lm_head" in name:
                     permute_dims = (1, 0)
 
