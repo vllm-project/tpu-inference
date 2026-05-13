@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
     VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
     ENABLE_RS_KERNEL: bool = False
-
+    DP_SCHED_BATCH_PREFILL: bool = False
 
 def env_with_choices(
     env_name: str,
@@ -307,6 +307,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable hierarchical reduce-scatter kernel for MoE
     "ENABLE_RS_KERNEL":
     env_bool("ENABLE_RS_KERNEL", default=False),
+    # DP-scheduler: hold incoming requests (prefills) at the DP layer until
+    # `dp_size` of them have accumulated. The goal is to cluster new prefills.
+    "DP_SCHED_BATCH_PREFILL":
+    env_bool("DP_SCHED_BATCH_PREFILL", default=True),
 }
 
 
