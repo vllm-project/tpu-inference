@@ -327,9 +327,8 @@ NUM_PROMPTS=${NUM_PROMPTS:-1000}
 PREFIX_LEN=${PREFIX_LEN:-0}
 
 run_benchmark(){
-  echo "running benchmark..."
-  echo "logging to $BM_LOG"
-  echo
+  echo "running benchmark..." >&2
+  echo "logging to $BM_LOG" >&2
 
   local request_rate=${1:-""}
 
@@ -365,24 +364,25 @@ run_benchmark(){
   set -e
 
   if [ $client_exit_code -ne 0 ]; then
-      return $client_exit_code
+    echo "[ERROR] An error occurred while executing client_cmd." >&2
+    return $client_exit_code
   fi
 
-  throughput=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
-  p99_e2el=$(grep "P99 E2EL (ms):" "$BM_LOG" | awk '{print $NF}')
+  throughput=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g' || true)
+  p99_e2el=$(grep "P99 E2EL (ms):" "$BM_LOG" | awk '{print $NF}' || true)
+  echo "throughput: $throughput, P99 E2EL: $p99_e2el" >&2
 
   if [ -z "$throughput" ] || [ -z "$p99_e2el" ]; then
     echo "[ERROR] Unable to extract metrics from the log. Please check if $BM_LOG is correctly formatted or if the test failed." >&2
     return 1
   fi
 
-  local re='^[0-9]+([.][0-9]+)?$'
-  if ! [[ $throughput =~ $re ]] || ! [[ $p99_e2el =~ $re ]]; then
+  local num_reg='^[0-9]+([.][0-9]+)?$'
+  if ! [[ $throughput =~ $num_reg ]] || ! [[ $p99_e2el =~ $num_reg ]]; then
     echo "[ERROR] Extracted values are not valid numbers (Throughput: '$throughput', P99: '$p99_e2el')" >&2
     return 1
   fi
 
-  echo "throughput: $throughput, P99 E2EL: $p99_e2el" >&2
   echo "$throughput $p99_e2el"
 }
 
