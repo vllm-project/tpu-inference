@@ -124,8 +124,10 @@ class KernelTunerBase(ABC):
 
     def __init__(self,
                  *,
-                 tuner_config: TunerConfig = TunerConfig(),
-                 run_config: RunConfig = RunConfig()):
+                 tuner_config: TunerConfig = None,
+                 run_config: RunConfig = None):
+        assert tuner_config is not None, "tuner_config must be specified"
+        assert run_config is not None, "run_config must be specified"
         assert tuner_config.tuning_key_class is not None, "tuning_key_class must be specified"
         assert tuner_config.tunable_params_class is not None, "tunable_params_class must be specified"
         assert tuner_config.kernel_tuner_name is not None, "kernel_tuner_name must be specified, which will be used as the identifier for this kernel tuner in the Buildkite pipeline generation and execution. It should match the key in the KERNEL_TUNER_REGISTRY in kernel_tuner_runner.py to ensure the correct kernel tuner is called during execution."
