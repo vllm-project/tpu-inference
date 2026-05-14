@@ -244,12 +244,6 @@ class TpuPlatform(Platform):
                         cache_config.block_size = min_page_size  # type: ignore[assignment]
             if envs.USE_BATCHED_RPA_KERNEL and cache_config.block_size < 256:
                 cache_config.block_size = 256
-            # Enforcing block_size to be power of 2 always (for MQA, MHA, GQA, etc.)
-            bs = cache_config.block_size
-            cache_config.block_size = 1 << (bs - 1).bit_length()
-            logger.info(f"Override block_size from {bs} to {cache_config.block_size}")
-            logger.info(
-                f"Using KV cache block size: {cache_config.block_size}")
 
         if cache_config and envs.TPU_MAMBA_SSM_CACHE_DTYPE:
             override = envs.TPU_MAMBA_SSM_CACHE_DTYPE
@@ -328,13 +322,16 @@ class TpuPlatform(Platform):
             if vllm_config.model_config.is_hybrid:
                 backend_cls = cls._find_non_ssm_backend(vllm_config)
                 if backend_cls is not None:
+                    old_attn_block_size = vllm_config.cache_config.block_size
                     # Align block/mamba sizes for hybrid model (may override
                     # user settings).
                     cls._align_hybrid_block_size(vllm_config, backend_cls)
-                    # Enforcing block_size to be power of 2 always (for MQA, MHA, GQA, etc.)
-                    bs = vllm_config.cache_config.block_size
-                    vllm_config.cache_config.block_size = 1 << (bs - 1).bit_length()
-                    logger.info(f"Using block_size: {vllm_config.cache_config.block_size} instead of {bs}")
+                    overidden_attn_block_size = vllm_config.cache_config.block_size
+                    # Reset block size to the original value. The non-power of 2 page sizes decreased performance.
+                    # The mamba_page_size_unpadded is also overidden later in kv_cache_manager.py to (1 attn page + 3*GDN page size).
+                    # Attn(page sz)>=Mamba(page sz) is not required for correctness later.
+                    vllm_config.cache_config.block_size = old_attn_block_size
+                    logger.info(f"Using block_size: {vllm_config.cache_config.block_size} instead of {overidden_attn_block_size}")
 
         finally:
             vllm_config.parallel_config.tensor_parallel_size = orig_tp_size
