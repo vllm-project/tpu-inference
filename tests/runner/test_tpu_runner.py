@@ -210,7 +210,7 @@ class TestTPUJaxRunner:
         runner.input_batch.num_tokens_no_spec = [10, 20]
         runner.input_batch.token_ids_cpu = np.zeros((8, 512), dtype=np.int32)
         runner.requests = {"req1": MagicMock(), "req2": MagicMock()}
-        runner._get_remaining_slots.return_value = np.array([30, 40])
+        runner._get_min_remaining_slots.return_value = 30
         runner.vllm_config.additional_config = {
             "max_decode_steps": 5,
             "terminate_on_any_eos": False
@@ -218,6 +218,8 @@ class TestTPUJaxRunner:
         runner.model_config.get_vocab_size.return_value = 1000
         runner.model_config.hf_config = MagicMock(eos_token_id=999,
                                                   pad_token_id=0)
+        runner.eos_token_id = 999
+        runner.pad_token_id = 0
         runner.layer_name_to_kvcache_index = {}
 
         # Mock continue_decode output
@@ -256,7 +258,7 @@ class TestTPUJaxRunner:
             None,
             None,
             None,
-            None,
+            np.array([0, 1, -1, -1, -1, -1, -1, -1], dtype=np.int32),
             None,
             None,
             None)
@@ -304,7 +306,7 @@ class TestTPUJaxRunner:
         # Setup remaining slots to check capping logic
         # req1 has 15 slots left, req2 has 5 slots left, req3 has 20 slots left.
         # min_remaining = 5. max_decode_steps should be capped at min(10, 5) = 5.
-        runner._get_remaining_slots.return_value = np.array([15, 5, 20])
+        runner._get_min_remaining_slots.return_value = 5
         runner.vllm_config.additional_config = {
             "max_decode_steps": 10,
             "terminate_on_any_eos": True
@@ -313,6 +315,8 @@ class TestTPUJaxRunner:
         runner.model_config.get_vocab_size.return_value = 1000
         runner.model_config.hf_config = MagicMock(eos_token_id=999,
                                                   pad_token_id=0)
+        runner.eos_token_id = 999
+        runner.pad_token_id = 0
         runner.layer_name_to_kvcache_index = {}
 
         # Mock continue_decode output
@@ -358,7 +362,7 @@ class TestTPUJaxRunner:
             None,
             attn_metadata,
             None,
-            None,
+            np.array([0, 1, 2, -1, -1, -1, -1, -1], dtype=np.int32),
             None,
             None,
             None)
@@ -377,34 +381,36 @@ class TestTPUJaxRunner:
 
         # req1: [101, 102, 999] (length 3)
         assert output.sampled_token_ids[0] == [101, 102, 999]
-        # req2: [201, 202, 203] (length 3 - truncated due to terminate_on_any_eos)
-        assert output.sampled_token_ids[1] == [201, 202, 203]
-        # req3: [301, 302, 303] (length 3 - truncated due to terminate_on_any_eos)
-        assert output.sampled_token_ids[2] == [301, 302, 303]
+        # req2: [201, 202, 203, 204, 999] (length 5)
+        assert output.sampled_token_ids[1] == [201, 202, 203, 204, 999]
+        # req3: [301, 302, 303, 304, 305] (length 5)
+        assert output.sampled_token_ids[2] == [301, 302, 303, 304, 305]
 
         # 3. Verify CPU token_ids_cpu buffer is updated correctly
         # req1 starts at 10. next 3 tokens written.
         np.testing.assert_array_equal(
             runner.input_batch.token_ids_cpu[0, 10:13], [101, 102, 999])
-        # req2 starts at 20. next 3 tokens written.
+        # req2 starts at 20. next 5 tokens written.
         np.testing.assert_array_equal(
-            runner.input_batch.token_ids_cpu[1, 20:23], [201, 202, 203])
-        # req3 starts at 30. next 3 tokens written.
+            runner.input_batch.token_ids_cpu[1, 20:25],
+            [201, 202, 203, 204, 999])
+        # req3 starts at 30. next 5 tokens written.
         np.testing.assert_array_equal(
-            runner.input_batch.token_ids_cpu[2, 30:33], [301, 302, 303])
+            runner.input_batch.token_ids_cpu[2, 30:35],
+            [301, 302, 303, 304, 305])
 
         # 4. Verify request output_token_ids are extended
         assert req_mock1.output_token_ids == [1, 2, 3, 101, 102, 999]
-        assert req_mock2.output_token_ids == [4, 201, 202, 203]
-        assert req_mock3.output_token_ids == [5, 6, 301, 302, 303]
+        assert req_mock2.output_token_ids == [4, 201, 202, 203, 204, 999]
+        assert req_mock3.output_token_ids == [5, 6, 301, 302, 303, 304, 305]
 
         # 5. Verify attention metadata sequence lengths are advanced
         # req1: 10 -> 13
         assert attn_metadata.seq_lens_cpu[0] == 13
-        # req2: 20 -> 23
-        assert attn_metadata.seq_lens_cpu[1] == 23
-        # req3: 30 -> 33
-        assert attn_metadata.seq_lens_cpu[2] == 33
+        # req2: 20 -> 25
+        assert attn_metadata.seq_lens_cpu[1] == 25
+        # req3: 30 -> 35
+        assert attn_metadata.seq_lens_cpu[2] == 35
 
 
 class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
