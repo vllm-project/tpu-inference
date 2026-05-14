@@ -270,8 +270,10 @@ def test_mamba_state_indices_freed_on_remove(input_batch: InputBatch):
 
     input_batch.remove_request("req-0")
     # condense() with empty_indices=[0] would early-return because num_reqs==0,
-    # so we just verify the slot is back in the pool.
-    assert slot_first in input_batch._free_mamba_slots
+    # so we just verify the slot is back in *some* per-rank pool. Pools are
+    # sharded under DP attention; the slot lives in exactly one of them.
+    assert any(slot_first in pool
+               for pool in input_batch._free_mamba_slots_per_rank)
 
     new_req = create_dummy_request("req-new")
     input_batch.add_request(new_req)
