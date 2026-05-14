@@ -206,6 +206,7 @@ class TestTPUJaxRunner:
         runner.max_model_len = 512
         runner.dp_size = 1
         runner.input_batch.num_reqs = 2
+        runner.input_batch.req_ids = ["req1", "req2"]
         runner.input_batch.req_id_to_index = {"req1": 0, "req2": 1}
         runner.input_batch.num_tokens_no_spec = [10, 20]
         runner.input_batch.token_ids_cpu = np.zeros((8, 512), dtype=np.int32)
@@ -289,6 +290,7 @@ class TestTPUJaxRunner:
         runner.max_model_len = 512
         runner.dp_size = 1
         runner.input_batch.num_reqs = 3
+        runner.input_batch.req_ids = ["req1", "req2", "req3"]
         runner.input_batch.req_id_to_index = {"req1": 0, "req2": 1, "req3": 2}
 
         # Initialize token_ids_cpu buffer
