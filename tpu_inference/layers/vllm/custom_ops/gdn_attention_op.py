@@ -90,6 +90,8 @@ def gdn_attention_core_tpu(
     key_dim = n_kq * d_k
     value_dim = n_v * d_v
     tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
+    dp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA)
+
     j_mixed_qkv = reorder_concatenated_tensor_for_sharding(
         j_mixed_qkv, [key_dim, key_dim, value_dim], tp_size, -1)
     j_conv_weight = reorder_concatenated_tensor_for_sharding(
@@ -116,40 +118,44 @@ def gdn_attention_core_tpu(
     #     requests into lower-index slots after earlier ones finish), the
     #     slot id moves with the request so the kernel still reads/writes
     #     the slot that holds this request's real state.
-    state_indices = jax_view(attn_metadata.mamba_state_indices).astype(
-        jnp.int32)
-
-    # Map tokens to their respective requests
-    q_loc = jax_view(attn_metadata.query_start_loc)
-    distribution = jax_view(attn_metadata.request_distribution)
-    j_seq_lens = jax_view(attn_metadata.seq_lens)
+    state_indices = attn_metadata.mamba_state_indices.astype(jnp.int32)
 
     config = GdnAttentionConfig(
         ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl(
             envs.RAGGED_GATED_DELTA_RULE_IMPL))
     logger.info_once(f"GDN Attention Config: {config}")
 
+    padded_num_reqs = attn_metadata.padded_num_reqs
+
+    # Slice the state indices to the padded_num_reqs, which is the actual number
+    # of requests padded to the bucket.
+    state_indices_sliced = state_indices[:padded_num_reqs]
+    query_start_loc_sliced = attn_metadata.query_start_loc[:padded_num_reqs +
+                                                           dp_size]
+    seq_lens_sliced = attn_metadata.seq_lens[:padded_num_reqs]
+
     (new_conv_state_extracted,
-     new_recurrent_state), j_output = run_jax_gdn_attention(j_mixed_qkv,
-                                                            j_b,
-                                                            j_a,
-                                                            conv_state_in,
-                                                            recurrent_state,
-                                                            j_conv_weight,
-                                                            j_conv_bias,
-                                                            j_A_log,
-                                                            j_dt_bias,
-                                                            state_indices,
-                                                            q_loc,
-                                                            distribution,
-                                                            j_seq_lens,
-                                                            n_kq,
-                                                            n_v,
-                                                            d_k,
-                                                            d_v,
-                                                            kernel_size,
-                                                            mesh=mesh,
-                                                            config=config)
+     new_recurrent_state), j_output = run_jax_gdn_attention(
+         j_mixed_qkv,
+         j_b,
+         j_a,
+         conv_state_in,
+         recurrent_state,
+         j_conv_weight,
+         j_conv_bias,
+         j_A_log,
+         j_dt_bias,
+         state_indices_sliced,
+         query_start_loc_sliced,
+         attn_metadata.request_distribution,
+         seq_lens_sliced,
+         n_kq,
+         n_v,
+         d_k,
+         d_v,
+         kernel_size,
+         mesh=mesh,
+         config=config)
     if state_len > kernel_size - 1:
         remaining_old_state = conv_state[:, kernel_size - 1:, :]
         new_conv_state = jnp.concatenate(

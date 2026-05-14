@@ -71,6 +71,26 @@ def get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
     return paddings
 
 
+def get_attn_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
+    """Get num reqs paddings with custom override to reduce compilation time"""
+    if not envs.ATTN_BUCKETIZED_NUM_REQS:
+        reqs = [max_req_size]
+    elif envs.ATTN_CUSTOM_NUM_REQS_BUCKETS:
+        reqs = envs.ATTN_CUSTOM_NUM_REQS_BUCKETS
+    else:
+        reqs = get_req_paddings(min_req_size, max_req_size)
+
+    if max_req_size not in reqs:
+        logger.info(
+            "max_num_reqs must be supported but is not in ATTN_CUSTOM_NUM_REQS_BUCKETS. Adding max_num_reqs to the num_reqs buckets."
+        )
+        reqs.append(max_req_size)
+
+    logger.info(f"Prepared attn request paddings: {reqs}")
+
+    return reqs
+
+
 def get_token_paddings(min_token_size: int, max_token_size: int,
                        padding_gap: int) -> list[int]:
     """Generate a list of padding size, starting from min_token_size,
