@@ -107,9 +107,9 @@ def sampling_params():
     ],
     ids=lambda x: x["id"],
 )
-def test_export_expert_ids_correctness_matrix(matrix_case, test_prompts,
-                                              sampling_params):
-    """Verify expert ID export correctness across comprehensive execution matrix configurations."""
+def test_continue_decode_correctness_matrix(matrix_case, test_prompts,
+                                            sampling_params):
+    """Verify continue_decode correctness and expert ID exportation across comprehensive execution matrix configurations."""
     os.environ['SKIP_JAX_PRECOMPILE'] = '1'
     os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '0'
 
@@ -146,8 +146,8 @@ def test_export_expert_ids_correctness_matrix(matrix_case, test_prompts,
         )
 
 
-def test_export_expert_ids_performance_overhead(test_prompts, sampling_params):
-    """Verify that exporting expert IDs adds minimal latency overhead compared to baseline execution."""
+def test_continue_decode_performance_overhead(test_prompts, sampling_params):
+    """Verify that continue_decode with expert ID exportation adds minimal latency overhead compared to baseline execution."""
     os.environ['SKIP_JAX_PRECOMPILE'] = '0'
     os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '1'
 
@@ -168,10 +168,10 @@ def test_export_expert_ids_performance_overhead(test_prompts, sampling_params):
 
     overhead = (latency_export - latency_baseline
                 ) / latency_baseline if latency_baseline > 0 else 0
-    print("✓ Export expert IDs performance validation:")
+    print("✓ Continue decode performance validation:")
     print(f"  Baseline latency: {latency_baseline:.3f}s")
     print(f"  Export latency:   {latency_export:.3f}s")
     print(f"  Overhead ratio:   {overhead:.1%}")
 
     # Set conservative upper bound threshold for latency overhead to prevent regression
-    assert overhead < 0.50, f"Expert ID export performance overhead ({overhead:.1%}) exceeds 50% threshold limit."
+    assert overhead < 0.50, f"Continue decode performance overhead ({overhead:.1%}) exceeds 50% threshold limit."
