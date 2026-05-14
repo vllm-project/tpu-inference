@@ -1060,8 +1060,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         ) = self._prepare_inputs(scheduler_output)
 
         init_tokens = input_ids
-        active_mask = jnp.arange(
-            input_ids.shape[0]) < self.input_batch.num_reqs
+        # Map active rows correctly across DP buckets by checking valid query locations
+        active_mask = logits_indices >= 0
 
         init_state = TpuSamplingState(
             current_tokens=init_tokens,
@@ -1146,8 +1146,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             req_idx = self.input_batch.req_id_to_index.get(req_id, i)
             safe_req_id_to_index[req_id] = i
 
+            # Map the request index to its correct DP-bucket output row position
+            out_idx = (logits_indices_selector[req_idx]
+                       if logits_indices_selector is not None else req_idx)
+
             req_state = self.requests.get(req_id)
-            tokens = generated_tokens_cpu[req_idx]
+            tokens = generated_tokens_cpu[out_idx]
 
             eos_indices = np.where(tokens == self.eos_token_id)[0]
             if len(eos_indices) > 0:
@@ -1166,7 +1170,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             if all_expert_indices_cpu is not None:
                 # Raw shape: (steps, layers, reqs, top_k) -> Slice to (actual_len, layers, top_k)
                 req_experts = all_expert_indices_cpu[:actual_len, :,
-                                                     req_idx, :]
+                                                     out_idx, :]
                 # Transpose to (layers, actual_len, top_k) and collect
                 expert_indices_list.append(req_experts.transpose(1, 0, 2))
 

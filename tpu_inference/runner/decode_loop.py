@@ -44,7 +44,9 @@ class TpuSamplingState:
     step_counter: jax.Array
 
 
-@functools.partial(jax.jit, static_argnames=["dp_size", "pad_len"])
+@functools.partial(
+    jax.jit,
+    static_argnames=["eos_token_id", "padding_token_id", "dp_size", "pad_len"])
 def _update_loop_state(
     next_tokens: jax.Array,
     active_mask: jax.Array,
@@ -118,16 +120,13 @@ def continue_decode(
     seq_lens_size = init_state.attn_metadata.seq_lens.shape[0]
     pad_len = (seq_lens_size - batch_size) // dp_size
 
-    generated_tokens = jnp.full((max_decode_steps, batch_size),
-                                padding_token_id,
-                                dtype=jnp.int32)
-
     current_tokens = init_state.current_tokens
     active_mask = init_state.active_mask
     attn_metadata = init_state.attn_metadata
     current_rng = rng
 
-    all_expert_indices = None
+    token_list = []
+    expert_indices_list = []
 
     for step_idx in range(max_decode_steps):
         # Split RNG for current step
@@ -148,16 +147,9 @@ def continue_decode(
             is_last_rank,
         )
 
-        # Initialize and record expert indices if returned
+        # Record expert indices if returned
         if expert_indices_step is not None:
-            if step_idx == 0:
-                num_layers, _, top_k = expert_indices_step.shape
-                all_expert_indices = jnp.zeros(
-                    (max_decode_steps, num_layers, batch_size, top_k),
-                    dtype=expert_indices_step.dtype,
-                )
-            all_expert_indices = all_expert_indices.at[step_idx].set(
-                expert_indices_step)
+            expert_indices_list.append(expert_indices_step)
 
         # 2. Compute logits and sample
         logits = compute_logits_fn(state, hidden_states, None)
@@ -186,13 +178,16 @@ def continue_decode(
         )
 
         # 4. Record generated tokens
-        generated_tokens = generated_tokens.at[step_idx].set(
-            step_record_tokens)
+        token_list.append(step_record_tokens)
 
         # Update loop variables
         current_tokens = next_input_ids
         active_mask = new_active_mask
         attn_metadata = new_attn_metadata
+
+    generated_tokens = jnp.stack(token_list)
+    all_expert_indices = jnp.stack(
+        expert_indices_list) if expert_indices_list else None
 
     final_state = TpuSamplingState(
         current_tokens=current_tokens,
