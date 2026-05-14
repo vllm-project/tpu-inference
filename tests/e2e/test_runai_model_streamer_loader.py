@@ -34,10 +34,32 @@
 
 from __future__ import annotations
 
+import errno
+import os
 import time
 
 import pytest
+import ray
+
 from vllm import LLM, SamplingParams
+
+_LIBTPU_LOCKFILE = "/tmp/libtpu_lockfile"
+
+
+def _release_tpu_after_ray():
+    """Shut Ray down and clear the libtpu lockfile.
+
+    `ray.shutdown()` SIGKILLs worker actors, so libtpu's atexit handler may not
+    run and leaves a stale entry in /tmp/libtpu_lockfile. The next LLM then
+    fails with `ABORTED: Internal error when accessing libtpu multi-process
+    lockfile`. Removing the file matches the remedy printed in that error.
+    """
+    ray.shutdown()
+    try:
+        os.unlink(_LIBTPU_LOCKFILE)
+    except OSError as e:
+        if e.errno != errno.ENOENT:
+            raise
 
 
 @pytest.fixture
@@ -181,6 +203,10 @@ def test_correctness_torchax_ray_distributed_executor(
     gcs_outputs = gcs_llm.generate([prompt], sampling_config)
     gcs_output_text = gcs_outputs[0].outputs[0].text
     del gcs_llm
+    # `del` only drops the Python reference; Ray actors holding the TPU are
+    # torn down asynchronously. Shut Ray down and clear the libtpu lockfile
+    # so the next LLM doesn't race with the previous workers for the TPU.
+    _release_tpu_after_ray()
     time.sleep(10)  # Wait for TPUs to be released
 
     # Test with Hugging Face model
@@ -192,6 +218,7 @@ def test_correctness_torchax_ray_distributed_executor(
     hf_outputs = hf_llm.generate([prompt], sampling_config)
     hf_output_text = hf_outputs[0].outputs[0].text
     del hf_llm
+    _release_tpu_after_ray()
     time.sleep(10)  # Wait for TPUs to be released
 
     assert gcs_output_text == hf_output_text, (
