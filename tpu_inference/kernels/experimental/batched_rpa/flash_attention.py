@@ -36,21 +36,21 @@ def flash_attention_qk_softmax(
     b, k_heads, tq, _ = q.shape
     s = k.shape[2]
 
-    if cfgs.serve.scale_q is not None:
-        q = q / cfgs.serve.scale_q
-        if jnp.issubdtype(k.dtype, jnp.floating):
-            dtype_info = jnp.finfo(k.dtype)
-            minval = float(dtype_info.min)
-            maxval = float(dtype_info.max)
-            q = jnp.clip(q, min=minval, max=maxval)
-        q = q.astype(k.dtype)
+    # if cfgs.serve.scale_q is not None:
+    #     q = q / cfgs.serve.scale_q
+    #     if jnp.issubdtype(k.dtype, jnp.floating):
+    #         dtype_info = jnp.finfo(k.dtype)
+    #         minval = float(dtype_info.min)
+    #         maxval = float(dtype_info.max)
+    #         q = jnp.clip(q, min=minval, max=maxval)
+    #     q = q.astype(k.dtype)
 
     qk = lax.dot_general(
         pltpu.einshape("bkth->(bk)th", q, True),
         pltpu.einshape("bksh->(bk)sh", k, True),
         dimension_numbers=(([2], [2]), ([0], [0])),
         preferred_element_type=jnp.float32,
-    ).astype(cfgs.serve.dtype_out)
+    ).astype(cfgs.model.s_dtype)
     qk = pltpu.einshape("(bk)ts->bkts", qk, True, b=b)
 
     qk *= cfgs.model.sm_scale
@@ -81,13 +81,15 @@ def flash_attention_qk_softmax(
             mask_b = jnp.logical_and(mask_b, q_idx_b
                                      < kv_idx_b + sliding_window)
 
-        qk_masked.append(jnp.where(mask_b, qk[b_idx], cfgs.model.mask_value))
+        qk_masked.append(
+            jnp.where(mask_b, qk[b_idx],
+                      cfgs.model.mask_value.astype(qk.dtype)))
     qk = jnp.stack(qk_masked, axis=0)
 
     m_curr = jnp.max(qk, axis=-1, keepdims=True)
     m_next = jnp.maximum(m_prev, m_curr)
     p = jnp.exp(qk - utils.broadcast_minor(m_next, qk.shape))
-    p_rowsum = jnp.sum(p, axis=-1, keepdims=True, dtype=cfgs.serve.dtype_out)
+    p_rowsum = jnp.sum(p, axis=-1, keepdims=True)
 
     alpha = jnp.exp(m_prev - m_next)
     l_next = alpha * l_prev + p_rowsum
@@ -104,12 +106,14 @@ def flash_attention_pv(
 ):
     """Flash attention kernel."""
     b = p.shape[0]
+    if cfgs.model.p_same_dtype_as_v:
+        p = p.astype(v.dtype)
     pv = lax.dot_general(
         pltpu.einshape("bkts->(bk)ts", p, True),
         pltpu.einshape("bksh->(bk)sh", v, True),
         dimension_numbers=(([2], [1]), ([0], [0])),
         preferred_element_type=jnp.float32,
-    ).astype(cfgs.serve.dtype_out)
+    )
     pv = pltpu.einshape("(bk)th->bkth", pv, True, b=b)
 
     if cfgs.serve.scale_v is not None:
@@ -117,4 +121,4 @@ def flash_attention_pv(
 
     o_next = utils.broadcast_minor(alpha, o_prev.shape) * o_prev + pv
 
-    return o_next
+    return o_next.astype(o_prev.dtype)

@@ -19,14 +19,14 @@ environment variable.
 
 Compared to the default RPA kernel, this kernel does the following:
 
-1. Batches multiple sequences together to replace per-request flash_attention loops. 
+1. Batches multiple sequences together to replace per-request flash_attention loops.
 
 2. Enables triple-buffering via Pallas emit_pipeline
 
-3. Precomputes expensive metadata upfront (e.g., page locations and bounds clipping) via 
-scheduler.py kernel. Kernel is calculated once and ammortized across different layers in a model. 
+3. Precomputes expensive metadata upfront (e.g., page locations and bounds clipping) via
+scheduler.py kernel. Kernel is calculated once and ammortized across different layers in a model.
 
-Note: batched_rpa is build on top / derived from RPA3. 
+Note: batched_rpa is build on top / derived from RPA3.
 """
 
 import jax
@@ -216,8 +216,19 @@ def calculate_block_sizes(
         # Sum up all compute memory usage.
         compute_bytes = loaded_bq_bytes + loaded_bkv_bytes + qk_bytes
 
+        # Account for scratches allocated in kernel.py
+        # m and l scratches are bfloat16 (2 bytes)
+        scratch_lm_bytes = (bq_sz * model_cfgs.num_q_heads_per_kv_head *
+                            model_cfgs.num_kv_heads * num_lanes * 2)
+        # acc scratch is bfloat16 (2 bytes)
+        scratch_acc_bytes = (bq_sz * model_cfgs.num_q_heads_per_kv_head *
+                             model_cfgs.num_kv_heads * model_cfgs.head_dim * 2)
+
+        # Total scratches per batch item (2 lm scratches and 1 acc scratch)
+        scratches_bytes = 2 * scratch_lm_bytes + scratch_acc_bytes
+
         # Step 3: Sum up all memory usage.
-        total_bytes = buffer_bytes + compute_bytes
+        total_bytes = buffer_bytes + compute_bytes + scratches_bytes
 
         # Account for batch size.
         total_bytes *= batch_size
@@ -349,6 +360,8 @@ def calculate_block_sizes(
         "out_dtype",
         "use_causal_mask",
         "update_kv_cache",
+        "p_same_dtype_as_v",
+        "s_dtype",
     ),
     donate_argnames=("queries", "keys", "values", "kv_cache"),
 )
@@ -377,6 +390,8 @@ def ragged_paged_attention(
     out_dtype: jnp.dtype | None = None,
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
+    p_same_dtype_as_v: bool = False,
+    s_dtype: jnp.dtype = jnp.bfloat16,
 ) -> tuple[jax.Array, jax.Array]:
     """Perform batched ragged paged attention.
 
@@ -451,6 +466,8 @@ def ragged_paged_attention(
         sm_scale=sm_scale,
         soft_cap=soft_cap,
         mask_value=mask_value,
+        p_same_dtype_as_v=p_same_dtype_as_v,
+        s_dtype=s_dtype,
     )
     serve_cfgs = configs.ServingConfigs(
         num_seqs=max_num_seqs,

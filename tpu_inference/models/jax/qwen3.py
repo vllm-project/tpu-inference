@@ -26,7 +26,8 @@ from tpu_inference import envs, utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.common.quantization import quantize_kv
+from tpu_inference.layers.common.quantization import (
+    quantize_kv, static_per_tensor_quantize_tensor)
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.linear import JaxEinsum
@@ -184,9 +185,11 @@ class Qwen3Attention(JaxModule):
         q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
             # TODO(kyuyeunk/jacobplatin): Enable w8a8 when VREG spill issue is resolved.
-            # q_scale = self._q_scale
+            q_scale = self._q_scale
             k_scale = self._k_scale
             v_scale = self._v_scale
+            q = static_per_tensor_quantize_tensor(
+                self.kv_cache_quantized_dtype, q, q_scale)
             k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
                                v_scale)
 

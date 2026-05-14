@@ -353,7 +353,7 @@ class TestPallasMLAttentionBackendImpl:
         assert outputs is not None
         assert new_kv_cache is not None
 
-    def test_forward_with_fp8_kv_cache_DISABLE_MLA_Q_ACTIVATION_QUANTIZATION(
+    def test_forward_with_fp8_kv_cache_DISABLE_Q_ACTIVATION_QUANTIZATION(
             self, mesh):
         impl = PallasMLAttentionBackendImpl(
             num_heads=NUM_HEADS,
@@ -401,7 +401,7 @@ class TestPallasMLAttentionBackendImpl:
                                                      env=torchax.default_env())
 
             with patch(
-                    "tpu_inference.layers.vllm.backends.flash_attn_mla.envs.DISABLE_MLA_Q_ACTIVATION_QUANTIZATION",
+                    "tpu_inference.layers.vllm.backends.flash_attn_mla.envs.DISABLE_Q_ACTIVATION_QUANTIZATION",
                     True):
                 outputs, new_kv_cache = impl.forward(q, kv_c_normed, k_pe,
                                                      kv_cache, metadata, mesh,

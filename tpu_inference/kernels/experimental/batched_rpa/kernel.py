@@ -82,11 +82,12 @@ def calculate_and_store_out(
         batch_l = l_scratch_ref[b_idx]
         batch_l = utils.broadcast_minor(batch_l, batch_acc.shape)
 
-        if (cfgs.serve.dtype_out == jnp.float32
-                or cfgs.serve.dtype_out == batch_l.dtype == jnp.bfloat16):
-            result = lax.div(batch_acc, batch_l)
-        else:
-            result = batch_acc * pl.reciprocal(batch_l, approx=True)
+        # if (cfgs.serve.dtype_out == jnp.float32
+        #         or (cfgs.serve.dtype_out == batch_l.dtype
+        #             and batch_l.dtype in [jnp.bfloat16, jnp.float8_e4m3fn])):
+        result = lax.div(batch_acc, batch_l)
+        # else:
+        #     result = batch_acc * pl.reciprocal(batch_l, approx=True)
         out = result.astype(cfgs.serve.dtype_out)
 
         o_u32_vref = o_vref.at[b_idx].bitcast(jnp.uint32)
@@ -427,15 +428,15 @@ def rpa_kernel(
             scratches=(
                 pltpu.VMEM(
                     cfgs.lm_scratch_shape,
-                    dtype=cfgs.serve.dtype_out,
+                    dtype=jnp.bfloat16,
                 ),  # m
                 pltpu.VMEM(
                     cfgs.lm_scratch_shape,
-                    dtype=cfgs.serve.dtype_out,
+                    dtype=jnp.bfloat16,
                 ),  # l
                 pltpu.VMEM(
                     cfgs.acc_scratch_shape,
-                    dtype=cfgs.serve.dtype_out,
+                    dtype=jnp.bfloat16,
                 ),  # acc
             ),
         )

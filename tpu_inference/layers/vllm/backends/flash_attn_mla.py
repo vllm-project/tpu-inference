@@ -162,7 +162,7 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             k_scale = layer._k_scale_float
             v_scale = layer._v_scale_float
 
-            if not envs.DISABLE_MLA_Q_ACTIVATION_QUANTIZATION:
+            if not envs.DISABLE_Q_ACTIVATION_QUANTIZATION:
                 q_nope = static_per_tensor_quantize_tensor(
                     layer.kv_cache_quantized_dtype, q_nope, q_scale)
                 q_pe = static_per_tensor_quantize_tensor(

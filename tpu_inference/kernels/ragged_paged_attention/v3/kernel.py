@@ -86,6 +86,7 @@ def ref_ragged_paged_attention(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    p_same_dtype_as_v: bool = True,
 ):
     if out_dtype is None:
         out_dtype = jnp.float32 if queries.dtype == jnp.float32 else jnp.bfloat16
@@ -193,7 +194,9 @@ def ref_ragged_paged_attention(
             if sliding_window is not None:
                 mask = jnp.logical_and(mask, q_span < kv_span + sliding_window)
             attn = jnp.where(mask, attn, mask_value)
-        attn = jax.nn.softmax(attn, axis=-1).astype(v.dtype)
+        attn = jax.nn.softmax(attn, axis=-1)
+        if p_same_dtype_as_v:
+            attn = attn.astype(v.dtype)
 
         out = jnp.einsum("hqk,khd->qhd", attn, v).astype(out_dtype)
         if v_scale is not None:
@@ -326,6 +329,7 @@ def _ragged_paged_attention_kernel_loop(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    p_same_dtype_as_v: bool = False,
     static_q_len: int | None = None,
     bq_sz,  # bq fetch size
     bkv_sz,  # bkv prefetch size
@@ -525,6 +529,8 @@ def _ragged_paged_attention_kernel_loop(
                                     128)
         assert o_ref.shape == (actual_bq_csz * num_q_heads_per_kv_head,
                                head_dim)
+        if p_same_dtype_as_v:
+            p = p.astype(v.dtype)
         pv = jnp.matmul(p, v, preferred_element_type=jnp.float32)
 
         if v_scale is not None:
@@ -1605,6 +1611,7 @@ def ragged_paged_attention(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    p_same_dtype_as_v: bool = False,
     # Kernel optimization params.
     chunk_prefill_size: int | None = None,
     # Kernel tuning params for decode, prefill, and mixed cases.
@@ -1819,6 +1826,7 @@ def ragged_paged_attention(
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
+                p_same_dtype_as_v=p_same_dtype_as_v,
                 static_q_len=static_q_len,
                 bq_sz=bq_sz,
                 bkv_sz=bkv_sz,

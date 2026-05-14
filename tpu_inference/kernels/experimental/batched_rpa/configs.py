@@ -45,6 +45,8 @@ class ModelConfigs:
     sm_scale: float = 1.0
     soft_cap: float | None = None
     sliding_window: int | None = None
+    p_same_dtype_as_v: bool = False
+    s_dtype: jnp.dtype = jnp.bfloat16
 
     @property
     def num_q_heads_per_kv_head(self) -> int:
