@@ -200,10 +200,10 @@ class TestDPScheduler:
 
                     assert scheduler.dp_size == 2
 
-    def test_get_rank_token_counts(self, mock_vllm_config,
-                                   mock_kv_cache_config,
-                                   mock_structured_output_manager):
-        """Test _get_rank_token_counts queries workers and aggregates tokens."""
+    def test_get_rank_pending_prefill_tokens(self, mock_vllm_config,
+                                             mock_kv_cache_config,
+                                             mock_structured_output_manager):
+        """Test _get_rank_pending_prefill_tokens queries workers and aggregates tokens."""
         scheduler = self._create_scheduler(mock_vllm_config,
                                            mock_kv_cache_config,
                                            mock_structured_output_manager)
@@ -212,19 +212,19 @@ class TestDPScheduler:
         scheduler._send_command = MagicMock()
         scheduler._get_result = MagicMock(side_effect=[30, 15])
 
-        rank_tokens = scheduler._get_rank_token_counts()
+        rank_tokens = scheduler._get_rank_pending_prefill_tokens()
 
         # Verify correct commands were sent
         scheduler._send_command.assert_any_call(
-            0, SchedulerCommand.GET_TOKEN_COUNT)
+            0, SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
         scheduler._send_command.assert_any_call(
-            1, SchedulerCommand.GET_TOKEN_COUNT)
+            1, SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
 
         # Verify results were collected
-        scheduler._get_result.assert_any_call(0,
-                                              SchedulerCommand.GET_TOKEN_COUNT)
-        scheduler._get_result.assert_any_call(1,
-                                              SchedulerCommand.GET_TOKEN_COUNT)
+        scheduler._get_result.assert_any_call(
+            0, SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
+        scheduler._get_result.assert_any_call(
+            1, SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
 
         assert rank_tokens[0] == 30
         assert rank_tokens[1] == 15
@@ -256,20 +256,22 @@ class TestDPScheduler:
     def test_find_best_rank_without_cache_hit(self, mock_vllm_config,
                                               mock_kv_cache_config,
                                               mock_structured_output_manager):
-        """Test _find_best_rank_for_request uses local prompt-token tracking."""
+        """Test _find_best_rank_for_request uses pending prefill token counts."""
         scheduler = self._create_scheduler(mock_vllm_config,
                                            mock_kv_cache_config,
                                            mock_structured_output_manager)
 
         mock_request = MagicMock(spec=Request)
 
-        # Simulate rank 0 having more assigned prompt tokens than rank 1
-        scheduler._rank_prompt_tokens[0] = 100
-        scheduler._rank_prompt_tokens[1] = 50
+        # Simulate rank 0 having more pending prefill tokens than rank 1
+        scheduler._get_rank_pending_prefill_tokens = MagicMock(return_value={
+            0: 100,
+            1: 50
+        })
 
         rank = scheduler._find_best_rank_for_request(mock_request)
 
-        # Should choose rank with fewer prompt tokens (rank 1)
+        # Should choose rank with fewer pending prefill tokens (rank 1)
         assert rank == 1
 
     def test_add_request_assigns_to_best_rank(self, mock_vllm_config,
@@ -279,6 +281,9 @@ class TestDPScheduler:
         scheduler = self._create_scheduler(mock_vllm_config,
                                            mock_kv_cache_config,
                                            mock_structured_output_manager)
+
+        # Disable batch prefills so add_request routes immediately
+        scheduler._batch_prefills = False
 
         mock_request = MagicMock(spec=Request)
         mock_request.request_id = "req1"
@@ -293,10 +298,6 @@ class TestDPScheduler:
 
         # Verify request was assigned to rank 1
         assert scheduler.assigned_dp_rank["req1"] == 1
-
-        # Verify prompt token tracking was updated
-        assert scheduler._rank_prompt_tokens[1] == 512
-        assert scheduler._req_prompt_len["req1"] == 512
 
         # Verify ADD_REQUEST command was sent to rank 1
         scheduler._send_command.assert_called_with(
