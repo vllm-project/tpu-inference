@@ -309,8 +309,10 @@ class TpuPlatform(Platform):
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         # TODO: TPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
-        logger.info(f"Using cache_config.block_size: {vllm_config.cache_config.block_size} instead of overriding with _align_hybrid_block_size()"
-                     f" since we set mamba_page_size_padded in kv_cache_manager.py to align with the backend's requirements.")
+        logger.info(
+            f"Using cache_config.block_size: {vllm_config.cache_config.block_size} instead of overriding with _align_hybrid_block_size()"
+            f" since we set mamba_page_size_padded in kv_cache_manager.py to align with the backend's requirements."
+        )
         pass
 
     @classmethod
