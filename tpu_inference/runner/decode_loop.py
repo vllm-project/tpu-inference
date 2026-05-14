@@ -66,7 +66,10 @@ def _update_loop_state(
     # Fix DP padding bug by exposing DP dimension as 2D before padding
     increment_2d = increment.reshape(dp_size, -1)
     seq_lens_2d = seq_lens.reshape(dp_size, -1)
-    padded_increment_2d = jnp.pad(increment_2d, ((0, 0), (0, pad_len)))
+    if pad_len > 0:
+        padded_increment_2d = jnp.pad(increment_2d, ((0, 0), (0, pad_len)))
+    else:
+        padded_increment_2d = increment_2d[:, :seq_lens_2d.shape[1]]
     new_seq_lens = (seq_lens_2d + padded_increment_2d).ravel()
 
     # Compute the token to record in generated_tokens
