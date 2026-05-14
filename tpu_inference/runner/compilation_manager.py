@@ -289,7 +289,7 @@ class CompilationManager:
             self._run_compilation(
                 name,
                 model_fn_wrapper,
-                self.runner.state,
+                self.runner.state_leaves,
                 self.runner.kv_caches,
                 input_ids,
                 attention_metadata,

@@ -14,7 +14,7 @@ Model,Type,UnitTest,Accuracy/Correctness,Benchmark
 "Qwen/Qwen3-Coder-480B-A35B-Instruct",Text,✅ Passing,✅ Passing,✅ Passing
 "Qwen/Qwen3.5-397B-A17B",Text,✅ Passing,✅ Passing,✅ Passing
 "deepseek-ai/DeepSeek-Math-V2",Text,❓ Untested,❓ Untested,❓ Untested
-"deepseek-ai/DeepSeek-R1",Text,✅ Passing,❓ Untested,❓ Untested
+"deepseek-ai/DeepSeek-R1",Text,✅ Passing,✅ Passing,❓ Untested
 "deepseek-ai/DeepSeek-V3.1",Text,❓ Untested,❓ Untested,❓ Untested
 "deepseek-ai/DeepSeek-V3.2",Text,❓ Untested,❓ Untested,❓ Untested
 "deepseek-ai/DeepSeek-V3.2-Speciale",Text,❓ Untested,❓ Untested,❓ Untested
