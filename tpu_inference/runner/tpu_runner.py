@@ -92,6 +92,16 @@ INVALID_TOKEN_ID = -1
 MIN_NUM_SEQS = 8
 
 
+@dataclass
+class LogitsMetadata:
+    logits_indices_selector: Optional[List[int]] = None
+    num_logits_per_req: Optional[list[int]] = None
+    any_prompt_logprobs: bool = False
+    sampling_indices_selector: Optional[np.ndarray] = None
+    gi_physical_indices: Optional[np.ndarray] = None
+    gi_relative_indices: Optional[np.ndarray] = None
+
+
 class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
     """Holds asynchronous model output specifically from a TPU runner.
 
@@ -110,49 +120,46 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         next_tokens: jax.Array,
         num_reqs: int,
         discard_sampled_tokens_req_indices: list[int],
-        logits_indices_selector: Optional[List[int]] = None,
         logprobs_tensors: Optional[LogprobsTensors] = None,
         expert_indices: Optional[jax.Array] = None,
         total_num_scheduled_tokens: int = 0,
-        num_logits_per_req: Optional[list[int]] = None,
-        any_prompt_logprobs: bool = False,
-        sampling_indices_selector: Optional[np.ndarray] = None,
-        gi_physical_indices: Optional[np.ndarray] = None,
-        gi_relative_indices: Optional[np.ndarray] = None,
+        logits_metadata: Optional[LogitsMetadata] = None,
     ):
         self._model_runner_output = model_runner_output
         self._next_tokens = next_tokens
         self._num_reqs = num_reqs
         self._discard_sampled_tokens_req_indices = discard_sampled_tokens_req_indices
-        self.logits_indices_selector: list[int] = logits_indices_selector
         self._logprobs_tensors = logprobs_tensors
         self._expert_indices = expert_indices
         self._total_num_scheduled_tokens = total_num_scheduled_tokens
-        self.num_logits_per_req = num_logits_per_req
-        self.any_prompt_logprobs = any_prompt_logprobs
-        self.sampling_indices_selector = sampling_indices_selector
-        self.gi_physical_indices = gi_physical_indices
-        self.gi_relative_indices = gi_relative_indices
+        self.logits_metadata = logits_metadata
 
     def get_output(self) -> ModelRunnerOutput:
         next_tokens_cpu = np.asarray(jax.device_get(self._next_tokens))
 
         # Use the dedicated sampling selector to unsuffle tokens from multiple chips
         # Only use the portion corresponding to the current active requests
-        active_selector = self.sampling_indices_selector[:self._num_reqs]
+        active_selector = self.logits_metadata.sampling_indices_selector[:
+                                                                              self.
+                                                                              _num_reqs]
+        # Ensure it is on CPU for indexing
+        active_selector = np.asarray(jax.device_get(active_selector))
         selected_token_ids = next_tokens_cpu[active_selector]
         selected_token_ids = np.expand_dims(selected_token_ids, 1)
 
         valid_sampled_token_ids = selected_token_ids.tolist()
+        # Mask out the sampled tokens that should not be sampled.
         for i in self._discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
+
         self._model_runner_output.sampled_token_ids = valid_sampled_token_ids
 
         if self._logprobs_tensors is not None:
             # Separate prompt logprobs and sampling logprobs
             self._model_runner_output.logprobs, self._model_runner_output.prompt_logprobs_dict = _separate_logprobs(
-                self._logprobs_tensors, self.logits_indices_selector,
-                self.num_logits_per_req, self._model_runner_output.req_ids)
+                self._logprobs_tensors, self.logits_metadata.logits_indices_selector,
+                self.logits_metadata.num_logits_per_req,
+                self._model_runner_output.req_ids)
 
         if self._expert_indices is not None:
             expert_indices_cpu = np.asarray(
@@ -171,11 +178,7 @@ class AsyncPreResults:
     request_seq_lens: list[tuple[int, CachedRequestState, int]]
     discard_sampled_tokens_req_indices: list[int]
     placeholder_req_id_to_index: dict[str, int]
-    logits_indices_selector: Optional[List[int]] = None
-    any_prompt_logprobs: bool = False
-    sampling_indices_selector: Optional[np.ndarray] = None
-    gi_physical_indices: Optional[np.ndarray] = None
-    gi_relative_indices: Optional[np.ndarray] = None
+    logits_metadata: Optional[LogitsMetadata] = None
 
 
 @dataclass
@@ -192,14 +195,9 @@ class ExecuteModelState:
     aux_hidden_states: Optional[jax.Array]
     spec_decode_metadata: Optional[SpecDecodeMetadata]
     kv_connector_output: Optional[KVConnectorOutput]
-    logits_indices_selector: Optional[List[int]] = None
+    logits_metadata: Optional[LogitsMetadata] = None
     padded_num_reqs: Optional[int] = None
     expert_indices: Optional[jax.Array] = None
-    num_logits_per_req: Optional[list[int]] = None
-    any_prompt_logprobs: bool = False
-    sampling_indices_selector: Optional[np.ndarray] = None
-    gi_physical_indices: Optional[np.ndarray] = None
-    gi_relative_indices: Optional[np.ndarray] = None
 
 
 @jax.jit(donate_argnums=(0, 1, 2))
@@ -982,11 +980,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             state.scheduler_output, state.attn_metadata,
             state.sampling_metadata, state.input_ids, state.hidden_states,
             logits, state.aux_hidden_states, state.spec_decode_metadata,
-            state.kv_connector_output, state.logits_indices_selector,
-            state.padded_num_reqs, state.expert_indices,
-            state.num_logits_per_req, state.any_prompt_logprobs,
-            state.sampling_indices_selector, state.gi_physical_indices,
-            state.gi_relative_indices)
+            state.kv_connector_output, state.logits_metadata,
+            state.padded_num_reqs, state.expert_indices)
 
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
@@ -996,12 +991,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         pre_next_tokens = self._pre_async_results.next_tokens
         pre_request_seq_lens = self._pre_async_results.request_seq_lens
         pre_discard_sampled_tokens_req_indices = self._pre_async_results.discard_sampled_tokens_req_indices
-        pre_sampling_indices_selector = self._pre_async_results.sampling_indices_selector
+        pre_sampling_indices_selector = self._pre_async_results.logits_metadata.sampling_indices_selector
 
         next_tokens_cpu = np.asarray(jax.device_get(pre_next_tokens))
 
         # Use sampling_indices_selector to correctly map tokens from multiple chips back to original req order
         active_selector = pre_sampling_indices_selector[:len(pre_req_ids)]
+        # Ensure it is on CPU for indexing
+        active_selector = np.asarray(jax.device_get(active_selector))
         selected_token_ids = next_tokens_cpu[active_selector]
         selected_token_ids = np.expand_dims(selected_token_ids, 1)
 
@@ -1046,6 +1043,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         placeholder_req_id_to_index: dict[str, int] = {}
         discard_sampled_tokens_req_indices_set = set(
             discard_sampled_tokens_req_indices)
+        
+        if sampling_indices_selector is not None:
+             # Ensure it is on CPU for indexing
+             sampling_indices_selector = np.asarray(jax.device_get(sampling_indices_selector))
+
         for req_idx, req_state, _ in request_seq_lens:
             if req_idx in discard_sampled_tokens_req_indices_set:
                 continue
@@ -1104,13 +1106,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             sampling_metadata,
             logits_indices,
             spec_decode_metadata,
-            logits_indices_selector,
+            logits_metadata,
             padded_num_reqs,
-            num_logits_per_req,
-            any_prompt_logprobs,
-            sampling_indices_selector,
-            gi_physical_indices,
-            gi_relative_indices,
         ) = self._prepare_inputs(scheduler_output)
 
         # multi-modal support
@@ -1146,7 +1143,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             log_jax_input("input_pos", input_positions),
             log_jax_input("logits_idx", logits_indices),
             f"padded_reqs={padded_num_reqs}",
-            f"any_lp={any_prompt_logprobs}",
+            f"any_lp={logits_metadata.any_prompt_logprobs}",
         ]
         
         if not isinstance(attn_metadata, dict):
@@ -1237,14 +1234,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             aux_hidden_states=aux_hidden_states,
             spec_decode_metadata=spec_decode_metadata,
             kv_connector_output=kv_connector_output,
-            logits_indices_selector=logits_indices_selector,
+            logits_metadata=logits_metadata,
             padded_num_reqs=padded_num_reqs,
-            expert_indices=expert_indices,
-            num_logits_per_req=num_logits_per_req,
-            any_prompt_logprobs=any_prompt_logprobs,
-            sampling_indices_selector=sampling_indices_selector,
-            gi_physical_indices=gi_physical_indices,
-            gi_relative_indices=gi_relative_indices)
+            expert_indices=expert_indices)
         return None
 
     def _sample_from_logits(
@@ -1258,14 +1250,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         aux_hidden_states: Optional[jax.Array],
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         kv_connector_output: Optional[KVConnectorOutput],
-        logits_indices_selector: Optional[List[int]] = None,
+        logits_metadata: Optional[LogitsMetadata] = None,
         padded_num_reqs: Optional[int] = None,
         expert_indices: Optional[jax.Array] = None,
-        num_logits_per_req: Optional[list[int]] = None,
-        any_prompt_logprobs: bool = False,
-        sampling_indices_selector: Optional[np.ndarray] = None,
-        gi_physical_indices: Optional[np.ndarray] = None,
-        gi_relative_indices: Optional[np.ndarray] = None,
     ) -> ModelRunnerOutput | AsyncTPUModelRunnerOutput:
         if padded_num_reqs is None:
             padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
@@ -1283,10 +1270,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Use gi_physical_indices to correctly extract the sampling logits
             # from the flattened array. This handles both Interleaved and
             # Generation First layouts, and ensures SPMD alignment across all chips.
-            idx_jax = None
-            if gi_physical_indices is not None:
-                idx_sharding = NamedSharding(self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
-                idx_jax = device_array(self.mesh, gi_physical_indices, sharding=idx_sharding)
+            idx_jax = logits_metadata.gi_physical_indices if logits_metadata else None
+            if idx_jax is not None:
                 gen_logits = logits[idx_jax]
             else:
                 # Fallback to legacy behavior if gi_physical_indices is missing
@@ -1349,9 +1334,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # ensuring gather_logprobs doesn't crash.
             # We do this eager prep outside forbid_compile because JAX compiles
             # simple eager ops for new shapes and we don't want to crash.
-            if any_prompt_logprobs:
+            if logits_metadata and logits_metadata.any_prompt_logprobs:
                 padded_next_tokens = jnp.zeros((logits_to_gather.shape[0], ),
                                                dtype=next_tokens.dtype)
+                idx_jax = logits_metadata.gi_physical_indices
                 if idx_jax is not None:
                     padded_next_tokens = padded_next_tokens.at[idx_jax].set(next_tokens)
                 else:
@@ -1415,7 +1401,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             placeholder_req_id_to_index: dict[
                 str, int] = self._update_placeholder(
                     discard_sampled_tokens_req_indices, request_seq_lens,
-                    sampling_indices_selector)
+                    logits_metadata.sampling_indices_selector if logits_metadata else None)
 
             # Save the previous results
             next_tokens = jax.copy_to_host_async(next_tokens)
@@ -1426,10 +1412,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 discard_sampled_tokens_req_indices=
                 discard_sampled_tokens_req_indices,
                 placeholder_req_id_to_index=placeholder_req_id_to_index,
-                logits_indices_selector=logits_indices_selector,
-                any_prompt_logprobs=any_prompt_logprobs,
-                sampling_indices_selector=sampling_indices_selector,
-                gi_physical_indices=gi_physical_indices)
+                logits_metadata=logits_metadata)
 
             # Return Model output to executor
             model_runner_output = ModelRunnerOutput(
@@ -1447,21 +1430,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 next_tokens,
                 num_reqs,
                 discard_sampled_tokens_req_indices,
-                logits_indices_selector,
                 logprobs_tensors=logprobs,
                 expert_indices=expert_indices,
                 total_num_scheduled_tokens=scheduler_output.
                 total_num_scheduled_tokens,
-                num_logits_per_req=num_logits_per_req,
-                any_prompt_logprobs=any_prompt_logprobs,
-                sampling_indices_selector=sampling_indices_selector,
-                gi_physical_indices=gi_physical_indices,
-                gi_relative_indices=gi_relative_indices)
+                logits_metadata=logits_metadata)
             return async_model_runner_output
         if spec_decode_metadata is None:
             next_tokens = np.asarray(jax.device_get(next_tokens))
 
-            active_selector = sampling_indices_selector[:num_reqs]
+            active_selector = logits_metadata.sampling_indices_selector[:
+                                                                             num_reqs]
+            # Ensure it is on CPU for indexing
+            active_selector = np.asarray(jax.device_get(active_selector))
             selected_token_ids = next_tokens[active_selector]
             selected_token_ids = np.expand_dims(selected_token_ids, 1)
             valid_sampled_token_ids = selected_token_ids.tolist()
@@ -1496,7 +1477,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if logprobs is not None:
             # Separate prompt logprobs and sampling logprobs
             logprobs_lists, prompt_logprobs_dict_updates = _separate_logprobs(
-                logprobs, logits_indices_selector, num_logits_per_req, req_ids)
+                logprobs, logits_metadata.logits_indices_selector if logits_metadata else None,
+                logits_metadata.num_logits_per_req if logits_metadata else None, req_ids)
             prompt_logprobs_dict.update(prompt_logprobs_dict_updates)
         else:
             logprobs_lists = None
@@ -1925,6 +1907,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             sharding=data_parallel_attn_sharding,
         )
 
+        logits_metadata = LogitsMetadata(
+            logits_indices_selector=logits_indices_selector,
+            num_logits_per_req=num_logits_per_req,
+            any_prompt_logprobs=any_prompt_logprobs,
+            sampling_indices_selector=device_array(
+                self.mesh,
+                sampling_indices_selector,
+                sharding=data_parallel_attn_sharding),
+            gi_physical_indices=device_array(
+                self.mesh,
+                gi_physical_indices,
+                sharding=data_parallel_attn_sharding),
+            gi_relative_indices=device_array(
+                self.mesh,
+                gi_relative_indices,
+                sharding=data_parallel_attn_sharding),
+        )
+
         if self.uses_mrope:
             # M-RoPE positions are of the shape (3, max_num_tokens).
             # https://github.com/vllm-project/tpu-inference/blob/efc9608acd925bb3b64db6fda509514f799ab7be/tpu_inference/runner/tpu_runner.py#L555
@@ -2064,6 +2064,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 padded_total_num_scheduled_tokens,
             )
 
+        logits_metadata = LogitsMetadata(
+            logits_indices_selector=logits_indices_selector,
+            num_logits_per_req=num_logits_per_req,
+            any_prompt_logprobs=any_prompt_logprobs,
+            sampling_indices_selector=device_array(
+                self.mesh,
+                sampling_indices_selector,
+                sharding=data_parallel_attn_sharding),
+            gi_physical_indices=device_array(
+                self.mesh,
+                gi_physical_indices,
+                sharding=data_parallel_attn_sharding),
+            gi_relative_indices=device_array(
+                self.mesh,
+                gi_relative_indices,
+                sharding=data_parallel_attn_sharding),
+        )
+
         return (
             input_ids,
             positions,
@@ -2071,13 +2089,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             sampling_metadata,
             logits_indices,
             spec_decode_metadata,
-            logits_indices_selector,
+            logits_metadata,
             padded_num_reqs,
-            num_logits_per_req,
-            any_prompt_logprobs,
-            sampling_indices_selector,
-            gi_physical_indices,
-            gi_relative_indices,
         )
 
     def _prepare_inputs_non_dp(self,
@@ -2236,6 +2249,27 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             sharding=data_parallel_attn_sharding,
         )
 
+        # Non-DP sampling selector is just a range
+        sampling_indices_selector = np.arange(num_reqs, dtype=np.int32)
+
+        logits_metadata = LogitsMetadata(
+            logits_indices_selector=logits_indices_selector,
+            num_logits_per_req=num_logits_per_req,
+            any_prompt_logprobs=any_prompt_logprobs,
+            sampling_indices_selector=device_array(
+                self.mesh,
+                sampling_indices_selector,
+                sharding=data_parallel_attn_sharding),
+            gi_physical_indices=device_array(
+                self.mesh,
+                gi_physical_indices,
+                sharding=data_parallel_attn_sharding),
+            gi_relative_indices=device_array(
+                self.mesh,
+                gi_relative_indices,
+                sharding=data_parallel_attn_sharding),
+        )
+
         if self.uses_mrope:
             # M-RoPE positions are of the shape (3, max_num_tokens).
             # https://github.com/vllm-project/tpu-inference/blob/efc9608acd925bb3b64db6fda509514f799ab7be/tpu_inference/runner/tpu_runner.py#L555
@@ -2342,14 +2376,27 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 num_scheduled_tokens_per_req, total_num_scheduled_tokens,
                 padded_total_num_scheduled_tokens)
 
-        # Non-DP sampling selector is just a range
-        sampling_indices_selector = np.arange(num_reqs, dtype=np.int32)
+        logits_metadata = LogitsMetadata(
+            logits_indices_selector=logits_indices_selector,
+            num_logits_per_req=num_logits_per_req,
+            any_prompt_logprobs=any_prompt_logprobs,
+            sampling_indices_selector=device_array(
+                self.mesh,
+                sampling_indices_selector,
+                sharding=data_parallel_attn_sharding),
+            gi_physical_indices=device_array(
+                self.mesh,
+                gi_physical_indices,
+                sharding=data_parallel_attn_sharding),
+            gi_relative_indices=device_array(
+                self.mesh,
+                gi_relative_indices,
+                sharding=data_parallel_attn_sharding),
+        )
 
         return (input_ids, positions, attention_metadata, sampling_metadata,
-                logits_indices, spec_decode_metadata, logits_indices_selector,
-                padded_num_reqs, num_logits_per_req, any_prompt_logprobs,
-                sampling_indices_selector, gi_physical_indices,
-                gi_relative_indices)
+                logits_indices, spec_decode_metadata, logits_metadata,
+                padded_num_reqs)
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
                               mm_embeds: list[jax.Array] | None,
